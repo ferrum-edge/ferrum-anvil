@@ -285,19 +285,20 @@ fn xml_element(
         _ => String::new(),
     };
     let pad = "  ".repeat(indent);
+    let no_schema = Value::Object(Map::new());
     match value {
         Value::Object(m) => {
-            let props = flat.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
+            let props = flat.get("properties").and_then(Value::as_object);
             let mut attrs = String::new();
             let mut text: Option<String> = None;
             let mut children = String::new();
             let unwrap = h.node_type.as_deref() == Some("none");
             let child_indent = if unwrap { indent } else { indent + 1 };
             for (k, v) in m {
-                let ps = props.get(k).cloned().unwrap_or(Value::Object(Map::new()));
+                let ps = props.and_then(|p| p.get(k)).unwrap_or(&no_schema);
                 let pptr = ptr(&ptr(&fp, "properties"), k);
-                let (pflat, _) = sg.flatten(&ps, &pptr);
-                let ph = hints(&ps);
+                let (pflat, _) = sg.flatten(ps, &pptr);
+                let ph = hints(ps);
                 let ph2 = hints(&pflat);
                 let nt = ph.node_type.clone().or(ph2.node_type.clone());
                 let pname = xml_name(ph.name.as_deref().or(ph2.name.as_deref()).unwrap_or(k));
@@ -311,7 +312,7 @@ fn xml_element(
                     }
                     Some("text") => text = Some(xml_escape(&scalar_text(v), false)),
                     Some("cdata") => text = Some(format!("<![CDATA[{}]]>", scalar_text(v).replace("]]>", "]]]]><![CDATA[>"))),
-                    _ => xml_element(sg, &ps, &pptr, v, k, &mut children, child_indent, depth + 1),
+                    _ => xml_element(sg, ps, &pptr, v, k, &mut children, child_indent, depth + 1),
                 }
             }
             if unwrap {
@@ -326,19 +327,19 @@ fn xml_element(
             }
         }
         Value::Array(items) => {
-            let item_schema = flat.get("items").cloned().unwrap_or(Value::Object(Map::new()));
+            let item_schema = flat.get("items").unwrap_or(&no_schema);
             let iptr = ptr(&fp, "items");
-            let (iflat, _) = sg.flatten(&item_schema, &iptr);
-            let item_name = hints(&item_schema).name.or(hints(&iflat).name).unwrap_or_else(|| name.clone());
+            let (iflat, _) = sg.flatten(item_schema, &iptr);
+            let item_name = hints(item_schema).name.or(hints(&iflat).name).unwrap_or_else(|| name.clone());
             if h.wrapped {
                 out.push_str(&format!("{pad}<{qname}{ns_attr}>\n"));
                 for it in items {
-                    xml_element(sg, &item_schema, &iptr, it, &item_name, out, indent + 1, depth + 1);
+                    xml_element(sg, item_schema, &iptr, it, &item_name, out, indent + 1, depth + 1);
                 }
                 out.push_str(&format!("{pad}</{qname}>\n"));
             } else {
                 for it in items {
-                    xml_element(sg, &item_schema, &iptr, it, &item_name, out, indent, depth + 1);
+                    xml_element(sg, item_schema, &iptr, it, &item_name, out, indent, depth + 1);
                 }
             }
         }

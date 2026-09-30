@@ -798,17 +798,22 @@
   a group being expanded stop at the first repetition (`recursive_schema`).
   An attribute is written once per element. Once the import's envelope budget
   is spent, the remaining envelopes are left empty (`sample_size_limit`).
-  Branching or self-referencing groups and types could make generation grow
-  exponentially, and many message parts could exceed the envelope limit.
+  A document in which an element has more than 256 namespaces in scope is
+  refused (`LimitExceeded`), and once `max_operations` is reached the
+  remaining operations are counted without being walked again for each
+  port. Branching or self-referencing groups and types could make generation
+  grow exponentially, and many message parts could exceed the envelope limit.
 - OpenAPI imports: `allOf` merging charges each branch against the payload's
   `max_sample_nodes` budget, and a `$ref` it follows counts toward
-  `max_ref_depth` like a direct `$ref` (`ref_depth_limit`). Examples,
-  defaults, merged schemas and per-operation parameter copies now share a
-  byte budget for the whole import (eight times `max_bytes`), charged before
-  each copy is made. When it is spent, the remaining samples are left out
-  (`sample_size_limit`). Structural lookups (`flatten`) have a node budget of
-  their own and no longer use up the payload's. Long or branching
-  composition chains, and large examples reused many times, could previously
+  `max_ref_depth` like a direct `$ref` (`ref_depth_limit`). Generated
+  values (including `minLength` padding), examples, defaults, merged schemas
+  and per-operation parameter copies now share a byte budget for the whole
+  import (four times `max_bytes`), charged before each value is made. When
+  it is spent, the remaining samples are left out (`sample_size_limit`).
+  The structural lookups made while writing one payload (XML names,
+  multipart parts) share a node budget of their own and no longer use up the
+  payload's. Long or branching composition chains, large examples reused
+  many times and long generated strings in many operations could previously
   do unbounded work.
 - Insomnia v4 imports: an export in which a workspace, request group or
   environment shares its `_id` with another resource is refused (`Invalid`,

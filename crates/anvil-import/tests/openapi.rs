@@ -517,7 +517,8 @@ fn branching_all_of_graphs_hit_the_sample_budget() {
     assert_eq!(r.requests.len(), 1);
     // A small diamond still merges completely.
     let r = import(&doc_with_schemas(schemas, "D13"), &opts()).unwrap();
-    assert!(!has(&r, "sample_size_limit") && !has(&r, "ref_depth_limit"));
+    assert!(!has(&r, "sample_size_limit"));
+    assert!(!has(&r, "ref_depth_limit"));
     assert_eq!(json_body(&req(&r, "a").spec).get("leaf").map(|v| v.is_string()), Some(true));
 }
 
@@ -545,6 +546,54 @@ fn copied_examples_share_an_import_byte_budget() {
     let total: usize = r.requests.iter().map(|q| serde_json::to_string(&q.spec.body).map_or(0, |t| t.len())).sum();
     assert!(total < 40 * 1024 * 1024, "the bodies hold {total} bytes");
     assert_eq!(r.requests.len(), 3);
+}
+
+/// `Root` has `n` required members, each `member`; `ops` operations send it
+/// as `media`.
+fn wide_doc(n: usize, member: serde_json::Value, extra: serde_json::Map<String, serde_json::Value>, media: &str, ops: usize) -> Vec<u8> {
+    let mut props = serde_json::Map::new();
+    for i in 0..n {
+        props.insert(format!("p{i}"), member.clone());
+    }
+    let names: Vec<String> = (0..n).map(|i| format!("p{i}")).collect();
+    let mut schemas = extra;
+    schemas.insert("Root".into(), json!({"type": "object", "required": names, "properties": props}));
+    let mut paths = serde_json::Map::new();
+    for i in 0..ops {
+        let body = json!({"content": {media: {"schema": {"$ref": "#/components/schemas/Root"}}}});
+        paths.insert(format!("/op{i}"), json!({"post": {"operationId": format!("op{i}"), "requestBody": body, "responses": {}}}));
+    }
+    let doc = json!({"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": paths, "components": {"schemas": schemas}});
+    doc.to_string().into_bytes()
+}
+
+#[test]
+fn structural_lookups_share_one_budget_per_payload() {
+    // The XML writer looks up every member's schema twice; each is an allOf
+    // of 20k branches, so a fresh budget per lookup would redo that work for
+    // all 20k members.
+    let mut extra = serde_json::Map::new();
+    let branches = vec![json!({}); 20_000];
+    extra.insert("X".into(), json!({"allOf": branches}));
+    let doc = wide_doc(20_000, json!({"$ref": "#/components/schemas/X"}), extra, "application/xml", 1);
+    let r = import(&doc, &opts()).unwrap();
+    assert!(has(&r, "sample_size_limit"));
+    match &req(&r, "op0").spec.body {
+        Body::Xml { text } => assert!(text.len() < 4 * 1024 * 1024, "the body is {} bytes", text.len()),
+        other => panic!("expected an XML body, got {other:?}"),
+    }
+}
+
+#[test]
+fn generated_strings_share_the_import_byte_budget() {
+    // 20k members padded to 4096 characters, in ten operations: about 800 MB
+    // without a byte budget. A 4 MiB input limit allows 16 MiB for the import.
+    let doc = wide_doc(20_000, json!({"type": "string", "minLength": 4096}), serde_json::Map::new(), "application/json", 10);
+    let r = import(&doc, &ImportOptions { max_bytes: 4 * 1024 * 1024, ..opts() }).unwrap();
+    assert!(has(&r, "sample_size_limit"));
+    assert_eq!(r.requests.len(), 10);
+    let total: usize = r.requests.iter().map(|q| serde_json::to_string(&q.spec.body).map_or(0, |t| t.len())).sum();
+    assert!(total < 20 * 1024 * 1024, "the bodies hold {total} bytes");
 }
 
 #[test]

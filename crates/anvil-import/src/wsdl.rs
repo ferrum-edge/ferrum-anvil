@@ -34,6 +34,9 @@ const MAX_DEPTH: usize = 40;
 const MAX_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 /// Generated envelope bytes allowed across one import, per input byte limit.
 const ENVELOPE_BYTES_PER_INPUT_BYTE: usize = 4;
+/// Namespaces one element may have in scope. Every prefixed name is looked
+/// up among them, so the number is bounded before any lookup happens.
+const MAX_IN_SCOPE_NAMESPACES: usize = 256;
 
 type QName = (String, String);
 
@@ -95,6 +98,9 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             }
         }
     })?;
+    if doc.descendants().any(|n| n.is_element() && n.namespaces().len() > MAX_IN_SCOPE_NAMESPACES) {
+        return Err(ImportError::LimitExceeded { what: "XML namespaces in scope of one element".into(), limit: MAX_IN_SCOPE_NAMESPACES });
+    }
     if text.contains("<!DOCTYPE") {
         b.report.warn("doctype_ignored", "/", "the DOCTYPE declaration is ignored; external DTDs are never loaded");
     }
@@ -133,12 +139,19 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     let messages = by_name("message");
     let port_types = by_name("portType");
     let bindings = by_name("binding");
+    // Indexes built once, so no port or operation walks a list again.
+    let binding_ops = child_lists(root, "binding", "operation");
+    let port_type_ops = by_name_attr(child_lists(root, "portType", "operation"));
+    let message_parts = by_name_attr(child_lists(root, "message", "part"));
 
     let mut endpoint_vars: Vec<Variable> = vec![];
-    let mut used_bindings: Vec<String> = vec![];
+    let mut used_bindings: HashSet<String> = HashSet::new();
     let ctx = WsdlCtx {
         messages: &messages,
         port_types: &port_types,
+        binding_ops: &binding_ops,
+        port_type_ops: &port_type_ops,
+        message_parts: &message_parts,
         schemas: &schemas,
         tns: &tns,
         envelope_bytes: Cell::new(b.opts.max_bytes.saturating_mul(ENVELOPE_BYTES_PER_INPUT_BYTE)),
@@ -161,7 +174,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 b.report.warn("unresolved_binding", &path(port), format!("binding '{bref}' is not defined in this document"));
                 continue;
             };
-            used_bindings.push(blocal.clone());
+            used_bindings.insert(blocal.clone());
             let is_soap = child(binding, SOAP11_BIND, "binding").is_some() || child(binding, SOAP12_BIND, "binding").is_some();
             let address = port
                 .children()
@@ -189,7 +202,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
         .filter_map(|c| c.attribute("name").map(|n| (n.to_string(), c)))
         .collect();
     for (bname, binding) in &binding_order {
-        if used_bindings.contains(bname) {
+        if used_bindings.contains(bname.as_str()) {
             continue;
         }
         let var = sanitize_var(&format!("{bname}_url"));
@@ -208,9 +221,39 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     Ok(())
 }
 
+/// Each `local` child of `root` → its `item` children, in document order.
+fn child_lists<'a, 'i>(root: Node<'a, 'i>, local: &str, item: &str) -> HashMap<NodeId, Vec<Node<'a, 'i>>> {
+    children(root, WSDL_NS)
+        .filter(|c| c.tag_name().name() == local)
+        .map(|c| (c.id(), children(c, WSDL_NS).filter(|k| k.tag_name().name() == item).collect()))
+        .collect()
+}
+
+/// The lists of `child_lists` keyed by `name` (the first of a name wins).
+fn by_name_attr<'a, 'i>(lists: HashMap<NodeId, Vec<Node<'a, 'i>>>) -> HashMap<NodeId, HashMap<String, Node<'a, 'i>>> {
+    lists
+        .into_iter()
+        .map(|(id, items)| {
+            let mut m = HashMap::new();
+            for it in items {
+                if let Some(n) = it.attribute("name") {
+                    m.entry(n.to_string()).or_insert(it);
+                }
+            }
+            (id, m)
+        })
+        .collect()
+}
+
 struct WsdlCtx<'r, 'a, 'i> {
     messages: &'r HashMap<String, Node<'a, 'i>>,
     port_types: &'r HashMap<String, Node<'a, 'i>>,
+    /// Binding → its operations.
+    binding_ops: &'r HashMap<NodeId, Vec<Node<'a, 'i>>>,
+    /// Port type → its operations by name.
+    port_type_ops: &'r HashMap<NodeId, HashMap<String, Node<'a, 'i>>>,
+    /// Message → its parts by name.
+    message_parts: &'r HashMap<NodeId, HashMap<String, Node<'a, 'i>>>,
     schemas: &'r SchemaSet<'a, 'i>,
     tns: &'r str,
     /// Generated envelope bytes left for the rest of the import.
@@ -219,17 +262,16 @@ struct WsdlCtx<'r, 'a, 'i> {
 
 fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<Id>, key_prefix: &str, label: &str, url_var: &str) {
     let bpath = path(binding);
+    let ops: &[Node] = ctx.binding_ops.get(&binding.id()).map(Vec::as_slice).unwrap_or_default();
     let (version, soap_binding) = if let Some(sb) = child(binding, SOAP11_BIND, "binding") {
         (SoapVersion::Soap11, sb)
     } else if let Some(sb) = child(binding, SOAP12_BIND, "binding") {
         (SoapVersion::Soap12, sb)
     } else {
         let what = if child(binding, HTTP_BIND, "binding").is_some() { "HTTP GET/POST binding" } else { "non-SOAP binding" };
-        let n = children(binding, WSDL_NS).filter(|c| c.tag_name().name() == "operation").count();
-        for _ in 0..n {
-            b.report.counts.operations_found += 1;
-            b.skipped();
-        }
+        let n = ops.len();
+        b.report.counts.operations_found += n;
+        b.report.counts.skipped_operations += n;
         b.report.unsupported(
             "wsdl_binding_unsupported",
             &bpath,
@@ -253,15 +295,18 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
         );
     }
     let bind_ns = if version == SoapVersion::Soap11 { SOAP11_BIND } else { SOAP12_BIND };
-    for bop in children(binding, WSDL_NS).filter(|c| c.tag_name().name() == "operation") {
+    for (i, &bop) in ops.iter().enumerate() {
         let oname = bop.attribute("name").unwrap_or("").to_string();
         let opath = path(bop);
+        if b.operations_full() {
+            // No later operation can be admitted: count them without walking them.
+            b.skip_operations(&opath, ops.len() - i);
+            break;
+        }
         if !b.admit(&opath) {
             continue;
         }
-        let pt_op = port_type.and_then(|pt| {
-            children(pt, WSDL_NS).find(|o| o.tag_name().name() == "operation" && o.attribute("name") == Some(oname.as_str()))
-        });
+        let pt_op = port_type.and_then(|pt| ctx.port_type_ops.get(&pt.id())).and_then(|m| m.get(&oname)).copied();
         let Some(pt_op) = pt_op else {
             if port_type.is_some() {
                 b.report.warn("unresolved_operation", &opath, format!("operation '{oname}' is not declared in the portType"));
@@ -310,31 +355,36 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
                 let msg = input.attribute("message").map(|m| qname(input, m).1).and_then(|m| ctx.messages.get(&m).copied());
                 match msg {
                     Some(msg) => {
-                        let parts: Vec<Node> = children(msg, WSDL_NS)
-                            .filter(|p| p.tag_name().name() == "part")
-                            .filter(|p| parts_filter.as_ref().is_none_or(|f| p.attribute("name").is_some_and(|n| f.contains(n))))
-                            .collect();
-                        if style == "rpc" {
-                            let pfx = g.out.prefix_for(&rpc_ns);
+                        let rpc = style == "rpc";
+                        let (indent, pfx) = if rpc { (3, Some(g.out.prefix_for(&rpc_ns))) } else { (2, None) };
+                        if let Some(pfx) = &pfx {
                             body_xml.push_str(&format!("    <{pfx}:{oname}>\n"));
-                            for p in &parts {
-                                g.part(*p, true, 3, &mut body_xml);
+                        }
+                        // Every part looked at is charged, so generation stops
+                        // with the envelope's budget.
+                        for p in children(msg, WSDL_NS).filter(|p| p.tag_name().name() == "part") {
+                            if !g.charge(p) {
+                                break;
                             }
+                            if parts_filter.as_ref().is_none_or(|f| p.attribute("name").is_some_and(|n| f.contains(n))) {
+                                g.part(p, rpc, indent, &mut body_xml);
+                            }
+                        }
+                        if let Some(pfx) = &pfx {
                             body_xml.push_str(&format!("    </{pfx}:{oname}>\n"));
-                        } else {
-                            for p in &parts {
-                                g.part(*p, false, 2, &mut body_xml);
-                            }
                         }
                     }
                     None => g.report.warn("unresolved_message", &opath, "the input message is not defined in this document; empty body"),
                 }
                 for h in bin.into_iter().flat_map(|i| i.children()).filter(|c| is(c, bind_ns, "header")) {
+                    if !g.charge(h) {
+                        break;
+                    }
                     let hmsg = h.attribute("message").map(|m| qname(h, m).1).and_then(|m| ctx.messages.get(&m).copied());
-                    let hpart = h.attribute("part");
-                    match hmsg.and_then(|m| children(m, WSDL_NS).find(|p| p.tag_name().name() == "part" && p.attribute("name") == hpart)) {
-                        Some(p) => g.part(p, false, 2, &mut header_xml),
-                        None => g.report.warn("unresolved_header", &path(h), "SOAP header part is not defined in this document"),
+                    let parts = hmsg.and_then(|m| ctx.message_parts.get(&m.id()));
+                    match parts.zip(h.attribute("part")).and_then(|(parts, name)| parts.get(name)) {
+                        Some(p) => g.part(*p, false, 2, &mut header_xml),
+                        None => g.warn("unresolved_header", h, "SOAP header part is not defined in this document"),
                     }
                 }
             }
@@ -553,6 +603,9 @@ struct XsdGen<'r, 'a, 'i> {
     exhausted: bool,
     /// The byte budget (not the node budget) was what ran out.
     bytes_hit: bool,
+    /// Findings already reported, by code and schema node (the path is built
+    /// only for the first).
+    noted: HashSet<(&'static str, NodeId)>,
     out: XmlOut,
 }
 
@@ -581,7 +634,20 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             max_bytes,
             exhausted: false,
             bytes_hit: false,
+            noted: HashSet::new(),
             out: XmlOut::default(),
+        }
+    }
+
+    fn warn(&mut self, code: &'static str, n: Node, message: impl Into<String>) {
+        if self.noted.insert((code, n.id())) {
+            self.report.warn(code, &path(n), message);
+        }
+    }
+
+    fn unsupported(&mut self, code: &'static str, n: Node, message: impl Into<String>) {
+        if self.noted.insert((code, n.id())) {
+            self.report.unsupported(code, &path(n), message);
         }
     }
 
@@ -597,9 +663,9 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         }
         if units > self.max_nodes - self.nodes {
             self.exhausted = true;
-            self.report.warn(
+            self.warn(
                 "sample_size_limit",
-                &path(n),
+                n,
                 format!("envelope reached {} generated nodes (max_sample_nodes); the rest was omitted", self.max_nodes),
             );
             return false;
@@ -616,9 +682,9 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         if len > self.max_bytes - self.bytes {
             self.exhausted = true;
             self.bytes_hit = true;
-            self.report.warn(
+            self.warn(
                 "sample_size_limit",
-                &path(n),
+                n,
                 format!("envelope reached its size limit ({} generated bytes); the rest was omitted", self.max_bytes),
             );
             return false;
@@ -638,7 +704,12 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
     /// The XSD children of `n`, each charged as one unit of work before any
     /// of them is visited (none once the budget is spent).
     fn kids(&mut self, n: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
-        let kids: Vec<Node<'a, 'i>> = children(n, XSD_NS).collect();
+        if self.exhausted {
+            return vec![];
+        }
+        // One more than the budget allows is enough to know it does not fit.
+        let room = self.max_nodes - self.nodes;
+        let kids: Vec<Node<'a, 'i>> = children(n, XSD_NS).take(room.saturating_add(1)).collect();
         if self.charge_n(n, kids.len()) { kids } else { vec![] }
     }
 
@@ -658,7 +729,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
     fn enter_group(&mut self, def: Node, name: &str) -> bool {
         if self.group_stack.contains(&def.id()) {
             let msg = format!("recursive group '{}': expansion stops at the first repetition", clip(name, 128));
-            self.report.warn("recursive_schema", &path(def), msg);
+            self.warn("recursive_schema", def, msg);
             return false;
         }
         self.group_stack.push(def.id());
@@ -686,7 +757,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
     }
 
     /// A message part: `element=` (document) or `type=` (rpc, or document
-    /// with a type — WS-I disallows the latter).
+    /// with a type — WS-I disallows the latter). The caller has charged it.
     fn part(&mut self, p: Node<'a, 'i>, rpc: bool, indent: usize, out: &mut String) {
         if self.exhausted {
             return;
@@ -697,14 +768,11 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             match self.set.elements.get(&q) {
                 Some(decl) => self.element(decl, indent, 0, out, true),
                 None => {
-                    self.report.warn(
+                    self.warn(
                         "unresolved_element",
-                        &path(p),
+                        p,
                         format!("element '{}' is not defined in an inline schema; an empty element is used", clip(e, 128)),
                     );
-                    if !self.charge(p) {
-                        return;
-                    }
                     let pfx = self.prefix(p, &q.0);
                     if self.charge_bytes(p, 2 * indent + pfx.len() + q.1.len() + 5) {
                         out.push_str(&format!("{}<{pfx}:{}/>\n", "  ".repeat(indent), q.1));
@@ -715,13 +783,13 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         }
         if let Some(t) = p.attribute("type") {
             if !rpc {
-                self.report.warn(
+                self.warn(
                     "document_part_type",
-                    &path(p),
+                    p,
                     "document-style part uses type= instead of element=; the part name is used as the element name",
                 );
             }
-            if !self.charge(p) || !self.charge_bytes(p, tag_bytes(indent, pname.len())) {
+            if !self.charge_bytes(p, tag_bytes(indent, pname.len())) {
                 return;
             }
             let q = qname(p, t);
@@ -730,17 +798,16 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         }
     }
 
+    /// An element declaration, already charged: by its parent's `kids`, or
+    /// as a message part.
     fn element(&mut self, decl: Node<'a, 'i>, indent: usize, depth: usize, out: &mut String, top: bool) {
         if depth > MAX_DEPTH {
-            self.report.warn("schema_depth_limit", &path(decl), format!("XSD nesting deeper than {MAX_DEPTH} levels was not expanded"));
-            return;
-        }
-        if !self.charge(decl) {
+            self.warn("schema_depth_limit", decl, format!("XSD nesting deeper than {MAX_DEPTH} levels was not expanded"));
             return;
         }
         let min: u64 = decl.attribute("minOccurs").and_then(|v| v.parse().ok()).unwrap_or(1);
         let max = decl.attribute("maxOccurs").unwrap_or("1");
-        if min == 0 && !self.include_optional && !top {
+        if (min == 0 && !self.include_optional && !top) || self.exhausted {
             return;
         }
         // `ref=` uses the referenced global element's name and content.
@@ -750,11 +817,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                 match self.set.elements.get(&q) {
                     Some(g) => (g, true),
                     None => {
-                        self.report.warn(
-                            "unresolved_element",
-                            &path(decl),
-                            format!("element ref '{}' is not defined in an inline schema", clip(r, 128)),
-                        );
+                        self.warn("unresolved_element", decl, format!("element ref '{}' is not defined in an inline schema", clip(r, 128)));
                         return;
                     }
                 }
@@ -762,7 +825,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             None => (decl, decl.parent().is_some_and(|p| is(&p, XSD_NS, "schema"))),
         };
         if target.attribute("abstract") == Some("true") {
-            self.report.unsupported("xsd_abstract_element", &path(target), "abstract elements / substitution groups are not resolved");
+            self.unsupported("xsd_abstract_element", target, "abstract elements / substitution groups are not resolved");
         }
         let name = target.attribute("name").unwrap_or("element");
         let schema = schema_of(target);
@@ -801,7 +864,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
 
     /// Text taken from the document (`fixed`, `default`, an enumeration
     /// value), after checking that it fits.
-    fn from_doc(&mut self, at: Node, v: &str) -> Option<String> {
+    fn doc_text_if_fits(&mut self, at: Node, v: &str) -> Option<String> {
         self.fits(at, v.len()).then(|| v.to_string())
     }
 
@@ -842,17 +905,17 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         }
         if q.0 == SOAP_ENC {
             let msg = format!("SOAP-encoding type soapenc:{} is not supported", clip(&q.1, 128));
-            self.report.unsupported("soap_encoded_type", &path(at), msg);
+            self.unsupported("soap_encoded_type", at, msg);
             return Content::default();
         }
         let Some(t) = self.set.types.get(q) else {
             let msg = format!("type '{}' is not defined in an inline schema; left empty", clip(&q.1, 128));
-            self.report.warn("unresolved_type", &path(at), msg);
+            self.warn("unresolved_type", at, msg);
             return Content::default();
         };
         if self.type_stack.contains(q) {
             let msg = format!("recursive type '{}': expansion stops at the first repetition", clip(&q.1, 128));
-            self.report.warn("recursive_schema", &path(t), msg);
+            self.warn("recursive_schema", t, msg);
             return Content::default();
         }
         self.type_stack.push(q.clone());
@@ -869,7 +932,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
     fn complex(&mut self, ct: Node<'a, 'i>, depth: usize) -> Content {
         let mut c = Content::default();
         if ct.attribute("mixed") == Some("true") {
-            self.report.warn("xsd_mixed", &path(ct), "mixed content: only the element structure is generated");
+            self.warn("xsd_mixed", ct, "mixed content: only the element structure is generated");
         }
         self.complex_into(ct, depth, &mut c);
         c
@@ -897,11 +960,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                             "restriction" => {
                                 let base = d.attribute("base").map(|b| qname(d, b));
                                 if base.as_ref().is_some_and(|b| b.0 == SOAP_ENC) {
-                                    self.report.unsupported(
-                                        "soap_encoded_array",
-                                        &path(d),
-                                        "SOAP-encoded arrays (soapenc:Array) are not supported",
-                                    );
+                                    self.unsupported("soap_encoded_array", d, "SOAP-encoded arrays (soapenc:Array) are not supported");
                                     continue;
                                 }
                                 self.complex_into(d, depth + 1, c);
@@ -909,7 +968,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                             "annotation" => {}
                             other => {
                                 let msg = format!("xsd:{} in complexContent is not supported", clip(other, 128));
-                                self.report.unsupported("xsd_construct", &path(d), msg);
+                                self.unsupported("xsd_construct", d, msg);
                             }
                         }
                     }
@@ -937,14 +996,14 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                             "annotation" => {}
                             other => {
                                 let msg = format!("xsd:{} in simpleContent is not supported", clip(other, 128));
-                                self.report.unsupported("xsd_construct", &path(d), msg);
+                                self.unsupported("xsd_construct", d, msg);
                             }
                         }
                     }
                 }
                 other => {
                     let msg = format!("xsd:{} in a complexType is not supported", clip(other, 128));
-                    self.report.unsupported("xsd_construct", &path(k), msg);
+                    self.unsupported("xsd_construct", k, msg);
                 }
             }
         }
@@ -964,12 +1023,12 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         }
         let Some(t) = self.set.types.get(q) else {
             let msg = format!("base type '{}' is not defined in an inline schema", clip(&q.1, 128));
-            self.report.warn("unresolved_type", &path(at), msg);
+            self.warn("unresolved_type", at, msg);
             return;
         };
         if self.type_stack.contains(q) {
             let msg = format!("recursive type '{}': expansion stops at the first repetition", clip(&q.1, 128));
-            self.report.warn("recursive_schema", &path(t), msg);
+            self.warn("recursive_schema", t, msg);
             return;
         }
         self.type_stack.push(q.clone());
@@ -984,7 +1043,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
 
     fn particle(&mut self, p: Node<'a, 'i>, depth: usize, c: &mut Content) {
         if depth > MAX_DEPTH {
-            self.report.warn("schema_depth_limit", &path(p), format!("XSD nesting deeper than {MAX_DEPTH} levels was not expanded"));
+            self.warn("schema_depth_limit", p, format!("XSD nesting deeper than {MAX_DEPTH} levels was not expanded"));
             return;
         }
         if self.exhausted || (p.attribute("minOccurs") == Some("0") && !self.include_optional) {
@@ -1008,18 +1067,14 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                     }
                     None => {
                         let msg = format!("group '{}' is not defined in an inline schema", clip(r, 128));
-                        self.report.warn("unresolved_group", &path(p), msg);
+                        self.warn("unresolved_group", p, msg);
                     }
                 }
             }
             "choice" => {
                 let branches: Vec<Node> = self.kids(p).into_iter().filter(|k| k.tag_name().name() != "annotation").collect();
                 if branches.len() > 1 {
-                    self.report.warn(
-                        "xsd_choice_first",
-                        &path(p),
-                        format!("xsd:choice has {} branches; the first one is generated", branches.len()),
-                    );
+                    self.warn("xsd_choice_first", p, format!("xsd:choice has {} branches; the first one is generated", branches.len()));
                 }
                 if let Some(first) = branches.first() {
                     self.particle_item(*first, depth + 1, c);
@@ -1040,7 +1095,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             "element" => self.element(k, self.child_indent, depth, &mut c.children, false),
             "sequence" | "all" | "choice" | "group" => self.particle(k, depth, c),
             "any" => {
-                self.report.unsupported("xsd_any", &path(k), "xsd:any wildcard content is not generated; add the element(s) yourself");
+                self.unsupported("xsd_any", k, "xsd:any wildcard content is not generated; add the element(s) yourself");
                 let line = format!("{}<!--xsd:any content-->\n", "  ".repeat(self.child_indent));
                 if self.charge_bytes(k, line.len()) {
                     c.children.push_str(&line);
@@ -1049,7 +1104,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             "annotation" => {}
             other => {
                 let msg = format!("xsd:{} in a content model is not supported", clip(other, 128));
-                self.report.unsupported("xsd_construct", &path(k), msg);
+                self.unsupported("xsd_construct", k, msg);
             }
         }
     }
@@ -1063,7 +1118,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                 Some(g) => g,
                 None => {
                     let msg = format!("attribute ref '{}' is not defined in an inline schema", clip(r, 128));
-                    self.report.warn("unresolved_attribute", &path(a), msg);
+                    self.warn("unresolved_attribute", a, msg);
                     return;
                 }
             },
@@ -1082,11 +1137,8 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         let pfx = if qualified && !tns.is_empty() { Some(self.prefix(a, tns)) } else { None };
         // The name and a value taken from the document are checked before
         // either is copied.
-        let raw = match decl.attribute("fixed").or(a.attribute("fixed")) {
-            Some(f) => Some(f),
-            None if self.mode == SampleMode::Sample => decl.attribute("default").or(a.attribute("default")),
-            None => None,
-        };
+        let default = if self.mode == SampleMode::Sample { decl.attribute("default").or(a.attribute("default")) } else { None };
+        let raw = decl.attribute("fixed").or(a.attribute("fixed")).or(default);
         let an_len = pfx.as_ref().map_or(0, |p| p.len() + 1) + name.len();
         if !self.fits(a, an_len + raw.map_or(0, str::len) + 4) {
             return;
@@ -1122,7 +1174,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         let q = qname(g, r);
         let Some(def) = self.set.attr_groups.get(&q) else {
             let msg = format!("attributeGroup '{}' is not defined in an inline schema", clip(r, 128));
-            self.report.warn("unresolved_attribute_group", &path(g), msg);
+            self.warn("unresolved_attribute_group", g, msg);
             return;
         };
         if !self.enter_group(def, &q.1) {
@@ -1147,7 +1199,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             Some(_) => String::new(),
             None => {
                 let msg = format!("simple type '{}' is not defined in an inline schema", clip(&q.1, 128));
-                self.report.warn("unresolved_type", &path(at), msg);
+                self.warn("unresolved_type", at, msg);
                 String::new()
             }
         }
@@ -1168,14 +1220,14 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                     let first_enum = facet_nodes.iter().filter(|e| is(e, XSD_NS, "enumeration")).find_map(|e| e.attribute("value"));
                     if let Some(first) = first_enum {
                         return match self.mode {
-                            SampleMode::Sample => self.from_doc(k, first).unwrap_or_default(),
+                            SampleMode::Sample => self.doc_text_if_fits(k, first).unwrap_or_default(),
                             SampleMode::Blank => String::new(),
                         };
                     }
                     if let Some(p) = facet_nodes.iter().find(|e| is(e, XSD_NS, "pattern")) {
                         let pattern = clip(p.attribute("value").unwrap_or(""), 200);
                         let msg = format!("the sample is not guaranteed to match pattern `{pattern}`");
-                        self.report.warn("pattern_not_enforced", &path(*p), msg);
+                        self.warn("pattern_not_enforced", *p, msg);
                     }
                     let mut f = facets(k);
                     f.min = f.min.or(outer.min);
@@ -1195,7 +1247,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                     let member = if k.tag_name().name() == "list" {
                         k.attribute("itemType")
                     } else {
-                        self.report.warn("xsd_union_first", &path(k), "xsd:union: the first member type is generated");
+                        self.warn("xsd_union_first", k, "xsd:union: the first member type is generated");
                         k.attribute("memberTypes").and_then(|m| m.split_whitespace().next())
                     };
                     if let Some(t) = member {
@@ -1217,9 +1269,9 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             return String::new();
         }
         if is_credential_name(name) {
-            self.report.warn(
+            self.warn(
                 "credential_left_blank",
-                &path(at),
+                at,
                 format!("credential-like value '{name}' is never generated; left empty for you to supply"),
             );
             return String::new();
@@ -1284,7 +1336,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             }
             other => {
                 let msg = format!("built-in type xsd:{} has no sample generator; left empty", clip(other, 128));
-                self.report.warn("unknown_xsd_type", &path(at), msg);
+                self.warn("unknown_xsd_type", at, msg);
                 String::new()
             }
         }

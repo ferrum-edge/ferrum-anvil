@@ -265,7 +265,7 @@ fn branching_acyclic_groups_hit_the_shared_budget() {
             assert_eq!(env.matches(" leaf=\"").count(), 1, "{env}");
         } else {
             let leaves = count(&env, "leaf");
-            assert!(leaves > 0 && leaves < 20_000, "{leaves} leaves");
+            assert!((1..20_000).contains(&leaves), "{leaves} leaves");
         }
     }
 }
@@ -287,7 +287,7 @@ fn branching_extension_bases_hit_the_shared_budget() {
     assert!(has(&r, "sample_size_limit"));
     assert!(env.len() < 4 * 1024 * 1024, "envelope is {} bytes", env.len());
     let leaves = count(&env, "leaf");
-    assert!(leaves > 0 && leaves < 20_000, "{leaves} leaves");
+    assert!((1..20_000).contains(&leaves), "{leaves} leaves");
     assert_eq!(env.matches(" mark=\"").count(), 1, "{env}");
 }
 
@@ -297,13 +297,13 @@ fn message_parts_are_charged_like_elements() {
         r#"<xsd:simpleType name="S"><xsd:restriction base="xsd:string">"#,
         r#"<xsd:minLength value="4096"/></xsd:restriction></xsd:simpleType>"#,
     );
-    let parts: String = (0..100_000).map(|i| format!(r#"<part name="p{i}" type="tns:S"/>"#)).collect();
+    let parts = (0..100_000).map(|i| format!(r#"<part name="p{i}" type="tns:S"/>"#)).collect::<Vec<_>>().concat();
     let (r, env) = op_envelope_with(schema, &parts);
     assert!(has(&r, "sample_size_limit"));
     assert!(env.len() < 9 * 1024 * 1024, "envelope is {} bytes", env.len());
     parse(&env);
     // Parts whose element is missing are charged too.
-    let parts: String = (0..100_000).map(|i| format!(r#"<part name="p{i}" element="tns:Missing{i}"/>"#)).collect();
+    let parts = (0..100_000).map(|i| format!(r#"<part name="p{i}" element="tns:Missing{i}"/>"#)).collect::<Vec<_>>().concat();
     let (r, env) = op_envelope_with(schema, &parts);
     assert!(has(&r, "sample_size_limit"));
     assert!(env.len() < 4 * 1024 * 1024, "envelope is {} bytes", env.len());
@@ -333,9 +333,9 @@ const MANY_OPERATIONS: &str = r#"<?xml version="1.0"?>
 fn the_import_wide_envelope_budget_is_shared_by_operations() {
     // Ten operations, each asking for about 20 MB; with a 1 MiB input limit
     // the whole import may generate 4 MiB.
-    let ops: String = (0..10).map(|i| format!(r#"<operation name="Op{i}"><input message="tns:In"/></operation>"#)).collect();
+    let ops = (0..10).map(|i| format!(r#"<operation name="Op{i}"><input message="tns:In"/></operation>"#)).collect::<Vec<_>>().concat();
     let body = r#"<input><soap:body use="literal"/></input>"#;
-    let bops: String = (0..10).map(|i| format!(r#"<operation name="Op{i}">{body}</operation>"#)).collect();
+    let bops = (0..10).map(|i| format!(r#"<operation name="Op{i}">{body}</operation>"#)).collect::<Vec<_>>().concat();
     let doc = MANY_OPERATIONS
         .replace("{big}", &"v".repeat(100 * 1024))
         .replace("{refs}", &r#"<xsd:element ref="tns:Big"/>"#.repeat(200))
@@ -349,6 +349,22 @@ fn the_import_wide_envelope_budget_is_shared_by_operations() {
     for env in &envelopes {
         parse(env);
     }
+}
+
+#[test]
+fn generated_envelope_bytes_are_capped() {
+    let big = "v".repeat(100 * 1024);
+    let refs = r#"<xsd:element ref="tns:Big"/>"#.repeat(200);
+    let mut schema = format!(r#"<xsd:element name="Big" type="xsd:string" fixed="{big}"/>"#);
+    schema.push_str(&format!(
+        r#"<xsd:element name="Req"><xsd:complexType><xsd:sequence>{refs}</xsd:sequence></xsd:complexType></xsd:element>"#
+    ));
+    let (r, env) = op_envelope(&schema);
+    assert!(has(&r, "sample_size_limit"));
+    assert!(env.len() < 9 * 1024 * 1024, "envelope is {} bytes", env.len());
+    // What was generated before the limit is kept and stays well-formed.
+    let copies = count(&env, "Big");
+    assert!((1..200).contains(&copies), "{copies} copies");
 }
 
 const REUSED_GROUPS: &str = r#"
@@ -377,4 +393,17 @@ fn reused_groups_still_expand_at_every_use() {
     assert_eq!(count(&env, "a"), 3, "{env}");
     assert_eq!(count(&env, "b"), 3, "{env}");
     assert_eq!(env.matches(" lang=\"").count(), 2, "{env}");
+}
+
+#[test]
+fn elements_with_too_many_namespaces_in_scope_are_refused() {
+    let doc = |n: usize| {
+        let decls = (0..n).map(|i| format!(r#" xmlns:p{i}="urn:p{i}""#)).collect::<Vec<_>>().concat();
+        format!(r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:x"{decls}/>"#)
+    };
+    match import(doc(300).as_bytes(), &opts()) {
+        Err(ImportError::LimitExceeded { limit, .. }) => assert_eq!(limit, 256),
+        other => panic!("expected the namespace limit, got {:?}", other.map(|r| r.requests.len())),
+    }
+    assert!(import(doc(200).as_bytes(), &opts()).is_ok());
 }
