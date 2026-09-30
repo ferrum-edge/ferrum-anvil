@@ -83,7 +83,7 @@ pub fn is_sensitive_name(name: &str, extra: &[String]) -> bool {
     SENSITIVE_NAME_PARTS.iter().any(|p| n == *p || n.contains(p) && n.len() <= 48)
 }
 
-/// Whether a configured header name marks a credential that must not follow
+/// Whether a configured header or form field name marks a credential that must not follow
 /// a redirect to another origin. Broader than [`is_sensitive_name`], which
 /// decides redaction: no length limit, and names ending in `-key` / `_key`
 /// (`X-Master-Key`, `Subscription-Key`, ...) count too.

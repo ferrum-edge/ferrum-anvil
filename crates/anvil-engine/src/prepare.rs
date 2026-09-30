@@ -254,6 +254,8 @@ pub fn prepare_http(
     )
 }
 
+/// Prepare an HTTP request using configured credential names to identify
+/// credential-bearing form fields for cross-origin redirect handling.
 pub(crate) fn prepare_http_with_redaction_names(
     spec: &RequestSpec,
     r: &Resolver,
@@ -350,8 +352,10 @@ pub(crate) fn prepare_http_with_redaction_names(
             for (i, f) in fields.iter().enumerate().filter(|(_, f)| f.enabled) {
                 let k = r.resolve(&f.name, &format!("body.fields[{i}].name"))?;
                 let v = r.resolve(&f.value, &format!("body.fields[{i}].value"))?;
-                if f.sensitive || crate::redact::is_credential_name(&k, redaction_names) {
+                if f.sensitive {
                     r.mark_sensitive(&k, &v);
+                }
+                if f.sensitive || crate::redact::is_credential_name(&k, redaction_names) {
                     sensitive_body_field = true;
                 }
                 parts.push(format!(
@@ -368,11 +372,18 @@ pub(crate) fn prepare_http_with_redaction_names(
             let boundary = format!("----AnvilFormBoundary{}", hex::encode(b));
             let mut out: Vec<u8> = Vec::new();
             for (i, p) in parts.iter().enumerate().filter(|(_, p)| p.enabled) {
-                let name = r.resolve(&p.name, &format!("body.parts[{i}].name"))?.replace('"', "%22");
+                let resolved_name = r.resolve(&p.name, &format!("body.parts[{i}].name"))?;
+                let name = resolved_name.replace('"', "%22");
                 out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
                 match &p.content {
                     MultipartContent::Text { value } => {
                         let v = r.resolve(value, &format!("body.parts[{i}].value"))?;
+                        if p.sensitive {
+                            r.mark_sensitive(&resolved_name, &v);
+                        }
+                        if p.sensitive || crate::redact::is_credential_name(&resolved_name, redaction_names) {
+                            sensitive_body_field = true;
+                        }
                         out.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes());
                         if let Some(ct) = &p.content_type {
                             out.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
@@ -676,6 +687,51 @@ mod tests {
         let disabled = KeyValue { enabled: false, ..password };
         spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), disabled] };
         assert!(!prepared(&spec).body_uses_secret);
+    }
+
+    #[test]
+    fn credential_name_fields_do_not_register_literal_values_as_secrets() {
+        use anvil_domain::request::KeyValue;
+        let value = "John Smith";
+        let spec = RequestSpec {
+            body: Body::FormUrlEncoded { fields: vec![KeyValue::new("author", value)] },
+            ..RequestSpec::http("POST", "https://api.example.com/submit")
+        };
+        let resolver = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        let request = prepare_http(
+            &spec,
+            &resolver,
+            &attachments,
+            &EffectiveSettings::default(),
+            false,
+            &["https"],
+        )
+        .unwrap();
+
+        assert!(resolver.used_secrets.lock().is_empty(), "a heuristic name does not register its value as a secret");
+        let redactor = crate::redact::Redactor::for_execution(&resolver, &[]);
+        let preview = redactor.text(&String::from_utf8_lossy(&request.body));
+        let encoded_value = encode_component(value);
+        assert!(preview.contains(&encoded_value), "the literal author remains visible in the preview: {preview}");
+        let decoded_value = url::form_urlencoded::parse(preview.as_bytes()).find(|(name, _)| name == "author").map(|(_, value)| value);
+        assert_eq!(decoded_value.as_deref(), Some(value), "the preview still shows the author value");
+    }
+
+    #[test]
+    fn a_multipart_credential_named_text_part_marks_the_body() {
+        let spec = RequestSpec {
+            body: Body::Multipart {
+                parts: vec![anvil_domain::request::MultipartPart {
+                    name: "password".into(),
+                    enabled: true,
+                    content: MultipartContent::Text { value: "literal-password".into() },
+                    content_type: None,
+                }],
+            },
+            ..RequestSpec::http("POST", "https://api.example.com/login")
+        };
+        assert!(prepared(&spec).body_uses_secret);
     }
 
     #[test]

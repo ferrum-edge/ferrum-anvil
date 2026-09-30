@@ -106,12 +106,13 @@ against it).
   - auth (headers, API-key query parameters and API-key cookies) is no longer
     applied;
   - a redirect that would resend a body to another origin is not followed
-    when preparing the body substituted a secret variable or included a form
-    field marked sensitive or named as a credential, literal value or not
-    (whatever the body type and encoding: form fields are percent-encoded,
-    GraphQL variables are re-serialized), or when the body holds a resolved
-    secret value byte for byte (an attachment, say). This covers 301/302
-    redirects that keep the body, such as for PUT, PATCH and DELETE.
+    when preparing the body substituted a secret variable or included a
+    URL-encoded or multipart text form field marked sensitive or named as a
+    credential, literal value or not. JSON, GraphQL, XML, SOAP and raw bodies
+    have no field notion and are covered only when they contain an explicitly
+    sensitive value (or a resolved secret value detected byte for byte). This
+    applies to 301/302 redirects that keep the body, such as for PUT, PATCH
+    and DELETE.
 
   The workspace cookie jar is separate: on each hop it sends the stored
   cookies that match that hop's target under cookie rules, which do not
