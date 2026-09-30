@@ -789,14 +789,17 @@
   proxy. For HTTP/3 the limit is at least 8 KiB (as for HTTP/1) and at most
   2^62-1 bytes, the largest a SETTINGS value can carry. Anvil advertises it
   as `SETTINGS_MAX_FIELD_SECTION_SIZE` (before, it advertised no limit), and
-  a pooled connection is reused only by requests with the same limit. It
-  refuses a HEADERS frame that declares more before buffering any more of
-  it, and refuses a decoded field section over it before keeping any of it.
-  The request fails with `response_headers_too_large` (for gRPC trailers
-  too) and the response stream is stopped; the connection stays usable. Other frames with a payload are bounded as well
-  (at most 64 KiB on the control stream), and an unknown frame over the
-  bound is skipped without being buffered. The vendored `h3` carries the
-  change as a second patch (`vendor/README.md`).
+  a pooled connection (or gRPC channel) is reused only by requests with the
+  same limit. It refuses a HEADERS frame that declares more before
+  buffering any more of it, and refuses a decoded field section over it
+  before keeping any of it. The request fails with
+  `response_headers_too_large` (for gRPC trailers too) and the response
+  stream is stopped. A pooled HTTP/3 request connection stays usable; a
+  gRPC call that ends this way closes its HTTP/3 connection, as any call
+  that does not end cleanly does. Other frames with a payload are bounded
+  as well (at most 64 KiB on the control stream), and an unknown frame over
+  the bound is skipped without being buffered. The vendored `h3` carries
+  the change as a second patch (`vendor/README.md`).
 - An HTTP/3 response can no longer outlive its deadlines or a cancel. The
   total deadline now also ends the response body (a body that keeps
   arriving just inside the idle deadline stopped only at

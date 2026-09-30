@@ -95,9 +95,15 @@ impl RawH3 {
     /// Wait up to `within` for the first `STOP_SENDING` a client sent on a
     /// request stream, and return its code.
     pub async fn first_stop(&self, within: Duration) -> Option<u64> {
+        self.nth_stop(0, within).await
+    }
+
+    /// Wait up to `within` for the `n`th (from 0) `STOP_SENDING` a client
+    /// sent on a request stream, and return its code.
+    pub async fn nth_stop(&self, n: usize, within: Duration) -> Option<u64> {
         let until = Instant::now() + within;
         loop {
-            if let Some(v) = self.stops.lock().first() {
+            if let Some(v) = self.stops.lock().get(n) {
                 return Some(*v);
             }
             if Instant::now() >= until {

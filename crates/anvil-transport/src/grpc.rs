@@ -789,8 +789,10 @@ fn channel_key(isolation: &str, plan: &GrpcPlan, leg: Leg) -> String {
     // A connection's PROXY header is fixed for its lifetime, so channels with
     // different header plans (or none) are never shared.
     let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
+    // A connection advertises (and HTTP/3 enforces) the header limit it was
+    // opened with, so a call with a smaller one never reuses it.
     format!(
-        "{}|{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        "{}|{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}|fs={}",
         isolation,
         leg,
         plan.host.to_ascii_lowercase(),
@@ -800,7 +802,8 @@ fn channel_key(isolation: &str, plan: &GrpcPlan, leg: Leg) -> String {
         plan.version,
         plan.wire.is_web(),
         crate::certs::sha256_hex(dns.as_bytes()),
-        header
+        header,
+        crate::h3::field_section_limit(&plan.limits)
     )
 }
 
@@ -2230,6 +2233,44 @@ mod tests {
         message Req { string name = 1; google.protobuf.Timestamp at = 2; }
         message Rep { string text = 1; }
         service S { rpc U(Req) returns (Rep); rpc B(stream Req) returns (stream Rep); }"#;
+
+    #[test]
+    fn a_channel_is_keyed_on_the_header_limit_it_advertises() {
+        let pool = pool_from_proto_sources(&[("t.proto".into(), PROTO.into())]).unwrap();
+        let plan = |max_response_header_bytes| GrpcPlan {
+            tls: None,
+            host: "127.0.0.1".into(),
+            port: 50051,
+            authority: "127.0.0.1:50051".into(),
+            path_prefix: String::new(),
+            service: "t.v1.S".into(),
+            method: "U".into(),
+            mode: GrpcMode::Unary,
+            schema: Schema::Pool(pool.clone()),
+            messages: vec![],
+            headers: vec![],
+            sign: None,
+            sign_reflection: None,
+            deadline_ms: None,
+            timeouts: Timeouts::default(),
+            limits: Limits { max_response_header_bytes, ..Limits::default() },
+            dns: DnsConfig::default(),
+            proxy: None,
+            display_url: String::new(),
+            max_message_bytes: 1024,
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            wire: GrpcWire::Grpc,
+            version: HttpVersionPolicy::Http3Only,
+            proxy_header: None,
+            channels: None,
+        };
+        let key = |limit| channel_key("w", &plan(limit), Leg::Quic);
+        assert_ne!(key(16 * 1024), key(64 * 1024), "a larger limit is its own channel");
+        // Keyed on the limit HTTP/3 advertises: raw values it clamps alike share.
+        assert_eq!(key(0), key(1));
+        assert_eq!(key(u64::MAX), key(1 << 62));
+    }
 
     #[test]
     fn proto_sources_compile_in_memory_with_well_known_imports() {

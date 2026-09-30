@@ -343,7 +343,10 @@ async fn a_body_dripped_past_the_total_deadline_stops_at_it() {
     p.timeouts.body_idle_ms = Some(1_000);
     p.timeouts.total_ms = Some(1_500);
 
-    let out = send(&H3Transport::new(), &p, &CancellationToken::new()).await;
+    // The transport outlives the check: dropping it closes its pooled
+    // connections, and a STOP_SENDING still queued would never be sent.
+    let t = H3Transport::new();
+    let out = send(&t, &p, &CancellationToken::new()).await;
     assert_eq!(failure(&out), (FailureKind::TotalTimeout, Phase::ResponseBody));
     assert_eq!(out.observation.failure.as_ref().unwrap().deadline_ms, Some(1_500));
     let r = out.response.as_ref().unwrap();
@@ -381,7 +384,8 @@ async fn trailers_without_the_end_of_the_stream_end_on_cancel() {
         c.cancel();
     });
 
-    let out = send_with(&H3Transport::new(), &plan(o.addr), &events, &cancel).await;
+    let t = H3Transport::new();
+    let out = send_with(&t, &plan(o.addr), &events, &cancel).await;
     assert_eq!(failure(&out), (FailureKind::Canceled, Phase::ResponseBody));
     let r = out.response.as_ref().unwrap();
     assert_eq!(r.body.completeness, BodyCompleteness::Canceled);
@@ -399,11 +403,14 @@ async fn trailers_without_the_end_of_the_stream_end_at_the_idle_and_total_deadli
     let mut total = plan(o.addr);
     total.timeouts.total_ms = Some(1_500);
 
-    for (p, kind, deadline) in [(idle, FailureKind::BodyIdleTimeout, 500), (total, FailureKind::TotalTimeout, 1_500)] {
-        let out = send(&H3Transport::new(), &p, &CancellationToken::new()).await;
+    let cases = [(idle, FailureKind::BodyIdleTimeout, 500), (total, FailureKind::TotalTimeout, 1_500)];
+    for (n, (p, kind, deadline)) in cases.into_iter().enumerate() {
+        // A transport per case, kept until its STOP_SENDING has arrived.
+        let t = H3Transport::new();
+        let out = send(&t, &p, &CancellationToken::new()).await;
         assert_eq!(failure(&out), (kind, Phase::ResponseBody));
         assert_eq!(out.observation.failure.as_ref().unwrap().deadline_ms, Some(deadline));
         assert_eq!(out.response.as_ref().unwrap().body.completeness, BodyCompleteness::Incomplete);
+        assert_eq!(o.nth_stop(n, Duration::from_secs(5)).await, Some(H3_REQUEST_CANCELLED), "{kind:?}");
     }
-    assert_eq!(o.first_stop(Duration::from_secs(5)).await, Some(H3_REQUEST_CANCELLED));
 }
