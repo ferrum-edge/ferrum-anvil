@@ -96,7 +96,8 @@ async fn an_interrupted_write_resets_the_http3_stream_instead_of_finishing_it() 
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         c.cancel();
     });
-    let run = ws::run(&plan, &EventCtx::none(), &cancel, None);
+    let events = EventCtx::none();
+    let run = ws::run(&plan, &events, &cancel, None);
     let out = tokio::time::timeout(GIVE_UP, run).await.expect("the session must end although the peer never reads");
     let f = out.attempts[0].observation.failure.as_ref().expect("the session was canceled");
     assert_eq!(f.kind, FailureKind::Canceled);
