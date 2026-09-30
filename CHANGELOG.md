@@ -808,6 +808,8 @@
   the request, so the effective-request preview of a WS-Security body and
   the execution record redact them. Before, an assertion taken directly
   from the vault was shown in the preview. (GHSA-6j83-rrqr-953h)
+- Desktop development dependencies now override Mocha's vulnerable
+  `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted
