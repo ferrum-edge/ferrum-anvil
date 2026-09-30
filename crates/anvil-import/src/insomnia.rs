@@ -136,6 +136,21 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
             message: "missing `resources` array".into(),
         });
     };
+    // Resources point at their parent by id, so ids must be unique: a
+    // repeated id would give one resource several parents (or make a group
+    // its own ancestor) and repeat its subtree.
+    let mut ids: HashMap<&str, usize> = HashMap::new();
+    for (i, r) in resources.iter().enumerate() {
+        if let Some(id) = str_of(r, "_id").filter(|id| !id.is_empty())
+            && let Some(first) = ids.insert(id, i)
+        {
+            return Err(ImportError::Invalid {
+                dialect: Dialect::InsomniaV4,
+                pointer: format!("/resources/{i}/_id"),
+                message: format!("resource id is already used by /resources/{first}; resource ids must be unique"),
+            });
+        }
+    }
     let mut by_parent: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, r) in resources.iter().enumerate() {
         by_parent.entry(str_of(r, "parentId").unwrap_or("").to_string()).or_default().push(i);
@@ -273,6 +288,11 @@ fn walk_v4(
     let mut kids: Vec<usize> = by_parent.get(pid).into_iter().flatten().copied().collect();
     kids.sort_by(|a, c| sort_key(&res[*a]).total_cmp(&sort_key(&res[*c])).then(a.cmp(c)));
     for i in kids {
+        // Every resource is visited at most once, so the walk is linear in
+        // the number of resources whatever the parent links say.
+        if handled[i] {
+            continue;
+        }
         let r = &res[i];
         let at = format!("/resources/{i}");
         match str_of(r, "_type") {
@@ -282,7 +302,10 @@ fn walk_v4(
                 let name = str_of(r, "name").unwrap_or("Folder").to_string();
                 let fid =
                     group(b, r, &at, folder, &id, &name, r.get("environment"), r.get("preRequestScript"), r.get("afterResponseScript"));
-                walk_v4(b, res, by_parent, &id, Some(fid), handled, depth + 1);
+                // A group without an id cannot be anyone's parent.
+                if !id.is_empty() {
+                    walk_v4(b, res, by_parent, &id, Some(fid), handled, depth + 1);
+                }
             }
             Some("request") => {
                 handled[i] = true;

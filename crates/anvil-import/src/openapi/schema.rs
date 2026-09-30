@@ -381,18 +381,38 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     }
 
     /// Merge `allOf` branches (following `$ref`s) into one schema object.
+    ///
+    /// Every branch is charged against the payload budget before it is
+    /// resolved or copied, and a followed `$ref` counts toward the active
+    /// `$ref` depth like a direct one, so a long or branching composition
+    /// graph stops at the same limits as the rest of the generator.
     pub fn merge_all_of(&mut self, schema: &Value, at: &str) -> Option<Value> {
+        self.merge_all_of_at(schema, at, 0)
+    }
+
+    fn merge_all_of_at(&mut self, schema: &Value, at: &str, nesting: usize) -> Option<Value> {
         let obj = schema.as_object()?;
         let mut acc = obj.clone();
         acc.remove("allOf");
         let branches = obj.get("allOf").and_then(Value::as_array).cloned().unwrap_or_default();
         for (i, br) in branches.iter().enumerate() {
             let bptr = ptr_i(&ptr(at, "allOf"), i);
+            if !self.charge(&bptr) {
+                return None;
+            }
             let mut pushed = false;
             let mut resolved = if Refs::ref_of(br).is_some() {
                 let (t, tp) = self.refs.resolve(br, &bptr, self.report)?;
                 if self.stack.contains(&tp) {
                     self.report.warn("recursive_schema", &tp, "recursive allOf composition: expansion stops at the first repetition");
+                    continue;
+                }
+                if self.stack.len() >= self.max_ref_depth {
+                    self.report.warn(
+                        "ref_depth_limit",
+                        &bptr,
+                        format!("more than {} nested $ref levels were not expanded", self.max_ref_depth),
+                    );
                     continue;
                 }
                 self.stack.push(tp);
@@ -410,7 +430,25 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 br.clone()
             };
             if resolved.get("allOf").is_some_and(Value::is_array) {
-                resolved = self.merge_all_of(&resolved, &bptr).unwrap_or(resolved);
+                if nesting >= MAX_NESTING {
+                    let msg = format!("allOf nesting deeper than {MAX_NESTING} levels was not expanded");
+                    self.report.warn("schema_depth_limit", &bptr, msg);
+                    if let Value::Object(m) = &mut resolved {
+                        m.remove("allOf");
+                    }
+                } else {
+                    match self.merge_all_of_at(&resolved, &bptr, nesting + 1) {
+                        Some(m) => resolved = m,
+                        // The payload budget is spent: stop, as `gen_value` does.
+                        None if self.nodes >= self.max_nodes => {
+                            if pushed {
+                                self.stack.pop();
+                            }
+                            return None;
+                        }
+                        None => {}
+                    }
+                }
             }
             if pushed {
                 self.stack.pop();

@@ -166,3 +166,138 @@ fn node_limit_applies_to_xml() {
 fn deterministic() {
     assert_eq!(run(WSDL, &opts()), run(WSDL, &opts()));
 }
+
+/// A one-operation document/literal WSDL (`S/P/Op`) whose request element is
+/// `tns:Req`; `{schema}` is replaced with more inline schema.
+const WSDL_TEMPLATE: &str = r#"<?xml version="1.0"?>
+<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:g" targetNamespace="urn:g" name="G">
+  <types>
+    <xsd:schema targetNamespace="urn:g" elementFormDefault="qualified">{schema}</xsd:schema>
+  </types>
+  <message name="In"><part name="body" element="tns:Req"/></message>
+  <portType name="PT"><operation name="Op"><input message="tns:In"/></operation></portType>
+  <binding name="B" type="tns:PT">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <operation name="Op"><soap:operation soapAction="urn:g#Op"/><input><soap:body use="literal"/></input></operation>
+  </binding>
+  <service name="S"><port name="P" binding="tns:B"><soap:address location="https://example.com/soap"/></port></service>
+</definitions>"#;
+
+fn op_envelope(schema: &str) -> (anvil_import::ImportResult, String) {
+    let doc = WSDL_TEMPLATE.replace("{schema}", schema);
+    let r = import(doc.as_bytes(), &opts()).unwrap();
+    let (_, env, _) = soap(&r, "S/P/Op");
+    (r, env)
+}
+
+fn count(env: &str, local: &str) -> usize {
+    parse(env).descendants().filter(|n| n.has_tag_name(("urn:g", local))).count()
+}
+
+/// `Ids` and `Items` reference themselves where `{refs}` is.
+const RECURSIVE_GROUPS: &str = r#"
+<xsd:attributeGroup name="Ids">
+  <xsd:attribute name="id" type="xsd:string" use="required"/>
+  {attr_refs}
+</xsd:attributeGroup>
+<xsd:group name="Items">
+  <xsd:sequence>
+    <xsd:element name="item" type="xsd:string"/>
+    {group_refs}
+  </xsd:sequence>
+</xsd:group>
+<xsd:element name="Req">
+  <xsd:complexType>
+    <xsd:group ref="tns:Items"/>
+    <xsd:attributeGroup ref="tns:Ids"/>
+  </xsd:complexType>
+</xsd:element>"#;
+
+#[test]
+fn self_referencing_groups_stop_at_the_first_repetition() {
+    for refs in [1, 2] {
+        let schema = RECURSIVE_GROUPS
+            .replace("{attr_refs}", &r#"<xsd:attributeGroup ref="tns:Ids"/>"#.repeat(refs))
+            .replace("{group_refs}", &r#"<xsd:group ref="tns:Items"/>"#.repeat(refs));
+        let (r, env) = op_envelope(&schema);
+        assert!(has(&r, "recursive_schema"), "{refs} self-references");
+        assert_eq!(env.matches(" id=\"").count(), 1, "{refs} self-references:\n{env}");
+        assert_eq!(count(&env, "item"), 1, "{refs} self-references:\n{env}");
+    }
+}
+
+/// Groups `X0`..`X15` each reference the next one twice (2^16 leaves, within
+/// the nesting limit, without a shared budget); `X16` holds the leaf.
+fn fan_out(attributes: bool) -> String {
+    let (kind, leaf) = if attributes {
+        ("attributeGroup", r#"<xsd:attribute name="leaf" type="xsd:string" use="required"/>"#)
+    } else {
+        ("group", r#"<xsd:sequence><xsd:element name="leaf" type="xsd:string"/></xsd:sequence>"#)
+    };
+    let mut schema = String::new();
+    for i in 0..16 {
+        let next = format!(r#"<xsd:{kind} ref="tns:X{}"/>"#, i + 1);
+        let body = if attributes { format!("{next}{next}") } else { format!("<xsd:sequence>{next}{next}</xsd:sequence>") };
+        schema.push_str(&format!(r#"<xsd:{kind} name="X{i}">{body}</xsd:{kind}>"#));
+    }
+    schema.push_str(&format!(r#"<xsd:{kind} name="X16">{leaf}</xsd:{kind}>"#));
+    schema.push_str(&format!(r#"<xsd:element name="Req"><xsd:complexType><xsd:{kind} ref="tns:X0"/></xsd:complexType></xsd:element>"#));
+    schema
+}
+
+#[test]
+fn branching_acyclic_groups_hit_the_shared_budget() {
+    for attributes in [false, true] {
+        let (r, env) = op_envelope(&fan_out(attributes));
+        assert!(has(&r, "sample_size_limit"), "attributes: {attributes}");
+        assert!(!has(&r, "recursive_schema"), "acyclic groups are not recursive");
+        assert!(env.len() < 4 * 1024 * 1024, "envelope is {} bytes", env.len());
+        // Repeated attributes are not well-formed XML, so count the text.
+        let leaves = if attributes { env.matches(" leaf=\"").count() } else { count(&env, "leaf") };
+        assert!(leaves > 0 && leaves < 20_000, "{leaves} leaves");
+    }
+}
+
+#[test]
+fn generated_envelope_bytes_are_capped() {
+    let big = "v".repeat(100 * 1024);
+    let refs = r#"<xsd:element ref="tns:Big"/>"#.repeat(200);
+    let mut schema = format!(r#"<xsd:element name="Big" type="xsd:string" fixed="{big}"/>"#);
+    schema.push_str(&format!(
+        r#"<xsd:element name="Req"><xsd:complexType><xsd:sequence>{refs}</xsd:sequence></xsd:complexType></xsd:element>"#
+    ));
+    let (r, env) = op_envelope(&schema);
+    assert!(has(&r, "sample_size_limit"));
+    assert!(env.len() < 9 * 1024 * 1024, "envelope is {} bytes", env.len());
+    // What was generated before the limit is kept and stays well-formed.
+    let copies = count(&env, "Big");
+    assert!(copies > 0 && copies < 200, "{copies} copies");
+}
+
+const REUSED_GROUPS: &str = r#"
+<xsd:attributeGroup name="Common"><xsd:attribute name="lang" type="xsd:string" use="required"/></xsd:attributeGroup>
+<xsd:attributeGroup name="Both"><xsd:attributeGroup ref="tns:Common"/></xsd:attributeGroup>
+<xsd:group name="Pair">
+  <xsd:sequence><xsd:element name="a" type="xsd:string"/><xsd:element name="b" type="xsd:int"/></xsd:sequence>
+</xsd:group>
+<xsd:complexType name="Row"><xsd:group ref="tns:Pair"/><xsd:attributeGroup ref="tns:Both"/></xsd:complexType>
+<xsd:element name="Req">
+  <xsd:complexType>
+    <xsd:sequence>
+      <xsd:element name="first" type="tns:Row"/>
+      <xsd:element name="second" type="tns:Row"/>
+      <xsd:group ref="tns:Pair"/>
+    </xsd:sequence>
+  </xsd:complexType>
+</xsd:element>"#;
+
+#[test]
+fn reused_groups_still_expand_at_every_use() {
+    let (r, env) = op_envelope(REUSED_GROUPS);
+    assert!(!has(&r, "recursive_schema"));
+    assert!(!has(&r, "sample_size_limit"));
+    assert_eq!(count(&env, "a"), 3, "{env}");
+    assert_eq!(count(&env, "b"), 3, "{env}");
+    assert_eq!(env.matches(" lang=\"").count(), 2, "{env}");
+}

@@ -473,6 +473,54 @@ fn ref_budget_and_depth_are_bounded() {
     assert!(has(&r, "ref_budget_exhausted"));
 }
 
+/// One POST operation whose JSON request body is `#/components/schemas/{root}`.
+fn doc_with_schemas(schemas: serde_json::Map<String, serde_json::Value>, root: &str) -> Vec<u8> {
+    let body = json!({"content": {"application/json": {"schema": {"$ref": format!("#/components/schemas/{root}")}}}});
+    let doc = json!({
+        "openapi": "3.0.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"post": {"operationId": "a", "requestBody": body, "responses": {}}}},
+        "components": {"schemas": schemas}
+    });
+    doc.to_string().into_bytes()
+}
+
+#[test]
+fn long_all_of_chains_stop_at_the_ref_depth() {
+    // Each schema only composes the next one, so every `$ref` is one hop.
+    let mut schemas = serde_json::Map::new();
+    for i in 0..200 {
+        let p = format!("p{i}");
+        let next = format!("#/components/schemas/A{}", i + 1);
+        let mut props = serde_json::Map::new();
+        props.insert(p.clone(), json!({"type": "string"}));
+        schemas.insert(format!("A{i}"), json!({"allOf": [{"$ref": next}], "type": "object", "required": [p], "properties": props}));
+    }
+    schemas.insert("A200".into(), json!({"type": "object"}));
+    let r = import(&doc_with_schemas(schemas, "A0"), &opts()).unwrap();
+    assert!(has(&r, "ref_depth_limit"));
+    let body = json_body(&req(&r, "a").spec);
+    assert!(body.get("p0").is_some() && body.get("p1").is_some(), "{body}");
+    assert!(body.get("p100").is_none() && body.get("p199").is_none(), "{body}");
+}
+
+#[test]
+fn branching_all_of_graphs_hit_the_sample_budget() {
+    // Each schema composes the next one twice: 2^17 merges without a budget.
+    let mut schemas = serde_json::Map::new();
+    for i in 0..16 {
+        let next = json!({"$ref": format!("#/components/schemas/D{}", i + 1)});
+        schemas.insert(format!("D{i}"), json!({"allOf": [next.clone(), next]}));
+    }
+    schemas.insert("D16".into(), json!({"type": "object", "required": ["leaf"], "properties": {"leaf": {"type": "string"}}}));
+    let r = import(&doc_with_schemas(schemas.clone(), "D0"), &opts()).unwrap();
+    assert!(has(&r, "sample_size_limit"));
+    assert_eq!(r.requests.len(), 1);
+    // A small diamond still merges completely.
+    let r = import(&doc_with_schemas(schemas, "D13"), &opts()).unwrap();
+    assert!(!has(&r, "sample_size_limit") && !has(&r, "ref_depth_limit"));
+    assert_eq!(json_body(&req(&r, "a").spec).get("leaf").map(|v| v.is_string()), Some(true));
+}
+
 #[test]
 fn wide_schemas_hit_the_sample_budget() {
     let mut props = serde_json::Map::new();

@@ -3,7 +3,7 @@ mod common;
 use anvil_domain::auth::{AuthConfig, KeyLocation, OAuthGrant};
 use anvil_domain::request::Body;
 use anvil_domain::secret::SensitiveValue;
-use anvil_import::{Dialect, detect};
+use anvil_import::{Dialect, ImportError, detect};
 use common::*;
 
 const V4: &str = "insomnia/insomnia-v4.json";
@@ -219,4 +219,69 @@ fn path_parameters_match_whole_segments_and_are_encoded() {
     assert_eq!(v4, "{{baseUrl}}/users/{{userId}}%2Fx/{{rev}}");
     let r = v4_request(serde_json::json!({ "url": "https://example.test/:rev", "pathParameters": [{ "name": "rev", "value": "" }] }));
     assert!(r.report.required_variables.iter().any(|v| v.name == "rev"));
+}
+
+fn v4_export(resources: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({ "_type": "export", "__export_format": 4, "resources": resources }).to_string().into_bytes()
+}
+
+#[test]
+fn v4_duplicate_resource_ids_are_refused() {
+    // A repeated group id would import the group's requests under both groups.
+    let repeated = v4_export(serde_json::json!([
+        { "_id": "wrk", "_type": "workspace", "name": "W" },
+        { "_id": "fld", "_type": "request_group", "parentId": "wrk", "name": "A" },
+        { "_id": "fld", "_type": "request_group", "parentId": "wrk", "name": "B" },
+        { "_id": "req", "_type": "request", "parentId": "fld", "name": "R", "method": "GET", "url": "https://example.com" },
+    ]));
+    // Groups claiming the workspace's id are their own parents: every level
+    // would repeat both subtrees.
+    let cyclic = v4_export(serde_json::json!([
+        { "_id": "wrk", "_type": "workspace", "name": "W" },
+        { "_id": "wrk", "_type": "request_group", "parentId": "wrk", "name": "A" },
+        { "_id": "wrk", "_type": "request_group", "parentId": "wrk", "name": "B" },
+    ]));
+    for (doc, at) in [(repeated, "/resources/2/_id"), (cyclic, "/resources/1/_id")] {
+        match anvil_import::import(&doc, &opts()) {
+            Err(ImportError::Invalid { dialect: Dialect::InsomniaV4, pointer, .. }) => assert_eq!(pointer, at),
+            other => panic!("expected a duplicate-id error at {at}, got {:?}", other.map(|r| r.requests.len())),
+        }
+    }
+}
+
+#[test]
+fn v4_groups_without_ids_do_not_adopt_parentless_resources() {
+    // Resources without a parent share the empty parent key; a group without
+    // an id must not walk them (each would walk the others again).
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk", "_type": "workspace", "name": "W" },
+        { "_type": "request_group", "parentId": "wrk", "name": "A" },
+        { "_type": "request_group", "name": "B" },
+        { "_type": "request_group", "name": "C" },
+        { "_id": "req", "_type": "request", "name": "R", "method": "GET", "url": "https://example.com" },
+    ]));
+    let r = anvil_import::import(&doc, &opts()).unwrap();
+    let names: Vec<&str> = r.folders.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["A"]);
+    assert!(r.requests.is_empty());
+    assert!(has_at(&r, "orphan_resource", "/resources/4"));
+}
+
+#[test]
+fn v4_sibling_and_nested_groups_still_import() {
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk", "_type": "workspace", "name": "W" },
+        { "_id": "fld_a", "_type": "request_group", "parentId": "wrk", "name": "A" },
+        { "_id": "fld_b", "_type": "request_group", "parentId": "wrk", "name": "B" },
+        { "_id": "fld_c", "_type": "request_group", "parentId": "fld_a", "name": "C" },
+        { "_id": "req_1", "_type": "request", "parentId": "fld_c", "name": "R1", "method": "GET", "url": "https://example.com/1" },
+        { "_id": "req_2", "_type": "request", "parentId": "fld_b", "name": "R2", "method": "GET", "url": "https://example.com/2" },
+    ]));
+    let r = anvil_import::import(&doc, &opts()).unwrap();
+    let folder = |name: &str| r.folders.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("no folder {name}"));
+    assert_eq!(folder("C").parent_id, Some(folder("A").meta.id));
+    assert_eq!(req(&r, "insomnia:req_1").folder_id, Some(folder("C").meta.id));
+    assert_eq!(req(&r, "insomnia:req_2").folder_id, Some(folder("B").meta.id));
+    assert_eq!(r.requests.len(), 2);
+    assert!(!has(&r, "orphan_resource"));
 }
