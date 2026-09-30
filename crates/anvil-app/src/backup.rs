@@ -790,9 +790,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
         owned("spec import", &x.file_name, &x.workspace_id)?;
         if let Some(root_id) = x.root_folder_id {
             let root = g.folders.iter().find(|folder| folder.meta.id == root_id);
-            if !root.is_some_and(|folder| {
-                folder.workspace_id == x.workspace_id && folder.parent_id.is_none() && folder.import_root
-            }) {
+            if !root.is_some_and(|folder| folder.workspace_id == x.workspace_id && folder.parent_id.is_none() && folder.import_root) {
                 return Err(invalid(format!("spec import '{}' has an invalid root folder", x.file_name)));
             }
         }

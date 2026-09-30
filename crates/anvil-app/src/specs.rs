@@ -647,9 +647,7 @@ mod tests {
         app.store.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec).unwrap();
 
         assert!(app.spec_reimport_plan(&imported.import_id, ADMIN.as_bytes()).is_err());
-        assert!(app
-            .spec_reimport_apply(&imported.import_id, ADMIN.as_bytes(), "admin-v2.json", &ReimportApproval::default())
-            .is_err());
+        assert!(app.spec_reimport_apply(&imported.import_id, ADMIN.as_bytes(), "admin-v2.json", &ReimportApproval::default()).is_err());
         assert_eq!(app.folder(&folder.meta.id).unwrap(), folder);
     }
 
