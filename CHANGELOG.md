@@ -79,6 +79,10 @@
 
 ### Changed
 
+- CI: Dependabot now covers GitHub composite actions, keeps patched vendored
+  crates pinned, and leaves coordinated Tauri updates for a manual bump.
+  Dependabot dependency PRs may require manual license and generated-contract
+  updates before the required CI checks pass.
 - New Ferrum gateway profiles default to `ferrum-edge-0.9.8` (desktop dialog
   and CLI), and the failure lab's default pin is Ferrum Edge v0.9.8
   (`lab/gateway/RELEASE.lock`, the release's published sha256 for every

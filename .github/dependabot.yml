@@ -1,0 +1,102 @@
+version: 2
+updates:
+  # The root Cargo workspace includes the Tauri desktop shell.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    # Keep these pinned to their patched local copies; retire the ignores by
+    # following vendor/README.md when upstream releases contain the fixes.
+    ignore:
+      - dependency-name: h3
+      - dependency-name: h3-quinn
+      - dependency-name: tungstenite
+      - dependency-name: tokio-tungstenite
+      # Tauri's Rust crate and JavaScript CLI must move together by hand.
+      # Patch skew is supported; major/minor changes need a coordinated bump.
+      - dependency-name: tauri*
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@tauri-apps/*'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: tauri-plugin-wdio-webdriver
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@wdio/tauri-service'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    groups:
+      cargo-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    # Tauri's Rust crates and JavaScript CLI must move together by hand.
+    # Patch skew is supported; major/minor changes need a coordinated bump.
+    ignore:
+      - dependency-name: tauri*
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@tauri-apps/*'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: tauri-plugin-wdio-webdriver
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: '@wdio/tauri-service'
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+    groups:
+      github-actions-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
