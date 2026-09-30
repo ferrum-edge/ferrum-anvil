@@ -52,7 +52,9 @@ company ruleset.
     every compile).
 
   Examples behind such a schema are counted in `examples_not_checked`. A
-  schema is compiled once however many media types `$ref` it.
+  schema is compiled once however many media types `$ref` it, and all the
+  compiles of a lint scan 20,000,000 members and items at most; examples
+  past that are counted as not checked too.
 - **Operations are bounded too.** They look at 2 million parameters,
   responses and media types at most in all. Inherited path-level
   parameters, the document's security requirements and a shared response's
