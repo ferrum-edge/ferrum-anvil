@@ -368,6 +368,7 @@ dependencies = [
  "p12-keystore",
  "parking_lot",
  "percent-encoding",
+ "psl",
  "rand 0.10.3",
  "regex",
  "roxmltree",
@@ -5472,6 +5473,15 @@ dependencies = [
  "miette",
  "prost-types",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "psl"
+version = "2.1.238"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e6aa2cd4e8e062e78ac5d7df6206e2f8e39b624f658efd6f34f9aa1928ac5da"
+dependencies = [
+ "psl-types",
 ]
 
 [[package]]
