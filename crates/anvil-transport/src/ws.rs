@@ -696,6 +696,9 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         // ending it: a partial frame must not be followed by a clean FIN.
         let _ = tokio::time::timeout(Duration::from_millis(100), &mut uplink).await;
         uplink.abort();
+        // Give the QUIC connection a moment to send the RESET_STREAM before
+        // it is closed: frames still queued at the close are discarded.
+        tokio::time::sleep(Duration::from_millis(50)).await;
     } else {
         // Let the last frames (normally our Close) leave before the connection closes.
         let _ = tokio::time::timeout(Duration::from_millis(500), &mut uplink).await;
@@ -1175,7 +1178,8 @@ where
             break;
         }
         if let Some(e) = pending_error.take() {
-            let st = ErrorState { close: &mut close, failure: &mut failure, violation: &mut violation };
+            let st =
+                ErrorState { close: &mut close, failure: &mut failure, violation: &mut violation, write_interrupted: &write_interrupted };
             classify_ws_error(e, st, &mut ws, &mut tr, peer_close_seen, &stats).await;
             break;
         }
@@ -1367,6 +1371,12 @@ where
             }
         }
     }
+    // An interrupted write may have left a partial frame: the dedicated TCP
+    // connection of an HTTP/1.1 or HTTP/2 bootstrap is reset (RST, not FIN)
+    // when it is dropped; over HTTP/3 the bootstrap resets the stream.
+    if write_interrupted.is_cancelled() {
+        stats.request_abortive_close();
+    }
     let close = close.unwrap_or(match &client_close_sent {
         Some((c, r)) => Close { code: Some(*c), reason: r.clone(), closed_by: ClosedBy::Client },
         None => Close { code: None, reason: String::new(), closed_by: ClosedBy::NotClosed },
@@ -1431,6 +1441,9 @@ struct ErrorState<'a> {
     close: &'a mut Option<Close>,
     failure: &'a mut Option<TransportFailure>,
     violation: &'a mut Option<WsCompressionViolation>,
+    /// Canceled when the Close frame sent after a local policy violation is
+    /// not written in time (it may be partly written).
+    write_interrupted: &'a CancellationToken,
 }
 
 /// Map a WebSocket error to the close outcome and a typed failure. For
@@ -1454,7 +1467,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
         }
         return;
     }
-    let ErrorState { close, failure, violation } = st;
+    let ErrorState { close, failure, violation, write_interrupted } = st;
     let mut close_with = |code: u16, reason: &str| {
         *close = Some(Close { code: Some(code), reason: reason.into(), closed_by: ClosedBy::Client });
         (code, reason.to_string())
@@ -1478,7 +1491,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                 limit_bytes: Some(max_size as u64),
                 detail: None,
             });
-            send_close_and_drain(ws, tr, code, &reason).await;
+            send_close_and_drain(ws, tr, code, &reason, write_interrupted).await;
         }
         E::Capacity(c) => {
             let (code, reason) = close_with(1009, "message too big");
@@ -1489,7 +1502,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                     "an inbound message exceeded Anvil's local message limit ({c}); Anvil closed the session with 1009. This is a local size policy, not a protocol corruption"
                 ),
             ));
-            send_close_and_drain(ws, tr, code, &reason).await;
+            send_close_and_drain(ws, tr, code, &reason, write_interrupted).await;
         }
         E::Utf8(_) => {
             let (code, reason) = close_with(1007, "invalid UTF-8");
@@ -1498,7 +1511,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                 FailureKind::WsProtocolError,
                 "a text message was not valid UTF-8; Anvil closed with 1007",
             ));
-            send_close_and_drain(ws, tr, code, &reason).await;
+            send_close_and_drain(ws, tr, code, &reason, write_interrupted).await;
         }
         E::Protocol(P::ResetWithoutClosingHandshake) => {
             *close = Some(Close { code: Some(1006), reason: String::new(), closed_by: ClosedBy::Abnormal });
@@ -1521,7 +1534,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                 limit_bytes: None,
                 detail: None,
             });
-            send_close_and_drain(ws, tr, code, &reason).await;
+            send_close_and_drain(ws, tr, code, &reason, write_interrupted).await;
         }
         E::Protocol(P::InvalidCompressedMessage(detail)) => {
             let (code, reason) = close_with(1002, "protocol error");
@@ -1538,7 +1551,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                 limit_bytes: None,
                 detail: Some(detail),
             });
-            send_close_and_drain(ws, tr, code, &reason).await;
+            send_close_and_drain(ws, tr, code, &reason, write_interrupted).await;
         }
         E::Protocol(p) => {
             let (code, reason) = close_with(1002, "protocol error");
@@ -1547,7 +1560,7 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
                 FailureKind::WsProtocolError,
                 format!("WebSocket protocol violation by the peer: {p}"),
             ));
-            send_close_and_drain(ws, tr, code, &reason).await;
+            send_close_and_drain(ws, tr, code, &reason, write_interrupted).await;
         }
         E::Io(ioe) => {
             let kind = match ioe.kind() {
@@ -1577,17 +1590,33 @@ async fn classify_ws_error<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+/// How long the Close frame sent after a local policy violation may take to
+/// be written, and how long the peer then has to acknowledge it.
+const VIOLATION_CLOSE_WAIT: Duration = Duration::from_millis(500);
+
+/// Send the Close frame for a local policy violation, then give the peer a
+/// bounded moment to acknowledge it. A Close frame not written within its
+/// bound may have been partly written: `write_interrupted` is canceled, so
+/// the stream is reset (HTTP/3) instead of ended cleanly, and nothing more
+/// is written or read.
 async fn send_close_and_drain<S: AsyncRead + AsyncWrite + Unpin>(
     ws: &mut WebSocketStream<S>,
     tr: &mut Transcript,
     code: u16,
     reason: &str,
+    write_interrupted: &CancellationToken,
 ) {
-    if tokio::time::timeout(Duration::from_millis(500), ws.send(close_frame(code, reason))).await.map(|r| r.is_ok()).unwrap_or(false) {
-        tr.control(Direction::Sent, "close", format!("{code} {reason}").as_bytes());
+    match tokio::time::timeout(VIOLATION_CLOSE_WAIT, ws.send(close_frame(code, reason))).await {
+        Ok(Ok(())) => tr.control(Direction::Sent, "close", format!("{code} {reason}").as_bytes()),
+        Ok(Err(_)) => {}
+        Err(_) => {
+            write_interrupted.cancel();
+            tr.note("close_incomplete", "the Close frame could not be written (the peer was not reading); the connection was dropped");
+            return;
+        }
     }
     // Give the peer a bounded moment to acknowledge; ignore whatever arrives.
-    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+    let _ = tokio::time::timeout(VIOLATION_CLOSE_WAIT, async {
         while let Some(Ok(m)) = ws.next().await {
             if let Message::Close(_) = m {
                 tr.control(Direction::Received, "close", b"(acknowledgement)");
@@ -1632,6 +1661,19 @@ mod tests {
 
     /// The session phase over an in-memory pipe (the handshake is not part of it).
     async fn session(io: DuplexStream, plan: &WsPlan, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
+        session_with(io, plan, cancel, commands, CancellationToken::new(), crate::stats::ConnStats::new()).await
+    }
+
+    /// [`session`] with the token an interrupted write cancels and the
+    /// connection's stats (which carry the request for an abortive close).
+    async fn session_with(
+        io: DuplexStream,
+        plan: &WsPlan,
+        cancel: &CancellationToken,
+        commands: Option<CommandRx>,
+        write_interrupted: CancellationToken,
+        stats: Arc<crate::stats::ConnStats>,
+    ) -> SessionOutput {
         let events = EventCtx::none();
         let interactive = commands.is_some();
         let cx = SessionCtx {
@@ -1640,14 +1682,14 @@ mod tests {
             cancel,
             interactive,
             total_deadline: if interactive { None } else { deadline_from(plan.timeouts.total_ms) },
-            stats: crate::stats::ConnStats::new(),
+            stats,
             written_before: 0,
             read_before: 0,
             status: 101,
             response: response_record(101, http::Version::HTTP_11, vec![], body_capture(BodyCompleteness::NoBody, 0, &[], None)),
             deflate: None,
             extensions: None,
-            write_interrupted: CancellationToken::new(),
+            write_interrupted,
         };
         let rec = Recorder::new(0, events.clone());
         let obs = new_attempt(0, AttemptReason::Initial, "GET", &plan.display_url);
@@ -1689,6 +1731,19 @@ mod tests {
         assert_eq!(failure(&out), Some(FailureKind::Canceled));
         assert_eq!(closed(&out), (None, ClosedBy::Client), "no Close frame follows a partly written message");
         assert_eq!(out.transcript.unwrap().sent_count, 0, "the stalled message is not recorded as sent");
+    }
+
+    /// Over a TCP connection (HTTP/1.1 or HTTP/2 bootstrap) an interrupted
+    /// write resets the connection instead of ending it with a FIN.
+    #[tokio::test]
+    async fn an_interrupted_write_asks_for_the_connection_to_be_reset() {
+        let (io, _peer) = tokio::io::duplex(1024);
+        let plan = plan(vec![big_text()], None);
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &cancel_after(100), None, interrupted.clone(), stats.clone()).await;
+        assert_eq!(failure(&out), Some(FailureKind::Canceled));
+        assert!(interrupted.is_cancelled());
+        assert!(stats.abortive_close_requested(), "the connection is reset (SO_LINGER 0) when it is dropped");
     }
 
     #[tokio::test]
@@ -1761,6 +1816,48 @@ mod tests {
         let t = out.transcript.unwrap();
         assert!(t.messages.iter().any(|m| m.kind == "ping" && m.direction == Direction::Received));
         assert!(!t.messages.iter().any(|m| m.kind == "pong"), "the stalled Pong is not recorded as sent");
+        drop(peer);
+    }
+
+    /// An unmasked text frame from the server that is not valid UTF-8.
+    const INVALID_UTF8_TEXT: [u8; 4] = [0x81, 0x02, 0xff, 0xfe];
+
+    /// The Close frame Anvil sends after a peer's protocol violation is
+    /// bounded; when the peer is not reading it may be left partly written,
+    /// so the write counts as interrupted (an HTTP/3 stream is then reset,
+    /// not finished) and nothing more is written or read.
+    #[tokio::test]
+    async fn a_violation_close_the_peer_never_reads_is_an_interrupted_write() {
+        let (io, mut peer) = tokio::io::duplex(64);
+        // The filler leaves 6 bytes of the pipe: the 1007 Close frame (21 bytes masked) does not fit.
+        let plan = plan(vec![filler()], None);
+        peer.write_all(&INVALID_UTF8_TEXT).await.unwrap();
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone(), stats.clone()).await;
+        assert_eq!(failure(&out), Some(FailureKind::WsProtocolError));
+        assert!(interrupted.is_cancelled(), "the stalled Close frame counts as an interrupted write");
+        assert!(stats.abortive_close_requested(), "a TCP connection is reset, not ended with a FIN");
+        let t = out.transcript.unwrap();
+        assert!(t.messages.iter().any(|m| m.kind == "close_incomplete"), "{:?}", t.messages);
+        assert!(!t.messages.iter().any(|m| m.kind == "close" && m.direction == Direction::Sent), "the Close frame was not written");
+        drop(peer);
+    }
+
+    /// Positive control: a peer that reads gets the Close frame, and no write
+    /// was interrupted.
+    #[tokio::test]
+    async fn a_violation_close_the_peer_reads_is_sent() {
+        let (io, mut peer) = tokio::io::duplex(1024);
+        let plan = plan(vec![], None);
+        peer.write_all(&INVALID_UTF8_TEXT).await.unwrap();
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone(), stats.clone()).await;
+        assert_eq!(failure(&out), Some(FailureKind::WsProtocolError));
+        assert!(!interrupted.is_cancelled());
+        assert!(!stats.abortive_close_requested(), "the connection ends normally");
+        assert_eq!(closed(&out), (Some(1007), ClosedBy::Client));
+        let t = out.transcript.unwrap();
+        assert!(t.messages.iter().any(|m| m.kind == "close" && m.direction == Direction::Sent), "{:?}", t.messages);
         drop(peer);
     }
 

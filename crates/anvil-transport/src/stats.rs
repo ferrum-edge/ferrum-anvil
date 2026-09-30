@@ -8,7 +8,7 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -25,6 +25,9 @@ pub struct ConnStats {
     /// Typed TLS error observed on the decrypted stream (captured before
     /// higher layers such as h2 flatten it into text).
     tls_error: parking_lot::Mutex<Option<(anvil_domain::execution::FailureKind, Option<String>)>>,
+    /// The connection ends with a reset instead of a FIN when its socket is
+    /// dropped ([`crate::net::AbortableTcp`]).
+    abortive_close: AtomicBool,
 }
 
 impl ConnStats {
@@ -36,7 +39,22 @@ impl ConnStats {
             first_read_after_mark_ns: AtomicU64::new(0),
             mark_armed: AtomicU64::new(0),
             tls_error: parking_lot::Mutex::new(None),
+            abortive_close: AtomicBool::new(false),
         })
+    }
+
+    /// End the connection with a reset (RST) instead of a FIN when its
+    /// socket is dropped: a write was interrupted and may have left a partial
+    /// payload, which a clean end would present to the peer as complete.
+    /// Applies to the TCP connection Anvil owns (direct, or to a forward
+    /// proxy); a stream tunneled through an HBONE endpoint has no socket of
+    /// its own and is only dropped.
+    pub fn request_abortive_close(&self) {
+        self.abortive_close.store(true, Ordering::Relaxed);
+    }
+
+    pub fn abortive_close_requested(&self) -> bool {
+        self.abortive_close.load(Ordering::Relaxed)
     }
 
     pub fn bytes_read(&self) -> u64 {

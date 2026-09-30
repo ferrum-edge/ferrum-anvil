@@ -41,6 +41,7 @@ fn udp(stream: &StreamTranscript, sent: u64, received: u64) -> Diagnosis {
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     })
 }
 

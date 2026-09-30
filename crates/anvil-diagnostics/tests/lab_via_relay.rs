@@ -60,6 +60,7 @@ fn http(r: &ResponseRecord, body: &[u8], trusted: bool) -> Diagnosis {
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     })
 }
 

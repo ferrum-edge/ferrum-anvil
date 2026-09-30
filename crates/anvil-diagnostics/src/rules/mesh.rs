@@ -46,15 +46,15 @@ const CLIENT_CERT_ALERTS: &[&str] = &[
     "access_denied",
 ];
 
-fn body_error(t: &TunnelObservation) -> String {
+fn body_error(ctx: &Ctx<'_>, t: &TunnelObservation) -> String {
     let Some(b) = t.refusal_body.as_deref() else { return "no body".into() };
     let trimmed = b.trim();
     if let Ok(serde_json::Value::Object(o)) = serde_json::from_str::<serde_json::Value>(trimmed)
         && let Some(e) = o.get("error").and_then(|e| e.as_str())
     {
-        return format!("\u{201c}{}\u{201d}", e.chars().take(200).collect::<String>());
+        return format!("\u{201c}{}\u{201d}", ctx.excerpt(e, 200));
     }
-    if trimmed.is_empty() { "an empty body".into() } else { format!("\u{201c}{}\u{201d}", trimmed.chars().take(200).collect::<String>()) }
+    if trimmed.is_empty() { "an empty body".into() } else { format!("\u{201c}{}\u{201d}", ctx.excerpt(trimmed, 200)) }
 }
 
 pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarning>) {
@@ -193,9 +193,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             let mut d = base(code, conf, Owner::Unknown)
                 .ev_at(E::HttpStatus, "tunnel.connect_status", status.to_string(), a.index)
                 .var("status", status.to_string())
-                .var("body_error", body_error(t));
+                .var("body_error", body_error(ctx, t));
             if let Some(b) = &t.refusal_body {
-                d = d.ev_at(E::BodyContent, "tunnel.refusal_body", b.chars().take(300).collect::<String>(), a.index);
+                d = d.ev_at(E::BodyContent, "tunnel.refusal_body", ctx.excerpt(b, 300), a.index);
             }
             if !t.connect_headers.is_empty() {
                 d = d.ev_at(

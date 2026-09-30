@@ -10,3 +10,9 @@ fa40c8bc7e0dd5f62b2f36ead7f7c67b5c7a80a8:crates/anvil-engine/tests/redirect_poli
 # branch claude/openapi-contract-drift. It encodes no real credential; later commits
 # build it at run time. CI scans full history, hence this single fingerprint.
 a7b38263c579e088c5fe03efd2f18aba50453414:crates/anvil-contract/tests/drift.rs:jwt:289
+
+# Exact-fingerprint ignore for a dummy refusal-body test secret in
+# crates/anvil-engine/src/record.rs, first pushed in commit 4c929780 on branch
+# fix/stream-residuals. The value is fake; the next commit switches it to the
+# allowlisted tok-SENSITIVE- canary prefix. CI scans full history, hence this fingerprint.
+4c929780cc834aaaa5f67af9a8ca1a38f7ec67ed:crates/anvil-engine/src/record.rs:generic-api-key:567

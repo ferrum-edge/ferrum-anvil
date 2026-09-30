@@ -422,7 +422,15 @@ pub(crate) fn prepare_all_at(
     allowed: &[&str],
 ) -> Result<Prepared, TransportFailure> {
     let settings = crate::settings::resolve(&ctx.settings_layers);
-    let http = prepare::prepare_http(&ctx.spec, r, ctx.attachments.as_ref(), &settings, ctx.send_anyway, allowed)?;
+    let http = prepare::prepare_http_with_redaction_names(
+        &ctx.spec,
+        r,
+        ctx.attachments.as_ref(),
+        &settings,
+        &ctx.redaction_names,
+        ctx.send_anyway,
+        allowed,
+    )?;
     let mut inferred = http.inferred.clone();
     let (auth_scope, auth_cfg) = ctx.effective_auth();
     let mut oauth_key = None;

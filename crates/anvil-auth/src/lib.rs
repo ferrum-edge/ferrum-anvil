@@ -458,7 +458,7 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
             out.facts.push(("dpop.htu".into(), proof.htu));
         }
         ResolvedAuth::Wsse { username, password, password_type, timestamp_ttl_secs, saml_assertion } => {
-            let body = wsse::insert_security(
+            let inserted = wsse::insert_security_token(
                 &req.body,
                 username,
                 password,
@@ -468,6 +468,9 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
                 now,
             )?;
             out.secrets.push(password.to_string());
+            // A PasswordDigest and its Nonce authenticate on their own (they
+            // can be replayed where the service keeps no nonce cache).
+            out.secrets.extend(inserted.token_secrets);
             // A PasswordText password is sent XML-escaped.
             let escaped = wsse::xml_escape(password);
             if escaped != password.as_str() {
@@ -486,7 +489,7 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
                     out.secrets.push(escaped);
                 }
             }
-            out.body = Some(body);
+            out.body = Some(inserted.body);
         }
         ResolvedAuth::JwtSvid { token, header_name, prefix } => {
             if token.is_empty() {
@@ -550,8 +553,15 @@ mod tests {
             timestamp_ttl_secs: Some(300),
             saml_assertion: None,
         };
-        let secrets = apply(&auth, &req, Utc::now()).unwrap().secrets;
-        assert!(secrets == ["plain-password"], "{} secrets are registered, not only the password", secrets.len());
+        let applied = apply(&auth, &req, Utc::now()).unwrap();
+        let body = String::from_utf8(applied.body.expect("a WS-Security body")).unwrap();
+        let secrets = applied.secrets;
+        assert_eq!(secrets.len(), 3, "the password, the digest and the nonce are registered, nothing more");
+        assert_eq!(secrets[0], "plain-password");
+        // The digest and nonce sent are registered: once they are redacted, the UsernameToken holds no credential.
+        let redacted = secrets.iter().fold(body, |b, s| b.replace(s.as_str(), "‹redacted›"));
+        assert!(redacted.contains("#PasswordDigest\">‹redacted›</wsse:Password>"), "the digest is not registered: {redacted}");
+        assert!(redacted.contains("#Base64Binary\">‹redacted›</wsse:Nonce>"), "the nonce is not registered: {redacted}");
     }
 
     #[test]

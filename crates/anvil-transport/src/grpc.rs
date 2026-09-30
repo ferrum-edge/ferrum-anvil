@@ -1930,6 +1930,8 @@ async fn exchange(
     let mut text_body = false;
     let mut b64 = grpc_web::Base64Stream::default();
     let mut trailer_frame = false;
+    // A malformed trailer line is quoted in the failure, redacted before it is cut.
+    let quote_redact = plan.redact.as_deref();
     let mut web_facts = GrpcWebFacts::default();
     // A framing violation seen in an otherwise readable body.
     let mut framing: Option<TransportFailure> = None;
@@ -2113,7 +2115,7 @@ async fn exchange(
                                         break;
                                     }
                                 }
-                                Some(WireFrame::Trailer(payload)) => match grpc_web::parse_trailer_block(&payload) {
+                                Some(WireFrame::Trailer(payload)) => match grpc_web::parse_trailer_block_redacted(&payload, quote_redact) {
                                     Ok(entries) => {
                                         trailer_frame = true;
                                         let shown = entries.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n");

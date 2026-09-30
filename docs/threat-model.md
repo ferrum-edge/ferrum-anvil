@@ -65,9 +65,12 @@ against it).
     into a cookie name, a cookie attribute or an authorization scheme does
     not get it into records, history or exports.
   - Every credential an auth profile sends is a known secret, including a
-    WS-Security SAML assertion (as stored and as embedded, trimmed) and a
-    PasswordText password in the XML-escaped form it is sent in, so the
-    effective-request preview of the body it rewrites shows neither.
+    WS-Security SAML assertion (as stored and as embedded, trimmed), a
+    PasswordText password in the XML-escaped form it is sent in, and a
+    PasswordDigest UsernameToken's digest and nonce (together they can be
+    replayed against a service that keeps no nonce cache or Timestamp
+    limit), so neither the effective-request preview of the body it
+    rewrites nor the record shows them.
   - URL path segments, query names and values, and fragments are compared
     after percent-decoding, and a component that hides a secret is replaced
     whole, so no reversible encoding of it is kept. A URL that still reveals
@@ -89,11 +92,21 @@ against it).
     the transcript again with the record's redactor, but it sees only the
     previews already cut: a secret the live redactor did not yet know when
     the entry was recorded is caught when it lies wholly inside the preview,
-    and keeps its prefix when it crosses the cut. An OAuth issuer's
+    and keeps its prefix when it crosses the cut. The SSE last event id,
+    which every event of a stream shares, is redacted once per connection
+    attempt with what the live redactor knows then, so a reconnection's
+    fresh credentials are caught in it too. An OAuth issuer's
     `error_description` has the token request's own credentials (client
-    secret, refresh token, authorization code and PKCE verifier) replaced
-    before it is cut to 200 characters. Diagnostic evidence excerpts are
-    still cut before the record's redaction runs (see Residual risks).
+    secret, refresh token, authorization code and PKCE verifier), raw or
+    percent-encoded as a URL component or a form value, replaced before it
+    is cut to 200 characters. The excerpts a diagnostic finding quotes from
+    a response (a JSON `error`, a GraphQL or SOAP fault message, a tunnel
+    refusal body, a Ferrum Edge body signature) are redacted with the
+    record's redactor before they are cut to 160–300 characters, the same
+    way. An HBONE refusal body is captured up to 64 KiB past its 8 KiB
+    bound, and the record redacts it before cutting it to the bound. A
+    malformed gRPC-Web trailer line quoted in a failure is redacted with the
+    live redactor before it is cut to 64 characters.
 - **Redirect hops:** every hop is evaluated for its own target. Unless
   `redirects.forward_credentials_cross_origin` is on, once a redirect leaves
   the request's origin (scheme, host or port):
@@ -106,12 +119,13 @@ against it).
   - auth (headers, API-key query parameters and API-key cookies) is no longer
     applied;
   - a redirect that would resend a body to another origin is not followed
-    when preparing the body substituted a secret variable or included a form
-    field marked sensitive, literal value or not (whatever the body type and
-    encoding: form fields are percent-encoded, GraphQL variables are
-    re-serialized), or when the body holds a resolved secret value byte for
-    byte (an attachment, say). This covers 301/302 redirects that keep the
-    body, such as for PUT, PATCH and DELETE.
+    when preparing the body substituted a secret variable or included a
+    URL-encoded or multipart text form field marked sensitive or named as a
+    credential, literal value or not. JSON, GraphQL, XML, SOAP and raw bodies
+    have no field notion and are covered only when they contain an explicitly
+    sensitive value (or a resolved secret value detected byte for byte). This
+    applies to 301/302 redirects that keep the body, such as for PUT, PATCH
+    and DELETE.
 
   The workspace cookie jar is separate: on each hop it sends the stored
   cookies that match that hop's target under cookie rules, which do not
@@ -121,9 +135,10 @@ against it).
   whose `Domain` is a public suffix (`com`, `co.uk`, a private-section
   suffix such as `github.io`; from the Public Suffix List compiled into
   Anvil) is not stored, so one site cannot set a cookie that the jar sends
-  to unrelated sites under that suffix; when the suffix is the responding
-  host itself, the cookie is kept for that host only. The TLS client
-  identity is never presented to another origin unless a TLS profile is bound
+  to unrelated sites under that suffix. Unknown single-label domains such as
+  `internal`, `lan` and `corp` are also refused unless one is the responding
+  host itself; in either case the cookie is kept for that host only. The TLS
+  client identity is never presented to another origin unless a TLS profile is bound
   to it, whatever the redirect policy. TLS settings are prepared for each
   hop's target, and a hop whose route or TLS settings cannot be prepared is
   not followed.
@@ -193,12 +208,27 @@ against it).
     before the session opens (the handshake request) are bounded by the
     connection and handshake timeouts; gRPC streams are outside this list.
   - An interrupted write may have left a partial frame, so nothing is
-    written after it: raw TCP drops the connection without a shutdown (no
-    TLS `close_notify` or FIN written by the session), WebSocket over HTTP/3
-    resets its stream (`H3_REQUEST_CANCELLED`), and HBONE and MASQUE tunnels
-    are reset instead of finished. A raw TCP payload that was partly written
-    is reported as possibly dispatched. Interactive sessions have no total
-    deadline: cancel (or a profile lock) is what ends them.
+    written after it: raw TCP writes no TLS `close_notify` and resets the
+    connection (`SO_LINGER` 0: the OS sends RST, not FIN, so the peer cannot
+    read a cut payload as complete), WebSocket over HTTP/3 resets its stream
+    (`H3_REQUEST_CANCELLED`), including when the Close frame after a peer's
+    protocol violation is not written in time, WebSocket over HTTP/1.1 or
+    HTTP/2 resets its dedicated TCP connection the same way as raw TCP, and
+    DTLS inside an HBONE or MASQUE tunnel resets the tunnel. A DTLS tunnel is
+    reset only when a record was being sent at that moment; a session
+    canceled or timed out while waiting for the peer finishes it cleanly.
+    Plain UDP over MASQUE still resets its tunnel on every cancel (and on
+    an interrupted capsule send), and plain UDP over HBONE on every cancel
+    and total timeout, whether or not a send was pending. A raw TCP payload
+    that was partly written is reported as possibly dispatched. Through a
+    forward proxy a TCP reset reaches the proxy, not the destination.
+  - Interactive sessions have no total deadline: cancel (or a profile lock)
+    is what ends them. The session handle bounds that too: a session task
+    still running 5 s after its cancel is aborted (this is what ends a gRPC
+    stream whose send stalled, as gRPC writes are not raced against the
+    cancel), and dropping the handle cancels the session and aborts its
+    task. An aborted task is dropped at its next await point, together with
+    its connection.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -493,10 +523,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
-- Diagnostic evidence excerpts (a JSON `error`, a GraphQL or SOAP fault
-  message, a tunnel refusal body, a Ferrum Edge body signature) are cut to
-  160–300 characters before the record's secret-value redaction runs, so a
-  secret the response echoes across that cut can leave a prefix in the
-  finding.
+- Some text from a peer is still cut before the record's redaction sees
+  it: a SPIFFE Workload API `grpc-message` is cut to 300 characters where
+  it is received, with no redactor available there, and every
+  redact-before-cut bound looks only 64 KiB past the cut, so a longer
+  secret form that crosses a cut keeps its prefix.
 - Unsigned development builds cannot prove provenance; release signing is
   blocked on owner credentials (see [release.md](release.md)).

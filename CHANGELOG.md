@@ -869,6 +869,13 @@
 
 ### Security
 
+- Cookie domains that are a single, unknown label (`internal`, `lan`, `corp`)
+  are no longer shared across matching hosts; a cookie may still be stored
+  host-only when its single-label domain is the responding host. URL-encoded
+  and multipart text fields named as credentials are now treated as
+  secret-bearing for cross-origin redirects, even when their literal values
+  were not marked sensitive. This also applies to 301/302 redirects that keep
+  the body, such as for PUT, PATCH and DELETE.
 - Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
   `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
   secret value from the parts it keeps: the authorization scheme word,
@@ -1016,8 +1023,7 @@
   secret starts, instead of keeping all but the part past the cut in live
   events and stored records (GHSA-jjvp-frqf-xw3p). An OAuth issuer's
   `error_description` now has the token request's own credentials replaced
-  before it is cut to 200 characters. Diagnostic evidence excerpts are not
-  covered yet (see the threat model's residual risks).
+  before it is cut to 200 characters.
 - An SSE stream can no longer make a session retain metadata out of
   proportion to its limits (GHSA-gwfc-m32p-636g). An `id:` or `event:`
   value over 4 KiB stops the stream as a local limit as soon as the partial
@@ -1040,6 +1046,44 @@
   (DTLS ones included) are reset. A raw TCP payload that was partly written
   is reported as possibly dispatched. Graceful Close frames and
   `close_notify` have their own short bound.
+- Follow-ups to the three entries above (GHSA-jjvp-frqf-xw3p,
+  GHSA-gwfc-m32p-636g, GHSA-24m4-27gj-gvmx):
+  - The excerpts a diagnostic finding quotes from a response (a JSON
+    `error`, a GraphQL or SOAP fault message, an HBONE tunnel refusal body,
+    a Ferrum Edge body signature) are now redacted with the record's
+    redactor before they are cut to 160–300 characters. Before, a secret
+    the response echoed across the cut kept its prefix in the finding,
+    because the record's redaction could no longer match it.
+    `DiagnosticInput` has a new `redact` field for this. An HBONE refusal
+    body is now captured up to 64 KiB past its 8 KiB bound and redacted
+    before the record cuts it to the bound, and a malformed gRPC-Web trailer
+    line quoted in a failure is redacted before it is cut to 64 characters.
+  - An OAuth issuer's `error_description` also has the percent-encoded and
+    form-encoded forms of the token request's credentials replaced before
+    it is cut.
+  - An interactive session no longer outlives its `SessionHandle`: dropping
+    the handle cancels the session and aborts its task. A session task that
+    ignores its cancel is aborted 5 s after `cancel()`, so `finish()` and
+    `is_finished()` are bounded once a session is canceled (the record then
+    says the session was aborted).
+  - A raw TCP session, or a WebSocket session over HTTP/1.1 or HTTP/2, whose
+    write was interrupted now resets its connection (`SO_LINGER` 0: RST
+    instead of FIN), so the peer cannot read a partly written payload as a
+    complete one. A WebSocket Close frame sent after a
+    peer's protocol violation that is not written within 500 ms now counts
+    as an interrupted write (over HTTP/3 the stream is reset, not finished).
+  - DTLS inside an HBONE or MASQUE tunnel resets the tunnel only when a
+    record was being sent when the cancel or deadline stopped it. Before,
+    every cancel, total timeout and handshake timeout reset the tunnel, even
+    while the session was only waiting for the peer.
+  - The SSE transcript redacts the shared last event id again on each
+    connection attempt, so the credentials a reconnection is signed with
+    are redacted in it too.
+- A WS-Security PasswordDigest UsernameToken's digest and nonce are now
+  known secrets of the request, redacted in the effective-request preview
+  and the execution record like the password. Together with the creation
+  time they can be replayed against a service that keeps no nonce cache or
+  Timestamp limit. (Part of #244.)
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

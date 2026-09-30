@@ -154,6 +154,17 @@ pub fn next_frame(buf: &mut BytesMut, max: usize, web: bool) -> Result<Option<Wi
 /// Parse a trailer block: `name: value` lines separated by CRLF (a bare LF
 /// is tolerated). Names are lowercased; surrounding whitespace is trimmed.
 pub fn parse_trailer_block(payload: &[u8]) -> Result<Vec<(String, String)>, String> {
+    parse_trailer_block_redacted(payload, None)
+}
+
+/// [`parse_trailer_block`], quoting a malformed line in its error (at most
+/// 64 characters) redacted before it is cut, so a secret the line echoes
+/// across the cut is replaced whole instead of leaving its prefix.
+pub fn parse_trailer_block_redacted(
+    payload: &[u8],
+    redact: Option<&(dyn Fn(&str) -> String + Send + Sync)>,
+) -> Result<Vec<(String, String)>, String> {
+    let quote = |line: &str| crate::session::redacted_excerpt(redact, line, 64);
     let text = std::str::from_utf8(payload).map_err(|_| "the trailer block is not valid UTF-8".to_string())?;
     let mut out = Vec::new();
     for line in text.split('\n') {
@@ -162,11 +173,11 @@ pub fn parse_trailer_block(payload: &[u8]) -> Result<Vec<(String, String)>, Stri
             continue;
         }
         let Some((name, value)) = line.split_once(':') else {
-            return Err(format!("the trailer line {:?} has no ':'", line.chars().take(64).collect::<String>()));
+            return Err(format!("the trailer line {:?} has no ':'", quote(line)));
         };
         let name = name.trim().to_ascii_lowercase();
         if name.is_empty() || name.contains(char::is_whitespace) {
-            return Err(format!("the trailer line {:?} has no valid name", line.chars().take(64).collect::<String>()));
+            return Err(format!("the trailer line {:?} has no valid name", quote(line)));
         }
         out.push((name, value.trim().to_string()));
         if out.len() > MAX_TRAILER_ENTRIES {
@@ -267,5 +278,18 @@ mod tests {
         assert!(parse_trailer_block(b"no colon here").is_err());
         assert!(parse_trailer_block(b": value").is_err());
         assert!(parse_trailer_block(&[0xff, b':']).is_err());
+    }
+
+    #[test]
+    fn a_malformed_trailer_line_is_quoted_redacted_before_it_is_cut() {
+        const SECRET: &str = "zq7-trailer-secret-4k2m";
+        let redact = |s: &str| s.replace(SECRET, "‹redacted›");
+        // The quote keeps 64 characters: its cut falls 4 characters into the secret.
+        let line = format!("{}{SECRET}", "x".repeat(60));
+        let e = parse_trailer_block_redacted(line.as_bytes(), Some(&redact)).unwrap_err();
+        assert!(!(4..=SECRET.len()).any(|n| e.contains(&SECRET[..n])), "{e}");
+        assert!(e.contains(&format!("{}‹redacted›", "x".repeat(60))), "{e}");
+        // Ground truth: cut first, the quote ends with the secret's prefix.
+        assert!(parse_trailer_block(line.as_bytes()).unwrap_err().contains(&SECRET[..4]));
     }
 }
