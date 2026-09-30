@@ -378,10 +378,9 @@ pub(crate) fn prepare_http_with_redaction_names(
                 match &p.content {
                     MultipartContent::Text { value } => {
                         let v = r.resolve(value, &format!("body.parts[{i}].value"))?;
-                        if p.sensitive {
-                            r.mark_sensitive(&resolved_name, &v);
-                        }
-                        if p.sensitive || crate::redact::is_credential_name(&resolved_name, redaction_names) {
+                        // Multipart parts carry no sensitive flag; a credential-like name alone
+                        // keeps the body off cross-origin redirects.
+                        if crate::redact::is_credential_name(&resolved_name, redaction_names) {
                             sensitive_body_field = true;
                         }
                         out.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes());
