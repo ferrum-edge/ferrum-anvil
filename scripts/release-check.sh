@@ -149,8 +149,18 @@ unpack() {
       if command -v dpkg-deb >/dev/null; then dpkg-deb -x "$a" "$out"
       else (cd "$out" && ar x "$a" && for d in data.tar.*; do tar -xf "$d"; done); fi ;;
     *.rpm)
-      command -v rpm2cpio >/dev/null || { echo "rpm2cpio required for $a" >&2; return 1; }
-      (cd "$out" && rpm2cpio "$a" | cpio -idm --quiet) ;;
+      # rpm2cpio | cpio first; bsdtar (libarchive) reads the RPM payload
+      # itself. A failure says why instead of only "could not unpack".
+      local err="$work/unpack.$RANDOM.err"
+      : >"$err"
+      if command -v rpm2cpio >/dev/null && (cd "$out" && rpm2cpio "$a" 2>>"$err" | cpio -idm --quiet 2>>"$err"); then
+        :
+      elif command -v bsdtar >/dev/null && bsdtar -xf "$a" -C "$out" 2>>"$err"; then
+        say "      unpack: rpm2cpio/cpio failed ($(tr '\n' ' ' <"$err" | cut -c1-300)); read with bsdtar"
+      else
+        say "      unpack: $(command -v rpm2cpio >/dev/null || printf 'no rpm2cpio; ')$(command -v bsdtar >/dev/null || printf 'no bsdtar; ')$(tr '\n' ' ' <"$err" | cut -c1-300)"
+        return 1
+      fi ;;
     *.AppImage)
       chmod +x "$a"
       (cd "$out" && "$a" --appimage-extract >/dev/null) ;;
@@ -233,7 +243,9 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
   if [ ! -e "$a" ]; then bad_input "$a does not exist"; continue; fi
   dir="$work/a$idx"
   files=()
-  if [ -f "$a" ] && is_exe "$a" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe) false ;; *) true ;; esac; then
+  # Installers that are themselves executables (NSIS, and an AppImage, whose
+  # ELF runtime carries the app in a squashfs payload) are unpacked instead.
+  if [ -f "$a" ] && is_exe "$a" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe|*.AppImage) false ;; *) true ;; esac; then
     files=("$a")
   else
     if [ -d "$a" ]; then
