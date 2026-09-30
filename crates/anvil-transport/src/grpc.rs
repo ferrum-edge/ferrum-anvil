@@ -1096,11 +1096,7 @@ const REFLECTION_TIMEOUT_MS: u64 = 30_000;
 fn reflection_deadline(total_deadline: Option<Instant>, now: Instant) -> (Instant, u64) {
     let cap = now + Duration::from_millis(REFLECTION_TIMEOUT_MS);
     let deadline = total_deadline.map(|deadline| deadline.min(cap)).unwrap_or(cap);
-    let deadline_ms = deadline
-        .saturating_duration_since(now)
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    let deadline_ms = deadline.saturating_duration_since(now).as_millis().try_into().unwrap_or(u64::MAX);
     (deadline, deadline_ms)
 }
 
@@ -1337,18 +1333,8 @@ async fn reflect(
                 break;
             }
             let request = q.encode_to_vec();
-            let r = one_shot(
-                conn,
-                plan,
-                &path,
-                &request,
-                stats,
-                cancel,
-                Some(reflection_deadline),
-                reflection_deadline_ms,
-                &mut budget,
-            )
-            .await;
+            let r =
+                one_shot(conn, plan, &path, &request, stats, cancel, Some(reflection_deadline), reflection_deadline_ms, &mut budget).await;
             let outcome = |problem: String, r: &OneShot| ReflectionOutcome {
                 service: svc.trim_end_matches(".ServerReflection").to_string(),
                 http_status: r.status,
