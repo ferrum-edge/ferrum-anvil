@@ -1,0 +1,344 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LintReport",
+  "type": "object",
+  "properties": {
+    "spec": {
+      "$ref": "#/$defs/SpecSummary"
+    },
+    "rulesets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RulesetSummary"
+      }
+    },
+    "rules_run": {
+      "description": "Rules that applied to this dialect and ran.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "rules_skipped": {
+      "description": "Rules skipped because of their `formats`.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "counts": {
+      "description": "Counts of every finding, including any dropped past the limit.",
+      "$ref": "#/$defs/SeverityCounts"
+    },
+    "findings": {
+      "description": "Most severe first, then in document order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LintFinding"
+      }
+    },
+    "dropped": {
+      "description": "Findings dropped past [`LintOptions::max_findings`].",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "unresolved_refs": {
+      "description": "Locations of `$ref`s that could not be followed (external, dangling,\ncyclic or too deep; at most 1,000). The objects behind them were not\nchecked.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved_ref_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0,
+      "default": 0
+    },
+    "examples_not_checked": {
+      "description": "Body examples not checked: their schema uses an external reference\nor an unsupported pattern, refers to itself without descending into\nthe value, or expands too far through its references.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0,
+      "default": 0
+    },
+    "skipped_operations": {
+      "description": "Operations left out because the description is too large to lint\ncompletely (see `model::MAX_MODEL_WORK`).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0,
+      "default": 0
+    }
+  },
+  "required": [
+    "spec",
+    "rulesets",
+    "rules_run",
+    "rules_skipped",
+    "counts",
+    "findings",
+    "dropped"
+  ],
+  "$defs": {
+    "SpecSummary": {
+      "description": "The linted document.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dialect": {
+          "$ref": "#/$defs/Dialect"
+        },
+        "declared_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "operations": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "dialect",
+        "sha256",
+        "size_bytes",
+        "operations"
+      ]
+    },
+    "Dialect": {
+      "description": "Exact dialect. Every OpenAPI minor version is its own dialect: 3.2 is\nnever treated as 3.1, and an unknown future version is refused rather\nthan guessed.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "swagger20",
+            "open_api30",
+            "open_api31",
+            "open_api32",
+            "wsdl11",
+            "postman_v20",
+            "postman_v21",
+            "postman_environment",
+            "postman_globals",
+            "insomnia_v4",
+            "insomnia_v5",
+            "curl",
+            "har",
+            "unknown"
+          ]
+        },
+        {
+          "description": "An `openapi`/`swagger` version this importer does not implement.",
+          "type": "string",
+          "const": "open_api_unsupported"
+        },
+        {
+          "description": "WSDL 2.0 (`http://www.w3.org/ns/wsdl`): recognized, not supported.",
+          "type": "string",
+          "const": "wsdl20"
+        },
+        {
+          "description": "Postman collection format v1: recognized, not supported.",
+          "type": "string",
+          "const": "postman_v1"
+        }
+      ]
+    },
+    "RulesetSummary": {
+      "description": "A ruleset that took part in a [`RuleSet`].",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "description": "File name, or the built-in name.",
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "builtin": {
+          "type": "boolean"
+        },
+        "sha256": {
+          "description": "SHA-256 (hex) of the ruleset text.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "builtin",
+        "sha256"
+      ]
+    },
+    "SeverityCounts": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warn": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "info": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "hint": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "error",
+        "warn",
+        "info",
+        "hint"
+      ]
+    },
+    "LintFinding": {
+      "description": "Where a finding is, in the document and in its source text.",
+      "type": "object",
+      "properties": {
+        "rule": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/LintSeverity"
+        },
+        "message": {
+          "type": "string"
+        },
+        "pointer": {
+          "description": "RFC 6901 JSON Pointer of the object to change.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line and column in the source, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "column": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "target": {
+          "$ref": "#/$defs/TargetKind"
+        },
+        "label": {
+          "description": "What the finding is about: `GET /pets`, `schema Pet`, …",
+          "type": "string"
+        },
+        "how_to_fix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "docs_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ruleset": {
+          "description": "Name of the ruleset that defined the rule.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "severity",
+        "message",
+        "pointer",
+        "target",
+        "label",
+        "ruleset"
+      ]
+    },
+    "LintSeverity": {
+      "description": "How serious a lint finding is (`off` in a ruleset turns a rule off).",
+      "type": "string",
+      "enum": [
+        "hint",
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "TargetKind": {
+      "description": "What a rule applies to.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "document",
+            "info",
+            "server",
+            "tag",
+            "path",
+            "operation",
+            "parameter",
+            "request_body",
+            "response",
+            "header",
+            "media_type",
+            "schema",
+            "property",
+            "security_scheme"
+          ]
+        },
+        {
+          "description": "A node selected by a rule's JSONPath.",
+          "type": "string",
+          "const": "node"
+        }
+      ]
+    }
+  }
+}

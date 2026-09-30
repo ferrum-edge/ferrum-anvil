@@ -6,6 +6,7 @@ mod cmd_load;
 mod cmd_runner;
 mod cmd_sessions;
 mod cmd_specs;
+mod cmd_standards;
 mod commands;
 mod state;
 
@@ -222,6 +223,14 @@ pub fn run() {
             cmd_specs::spec_sources,
             cmd_specs::spec_reimport_plan,
             cmd_specs::spec_reimport_apply,
+            cmd_standards::standards_view,
+            cmd_standards::standards_add,
+            cmd_standards::standards_replace,
+            cmd_standards::standards_remove,
+            cmd_standards::standards_set_enabled,
+            cmd_standards::standards_set_recommended,
+            cmd_standards::standards_lint,
+            cmd_standards::standards_report_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ferrum Anvil");
