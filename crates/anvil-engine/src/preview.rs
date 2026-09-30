@@ -17,6 +17,7 @@ use anvil_diagnostics::FerrumTrust;
 use anvil_domain::execution::{HeaderEntry, TransportFailure};
 use anvil_domain::request::Protocol;
 use anvil_domain::settings::EffectiveSettings;
+use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -176,12 +177,7 @@ impl Engine {
             // schema comes from server reflection).
             redactor.json_text(m)
         } else {
-            let text: String = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]).into_owned();
-            if req.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false) {
-                redactor.json_text(&text)
-            } else {
-                redactor.text(&text)
-            }
+            redacted_body_preview(&redactor, &body, req.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false))
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
@@ -208,5 +204,61 @@ impl Engine {
             lint_warning: prep.http.lint_bypassed.clone(),
             omitted_secrets: omitted,
         })
+    }
+}
+
+/// Bytes of a request body the effective-request preview shows.
+const BODY_PREVIEW_BYTES: usize = 64 * 1024;
+
+/// The body as the preview shows it: its first [`BODY_PREVIEW_BYTES`],
+/// redacted before they are cut, so a secret that crosses the cut is replaced
+/// whole instead of leaving its prefix (only [`REDACT_LOOKAHEAD_BYTES`] past
+/// the cut are redacted). A whole JSON body also gets field-name redaction; a
+/// cut one is no longer JSON and is scrubbed as text, as before.
+fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String {
+    let window = String::from_utf8_lossy(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
+    if body.len() <= BODY_PREVIEW_BYTES {
+        return if json { redactor.json_text(&window) } else { redactor.text(&window) };
+    }
+    let mut cut = BODY_PREVIEW_BYTES.min(window.len());
+    while !window.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    redact_then_cut(&|s: &str| redactor.text(s), &window, cut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anvil_domain::secret::REDACTED;
+
+    #[test]
+    fn a_secret_crossing_the_body_preview_cut_leaves_no_prefix() {
+        let secret = "body-cut-secret-value-8h2k";
+        let redactor = Redactor::new(vec![secret.into()], vec![]);
+        // The cut falls before the secret's last character.
+        let pad = "p".repeat(BODY_PREVIEW_BYTES - (secret.len() - 1));
+        let body = format!("{pad}{secret} trailing");
+        for json in [false, true] {
+            let shown = redacted_body_preview(&redactor, body.as_bytes(), json);
+            assert!(!(4..=secret.len()).any(|n| shown.contains(&secret[..n])), "a secret prefix survived the preview cut");
+            assert!(shown == format!("{pad}{REDACTED}"), "the preview ends with the marker where the secret starts");
+        }
+    }
+
+    #[test]
+    fn body_previews_keep_their_redaction_and_their_cut() {
+        let secret = "body-cut-secret-value-8h2k";
+        let redactor = Redactor::new(vec![secret.into()], vec![]);
+        // Whole bodies: JSON field names and secret values are redacted, as before.
+        let json = redacted_body_preview(&redactor, format!(r#"{{"password":"x","v":"{secret}"}}"#).as_bytes(), true);
+        assert_eq!(json, format!(r#"{{"password":"{REDACTED}","v":"{REDACTED}"}}"#));
+        // A long body without secrets is cut at the preview size.
+        let plain = "q".repeat(BODY_PREVIEW_BYTES + 10);
+        assert_eq!(redacted_body_preview(&redactor, plain.as_bytes(), false), &plain[..BODY_PREVIEW_BYTES]);
+        // A secret wholly before the cut is redacted and the rest is shown up to the cut.
+        let early = format!("{secret}{}", "r".repeat(BODY_PREVIEW_BYTES));
+        let shown = redacted_body_preview(&redactor, early.as_bytes(), false);
+        assert_eq!(shown, format!("{REDACTED}{}", "r".repeat(BODY_PREVIEW_BYTES - secret.len())));
     }
 }

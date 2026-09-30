@@ -68,6 +68,21 @@ against it).
     where the explanation quotes it) get the same URL redaction.
   - A collection run drops a content-encoded response body it cannot check
     for sensitive run values.
+  - Session transcript previews (text and hex), SSE event ids and types, and
+    the effective-request body preview are redacted before they are cut to
+    their display size, over the text up to 64 KiB past the cut. A secret
+    that crosses the cut is replaced whole, and the preview ends with the
+    redaction marker where it starts, so a peer that echoes a credential
+    cannot align it to leave most of it in the record. A secret form longer
+    than 64 KiB that crosses a cut is not covered. The stored record redacts
+    the transcript again with the record's redactor, but it sees only the
+    previews already cut: a secret the live redactor did not yet know when
+    the entry was recorded is caught when it lies wholly inside the preview,
+    and keeps its prefix when it crosses the cut. An OAuth issuer's
+    `error_description` has the token request's own credentials (client
+    secret, refresh token, authorization code and PKCE verifier) replaced
+    before it is cut to 200 characters. Diagnostic evidence excerpts are
+    still cut before the record's redaction runs (see Residual risks).
 - **Redirect hops:** every hop is evaluated for its own target. Unless
   `redirects.forward_credentials_cross_origin` is on, once a redirect leaves
   the request's origin (scheme, host or port):
@@ -143,6 +158,34 @@ against it).
   including a body sent slowly past `total_ms` and trailers after which the
   stream never ends; Anvil then stops the stream rather than wait for the
   peer.
+- **Hostile or stalled session peers:** a WebSocket, SSE, raw TCP/TLS,
+  UDP/DTLS, HBONE or MASQUE peer cannot make a session hold unbounded
+  memory or outlive its cancellation and deadlines.
+  - Every transcript entry is bounded (a 2 KiB preview, 256 bytes of SSE
+    event id and type), so the retained history is bounded however large the
+    messages are. The SSE parser refuses an `id:` or `event:` value over
+    4 KiB as a local limit, shares one last-event-id buffer across events
+    instead of copying it into each, and parses a chunk only until
+    `max_events` events are in hand.
+  - Once a session is open, these writes are raced against cancellation
+    and the deadline that applies to them (the total deadline for
+    automation, the DTLS handshake deadline, the raw TCP write deadline):
+    WebSocket scripted messages, interactive commands and the Pong flush;
+    raw TCP scripted and interactive payloads and half-closes; DTLS
+    handshake flights and datagrams over UDP, HBONE and MASQUE; HBONE and
+    MASQUE datagrams waiting for flow-control credit. The Close frames and
+    `close_notify` a session sends have their own bound: the WebSocket close
+    wait for a graceful close, 250 ms at cancel and at the total deadline
+    (500 ms after a protocol error), 250 ms for the raw TCP shutdown. Writes
+    before the session opens (the handshake request) are bounded by the
+    connection and handshake timeouts; gRPC streams are outside this list.
+  - An interrupted write may have left a partial frame, so nothing is
+    written after it: raw TCP drops the connection without a shutdown (no
+    TLS `close_notify` or FIN written by the session), WebSocket over HTTP/3
+    resets its stream (`H3_REQUEST_CANCELLED`), and HBONE and MASQUE tunnels
+    are reset instead of finished. A raw TCP payload that was partly written
+    is reported as possibly dispatched. Interactive sessions have no total
+    deadline: cancel (or a profile lock) is what ends them.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -422,5 +465,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
+- Diagnostic evidence excerpts (a JSON `error`, a GraphQL or SOAP fault
+  message, a tunnel refusal body, a Ferrum Edge body signature) are cut to
+  160–300 characters before the record's secret-value redaction runs, so a
+  secret the response echoes across that cut can leave a prefix in the
+  finding.
 - Unsigned development builds cannot prove provenance; release signing is
   blocked on owner credentials (see [release.md](release.md)).
