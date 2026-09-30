@@ -396,11 +396,8 @@ mod tests {
             assert_eq!(c.compatibility_id, id);
             assert_eq!(format!("ferrum-edge-{}", c.release_tag.trim_start_matches('v')), id, "release tag matches the id");
             assert_eq!(c.source_sha.len(), 40, "{id}: full source sha");
-            let expected_tokens: Vec<&str> = TOKENS
-                .iter()
-                .copied()
-                .filter(|token| id == "ferrum-edge-0.9.8" || *token != "request_timeout")
-                .collect();
+            let expected_tokens: Vec<&str> =
+                TOKENS.iter().copied().filter(|token| id == "ferrum-edge-0.9.8" || *token != "request_timeout").collect();
             for t in expected_tokens {
                 assert!(c.is_known_token(t), "{id}: missing token {t}");
             }
