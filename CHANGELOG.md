@@ -79,6 +79,10 @@
 
 ### Changed
 
+- CI: Dependabot now covers GitHub composite actions, keeps patched vendored
+  crates pinned, and leaves coordinated Tauri updates for a manual bump.
+  Dependabot dependency PRs may require manual license and generated-contract
+  updates before the required CI checks pass.
 - New Ferrum gateway profiles default to `ferrum-edge-0.9.8` (desktop dialog
   and CLI), and the failure lab's default pin is Ferrum Edge v0.9.8
   (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
@@ -261,6 +265,11 @@
   scenario skipped this way in both the trusted and the untrusted pass of
   one run fails both results. Lab scenarios can now report such a skip
   (`Checks::skip`) (#221).
+- UDP load-scenario silence coverage keeps its non-responding target socket
+  bound for the whole sub-case, then checks ICMP-unreachable counts on a
+  released port with up to five fresh-port retries for parallel UDP replies.
+  PROTO-020 uses the same bounded retry for its ICMP-unreachable assertion;
+  both tests fail clearly if every attempt receives foreign traffic.
 - The effective-request preview reports a multi-auth as varying per send
   when any of its profiles is HMAC, DPoP, JWT, WS-Security or JWT-SVID
   (nested sets included), and an SSE preview with such a multi-auth says
@@ -800,6 +809,8 @@
 
 ### Security
 
+- Desktop development dependencies now override Mocha's vulnerable
+  `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted
