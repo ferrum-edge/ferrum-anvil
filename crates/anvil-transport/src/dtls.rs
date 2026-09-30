@@ -303,8 +303,7 @@ fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
         .with_deadline(Some(deadline_ms)),
         dimpl::Error::SecurityError(SecurityError::FatalAlert { description }) => {
             let code = *description;
-            let mut f =
-                TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeFailed, "");
+            let mut f = TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeFailed, "");
             let name = alert_name(code);
             f.message = format!(
                 "the DTLS peer sent a fatal alert ({name}) during the handshake{}",
@@ -1006,10 +1005,7 @@ mod tests {
 
     #[test]
     fn alert_codes_are_extracted() {
-        let f = classify_dimpl(
-            &dimpl::Error::SecurityError(SecurityError::FatalAlert { description: 48 }),
-            1000,
-        );
+        let f = classify_dimpl(&dimpl::Error::SecurityError(SecurityError::FatalAlert { description: 48 }), 1000);
         assert_eq!(f.kind, FailureKind::DtlsHandshakeFailed);
         assert_eq!(f.tls_alert.as_deref(), Some("unknown_ca"));
         assert_eq!(
@@ -1022,13 +1018,7 @@ mod tests {
 
     #[test]
     fn unknown_protocol_versions_keep_the_wire_value() {
-        assert_eq!(
-            version_label(Some(ProtocolVersion::DTLS1_2)).as_deref(),
-            Some("DTLSv1_2")
-        );
-        assert_eq!(
-            version_label(Some(ProtocolVersion::from_u16(0xFEFE))).as_deref(),
-            Some("DTLS(0xfefe)")
-        );
+        assert_eq!(version_label(Some(ProtocolVersion::DTLS1_2)).as_deref(), Some("DTLSv1_2"));
+        assert_eq!(version_label(Some(ProtocolVersion::from_u16(0xFEFE))).as_deref(), Some("DTLS(0xfefe)"));
     }
 }
