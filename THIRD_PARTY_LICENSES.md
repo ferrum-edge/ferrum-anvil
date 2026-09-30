@@ -16,14 +16,14 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-782 Rust crates, 5 npm packages.
+783 Rust crates, 5 npm packages.
 
 | License expression | Components |
 | --- | --- |
 | MIT OR Apache-2.0 | 363 |
 | MIT | 158 |
 | Apache-2.0 OR MIT | 113 |
-| MIT/Apache-2.0 | 36 |
+| MIT/Apache-2.0 | 37 |
 | Unicode-3.0 | 18 |
 | Zlib OR Apache-2.0 OR MIT | 17 |
 | BSD-3-Clause | 12 |
@@ -69,7 +69,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (782)
+## Rust crates (783)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -531,6 +531,7 @@ the modified file under MPL-2.0.
 | prost-types | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | protox | 0.9.1 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
 | protox-parse | 0.9.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
+| psl | 2.1.238 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
 | psl-types | 2.0.11 | MIT/Apache-2.0 | https://github.com/addr-rs/psl-types |
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |

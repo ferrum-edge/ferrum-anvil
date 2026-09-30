@@ -812,6 +812,21 @@
 
 ### Security
 
+- A redirect that would resend a request body to another origin is no
+  longer followed when the body has a form field marked sensitive, even
+  when its value is a literal rather than a secret variable. Before, only
+  secret variables marked the body structurally, and a literal whose form
+  encoding changed its bytes (such as one holding `@` or a space) was
+  resent by a 307 or 308 redirect. Allowing credentials to be forwarded
+  cross-origin in the redirect policy still lifts the refusal.
+  (GHSA-c8jq-hq57-v523)
+- The workspace cookie jar no longer stores a cookie whose `Domain` is a
+  public suffix, such as `com`, `co.uk` or a private-section suffix like
+  `github.io`, so one site can no longer set a cookie that Anvil then sends
+  to unrelated sites under that suffix. When the suffix is the responding
+  host itself, the cookie is kept for that host only. Cookies scoped to a
+  registrable parent domain and host-only cookies are unchanged. The Public
+  Suffix List is compiled in (the `psl` crate). (GHSA-vv3h-gm7f-3hm7)
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
