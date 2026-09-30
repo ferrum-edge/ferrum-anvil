@@ -306,12 +306,7 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
     let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
     let record = serde_json::to_string(&o.record).unwrap();
     assert!(!record.contains(secret), "the first stored record holds the echoed secret");
-    assert!(o
-        .record
-        .prepared
-        .inferred
-        .iter()
-        .any(|n| n == "a response cookie was not stored because its name contains a request secret"));
+    assert!(o.record.prepared.inferred.iter().any(|n| n == "a response cookie was not stored because its name contains a request secret"));
     let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
     let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
     assert_eq!(r.status, 200);
@@ -320,11 +315,7 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
     assert_eq!(set_cookie, vec![format!("{REDACTED}={REDACTED}; Path=/; HttpOnly")]);
 
     let second = engine
-        .execute(
-            &ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo"))),
-            EventCtx::none(),
-            CancellationToken::new(),
-        )
+        .execute(&ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo"))), EventCtx::none(), CancellationToken::new())
         .await;
     let second_record = serde_json::to_string(&second.record).unwrap();
     assert!(!second_record.contains(secret), "the second record contains a cookie named with the first execution's secret");

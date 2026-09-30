@@ -149,14 +149,10 @@ impl CookieJars {
         let jar = jars.by_isolation.entry(isolation.to_string()).or_default();
         let mut skipped_secret_name = false;
         for v in set_cookie {
-            if v.split(';')
-                .next()
-                .and_then(|pair| pair.split_once('='))
-                .is_some_and(|(name, _)| {
-                    let name = name.trim();
-                    redactor.text(name) != name
-                })
-            {
+            if v.split(';').next().and_then(|pair| pair.split_once('=')).is_some_and(|(name, _)| {
+                let name = name.trim();
+                redactor.text(name) != name
+            }) {
                 skipped_secret_name = true;
                 continue;
             }
