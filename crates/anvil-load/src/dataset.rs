@@ -5,8 +5,9 @@
 
 use crate::LoadError;
 use anvil_engine::vars::{VarEntry, VarLayer};
-use serde::{de::DeserializeSeed, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeSeed};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const MAX_DATASET_BYTES: usize = 64 * 1024 * 1024;
@@ -123,22 +124,35 @@ impl Dataset {
 
 type Parsed = (Vec<String>, Vec<Vec<Option<String>>>);
 
+fn check_column_name(column: &str, index: usize) -> Result<(), LoadError> {
+    if column.is_empty() {
+        return Err(LoadError::Invalid(format!("dataset column {} has an empty name", index + 1)));
+    }
+    if column.contains("{{") || column.contains("}}") {
+        return Err(LoadError::Invalid(format!("dataset column '{column}' contains template braces")));
+    }
+    Ok(())
+}
+
 fn check_columns(cols: &[String]) -> Result<(), LoadError> {
     if cols.len() > MAX_COLUMNS {
         return Err(LoadError::Invalid(format!("dataset has {} columns; the limit is {MAX_COLUMNS}", cols.len())));
     }
-    for (i, c) in cols.iter().enumerate() {
-        if c.is_empty() {
-            return Err(LoadError::Invalid(format!("dataset column {} has an empty name", i + 1)));
-        }
-        if c.contains("{{") || c.contains("}}") {
-            return Err(LoadError::Invalid(format!("dataset column '{c}' contains template braces")));
-        }
-        if cols[..i].contains(c) {
-            return Err(LoadError::Invalid(format!("dataset column '{c}' is duplicated")));
+    let mut indexes = HashMap::with_capacity(cols.len());
+    for (index, column) in cols.iter().enumerate() {
+        check_column_name(column, index)?;
+        if indexes.insert(column.as_str(), index).is_some() {
+            return Err(LoadError::Invalid(format!("dataset column '{column}' is duplicated")));
         }
     }
     Ok(())
+}
+
+fn load_error_message(error: LoadError) -> String {
+    match error {
+        LoadError::Invalid(message) => message,
+        error => error.to_string(),
+    }
 }
 
 /// Refuse a matrix of `rows` × `columns` cells over the budget. Error text
@@ -172,19 +186,20 @@ fn parse_csv(raw: &[u8], limits: DatasetLimits) -> Result<Parsed, LoadError> {
 
 fn parse_json(raw: &[u8], limits: DatasetLimits) -> Result<Parsed, LoadError> {
     let mut columns = Vec::new();
+    let mut column_indexes: HashMap<String, usize> = HashMap::new();
     let mut rows = Vec::new();
     let mut deserializer = serde_json::Deserializer::from_slice(raw);
-    JsonDatasetSeed { limits, columns: &mut columns, rows: &mut rows }
+    JsonDatasetSeed { limits, columns: &mut columns, column_indexes: &mut column_indexes, rows: &mut rows }
         .deserialize(&mut deserializer)
         .map_err(|e| LoadError::Invalid(format!("dataset JSON: {e}")))?;
     deserializer.end().map_err(|e| LoadError::Invalid(format!("dataset JSON: {e}")))?;
-    check_columns(&columns)?;
     Ok((columns, rows))
 }
 
 struct JsonDatasetSeed<'a> {
     limits: DatasetLimits,
     columns: &'a mut Vec<String>,
+    column_indexes: &'a mut HashMap<String, usize>,
     rows: &'a mut Vec<Vec<Option<String>>>,
 }
 
@@ -195,13 +210,19 @@ impl<'de> serde::de::DeserializeSeed<'de> for JsonDatasetSeed<'_> {
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_seq(JsonDatasetVisitor { limits: self.limits, columns: self.columns, rows: self.rows })
+        deserializer.deserialize_seq(JsonDatasetVisitor {
+            limits: self.limits,
+            columns: self.columns,
+            column_indexes: self.column_indexes,
+            rows: self.rows,
+        })
     }
 }
 
 struct JsonDatasetVisitor<'a> {
     limits: DatasetLimits,
     columns: &'a mut Vec<String>,
+    column_indexes: &'a mut HashMap<String, usize>,
     rows: &'a mut Vec<Vec<Option<String>>>,
 }
 
@@ -217,31 +238,34 @@ impl<'de> serde::de::Visitor<'de> for JsonDatasetVisitor<'_> {
         A: serde::de::SeqAccess<'de>,
     {
         use serde::de::Error;
-        loop {
-            let row = seq.next_element_seed(JsonRowSeed {
-                reject: self.rows.len() >= self.limits.max_rows,
-                max_rows: self.limits.max_rows,
-            })?;
-            let Some(row) = row else { break };
+        while let Some(row) = seq.next_element_seed(JsonRowSeed {
+            row_number: self.rows.len() + 1,
+            reject: self.rows.len() >= self.limits.max_rows,
+            max_rows: self.limits.max_rows,
+        })? {
             let row_index = self.rows.len() + 1;
             for (key, _) in &row {
-                if self.columns.contains(key) {
+                if self.column_indexes.contains_key(key) {
                     continue;
                 }
                 if self.columns.len() >= MAX_COLUMNS {
                     return Err(serde::de::Error::custom(format!("dataset has more than {MAX_COLUMNS} distinct keys")));
                 }
-                check_cells(row_index, self.columns.len() + 1, self.limits).map_err(A::Error::custom)?;
+                check_column_name(key, self.columns.len()).map_err(|e| A::Error::custom(load_error_message(e)))?;
+                check_cells(row_index, self.columns.len() + 1, self.limits)
+                    .map_err(|e| A::Error::custom(load_error_message(e)))?;
+                let index = self.columns.len();
                 self.columns.push(key.clone());
+                self.column_indexes.insert(key.clone(), index);
                 for previous in self.rows.iter_mut() {
                     previous.push(None);
                 }
             }
-            check_cells(row_index, self.columns.len(), self.limits).map_err(A::Error::custom)?;
-            check_columns(self.columns).map_err(A::Error::custom)?;
+            check_cells(row_index, self.columns.len(), self.limits)
+                .map_err(|e| A::Error::custom(load_error_message(e)))?;
             let mut values = vec![None; self.columns.len()];
             for (key, value) in row {
-                let index = self.columns.iter().position(|column| column == &key).expect("row key was added as a column");
+                let index = *self.column_indexes.get(&key).expect("row key was added as a column");
                 values[index] = Some(value);
             }
             self.rows.push(values);
@@ -251,6 +275,7 @@ impl<'de> serde::de::Visitor<'de> for JsonDatasetVisitor<'_> {
 }
 
 struct JsonRowSeed {
+    row_number: usize,
     reject: bool,
     max_rows: usize,
 }
@@ -265,17 +290,19 @@ impl<'de> serde::de::DeserializeSeed<'de> for JsonRowSeed {
         if self.reject {
             return Err(serde::de::Error::custom(format!("dataset has more than {} rows", self.max_rows)));
         }
-        deserializer.deserialize_map(JsonRowVisitor)
+        deserializer.deserialize_map(JsonRowVisitor { row_number: self.row_number })
     }
 }
 
-struct JsonRowVisitor;
+struct JsonRowVisitor {
+    row_number: usize,
+}
 
 impl<'de> serde::de::Visitor<'de> for JsonRowVisitor {
     type Value = Vec<(String, String)>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an object")
+        write!(formatter, "an object at row {}", self.row_number)
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -284,18 +311,21 @@ impl<'de> serde::de::Visitor<'de> for JsonRowVisitor {
     {
         use serde::de::Error;
         let mut values = Vec::new();
+        let mut value_indexes: HashMap<String, usize> = HashMap::new();
         while let Some(key) = map.next_key::<String>()? {
             let raw = map.next_value::<&serde_json::value::RawValue>()?;
             if raw.get().len() > MAX_CELL_BYTES {
                 return Err(A::Error::custom(format!("dataset JSON cell exceeds the 1 MiB limit ({MAX_CELL_BYTES} bytes)")));
             }
             let text = cell_text(raw.get()).map_err(A::Error::custom)?;
-            if let Some((_, value)) = values.iter_mut().find(|(existing, _)| existing == &key) {
-                *value = text;
+            if let Some(index) = value_indexes.get(&key) {
+                values[*index].1 = text;
             } else {
                 if values.len() >= MAX_COLUMNS {
                     return Err(A::Error::custom(format!("dataset has more than {MAX_COLUMNS} distinct keys")));
                 }
+                let index = values.len();
+                value_indexes.insert(key.clone(), index);
                 values.push((key, text));
             }
         }
@@ -396,10 +426,17 @@ mod tests {
     }
 
     #[test]
-    fn large_scalar_array_stops_at_the_row_limit() {
-        let bytes = format!("[0{}]", ",0".repeat(MAX_ROWS));
+    fn large_object_array_stops_at_the_row_limit() {
+        let bytes = format!("[{{}}{}]", ",{{}}".repeat(MAX_ROWS)).into_bytes();
         let e = Dataset::parse(DatasetFormat::Json, bytes).unwrap_err().to_string();
         assert!(e.contains("more than 1000000 rows"), "{e}");
+    }
+
+    #[test]
+    fn scalar_json_rows_are_refused_with_the_row_number() {
+        let e = Dataset::parse(DatasetFormat::Json, b"[0]".to_vec()).unwrap_err().to_string();
+        assert!(e.contains("row 1"), "{e}");
+        assert!(e.contains("an object"), "{e}");
     }
 
     #[test]

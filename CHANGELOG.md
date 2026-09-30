@@ -79,6 +79,9 @@
 
 ### Changed
 
+- Load testing: JSON dataset cells keep their source text, including number
+  spelling such as `1.50` or `1e2`, nested `\u` escapes, and nested duplicate
+  keys.
 - CI: Dependabot now covers GitHub composite actions, keeps patched vendored
   crates pinned, and leaves coordinated Tauri updates for a manual bump.
   Dependabot dependency PRs may require manual license and generated-contract

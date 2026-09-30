@@ -151,7 +151,7 @@ describe("ProtocolPanel", () => {
       semantics: sem("call", "calls"),
       grpc: { status_codes: [[0, 15], [5, 5], [7, 5], [-1, 2]], ok: 15, non_ok: 12, missing_status: 5, protocol_fallback_attempts: 0 },
     };
-    render(<ProtocolPanel p={p} requests={units({ started: 32, completed: 27, transport_failures: 5, application_failures: 10 })} />);
+    render(<ProtocolPanel p={p} requests={units({ started: 32, completed: 27, transport_failures: 5, application_failures: 12 })} />);
     const codes = screen.getByTestId("grpc-codes").textContent ?? "";
     expect(codes).toContain("7 PERMISSION_DENIED5");
     expect(codes).toContain("0 OK15");
