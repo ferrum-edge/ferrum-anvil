@@ -18,7 +18,9 @@
   `docs/contract.md` and `samples/api-standards/`.
 - CLI: `anvil lint-spec <spec> [--ruleset FILE]...` prints text, JSON or
   SARIF 2.1.0 (for code scanning) and exits with 2 when a finding reaches
-  `--fail-on` (default `error`). It needs no profile.
+  `--fail-on` (default `error`), and with 3 on a local error, including a
+  description too large to lint completely unless `--allow-incomplete` is
+  passed. It needs no profile.
 - Desktop: a **Contract** view checks the workspace's imported OpenAPI
   descriptions, or a chosen file, against the profile's API standards,
   filters findings by severity and exports JSON or SARIF. Rulesets are kept

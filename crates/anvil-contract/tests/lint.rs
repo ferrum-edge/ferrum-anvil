@@ -371,3 +371,18 @@ fn security_headers_and_shared_examples_count_against_the_budgets() {
     // Every example behind the refused schema is counted, with one compile.
     assert!(r.examples_not_checked > 0);
 }
+
+#[test]
+fn inherited_security_is_gathered_once() {
+    let reqs: Vec<serde_json::Value> = (0..200_000).map(|_| json!({"k": []})).collect();
+    let paths: serde_json::Map<String, serde_json::Value> = (0..2_000)
+        .map(|i| (format!("/p{i}"), json!({"get": {"operationId": format!("o{i}"), "responses": {"200": {"description": "ok"}}}})))
+        .collect();
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "security": reqs, "paths": paths,
+        "components": {"securitySchemes": {"k": {"type": "apiKey", "in": "header", "name": "X"}}}});
+    let start = std::time::Instant::now();
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
+    assert_eq!(r.skipped_operations, 0);
+    assert!(!r.findings.iter().any(|f| f.rule == "operation-security-defined"));
+}

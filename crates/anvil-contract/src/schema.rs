@@ -171,31 +171,53 @@ fn measure(spec: &Spec, schema: &Value) -> Result<usize, String> {
         }
     };
 
-    // 1. Cycles along references that do not descend (three colours; no
-    //    shortcuts, so a cycle is found whatever path reaches it first).
-    let mut colour: HashMap<String, u8> = HashMap::from([(ROOT.to_string(), 1)]);
-    let mut stack: Vec<(String, usize)> = vec![(ROOT.to_string(), 0)];
-    while let Some((key, i)) = stack.last_mut() {
-        let next = parts[key.as_str()].refs.iter().enumerate().skip(*i).find(|(_, (_, down))| !down).map(|(j, (t, _))| (j, t.clone()));
-        let Some((j, target)) = next else {
-            colour.insert(key.clone(), 2);
-            stack.pop();
-            continue;
-        };
-        *i = j + 1;
-        match colour.get(&target).copied() {
-            Some(1) => return Err("the schema refers to itself without descending into the value".into()),
-            Some(_) => {}
-            None => {
-                if part_of(&mut parts, &target)? {
-                    colour.insert(target.clone(), 1);
-                    stack.push((target, 0));
-                }
+    // 1. Every schema the root reaches, over all references.
+    let mut queue: Vec<String> = vec![ROOT.to_string()];
+    let mut reached: Vec<String> = vec![ROOT.to_string()];
+    let mut queued: HashSet<String> = HashSet::from([ROOT.to_string()]);
+    while let Some(key) = queue.pop() {
+        let targets: Vec<String> = parts[key.as_str()].refs.iter().map(|(t, _)| t.clone()).collect();
+        for t in targets {
+            if queued.insert(t.clone()) && part_of(&mut parts, &t)? {
+                reached.push(t.clone());
+                queue.push(t);
             }
         }
     }
 
-    // 2. Sizes, memoized per target; a reference back to a schema being
+    // 2. Cycles along references that do not descend, searched from every
+    //    reached schema (one reached only through a descending reference
+    //    can still loop on itself): three colours, iterative.
+    let mut colour: HashMap<String, u8> = HashMap::new();
+    for start in &reached {
+        if colour.contains_key(start) {
+            continue;
+        }
+        colour.insert(start.clone(), 1);
+        let mut stack: Vec<(String, usize)> = vec![(start.clone(), 0)];
+        while let Some((key, i)) = stack.last_mut() {
+            let next = parts
+                .get(key.as_str())
+                .and_then(|p| p.refs.iter().enumerate().skip(*i).find(|(_, (_, down))| !down).map(|(j, (t, _))| (j, t.clone())));
+            let Some((j, target)) = next else {
+                colour.insert(key.clone(), 2);
+                stack.pop();
+                continue;
+            };
+            *i = j + 1;
+            match colour.get(&target).copied() {
+                Some(1) => return Err("the schema refers to itself without descending into the value".into()),
+                Some(_) => {}
+                None if parts.contains_key(target.as_str()) => {
+                    colour.insert(target.clone(), 1);
+                    stack.push((target, 0));
+                }
+                None => {}
+            }
+        }
+    }
+
+    // 3. Sizes, memoized per target; a reference back to a schema being
     //    measured (a cycle through the value) adds nothing more.
     let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let mut size: HashMap<String, usize> = HashMap::new();
@@ -483,9 +505,13 @@ mod tests {
               "X":{"allOf":[{"$ref":"#/components/schemas/U"}]},
               "U":{"allOf":[{"$ref":"#/components/schemas/V"}]},
               "D":{"dependentSchemas":{"x":{"$ref":"#/components/schemas/D"}}},
+              "A":{"allOf":[{"$ref":"#/components/schemas/B"}]},
+              "B":{"allOf":[{"$ref":"#/components/schemas/A"}]},
+              "InProps":{"properties":{"x":{"$ref":"#/components/schemas/A"}}},
+              "VInProps":{"properties":{"x":{"$ref":"#/components/schemas/V"}}},
               "Tree":{"type":"object","properties":{"children":{"type":"array","items":{"$ref":"#/components/schemas/Tree"}}}}}}}"##,
         );
-        for name in ["V", "D"] {
+        for name in ["V", "D", "InProps", "VInProps"] {
             let e = compile(&s, &json!({"$ref": format!("#/components/schemas/{name}")}), Direction::Response).unwrap_err();
             assert!(e.contains("refers to itself"), "{name}: {e}");
         }

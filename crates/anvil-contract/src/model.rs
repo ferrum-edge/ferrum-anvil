@@ -519,7 +519,8 @@ impl<'a> ModelBuilder<'a> {
         let mut used_schemes: HashSet<String> = HashSet::new();
         let mut methods_by_path: HashMap<&str, Vec<&str>> = HashMap::new();
         // The document's requirements once; each operation adds only its own.
-        used_schemes.extend(requirement_names(root.get("security").and_then(Value::as_array)));
+        let global_security_names = requirement_names(root.get("security").and_then(Value::as_array));
+        used_schemes.extend(global_security_names.iter().cloned());
         for op in &ops {
             if let Some(id) = op.operation_id() {
                 *id_counts.entry(id).or_default() += 1;
@@ -655,7 +656,7 @@ impl<'a> ModelBuilder<'a> {
                 self.skipped_operations += 1;
                 continue;
             }
-            self.operation(op, &declared_tag_set, &scheme_names, &id_counts, examples);
+            self.operation(op, &declared_tag_set, &global_security_names, &scheme_names, &id_counts, examples);
         }
 
         // Security schemes.
@@ -750,6 +751,7 @@ impl<'a> ModelBuilder<'a> {
         &mut self,
         op: &OperationRef<'a>,
         declared_tags: &HashSet<String>,
+        global_security_names: &[String],
         scheme_names: &HashSet<String>,
         id_counts: &HashMap<&str, usize>,
         examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
@@ -759,13 +761,18 @@ impl<'a> ModelBuilder<'a> {
         let params = parameters(spec, op);
         let body = request_body(spec, op);
         let resps = responses(spec, op);
-        let security_reqs = effective_security(spec, op);
-        let security_names = requirement_names(security_reqs);
+        // Inheriting operations reuse the document's names (gathered once).
+        let own_security = op.op.get("security").and_then(Value::as_array);
+        let security_names = match own_security {
+            Some(reqs) => requirement_names(Some(reqs)),
+            None => global_security_names.to_vec(),
+        };
         // Everything below is proportional to these (inherited parameters and
         // the document's security count for every operation).
         self.work += 1
             + params.len()
             + security_names.len()
+            + own_security.map_or(0, Vec::len)
             + resps
                 .iter()
                 .map(|r| 1 + r.media.len() + r.value.get("headers").and_then(Value::as_object).map_or(0, |h| h.len()))
@@ -823,7 +830,8 @@ impl<'a> ModelBuilder<'a> {
                 "has_default_response": codes.contains(&"default"),
                 "response_content_types": resps.iter().flat_map(|r| r.media.iter().map(|m| m.media_type.clone())).collect::<BTreeSet<_>>(),
                 "security": security_names,
-                "has_security": security_reqs.is_some_and(|r| r.iter().any(|x| x.as_object().is_some_and(|o| !o.is_empty()))),
+                // A requirement naming no scheme (`{}`) makes security optional.
+                "has_security": !security_names.is_empty(),
                 "has_explicit_security": op.op.get("security").is_some(),
                 "callbacks": op.op.get("callbacks").and_then(Value::as_object).map(|c| c.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
                 "operation_id_duplicate": operation_id.is_some_and(|id| id_counts.get(id).copied().unwrap_or(0) > 1),
