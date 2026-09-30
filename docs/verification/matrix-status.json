@@ -30,7 +30,7 @@
  },
  "REL-003": {
   "status": "blocked",
-  "reason": "No updater is shipped: signed update channels need owner signing keys. Anvil never self-updates in this build. Owner steps: ferrum-edge/ferrum-anvil#2."
+  "reason": "The updater is wired (opt-in update check; tauri-plugin-updater verifies each download's minisign signature against the public key compiled into the build), but no build carries the owner's updater key yet, so Upgrade opens the release page and Anvil never installs an update itself. Owner steps: docs/release.md#in-app-updates, ferrum-edge/ferrum-anvil#2."
  },
  "REL-006": {
   "status": "blocked",

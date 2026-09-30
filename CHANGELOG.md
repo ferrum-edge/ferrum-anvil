@@ -4,6 +4,19 @@
 
 ### Added
 
+- Desktop: update check and upgrade. **Settings → Updates → Check for updates
+  when Anvil opens** (the existing `check_for_updates` setting, still off by
+  default) asks the GitHub Releases API for the latest published
+  `anvil-vX.Y.Z` release once per launch, after unlock; **Check now** asks on
+  demand. A newer release shows a prompt (**Upgrade…** / **Later**) and an
+  **Update** chip in the status bar. **Upgrade…** shows the release notes and,
+  in a build that carries the owner's updater public key, downloads the update,
+  verifies its minisign signature (`tauri-plugin-updater`), installs it and
+  offers **Restart now**. A build without the key (every build until the owner
+  configures it), and `.deb`/`.rpm` installs, open the release page instead.
+  The release workflow creates signed updater artifacts and `latest.json` only
+  with that key (docs/release.md, In-app updates). The launch check fails
+  silently; the request carries only Anvil's version.
 - Desktop: a linked local file that a saved request names (for example one
   imported from another machine) can be repointed to where the file is on
   this device. When the file is not chosen yet, or is missing or changed,

@@ -12,6 +12,7 @@ import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
 import { ResponsePanel } from "./ResponsePanel";
 import { LoadView } from "./LoadView";
 import { RunnerView } from "./RunnerView";
+import { UpdateDialog, UpdatePrompt, useLaunchUpdate } from "./Update";
 import { Icon } from "./icons";
 import { Keys, Modal, SidebarContext, SidebarResizer, Toast, drag, fmtAgo, shortcut, uid } from "./ui";
 
@@ -36,6 +37,7 @@ type Dialog =
   | "export"
   | "import"
   | "settings"
+  | "update"
   | "workspace"
   | { kind: "rename"; id: string; isFolder: boolean; name: string }
   | { kind: "history"; view: ExecutionView }
@@ -91,6 +93,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [profiles, setProfiles] = useState<Profiles>({ tls: [], proxy: [], integrations: [] });
   const [dialog, setDialog] = useState<Dialog>(null);
+  const launchUpdate = useLaunchUpdate();
   const [toast, setToast] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [catalog, setCatalog] = useState("");
@@ -910,6 +913,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             Environment: {activeEnv?.name ?? "none"}
           </span>
           <span className="spacer" />
+          {launchUpdate?.update && (
+            <button className="update-chip" title={`Ferrum Anvil ${launchUpdate.update.version} is available`} onClick={() => setDialog("update")}>
+              <Icon name="download" size={12} />
+              Update {launchUpdate.update.version}
+            </button>
+          )}
           <span className="local">
             <Icon name="shield" size={12} />
             Local-only · no account
@@ -1052,6 +1061,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             </div>
           </Modal>
         )}
+        {dialog === "update" && launchUpdate && <UpdateDialog check={launchUpdate} onClose={() => setDialog(null)} />}
+        <UpdatePrompt check={launchUpdate} onUpgrade={() => setDialog("update")} />
         <Toast message={toast} onClose={() => setToast(null)} />
       </div>
     </SidebarContext.Provider>

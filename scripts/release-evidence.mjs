@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Assemble release evidence for a set of built artifacts.
 //
-//   node scripts/release-evidence.mjs --dist <dir> [--test-runs <runs.json>] [--tag <tag>]
+//   [ANVIL_UPDATER_PUBKEY=<key>] node scripts/release-evidence.mjs --dist <dir> [--test-runs <runs.json>] [--tag <tag>]
 //
 // <dir> contains one sub-directory per build target (as downloaded from the
 // release workflow's build jobs), each holding that target's shipped files and
@@ -17,10 +17,16 @@
 // Signing is reported exactly as recorded by the build jobs, which only mark a
 // target signed after verifying the signature on the runner. Nothing here can
 // turn an unsigned artifact into a signed one.
+//
+// Updater artifacts (`*.sig` beside an .app.tar.gz, AppImage or Windows
+// installer) and the shared latest.json exist only when the build ran with the
+// owner's updater key. `updater.signed` is true only when latest.json exists
+// and every signature in it verifies here against ANVIL_UPDATER_PUBKEY.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { decodePublicKey, signedVersion, unpairedSignatures, updaterArtifacts, verifyUpdaterSignature } from "./updater-manifest.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (name) => {
@@ -44,6 +50,9 @@ function kind(name) {
   if (/^release-check-.*\.json$/.test(name)) return "release-check-report";
   if (name === "license-report.json") return "license-report";
   if (/^anvil-cli-/.test(name)) return "cli";
+  if (name === "latest.json") return "updater-manifest";
+  if (/\.sig$/.test(name)) return "updater-signature";
+  if (/\.app\.tar\.gz$/.test(name)) return "updater-bundle";
   if (/\.(dmg|msi|deb|rpm|AppImage)$/.test(name) || /-setup\.exe$/.test(name)) return "desktop-installer";
   return "other";
 }
@@ -104,6 +113,7 @@ for (const d of readdirSync(dist).sort()) {
   const reportFile = artifacts.find((a) => a.kind === "release-check-report");
   const report = reportFile ? readJson(join(dir, reportFile.name)) : null;
   const signed = info.signing?.signed === true;
+  const updater = updaterArtifacts(dir, info.target);
   targets.push({
     target: info.target,
     os: info.os,
@@ -114,7 +124,10 @@ for (const d of readdirSync(dist).sort()) {
     signing: signed ? info.signing.method : UNSIGNED,
     signing_detail: info.signing?.detail ?? null,
     release_check: report ? { result: report.result, graph: report.graph, report: reportFile.name, artifacts: report.artifacts } : { result: "missing" },
+    updater: { configured: info.updater?.configured === true, artifacts: updater.map((u) => ({ name: u.name, signature: u.sig, platforms: u.keys })) },
     artifacts,
+    _dir: dir,
+    _unpaired: unpairedSignatures(dir),
   });
 }
 if (targets.length === 0) throw new Error(`no target directories with build-info.json under ${dist}`);
@@ -131,6 +144,75 @@ for (const t of targets) {
 const allNames = [...targets.flatMap((t) => t.artifacts.map((a) => a.name)), ...shared.map((a) => a.name)];
 const dupes = allNames.filter((n, i) => allNames.indexOf(n) !== i);
 if (dupes.length) problems.push(`duplicate artifact names: ${[...new Set(dupes)].join(", ")}`);
+
+// Updater: every signature pairs with an artifact, every signed artifact is in
+// latest.json with the same signature and URL, and each verifies against the
+// configured public key.
+const pubkey = process.env.ANVIL_UPDATER_PUBKEY?.trim() || null;
+const manifestPath = join(dist, "latest.json");
+const manifest = existsSync(manifestPath) ? readJson(manifestPath) : null;
+const updaterProblems = [];
+let keyId = null;
+if (pubkey) {
+  try {
+    keyId = decodePublicKey(pubkey).displayId;
+  } catch (e) {
+    updaterProblems.push(`ANVIL_UPDATER_PUBKEY: ${e.message}`);
+  }
+}
+const signedFiles = new Map();
+for (const t of targets) {
+  for (const s of t._unpaired) updaterProblems.push(`${t.target}: ${s} has no matching artifact`);
+  if (t.updater.configured && t.updater.artifacts.length === 0) updaterProblems.push(`${t.target}: built with the updater key but no signed updater artifact`);
+  if (!t.updater.configured && t.updater.artifacts.length > 0) updaterProblems.push(`${t.target}: updater signatures present although the build recorded no updater key`);
+  for (const u of t.updater.artifacts) signedFiles.set(u.name, { target: t, ...u });
+}
+if (signedFiles.size > 0 && !manifest) updaterProblems.push("updater artifacts present but no latest.json");
+if (manifest) {
+  if (signedFiles.size === 0) updaterProblems.push("latest.json present but no signed updater artifacts");
+  if (manifest.version !== workspaceVersion) updaterProblems.push(`latest.json version ${manifest.version} is not ${workspaceVersion}`);
+  if (!pubkey) updaterProblems.push("latest.json present but ANVIL_UPDATER_PUBKEY is not set; signatures not verified");
+  const listed = new Set();
+  for (const [key, p] of Object.entries(manifest.platforms ?? {})) {
+    const file = decodeURIComponent(String(p.url).split("/").pop());
+    const a = signedFiles.get(file);
+    if (!a) {
+      updaterProblems.push(`latest.json ${key}: ${file} is not a signed updater artifact of this release`);
+      continue;
+    }
+    listed.add(file);
+    if (!a.platforms.includes(key)) updaterProblems.push(`latest.json ${key}: ${file} belongs under ${a.platforms.join(" / ")}`);
+    if (arg("--tag") && !String(p.url).includes(`/releases/download/${encodeURIComponent(arg("--tag"))}/`)) updaterProblems.push(`latest.json ${key}: URL is not under tag ${arg("--tag")}`);
+    const sigText = readFileSync(join(a.target._dir, a.signature), "utf8").trim();
+    if (p.signature !== sigText) updaterProblems.push(`latest.json ${key}: signature differs from ${a.signature}`);
+    if (pubkey && keyId) {
+      try {
+        const sv = signedVersion(verifyUpdaterSignature(readFileSync(join(a.target._dir, file)), p.signature, pubkey));
+        if (sv !== null && sv.replace(/^v/, "") !== workspaceVersion) updaterProblems.push(`${file}: signed for version ${sv}`);
+      } catch (e) {
+        updaterProblems.push(`${file}: ${e.message}`);
+      }
+    }
+  }
+  for (const f of signedFiles.keys()) if (!listed.has(f)) updaterProblems.push(`${f}: signed but not in latest.json`);
+}
+problems.push(...updaterProblems.map((p) => `updater: ${p}`));
+const updaterSigned = Boolean(manifest && pubkey && keyId && signedFiles.size > 0 && updaterProblems.length === 0);
+const updaterEvidence = {
+  signed: updaterSigned,
+  manifest: manifest ? "latest.json" : null,
+  key_id: updaterSigned ? keyId : null,
+  platforms: manifest ? Object.keys(manifest.platforms ?? {}).sort() : [],
+  detail: updaterSigned
+    ? `minisign signatures verified against ANVIL_UPDATER_PUBKEY (key ${keyId}); in-app updates resolve releases/latest/download/latest.json only after this draft is published`
+    : manifest || signedFiles.size > 0
+      ? "unverified — see problems"
+      : "not configured — owner updater key (TAURI_SIGNING_PRIVATE_KEY, ANVIL_UPDATER_PUBKEY) not set; no updater artifacts, the app links to the release page",
+};
+for (const t of targets) {
+  delete t._dir;
+  delete t._unpaired;
+}
 
 // ------------------------------------------------------------ outputs
 const sums = [...targets.flatMap((t) => t.artifacts), ...shared].sort((a, b) => a.name.localeCompare(b.name)).map((a) => `${a.sha256}  ${a.name}`);
@@ -165,6 +247,7 @@ const evidence = {
   },
   signed: allSigned,
   signing: allSigned ? "signed and verified on the build runner (see targets[].signing)" : UNSIGNED,
+  updater: updaterEvidence,
   targets,
   shared_artifacts: shared,
   checksums: { file: "SHA256SUMS", algorithm: "sha256" },
@@ -187,7 +270,7 @@ const evidence = {
   problems,
 };
 writeFileSync(join(dist, "release-evidence.json"), JSON.stringify(evidence, null, 2) + "\n");
-console.log(`wrote ${basename(dist)}/SHA256SUMS (${sums.length} files) and release-evidence.json — signed: ${allSigned}`);
+console.log(`wrote ${basename(dist)}/SHA256SUMS (${sums.length} files) and release-evidence.json — signed: ${allSigned}, updater signed: ${updaterSigned}`);
 if (problems.length) {
   console.error("release evidence problems:\n  " + problems.join("\n  "));
   process.exit(1);

@@ -637,6 +637,18 @@ details.evidence summary { font-size: 12px; }
 .toast { position: fixed; right: 16px; bottom: 40px; display: flex; align-items: flex-start; gap: 10px; max-width: min(440px, calc(100vw - 32px)); padding: 11px 10px 11px 14px; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); z-index: 60; font-size: 12.5px; line-height: 1.5; animation: toast-in 0.2s ease-out; }
 .toast > .icon { color: var(--accent); margin-top: 1px; }
 .toast > span { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 1px; }
+.update-prompt { position: fixed; right: 16px; bottom: 40px; display: flex; align-items: flex-start; gap: 10px; max-width: min(400px, calc(100vw - 32px)); padding: 12px 14px; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); z-index: 59; font-size: 12.5px; line-height: 1.5; }
+.update-prompt > .icon { color: var(--accent); margin-top: 2px; flex: none; }
+.update-prompt .row { margin-top: 8px; }
+.update-chip { display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 7px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 9px; background: var(--accent-soft); color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+.update-chip:hover { border-color: var(--accent); }
+.statusbar .update-chip .icon { color: var(--accent); }
+.update-panel { display: flex; flex-direction: column; gap: 10px; }
+.update-panel > p { margin: 0; }
+.release-notes { margin: 0; max-height: 220px; overflow: auto; padding: 10px 12px; background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius); font-family: var(--sans); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.update-progress { display: flex; flex-direction: column; gap: 6px; }
+.update-progress > progress { width: 100%; height: 6px; accent-color: var(--accent); }
+.ok-box .row, .bad-box .row { margin-top: 8px; }
 @keyframes toast-in { from { transform: translateY(8px); } to { transform: none; } }
 .progress { height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); background-size: 200% 100%; animation: slide 1.1s linear infinite; flex: none; }
 @keyframes slide { from { background-position: 200% 0; } to { background-position: -200% 0; } }

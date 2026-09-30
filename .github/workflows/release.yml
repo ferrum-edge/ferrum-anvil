@@ -9,7 +9,9 @@
 # Code signing/notarization runs only when the owner's credentials exist as
 # repository secrets and is recorded as signed only after the signature is
 # verified on the runner. Otherwise every target is recorded as
-# "unsigned — owner credentials not configured". See docs/release.md.
+# "unsigned — owner credentials not configured". Signed updater artifacts and
+# latest.json are produced only with the owner's updater key (secret
+# TAURI_SIGNING_PRIVATE_KEY + variable ANVIL_UPDATER_PUBKEY). See docs/release.md.
 name: Release
 
 on:
@@ -161,6 +163,7 @@ jobs:
           "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
       - name: Build desktop bundles (release profile, default features — no e2e)
+        id: tauri
         shell: bash
         working-directory: apps/desktop
         env:
@@ -171,14 +174,34 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
           BUNDLES: ${{ matrix.bundles }}
         run: |
           # Unset empty credentials so Tauri never attempts a half-configured signing.
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD ANVIL_UPDATER_PUBKEY; do
             [ -n "${!v:-}" ] || unset "$v"
           done
           args=(build --ci --target "$TARGET" --bundles "$BUNDLES")
           if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
+          # Signed updater artifacts only with both halves of the owner's updater
+          # key; the public key is compiled into the app. Tauri merges repeated
+          # --config values in order.
+          updater=false
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
+            cfg="$RUNNER_TEMP/anvil-updater.conf.json"
+            node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey: process.env.ANVIL_UPDATER_PUBKEY.trim() } } }))' "$cfg"
+            args+=(--config "$cfg")
+            updater=true
+            echo "Updater key configured; creating signed updater artifacts."
+          else
+            if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
+              echo "::warning::only one of TAURI_SIGNING_PRIVATE_KEY / ANVIL_UPDATER_PUBKEY is set; building without updater artifacts"
+            fi
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD ANVIL_UPDATER_PUBKEY
+          fi
+          echo "updater=$updater" >> "$GITHUB_OUTPUT"
           npx tauri "${args[@]}"
 
       - name: Build CLI
@@ -193,9 +216,19 @@ jobs:
           mkdir -p "$out"
           b="target/$TARGET/release/bundle"
           shopt -s nullglob
-          for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "$b"/msi/*.msi "$b"/nsis/*-setup.exe; do
+          for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "$b"/msi/*.msi "$b"/nsis/*-setup.exe \
+                   "$b"/appimage/*.AppImage.sig "$b"/msi/*.msi.sig "$b"/nsis/*-setup.exe.sig; do
             name="$(basename "$f" | tr ' ' '-')"
             cp "$f" "$out/$name"
+          done
+          # Updater archives (only with the updater key). Both macOS targets
+          # produce "<Product>.app.tar.gz"; name them like the DMGs.
+          for f in "$b"/macos/*.app.tar.gz; do
+            [ -f "$f.sig" ] || { echo "::error::$f has no updater signature"; exit 1; }
+            arch="${TARGET%%-*}"; [ "$arch" = "x86_64" ] && arch=x64
+            name="$(basename "$f" .app.tar.gz | tr ' ' '-')_${VERSION}_${arch}.app.tar.gz"
+            cp "$f" "$out/$name"
+            cp "$f.sig" "$out/$name.sig"
           done
           stage="$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET"
           mkdir -p "$stage"
@@ -222,7 +255,7 @@ jobs:
           args=(--report "$out/release-check-$VERSION-$TARGET.json")
           [ "$PROBE" = "true" ] && args+=(--runtime-probe)
           shopt -s nullglob
-          files=("$out"/*.dmg "$out"/*.deb "$out"/*.rpm "$out"/*.AppImage "$out"/*.msi "$out"/*-setup.exe "$out"/anvil-cli-* "$APP")
+          files=("$out"/*.dmg "$out"/*.deb "$out"/*.rpm "$out"/*.AppImage "$out"/*.msi "$out"/*-setup.exe "$out"/*.app.tar.gz "$out"/anvil-cli-* "$APP")
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a scripts/release-check.sh "${args[@]}" "${files[@]}"
           else
@@ -234,6 +267,7 @@ jobs:
         shell: bash
         env:
           RUNNER_LABEL: ${{ matrix.os }}
+          UPDATER: ${{ steps.tauri.outputs.updater }}
         run: |
           out="dist/$TARGET"
           signed=false; method="none"; detail="unsigned — owner credentials not configured"
@@ -262,16 +296,18 @@ jobs:
           echo "signed=$signed method=$method detail=$detail"
           # shellcheck disable=SC2016 # JavaScript source, not shell
           node -e '
-            const [target, os, arch, runner, signed, method, detail] = process.argv.slice(1);
+            const [target, os, arch, runner, signed, method, detail, updater] = process.argv.slice(1);
             const { execSync } = require("node:child_process");
             const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
             const info = {
               target, os, arch, runner,
               toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
               signing: { signed: signed === "true", method, detail },
+              // Built with the owner updater key; signatures are verified in the publish job.
+              updater: { configured: updater === "true" },
             };
             require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
-          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail"
+          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER"
 
       - name: CycloneDX SBOMs (Rust, per target)
         shell: bash
@@ -330,7 +366,13 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$RELEASE_COMMIT&per_page=100" \
             --jq '[.workflow_runs[] | {workflow: .name, run_id: .id, event: .event, status: .status, conclusion: .conclusion, url: .html_url}]' > "$RUNNER_TEMP/runs.json"
           cat "$RUNNER_TEMP/runs.json"
+      - name: Updater manifest (only with signed updater artifacts)
+        env:
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+        run: node scripts/updater-manifest.mjs --dist dist --repo "$GITHUB_REPOSITORY" --tag "${TAG:-anvil-v$VERSION}" --version "$VERSION"
       - name: Checksums and release evidence
+        env:
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
         run: |
           args=(--dist dist --test-runs "$RUNNER_TEMP/runs.json")
           [ -n "$TAG" ] && args+=(--tag "$TAG")
@@ -353,11 +395,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           signing="$(node -p 'require("./upload/release-evidence.json").signing')"
+          updater="$(node -p 'const u = require("./upload/release-evidence.json").updater; u.manifest ? u.detail : ""')"
           {
             echo "Draft release of Ferrum Anvil $VERSION built from \`$RELEASE_COMMIT\` by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
             echo
             echo "**Signing:** $signing."
             echo
+            if [ -n "$updater" ]; then echo "**In-app updates:** $updater."; echo; fi
             echo "Verify downloads with \`SHA256SUMS\`. \`release-evidence.json\` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs."
             echo
             echo "This draft is not published. Review the evidence (docs/release.md) before publishing."

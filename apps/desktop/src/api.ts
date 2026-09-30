@@ -506,9 +506,33 @@ export interface ProviderInfo {
   test_only: boolean;
 }
 
+export interface AvailableUpdate {
+  version: string;
+  name: string;
+  /** Plain text. */
+  notes: string;
+  published_at?: string | null;
+  url: string;
+}
+export interface UpdateCheck {
+  current: string;
+  /** The latest published release when it is newer than this build. */
+  update?: AvailableUpdate | null;
+  /** `release_page`: this build cannot verify an update, so the user downloads it. */
+  install: "in_app" | "release_page";
+  /** Installing closes Anvil (the Windows installer replaces the running app). */
+  install_quits: boolean;
+}
+
 export const api = {
   status: () => call<Status>("app_status"),
   systemInfo: () => call<SystemInfo>("system_info"),
+  /** The launch check: `null` unless the setting is on; once per launch, later calls repeat its result. */
+  updateCheckOnLaunch: () => call<UpdateCheck | null>("update_check_on_launch"),
+  updateCheck: () => call<UpdateCheck>("update_check"),
+  updateInstall: (version: string) => call<void>("update_install", { version }),
+  updateRestart: () => call<void>("update_restart"),
+  updateOpenReleasePage: (version: string) => call<void>("update_open_release_page", { version }),
   profiles: () => call<ProfileSummary[]>("profiles_list"),
   createProfile: (name: string, passphrase: string | null, keychain: boolean) =>
     call<{ profile_id: string; recovery_key?: string | null }>("profile_create", { name, passphrase, keychain }),
@@ -696,6 +720,10 @@ export function onRunFinished(cb: (e: { run_id: string; error?: string | null })
 
 export function onOAuthFlow(cb: (e: { attempt: string; event: FlowEvent }) => void): Promise<UnlistenFn> {
   return listen<{ attempt: string; event: FlowEvent }>("oauth-flow", (ev) => cb(ev.payload));
+}
+
+export function onUpdateProgress(cb: (p: { downloaded: number; total?: number | null }) => void): Promise<UnlistenFn> {
+  return listen<{ downloaded: number; total?: number | null }>("update-progress", (ev) => cb(ev.payload));
 }
 
 export function onLocked(cb: (reason: string) => void): Promise<UnlistenFn> {

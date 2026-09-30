@@ -49,5 +49,11 @@
       "../../../LICENSE-COMMERCIAL.md": "licenses/LICENSE-COMMERCIAL.md",
       "../../../THIRD_PARTY_LICENSES.md": "licenses/THIRD_PARTY_LICENSES.md"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": ["https://github.com/ferrum-edge/ferrum-anvil/releases/latest/download/latest.json"]
+    }
   }
 }
