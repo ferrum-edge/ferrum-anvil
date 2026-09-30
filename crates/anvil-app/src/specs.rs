@@ -15,7 +15,7 @@ use anvil_import::{
 };
 use anvil_storage::store::{StoreRead, StoreTx, kind};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Where an import lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,15 +367,20 @@ impl App {
             {
                 return Ok(Err(AppError::Invalid(CHANGED.into())));
             }
+            let mut foreign_owners = HashMap::new();
+            for object_kind in [kind::FOLDER, kind::REQUEST, kind::ENVIRONMENT, kind::REVISION, kind::SPEC_SOURCE] {
+                let owners = s.object_meta(object_kind)?.into_iter().map(|row| (row.id, row.workspace_id)).collect();
+                foreign_owners.insert(object_kind, owners);
+            }
             let mut collisions = false;
             for f in new_folders.iter().chain(&changed_folders) {
-                collisions |= foreign_workspace_owns(s, kind::FOLDER, &f.meta.id, &rec.workspace_id)?;
+                collisions |= foreign_workspace_owns(&foreign_owners, kind::FOLDER, &f.meta.id, &rec.workspace_id);
             }
             for q in &next {
-                collisions |= foreign_workspace_owns(s, kind::REQUEST, &q.meta.id, &rec.workspace_id)?;
+                collisions |= foreign_workspace_owns(&foreign_owners, kind::REQUEST, &q.meta.id, &rec.workspace_id);
             }
             for e in &environments {
-                collisions |= foreign_workspace_owns(s, kind::ENVIRONMENT, &e.meta.id, &rec.workspace_id)?;
+                collisions |= foreign_workspace_owns(&foreign_owners, kind::ENVIRONMENT, &e.meta.id, &rec.workspace_id);
             }
             let revisions: Vec<RequestRevision> = next
                 .iter()
@@ -390,9 +395,9 @@ impl App {
                 })
                 .collect();
             for rev in &revisions {
-                collisions |= foreign_workspace_owns(s, kind::REVISION, &rev.id, &rec.workspace_id)?;
+                collisions |= foreign_workspace_owns(&foreign_owners, kind::REVISION, &rev.id, &rec.workspace_id);
             }
-            collisions |= foreign_workspace_owns(s, kind::SPEC_SOURCE, &result.source.import_id, &rec.workspace_id)?;
+            collisions |= foreign_workspace_owns(&foreign_owners, kind::SPEC_SOURCE, &result.source.import_id, &rec.workspace_id);
             if collisions {
                 return Ok(Err(foreign_reimport_collision()));
             }
@@ -538,11 +543,17 @@ fn valid_root(s: &StoreRead<'_>, rec: &SpecSourceRecord) -> anvil_storage::store
     Ok(if folder.workspace_id == rec.workspace_id && folder.import_root { RootStatus::Valid } else { RootStatus::Invalid })
 }
 
-fn foreign_workspace_owns(s: &StoreTx<'_>, object_kind: &str, id: &Id, workspace_id: &Id) -> anvil_storage::store::Result<bool> {
+fn foreign_workspace_owns(
+    owners: &HashMap<&str, HashMap<String, Option<String>>>,
+    object_kind: &str,
+    id: &Id,
+    workspace_id: &Id,
+) -> bool {
     let expected = workspace_id.to_string();
-    Ok(s.object_meta(object_kind)?
-        .into_iter()
-        .any(|row| row.id == id.to_string() && row.workspace_id.as_deref() != Some(expected.as_str())))
+    owners
+        .get(object_kind)
+        .and_then(|kind_owners| kind_owners.get(&id.to_string()))
+        .is_some_and(|owner| owner.as_deref() != Some(expected.as_str()))
 }
 
 fn foreign_reimport_collision() -> AppError {

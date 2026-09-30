@@ -492,6 +492,7 @@ impl App {
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let local = self.store.read_consistently(|r| local(r, &d))?;
+        check_id_namespaces(&d, &local)?;
         let notes = restore_notes(&d, &local, policy)?;
         let plan = restore_plan(&d, &local, policy);
         Ok(report(plan, &manifest, &d, notes, None, port::file_sha256(bytes)))
@@ -1049,6 +1050,14 @@ fn foreign_secrets(d: &Decoded, existing: &Existing) -> Vec<String> {
 /// Every check a restore makes before writing: its plan, and a warning for
 /// each item that names a stored file the backup does not include.
 fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &ImportApproval) -> Result<(ImportPlan, Vec<String>)> {
+    check_id_namespaces(d, local)?;
+    let notes = restore_notes(d, local, policy)?;
+    let plan = restore_plan(d, local, policy);
+    refuse_unapproved(&plan, approval)?;
+    Ok((plan, notes))
+}
+
+fn check_id_namespaces(d: &Decoded, local: &Local) -> Result<()> {
     for incoming in &d.spec_sources {
         if local
             .spec_sources
@@ -1061,10 +1070,7 @@ fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &I
             )));
         }
     }
-    let notes = restore_notes(d, local, policy)?;
-    let plan = restore_plan(d, local, policy);
-    refuse_unapproved(&plan, approval)?;
-    Ok((plan, notes))
+    Ok(())
 }
 
 /// Refuse a restore that writes into a workspace stored here that the user
@@ -1329,6 +1335,10 @@ mod tests {
         let original = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
         target.restore(&original, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
         let before = target.backup_contents().unwrap();
+        let preview_err = target
+            .restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace)
+            .unwrap_err();
+        assert!(preview_err.to_string().contains("id namespace already used in another workspace"), "{preview_err}");
         let err = target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
 
         assert!(err.to_string().contains("id namespace already used in another workspace"), "{err}");
