@@ -194,11 +194,16 @@ scheduling); otherwise the **chain** runs in order, feeding
 `ExecutionOutput.extracted` into later steps. A chain continues after an
 application or assertion failure (a complete response exists) and stops at a
 transport failure, timeout or cancellation. **Datasets** (CSV with header row,
-or a JSON array of flat objects; ≤ 64 MiB, ≤ 1 M rows, ≤ 256 columns and
-≤ 16 Mi cells, rows × columns) supply row `iteration mod rows`; the SHA-256
+or a JSON array of flat objects; ≤ 64 MiB, ≤ 1 M rows, ≤ 256 columns,
+≤ 4 Mi cells (rows × columns), and ≤ 1 MiB per JSON cell) supply row
+`iteration mod rows`; the SHA-256
 of the exact bytes goes into the report. Every row keeps a slot for every
 column, including JSON keys it lacks, so the cell budget is checked while
-parsing, before the rows are built.
+parsing. JSON is read one row at a time, without first building a tree for the
+whole document. At the maximum bounds, stored dataset data is about 350 MiB
+or less before allocator and parser overhead: up to 64 MiB each for the source
+bytes and compact cell text, 4 Mi slots (about 192 MiB at the worst vector
+capacity), and up to 24 MiB for one million row-vector headers.
 
 **Warmup**: iterations that start (closed/iterations) or are scheduled (open)
 in the first `warmup_secs` are excluded from every summary metric. They stay

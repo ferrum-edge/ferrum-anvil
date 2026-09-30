@@ -121,7 +121,11 @@ against it).
   worker keeps from responses is bounded, whatever the target answers:
   failure categories and their examples, destinations, protocols, timeline
   buckets, and gRPC status counts, where every `grpc-status` outside 0–16
-  shares one bucket.
+  shares one bucket. Dataset parsing is bounded too: JSON rows are read one
+  at a time, with at most 100,000 rows in a collection run, 256 columns,
+  4,194,304 matrix cells and 1 MiB of raw JSON text per cell. The source is
+  capped at 16 MiB for a collection dataset and 64 MiB for a load dataset;
+  limits are checked before the stored matrix grows beyond its budget.
 
 ### Imports, bundles and backups
 

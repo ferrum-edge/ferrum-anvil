@@ -783,13 +783,15 @@
 
 ### Security
 
-- Datasets are now bounded in cells (rows × columns, at most 16,777,216)
-  while they are parsed, before any row is built, for CSV and JSON alike.
-  Every row keeps a slot for every column, so before this a small JSON file
-  of mostly empty objects could expand into a matrix of several gigabytes
-  in the app when the dataset was added or a load plan was checked. The
-  collection runner's 100,000-row limit is now enforced while parsing
-  rather than afterwards, and parsed rows are moved instead of copied.
+- Datasets are now bounded at 4,194,304 cells (rows × columns), with at most
+  1 MiB of raw JSON text per cell. CSV checks the cell budget before storing
+  each row; JSON parses one object at a time and checks row, column and cell
+  limits before expanding the stored matrix. A 64 MiB dataset can retain up
+  to about 350 MiB of dataset data at the configured maxima, before allocator
+  and parser overhead. This prevents mostly empty JSON rows from first being
+  built into a multi-gigabyte `Value` tree. The collection runner's
+  100,000-row limit is enforced while parsing, and parsed rows are moved
+  instead of copied.
 - A load run's gRPC status counts now keep one entry per valid code (0–16)
   and count every other `grpc-status` together under `-1` ("invalid: any
   code outside 0–16"). Before, each distinct value a target returned added

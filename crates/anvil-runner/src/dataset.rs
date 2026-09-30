@@ -170,7 +170,7 @@ mod tests {
         assert!(e.contains("at most"), "{e}");
         let rows = format!("[{{}}{}]", ",{}".repeat(MAX_DATASET_ROWS));
         let e = RunDataset::parse("rows", DatasetFormat::Json, rows.as_bytes(), &[]).unwrap_err().to_string();
-        assert!(e.contains("rows") && e.contains(&MAX_DATASET_ROWS.to_string()), "{e}");
+        assert!(e.contains("more than 100000 rows"), "{e}");
         assert_eq!(RunDataset::format_for_path("rows.CSV"), Some(DatasetFormat::Csv));
         assert_eq!(RunDataset::format_for_path("rows.txt"), None);
     }

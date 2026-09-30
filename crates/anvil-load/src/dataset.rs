@@ -5,22 +5,23 @@
 
 use crate::LoadError;
 use anvil_engine::vars::{VarEntry, VarLayer};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeSeed, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub const MAX_DATASET_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ROWS: usize = 1_000_000;
 pub const MAX_COLUMNS: usize = 256;
+pub const MAX_CELL_BYTES: usize = 1024 * 1024;
 /// Most cells (rows × columns) a parsed dataset may hold. Every row keeps a
 /// slot for every column, present or not, so the row and column limits alone
 /// would let a few megabytes of mostly empty JSON objects (or of empty CSV
-/// fields) expand into gigabytes. Checked before a row beyond it is built.
-pub const MAX_CELLS: usize = 16 * 1024 * 1024;
+/// fields) expand into gigabytes. Checked before the stored matrix grows past it.
+pub const MAX_CELLS: usize = 4 * 1024 * 1024;
 
-/// Bounds a caller applies while a dataset is parsed, before any row is
-/// built. Each is capped at this module's global limit, so a caller can only
-/// tighten them.
+/// Bounds a caller applies while a dataset is parsed, before rows are added
+/// to the stored dataset. Each is capped at this module's global limit, so a
+/// caller can only tighten them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatasetLimits {
     pub max_rows: usize,
@@ -170,46 +171,171 @@ fn parse_csv(raw: &[u8], limits: DatasetLimits) -> Result<Parsed, LoadError> {
 }
 
 fn parse_json(raw: &[u8], limits: DatasetLimits) -> Result<Parsed, LoadError> {
-    let v: serde_json::Value = serde_json::from_slice(raw).map_err(|e| LoadError::Invalid(format!("dataset JSON: {e}")))?;
-    let serde_json::Value::Array(arr) = v else {
-        return Err(LoadError::Invalid("dataset JSON must be an array of objects".into()));
-    };
-    if arr.len() > limits.max_rows {
-        return Err(LoadError::Invalid(format!("dataset has more than {} rows", limits.max_rows)));
-    }
-    let mut columns: Vec<String> = Vec::new();
-    for (i, row) in arr.iter().enumerate() {
-        let obj = row.as_object().ok_or_else(|| LoadError::Invalid(format!("dataset JSON row {} is not an object", i + 1)))?;
-        for k in obj.keys() {
-            if !columns.contains(k) {
-                columns.push(k.clone());
-                if columns.len() > MAX_COLUMNS {
-                    return Err(LoadError::Invalid(format!("dataset has more than {MAX_COLUMNS} distinct keys")));
-                }
-            }
-        }
-    }
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    let mut deserializer = serde_json::Deserializer::from_slice(raw);
+    JsonDatasetSeed { limits, columns: &mut columns, rows: &mut rows }
+        .deserialize(&mut deserializer)
+        .map_err(|e| LoadError::Invalid(format!("dataset JSON: {e}")))?;
+    deserializer.end().map_err(|e| LoadError::Invalid(format!("dataset JSON: {e}")))?;
     check_columns(&columns)?;
-    // Every row gets a slot for every column, including keys it lacks: bound
-    // the whole matrix before building it.
-    check_cells(arr.len(), columns.len(), limits)?;
-    let rows = arr
-        .into_iter()
-        .map(|row| {
-            let serde_json::Value::Object(mut obj) = row else { unreachable!("every row was checked to be an object") };
-            columns.iter().map(|c| obj.remove(c.as_str()).map(cell_text)).collect()
-        })
-        .collect();
     Ok((columns, rows))
 }
 
-/// Strings as-is, `null` as empty, other values as their compact JSON text.
-fn cell_text(v: serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
+struct JsonDatasetSeed<'a> {
+    limits: DatasetLimits,
+    columns: &'a mut Vec<String>,
+    rows: &'a mut Vec<Vec<Option<String>>>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for JsonDatasetSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(JsonDatasetVisitor { limits: self.limits, columns: self.columns, rows: self.rows })
     }
+}
+
+struct JsonDatasetVisitor<'a> {
+    limits: DatasetLimits,
+    columns: &'a mut Vec<String>,
+    rows: &'a mut Vec<Vec<Option<String>>>,
+}
+
+impl<'de> serde::de::Visitor<'de> for JsonDatasetVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an array of objects")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        use serde::de::Error;
+        loop {
+            let row = seq.next_element_seed(JsonRowSeed {
+                reject: self.rows.len() >= self.limits.max_rows,
+                max_rows: self.limits.max_rows,
+            })?;
+            let Some(row) = row else { break };
+            let row_index = self.rows.len() + 1;
+            for (key, _) in &row {
+                if self.columns.contains(key) {
+                    continue;
+                }
+                if self.columns.len() >= MAX_COLUMNS {
+                    return Err(serde::de::Error::custom(format!("dataset has more than {MAX_COLUMNS} distinct keys")));
+                }
+                check_cells(row_index, self.columns.len() + 1, self.limits).map_err(A::Error::custom)?;
+                self.columns.push(key.clone());
+                for previous in self.rows.iter_mut() {
+                    previous.push(None);
+                }
+            }
+            check_cells(row_index, self.columns.len(), self.limits).map_err(A::Error::custom)?;
+            check_columns(self.columns).map_err(A::Error::custom)?;
+            let mut values = vec![None; self.columns.len()];
+            for (key, value) in row {
+                let index = self.columns.iter().position(|column| column == &key).expect("row key was added as a column");
+                values[index] = Some(value);
+            }
+            self.rows.push(values);
+        }
+        Ok(())
+    }
+}
+
+struct JsonRowSeed {
+    reject: bool,
+    max_rows: usize,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for JsonRowSeed {
+    type Value = Vec<(String, String)>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.reject {
+            return Err(serde::de::Error::custom(format!("dataset has more than {} rows", self.max_rows)));
+        }
+        deserializer.deserialize_map(JsonRowVisitor)
+    }
+}
+
+struct JsonRowVisitor;
+
+impl<'de> serde::de::Visitor<'de> for JsonRowVisitor {
+    type Value = Vec<(String, String)>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        use serde::de::Error;
+        let mut values = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let raw = map.next_value::<&serde_json::value::RawValue>()?;
+            if raw.get().len() > MAX_CELL_BYTES {
+                return Err(A::Error::custom(format!("dataset JSON cell exceeds the 1 MiB limit ({MAX_CELL_BYTES} bytes)")));
+            }
+            let text = cell_text(raw.get()).map_err(A::Error::custom)?;
+            if let Some((_, value)) = values.iter_mut().find(|(existing, _)| existing == &key) {
+                *value = text;
+            } else {
+                if values.len() >= MAX_COLUMNS {
+                    return Err(A::Error::custom(format!("dataset has more than {MAX_COLUMNS} distinct keys")));
+                }
+                values.push((key, text));
+            }
+        }
+        Ok(values)
+    }
+}
+
+fn cell_text(raw: &str) -> Result<String, &'static str> {
+    if raw == "null" {
+        Ok(String::new())
+    } else if raw.starts_with('"') {
+        serde_json::from_str(raw).map_err(|_| "dataset JSON contains an invalid string cell")
+    } else {
+        Ok(compact_json(raw))
+    }
+}
+
+/// Remove insignificant JSON whitespace without materializing a nested Value tree.
+fn compact_json(raw: &str) -> String {
+    let mut compact = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if in_string {
+            compact.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            compact.push(ch);
+        } else if !ch.is_ascii_whitespace() {
+            compact.push(ch);
+        }
+    }
+    compact
 }
 
 #[cfg(test)]
@@ -267,6 +393,21 @@ mod tests {
         let loose = DatasetLimits { max_rows: usize::MAX, max_cells: usize::MAX };
         let e = Dataset::parse_with_limits(DatasetFormat::Json, bytes, loose).unwrap_err().to_string();
         assert!(e.contains("cells"), "{e}");
+    }
+
+    #[test]
+    fn large_scalar_array_stops_at_the_row_limit() {
+        let bytes = format!("[0{}]", ",0".repeat(MAX_ROWS));
+        let e = Dataset::parse(DatasetFormat::Json, bytes).unwrap_err().to_string();
+        assert!(e.contains("more than 1000000 rows"), "{e}");
+    }
+
+    #[test]
+    fn json_cells_have_a_clear_size_limit() {
+        let oversized = "x".repeat(MAX_CELL_BYTES);
+        let bytes = serde_json::to_vec(&vec![serde_json::json!({"cell": oversized})]).unwrap();
+        let e = Dataset::parse(DatasetFormat::Json, bytes).unwrap_err().to_string();
+        assert!(e.contains("cell exceeds the 1 MiB limit"), "{e}");
     }
 
     /// Parse under a caller's bounds of 3 rows and 6 cells.
