@@ -859,6 +859,27 @@ impl RespBody {
     }
 }
 
+enum ReflectionBodyEvent {
+    Item(BodyItem),
+    Idle,
+    Deadline,
+    Canceled,
+}
+
+async fn next_reflection_body_item(
+    body: &mut RespBody,
+    idle_deadline: Option<Instant>,
+    reflection_deadline: Option<Instant>,
+    cancel: &CancellationToken,
+) -> ReflectionBodyEvent {
+    tokio::select! {
+        item = body.next() => ReflectionBodyEvent::Item(item),
+        _ = sleep_until_opt(idle_deadline) => ReflectionBodyEvent::Idle,
+        _ = sleep_until_opt(reflection_deadline) => ReflectionBodyEvent::Deadline,
+        _ = cancel.cancelled() => ReflectionBodyEvent::Canceled,
+    }
+}
+
 struct RespHead {
     status: u16,
     version: http::Version,
@@ -1070,22 +1091,35 @@ struct OneShot {
     sign_failed: bool,
 }
 
+const REFLECTION_TIMEOUT_MS: u64 = 30_000;
+
+/// The cumulative wire and decoded bytes received during one reflection attempt.
+struct ReflectionBudget {
+    used_bytes: usize,
+    max_bytes: usize,
+}
+
+impl ReflectionBudget {
+    fn charge(&mut self, bytes: usize) -> Result<(), TransportFailure> {
+        self.used_bytes = self.used_bytes.checked_add(bytes).filter(|total| *total <= self.max_bytes).ok_or_else(|| {
+            TransportFailure::new(
+                Phase::ResponseBody,
+                FailureKind::ResponseTooLargeLocal,
+                "server reflection exceeded its cumulative wire and decoded response byte budget",
+            )
+        })?;
+        Ok(())
+    }
+}
+
 fn append_reflection_data(
     buf: &mut BytesMut,
     data: &[u8],
-    wire_bytes: &mut usize,
-    decoded_bytes: &mut usize,
+    budget: &mut ReflectionBudget,
     message_count: &mut usize,
     max_message_bytes: usize,
-    max_response_bytes: usize,
 ) -> Result<Vec<Bytes>, TransportFailure> {
-    *wire_bytes = wire_bytes.checked_add(data.len()).filter(|total| *total <= max_response_bytes).ok_or_else(|| {
-        TransportFailure::new(
-            Phase::ResponseBody,
-            FailureKind::ResponseTooLargeLocal,
-            "the reflection response exceeded the local max_response_bytes limit",
-        )
-    })?;
+    budget.charge(data.len())?;
     buf.extend_from_slice(data);
     let mut messages = Vec::new();
     loop {
@@ -1099,14 +1133,7 @@ fn append_reflection_data(
                         "the reflection response contained more than one message",
                     ));
                 }
-                *decoded_bytes =
-                    decoded_bytes.checked_add(message.len()).filter(|total| *total <= max_response_bytes).ok_or_else(|| {
-                        TransportFailure::new(
-                            Phase::ResponseBody,
-                            FailureKind::ResponseTooLargeLocal,
-                            "the decoded reflection response exceeded the local max_response_bytes limit",
-                        )
-                    })?;
+                budget.charge(message.len())?;
                 messages.push(message);
             }
             Ok(Some((true, _))) => {
@@ -1150,18 +1177,19 @@ async fn one_shot(
     msg: &[u8],
     stats: &Arc<ConnStats>,
     cancel: &CancellationToken,
-    total_deadline: Option<Instant>,
+    reflection_deadline: Option<Instant>,
+    budget: &mut ReflectionBudget,
 ) -> OneShot {
     let body = frame(msg);
     let mut out = OneShot::empty(None, None);
-    if total_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+    if reflection_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         out.failure = Some(
             TransportFailure::new(
                 Phase::AwaitResponseHeaders,
                 FailureKind::TotalTimeout,
-                "the total deadline elapsed during server reflection",
+                "the server reflection deadline elapsed",
             )
-            .with_deadline(plan.timeouts.total_ms),
+            .with_deadline(Some(REFLECTION_TIMEOUT_MS)),
         );
         return out;
     }
@@ -1194,11 +1222,11 @@ async fn one_shot(
     let head = tokio::select! {
         r = fut => r,
         _ = sleep_until_opt(deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout, "no answer to the reflection request").with_deadline(plan.timeouts.response_headers_ms)),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(
+        _ = sleep_until_opt(reflection_deadline) => Err(TransportFailure::new(
             Phase::AwaitResponseHeaders,
             FailureKind::TotalTimeout,
-            "the total deadline elapsed during server reflection",
-        ).with_deadline(plan.timeouts.total_ms)),
+            "the server reflection deadline elapsed",
+        ).with_deadline(Some(REFLECTION_TIMEOUT_MS))),
         _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during server reflection")),
     };
     let head = match head {
@@ -1218,20 +1246,29 @@ async fn one_shot(
     }
     let mut body = head.body;
     let mut buf = BytesMut::new();
-    let mut wire_bytes = 0usize;
-    let mut decoded_bytes = 0usize;
     let mut message_count = 0usize;
     loop {
         let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(30_000)));
-        let item = tokio::select! {
-            f = body.next() => f,
-            _ = sleep_until_opt(idle) => Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the reflection response stalled"))),
-            _ = sleep_until_opt(total_deadline) => Some(Err(TransportFailure::new(
+        let item = match next_reflection_body_item(&mut body, idle, reflection_deadline, cancel).await {
+            ReflectionBodyEvent::Item(item) => item,
+            ReflectionBodyEvent::Idle => Some(Err(TransportFailure::new(
                 Phase::ResponseBody,
-                FailureKind::TotalTimeout,
-                "the total deadline elapsed during server reflection",
-            ).with_deadline(plan.timeouts.total_ms))),
-            _ = cancel.cancelled() => Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled during server reflection"))),
+                FailureKind::BodyIdleTimeout,
+                "the reflection response stalled",
+            ))),
+            ReflectionBodyEvent::Deadline => Some(Err(
+                TransportFailure::new(
+                    Phase::ResponseBody,
+                    FailureKind::TotalTimeout,
+                    "the server reflection deadline elapsed",
+                )
+                .with_deadline(Some(REFLECTION_TIMEOUT_MS)),
+            )),
+            ReflectionBodyEvent::Canceled => Some(Err(TransportFailure::new(
+                Phase::ResponseBody,
+                FailureKind::Canceled,
+                "canceled during server reflection",
+            ))),
         };
         match item {
             None => break,
@@ -1241,11 +1278,9 @@ async fn one_shot(
                     match append_reflection_data(
                         &mut buf,
                         &data,
-                        &mut wire_bytes,
-                        &mut decoded_bytes,
+                        budget,
                         &mut message_count,
                         plan.max_message_bytes,
-                        plan.limits.max_response_bytes,
                     ) {
                         Ok(messages) => out.messages.extend(messages),
                         Err(failure) => {
@@ -1285,6 +1320,18 @@ async fn reflect(
     cancel: &CancellationToken,
     total_deadline: Option<Instant>,
 ) -> Result<(DescriptorPool, ReflectionOutcome), ReflectError> {
+    // Reflection has its own absolute cap, including interactive calls whose
+    // session deadline is intentionally unbounded. The call deadline can only
+    // shorten this limit.
+    let reflection_deadline = Some(
+        total_deadline
+            .map(|deadline| deadline.min(Instant::now() + Duration::from_millis(REFLECTION_TIMEOUT_MS)))
+            .unwrap_or_else(|| Instant::now() + Duration::from_millis(REFLECTION_TIMEOUT_MS)),
+    );
+    let mut budget = ReflectionBudget {
+        used_bytes: 0,
+        max_bytes: usize::try_from(plan.limits.max_response_bytes).unwrap_or(usize::MAX),
+    };
     let services = ["grpc.reflection.v1.ServerReflection", "grpc.reflection.v1alpha.ServerReflection"];
     let mut last: Option<(OneShot, ReflectionOutcome)> = None;
     'svc: for svc in services {
@@ -1303,7 +1350,7 @@ async fn reflect(
                 break;
             }
             let request = q.encode_to_vec();
-            let r = one_shot(conn, plan, &path, &request, stats, cancel, total_deadline).await;
+            let r = one_shot(conn, plan, &path, &request, stats, cancel, reflection_deadline, &mut budget).await;
             let outcome = |problem: String, r: &OneShot| ReflectionOutcome {
                 service: svc.trim_end_matches(".ServerReflection").to_string(),
                 http_status: r.status,
@@ -2355,35 +2402,69 @@ mod tests {
     fn reflection_response_is_bounded_and_single_message() {
         let response = frame(b"response");
         let mut buf = BytesMut::new();
-        let mut wire_bytes = 0;
-        let mut decoded_bytes = 0;
+        let mut budget = ReflectionBudget { used_bytes: 0, max_bytes: response.len() + 8 };
         let mut message_count = 0;
-        let messages =
-            append_reflection_data(&mut buf, &response, &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, response.len())
-                .unwrap();
+        let messages = append_reflection_data(&mut buf, &response, &mut budget, &mut message_count, 64).unwrap();
         assert_eq!(messages, vec![Bytes::from_static(b"response")]);
-        assert_eq!(wire_bytes, response.len());
-        assert_eq!(decoded_bytes, 8);
+        assert_eq!(budget.used_bytes, response.len() + 8);
 
         let mut buf = BytesMut::new();
-        let mut wire_bytes = 0;
-        let mut decoded_bytes = 0;
+        let mut budget = ReflectionBudget { used_bytes: 0, max_bytes: 8 };
         let mut message_count = 0;
-        let partial =
-            append_reflection_data(&mut buf, &response[..5], &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, 8).unwrap();
+        let partial = append_reflection_data(&mut buf, &response[..5], &mut budget, &mut message_count, 64).unwrap();
         assert!(partial.is_empty());
-        let too_large =
-            append_reflection_data(&mut buf, &response[5..], &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, 8).unwrap_err();
+        let too_large = append_reflection_data(&mut buf, &response[5..], &mut budget, &mut message_count, 64).unwrap_err();
         assert_eq!(too_large.kind, FailureKind::ResponseTooLargeLocal);
 
         let mut buf = BytesMut::new();
-        let mut wire_bytes = 0;
-        let mut decoded_bytes = 0;
+        let mut budget = ReflectionBudget { used_bytes: 0, max_bytes: response.len() * 2 + 16 };
         let mut message_count = 0;
         let twice = [response.as_ref(), response.as_ref()].concat();
-        let extra =
-            append_reflection_data(&mut buf, &twice, &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, twice.len()).unwrap_err();
+        let extra = append_reflection_data(&mut buf, &twice, &mut budget, &mut message_count, 64).unwrap_err();
         assert_eq!(extra.kind, FailureKind::HttpProtocolError);
+    }
+
+    #[test]
+    fn reflection_byte_budget_is_cumulative_across_requests() {
+        let response = frame(b"response");
+        let mut budget = ReflectionBudget { used_bytes: 0, max_bytes: 30 };
+        let mut first_buf = BytesMut::new();
+        let mut first_message_count = 0;
+        append_reflection_data(&mut first_buf, &response, &mut budget, &mut first_message_count, 64).unwrap();
+        assert_eq!(budget.used_bytes, 21);
+
+        let mut second_buf = BytesMut::new();
+        let mut second_message_count = 0;
+        let failure = append_reflection_data(&mut second_buf, &response, &mut budget, &mut second_message_count, 64).unwrap_err();
+        assert_eq!(failure.kind, FailureKind::ResponseTooLargeLocal);
+    }
+
+    #[tokio::test]
+    async fn reflection_deadline_stops_a_stream_that_keeps_trickling_data() {
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            loop {
+                if tx.send(Ok(Frame::data(Bytes::from_static(b"x")))).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let mut body = RespBody::H3(rx);
+        let deadline = Instant::now() + Duration::from_millis(40);
+        let cancel = CancellationToken::new();
+        let mut items = 0;
+        loop {
+            match next_reflection_body_item(&mut body, None, Some(deadline), &cancel).await {
+                ReflectionBodyEvent::Item(Some(Ok(_))) => items += 1,
+                ReflectionBodyEvent::Deadline => break,
+                ReflectionBodyEvent::Item(None) => panic!("trickling stream ended before its deadline"),
+                ReflectionBodyEvent::Item(Some(Err(error))) => panic!("trickling stream failed: {error:?}"),
+                ReflectionBodyEvent::Idle => panic!("unexpected idle timeout"),
+                ReflectionBodyEvent::Canceled => panic!("unexpected cancellation"),
+            }
+        }
+        assert!(items > 0, "the test stream should deliver data before the deadline");
     }
 
     #[test]
@@ -2392,6 +2473,28 @@ mod tests {
         assert_eq!(percent_decode("%€"), "%€");
         assert_eq!(percent_decode("%2G"), "%2G");
         assert_eq!(percent_decode("a%20b"), "a b");
+    }
+
+    #[test]
+    fn grpc_web_binary_and_text_trailers_percent_decode_messages() {
+        let trailer = frame(0x80, b"grpc-status: 13\r\ngrpc-message: %E2%82%AC%zz\r\n");
+        for text in [false, true] {
+            let mut body = BytesMut::new();
+            if text {
+                let encoded = grpc_web::encode_text(&trailer);
+                let mut decoder = grpc_web::Base64Stream::default();
+                decoder.push(&encoded, &mut body).unwrap();
+                decoder.finish().unwrap();
+            } else {
+                body.extend_from_slice(&trailer);
+            }
+            let WireFrame::Trailer(payload) = grpc_web::next_frame(&mut body, 1024, true).unwrap().unwrap() else {
+                panic!("expected a gRPC-Web trailer frame");
+            };
+            let entries = grpc_web::parse_trailer_block(&payload).unwrap();
+            let message = grpc_web::trailer_value(&entries, "grpc-message").unwrap();
+            assert_eq!(percent_decode(message), "€%zz");
+        }
     }
 
     #[test]

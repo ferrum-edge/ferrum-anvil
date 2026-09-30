@@ -784,10 +784,12 @@
 ### Security
 
 - Fixed GHSA-6g2g-2mvw-7h7v and GHSA-x6q9-gx98-c5wc: gRPC reflection now
-  shares the call's total deadline, bounds cumulative response bytes and
-  accepts only one response message per request. gRPC-Web percent decoding
-  now reads escape digits as bytes, preserving malformed escapes without
-  panicking on multibyte UTF-8.
+  has a 30-second absolute deadline, shortened by the call's total deadline,
+  including interactive sessions. Its cumulative budget counts wire and
+  decoded response bytes across every reflection request, and it accepts only
+  one response message per request. gRPC-Web percent decoding reads escape
+  digits as bytes, preserving malformed escapes without panicking on
+  multibyte UTF-8.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted
