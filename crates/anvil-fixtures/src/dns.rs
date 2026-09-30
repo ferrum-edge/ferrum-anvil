@@ -21,6 +21,13 @@ const WINDOWS_WSAEACCES: i32 = 10013;
 type TcpBindFuture = Pin<Box<dyn Future<Output = io::Result<TcpListener>> + Send>>;
 type UdpBindFuture = Pin<Box<dyn Future<Output = io::Result<UdpSocket>> + Send>>;
 
+/// A `'static` UDP bind future: the address is copied, so the future does not
+/// borrow the caller's `&str`.
+fn bind_udp_future(bind: &str) -> UdpBindFuture {
+    let bind = bind.to_owned();
+    Box::pin(async move { UdpSocket::bind(bind).await })
+}
+
 fn retryable_bind_error(error: &io::Error) -> bool {
     if error.raw_os_error() == Some(WINDOWS_WSAEACCES) {
         return true;
@@ -126,7 +133,7 @@ pub async fn serve(bind: &str, mode: DnsMode) -> anyhow::Result<DnsFixture> {
     let (udp, tcp) = if requests_ephemeral_port(bind) {
         bind_ephemeral_pair_with(
             bind,
-            |addr| Box::pin(UdpSocket::bind(addr)),
+            bind_udp_future,
             |addr| Box::pin(TcpListener::bind(addr)),
         )
         .await?
@@ -256,7 +263,7 @@ mod tests {
             "127.0.0.1:0",
             move |addr| {
                 udp_order.lock().unwrap().push("udp");
-                Box::pin(UdpSocket::bind(addr))
+                bind_udp_future(addr)
             },
             move |addr| {
                 tcp_order.lock().unwrap().push("tcp");
@@ -289,7 +296,7 @@ mod tests {
         let bind_ports = ports.clone();
         let result = bind_ephemeral_pair_with(
             "127.0.0.1:0",
-            |addr| Box::pin(UdpSocket::bind(addr)),
+            bind_udp_future,
             move |addr| {
                 bind_ports.lock().unwrap().push(addr.port());
                 let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
