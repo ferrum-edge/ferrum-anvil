@@ -445,7 +445,11 @@ fn duplicate_import_skips_matching_ruleset_hashes_and_combined_limits_refuse_exc
     let backup = source.export_backup_with("backup passphrase", anvil_storage::KdfParams::testing()).unwrap().0;
     let preview = full_target.restore_preview(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("the restore will be refused")), "{:?}", preview.warnings);
-    assert!(preview.warnings.iter().any(|warning| warning.contains("remove rulesets from this profile or from the backup")), "{:?}", preview.warnings);
+    assert!(
+        preview.warnings.iter().any(|warning| warning.contains("remove rulesets from this profile or from the backup")),
+        "{:?}",
+        preview.warnings
+    );
     let err = full_target.restore(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap_err();
     assert!(err.to_string().contains("32 rulesets"));
 }

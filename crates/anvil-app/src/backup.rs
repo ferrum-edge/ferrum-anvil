@@ -951,7 +951,9 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
         crate::standards::normalize_imported_ruleset(ruleset).map_err(|e| invalid(e.to_string()))?;
     }
     anvil_portability::validate::validate_ruleset_limits(&d.graph, "backup").map_err(|e| {
-        invalid(format!("{e}; a profile over the ruleset limits must have rulesets removed before a full backup of it can be made or restored"))
+        invalid(format!(
+            "{e}; a profile over the ruleset limits must have rulesets removed before a full backup of it can be made or restored"
+        ))
     })?;
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
     if outside_history > 0 {
