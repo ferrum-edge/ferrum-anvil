@@ -32,6 +32,8 @@ pub struct ImportReport {
     pub workspace_ids: Vec<String>,
     /// Whether the file is a full backup (restored) rather than a bundle.
     pub full_backup: bool,
+    /// API standards rulesets carried by the bundle or backup.
+    pub api_standards_count: usize,
     /// SHA-256 (lowercase hex) of the file as read. An approval given after
     /// the preview names it ([`ImportApproval::bundle_sha256`]), so it holds
     /// only for the file that was previewed.
@@ -87,8 +89,7 @@ impl App {
             Some(w) => vec![self.workspace(w)?],
             None => self.workspaces()?,
         };
-        let mut g = PortableGraph::default();
-        g.rulesets = self.store.list(kind::API_RULESET, None)?;
+        let mut g = PortableGraph { rulesets: self.store.list(kind::API_RULESET, None)?, ..Default::default() };
         for w in &wss {
             let id = w.meta.id;
             g.folders.extend(self.folders(&id)?);
@@ -164,8 +165,22 @@ impl App {
     /// What [`App::export`] would write. A full backup is not a bundle: see
     /// [`App::backup_preview`].
     pub fn export_preview(&self, ws: Option<&Id>, mode: ExportMode, include_history: bool) -> Result<ExportPreview> {
+        self.export_preview_with_standards(ws, mode, include_history, false)
+    }
+
+    pub fn export_preview_with_standards(
+        &self,
+        ws: Option<&Id>,
+        mode: ExportMode,
+        include_history: bool,
+        include_standards: bool,
+    ) -> Result<ExportPreview> {
         refuse_full_backup(mode)?;
         let g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
+        let mut g = g;
+        if !include_standards {
+            g.rulesets.clear();
+        }
         let opts = ExportOptions {
             kind: BundleKind::Workspace,
             mode,
@@ -186,8 +201,22 @@ impl App {
         passphrase: Option<&str>,
         include_history: bool,
     ) -> Result<(Vec<u8>, ExportPreview)> {
+        self.export_with_standards(ws, mode, passphrase, include_history, false)
+    }
+
+    pub fn export_with_standards(
+        &self,
+        ws: Option<&Id>,
+        mode: ExportMode,
+        passphrase: Option<&str>,
+        include_history: bool,
+        include_standards: bool,
+    ) -> Result<(Vec<u8>, ExportPreview)> {
         refuse_full_backup(mode)?;
-        let g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
+        let mut g = self.graph(ws, !matches!(mode, ExportMode::ShareSafely), include_history)?;
+        if !include_standards {
+            g.rulesets.clear();
+        }
         let opts = ExportOptions {
             kind: BundleKind::Workspace,
             mode,
@@ -205,22 +234,50 @@ impl App {
     pub fn import_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let bundle_sha256 = file_sha256(bytes);
         let opened = bundle::open(bytes, passphrase)?;
-        let uncarried = validate::uncarried_attachments(&opened.graph)?;
-        let (existing, stored) = self.store.read_consistently(|r| Ok((existing(r)?, stored_among(r, &uncarried)?)))?;
+        let mut graph = opened.graph;
+        for ruleset in &mut graph.rulesets {
+            crate::standards::normalize_imported_ruleset(ruleset)?;
+            ruleset.enabled = false;
+        }
+        let uncarried = validate::uncarried_attachments(&graph)?;
+        let (existing, stored, local_rulesets) = self.store.read_consistently(|r| {
+            Ok((existing(r)?, stored_among(r, &uncarried)?, r.list::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, None)?))
+        })?;
         let mut warnings = opened.warnings;
         warnings.extend(uncarried_warnings(&uncarried, &stored, "bundle", "imported")?);
-        warnings.extend(crate::device_identity::sealed_note(&opened.graph.workspaces));
-        let plan = plan::plan(&opened.graph, &existing, policy);
+        warnings.extend(crate::device_identity::sealed_note(&graph.workspaces));
+        if policy == ConflictPolicy::Duplicate {
+            let mut hashes: HashSet<String> = local_rulesets.iter().map(|r| hex::encode(Sha256::digest(r.text.as_bytes()))).collect();
+            let before = graph.rulesets.len();
+            graph.rulesets.retain(|r| hashes.insert(r.sha256.clone()));
+            if before > graph.rulesets.len() {
+                warnings.push(format!("{} duplicate API ruleset(s) with matching SHA-256 will be skipped.", before - graph.rulesets.len()));
+            }
+        }
+        let replacing: HashSet<Id> = graph.rulesets.iter().map(|r| r.id).collect();
+        let mut combined: Vec<_> = local_rulesets
+            .iter()
+            .filter(|r| !(policy != ConflictPolicy::Merge && replacing.contains(&r.id)))
+            .cloned()
+            .collect();
+        combined.extend(graph.rulesets.iter().filter(|r| {
+            !(policy == ConflictPolicy::Merge && existing.objects.contains(&r.id))
+        }).cloned());
+        if let Err(e) = crate::standards::layered_for_port(&combined) {
+            warnings.push(format!("Imported API standards would not load: {e}"));
+        }
+        let plan = plan::plan(&graph, &existing, policy);
         Ok(ImportReport {
             plan,
             warnings,
             secrets_restored: opened.secrets_restored,
-            missing_secrets: missing_secrets(&opened.graph),
-            linked_files: opened.graph.linked_files(),
+            missing_secrets: missing_secrets(&graph),
+            linked_files: graph.linked_files(),
             checkpoint: None,
-            workspaces: opened.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
+            workspaces: graph.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: vec![],
             full_backup: false,
+            api_standards_count: graph.rulesets.len(),
             bundle_sha256,
         })
     }
@@ -279,6 +336,10 @@ impl App {
         approval.check_file(bytes, "imported")?;
         let opened = bundle::open(bytes, passphrase)?;
         let mut g = opened.graph;
+        for ruleset in &mut g.rulesets {
+            crate::standards::normalize_imported_ruleset(ruleset)?;
+            ruleset.enabled = false;
+        }
         let uncarried = validate::uncarried_attachments(&g)?;
         if !proceed() {
             return Err(AppError::Canceled);
@@ -322,10 +383,41 @@ impl App {
                     plan.foreign_secrets.join(", ")
                 ))));
             }
+            let mut notes = notes;
             if policy == ConflictPolicy::Duplicate {
+                let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
+                let hashes: HashSet<String> = local_rulesets
+                    .iter()
+                    .map(|r| hex::encode(Sha256::digest(r.text.as_bytes())))
+                    .collect();
+                let before = g.rulesets.len();
+                let mut seen_hashes = hashes;
+                g.rulesets.retain(|r| seen_hashes.insert(r.sha256.clone()));
+                if g.rulesets.len() < before {
+                    notes.push(format!("{} duplicate API ruleset(s) with matching SHA-256 were skipped.", before - g.rulesets.len()));
+                }
                 // Fresh ids for every object, revision and secret: the copy
                 // can never overwrite or share anything with its source.
                 plan::remap_all(&mut g)?;
+            }
+            let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.objects.contains(id);
+            let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
+            let replacing: HashSet<Id> = g.rulesets.iter().map(|r| r.id).collect();
+            let retained: Vec<_> = local_rulesets
+                .iter()
+                .filter(|r| !(policy != ConflictPolicy::Merge && replacing.contains(&r.id)))
+                .cloned()
+                .collect();
+            let mut combined = retained;
+            combined.extend(g.rulesets.iter().filter(|r| !skip(&r.id)).cloned());
+            if let Err(e) = crate::standards::validate_standards(
+                &anvil_domain::settings::ApiStandards { include_recommended: true, rulesets: combined.clone() },
+                &local_rulesets,
+            ) {
+                return Ok(Err(e));
+            }
+            if let Err(e) = crate::standards::layered_for_port(&combined) {
+                notes.push(format!("Imported API standards would not load: {e}"));
             }
             // A different workspace with the same name would be
             // indistinguishable in the UI; label the incoming copy.
@@ -334,7 +426,6 @@ impl App {
                     w.name = format!("{} (imported)", w.name);
                 }
             }
-            let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.objects.contains(id);
             for w in &g.workspaces {
                 if !skip(&w.meta.id) {
                     s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, w)?;
@@ -392,9 +483,16 @@ impl App {
                     s.put(kind::LOAD_PLAN, &p.id, Some(&p.workspace_id), None, 0.0, p)?;
                 }
             }
-            for (index, ruleset) in g.rulesets.iter().enumerate() {
+            let mut next_ruleset_sort = s.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+            for ruleset in &g.rulesets {
                 if !skip(&ruleset.id) {
-                    s.put(kind::API_RULESET, &ruleset.id, None, None, index as f64, ruleset)?;
+                    let sort_key = s
+                        .object_meta(kind::API_RULESET)?
+                        .iter()
+                        .find(|row| row.id == ruleset.id.to_string())
+                        .map_or(next_ruleset_sort, |row| row.sort_key);
+                    s.put(kind::API_RULESET, &ruleset.id, None, None, sort_key, ruleset)?;
+                    next_ruleset_sort = next_ruleset_sort.max(sort_key + 1.0);
                 }
             }
             // Validation keeps only records of a workspace in the bundle, as
@@ -456,6 +554,7 @@ impl App {
             workspaces: g.workspaces.iter().map(|w| w.name.clone()).collect(),
             workspace_ids: g.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
             full_backup: false,
+            api_standards_count: g.rulesets.len(),
             bundle_sha256: file_sha256(bytes),
         })
     }

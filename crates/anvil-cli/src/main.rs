@@ -125,6 +125,9 @@ enum Cmd {
         /// Only print what would be included/excluded.
         #[arg(long)]
         preview: bool,
+        /// Include profile-wide API standards rulesets (off by default).
+        #[arg(long)]
+        include_standards: bool,
     },
     /// Import a bundle (previewed first; `--dry-run` stops after the preview).
     Import {
@@ -992,7 +995,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Cmd::Export { workspace, mode, out, preview } => {
+        Cmd::Export { workspace, mode, out, preview, include_standards } => {
             let ws = match workspace {
                 Some(w) => Some(app.find_workspace(w)?.meta.id),
                 None => None,
@@ -1026,7 +1029,12 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 return Ok(0);
             }
             if *preview {
-                let p = app.export_preview(ws.as_ref(), m, false)?;
+                let p = app.export_preview_with_standards(
+                    ws.as_ref(),
+                    m,
+                    false,
+                    *include_standards,
+                )?;
                 println!("{}", serde_json::to_string_pretty(&p)?);
                 return Ok(0);
             }
@@ -1034,7 +1042,13 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             if !matches!(m, ExportMode::ShareSafely) && pass.is_none() {
                 bail!("encrypted exports need ANVIL_EXPORT_PASSPHRASE (the recipient needs it to restore)");
             }
-            let (bytes, p) = app.export(ws.as_ref(), m, pass.as_deref(), false)?;
+            let (bytes, p) = app.export_with_standards(
+                ws.as_ref(),
+                m,
+                pass.as_deref(),
+                false,
+                *include_standards,
+            )?;
             std::fs::write(out, &bytes)?;
             println!(
                 "wrote {} ({} bytes): {} objects, {} secrets, {} excluded",

@@ -204,6 +204,12 @@ profiles, spec-import records or load reports, and its bundle kind is
 
 ### What a bundle carries
 
+- Profile-wide API standards rulesets are excluded by default. In the desktop,
+  select **Include API standards** to carry them; the CLI accepts
+  `--include-standards` for the same opt-in. The manifest and both export and
+  import previews show the number carried. Imported bundle rulesets start
+  disabled, so they cannot change linting until enabled in API standards.
+  Full backups always carry rulesets and restore their enabled state and order.
 - Each workspace's load plans, except one that names a request, dataset or
   environment deleted since (an import would refuse it; the export lists it
   among its excluded items).
@@ -228,6 +234,10 @@ profiles, spec-import records or load reports, and its bundle kind is
   the request or dataset that names it (`linked_files` in the preview, as
   `request 'Upload': /path/to/file`); the manifest does not repeat them.
   Attach a copy instead to keep a local path out of a bundle.
+
+For example, `anvil export --workspace Team --mode share --include-standards
+--out team.anvil` includes profile standards in a share-safe bundle. Omit
+`--include-standards` to leave them out (the default in both export modes).
 
 In either bundle mode **only the vault is encrypted**. The objects (names,
 URLs, header and body text), attachments and history are ordinary zip

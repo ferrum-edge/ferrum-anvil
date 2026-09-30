@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 anvil-domain.workspace = true
-anvil-contract.workspace = true
 anvil-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -28,25 +28,13 @@ use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::request::AttachmentRef;
+use anvil_domain::settings::{MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS, MAX_STORED_RULESETS_BYTES};
 use anvil_domain::workspace::RequestRevision;
 use std::collections::{HashMap, HashSet};
 
-pub const MAX_RULESET_RECORDS: usize = 32;
-pub const MAX_TOTAL_RULESET_BYTES: usize = 8 * anvil_contract::ruleset::MAX_RULESET_BYTES;
-
 pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, BundleError> {
     let mut warnings = Vec::new();
-    let max_ruleset_bytes = anvil_contract::ruleset::MAX_RULESET_BYTES;
-    if g.rulesets.len() > MAX_RULESET_RECORDS {
-        return Err(BundleError::Invalid(format!("a bundle has more than {MAX_RULESET_RECORDS} API rulesets")));
-    }
-    let ruleset_bytes: usize = g.rulesets.iter().map(|r| r.text.len()).sum();
-    if let Some(r) = g.rulesets.iter().find(|r| r.text.len() > max_ruleset_bytes) {
-        return Err(BundleError::Invalid(format!("API ruleset '{}' exceeds the {max_ruleset_bytes}-byte limit", r.name)));
-    }
-    if ruleset_bytes > MAX_TOTAL_RULESET_BYTES {
-        return Err(BundleError::Invalid("API rulesets together exceed the 8 MiB limit".into()));
-    }
+    validate_ruleset_limits(g, "bundle")?;
     let ws: HashSet<Id> = g.workspaces.iter().map(|w| w.meta.id).collect();
     // Import writes each object under the workspace it names, and a Duplicate
     // import remaps only workspaces in the bundle: any other workspace id
@@ -356,6 +344,27 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
         ));
     }
     Ok(warnings)
+}
+
+pub fn validate_ruleset_limits(g: &PortableGraph, source: &str) -> Result<(), BundleError> {
+    if g.rulesets.len() > MAX_STORED_RULESETS {
+        return Err(BundleError::Invalid(format!("a {source} has more than {MAX_STORED_RULESETS} API rulesets")));
+    }
+    if let Some(r) = g.rulesets.iter().find(|r| r.text.len() > MAX_STORED_RULESET_BYTES) {
+        return Err(BundleError::Invalid(format!(
+            "API ruleset '{}' in the {source} exceeds the {} MiB limit",
+            r.name,
+            MAX_STORED_RULESET_BYTES / (1024 * 1024)
+        )));
+    }
+    let ruleset_bytes: usize = g.rulesets.iter().map(|r| r.text.len()).sum();
+    if ruleset_bytes > MAX_STORED_RULESETS_BYTES {
+        return Err(BundleError::Invalid(format!(
+            "API rulesets in the {source} together exceed the {} MiB limit",
+            MAX_STORED_RULESETS_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
 }
 
 /// Clear the token-cache id of every OAuth 2 profile in the graph's

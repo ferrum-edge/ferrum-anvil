@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ApiStandardsSettings",
-  "description": "API standards settings stored in `AppSettings`. User rulesets are separate\nobjects; `legacy_rulesets` only reads the pre-separate-records field so the\napp can migrate it when opening a profile.",
+  "description": "API standards settings stored in `AppSettings`.",
   "type": "object",
   "properties": {
     "include_recommended": {

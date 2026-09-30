@@ -449,6 +449,8 @@ struct Local {
     existing: Existing,
     /// Spec import namespaces already assigned in this profile.
     spec_sources: Vec<SpecSourceRecord>,
+    /// Profile-wide API standards rulesets.
+    rulesets: Vec<anvil_domain::settings::StoredRuleset>,
     /// The content hashes among the backup's uncarried attachments whose
     /// content is stored here.
     stored: HashSet<String>,
@@ -491,7 +493,10 @@ impl App {
     /// Dry run of [`App::restore`]: authenticate, validate and plan without
     /// changing anything.
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
-        let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
+        let (manifest, mut d) = open_for_restore(bytes, passphrase, policy)?;
+        for ruleset in &mut d.graph.rulesets {
+            crate::standards::normalize_imported_ruleset(ruleset)?;
+        }
         let local = self.store.read_consistently(|r| local(r, &d))?;
         check_id_namespaces(&d, &local, policy)?;
         let notes = restore_notes(&d, &local, policy)?;
@@ -557,7 +562,10 @@ impl App {
         proceed: &dyn Fn() -> bool,
     ) -> Result<ImportReport> {
         approval.check_file(bytes, "restored")?;
-        let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
+        let (manifest, mut d) = open_for_restore(bytes, passphrase, policy)?;
+        for ruleset in &mut d.graph.rulesets {
+            crate::standards::normalize_imported_ruleset(ruleset)?;
+        }
         if !proceed() {
             return Err(AppError::Canceled);
         }
@@ -568,11 +576,38 @@ impl App {
             // Read inside the transaction, so every check sees exactly what
             // the writes below land on.
             let local = local(&s.as_read(), &d)?;
-            let (plan, notes) = match checked_plan(&d, &local, policy, approval) {
+            let (plan, mut notes) = match checked_plan(&d, &local, policy, approval) {
                 Ok(checked) => checked,
                 Err(e) => return Ok(Err(e)),
             };
             let keep_settings = keeps_local_settings(&d, &local, policy);
+            let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
+            let replacing: HashSet<Id> = d.graph.rulesets.iter().map(|r| r.id).collect();
+            let mut combined: Vec<_> = local_rulesets
+                .iter()
+                .filter(|r| {
+                    !(policy == ConflictPolicy::Replace && !keep_settings)
+                        && !(policy != ConflictPolicy::Merge && replacing.contains(&r.id))
+                })
+                .cloned()
+                .collect();
+            combined.extend(d.graph.rulesets.iter().filter(|r| {
+                !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
+            }).cloned());
+            if let Err(e) = crate::standards::validate_standards(
+                &anvil_domain::settings::ApiStandards { include_recommended: true, rulesets: combined.clone() },
+                &local_rulesets,
+            ) {
+                return Ok(Err(e));
+            }
+            if let Err(e) = crate::standards::layered_for_port(&combined) {
+                notes.push(format!("Restored API standards would not load: {e}"));
+            }
+            if policy == ConflictPolicy::Replace && !keep_settings {
+                for ruleset in &local_rulesets {
+                    s.delete(kind::API_RULESET, &ruleset.id)?;
+                }
+            }
             write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
             // This device's workload identity stays out of every workspace
             // written here until the user allows it on this device.
@@ -767,6 +802,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
                 }
                 d.items.extend(settings.api_standards.legacy_rulesets.iter().map(|r| (kind::API_RULESET.to_string(), r.id.to_string())));
                 g.rulesets.append(&mut settings.api_standards.legacy_rulesets);
+                settings.api_standards.legacy_rulesets.clear();
                 g.app_settings = Some(settings);
             }
             kind::USER_PROFILE => d.user_profiles.push(typed(o, |x: &UserProfile| x.meta.id)?),
@@ -901,6 +937,10 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     // integrity, TLS bypasses, marker trust, credential forwarding, early
     // data, legacy HMAC and scenario/plan trust. Revisions of requests that
     // are not in the backup (their request was deleted) are left out.
+    for ruleset in &mut d.graph.rulesets {
+        crate::standards::normalize_imported_ruleset(ruleset).map_err(|e| invalid(e.to_string()))?;
+    }
+    anvil_portability::validate::validate_ruleset_limits(&d.graph, "backup").map_err(|e| invalid(e.to_string()))?;
     d.warnings = anvil_portability::validate::validate_and_normalize(&mut d.graph).map_err(|e| invalid(e.to_string()))?;
     if outside_history > 0 {
         d.warnings.push(format!("{outside_history} history record(s) of workspaces that are not in the backup were left out."));
@@ -974,6 +1014,7 @@ fn local(r: &StoreRead<'_>, d: &Decoded) -> anvil_storage::store::Result<Local> 
         existing: port::existing(r)?,
         spec_sources: r.list(kind::SPEC_SOURCE, None)?,
         stored: port::stored_among(r, &d.uncarried)?,
+        rulesets: r.list(kind::API_RULESET, None)?,
     })
 }
 
@@ -993,6 +1034,22 @@ fn keeps_local_settings(d: &Decoded, local: &Local, policy: ConflictPolicy) -> b
 /// this profile's app settings.
 fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<Vec<String>> {
     let mut notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
+    let replacing: HashSet<Id> = d.graph.rulesets.iter().map(|r| r.id).collect();
+    let mut combined: Vec<_> = local
+        .rulesets
+        .iter()
+        .filter(|r| {
+            !(policy == ConflictPolicy::Replace && !keeps_local_settings(d, local, policy))
+                && !(policy != ConflictPolicy::Merge && replacing.contains(&r.id))
+        })
+        .cloned()
+        .collect();
+    combined.extend(d.graph.rulesets.iter().filter(|r| {
+        !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
+    }).cloned());
+    if let Err(e) = crate::standards::layered_for_port(&combined) {
+        notes.push(format!("Restored API standards would not load: {e}"));
+    }
     if policy == ConflictPolicy::Replace && d.graph.app_settings.is_some() {
         let kept = keeps_local_settings(d, local, policy);
         notes.push(if kept { KEPT_SETTINGS_NOTE } else { REPLACED_SETTINGS_NOTE }.into());
@@ -1148,6 +1205,7 @@ fn report(
         workspaces: d.graph.workspaces.iter().map(|w| w.name.clone()).collect(),
         workspace_ids: d.graph.workspaces.iter().map(|w| w.meta.id.to_string()).collect(),
         full_backup: true,
+        api_standards_count: d.graph.rulesets.len(),
         bundle_sha256,
     }
 }
@@ -1225,8 +1283,16 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     {
         w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
     }
-    for (index, x) in g.rulesets.iter().enumerate() {
-        w.put(kind::API_RULESET, &x.id, None, None, index as f64, x)?;
+    let mut next_ruleset_sort = w.tx.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
+    for x in &g.rulesets {
+        let sort_key = w
+            .tx
+            .object_meta(kind::API_RULESET)?
+            .iter()
+            .find(|row| row.id == x.id.to_string())
+            .map_or(next_ruleset_sort, |row| row.sort_key);
+        w.put(kind::API_RULESET, &x.id, None, None, sort_key, x)?;
+        next_ruleset_sort = next_ruleset_sort.max(sort_key + 1.0);
     }
     // Nothing reads user profiles yet (no request uses one), so they are
     // restored as carried, without a gate.

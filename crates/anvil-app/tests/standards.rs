@@ -81,7 +81,7 @@ fn invalid_rulesets_and_specs_are_refused_before_anything_is_kept() {
     ] {
         assert!(app.add_api_ruleset("bad.yaml", bad.as_bytes()).is_err(), "{bad}");
     }
-    let big = format!("anvil_ruleset: 1\n# {}\n", "x".repeat(anvil_app::standards::MAX_STORED_RULESET_BYTES));
+    let big = format!("anvil_ruleset: 1\n# {}\n", "x".repeat(anvil_domain::settings::MAX_STORED_RULESET_BYTES));
     assert!(app.add_api_ruleset("big.yaml", big.as_bytes()).unwrap_err().to_string().contains("at most"));
     assert!(app.api_standards().unwrap().rulesets.is_empty());
     assert!(app.lint_spec(b"{\"info\": {\"_postman_id\": \"x\"}, \"item\": []}").is_err());
@@ -105,7 +105,7 @@ fn a_settings_save_from_elsewhere_keeps_the_standards() {
     let dir = tempfile::tempdir().unwrap();
     let app = new_app(dir.path());
     let stale = app.settings().unwrap();
-    app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    let ruleset = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
     let mut edited = stale.clone();
     edited.autosave = true;
     app.save_settings_keeping_standards(&edited).unwrap();
@@ -135,13 +135,15 @@ fn stored_standards_that_do_not_load_can_still_be_seen_and_removed() {
 }
 
 #[test]
-fn old_settings_rulesets_migrate_once_on_profile_open() {
+fn old_settings_rulesets_migrate_once_and_keep_newer_id_collision() {
     let dir = tempfile::tempdir().unwrap();
     let app = new_app(dir.path());
     let ruleset = app.add_api_ruleset("legacy.yaml", TEAM.as_bytes()).unwrap();
-    app.store.delete(kind::API_RULESET, &ruleset.id).unwrap();
+    let mut newer = ruleset.clone();
+    newer.name = "Newer legacy copy".into();
+    newer.added_at += chrono::Duration::seconds(60);
     let mut settings = app.settings().unwrap();
-    settings.api_standards.legacy_rulesets.push(ruleset.clone());
+    settings.api_standards.legacy_rulesets.push(newer.clone());
     app.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
     let path = app.dir.clone();
     drop(app);
@@ -149,13 +151,13 @@ fn old_settings_rulesets_migrate_once_on_profile_open() {
     let manager = ProfileManager::new(dir.path());
     let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
     let migrated = App::open(path.clone(), header, key).unwrap();
-    assert_eq!(migrated.api_standards().unwrap().rulesets, [ruleset.clone()]);
+    assert_eq!(migrated.api_standards().unwrap().rulesets, [newer.clone()]);
     assert!(migrated.settings().unwrap().api_standards.legacy_rulesets.is_empty());
     drop(migrated);
 
     let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
     let reopened = App::open(path, header, key).unwrap();
-    assert_eq!(reopened.api_standards().unwrap().rulesets, [ruleset]);
+    assert_eq!(reopened.api_standards().unwrap().rulesets, [newer]);
     assert_eq!(manager.list().len(), 1);
 }
 
@@ -165,8 +167,15 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
     let source = new_app(root.path());
     let ws = source.create_workspace("Standards workspace").unwrap();
     let ruleset = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
-    let (bundle, _) =
-        source.export(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false).unwrap();
+    let (bundle, _) = source
+        .export_with_standards(
+            Some(&ws.meta.id),
+            anvil_portability::ExportMode::EncryptedTransfer,
+            Some("bundle passphrase"),
+            false,
+            true,
+        )
+        .unwrap();
 
     let target = new_app(root.path());
     let preview = target.import_preview(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
@@ -181,15 +190,74 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
 
     let round_trip = new_app(root.path());
     round_trip.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
-    assert_eq!(round_trip.api_standards().unwrap().rulesets, [ruleset]);
+    let mut imported = ruleset;
+    imported.enabled = false;
+    assert_eq!(round_trip.api_standards().unwrap().rulesets, [imported]);
+}
+
+#[test]
+fn share_safe_bundles_exclude_standards_unless_explicitly_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let ws = app.create_workspace("Standards option").unwrap();
+    let ruleset = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    let overlay = app.add_api_ruleset("overlay.yaml", OVERLAY.as_bytes()).unwrap();
+
+    let (excluded, preview) = app
+        .export_with_standards(
+            Some(&ws.meta.id),
+            anvil_portability::ExportMode::ShareSafely,
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+    assert_eq!(preview.manifest.counts["api_standards"], 0);
+    assert!(anvil_portability::bundle::open(&excluded, None).unwrap().graph.rulesets.is_empty());
+
+    let (included, preview) = app
+        .export_with_standards(
+            Some(&ws.meta.id),
+            anvil_portability::ExportMode::ShareSafely,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+    assert_eq!(preview.manifest.counts["api_standards"], 2);
+    let carried = anvil_portability::bundle::open(&included, None).unwrap().graph.rulesets;
+    assert_eq!(carried.iter().map(|r| r.id).collect::<Vec<_>>(), [ruleset.id, overlay.id]);
+
+    let mut tampered = ruleset.clone();
+    tampered.sha256 = "incorrect incoming hash".into();
+    app.store
+        .put(kind::API_RULESET, &tampered.id, None, None, 0.0, &tampered)
+        .unwrap();
+    let (mismatched, _) = app
+        .export_with_standards(
+            Some(&ws.meta.id),
+            anvil_portability::ExportMode::ShareSafely,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+    let target = new_app(dir.path());
+    target
+        .import(&mismatched, None, anvil_portability::plan::ConflictPolicy::Merge)
+        .unwrap();
+    let imported = target.api_standards().unwrap().rulesets;
+    assert_eq!(imported.iter().map(|r| r.id).collect::<Vec<_>>(), [ruleset.id, overlay.id]);
+    assert_eq!(imported[0].sha256, ruleset.sha256);
+    assert!(imported.iter().all(|r| !r.enabled));
 }
 
 #[test]
 fn one_mebibyte_rulesets_are_stored_as_individual_records() {
     let dir = tempfile::tempdir().unwrap();
     let app = new_app(dir.path());
-    let body = format!("{TEAM}#{}\n", "x".repeat(anvil_app::standards::MAX_STORED_RULESET_BYTES - TEAM.len() - 2));
-    assert_eq!(body.len(), anvil_app::standards::MAX_STORED_RULESET_BYTES);
+    let body = format!("{TEAM}#{}\n", "x".repeat(anvil_domain::settings::MAX_STORED_RULESET_BYTES - TEAM.len() - 2));
+    assert_eq!(body.len(), anvil_domain::settings::MAX_STORED_RULESET_BYTES);
     let stored = app.add_api_ruleset("large.yaml", body.as_bytes()).unwrap();
     assert_eq!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(), Some(stored.clone()));
 
@@ -200,4 +268,90 @@ fn one_mebibyte_rulesets_are_stored_as_individual_records() {
     assert_eq!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(), Some(updated));
     app.remove_api_ruleset(&stored.id).unwrap();
     assert!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap().is_none());
+}
+
+#[test]
+fn over_limit_rule_count_still_allows_disabling_and_removing_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let template = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    for index in 1..=anvil_domain::settings::MAX_STORED_RULESETS {
+        let mut copy = template.clone();
+        copy.id = anvil_domain::Id::new();
+        copy.name = format!("Team {index}");
+        app.store
+            .put(kind::API_RULESET, &copy.id, None, None, index as f64, &copy)
+            .unwrap();
+    }
+    let records = app.api_standards().unwrap().rulesets;
+    assert_eq!(records.len(), anvil_domain::settings::MAX_STORED_RULESETS + 1);
+    app.set_api_ruleset_enabled(&records[0].id, false).unwrap();
+    app.remove_api_ruleset(&records[1].id).unwrap();
+    assert_eq!(app.api_standards().unwrap().rulesets.len(), anvil_domain::settings::MAX_STORED_RULESETS);
+}
+
+#[test]
+fn over_limit_total_size_still_allows_disabling_rulesets() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let size = anvil_domain::settings::MAX_STORED_RULESET_BYTES - 1;
+    let text = format!("{TEAM}#{}\n", "x".repeat(size - TEAM.len() - 2));
+    let template = app.add_api_ruleset("large.yaml", text.as_bytes()).unwrap();
+    for index in 1..9 {
+        let mut copy = template.clone();
+        copy.id = anvil_domain::Id::new();
+        copy.name = format!("Large {index}");
+        app.store
+            .put(kind::API_RULESET, &copy.id, None, None, index as f64, &copy)
+            .unwrap();
+    }
+    let records = app.api_standards().unwrap().rulesets;
+    assert!(records.iter().map(|r| r.text.len()).sum::<usize>() > anvil_domain::settings::MAX_STORED_RULESETS_BYTES);
+    app.set_api_ruleset_enabled(&records[0].id, false).unwrap();
+}
+
+#[test]
+fn duplicate_import_skips_matching_ruleset_hashes_and_combined_limits_refuse_excess() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = new_app(dir.path());
+    let ws = source.create_workspace("Standards source").unwrap();
+    source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    let (bundle, _) = source
+        .export_with_standards(
+            Some(&ws.meta.id),
+            anvil_portability::ExportMode::ShareSafely,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+
+    let duplicate_target = new_app(dir.path());
+    duplicate_target.add_api_ruleset("local.yaml", TEAM.as_bytes()).unwrap();
+    duplicate_target
+        .import(&bundle, None, anvil_portability::plan::ConflictPolicy::Duplicate)
+        .unwrap();
+    assert_eq!(duplicate_target.api_standards().unwrap().rulesets.len(), 1);
+
+    let full_target = new_app(dir.path());
+    let local = full_target.add_api_ruleset("local.yaml", TEAM.as_bytes()).unwrap();
+    for index in 1..anvil_domain::settings::MAX_STORED_RULESETS {
+        let mut copy = local.clone();
+        copy.id = anvil_domain::Id::new();
+        copy.name = format!("Local {index}");
+        copy.text = format!("{TEAM}# local {index}\n");
+        full_target
+            .store
+            .put(kind::API_RULESET, &copy.id, None, None, index as f64, &copy)
+            .unwrap();
+    }
+    let err = full_target
+        .import(&bundle, None, anvil_portability::plan::ConflictPolicy::Merge)
+        .unwrap_err();
+    assert!(err.to_string().contains("32 rulesets"));
+    let backup = source.export_backup_with("backup passphrase", anvil_storage::KdfParams::testing()).unwrap().0;
+    let err = full_target
+        .restore(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge)
+        .unwrap_err();
+    assert!(err.to_string().contains("32 rulesets"));
 }

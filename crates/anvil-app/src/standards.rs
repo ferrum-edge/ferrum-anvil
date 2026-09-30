@@ -9,16 +9,13 @@
 use crate::{App, AppError, Result, settings_id};
 use anvil_contract::{LintOptions, LintReport, RuleInfo, RuleSet, RulesetSummary, Spec};
 use anvil_domain::Id;
-use anvil_domain::settings::{ApiStandards, ApiStandardsSettings, AppSettings, StoredRuleset};
+use anvil_domain::settings::{
+    ApiStandards, ApiStandardsSettings, AppSettings, MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS,
+    MAX_STORED_RULESETS_BYTES, StoredRuleset,
+};
 use anvil_storage::kind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-/// Per-ruleset limit shared with the CLI parser.
-pub const MAX_STORED_RULESET_BYTES: usize = anvil_contract::ruleset::MAX_RULESET_BYTES;
-/// Bound the number and aggregate size of profile ruleset records.
-pub const MAX_STORED_RULESETS: usize = anvil_portability::validate::MAX_RULESET_RECORDS;
-pub const MAX_STORED_RULESETS_BYTES: usize = anvil_portability::validate::MAX_TOTAL_RULESET_BYTES;
 
 /// The rules in effect, for listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,12 +32,17 @@ pub struct StandardsView {
     pub error: Option<String>,
 }
 
-fn layered(std: &ApiStandards) -> std::result::Result<RuleSet, AppError> {
+pub(crate) fn layered_for_port(rulesets: &[StoredRuleset]) -> std::result::Result<RuleSet, AppError> {
+    let std = ApiStandards { include_recommended: true, rulesets: rulesets.to_vec() };
     let mut set = if std.include_recommended { RuleSet::recommended() } else { RuleSet::default() };
     for r in std.rulesets.iter().filter(|r| r.enabled) {
         set.add(&r.file_name, r.text.as_bytes(), false).map_err(|e| AppError::Invalid(e.to_string()))?;
     }
     Ok(set)
+}
+
+fn layered(std: &ApiStandards) -> std::result::Result<RuleSet, AppError> {
+    layered_for_port(&std.rulesets)
 }
 
 impl App {
@@ -73,7 +75,14 @@ impl App {
             let current = tx.list::<StoredRuleset>(kind::API_RULESET, None)?;
             let mut next = ApiStandards { include_recommended: settings.api_standards.include_recommended, rulesets: current.clone() };
             // The result must load, as it will be used.
-            if let Err(e) = f(&mut next).and_then(|()| validate_standards(&next).and_then(|()| layered(&next).map(|_| ()))) {
+            let change = f(&mut next).and_then(|()| {
+                validate_standards(&next, &current)?;
+                if !only_disables_or_removals(&current, &next.rulesets) {
+                    layered(&next)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = change {
                 return Ok(Err(e));
             }
             settings.api_standards = ApiStandardsSettings { include_recommended: next.include_recommended, legacy_rulesets: vec![] };
@@ -84,8 +93,26 @@ impl App {
                     tx.delete(kind::API_RULESET, &old.id)?;
                 }
             }
-            for (index, ruleset) in next.rulesets.iter().enumerate() {
-                tx.put(kind::API_RULESET, &ruleset.id, None, None, index as f64, ruleset)?;
+            let mut next_sort_key = tx
+                .object_meta(kind::API_RULESET)?
+                .iter()
+                .map(|row| row.sort_key)
+                .fold(-1.0_f64, f64::max)
+                + 1.0;
+            for ruleset in &next.rulesets {
+                if let Some(old) = current.iter().find(|old| old.id == ruleset.id) {
+                    if old != ruleset {
+                        let sort_key = tx
+                            .object_meta(kind::API_RULESET)?
+                            .iter()
+                            .find(|row| row.id == ruleset.id.to_string())
+                            .map_or(next_sort_key, |row| row.sort_key);
+                        tx.put(kind::API_RULESET, &ruleset.id, None, None, sort_key, ruleset)?;
+                    }
+                } else {
+                    tx.put(kind::API_RULESET, &ruleset.id, None, None, next_sort_key, ruleset)?;
+                    next_sort_key += 1.0;
+                }
             }
             Ok(Ok(next))
         })?
@@ -181,6 +208,9 @@ impl App {
 }
 
 fn stored_ruleset(file_name: &str, bytes: &[u8]) -> Result<StoredRuleset> {
+    if file_name.is_empty() || file_name.len() > 255 {
+        return Err(AppError::Invalid("the ruleset file name must be 1 to 255 bytes".into()));
+    }
     if bytes.len() > MAX_STORED_RULESET_BYTES {
         return Err(AppError::Invalid(format!("the ruleset is {} bytes; at most {MAX_STORED_RULESET_BYTES} are kept", bytes.len())));
     }
@@ -188,6 +218,9 @@ fn stored_ruleset(file_name: &str, bytes: &[u8]) -> Result<StoredRuleset> {
     // Its rules are checked in context when it is stored.
     let summary = anvil_contract::ruleset::describe(file_name, bytes).map_err(|e| AppError::Invalid(e.to_string()))?;
     let (name, version) = (summary.name, summary.version);
+    if name.is_empty() || name.len() > 255 {
+        return Err(AppError::Invalid("the ruleset name must be 1 to 255 bytes".into()));
+    }
     Ok(StoredRuleset {
         id: Id::new(),
         name,
@@ -200,13 +233,49 @@ fn stored_ruleset(file_name: &str, bytes: &[u8]) -> Result<StoredRuleset> {
     })
 }
 
-fn validate_standards(standards: &ApiStandards) -> Result<()> {
-    if standards.rulesets.len() > MAX_STORED_RULESETS {
+pub(crate) fn normalize_imported_ruleset(ruleset: &mut StoredRuleset) -> Result<()> {
+    if ruleset.name.is_empty() || ruleset.name.len() > 255 || ruleset.file_name.is_empty() || ruleset.file_name.len() > 255 {
+        return Err(AppError::Invalid("API ruleset names and file names must be 1 to 255 bytes".into()));
+    }
+    if ruleset.text.len() > MAX_STORED_RULESET_BYTES {
+        return Err(AppError::Invalid(format!("API ruleset exceeds {} MiB", MAX_STORED_RULESET_BYTES / (1024 * 1024))));
+    }
+    ruleset.sha256 = hex::encode(Sha256::digest(ruleset.text.as_bytes()));
+    Ok(())
+}
+
+pub(crate) fn validate_standards(standards: &ApiStandards, current: &[StoredRuleset]) -> Result<()> {
+    let current_bytes: usize = current.iter().map(|r| r.text.len()).sum();
+    if standards.rulesets.len() > MAX_STORED_RULESETS
+        && (current.len() <= MAX_STORED_RULESETS || standards.rulesets.len() > current.len())
+    {
         return Err(AppError::Invalid(format!("at most {MAX_STORED_RULESETS} rulesets can be kept")));
     }
     let total: usize = standards.rulesets.iter().map(|r| r.text.len()).sum();
-    if total > MAX_STORED_RULESETS_BYTES {
-        return Err(AppError::Invalid(format!("rulesets together are {total} bytes; at most {MAX_STORED_RULESETS_BYTES} are kept")));
+    if total > MAX_STORED_RULESETS_BYTES && (current_bytes <= MAX_STORED_RULESETS_BYTES || total > current_bytes) {
+        return Err(AppError::Invalid(format!(
+            "rulesets together are {total} bytes; at most {} MiB are kept",
+            MAX_STORED_RULESETS_BYTES / (1024 * 1024)
+        )));
     }
     Ok(())
+}
+
+fn only_disables_or_removals(current: &[StoredRuleset], next: &[StoredRuleset]) -> bool {
+    if next.len() > current.len() {
+        return false;
+    }
+    let mut disabled = next.len() < current.len();
+    for ruleset in next {
+        let Some(old) = current.iter().find(|old| old.id == ruleset.id) else {
+            return false;
+        };
+        let mut expected = old.clone();
+        expected.enabled = ruleset.enabled;
+        if &expected != ruleset || (!old.enabled && ruleset.enabled) {
+            return false;
+        }
+        disabled |= old.enabled && !ruleset.enabled;
+    }
+    disabled
 }

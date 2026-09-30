@@ -1620,9 +1620,7 @@ export interface StoredRuleset {
   enabled?: boolean;
 }
 /**
- * API standards settings stored in `AppSettings`. User rulesets are separate
- * objects; `legacy_rulesets` only reads the pre-separate-records field so the
- * app can migrate it when opening a profile.
+ * API standards settings stored in `AppSettings`.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ApiStandardsSettings".
@@ -1812,9 +1810,7 @@ export interface LockPolicy {
   clear_clipboard_on_lock: boolean;
 }
 /**
- * API standards settings stored in `AppSettings`. User rulesets are separate
- * objects; `legacy_rulesets` only reads the pre-separate-records field so the
- * app can migrate it when opening a profile.
+ * API standards settings stored in `AppSettings`.
  */
 export interface ApiStandardsSettings1 {
   include_recommended?: boolean;

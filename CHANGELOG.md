@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Workspace bundles now omit profile-wide API standards unless explicitly
+  included (`--include-standards` in the CLI or **Include API standards** in
+  the desktop). Bundle imports keep those rulesets disabled, recompute their
+  hashes, and enforce profile-wide limits together with local records.
+- API standards records append after existing records on import and are only
+  rewritten when changed; full backups continue to restore their order and
+  enabled flags.
+
 ### Added
 
 - Contract drift: compare observed traffic with an OpenAPI description

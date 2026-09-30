@@ -248,6 +248,7 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     counts.insert("scenarios".into(), graph.scenarios.len());
     counts.insert("datasets".into(), graph.datasets.len());
     counts.insert("load_plans".into(), graph.load_plans.len());
+    counts.insert("api_standards".into(), graph.rulesets.len());
     counts.insert("attachments".into(), graph.attachments.len());
     counts.insert("secrets".into(), if encrypted { graph.secrets.len() } else { 0 });
     counts.insert("history".into(), if opts.include_history { graph.history.len() } else { 0 });

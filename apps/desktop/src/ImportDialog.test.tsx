@@ -33,6 +33,7 @@ const report: ImportReport = {
   workspaces: ["W"],
   workspace_ids: ["ws-1"],
   full_backup: true,
+  api_standards_count: 0,
   bundle_sha256: "abc",
 };
 

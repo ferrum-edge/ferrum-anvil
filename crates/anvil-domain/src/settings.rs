@@ -371,9 +371,7 @@ pub struct AppSettings {
     pub api_standards: ApiStandardsSettings,
 }
 
-/// API standards settings stored in `AppSettings`. User rulesets are separate
-/// objects; `legacy_rulesets` only reads the pre-separate-records field so the
-/// app can migrate it when opening a profile.
+/// API standards settings stored in `AppSettings`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApiStandardsSettings {
     #[serde(default = "crate::request::default_true")]
@@ -423,6 +421,13 @@ pub struct StoredRuleset {
     #[serde(default = "crate::request::default_true")]
     pub enabled: bool,
 }
+
+/// Largest ruleset file accepted by the CLI and profile storage.
+pub const MAX_STORED_RULESET_BYTES: usize = 1024 * 1024;
+/// Maximum number of profile-wide API standards records.
+pub const MAX_STORED_RULESETS: usize = 32;
+/// Maximum combined size of profile-wide API standards records.
+pub const MAX_STORED_RULESETS_BYTES: usize = 8 * 1024 * 1024;
 
 impl Default for AppSettings {
     fn default() -> Self {

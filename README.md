@@ -72,6 +72,8 @@ anvil import-spec Demo --file openapi.yaml
 anvil lint-spec openapi.yaml --ruleset api-standards.yaml
 anvil spec-drift openapi.yaml --har traffic.har --revised openapi.revised.yaml
 anvil run Demo --folder Smoke --junit report.xml
+anvil export --workspace Demo --mode share --out demo.anvil
+# Add --include-standards to include the profile's API standards (off by default).
 ```
 
 <details>

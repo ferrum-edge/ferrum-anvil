@@ -59,6 +59,35 @@ fn new_app(root: &std::path::Path, name: &str) -> App {
     App::open(s.dir, h, dek).unwrap()
 }
 
+#[test]
+fn restores_rulesets_from_legacy_app_settings_in_an_old_backup() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path(), "legacy-source");
+    let ruleset = source
+        .add_api_ruleset(
+            "legacy.yaml",
+            b"anvil_ruleset: 1\nname: Legacy\nrules:\n  info-contact: error\n",
+        )
+        .unwrap();
+    source.store.delete(kind::API_RULESET, &ruleset.id).unwrap();
+    let mut settings = source.settings().unwrap();
+    settings.api_standards.legacy_rulesets.push(ruleset.clone());
+    source
+        .store
+        .put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings)
+        .unwrap();
+    let bytes = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let target = new_app(root.path(), "legacy-target");
+    let restored = target.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(restored.api_standards_count, 1);
+    let imported = target.api_standards().unwrap().rulesets;
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].id, ruleset.id);
+    assert_eq!(imported[0].sha256, ruleset.sha256);
+    assert!(target.settings().unwrap().api_standards.legacy_rulesets.is_empty());
+}
+
 fn export(app: &App) -> Vec<u8> {
     app.export_backup_with(PASS, KdfParams::testing()).unwrap().0
 }
