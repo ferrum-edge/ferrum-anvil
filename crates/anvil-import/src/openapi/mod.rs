@@ -485,7 +485,7 @@ fn import_path_item(
     let field = |k: &str| path_field(local, target, k);
     let mut ops: Vec<(String, &Value, String)> = vec![];
     for m in METHODS {
-        if let Some(op) = field(*m) {
+        if let Some(op) = field(m) {
             ops.push((m.to_uppercase(), op, ptr(pptr, m)));
         }
     }
