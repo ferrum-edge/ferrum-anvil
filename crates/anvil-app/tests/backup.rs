@@ -63,19 +63,11 @@ fn new_app(root: &std::path::Path, name: &str) -> App {
 fn restores_rulesets_from_legacy_app_settings_in_an_old_backup() {
     let root = tempfile::tempdir().unwrap();
     let source = new_app(root.path(), "legacy-source");
-    let ruleset = source
-        .add_api_ruleset(
-            "legacy.yaml",
-            b"anvil_ruleset: 1\nname: Legacy\nrules:\n  info-contact: error\n",
-        )
-        .unwrap();
+    let ruleset = source.add_api_ruleset("legacy.yaml", b"anvil_ruleset: 1\nname: Legacy\nrules:\n  info-contact: error\n").unwrap();
     source.store.delete(kind::API_RULESET, &ruleset.id).unwrap();
     let mut settings = source.settings().unwrap();
     settings.api_standards.legacy_rulesets.push(ruleset.clone());
-    source
-        .store
-        .put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings)
-        .unwrap();
+    source.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();
     let bytes = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
 
     let target = new_app(root.path(), "legacy-target");

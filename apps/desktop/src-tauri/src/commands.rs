@@ -758,14 +758,7 @@ pub async fn export_preview(
         if full_backup(ws.as_ref(), m)? {
             return app.backup_preview().map(ExportPreview::Backup).map_err(e);
         }
-        app.export_preview_with_standards(
-            ws.as_ref(),
-            m,
-            false,
-            include_standards,
-        )
-            .map(ExportPreview::Bundle)
-            .map_err(e)
+        app.export_preview_with_standards(ws.as_ref(), m, false, include_standards).map(ExportPreview::Bundle).map_err(e)
     })
     .await
 }
@@ -795,17 +788,7 @@ pub async fn export_to_path(
         let pass = passphrase.ok_or("a full backup needs a passphrase")?;
         off_ui_thread(move || app.export_backup(&pass)).await?.0
     } else {
-        off_ui_thread(move || {
-            app.export_with_standards(
-                ws.as_ref(),
-                m,
-                passphrase.as_deref(),
-                false,
-                include_standards,
-            )
-        })
-        .await?
-        .0
+        off_ui_thread(move || app.export_with_standards(ws.as_ref(), m, passphrase.as_deref(), false, include_standards)).await?.0
     };
     st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }

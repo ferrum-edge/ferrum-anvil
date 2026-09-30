@@ -255,14 +255,9 @@ impl App {
             }
         }
         let replacing: HashSet<Id> = graph.rulesets.iter().map(|r| r.id).collect();
-        let mut combined: Vec<_> = local_rulesets
-            .iter()
-            .filter(|r| !(policy != ConflictPolicy::Merge && replacing.contains(&r.id)))
-            .cloned()
-            .collect();
-        combined.extend(graph.rulesets.iter().filter(|r| {
-            !(policy == ConflictPolicy::Merge && existing.objects.contains(&r.id))
-        }).cloned());
+        let mut combined: Vec<_> =
+            local_rulesets.iter().filter(|r| !(policy != ConflictPolicy::Merge && replacing.contains(&r.id))).cloned().collect();
+        combined.extend(graph.rulesets.iter().filter(|r| !(policy == ConflictPolicy::Merge && existing.objects.contains(&r.id))).cloned());
         if let Err(e) = crate::standards::layered_for_port(&combined) {
             warnings.push(format!("Imported API standards would not load: {e}"));
         }

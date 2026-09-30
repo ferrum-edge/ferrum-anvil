@@ -591,9 +591,13 @@ impl App {
                 })
                 .cloned()
                 .collect();
-            combined.extend(d.graph.rulesets.iter().filter(|r| {
-                !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
-            }).cloned());
+            combined.extend(
+                d.graph
+                    .rulesets
+                    .iter()
+                    .filter(|r| !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))))
+                    .cloned(),
+            );
             if let Err(e) = crate::standards::validate_standards(
                 &anvil_domain::settings::ApiStandards { include_recommended: true, rulesets: combined.clone() },
                 &local_rulesets,
@@ -1044,9 +1048,13 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
         })
         .cloned()
         .collect();
-    combined.extend(d.graph.rulesets.iter().filter(|r| {
-        !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
-    }).cloned());
+    combined.extend(
+        d.graph
+            .rulesets
+            .iter()
+            .filter(|r| !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))))
+            .cloned(),
+    );
     if let Err(e) = crate::standards::layered_for_port(&combined) {
         notes.push(format!("Restored API standards would not load: {e}"));
     }
@@ -1285,12 +1293,11 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     }
     let mut next_ruleset_sort = w.tx.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
     for x in &g.rulesets {
-        let sort_key = w
-            .tx
-            .object_meta(kind::API_RULESET)?
-            .iter()
-            .find(|row| row.id == x.id.to_string())
-            .map_or(next_ruleset_sort, |row| row.sort_key);
+        let sort_key =
+            w.tx.object_meta(kind::API_RULESET)?
+                .iter()
+                .find(|row| row.id == x.id.to_string())
+                .map_or(next_ruleset_sort, |row| row.sort_key);
         w.put(kind::API_RULESET, &x.id, None, None, sort_key, x)?;
         next_ruleset_sort = next_ruleset_sort.max(sort_key + 1.0);
     }

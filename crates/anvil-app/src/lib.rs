@@ -169,14 +169,17 @@ impl App {
                         }
                     } else {
                         tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, order, &ruleset)?;
-                        rows.insert(id, anvil_storage::store::RowMeta {
-                            kind: anvil_storage::kind::API_RULESET.into(),
-                            id: ruleset.id.to_string(),
-                            workspace_id: None,
-                            parent_id: None,
-                            sort_key: order,
-                            updated_at: ruleset.added_at.timestamp_millis(),
-                        });
+                        rows.insert(
+                            id,
+                            anvil_storage::store::RowMeta {
+                                kind: anvil_storage::kind::API_RULESET.into(),
+                                id: ruleset.id.to_string(),
+                                workspace_id: None,
+                                parent_id: None,
+                                sort_key: order,
+                                updated_at: ruleset.added_at.timestamp_millis(),
+                            },
+                        );
                         order += 1.0;
                     }
                 }

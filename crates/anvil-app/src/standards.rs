@@ -10,8 +10,8 @@ use crate::{App, AppError, Result, settings_id};
 use anvil_contract::{LintOptions, LintReport, RuleInfo, RuleSet, RulesetSummary, Spec};
 use anvil_domain::Id;
 use anvil_domain::settings::{
-    ApiStandards, ApiStandardsSettings, AppSettings, MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS,
-    MAX_STORED_RULESETS_BYTES, StoredRuleset,
+    ApiStandards, ApiStandardsSettings, AppSettings, MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS, MAX_STORED_RULESETS_BYTES,
+    StoredRuleset,
 };
 use anvil_storage::kind;
 use serde::{Deserialize, Serialize};
@@ -93,12 +93,7 @@ impl App {
                     tx.delete(kind::API_RULESET, &old.id)?;
                 }
             }
-            let mut next_sort_key = tx
-                .object_meta(kind::API_RULESET)?
-                .iter()
-                .map(|row| row.sort_key)
-                .fold(-1.0_f64, f64::max)
-                + 1.0;
+            let mut next_sort_key = tx.object_meta(kind::API_RULESET)?.iter().map(|row| row.sort_key).fold(-1.0_f64, f64::max) + 1.0;
             for ruleset in &next.rulesets {
                 if let Some(old) = current.iter().find(|old| old.id == ruleset.id) {
                     if old != ruleset {
@@ -246,8 +241,7 @@ pub(crate) fn normalize_imported_ruleset(ruleset: &mut StoredRuleset) -> Result<
 
 pub(crate) fn validate_standards(standards: &ApiStandards, current: &[StoredRuleset]) -> Result<()> {
     let current_bytes: usize = current.iter().map(|r| r.text.len()).sum();
-    if standards.rulesets.len() > MAX_STORED_RULESETS
-        && (current.len() <= MAX_STORED_RULESETS || standards.rulesets.len() > current.len())
+    if standards.rulesets.len() > MAX_STORED_RULESETS && (current.len() <= MAX_STORED_RULESETS || standards.rulesets.len() > current.len())
     {
         return Err(AppError::Invalid(format!("at most {MAX_STORED_RULESETS} rulesets can be kept")));
     }
