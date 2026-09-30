@@ -103,6 +103,9 @@
 
 ### Changed
 
+- Load testing: JSON dataset cells keep their source text, including number
+  spelling such as `1.50` or `1e2`, nested `\u` escapes, and nested duplicate
+  keys.
 - CI: Dependabot now covers GitHub composite actions, keeps patched vendored
   crates pinned, and leaves coordinated Tauri updates for a manual bump.
   Dependabot dependency PRs may require manual license and generated-contract
@@ -863,6 +866,26 @@
   refuses generated IDs owned by another workspace before writing. This keeps
   restored provenance from changing unrelated objects. Fixes
   GHSA-2c97-mfx4-3g7r.
+- Datasets are now bounded at 4,194,304 cells (rows × columns), with at most
+  1 MiB of raw JSON text per cell. CSV checks the cell budget before storing
+  each row; JSON parses one object at a time and checks row, column and cell
+  limits before expanding the stored matrix. A 64 MiB dataset can retain up
+  to about 350 MiB of dataset data at the configured maxima, before allocator
+  and parser overhead. This prevents mostly empty JSON rows from first being
+  built into a multi-gigabyte `Value` tree. The collection runner's
+  100,000-row limit is enforced while parsing, and parsed rows are moved
+  instead of copied.
+- A load run's gRPC status counts now keep one entry per valid code (0–16)
+  and count every other `grpc-status` together under `-1` ("invalid: any
+  code outside 0–16"). Before, each distinct value a target returned added
+  an entry, growing the worker's memory and the work of every progress
+  snapshot for the length of the run. The raw value is still kept in the
+  execution record and the bounded failure examples.
+- The HTML export of a load report now escapes the unit nouns from the
+  report's protocol semantics everywhere it writes them. A report imported
+  from a file or a full backup could otherwise place markup and inline
+  styles in the exported page (the page's CSP already blocked scripts).
+
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
