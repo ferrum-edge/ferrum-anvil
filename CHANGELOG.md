@@ -388,6 +388,10 @@
 
 ### Fixed
 
+- Windows: the DNS and replay-guard fixtures now bind UDP (including QUIC)
+  on port 0 before binding TCP to the assigned port. If TCP refuses the port,
+  they retry up to 64 times while holding rejected UDP candidates, and the
+  final error lists the ports tried.
 - The failure lab's EARLY-001 and EARLY-002 test the gateway's pending
   0-RTT window deterministically. The client's "offered and accepted"
   evidence does not prove the gateway saw the request early: Ferrum Edge
