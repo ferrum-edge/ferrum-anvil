@@ -372,6 +372,44 @@ async fn redirect_that_would_resend_an_encoded_secret_body_to_another_origin_is_
     }
 }
 
+/// A form field marked sensitive with a literal value (no secret variable) is
+/// a secret too: form encoding changes its bytes, and the body still stays at
+/// its origin unless the policy allows forwarding credentials cross-origin.
+#[tokio::test]
+async fn redirect_that_would_resend_a_sensitive_form_field_to_another_origin_is_not_followed() {
+    init();
+    let a = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let b = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let password = KeyValue { sensitive: true, ..KeyValue::new("password", "tok-SENSITIVE-p@ss w/rd+=") };
+    let form = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), password] };
+    let ctx_with = |status: u16, forward: bool| {
+        let mut ctx = ctx_for(&a.url(&format!("/redirect?to={}&status={status}", url_encode(&b.url("/echo")))));
+        ctx.spec.method = "POST".into();
+        ctx.spec.body = form.clone();
+        let policy = RedirectPolicy { follow: true, max: 10, forward_credentials_cross_origin: forward };
+        settings(&mut ctx, SettingsOverrides { redirects: Some(policy), ..Default::default() });
+        ctx
+    };
+    for status in [307u16, 308] {
+        a.log.clear();
+        b.log.clear();
+        let o = run(&e, &ctx_with(status, false)).await;
+        assert_eq!(o.record.attempts.len(), 1, "{status}");
+        assert_eq!(o.record.response.as_ref().unwrap().status, status, "the redirect response stays the final response");
+        assert_eq!(a.log.count_requests(), 1, "{status}");
+        assert_eq!(b.log.count_requests(), 0, "{status}: ground truth: the body never reached the other origin");
+        let note = inferred(&o).iter().any(|i| i.contains("not followed") && i.contains("body holding a secret"));
+        assert!(note, "{status}: the refusal is recorded");
+    }
+
+    // Allowed explicitly, the body follows the redirect.
+    b.log.clear();
+    let o = run(&e, &ctx_with(307, true)).await;
+    assert_eq!(o.record.attempts.len(), 2);
+    assert_eq!(b.log.count_requests(), 1, "the policy allows forwarding the body");
+}
+
 #[tokio::test]
 async fn secret_body_follows_a_same_origin_redirect() {
     init();

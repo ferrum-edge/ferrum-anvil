@@ -47,9 +47,11 @@ pub struct PreparedHttp {
     /// credentials of the request's own origin, like `Authorization`.
     pub sensitive_headers: Vec<String>,
     pub body: Bytes,
-    /// Whether resolving the body substituted a secret variable. Decided
-    /// structurally, before encoding: a form-urlencoded or re-serialized
-    /// GraphQL body holds the secret in a form a byte scan does not find.
+    /// Whether the body holds a secret: resolving it substituted a secret
+    /// variable, or it has a form field the user marked sensitive (whatever
+    /// its value, literal or not). Decided structurally, before encoding: a
+    /// form-urlencoded or re-serialized GraphQL body holds the secret in a
+    /// form a byte scan does not find.
     pub body_uses_secret: bool,
     pub content_type: Option<String>,
     pub inferred: Vec<String>,
@@ -308,6 +310,7 @@ pub fn prepare_http(
 
     // ---- body ----
     let secret_substitutions_before_body = r.secret_substitutions();
+    let mut sensitive_body_field = false;
     let (body, inferred_ct, lint_target): (Vec<u8>, Option<String>, Option<(&str, String)>) = match &spec.body {
         Body::None => (vec![], None, None),
         Body::Raw { text, content_type } => {
@@ -329,6 +332,7 @@ pub fn prepare_http(
                 let v = r.resolve(&f.value, &format!("body.fields[{i}].value"))?;
                 if f.sensitive {
                     r.mark_sensitive(&k, &v);
+                    sensitive_body_field = true;
                 }
                 parts.push(format!(
                     "{}={}",
@@ -447,7 +451,7 @@ pub fn prepare_http(
             (t.clone().into_bytes(), Some(ct), Some(("xml", t)))
         }
     };
-    let body_uses_secret = r.secret_substitutions() > secret_substitutions_before_body;
+    let body_uses_secret = sensitive_body_field || r.secret_substitutions() > secret_substitutions_before_body;
 
     // ---- lint ----
     let mut lint_bypassed = None;
@@ -595,6 +599,35 @@ mod tests {
             }],
         };
         assert!(prepared(&spec).body_uses_secret);
+    }
+
+    /// A form field marked sensitive holds a secret whether its value is a
+    /// secret variable or a literal; once form-encoded, a literal's bytes are
+    /// not in the body as such.
+    #[test]
+    fn a_sensitive_form_field_marks_the_body_whatever_its_value() {
+        use anvil_domain::request::KeyValue;
+        let literal = "tok-SENSITIVE-lit p@ss+w/rd";
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/login");
+        let password = KeyValue { sensitive: true, ..KeyValue::new("password", literal) };
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), password.clone()] };
+        let form = prepared(&spec);
+        assert!(form.body_uses_secret, "a sensitive literal form field marks the body");
+        assert!(!holds(&form.body, literal), "the encoded form does not hold the literal byte for byte");
+
+        // A short sensitive value, below the byte scan's minimum, still marks it.
+        let pin = KeyValue { sensitive: true, ..KeyValue::new("pin", "123") };
+        spec.body = Body::FormUrlEncoded { fields: vec![pin] };
+        assert!(prepared(&spec).body_uses_secret);
+
+        // The same literal in a field not marked sensitive does not.
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)] };
+        assert!(!prepared(&spec).body_uses_secret);
+
+        // A disabled sensitive field is not sent, so it does not either.
+        let disabled = KeyValue { enabled: false, ..password };
+        spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), disabled] };
+        assert!(!prepared(&spec).body_uses_secret);
     }
 
     #[test]

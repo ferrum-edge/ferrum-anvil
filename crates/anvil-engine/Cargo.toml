@@ -35,6 +35,8 @@ jsonschema.workspace = true
 zeroize.workspace = true
 parking_lot.workspace = true
 cookie_store = "0.22.1"
+# Public suffix list compiled in: the cookie jar refuses a cookie scoped to a public suffix.
+psl = "2.1.238"
 p12-keystore = "0.3.2"
 tracing.workspace = true
 

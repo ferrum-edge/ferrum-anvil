@@ -216,7 +216,12 @@ where
 
         let request_stream = RequestStream {
             inner: connection::RequestStream::new(
-                FrameStream::new(BufRecvStream::new(stream)),
+                // A HEADERS frame is refused before it is buffered once its
+                // encoded size exceeds the field-section limit.
+                FrameStream::with_max_payload(
+                    BufRecvStream::new(stream),
+                    self.max_field_section_size,
+                ),
                 self.max_field_section_size,
                 self.conn_state.clone(),
                 self.send_grease_frame,

@@ -20,8 +20,8 @@ against it).
 
 | Boundary | Untrusted side | Controls |
 |---|---|---|
-| Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; no response can call IPC or change settings |
-| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size/node/ref limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
+| Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; gRPC reflection enforces cumulative wire-plus-decoded byte and per-request message limits under its own absolute deadline; no response can call IPC or change settings |
+| Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size, node, string-byte, reference and sample-generation limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
 | Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no open or save dialog, no filesystem plugin. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
@@ -38,14 +38,36 @@ against it).
   produced the final response (its own profile and TLS requirement), never
   the original request's. See [diagnostics.md](diagnostics.md).
 
+### gRPC responses
+
+- Server reflection retains at most one response message per request and
+  applies the configured cumulative budget to wire and decoded bytes across
+  all reflection requests. Its own 30-second absolute deadline is shortened
+  by the call's total deadline, including for interactive sessions, so a peer
+  cannot extend the attempt by continuing to send data.
+- gRPC-Web trailer values are untrusted UTF-8. Percent escapes are decoded
+  from bytes, and malformed escapes are preserved without slicing UTF-8 at
+  arbitrary offsets.
+
 ### Requests and redirects
 
 - **Credential leakage via redirects or logs:** cross-origin credential
   stripping; redaction by name and by exact secret value across records,
   history, reports, exports and support bundles; a warning for keys in query
   strings.
-  - Headers, query parameters and form fields the user marks sensitive are
-    redacted by name and by value.
+  - Headers, query parameters, form fields and gRPC metadata the user marks
+    sensitive are redacted by name and by value, in the effective-request
+    preview as in records and history.
+  - A credential header (`Authorization`, `Cookie`, `Set-Cookie`, ...) keeps
+    only the parts that describe its credential: the scheme word, cookie
+    names and `Set-Cookie` attributes. Those are scrubbed of every known
+    secret value as well, so a server that echoes a credential it received
+    into a cookie name, a cookie attribute or an authorization scheme does
+    not get it into records, history or exports.
+  - Every credential an auth profile sends is a known secret, including a
+    WS-Security SAML assertion (as stored and as embedded, trimmed) and a
+    PasswordText password in the XML-escaped form it is sent in, so the
+    effective-request preview of the body it rewrites shows neither.
   - URL path segments, query names and values, and fragments are compared
     after percent-decoding, and a component that hides a secret is replaced
     whole, so no reversible encoding of it is kept. A URL that still reveals
@@ -57,6 +79,21 @@ against it).
     where the explanation quotes it) get the same URL redaction.
   - A collection run drops a content-encoded response body it cannot check
     for sensitive run values.
+  - Session transcript previews (text and hex), SSE event ids and types, and
+    the effective-request body preview are redacted before they are cut to
+    their display size, over the text up to 64 KiB past the cut. A secret
+    that crosses the cut is replaced whole, and the preview ends with the
+    redaction marker where it starts, so a peer that echoes a credential
+    cannot align it to leave most of it in the record. A secret form longer
+    than 64 KiB that crosses a cut is not covered. The stored record redacts
+    the transcript again with the record's redactor, but it sees only the
+    previews already cut: a secret the live redactor did not yet know when
+    the entry was recorded is caught when it lies wholly inside the preview,
+    and keeps its prefix when it crosses the cut. An OAuth issuer's
+    `error_description` has the token request's own credentials (client
+    secret, refresh token, authorization code and PKCE verifier) replaced
+    before it is cut to 200 characters. Diagnostic evidence excerpts are
+    still cut before the record's redaction runs (see Residual risks).
 - **Redirect hops:** every hop is evaluated for its own target. Unless
   `redirects.forward_credentials_cross_origin` is on, once a redirect leaves
   the request's origin (scheme, host or port):
@@ -69,15 +106,23 @@ against it).
   - auth (headers, API-key query parameters and API-key cookies) is no longer
     applied;
   - a redirect that would resend a body to another origin is not followed
-    when preparing the body substituted a secret variable (whatever the body
-    type and encoding: form fields are percent-encoded, GraphQL variables are
+    when preparing the body substituted a secret variable or included a form
+    field marked sensitive, literal value or not (whatever the body type and
+    encoding: form fields are percent-encoded, GraphQL variables are
     re-serialized), or when the body holds a resolved secret value byte for
     byte (an attachment, say). This covers 301/302 redirects that keep the
     body, such as for PUT, PATCH and DELETE.
 
   The workspace cookie jar is separate: on each hop it sends the stored
   cookies that match that hop's target under cookie rules, which do not
-  separate ports (nor schemes, for cookies without `Secure`). The TLS client
+  separate ports (nor schemes, for cookies without `Secure`). A `Set-Cookie`
+  whose name contains a known request secret is refused by the jar, including
+  names that contain a percent-encoded form of the secret. A `Set-Cookie`
+  whose `Domain` is a public suffix (`com`, `co.uk`, a private-section
+  suffix such as `github.io`; from the Public Suffix List compiled into
+  Anvil) is not stored, so one site cannot set a cookie that the jar sends
+  to unrelated sites under that suffix; when the suffix is the responding
+  host itself, the cookie is kept for that host only. The TLS client
   identity is never presented to another origin unless a TLS profile is bound
   to it, whatever the redirect policy. TLS settings are prepared for each
   hop's target, and a hop whose route or TLS settings cannot be prepared is
@@ -114,9 +159,58 @@ against it).
   none of the tickets it receives afterwards. Outside the early-data opt-in
   no ticket and no TLS 1.2 session is kept at all (such a connection could
   never resume one): only the key-exchange group each server chose.
+- **Hostile HTTP/3 responses:** the server (or MASQUE proxy) chooses frame
+  sizes and when the stream ends. Every HTTP/3 connection advertises
+  `max_response_header_bytes` as `SETTINGS_MAX_FIELD_SECTION_SIZE`; a HEADERS
+  frame (headers or trailers) that declares more is refused before it is
+  buffered, and a decoded field section over it before any of it is kept
+  (`response_headers_too_large`; only that stream is stopped). Other frames
+  with a payload are bounded too (64 KiB on the control stream), and an
+  unknown frame over the bound is skipped unbuffered. The total deadline,
+  the body idle deadline and cancellation end a response in every phase,
+  including a body sent slowly past `total_ms` and trailers after which the
+  stream never ends; Anvil then stops the stream rather than wait for the
+  peer.
+- **Hostile or stalled session peers:** a WebSocket, SSE, raw TCP/TLS,
+  UDP/DTLS, HBONE or MASQUE peer cannot make a session hold unbounded
+  memory or outlive its cancellation and deadlines.
+  - Every transcript entry is bounded (a 2 KiB preview, 256 bytes of SSE
+    event id and type), so the retained history is bounded however large the
+    messages are. The SSE parser refuses an `id:` or `event:` value over
+    4 KiB as a local limit, shares one last-event-id buffer across events
+    instead of copying it into each, and parses a chunk only until
+    `max_events` events are in hand.
+  - Once a session is open, these writes are raced against cancellation
+    and the deadline that applies to them (the total deadline for
+    automation, the DTLS handshake deadline, the raw TCP write deadline):
+    WebSocket scripted messages, interactive commands and the Pong flush;
+    raw TCP scripted and interactive payloads and half-closes; DTLS
+    handshake flights and datagrams over UDP, HBONE and MASQUE; HBONE and
+    MASQUE datagrams waiting for flow-control credit. The Close frames and
+    `close_notify` a session sends have their own bound: the WebSocket close
+    wait for a graceful close, 250 ms at cancel and at the total deadline
+    (500 ms after a protocol error), 250 ms for the raw TCP shutdown. Writes
+    before the session opens (the handshake request) are bounded by the
+    connection and handshake timeouts; gRPC streams are outside this list.
+  - An interrupted write may have left a partial frame, so nothing is
+    written after it: raw TCP drops the connection without a shutdown (no
+    TLS `close_notify` or FIN written by the session), WebSocket over HTTP/3
+    resets its stream (`H3_REQUEST_CANCELLED`), and HBONE and MASQUE tunnels
+    are reset instead of finished. A raw TCP payload that was partly written
+    is reported as possibly dispatched. Interactive sessions have no total
+    deadline: cancel (or a profile lock) is what ends them.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
+- **A load target inflating the run's metrics:** every aggregate a load
+  worker keeps from responses is bounded, whatever the target answers:
+  failure categories and their examples, destinations, protocols, timeline
+  buckets, and gRPC status counts, where every `grpc-status` outside 0–16
+  shares one bucket. Dataset parsing is bounded too: JSON rows are read one
+  at a time, with at most 100,000 rows in a collection run, 256 columns,
+  4,194,304 matrix cells and 1 MiB of raw JSON text per cell. The source is
+  capped at 16 MiB for a collection dataset and 64 MiB for a load dataset;
+  limits are checked before the stored matrix grows beyond its budget.
 
 ### Imports, bundles and backups
 
@@ -212,6 +306,18 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
     its path and the request or dataset that names it, as the receiving
     device's import preview does. Attach a copy instead to keep a local
     path out of a bundle.
+- **Small spec or collection that expands during preview:** the expansions
+  known to multiply work after parsing are charged before they run, against
+  the import limits in [import.md](import.md#trust-and-safety-policy).
+  JSON/YAML parsing charges nodes and the string bytes it keeps (YAML aliases
+  included). OpenAPI `allOf` merging charges the payload budget and the
+  `$ref` depth, and copied examples, defaults and merged schemas share a byte
+  budget for the whole import. WSDL envelopes charge the schema nodes they
+  look at and the bytes they generate (per envelope and per import) and cut
+  recursive groups. An Insomnia v4 export with a repeated workspace, group or
+  environment id is refused, and each resource is walked once. These are
+  budgets, not a proof that every code path is linear: a preview can still
+  take time and memory proportional to those limits.
 - **Altering an encrypted bundle:** the vault is sealed with associated data
   covering the format version and the SHA-256 of every other entry
   (manifest, `workspace/objects.json`, each attachment, the history). Any
@@ -269,6 +375,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   contents are still type-checked and must belong to the backup's own
   workspaces, and the import trust normalisation applies to the backup's app
   settings too.
+- **Restored spec provenance:** a spec source's optional root folder must be
+  present in the backup, belong to that source's workspace, and be a
+  top-level import root. Reimport checks the same relationship before reading
+  the baseline or scope and again in the write transaction, so provenance
+  cannot direct a reimport at another workspace's folder.
 - **App settings from a backup:** app settings are the lowest settings layer
   of every workspace's requests, and normalisation cannot judge their DNS
   overrides, resolver and other defaults. Replace therefore restores them
@@ -279,6 +390,16 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   vault authenticated nothing else in the archive, are refused, and no
   secret from such a vault is ever restored. Their other entries were never
   encrypted: a copy exposes its objects, attachments, settings and history.
+- **Datasets that expand when parsed:** a dataset (chosen by the user, or
+  carried by a bundle or backup) is bounded in bytes, rows, columns and
+  cells (rows × columns) while it is parsed, before its rows are built, so a
+  small file of mostly empty JSON objects cannot expand into a matrix of
+  gigabytes in the app. The collection runner's tighter row limit applies
+  the same way.
+- **Imported load reports exported as HTML:** a restored report's text,
+  including the unit nouns of its protocol semantics, is escaped wherever
+  the HTML export writes it, and the export's CSP blocks scripts, forms and
+  external resources.
 - **An OAuth profile imported from a bundle** never keeps the bundle's
   token-cache id, so it cannot share a token with a profile stored here.
 
@@ -372,5 +493,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
+- Diagnostic evidence excerpts (a JSON `error`, a GraphQL or SOAP fault
+  message, a tunnel refusal body, a Ferrum Edge body signature) are cut to
+  160–300 characters before the record's secret-value redaction runs, so a
+  secret the response echoes across that cut can leave a prefix in the
+  finding.
 - Unsigned development builds cannot prove provenance; release signing is
   blocked on owner credentials (see [release.md](release.md)).

@@ -7,6 +7,7 @@ use bytes::Buf;
 use crate::{
     connection::ConnectionInner,
     frame::FrameStreamError,
+    proto::frame::FrameType,
     quic::{self, ConnectionErrorIncoming, StreamErrorIncoming},
     shared_state::ConnectionState,
 };
@@ -202,6 +203,23 @@ where
                 self.handle_connection_error_on_stream(InternalConnectionError::new(
                     Code::H3_FRAME_ERROR,
                     "received incomplete frame".to_string(),
+                ))
+            }
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+            //# An HTTP/3 implementation MAY impose a limit on the maximum size of
+            //# the message header it will accept on an individual HTTP message.
+            FrameStreamError::TooLarge {
+                frame_type,
+                size,
+                max_size,
+            } if frame_type == FrameType::HEADERS.value() => StreamError::HeaderTooBig {
+                actual_size: size,
+                max_size,
+            },
+            FrameStreamError::TooLarge { .. } => {
+                self.handle_connection_error_on_stream(InternalConnectionError::new(
+                    Code::H3_EXCESSIVE_LOAD,
+                    "received a frame larger than allowed".to_string(),
                 ))
             }
         }

@@ -570,6 +570,14 @@ where
                     InternalConnectionError::got_frame_error(frame_error),
                 )));
             }
+            Err(FrameStreamError::TooLarge { .. }) => {
+                return Poll::Ready(Err(self.handle_connection_error(
+                    InternalConnectionError::new(
+                        Code::H3_EXCESSIVE_LOAD,
+                        "received a frame larger than allowed on the control stream".to_string(),
+                    ),
+                )));
+            }
             Ok(None) =>
             //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
             //# If either control

@@ -126,6 +126,9 @@
 
 ### Changed
 
+- Load testing: JSON dataset cells keep their source text, including number
+  spelling such as `1.50` or `1e2`, nested `\u` escapes, and nested duplicate
+  keys.
 - CI: Dependabot now covers GitHub composite actions, keeps patched vendored
   crates pinned, and leaves coordinated Tauri updates for a manual bump.
   Dependabot dependency PRs may require manual license and generated-contract
@@ -291,6 +294,27 @@
 
 ### Fixed
 
+- The failure lab's EARLY-001 and EARLY-002 no longer fail when the gateway
+  handles the 0-RTT request after its own handshake completed. Ferrum Edge
+  classifies each HTTP/3 stream when it accepts it and handles a 0-RTT
+  stream accepted after its handshake as 1-RTT (RFC 8470 section 6.4), so
+  the client's "offered and accepted" evidence does not prove the gateway
+  saw the request early; lab run 36557709775 got one 200 for EARLY-002's PUT
+  and failed. A round is now judged strictly only once the gateway's side
+  shows it saw the stream while its handshake was pending (a `425` on the
+  first attempt, its refusal log, or the request forwarded with
+  `Early-Data: 1`): EARLY-001 still requires the admitted GET with
+  `Early-Data: 1`, EARLY-002 still requires `425`, the one retry on the same
+  connection, `request.too_early` and the refusal log. A round of exactly
+  the permitted shape (one 200, no retry, one backend request without
+  `Early-Data`, no refusal logged) is a missed window and the next round is
+  tried; if every round that sent the request as early data was one, the
+  scenario is skipped with a reason starting `window not observed: `, never
+  passed. Any other shape still fails. Because a gateway that processes the
+  request early but forwards it unmarked looks like the permitted shape, a
+  scenario skipped this way in both the trusted and the untrusted pass of
+  one run fails both results. Lab scenarios can now report such a skip
+  (`Checks::skip`) (#221).
 - UDP load-scenario silence coverage keeps its non-responding target socket
   bound for the whole sub-case, then checks ICMP-unreachable counts on a
   released port with up to five fresh-port retries for parallel UDP replies.
@@ -835,6 +859,177 @@
 
 ### Security
 
+- Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
+  `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
+  secret value from the parts it keeps: the authorization scheme word,
+  cookie names and `Set-Cookie` attributes. Before, a response that echoed
+  a credential the request sent into one of those parts kept it in the
+  execution record, run history and history-inclusive exports. The whole
+  value is scrubbed before it is split, so a secret that spans a `;`, `=`
+  or space is replaced whole; a header value marked sensitive as a whole
+  (scheme included) is now shown as `‹redacted›` without its scheme.
+  Mixed and double percent-encoded secret echoes in `Set-Cookie` names,
+  Path and Domain attributes are redacted too. A `Set-Cookie` whose name
+  contains a secret used by that execution is not kept in the workspace cookie
+  jar, so it cannot appear in a later request's `Cookie` header or notes. History
+  recorded before this change is not rewritten.
+  (GHSA-vvjj-4xxf-966f)
+- gRPC metadata marked sensitive is now redacted by name and by value, like
+  a request header marked sensitive, in the effective-request preview, the
+  live session events, the execution record and run history, for gRPC and
+  both gRPC-Web modes. Before, a literal value under a name that is not a
+  known credential name was shown as is. (GHSA-653v-gxx9-r5pv)
+- The WS-Security SAML assertion (as stored and as embedded, trimmed) and
+  the XML-escaped form of a PasswordText password are now known secrets of
+  the request, so the effective-request preview of a WS-Security body and
+  the execution record redact them. Before, an assertion taken directly
+  from the vault was shown in the preview. (GHSA-6j83-rrqr-953h)
+- A redirect that would resend a request body to another origin is no
+  longer followed when the body has a form field marked sensitive, even
+  when its value is a literal rather than a secret variable. Before, only
+  secret variables marked the body structurally, and a literal whose form
+  encoding changed its bytes (such as one holding `@` or a space) was
+  resent by a 307 or 308 redirect. Allowing credentials to be forwarded
+  cross-origin in the redirect policy still lifts the refusal.
+  (GHSA-c8jq-hq57-v523)
+- The workspace cookie jar no longer stores a cookie whose `Domain` is a
+  public suffix, such as `com`, `co.uk` or a private-section suffix like
+  `github.io`, so one site can no longer set a cookie that Anvil then sends
+  to unrelated sites under that suffix. When the suffix is the responding
+  host itself, the cookie is kept for that host only. Cookies scoped to a
+  registrable parent domain and host-only cookies are unchanged. The Public
+  Suffix List is compiled in (the `psl` crate). (GHSA-vv3h-gm7f-3hm7)
+- Fixed GHSA-6g2g-2mvw-7h7v and GHSA-x6q9-gx98-c5wc: gRPC reflection now
+  has a 30-second absolute deadline, shortened by the call's total deadline,
+  including interactive sessions. Its cumulative budget counts wire and
+  decoded response bytes across every reflection request, and it accepts only
+  one response message per request. gRPC-Web percent decoding reads escape
+  digits as bytes, preserving malformed escapes without panicking on
+  multibyte UTF-8.
+- Full backup restores now reject spec provenance whose root is missing,
+  belongs to another workspace, or is not an import root. Import roots may be
+  nested in their workspace and remain valid for restore and reimport; a
+  deleted root retains the guidance to import the source again. Restore rejects
+  an imported spec namespace already used in another workspace, and reimport
+  refuses generated IDs owned by another workspace before writing. This keeps
+  restored provenance from changing unrelated objects. Fixes
+  GHSA-2c97-mfx4-3g7r.
+- Datasets are now bounded at 4,194,304 cells (rows × columns), with at most
+  1 MiB of raw JSON text per cell. CSV checks the cell budget before storing
+  each row; JSON parses one object at a time and checks row, column and cell
+  limits before expanding the stored matrix. A 64 MiB dataset can retain up
+  to about 350 MiB of dataset data at the configured maxima, before allocator
+  and parser overhead. This prevents mostly empty JSON rows from first being
+  built into a multi-gigabyte `Value` tree. The collection runner's
+  100,000-row limit is enforced while parsing, and parsed rows are moved
+  instead of copied.
+- A load run's gRPC status counts now keep one entry per valid code (0–16)
+  and count every other `grpc-status` together under `-1` ("invalid: any
+  code outside 0–16"). Before, each distinct value a target returned added
+  an entry, growing the worker's memory and the work of every progress
+  snapshot for the length of the run. The raw value is still kept in the
+  execution record and the bounded failure examples.
+- The HTML export of a load report now escapes the unit nouns from the
+  report's protocol semantics everywhere it writes them. A report imported
+  from a file or a full backup could otherwise place markup and inline
+  styles in the exported page (the page's CSP already blocked scripts).
+
+- Imports: parsing a JSON or YAML document now also bounds the string bytes
+  it keeps (string values and map keys, every YAML alias expansion
+  included) at twice `max_bytes`, charged before each string is copied. A
+  long scalar that many aliases repeat was charged one node per copy, so a
+  small file could make the preview allocate far more than its size; it is
+  now refused with `LimitExceeded` ("document string bytes").
+- WSDL imports: envelope generation is bounded by the envelope's
+  `max_sample_nodes` budget and by the bytes it may generate (8 MiB per
+  envelope, four times `max_bytes` per import, both charged before the text
+  is built). Every schema node looked at counts: group and attributeGroup
+  references, extension bases, particles, attributes, message parts and the
+  children of each construct. `group` and `attributeGroup` references back to
+  a group being expanded stop at the first repetition (`recursive_schema`).
+  An attribute is written once per element. Once the import's envelope budget
+  is spent, the remaining envelopes are left empty (`sample_size_limit`).
+  A document in which an element has more than 256 namespaces in scope is
+  refused (`LimitExceeded`), and once `max_operations` is reached the
+  remaining operations are counted without being walked again for each
+  port. Branching or self-referencing groups and types could make generation
+  grow exponentially, and many message parts could exceed the envelope limit.
+- OpenAPI imports: `allOf` merging charges each branch against the payload's
+  `max_sample_nodes` budget, and a `$ref` it follows counts toward
+  `max_ref_depth` like a direct `$ref` (`ref_depth_limit`). Generated
+  values (including `minLength` padding), examples, defaults, merged schemas
+  and per-operation parameter copies now share a byte budget for the whole
+  import (four times `max_bytes`), charged before each value is made. When
+  it is spent, the remaining samples are left out (`sample_size_limit`).
+  The structural lookups made while writing one payload (XML names,
+  multipart parts) share a node budget of their own and no longer use up the
+  payload's. Long or branching composition chains, large examples reused
+  many times and long generated strings in many operations could previously
+  do unbounded work.
+- Insomnia v4 imports: an export in which a workspace, request group or
+  environment shares its `_id` with another resource is refused (`Invalid`,
+  naming both). A repeated id of any other resource skips the later copy
+  (`duplicate_resource_id`). A resource without an `_id` is never treated as
+  a parent, the walk lists each parent's children once, and each request or
+  group is imported at most once. Repeated, empty or self-referencing ids
+  could make the import repeat subtrees exponentially.
+- HTTP/3 response headers and trailers are now held to
+  `max_response_header_bytes` (256 KiB by default) on every HTTP/3
+  connection: requests, SSE, WebSocket, gRPC and the connection to a MASQUE
+  proxy. For HTTP/3 the limit is at least 8 KiB (as for HTTP/1) and at most
+  2^62-1 bytes, the largest a SETTINGS value can carry. Anvil advertises it
+  as `SETTINGS_MAX_FIELD_SECTION_SIZE` (before, it advertised no limit), and
+  a pooled connection (or gRPC channel) is reused only by requests with the
+  same limit. It refuses a HEADERS frame that declares more before
+  buffering any more of it, and refuses a decoded field section over it
+  before keeping any of it. The request fails with
+  `response_headers_too_large` (for gRPC trailers too) and the response
+  stream is stopped. A pooled HTTP/3 request connection stays usable; a
+  gRPC call that ends this way closes its HTTP/3 connection, as any call
+  that does not end cleanly does. Other frames with a payload are bounded
+  as well (at most 64 KiB on the control stream), and an unknown frame over
+  the bound is skipped without being buffered. The vendored `h3` carries
+  the change as a second patch (`vendor/README.md`).
+- An HTTP/3 response can no longer outlive its deadlines or a cancel. The
+  total deadline now also ends the response body (a body that keeps
+  arriving just inside the idle deadline stopped only at
+  `max_response_bytes`), and the wait for the end of the stream after the
+  trailers is bounded by the body idle deadline, the total deadline and
+  cancellation (before, it waited for the server however long it took).
+  When any of them ends the response, Anvil stops the stream with
+  `H3_REQUEST_CANCELLED` instead of leaving it open, and the response body
+  phase is recorded as timed out or canceled rather than failed.
+- Session transcript previews (text and hex), SSE event ids and types, and
+  the effective-request body preview are now redacted before they are cut
+  to their display size, not after. A known secret that crosses the cut is
+  replaced whole, and the preview ends with the redaction marker where the
+  secret starts, instead of keeping all but the part past the cut in live
+  events and stored records (GHSA-jjvp-frqf-xw3p). An OAuth issuer's
+  `error_description` now has the token request's own credentials replaced
+  before it is cut to 200 characters. Diagnostic evidence excerpts are not
+  covered yet (see the threat model's residual risks).
+- An SSE stream can no longer make a session retain metadata out of
+  proportion to its limits (GHSA-gwfc-m32p-636g). An `id:` or `event:`
+  value over 4 KiB stops the stream as a local limit as soon as the partial
+  line is one, not once the line reaches the 1 MiB line bound; events share
+  the last event id instead of copying it, and the transcript redacts that
+  shared id once instead of once per event; a chunk is parsed only until
+  `max_events` events are in hand; and a transcript entry keeps at most
+  256 bytes of an event id or type (a longer one ends with `…`).
+- A session peer that stops reading, or withholds HTTP/2 or QUIC
+  flow-control credit, can no longer keep a session running after it is
+  canceled (or the profile locks) or past its deadline
+  (GHSA-24m4-27gj-gvmx). WebSocket scripted messages, interactive commands
+  and automatic Pong and Close frames, raw TCP scripted and interactive
+  sends and half-closes (scripted sends now honour the total deadline too,
+  not only the write deadline), DTLS handshake flights and datagrams (over
+  UDP, HBONE or MASQUE), HBONE interactive datagrams and MASQUE capsules are
+  raced against cancellation and the applicable deadline. An interrupted
+  write is never followed by a clean end: raw TCP skips its shutdown,
+  WebSocket over HTTP/3 resets its stream, and HBONE and MASQUE tunnels
+  (DTLS ones included) are reset. A raw TCP payload that was partly written
+  is reported as possibly dispatched. Graceful Close frames and
+  `close_notify` have their own short bound.
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

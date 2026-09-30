@@ -867,6 +867,11 @@ async fn replace_never_overwrites_records_or_reports_of_another_workspace() {
         let o = contents.objects.iter().find(|o| o.kind == k).unwrap();
         let mut v = o.value.clone();
         v["workspace_id"] = json!(payments.meta.id);
+        if k == kind::SPEC_SOURCE {
+            // Keep this case about records and reports sharing their ids.
+            // Namespace collisions are checked separately below.
+            v["source"]["id_namespace"] = json!(Id::new());
+        }
         b.store.put(k, &o.id.parse::<Id>().unwrap(), Some(&payments.meta.id), None, 0.0, &v).unwrap();
         reused.push((k.to_string(), o.id.clone()));
     }
