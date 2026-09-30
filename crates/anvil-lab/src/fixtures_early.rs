@@ -13,18 +13,21 @@
 //!
 //! 1. *Armed*: everything passes until the client sends a 0-RTT packet.
 //! 2. *Holding*: a datagram with only Initial or 0-RTT packets passes; one
-//!    carrying a Handshake packet (the Finished, or its retransmission) or a
-//!    1-RTT packet is queued, in order.
+//!    carrying a Handshake packet (the Finished, or its retransmission), a
+//!    1-RTT packet, or a long-header packet the relay cannot read (it fails
+//!    closed) is queued, in order.
 //! 3. [`Relay::release`] (the scenario saw the gateway act on the 0-RTT
 //!    request, or its cap ran out): the queued datagrams that carry a
-//!    Handshake packet go out first.
-//! 4. *Draining*: the queued 1-RTT datagrams (for example EARLY-002's retry
-//!    after its 425) wait for the gateway's first datagram after the Finished
-//!    went out, which normally carries HANDSHAKE_DONE, then for the relay's
-//!    `settle` time, or at most [`DRAIN_CAP`] in all. Releases before v0.9.8
-//!    can classify a 1-RTT stream that becomes ready in the same turn as their
-//!    handshake completion as early data (ferrum-edge#5761), so the retry
-//!    must not arrive with the Finished; the lab sets `settle` only for them.
+//!    Handshake packet go out first. A 1-RTT packet coalesced into one of
+//!    them goes out with it; [`HoldStats`] counts such datagrams.
+//! 4. *Draining*: the other queued datagrams (1-RTT data such as EARLY-002's
+//!    retry after its 425) wait for the first gateway datagram relayed to the
+//!    Finished's client address after the release, which normally carries
+//!    HANDSHAKE_DONE, then for the relay's `settle` time, or at most
+//!    [`DRAIN_CAP`] in all. Releases before v0.9.8 can classify a 1-RTT stream
+//!    that becomes ready in the same turn as their handshake completion as
+//!    early data (ferrum-edge#5761), so the retry must not arrive with the
+//!    Finished; the lab sets `settle` only for them.
 //! 5. *Open*: everything passes until the next [`Relay::arm`].
 
 use std::collections::HashMap;
@@ -50,13 +53,35 @@ pub struct Packets {
     pub handshake: bool,
     /// A short-header (1-RTT) packet, always the last one in a datagram.
     pub one_rtt: bool,
+    /// A long-header packet the relay could not read (an unknown version, or
+    /// lengths past the datagram's end).
+    pub unparsed: bool,
 }
 
 impl Packets {
-    /// Queued while the Finished is held: a Handshake or a 1-RTT packet.
+    /// Queued while the Finished is held: a Handshake, a 1-RTT or an
+    /// unreadable packet.
     fn held(&self) -> bool {
-        self.handshake || self.one_rtt
+        self.handshake || self.one_rtt || self.unparsed
     }
+
+    /// Waits for the drain after the release: 1-RTT or unreadable data
+    /// without a Handshake packet.
+    fn after_finished(&self) -> bool {
+        (self.one_rtt || self.unparsed) && !self.handshake
+    }
+}
+
+/// What the relay did during one hold that a check detail should name.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HoldStats {
+    /// Datagrams that carried both a Handshake and a 1-RTT packet, released
+    /// with the Finished or passed while draining: their 1-RTT data reached
+    /// the gateway without waiting for the drain.
+    pub coalesced_1rtt: usize,
+    /// Datagrams with a long-header packet the relay could not read, held
+    /// like 1-RTT data.
+    pub unparsed: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,8 +131,8 @@ fn long_packet(d: &[u8]) -> Option<(LongType, usize)> {
 }
 
 /// The packet types of one datagram, coalesced packets included (RFC 9000
-/// section 12.2). Parsing stops at anything it cannot read: a version it does
-/// not know, or zero padding after the last long-header packet.
+/// section 12.2). Parsing stops at zero padding after the last long-header
+/// packet, and at a long-header packet it cannot read (`unparsed`).
 pub fn packets(datagram: &[u8]) -> Packets {
     let mut p = Packets::default();
     let mut d = datagram;
@@ -117,7 +142,10 @@ pub fn packets(datagram: &[u8]) -> Packets {
             p.one_rtt = d.len() == datagram.len() || d.iter().any(|b| *b != 0);
             break;
         }
-        let Some((ty, len)) = long_packet(d) else { break };
+        let Some((ty, len)) = long_packet(d) else {
+            p.unparsed = true;
+            break;
+        };
         match ty {
             LongType::ZeroRtt => p.zero_rtt = true,
             LongType::Handshake => p.handshake = true,
@@ -139,9 +167,10 @@ enum Gate {
     Holding { since: Option<Instant> },
     /// Released: the queued Handshake datagrams go out next.
     Releasing,
-    /// The Finished went out after `server` gateway datagrams: 1-RTT
-    /// datagrams wait for the next one and the settle time, or `until`.
-    Draining { server: u64, until: Instant },
+    /// The Finished went out: the other datagrams wait for the next gateway
+    /// datagram to `client` (the Finished's sender; `None` once it came, or
+    /// when no Finished was queued) and the settle time, or `until`.
+    Draining { client: Option<SocketAddr>, until: Instant },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,20 +185,23 @@ struct Queued {
 struct Machine {
     gate: Gate,
     queue: Vec<Queued>,
-    /// Gateway datagrams relayed so far.
-    server: u64,
     /// How long 1-RTT datagrams still wait after the gateway's first datagram
     /// following the Finished.
     settle: Duration,
+    /// Since the last [`Machine::arm`].
+    stats: HoldStats,
 }
 
 impl Machine {
     fn new(settle: Duration) -> Self {
-        Machine { gate: Gate::Open, queue: Vec::new(), server: 0, settle }
+        Machine { gate: Gate::Open, queue: Vec::new(), settle, stats: HoldStats::default() }
     }
 
+    /// Hold the next 0-RTT connection's Finished. Anything still queued goes
+    /// out first ([`Machine::due`]).
     fn arm(&mut self) {
         self.gate = Gate::Armed;
+        self.stats = HoldStats::default();
     }
 
     fn disarm(&mut self) {
@@ -201,12 +233,16 @@ impl Machine {
         let hold = match self.gate {
             Gate::Open | Gate::Armed => false,
             Gate::Holding { .. } | Gate::Releasing => packets.held(),
-            Gate::Draining { .. } => packets.one_rtt && !packets.handshake,
+            Gate::Draining { .. } => {
+                self.stats.coalesced_1rtt += usize::from(packets.handshake && packets.one_rtt);
+                packets.after_finished()
+            }
         };
         let q = Queued { client, datagram, packets };
         if !hold {
             return Some(q);
         }
+        self.stats.unparsed += usize::from(packets.unparsed);
         if packets.handshake && self.gate == (Gate::Holding { since: None }) {
             self.gate = Gate::Holding { since: Some(now) };
         }
@@ -214,16 +250,15 @@ impl Machine {
         None
     }
 
-    /// A gateway datagram was relayed: while draining, the first one after
-    /// the Finished went out frees the queue, once the settle time passed.
-    fn server(&mut self, now: Instant) -> Vec<Queued> {
-        self.server += 1;
+    /// A gateway datagram was relayed to `to`: while draining, the first one
+    /// to the Finished's client frees the queue, once the settle time passed.
+    fn server(&mut self, now: Instant, to: SocketAddr) -> Vec<Queued> {
         match self.gate {
-            Gate::Draining { server, until } if self.server > server => {
+            Gate::Draining { client: Some(c), until } if c == to => {
                 if self.settle.is_zero() {
                     return self.open();
                 }
-                self.gate = Gate::Draining { server: u64::MAX, until: until.min(now + self.settle) };
+                self.gate = Gate::Draining { client: None, until: until.min(now + self.settle) };
                 Vec::new()
             }
             _ => Vec::new(),
@@ -237,8 +272,9 @@ impl Machine {
             Gate::Releasing => {
                 let queue = std::mem::take(&mut self.queue);
                 let (handshake, rest): (Vec<Queued>, Vec<Queued>) = queue.into_iter().partition(|q| q.packets.handshake);
+                self.stats.coalesced_1rtt += handshake.iter().filter(|q| q.packets.one_rtt).count();
                 self.queue = rest;
-                self.gate = Gate::Draining { server: self.server, until: now + DRAIN_CAP };
+                self.gate = Gate::Draining { client: handshake.first().map(|q| q.client), until: now + DRAIN_CAP };
                 handshake
             }
             Gate::Draining { until, .. } if now >= until => self.open(),
@@ -302,6 +338,11 @@ impl Relay {
     pub fn disarm(&self) {
         self.with(Machine::disarm)
     }
+
+    /// What the relay did since the last [`Relay::arm`].
+    pub fn stats(&self) -> HoldStats {
+        step(&self.machine, |m| m.stats)
+    }
 }
 
 impl Drop for Relay {
@@ -339,7 +380,7 @@ async fn relay(front: Arc<UdpSocket>, upstream: SocketAddr, machine: Arc<Mutex<M
             }
             Some((client, datagram)) = from_gateway.recv() => {
                 let _ = front.send_to(&datagram, client).await;
-                step(&machine, |m| m.server(Instant::now()))
+                step(&machine, |m| m.server(Instant::now(), client))
             }
             _ = wake.notified() => step(&machine, |m| m.due(Instant::now())),
             _ = tick.tick() => step(&machine, |m| m.due(Instant::now())),
@@ -447,15 +488,35 @@ mod tests {
     }
 
     #[test]
-    fn unknown_versions_and_truncated_packets_are_not_read() {
-        assert_eq!(packets(&long_with(0x0a0a_0a0a, HANDSHAKE, false, 8)), Packets::default());
+    fn unknown_versions_and_truncated_packets_are_unparsed() {
+        let unparsed = Packets { unparsed: true, ..Default::default() };
+        assert_eq!(packets(&long_with(0x0a0a_0a0a, HANDSHAKE, false, 8)), unparsed);
         let mut cut = long(HANDSHAKE, 8);
         cut.truncate(cut.len() - 1);
-        assert_eq!(packets(&cut), Packets::default());
+        assert_eq!(packets(&cut), unparsed);
+        // After a readable packet the flags add up.
+        assert_eq!(packets(&cat(&[long(ZERO_RTT, 8), cut])), Packets { zero_rtt: true, unparsed: true, ..Default::default() });
+    }
+
+    /// A token longer than 63 bytes has a two-byte length varint.
+    #[test]
+    fn an_initial_token_with_a_multi_byte_length_is_skipped() {
+        let mut initial = vec![0xc0, 0, 0, 0, 1, 0, 0, 0x40, 100];
+        initial.extend([7; 100]);
+        initial.extend([0x40, 20]);
+        initial.extend([0xaa; 20]);
+        assert_eq!(packets(&cat(&[initial.clone(), long(ZERO_RTT, 4)])), zero_rtt());
+        // One byte short of the token: unreadable, never a 0-RTT packet.
+        initial.truncate(9 + 99);
+        assert_eq!(packets(&initial), Packets { unparsed: true, ..Default::default() });
     }
 
     fn addr() -> SocketAddr {
         "127.0.0.1:40000".parse().unwrap()
+    }
+
+    fn other() -> SocketAddr {
+        "127.0.0.1:40001".parse().unwrap()
     }
 
     fn sent(q: Option<Queued>) -> bool {
@@ -491,7 +552,7 @@ mod tests {
         assert!(!sent(m.client(t1, addr(), finished.clone())));
         assert!(!sent(m.client(t1 + Duration::from_millis(3), addr(), long(HANDSHAKE, 60))), "a retransmission waits too");
         assert_eq!(m.holding_since(), Some(t1));
-        assert!(m.server(t1).is_empty(), "the gateway's 0.5-RTT data frees nothing");
+        assert!(m.server(t1, addr()).is_empty(), "the gateway's 0.5-RTT data frees nothing");
         assert!(m.due(t1).is_empty(), "nothing is due before the release");
 
         assert_eq!(m.release(), 3);
@@ -504,7 +565,7 @@ mod tests {
         assert!(!sent(m.client(t2, addr(), short(30))), "1-RTT data waits for the gateway");
         assert!(sent(m.client(t2, addr(), long(HANDSHAKE, 60))), "Handshake data passes");
         assert!(m.due(t2 + Duration::from_millis(1)).is_empty());
-        let rest: Vec<Vec<u8>> = m.server(t2).into_iter().map(|q| q.datagram).collect();
+        let rest: Vec<Vec<u8>> = m.server(t2, addr()).into_iter().map(|q| q.datagram).collect();
         assert_eq!(rest, vec![ack, retry, short(30)], "in order");
         assert!(sent(m.client(t2, addr(), short(30))), "open");
     }
@@ -538,8 +599,8 @@ mod tests {
         m.release();
         assert_eq!(m.due(t0).len(), 1);
         let t1 = t0 + Duration::from_millis(1);
-        assert!(m.server(t1).is_empty());
-        assert!(m.server(t1).is_empty(), "a second gateway datagram does not cut the settle time short");
+        assert!(m.server(t1, addr()).is_empty());
+        assert!(m.server(t1, addr()).is_empty(), "a second gateway datagram does not cut the settle time short");
         assert!(!sent(m.client(t1, addr(), short(10))));
         assert!(m.due(t1 + settle - Duration::from_millis(1)).is_empty());
         assert_eq!(m.due(t1 + settle).len(), 2);
@@ -559,5 +620,77 @@ mod tests {
         assert_eq!(all, vec![short(1), long(HANDSHAKE, 10)]);
         assert!(sent(m.client(t0, addr(), short(1))));
         assert_eq!(m.release(), 0, "no hold to release");
+    }
+
+    /// A 1-RTT packet coalesced into a Handshake datagram goes out with the
+    /// Finished, or passes while draining, and the stats count it.
+    #[test]
+    fn coalesced_1rtt_goes_with_the_finished_and_is_counted() {
+        let t0 = Instant::now();
+        let mut m = Machine::new(Duration::ZERO);
+        m.arm();
+        m.client(t0, addr(), long(ZERO_RTT, 10));
+        let finished = cat(&[long(HANDSHAKE, 60), short(40)]);
+        assert!(!sent(m.client(t0, addr(), finished.clone())));
+        assert!(!sent(m.client(t0, addr(), short(9))));
+        m.release();
+        let first: Vec<Vec<u8>> = m.due(t0).into_iter().map(|q| q.datagram).collect();
+        assert_eq!(first, vec![finished]);
+        assert_eq!(m.stats, HoldStats { coalesced_1rtt: 1, unparsed: 0 });
+        assert!(sent(m.client(t0, addr(), cat(&[long(HANDSHAKE, 60), short(5)]))), "Handshake data passes while draining");
+        assert_eq!(m.stats.coalesced_1rtt, 2);
+        assert_eq!(m.server(t0, addr()).len(), 1, "the lone 1-RTT datagram waited for the gateway");
+    }
+
+    /// Unreadable datagrams are held while the Finished is (fail closed),
+    /// wait for the drain after it, and are counted.
+    #[test]
+    fn unreadable_datagrams_are_held_and_counted() {
+        let t0 = Instant::now();
+        let mut m = Machine::new(Duration::ZERO);
+        m.arm();
+        m.client(t0, addr(), long(ZERO_RTT, 10));
+        let odd = long_with(0x0a0a_0a0a, HANDSHAKE, false, 8);
+        assert!(!sent(m.client(t0, addr(), odd.clone())));
+        m.client(t0, addr(), long(HANDSHAKE, 10));
+        m.release();
+        assert_eq!(m.due(t0).len(), 1, "only the readable Handshake datagram goes first");
+        assert!(!sent(m.client(t0, addr(), odd.clone())));
+        assert_eq!(m.stats.unparsed, 2);
+        assert_eq!(m.server(t0, addr()).len(), 2);
+    }
+
+    /// Only a gateway datagram to the Finished's client ends the drain.
+    #[test]
+    fn the_drain_waits_for_a_datagram_to_the_finisheds_client() {
+        let t0 = Instant::now();
+        let mut m = Machine::new(Duration::ZERO);
+        m.arm();
+        m.client(t0, addr(), long(ZERO_RTT, 10));
+        m.client(t0, addr(), long(HANDSHAKE, 10));
+        m.client(t0, addr(), short(10));
+        m.release();
+        assert_eq!(m.due(t0).len(), 1);
+        assert!(m.server(t0, other()).is_empty(), "another client's datagram");
+        assert_eq!(m.server(t0, addr()).len(), 1);
+    }
+
+    /// Arming again flushes what an earlier hold left queued, before
+    /// anything else; until the 0-RTT packet, everything passes.
+    #[test]
+    fn arming_flushes_a_leftover_queue_first() {
+        let t0 = Instant::now();
+        let mut m = Machine::new(Duration::ZERO);
+        m.arm();
+        m.client(t0, addr(), long(ZERO_RTT, 10));
+        m.client(t0, addr(), short(3));
+        m.stats.unparsed = 7;
+        m.arm();
+        assert_eq!(m.stats, HoldStats::default(), "arming resets the stats");
+        let left: Vec<Vec<u8>> = m.due(t0).into_iter().map(|q| q.datagram).collect();
+        assert_eq!(left, vec![short(3)]);
+        assert!(sent(m.client(t0, addr(), long(HANDSHAKE, 10))), "armed: an earlier connection's Finished passes");
+        assert!(sent(m.client(t0, addr(), cat(&[long(INITIAL, 40), long(ZERO_RTT, 10)]))));
+        assert!(!sent(m.client(t0, addr(), long(HANDSHAKE, 10))), "after the 0-RTT packet the Finished is held");
     }
 }

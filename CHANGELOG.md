@@ -271,39 +271,36 @@
 
 ### Fixed
 
-- The failure lab's EARLY-001 and EARLY-002 no longer fail when the gateway
-  handles the 0-RTT request after its own handshake completed. Ferrum Edge
+- The failure lab's EARLY-001 and EARLY-002 test the gateway's pending
+  0-RTT window deterministically. The client's "offered and accepted"
+  evidence does not prove the gateway saw the request early: Ferrum Edge
   classifies each HTTP/3 stream when it accepts it and handles a 0-RTT
-  stream accepted after its handshake as 1-RTT (RFC 8470 section 6.4), so
-  the client's "offered and accepted" evidence does not prove the gateway
-  saw the request early; lab run 36557709775 got one 200 for EARLY-002's PUT
-  and failed. A round is now judged strictly only once the gateway's side
-  shows it saw the stream while its handshake was pending (a `425` on the
-  first attempt, its refusal log, or the request forwarded with
-  `Early-Data: 1`): EARLY-001 still requires the admitted GET with
-  `Early-Data: 1`, EARLY-002 still requires `425`, the one retry on the same
-  connection, `request.too_early` and the refusal log. A round of exactly
-  the permitted shape (one 200, no retry, one backend request without
-  `Early-Data`, no refusal logged) is a missed window and the next round is
-  tried. Any other shape still fails (#221).
-- The failure lab's EARLY-001 and EARLY-002 now test the gateway's pending
-  0-RTT window deterministically, with no run-time skip. They reach the
-  gateway's HTTP/3 listener through a UDP relay fixture (`127.0.0.1:17302`)
-  that holds the client's Handshake-space packets (its TLS Finished) while
-  its 0-RTT packets pass, and releases the Finished on an event: the backend
-  receiving the request, or the gateway logging its refusal (at most 2 s
-  when neither happens). The gateway's handshake is therefore still pending
-  when it handles the 0-RTT stream. A request that reached the backend
-  before the release was processed while the handshake was pending: for
-  EARLY-002's PUT that is a hard failure, and EARLY-001 now requires its
-  admitted GET to arrive before the release. A round the gateway did not act
-  on within the hold is retried, and running out of rounds fails; the skip
-  and the rule that failed a skip in both passes are gone, and so is
-  `Checks::skip`. The client's 1-RTT data queued during the hold, such as
-  EARLY-002's retry, waits for the gateway's first datagram after the
-  Finished, and 20 ms more on releases before v0.9.8, whose accept loop can
-  take a 1-RTT stream that arrives with the Finished for early data
-  (ferrum-edge#5761) (#223).
+  stream accepted after its handshake as 1-RTT (RFC 8470 section 6.4), and
+  lab run 36557709775 got one 200 for EARLY-002's PUT and failed (#221).
+  The scenarios now reach the gateway's HTTP/3 listener through a UDP relay
+  fixture (`127.0.0.1:17302`). The relay holds the client's
+  Handshake-space packets (its TLS Finished), its 1-RTT packets and any
+  packet it cannot read, while its 0-RTT packets pass. It releases the
+  Finished on an event: the backend receiving a request of the round's
+  method, or the gateway logging its refusal. When neither happens, it
+  releases after at most 2 s. The gateway's handshake is therefore still
+  pending when it handles the 0-RTT stream.
+  - A request of the method that reached the backend before the release
+    was processed while the handshake was pending. For EARLY-002's PUT that
+    is a hard failure.
+  - EARLY-001 requires its admitted GET to arrive before the release,
+    unless the hold ran to its cap.
+  - EARLY-002 also accepts a 425 with the refusal log after the cap.
+  - A round whose hold ran to the cap and that then served the permitted
+    shape (one 200, no retry, one backend request without `Early-Data`, no
+    refusal logged) is retried. Running out of rounds fails; there is no
+    run-time skip.
+  - The client's queued 1-RTT data, such as EARLY-002's retry, waits for
+    the first gateway datagram relayed after the release, and 20 ms more on
+    releases before v0.9.8. Their accept loop can take a 1-RTT stream that
+    arrives with the Finished for early data (ferrum-edge#5761).
+  - 1-RTT data coalesced into a Handshake datagram goes out without that
+    wait. The check detail counts such datagrams (#223).
 - UDP load-scenario silence coverage keeps its non-responding target socket
   bound for the whole sub-case, then checks ICMP-unreachable counts on a
   released port with up to five fresh-port retries for parallel UDP replies.

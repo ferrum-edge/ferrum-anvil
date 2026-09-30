@@ -18,7 +18,7 @@
 //! request that arrived before the release was processed while the gateway's
 //! handshake was pending.
 
-use crate::fixtures_early::Relay;
+use crate::fixtures_early::{HoldStats, Relay};
 use crate::gateway::{Gateway, Instance, Readiness};
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
@@ -35,6 +35,7 @@ use anvil_fixtures::http::{self, Fixture};
 use anvil_fixtures::{GroundTruth, LabPki};
 use anvil_transport::recorder::EventCtx;
 use std::future::Future;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
@@ -215,10 +216,11 @@ fn misclassifies_1rtt() -> bool {
     !crate::gateway::release_at_least("v0.9.8")
 }
 
-/// Before v0.9.8 the relay also waits this long after the gateway's first
-/// datagram following the released Finished before it lets the client's
-/// queued 1-RTT data (EARLY-002's retry) through, so the retry does not reach
-/// the gateway in the turn its handshake completes (see [`misclassifies_1rtt`]).
+/// Before v0.9.8 the relay also waits this long after the first gateway
+/// datagram relayed to the Finished's client after the release before it
+/// lets the client's queued 1-RTT data (EARLY-002's retry) through, so the
+/// retry does not reach the gateway in the turn its handshake completes (see
+/// [`misclassifies_1rtt`]).
 const PRE_098_SETTLE: Duration = Duration::from_millis(20);
 
 fn misclassified_note() -> String {
@@ -277,30 +279,42 @@ async fn fetch_ticket(env: &Env, c: &mut Checks, https: &str, version: HttpVersi
 const EARLY_ROUNDS: usize = 6;
 
 /// The longest the relay holds the client's Finished when the gateway does
-/// not act on the 0-RTT request: the one timing assumption of the pending
-/// window (see [`send_held`]).
+/// not act on the 0-RTT request (see [`send_held`]). A gateway slower than
+/// this is judged by what it does after the release.
 const HOLD_CAP: Duration = Duration::from_secs(2);
 
 /// How often the backend and gateway logs are read while the Finished is held.
-const HOLD_POLL: Duration = Duration::from_millis(1);
+const HOLD_POLL: Duration = Duration::from_millis(2);
+
+/// How the relay's hold of the client's Finished ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Released {
+    /// The gateway acted on the 0-RTT request: the backend received a
+    /// request of the method, or the gateway logged its refusal of it.
+    Acted,
+    /// [`HOLD_CAP`] ran out without the gateway acting.
+    Cap,
+    /// The request finished while the Finished was still held.
+    Done,
+}
 
 /// What the relay's hold of the client's Finished showed for one round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Hold {
-    /// The gateway acted on the 0-RTT request before the release: the backend
-    /// received a request, or the gateway logged its refusal of the method.
-    /// Otherwise [`HOLD_CAP`] or the end of the request released it.
-    acted: bool,
-    /// Backend requests since the round's request, counted before the
-    /// release: each reached the backend before the gateway could have the
-    /// client's Finished, so while the gateway's handshake was pending.
+    released: Released,
+    /// Backend requests of the method since the round's request, counted
+    /// before the release: each reached the backend before the gateway could
+    /// have the client's Finished, so while its handshake was pending.
     backend_before: usize,
-    /// The gateway's refusals of the method logged before the release.
+    /// The gateway's refusals of the method read from its log before the
+    /// release (not read once a backend request was counted).
     refusals_before: usize,
     /// How long the Finished was held.
     held_for: Duration,
     /// Datagrams queued at the release.
     datagrams: usize,
+    /// What the relay did during the hold, read when the request finished.
+    relay: HoldStats,
 }
 
 /// A check detail for the relay's hold of a round's Finished.
@@ -308,12 +322,15 @@ fn held(hold: Option<Hold>) -> String {
     match hold {
         None => "the relay held no Finished".into(),
         Some(h) => format!(
-            "held {:?} with {} datagrams queued, released {}; before it: {} backend request(s), {} refusal line(s)",
+            "held {:?} with {} datagrams queued, released {:?}; before it: {} backend request(s), {} refusal line(s); \
+             {} Handshake datagram(s) also carried 1-RTT data, {} unreadable datagram(s) held",
             h.held_for,
             h.datagrams,
-            if h.acted { "once the gateway acted" } else { "by the cap or the end of the request" },
+            h.released,
             h.backend_before,
-            h.refusals_before
+            h.refusals_before,
+            h.relay.coalesced_1rtt,
+            h.relay.unparsed
         ),
     }
 }
@@ -323,33 +340,74 @@ fn refusals(env: &Env, from: usize, method: &str) -> usize {
     gw_lines(&env.gateway, from, H3_REFUSAL).iter().filter(|l| l.contains(method)).count()
 }
 
-/// Release the held Finished once the gateway acted on the round's request,
-/// once [`HOLD_CAP`] ran out, or (`done`) once the request finished. `None`
-/// while no Finished is held, and while the hold goes on.
-fn watch(env: &Env, method: &str, backend_from: usize, log_from: usize, done: bool) -> Option<Hold> {
-    let since = env.fx.relay.holding_since()?;
-    let backend_before = backend_requests(env, backend_from).len();
-    let refusals_before = refusals(env, log_from, method);
-    let acted = backend_before > 0 || refusals_before > 0;
-    let held_for = since.elapsed();
-    let release = acted || done || held_for >= HOLD_CAP;
-    if !release {
-        return None;
+/// Backend requests of `method` since request `from`.
+fn backend_of(env: &Env, from: usize, method: &str) -> usize {
+    env.fx.backend.log.requests().iter().skip(from).filter(|(m, _)| m == method).count()
+}
+
+/// Watches one round's backend and gateway logs while the relay holds the
+/// client's Finished, and releases it ([`Watch::poll`]).
+struct Watch<'a> {
+    env: &'a Env,
+    method: &'a str,
+    backend_from: usize,
+    /// Byte offset of the gateway log read so far: only appended lines are read.
+    log_offset: u64,
+    refusals: usize,
+}
+
+impl<'a> Watch<'a> {
+    fn new(env: &'a Env, method: &'a str, backend_from: usize) -> Self {
+        let log_offset = std::fs::metadata(&env.gateway.log_path).map(|m| m.len()).unwrap_or(0);
+        Watch { env, method, backend_from, log_offset, refusals: 0 }
     }
-    // Counted above, before the release: the relay forwards the Finished
-    // only after this call, so a request counted here never came after it.
-    let datagrams = env.fx.relay.release();
-    Some(Hold { acted, backend_before, refusals_before, held_for, datagrams })
+
+    /// Count the refusal lines the gateway appended since the last read, up
+    /// to its last complete line.
+    fn read_log(&mut self) {
+        let Ok(mut f) = std::fs::File::open(&self.env.gateway.log_path) else { return };
+        let mut buf = Vec::new();
+        if f.seek(SeekFrom::Start(self.log_offset)).is_err() || f.read_to_end(&mut buf).is_err() {
+            return;
+        }
+        let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return };
+        let text = String::from_utf8_lossy(&buf[..=end]);
+        self.refusals += text.lines().filter(|l| l.contains(H3_REFUSAL) && l.contains(self.method)).count();
+        self.log_offset += end as u64 + 1;
+    }
+
+    /// Release the held Finished once the gateway acted on the round's
+    /// request, once [`HOLD_CAP`] ran out, or (`done`) once the request
+    /// finished. `None` while no Finished is held, and while the hold goes on.
+    fn poll(&mut self, done: bool) -> Option<Hold> {
+        let since = self.env.fx.relay.holding_since()?;
+        let backend_before = backend_of(self.env, self.backend_from, self.method);
+        if backend_before == 0 {
+            self.read_log();
+        }
+        let held_for = since.elapsed();
+        let released = if backend_before > 0 || self.refusals > 0 {
+            Released::Acted
+        } else if held_for >= HOLD_CAP {
+            Released::Cap
+        } else if done {
+            Released::Done
+        } else {
+            return None;
+        };
+        // Counted above, before the release: the relay forwards the Finished
+        // only after this call, so a request counted here never came after it.
+        let datagrams = self.env.fx.relay.release();
+        Some(Hold { released, backend_before, refusals_before: self.refusals, held_for, datagrams, relay: HoldStats::default() })
+    }
 }
 
 /// Send `c` through the relay with its gate armed: the connection's 0-RTT
-/// packets pass while its Finished is held, until [`watch`] releases it. The
+/// packets pass while its Finished is held, until `watch` releases it. The
 /// release waits for an event (a backend request or the gateway's refusal
 /// log), not for a fixed time; only a gateway that does not act on the 0-RTT
-/// request within [`HOLD_CAP`] is released by time, and that round is
-/// retried.
-async fn send_held(env: &Env, c: &ExecutionContext, method: &str, from: (usize, usize)) -> (ExecutionOutput, Option<Hold>) {
-    let (backend_from, log_from) = from;
+/// request within [`HOLD_CAP`] is released by time.
+async fn send_held(env: &Env, c: &ExecutionContext, mut watch: Watch<'_>) -> (ExecutionOutput, Option<Hold>) {
     env.fx.relay.arm();
     let request = send(env, c);
     tokio::pin!(request);
@@ -357,12 +415,12 @@ async fn send_held(env: &Env, c: &ExecutionContext, method: &str, from: (usize, 
     let out = loop {
         tokio::select! {
             o = &mut request => break o,
-            _ = tokio::time::sleep(HOLD_POLL), if hold.is_none() => hold = watch(env, method, backend_from, log_from, false),
+            _ = tokio::time::sleep(HOLD_POLL), if hold.is_none() => hold = watch.poll(false),
         }
     };
-    let hold = hold.or_else(|| watch(env, method, backend_from, log_from, true));
+    let hold = hold.or_else(|| watch.poll(true));
     env.fx.relay.disarm();
-    (out, hold)
+    (out, hold.map(|h| Hold { relay: env.fx.relay.stats(), ..h }))
 }
 
 /// One round that did send the request as early data, with the backend and
@@ -470,7 +528,7 @@ async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str], g
         let backend_from = backend_count(env);
         let log_from = gw_from(&env.gateway);
         let request = ctx(env, method, RELAY, HttpVersionPolicy::Http3Only, Some(extra));
-        let (out, hold) = send_held(env, &request, method, (backend_from, log_from)).await;
+        let (out, hold) = send_held(env, &request, Watch::new(env, method, backend_from)).await;
         let mut this_round = None;
         if early(&out, 0).is_some_and(|e| e.offered) {
             let r = EarlyRound { out, backend_from, log_from, hold };
@@ -541,8 +599,9 @@ enum GatewayWindow {
     /// relay released the client's Finished. The scenario's strict checks
     /// apply (a PUT at the backend by then fails them).
     Pending,
-    /// The relay held the Finished for [`HOLD_CAP`] without the gateway
-    /// acting, and the gateway then handled the stream after its handshake:
+    /// The relay held the Finished until [`HOLD_CAP`] ran out without the
+    /// gateway acting, and the gateway then handled the stream after its
+    /// handshake:
     /// one 200, no retry, no `request.too_early`, exactly one backend request
     /// of the method without `Early-Data`, no refusal logged. A missed round.
     Completed,
@@ -578,8 +637,8 @@ fn gateway_window(f: &RoundFacts) -> GatewayWindow {
         return GatewayWindow::Pending;
     }
     let one_rtt = matches!(f.backend, [(m, None)] if m == f.method);
-    let not_acted = f.hold.is_some_and(|h| !h.acted);
-    if not_acted && f.statuses == [Some(200)] && !f.retried && !f.too_early_finding && one_rtt {
+    let capped = f.hold.is_some_and(|h| h.released == Released::Cap);
+    if capped && f.statuses == [Some(200)] && !f.retried && !f.too_early_finding && one_rtt {
         GatewayWindow::Completed
     } else {
         GatewayWindow::Unexplained
@@ -600,6 +659,20 @@ fn round_window(env: &Env, r: &EarlyRound, method: &str) -> (GatewayWindow, Stri
         hold: r.hold,
     };
     (gateway_window(&facts), format!("{} backend={seen:?} refusals={refusals}; {}", line(&r.out), held(r.hold)))
+}
+
+/// EARLY-001: the admitted GET reached the backend before the relay released
+/// the Finished; or, for a gateway slower than [`HOLD_CAP`], the hold ran to
+/// its cap and the `Early-Data: 1` check decides.
+fn get_admitted_in_window(hold: Option<Hold>) -> bool {
+    hold.is_some_and(|h| (h.released == Released::Acted && h.backend_before == 1) || h.released == Released::Cap)
+}
+
+/// EARLY-002: the gateway refused the 0-RTT PUT while the relay held the
+/// Finished, or (a gateway slower than [`HOLD_CAP`]) answered its first
+/// attempt 425 and logged its refusal after the release.
+fn put_refused_in_window(hold: Option<Hold>, first_status: Option<u16>, refusals: usize) -> bool {
+    hold.is_some_and(|h| h.released == Released::Acted || (first_status == Some(425) && refusals > 0))
 }
 
 /// EARLY-001's gateway side: a 0-RTT GET the gateway handled after its
@@ -695,8 +768,8 @@ fn early001(env: &Env) -> Fut<'_> {
         );
         c.add(
             CheckKind::GroundTruth,
-            "the backend saw the 0-RTT GET before the relay released the client's Finished: the gateway admitted it while its handshake was pending",
-            hold.is_some_and(|h| h.acted && h.backend_before == 1),
+            "the backend saw the 0-RTT GET before the relay released the client's Finished (unless the hold ran to its cap): admitted while the handshake was pending",
+            get_admitted_in_window(hold),
             held(hold),
         );
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
@@ -720,12 +793,13 @@ fn early002(env: &Env) -> Fut<'_> {
         );
         c.add(
             CheckKind::GroundTruth,
-            "the relay held the client's Finished until the gateway acted on the 0-RTT PUT",
-            r.hold.is_some_and(|h| h.acted),
+            "the gateway refused the 0-RTT PUT while the relay held the client's Finished, or answered it 425 and logged its refusal after the cap",
+            put_refused_in_window(r.hold, r.out.record.attempts.first().and_then(|x| x.response_status), refusals(env, r.log_from, "PUT")),
             held(r.hold),
         );
         // The hard failure: a PUT that reached the backend while the
-        // gateway's handshake was held pending was processed as early data.
+        // gateway's handshake was held pending was processed as early data
+        // (the count is of PUTs only).
         c.add(
             CheckKind::GroundTruth,
             "no PUT reached the backend before the relay released the client's Finished",
@@ -1121,12 +1195,25 @@ mod tests {
     }
 
     /// The relay held the Finished for the whole cap: the gateway did not act.
-    const CAPPED: Hold = Hold { acted: false, backend_before: 0, refusals_before: 0, held_for: HOLD_CAP, datagrams: 4 };
+    const CAPPED: Hold = Hold {
+        released: Released::Cap,
+        backend_before: 0,
+        refusals_before: 0,
+        held_for: HOLD_CAP,
+        datagrams: 4,
+        relay: HoldStats { coalesced_1rtt: 0, unparsed: 0 },
+    };
 
     /// The gateway acted: `backend` backend requests and `refusals` refusal
     /// lines before the release.
     fn acted(backend: usize, refusals: usize) -> Option<Hold> {
-        Some(Hold { acted: true, backend_before: backend, refusals_before: refusals, held_for: Duration::from_millis(3), datagrams: 2 })
+        Some(Hold {
+            released: Released::Acted,
+            backend_before: backend,
+            refusals_before: refusals,
+            held_for: Duration::from_millis(3),
+            ..CAPPED
+        })
     }
 
     /// Issue #221 (lab run 36557709775, EARLY-002-untrusted on v0.9.8): the
@@ -1143,6 +1230,26 @@ mod tests {
         let mut f = facts("PUT", &[200], false, false, &backend, 0);
         f.hold = None;
         assert_eq!(gateway_window(&f), GatewayWindow::Unexplained, "a round the relay did not hold is judged strictly");
+        f.hold = Some(Hold { released: Released::Done, ..CAPPED });
+        assert_eq!(gateway_window(&f), GatewayWindow::Unexplained, "only a hold that ran to its cap is a missed round");
+    }
+
+    /// A correct gateway slower than the cap still passes EARLY-002's hold
+    /// check with its 425 and refusal log; EARLY-001 then leaves the verdict
+    /// to its `Early-Data: 1` check. Without a hold, or without the gateway's
+    /// action, neither passes.
+    #[test]
+    fn a_gateway_slower_than_the_cap_is_judged_by_what_it_did() {
+        assert!(put_refused_in_window(acted(0, 1), Some(425), 1));
+        assert!(put_refused_in_window(Some(CAPPED), Some(425), 1));
+        assert!(!put_refused_in_window(Some(CAPPED), Some(425), 0), "a 425 without the refusal log");
+        assert!(!put_refused_in_window(Some(CAPPED), Some(200), 1));
+        assert!(!put_refused_in_window(None, Some(425), 1));
+        assert!(get_admitted_in_window(acted(1, 0)));
+        assert!(get_admitted_in_window(Some(CAPPED)));
+        assert!(!get_admitted_in_window(acted(2, 0)));
+        assert!(!get_admitted_in_window(Some(Hold { released: Released::Done, ..CAPPED })));
+        assert!(!get_admitted_in_window(None));
     }
 
     /// Issue #223: a 200 whose backend receipt came before the relay released

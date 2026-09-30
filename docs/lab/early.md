@@ -72,8 +72,8 @@ cache (the vault-lock path), so the trusted and untrusted passes behave alike.
 | ID | Stimulus | Anvil must conclude | Ground truth |
 |---|---|---|---|
 | CTRL-EARLY | GET over HTTP/3, no opt-in | success; no early-data evidence; no ticket kept | backend saw the GET without `Early-Data` |
-| EARLY-001 | GET (fetches tickets), then GET with the opt-in | first: `no_ticket`, 2 tickets, `max_early_data_size` 4294967295; second: resumed, 0-RTT offered and **accepted** (154 bytes), `early_data.accepted` (confirmed, `client_to_peer`, replay note) | backend saw the 0-RTT GET with **`Early-Data: 1`**, the ticket GET without, **before the relay released the client's Finished** (see *Pending-window relay*) |
-| EARLY-002 | GET, then PUT in 0-RTT (Anvil's policy lists PUT; the gateway's only GET) | once the gateway saw the PUT while its handshake was pending: attempt 0: 0-RTT accepted by QUIC, answered **425**; attempt 1 `too_early_retry` on the **same connection**, not early, **200**; `request.too_early` (confirmed, scope unknown, names "HTTP 200") | the relay held the client's Finished until the gateway refused the PUT, and **no PUT reached the backend before the release**; backend saw exactly one PUT (the retry) without `Early-Data`; gateway log `Rejected HTTP/3 0-RTT request: method PUT …` |
+| EARLY-001 | GET (fetches tickets), then GET with the opt-in | first: `no_ticket`, 2 tickets, `max_early_data_size` 4294967295; second: resumed, 0-RTT offered and **accepted** (154 bytes), `early_data.accepted` (confirmed, `client_to_peer`, replay note) | backend saw the 0-RTT GET with **`Early-Data: 1`**, the ticket GET without, **before the relay released the client's Finished**, unless the hold ran to its cap (see *Pending-window relay*) |
+| EARLY-002 | GET, then PUT in 0-RTT (Anvil's policy lists PUT; the gateway's only GET) | once the gateway saw the PUT while its handshake was pending: attempt 0: 0-RTT accepted by QUIC, answered **425**; attempt 1 `too_early_retry` on the **same connection**, not early, **200**; `request.too_early` (confirmed, scope unknown, names "HTTP 200") | the relay held the client's Finished until the gateway refused the PUT (or, after the 2 s cap, 425 and the refusal log), and **no PUT reached the backend before the release**; backend saw exactly one PUT (the retry) without `Early-Data`; gateway log `Rejected HTTP/3 0-RTT request: method PUT …` |
 | EARLY-003 | the same GET pair against `early-off` | tickets with `max_early_data_size` 0; second GET resumed, not offered (`ticket_without_early_data`), delivered after the handshake; `early_data.ticket_without_early_data` | backend saw both GETs, neither marked |
 | EARLY-004 | GET pair over TLS 1.3 / TCP (HTTP/1.1-only) to the HTTPS listener | resumed TLS 1.3 session (`resumed`, verification from the ticket's handshake), tickets never allow early data; `early_data.ticket_without_early_data` | backend saw both GETs, neither marked |
 | EARLY-005 | GET, then POST with the opt-in | POST not eligible: resumed, sent after the handshake (`method_not_eligible`), no 425 | backend saw the POST without `Early-Data` |
@@ -109,37 +109,48 @@ request:
 
 1. Datagrams pass until the client sends a 0-RTT packet. From then on, a datagram that carries only
    Initial or 0-RTT packets still passes; one that carries a Handshake packet (the Finished and its
-   retransmissions) or a 1-RTT packet is queued, in order.
-2. The lab releases the Finished on an **event**: the backend received a request since the round
-   began, or the gateway logged `Rejected HTTP/3 0-RTT request … <method>` (polled every 1 ms). It
-   counts the backend requests before it releases, so a request counted there reached the backend
-   while the gateway's handshake was still pending. Only when neither happens is the Finished
-   released by time, after **2 s** (the hold cap), or when the request finishes.
-3. The queued Handshake datagrams go out first. The queued 1-RTT datagrams (acknowledgements, and
-   EARLY-002's retry after its 425) wait for the gateway's first datagram after the Finished went
-   out, which normally carries HANDSHAKE_DONE, at most 250 ms. On releases before v0.9.8 they then
-   wait 20 ms more (see *Gateway race before v0.9.8*).
+   retransmissions), a 1-RTT packet, or a long-header packet the relay cannot read (it fails closed)
+   is queued, in order.
+2. The lab releases the Finished on an **event**: the backend received a request of the round's
+   method, or the gateway logged `Rejected HTTP/3 0-RTT request … <method>`. It polls every 2 ms,
+   reads only what the gateway appended to its log, and stops reading the log once a backend request
+   is counted. It counts the backend requests before it releases, so a request counted there reached
+   the backend while the gateway's handshake was still pending. Only when neither happens is the
+   Finished released by time, after **2 s** (the hold cap), or when the request finishes.
+3. The queued datagrams that carry a Handshake packet go out first. The other queued datagrams
+   (acknowledgements, and EARLY-002's retry after its 425) wait for the first gateway datagram
+   relayed to the Finished's client address after the release, which normally carries
+   HANDSHAKE_DONE, at most 250 ms. On releases before v0.9.8 they then wait 20 ms more (see *Gateway
+   race before v0.9.8*). **Gap:** 1-RTT data that the client coalesced into a datagram with a
+   Handshake packet goes out with the Finished, or passes at once while draining, without that wait.
+   The hold's check detail counts such datagrams, and the unreadable ones held, so a failure caused
+   by either can be told apart.
 4. When the request finishes, the relay is disarmed and forwards anything still queued.
 
 A 0-RTT round is judged strictly when the gateway's side shows that it saw the stream while its
 handshake was pending: a 425 on the first attempt, its refusal log, the request forwarded with
-`Early-Data: 1`, or a backend request that arrived before the release. EARLY-001 then requires the
-admitted GET with `Early-Data: 1` to have reached the backend before the release. EARLY-002 requires
-the hold to have ended on the gateway's action, **no PUT at the backend before the release** (a 200
-for a PUT the gateway processed while its handshake was pending fails here), 425, one retry on the
-same connection, 200, one backend PUT, `request.too_early` and the refusal log. A round in which the
-gateway did not act during the whole hold and then served exactly the permitted shape (one 200, no
-retry, no `request.too_early`, one backend request of that method without `Early-Data`, no refusal
-logged) is a missed round, and the next round is tried. Any other shape, and any 0-RTT round the relay
-did not hold, goes to the strict checks and fails. When the rounds run out the scenario **fails**;
-there is no run-time skip.
+`Early-Data: 1`, or a backend request of the method that arrived before the release. EARLY-001 then
+requires the admitted GET with `Early-Data: 1`, and requires it to have reached the backend before
+the release unless the hold ran to its cap. EARLY-002 requires **no PUT at the backend before the
+release** (a 200 for a PUT the gateway processed while its handshake was pending fails here), a hold
+that ended on the gateway's refusal (or, after the cap, a 425 and the refusal log), 425, one retry on
+the same connection, 200, one backend PUT, `request.too_early` and the refusal log. A round whose
+hold ran to the cap without the gateway acting, and that then served exactly the permitted shape (one
+200, no retry, no `request.too_early`, one backend request of that method without `Early-Data`, no
+refusal logged), is a missed round, and the next round is tried. Any other shape, and any 0-RTT round
+the relay did not hold, goes to the strict checks and fails. When the rounds run out the scenario
+**fails**; there is no run-time skip.
 
-The residual timing assumptions: the gateway handles a 0-RTT request within 2 s of receiving it
-while its handshake is pending (a slower round is retried, and six slow rounds fail); its log line
-reaches the log file within that time; and, on releases before v0.9.8 only, the 20 ms after the
-gateway's first datagram following the Finished are enough for its accept loop to see its handshake
-complete. None of them makes a passing gateway fail on a fast machine, and none can make a gateway
-that processes the PUT early pass.
+The residual timing assumptions:
+
+- The gateway acts on a pending 0-RTT request, and its log line lands, within 2 s. A gateway slower
+  than that is judged by what it then does. A 425 with its refusal log (EARLY-002) or a GET forwarded
+  with `Early-Data: 1` (EARLY-001) still passes. The permitted 200 shape is a missed round and is
+  retried, and six missed rounds fail.
+- On releases before v0.9.8 only, the 20 ms after the first gateway datagram following the release
+  are enough for the gateway's accept loop to see its handshake complete.
+
+Neither assumption can make a gateway that processes the PUT early pass.
 
 **Gateway race before v0.9.8.** v0.9.5 and v0.9.7 can classify an HTTP/3 stream accepted before the
 gateway's own handshake-complete signal as early data (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8
@@ -150,8 +161,9 @@ the early-data listener (CTRL-EARLY, EARLY-001's ticket GET, EARLY-005, EARLY-00
 rounds) therefore accept `Early-Data: 1`, and EARLY-005 accepts a 425 followed by its one retry; the
 check detail names the misclassification. Anvil's own evidence must still say nothing was sent
 early. On v0.9.8 and later these checks stay strict. EARLY-002's retry must stay outside the race
-even though the relay queues it during the hold: it reaches the gateway only after the gateway's first
-datagram following the Finished and, on these releases, 20 ms more.
+even though the relay queues it during the hold: it reaches the gateway only after the first gateway
+datagram relayed after the release and, on these releases, 20 ms more (unless the client coalesced it
+into a Handshake datagram, which the hold's check detail counts).
 
 ## 4. Results
 
