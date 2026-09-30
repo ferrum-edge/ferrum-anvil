@@ -28,12 +28,60 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
 use std::convert::Infallible;
+use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+
+const PORT_ZERO_BIND_ATTEMPTS: usize = 64;
+const WINDOWS_WSAEACCES: i32 = 10013;
+
+type TcpBindFuture = Pin<Box<dyn Future<Output = io::Result<TcpListener>> + Send>>;
+type UdpBindFuture<E> = Pin<Box<dyn Future<Output = anyhow::Result<(E, SocketAddr)>> + Send>>;
+
+fn retryable_bind_error(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_WSAEACCES)
+        || matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse)
+}
+
+async fn bind_udp_tcp_pair_with<E, U, T>(mut bind_udp: U, mut bind_tcp: T) -> anyhow::Result<(E, TcpListener)>
+where
+    E: Send,
+    U: FnMut() -> UdpBindFuture<E>,
+    T: FnMut(SocketAddr) -> TcpBindFuture,
+{
+    let mut rejected = Vec::new();
+    let mut tried_ports = Vec::new();
+    let mut last_error = None;
+    for _ in 0..PORT_ZERO_BIND_ATTEMPTS {
+        let (endpoint, addr) = match bind_udp().await {
+            Ok(bound) => bound,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        tried_ports.push(addr.port());
+        match bind_tcp(addr).await {
+            Ok(listener) => return Ok((endpoint, listener)),
+            Err(error) if retryable_bind_error(&error) => {
+                last_error = Some(error.into());
+                rejected.push(endpoint);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let error = last_error.unwrap_or_else(|| anyhow::anyhow!("the fixture pair bind made no attempts"));
+    Err(anyhow::anyhow!(
+        "no port was free over both UDP and TCP after {PORT_ZERO_BIND_ATTEMPTS} attempts; tried UDP ports {tried_ports:?}: {error}"
+    ))
+}
 
 /// One request the fixture received.
 #[derive(Clone, Debug)]
@@ -151,9 +199,9 @@ fn event_stream(reconnected: bool) -> http::Response<Body> {
         .expect("static response")
 }
 
-/// A UDP port for QUIC and the same TCP port, on 127.0.0.1. Either bind can
-/// fail (another socket may hold that TCP port, or the port may sit in a
-/// Windows excluded range): the pair is then tried again on a fresh port.
+/// A UDP port for QUIC and the same TCP port, on 127.0.0.1. Bind UDP first
+/// because Windows assigns UDP port 0 outside its excluded ranges, then bind
+/// TCP to the assigned port. Rejected QUIC endpoints stay held until return.
 async fn bind(tls: &TlsServerOptions, quic: bool) -> anyhow::Result<(Option<quinn::Endpoint>, TcpListener)> {
     if !quic {
         return Ok((None, TcpListener::bind("127.0.0.1:0").await?));
@@ -164,24 +212,19 @@ async fn bind(tls: &TlsServerOptions, quic: bool) -> anyhow::Result<(Option<quin
     opts.tls12_only = false;
     let quic_cfg = quinn::crypto::rustls::QuicServerConfig::try_from(server_config(&opts)?)?;
     let server_cfg = quinn::ServerConfig::with_crypto(Arc::new(quic_cfg));
-    let mut last = None;
-    for _ in 0..16 {
-        let endpoint = match quinn::Endpoint::server(server_cfg.clone(), "127.0.0.1:0".parse()?) {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                last = Some(error);
-                continue;
-            }
-        };
-        match TcpListener::bind(endpoint.local_addr()?).await {
-            Ok(l) => return Ok((Some(endpoint), l)),
-            Err(e) => {
-                endpoint.close(0u32.into(), b"");
-                last = Some(e);
-            }
-        }
-    }
-    Err(anyhow::anyhow!("no port was free over both UDP and TCP: {last:?}"))
+    let (endpoint, listener) = bind_udp_tcp_pair_with(
+        || {
+            let server_cfg = server_cfg.clone();
+            Box::pin(async move {
+                let endpoint = quinn::Endpoint::server(server_cfg, "127.0.0.1:0".parse()?)?;
+                let addr = endpoint.local_addr()?;
+                Ok((endpoint, addr))
+            })
+        },
+        |addr| Box::pin(TcpListener::bind(addr)),
+    )
+    .await?;
+    Ok((Some(endpoint), listener))
 }
 
 /// Start the fixture on 127.0.0.1, with HTTP/3 when `quic`, whose every
@@ -292,4 +335,84 @@ async fn serve_with(tls: TlsServerOptions, script: Option<H3Script>) -> anyhow::
         }
     });
     Ok(ReplayFixture { addr, received, quic_connections, endpoint, cancel })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Mutex as StdMutex;
+    use tokio::net::UdpSocket;
+
+    #[tokio::test]
+    async fn pair_binds_udp_first_and_retries_tcp_refusal() {
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let udp_order = order.clone();
+        let tcp_order = order.clone();
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let tcp_calls = calls.clone();
+
+        let (udp, tcp) = bind_udp_tcp_pair_with(
+            move || {
+                udp_order.lock().unwrap().push("udp");
+                Box::pin(async {
+                    let udp = UdpSocket::bind("127.0.0.1:0").await?;
+                    let addr = udp.local_addr()?;
+                    Ok((udp, addr))
+                })
+            },
+            move |addr| {
+                tcp_order.lock().unwrap().push("tcp");
+                let attempt = {
+                    let mut calls = tcp_calls.lock().unwrap();
+                    calls.push(addr.port());
+                    calls.len()
+                };
+                if attempt == 1 {
+                    let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                    Box::pin(async move { denied }) as TcpBindFuture
+                } else {
+                    Box::pin(TcpListener::bind(addr)) as TcpBindFuture
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*order.lock().unwrap(), ["udp", "tcp", "udp", "tcp"]);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[0], calls[1]);
+        assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
+    }
+
+    #[tokio::test]
+    async fn pair_error_lists_every_tried_udp_port() {
+        let ports = Arc::new(StdMutex::new(Vec::new()));
+        let bind_ports = ports.clone();
+        let result = bind_udp_tcp_pair_with(
+            || {
+                Box::pin(async {
+                    let udp = UdpSocket::bind("127.0.0.1:0").await?;
+                    let addr = udp.local_addr()?;
+                    Ok((udp, addr))
+                })
+            },
+            move |addr| {
+                bind_ports.lock().unwrap().push(addr.port());
+                let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                Box::pin(async move { denied }) as TcpBindFuture
+            },
+        )
+        .await;
+
+        let tried = ports.lock().unwrap();
+        assert_eq!(tried.len(), PORT_ZERO_BIND_ATTEMPTS);
+        assert_eq!(tried.iter().copied().collect::<HashSet<_>>().len(), tried.len());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("tried UDP ports ["));
+        for port in tried.iter() {
+            assert!(error.contains(&port.to_string()), "error omitted tried port {port}: {error}");
+        }
+    }
 }
