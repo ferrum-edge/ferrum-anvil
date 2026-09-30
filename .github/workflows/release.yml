@@ -2,9 +2,10 @@
 # prove they contain no test hooks, generate checksums, SBOMs, a license
 # report and release evidence, and create a DRAFT GitHub release.
 #
-#   push tag anvil-vX.Y.Z           -> full build + draft release
-#   manual from the tag, tag input  -> same for an existing tag
-#   manual, no tag                  -> dry run: artifacts + evidence uploaded to the run only
+#   push tag anvil-vX.Y.Z             -> full build + draft release
+#   manual from the tag (input empty
+#     or the same tag)                -> same for an existing tag
+#   manual from a branch, no input    -> dry run: unsigned artifacts + evidence uploaded to the run only
 #
 # Signing runs only for a tagged release: its build jobs run in the protected
 # `release` environment, which should hold the owner's credentials (Apple and
@@ -22,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build (anvil-vX.Y.Z). Leave empty for a dry run of the selected ref (nothing is published)."
+        description: "Existing tag to release (anvil-vX.Y.Z); run the workflow from that tag. A run from a tag is a full signed release even when this is empty; a run from a branch with this empty is an unsigned dry run (nothing is published)."
         required: false
         default: ""
 
@@ -51,7 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          # The fully qualified ref of the run: a bare tag name would resolve to
+          # a branch of the same name if one exists.
+          ref: ${{ github.ref }}
           persist-credentials: false
       - name: Resolve version, tag and commit
         id: version
@@ -75,13 +78,17 @@ jobs:
           if [ -n "$tag" ] && ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             echo "::error::refs/tags/$tag does not exist"; exit 1
           fi
+          if [ -n "$tag" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$tag^{commit}")" ]; then
+            echo "::error::HEAD $(git rev-parse HEAD) is not the commit of $tag"; exit 1
+          fi
           if [ -n "$tag" ] && [ "$tag" != "anvil-v$version" ]; then
             echo "::error::tag $tag does not match workspace version $version (expected anvil-v$version)"; exit 1
           fi
           {
             echo "version=$version"
             echo "tag=$tag"
-            echo "ref=${tag:-$GITHUB_SHA}"
+            # Build and publish check out this exact commit, never a name.
+            echo "ref=$(git rev-parse HEAD)"
             echo "commit=$(git rev-parse HEAD)"
             echo "epoch=$(git log -1 --format=%ct)"
           } >> "$GITHUB_OUTPUT"
@@ -143,6 +150,11 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
           persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
       - uses: ./.github/actions/setup
         with:
           targets: ${{ matrix.target }}
@@ -169,17 +181,17 @@ jobs:
           # Signed updater artifacts need both halves of the owner's updater key
           # and a real tag: dry runs never sign updates. The public key is
           # compiled into the app, so build and bundle both get this config.
-          if [ -n "$TAG" ] && [ "$HAS_KEY" = "true" ] && [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
+          # One normalized key (all whitespace stripped) is compiled in and recorded.
+          pubkey="$(tr -d '[:space:]' <<<"${ANVIL_UPDATER_PUBKEY:-}")"
+          if [ -n "$TAG" ] && [ "$HAS_KEY" = "true" ] && [ -n "$pubkey" ]; then
             cfg="$RUNNER_TEMP/anvil-updater.conf.json"
-            # One normalized key (all whitespace stripped) is compiled in and recorded.
-            pubkey="$(tr -d '[:space:]' <<<"$ANVIL_UPDATER_PUBKEY")"
             PUBKEY="$pubkey" node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey: process.env.PUBKEY } } }))' "$cfg"
             { echo "updater=true"; echo "config=$cfg"; echo "pubkey=$pubkey"; } >> "$GITHUB_OUTPUT"
             echo "Updater key configured; creating signed updater artifacts."
           else
             if [ -z "$TAG" ]; then
               echo "Dry run: no updater artifacts."
-            elif [ "$HAS_KEY" = "true" ] || [ -n "${ANVIL_UPDATER_PUBKEY:-}" ]; then
+            elif [ "$HAS_KEY" = "true" ] || [ -n "$pubkey" ]; then
               echo "::warning::only one of TAURI_SIGNING_PRIVATE_KEY / ANVIL_UPDATER_PUBKEY is set; building without updater artifacts"
             fi
             { echo "updater=false"; echo "config="; echo "pubkey="; } >> "$GITHUB_OUTPUT"
@@ -212,13 +224,19 @@ jobs:
             exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP "anvil-signing.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-          Remove-Item $pfx
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            # A PFX with a chain imports several certificates: record them all for removal first.
+            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw)
+            "thumbprints=$(($imported | ForEach-Object Thumbprint) -join ' ')" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          $cert = $imported | Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $cert) { throw "the Windows signing PFX holds no certificate with a private key" }
           $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
           "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          "thumbprint=$($cert.Thumbprint)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
       - name: Bundle and sign
         shell: bash
@@ -249,12 +267,16 @@ jobs:
           if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
           npx tauri "${args[@]}"
 
-      - name: Remove Windows signing certificate
-        if: always() && steps.wincert.outputs.thumbprint != ''
+      - name: Remove Windows signing certificates
+        if: always() && steps.wincert.outputs.thumbprints != ''
         shell: pwsh
         env:
-          THUMBPRINT: ${{ steps.wincert.outputs.thumbprint }}
-        run: Remove-Item -Path "Cert:\CurrentUser\My\$env:THUMBPRINT" -DeleteKey
+          THUMBPRINTS: ${{ steps.wincert.outputs.thumbprints }}
+        run: |
+          foreach ($t in $env:THUMBPRINTS -split ' ' | Where-Object { $_ }) {
+            $c = Get-Item -Path "Cert:\CurrentUser\My\$t" -ErrorAction SilentlyContinue
+            if ($c -and $c.HasPrivateKey) { Remove-Item -Path $c.PSPath -DeleteKey } elseif ($c) { Remove-Item -Path $c.PSPath }
+          }
 
       - name: Build CLI
         shell: bash
@@ -326,6 +348,7 @@ jobs:
           out="dist/$TARGET"
           # Evidence that the updater public key is compiled into the app binary.
           if [ "$UPDATER" = "true" ]; then
+            [ -n "$UPDATER_PUBKEY" ] || { echo "::error::updater configured without a public key"; exit 1; }
             LC_ALL=C grep -aqF "$UPDATER_PUBKEY" "$APP" || { echo "::error::the updater public key is not in $APP"; exit 1; }
           fi
           signed=false; method="none"; detail="unsigned — owner credentials not configured"
@@ -404,6 +427,11 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
           persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
       - uses: ./.github/actions/setup
         with:
           tauri-deps: "false"

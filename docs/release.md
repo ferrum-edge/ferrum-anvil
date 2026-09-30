@@ -13,11 +13,14 @@ website are manual owner steps, taken only after the
    commit.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
    Or run the workflow manually **from the tag** (Run workflow → *Use workflow
-   from* → Tags → `anvil-v0.1.0`), optionally with the same tag as input;
-   preflight refuses an input that is not the tag the run started from, or a
-   tag that does not exist. A manual run from a branch without a tag input is
-   a **dry run**: everything is built and checked and the evidence is uploaded
-   to the run, but nothing is signed and no release is created.
+   from* → Tags → `anvil-v0.1.0`), optionally with the same tag as input. A
+   run from a tag is a full, signed release even with the input empty.
+   Preflight refuses an input that is not the tag the run started from, a tag
+   that does not exist, or a checkout whose commit is not the tag's; build and
+   publish then check out that exact commit (never a branch or tag name, which
+   a same-named branch could shadow). A manual run from a branch without a tag
+   input is a **dry run**: everything is built and checked and the evidence is
+   uploaded to the run, but nothing is signed and no release is created.
 4. Review the draft (checklist below), then publish it by hand.
 
 ## What the workflow does
@@ -186,8 +189,10 @@ The owner must:
   rule of **Ref type: Tag**, pattern `anvil-v*`, and store the two updater
   secrets there, together with the Apple and Windows signing secrets (not as
   repository secrets);
-- add a tag ruleset for `anvil-v*` that restricts who can create, update or
-  delete those tags.
+- add a tag ruleset for `refs/tags/anvil-v*` that restricts who can create,
+  update or delete those tags, and a branch ruleset that blocks creating
+  branches named `anvil-v*`;
+- do both before pushing the first `anvil-v*` tag.
 
 Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
 passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an

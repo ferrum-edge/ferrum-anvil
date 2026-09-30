@@ -19,9 +19,11 @@
   workflow creates signed updater artifacts and `latest.json` only for a tagged
   release with that key, which lives in the protected `release` environment.
   The release workflow now signs only tagged releases (dry runs are unsigned)
-  and, as defense in depth, gives the updater key and the Apple and Windows
-  credentials only to the `tauri bundle` step, not to compiling; a manual
-  release must run from its tag (docs/release.md, In-app updates). The launch check fails
+  and, as defense in depth, keeps signing material out of the compile step:
+  the updater key and the Apple credentials go to the `tauri bundle` step,
+  and the Windows certificate is imported just before it and removed after.
+  A manual release must run from its tag, and every job builds the tag's
+  exact commit (docs/release.md, In-app updates). The launch check fails
   silently; the request carries only Anvil's version.
 - Contract drift: compare observed traffic with an OpenAPI description
   (`anvil_contract::analyze`). Exchanges are routed to operations through
