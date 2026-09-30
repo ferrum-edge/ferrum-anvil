@@ -4,6 +4,9 @@
 
 ### Added
 
+- Diagnostics: vendor Ferrum contracts at `contracts-edge-0.9.8` and verify
+  their SHA-256 pins in the offline CI suite. See
+  [ferrum-contracts.md](docs/ferrum-contracts.md) for the pin and update steps.
 - API standards: check OpenAPI descriptions against a team's own rules.
   A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral
   objects (operations, parameters, responses, media types, schemas,
