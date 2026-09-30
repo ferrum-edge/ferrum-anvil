@@ -102,7 +102,7 @@ p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
 serde_norway = "0.9.42"
 roxmltree = "0.21.1"
 quick-xml = "0.42.0"
-jsonschema = { version = "0.57.0", default-features = false }
+jsonschema = { version = "0.58.1", default-features = false }
 serde_json_path = "0.7.2"
 csv = "1.4.0"
 clap = { version = "4.6.7", features = ["derive", "env"] }
