@@ -21,6 +21,7 @@ import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize, uid } from "./ui";
 import { Icon, type IconName } from "./icons";
 import { displayPath } from "./LinkedFile";
+import { UpdateSettings } from "./Update";
 import { WorkloadIdentityFields } from "./WorkloadApi";
 
 const now = () => new Date().toISOString();
@@ -1264,6 +1265,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
         </label>
         <Providers />
       </section>
+      <UpdateSettings enabled={s.check_for_updates} onChange={(check_for_updates) => setS({ ...s, check_for_updates })} />
       {info && (
         <section className="settings-section">
           <h3>About</h3>

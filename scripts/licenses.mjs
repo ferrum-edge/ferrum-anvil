@@ -7,7 +7,8 @@
 //
 // Scope: Rust crates reachable through normal/build edges from the shipped
 // packages (anvil-desktop with its default = release feature set, and the
-// `anvil` CLI) on every target platform, plus the npm production dependencies
+// `anvil` CLI) on every shipped target platform (deny.toml `[graph] targets`,
+// which `cargo deny` checks too), plus the npm production dependencies
 // bundled into the desktop UI. Dev/test-only dependencies (including the
 // E2E-only WebDriver plugin, which is behind the non-default `e2e` feature)
 // are excluded because they are not distributed.
@@ -93,10 +94,21 @@ function satisfied(expr, allowed) {
   }
 }
 
+/** The shipped target triples: deny.toml `[graph] targets`. */
+function targets() {
+  const toml = readFileSync(join(root, "deny.toml"), "utf8");
+  const section = toml.split(/^\[graph\]\s*$/m)[1]?.split(/^\[(?!\[)[^\]]+\]\s*$/m)[0];
+  const block = section?.match(/^targets\s*=\s*\[([\s\S]*?)\]/m);
+  if (!block) throw new Error("deny.toml [graph] has no targets list");
+  return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
 // ---------------------------------------------------------------- cargo
 function crates() {
+  // Dependencies only a platform Anvil does not ship for (wasm32, Android, …) are not compiled into any artifact.
+  const platforms = targets().flatMap((t) => ["--filter-platform", t]);
   const meta = JSON.parse(
-    execFileSync("cargo", ["metadata", "--format-version", "1", "--locked"], { cwd: root, maxBuffer: 256 * 1024 * 1024, encoding: "utf8" }),
+    execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", ...platforms], { cwd: root, maxBuffer: 256 * 1024 * 1024, encoding: "utf8" }),
   );
   const byId = new Map(meta.packages.map((p) => [p.id, p]));
   const nodes = new Map(meta.resolve.nodes.map((n) => [n.id, n]));

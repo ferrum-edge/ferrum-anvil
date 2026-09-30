@@ -4,6 +4,27 @@
 
 ### Added
 
+- Desktop: update check and upgrade. **Settings → Updates → Check for updates
+  when Anvil opens** (the existing `check_for_updates` setting, still off by
+  default) asks the GitHub Releases API for the latest published
+  `anvil-vX.Y.Z` release once per launch, after unlock; **Check now** asks on
+  demand. A newer release shows a prompt (**Upgrade…** / **Later**) and an
+  **Update** chip in the status bar. **Upgrade…** shows the release notes and,
+  in a build that carries the owner's updater public key, downloads the update,
+  verifies its minisign signature (`tauri-plugin-updater`), installs it and
+  offers **Restart now**. A build without the key (every build until the owner
+  configures it), and `.deb`/`.rpm` installs, open the release page instead.
+  The app requires the signed version (`requireSignedVersion`), so an unsigned
+  `latest.json` cannot pass an older signed build off as newer. The release
+  workflow creates signed updater artifacts and `latest.json` only for a tagged
+  release with that key, which lives in the protected `release` environment.
+  The release workflow now signs only tagged releases (dry runs are unsigned)
+  and, as defense in depth, keeps signing material out of the compile step:
+  the updater key and the Apple credentials go to the `tauri bundle` step,
+  and the Windows certificate is imported just before it and removed after.
+  A manual release must run from its tag, and every job builds the tag's
+  exact commit (docs/release.md, In-app updates). The launch check fails
+  silently; the request carries only Anvil's version.
 - Contract drift: compare observed traffic with an OpenAPI description
   (`anvil_contract::analyze`). Exchanges are routed to operations through
   the declared server base paths and checked for undeclared paths, methods,

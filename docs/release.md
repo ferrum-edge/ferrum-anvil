@@ -12,9 +12,15 @@ website are manual owner steps, taken only after the
    `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json` — and
    commit.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
-   Or run the workflow manually with the tag as input. A manual run without a
-   tag is a **dry run**: everything is built and checked and the evidence is
-   uploaded to the run, but no release is created.
+   Or run the workflow manually **from the tag** (Run workflow → *Use workflow
+   from* → Tags → `anvil-v0.1.0`), optionally with the same tag as input. A
+   run from a tag is a full, signed release even with the input empty.
+   Preflight refuses an input that is not the tag the run started from, a tag
+   that does not exist, or a checkout whose commit is not the tag's; build and
+   publish then check out that exact commit (never a branch or tag name, which
+   a same-named branch could shadow). A manual run from a branch without a tag
+   input is a **dry run**: everything is built and checked and the evidence is
+   uploaded to the run, but nothing is signed and no release is created.
 4. Review the draft (checklist below), then publish it by hand.
 
 ## What the workflow does
@@ -34,16 +40,26 @@ version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --chec
 
 Each build job:
 
-1. `tauri build --ci --target <t> --bundles <b>` — release profile, **default
-   features only**. The `e2e` feature (embedded WebDriver + environment-driven
-   unlock) is never passed.
+1. `tauri build --ci --target <t> --no-bundle` — release profile, **default
+   features only**, with no signing credentials in its environment and no
+   Windows certificate imported yet. The `e2e` feature (embedded WebDriver +
+   environment-driven unlock) is never passed. Then, for a tagged release, the
+   Windows certificate is imported and `tauri bundle --ci --target <t>
+   --bundles <b>` runs as the only step that receives the Apple, Windows and
+   updater signing credentials; the certificate is removed afterwards. This is
+   defense in depth, not isolation: both steps share the runner, and bundling
+   itself runs third-party tools (the AppImage bundler downloads unpinned
+   `linuxdeploy` tools while the key is present). Signing the updater artifacts
+   in a separate job with `tauri signer sign` would be stronger. With the
+   owner's updater key a tagged release also writes signed updater artifacts
+   (see [In-app updates](#in-app-updates)).
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
    `anvil-load-worker` binary is not packaged: the desktop app and the CLI run
    load workers by re-launching themselves.
-3. `scripts/release-check.sh` over every installer, the CLI archive and the raw
-   app binary, with the runtime probe on native targets (Linux under Xvfb). Any
+3. `scripts/release-check.sh` over every installer, the macOS updater archive
+   (if any), the CLI archive and the raw app binary, with the runtime probe on native targets (Linux under Xvfb). Any
    failure stops the release.
 4. Signature verification (see [Signing](#signing-and-what-unsigned-means)) and
    `build-info.json` (target, OS/arch, runner, `rustc`/`cargo`/Node/Tauri CLI
@@ -53,8 +69,9 @@ Each build job:
 
 **Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
-runs for the release commit, `SHA256SUMS`, `release-evidence.json` and an
-uploaded evidence bundle. For a tag only, it then runs
+runs for the release commit, `latest.json` (only with signed updater
+artifacts), `SHA256SUMS`, `release-evidence.json` and an uploaded evidence
+bundle. For a tag only, it then runs
 `gh release create --draft --verify-tag`.
 
 ### Release evidence
@@ -66,7 +83,11 @@ uploaded evidence bundle. For a tag only, it then runs
 - per target: OS, architecture, runner, toolchain versions, `signed`,
   `signing`, the release-check result and report, and every artifact with its
   file name, kind, size and SHA-256;
-- shared artifacts (npm SBOM, license report) and the `SHA256SUMS` file;
+- shared artifacts (npm SBOM, license report, `latest.json`) and the
+  `SHA256SUMS` file;
+- updater: `signed`, `manifest`, minisign `key_id`, the `latest.json`
+  platform keys and a `detail` line; per target, whether the build had the
+  updater key and which files it signed;
 - licensing: project license and third-party report;
 - compatibility: diagnostics catalog version, every Ferrum compatibility
   catalog (`catalog/ferrum/*/outcomes.json`: compatibility id, gateway release
@@ -77,8 +98,10 @@ uploaded evidence bundle. For a tag only, it then runs
   conclusions. A missing or skipped run is not a pass — check them.
 
 The script lists every problem in `problems` and exits non-zero if a target
-has no passing release check, no installer, no CLI archive or no SBOM, or if
-two artifacts share a name.
+has no passing release check, no installer, no CLI archive or no SBOM, if two
+artifacts share a name, or if updater signatures, artifacts and `latest.json`
+do not match, do not verify against the public key the builds compiled into
+the app, or do not record the release version.
 
 ## Release artifact safety check
 
@@ -115,7 +138,9 @@ that could not be inspected (never reported as a pass).
 ## Signing and what "unsigned" means
 
 Code signing needs the owner's certificates, which are **not** in the
-repository. The workflow signs only when the corresponding secrets exist:
+repository. The workflow signs only a tagged release, and only when the
+corresponding secrets exist; a dry run is always unsigned. Store these secrets
+in the protected `release` environment (see [In-app updates](#in-app-updates)):
 
 | Platform | Secrets | Effect |
 | --- | --- | --- |
@@ -139,7 +164,72 @@ warns. Do not publish unsigned installers as a production download, and never
 describe them as signed. No step in this repository creates, simulates or
 claims a signature it did not verify.
 
-The Tauri updater is not used, so there is no updater signing key.
+## In-app updates
+
+**Detection** is opt-in in Settings (off by default). When on, the app asks
+`api.github.com` for the latest published release (`anvil-vX.Y.Z`) and
+contacts nothing else. It works for every published release, signed or not.
+
+**In-app install** (`tauri-plugin-updater`) needs the owner's updater key,
+which is **not** in the repository. Without it the app has no public key
+compiled in and the Upgrade button opens the GitHub release page instead.
+
+| Setting | Kind | Value |
+| --- | --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | secret of the `release` environment | private key file contents from `npx tauri signer generate -w <file>` (generate it offline) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret of the `release` environment | its password (optional; set one) |
+| `ANVIL_UPDATER_PUBKEY` | repository variable | the `.pub` file contents (base64) |
+
+**Protecting the key.** The build job of a tagged release runs in the GitHub
+environment `release`; a dry run runs in none, and the workflow also withholds
+the key (and the Apple and Windows credentials) from any run without a tag.
+The owner must:
+
+- create the `release` environment with required reviewers and a deployment
+  rule of **Ref type: Tag**, pattern `anvil-v*`, and store the two updater
+  secrets there, together with the Apple and Windows signing secrets (not as
+  repository secrets);
+- add a tag ruleset for `refs/tags/anvil-v*` that restricts who can create,
+  update or delete those tags, and a branch ruleset that blocks creating
+  branches named `anvil-v*`;
+- do both before pushing the first `anvil-v*` tag.
+
+Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
+passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an
+extra `--config` (to the build, which compiles the key into the app, and to
+the bundle step); one without the other logs a warning and builds exactly as
+without a key. As defense in depth, the private key is in the environment of
+`tauri bundle` only, not of the compile step (build scripts, proc macros,
+`beforeBuildCommand`); both share the runner, so this narrows exposure rather
+than isolating the key. The build job checks that the public key is in the
+built app binary and `build-info.json` records it (`updater.embedded`). Tauri then signs
+(minisign), recording the version in each signature's trusted comment:
+
+| Target | Updater file | `latest.json` keys |
+| --- | --- | --- |
+| macOS | `Ferrum-Anvil_<version>_<aarch64\|x64>.app.tar.gz` (+ `.sig`) | `darwin-<arch>-app`, `darwin-<arch>` |
+| Linux | `.AppImage` (+ `.sig`) | `linux-x86_64-appimage` |
+| Windows | NSIS `-setup.exe`, `.msi` (+ `.sig` each) | `windows-x86_64-nsis`, `windows-x86_64-msi` |
+
+The publish job (`scripts/updater-manifest.mjs`) verifies every signature
+against the public key recorded in `build-info.json` (the same on every
+target) and requires its signed version to equal the release version, then
+writes `latest.json` (Tauri static format). Any mismatch, or a signature
+without a version, fails the run. `latest.json` itself is not signed: the app
+sets `requireSignedVersion`, so it rejects an update whose signature records
+no version or a version other than the one the manifest announces, and a
+crafted manifest cannot pass an older signed build off as newer. The plugin
+looks up `{os}-{arch}-{installer}` before `{os}-{arch}`; the bare key is
+written only for macOS, so an MSI install never receives the NSIS installer.
+`.deb`/`.rpm` installs are not updated in-app: the bundler signs no `.deb` or
+`.rpm`, so `latest.json` has no entry for them and those users update from the
+release page.
+
+The app reads `releases/latest/download/latest.json`. GitHub serves it only
+once the draft is published (drafts and pre-releases are never "latest"), so
+publishing the draft is what releases the update. Rotating the key strands
+installed apps that carry the old public key: they must update from the
+release page once.
 
 ## SBOMs and licensing
 
@@ -239,6 +329,13 @@ E2E build and requires it to fail.
 - [ ] `signed` is `true` for every desktop target you intend to offer — or the
       release is explicitly labelled unsigned/preview and not offered as a
       production download.
+- [ ] In-app updates: with the updater key configured (secrets
+      `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the
+      protected `release` environment, variable `ANVIL_UPDATER_PUBKEY`, and
+      the `anvil-v*` tag ruleset), `updater.signed` is `true` and
+      `updater.platforms` covers every target; otherwise `updater.manifest` is
+      `null` and users update from the release page. Publishing makes
+      `latest.json` live for every installed app with the key.
 - [ ] Clean-install smoke test of each installer (install, first run, create a
       profile, send a request, lock/unlock, uninstall); screenshots attached.
 - [ ] Advisory ignores in `deny.toml` re-reviewed.
@@ -250,6 +347,11 @@ E2E build and requires it to fail.
 - **Signing credentials** (owner): Apple Developer ID + notarization and a
   Windows code-signing certificate. Until then every build is unsigned. Steps,
   secret names and the recommended workflow changes: ferrum-edge/ferrum-anvil#2.
+- **Updater key** (owner): `npx tauri signer generate` offline, the secrets in
+  the protected `release` environment (required reviewers, `anvil-v*`
+  deployment rule) plus an `anvil-v*` tag ruleset, as described in
+  [In-app updates](#in-app-updates). Until then the app links to the release
+  page.
 - **Sign-in providers** (owner): Google/GitHub/Facebook registrations and an
   identity broker before application login can use them:
   ferrum-edge/ferrum-anvil#3.
