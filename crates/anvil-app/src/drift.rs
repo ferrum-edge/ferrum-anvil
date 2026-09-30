@@ -13,7 +13,7 @@
 
 use crate::specs::SpecSourceRecord;
 use crate::{App, AppError, Result};
-use anvil_contract::observe::{ObservedBody, ObservedResponse, body_of, query_names};
+use anvil_contract::observe::{BodyBudget, MAX_BODY_CHECKED, ObservedBody, ObservedResponse, body_of, query_names};
 use anvil_contract::{DriftOptions, DriftReport, Observation, Revision, Spec};
 use anvil_domain::Id;
 use anvil_domain::execution::{BodyCompleteness, ContentDecoding, ExecutionRecord, exchange_duration_us};
@@ -23,6 +23,9 @@ use std::collections::{HashMap, HashSet};
 
 /// History records read for a report at most.
 pub const MAX_DRIFT_RECORDS: usize = 1_000;
+/// History entries of the workspace scanned for them (most belong to other
+/// requests in a busy workspace).
+const MAX_DRIFT_SCAN: usize = 20 * MAX_DRIFT_RECORDS;
 
 /// The exchanges of an import's collection, as observations.
 pub struct Collected {
@@ -71,16 +74,17 @@ impl App {
     pub fn drift_observations(&self, import_id: &Id, limit: usize) -> Result<Collected> {
         let rec = self.spec_source_any(import_id)?;
         let requests = self.drift_requests(&rec)?;
-        let entries = self.store.list_history(Some(&rec.workspace_id), None, limit.min(MAX_DRIFT_RECORDS) * 4)?;
+        let entries = self.store.list_history(Some(&rec.workspace_id), None, (limit.min(MAX_DRIFT_RECORDS) * 20).min(MAX_DRIFT_SCAN))?;
         let mut observations = vec![];
         let mut scanned = 0;
+        let mut budget = BodyBudget::default();
         for e in entries {
             let Some(rid) = e.request_id.as_deref().and_then(|r| r.parse::<Id>().ok()) else { continue };
             let Some(hint) = requests.get(&rid) else { continue };
             scanned += 1;
             let Some((record, body)) = self.store.get_history::<ExecutionRecord>(&e.id)? else { continue };
             let body = body.map(|b| b.to_vec());
-            observations.push(observation(&record, body.as_deref(), hint.clone()));
+            observations.push(observation(&record, body.as_deref(), hint.clone(), &mut budget));
             if observations.len() >= limit.min(MAX_DRIFT_RECORDS) {
                 break;
             }
@@ -119,7 +123,7 @@ impl App {
             let Some(hint) = requests.get(&rid) else { continue };
             let spec = self.drift_spec(&rec.source.import_id)?;
             let body = body.map(|b| b.to_vec());
-            let obs = observation(&record, body.as_deref(), hint.clone());
+            let obs = observation(&record, body.as_deref(), hint.clone(), &mut BodyBudget::default());
             return Ok(Some((rec, anvil_contract::analyze(&spec, &[obs], &DriftOptions::default()))));
         }
         Ok(None)
@@ -145,8 +149,17 @@ impl App {
     /// Reimport the revised description as the import's new version: new
     /// operations become requests, safe updates apply, and conflicts and
     /// removals are kept as they are (see `docs/import.md#reimport`).
-    pub fn drift_reimport_apply(&self, import_id: &Id, ids: &[String], limit: usize) -> Result<(Revision, usize)> {
+    ///
+    /// The analysis runs again here, so `digest` (the previewed
+    /// [`Revision::digest`]) must match: new traffic or a new version in
+    /// between refuses the update instead of applying something else.
+    pub fn drift_reimport_apply(&self, import_id: &Id, ids: &[String], limit: usize, digest: &str) -> Result<(Revision, usize)> {
         let rev = self.drift_revise(import_id, ids, limit)?;
+        if rev.digest != digest {
+            return Err(AppError::Invalid(
+                "the revision changed since the preview (new traffic or a new version); preview it again".into(),
+            ));
+        }
         if rev.applied.is_empty() {
             return Err(AppError::Invalid("none of the chosen suggestions applies any more; check again".into()));
         }
@@ -157,8 +170,9 @@ impl App {
 }
 
 /// An observation of a recorded exchange. `raw` is the stored response
-/// body (still content-encoded), when history kept it.
-pub fn observation(r: &ExecutionRecord, raw: Option<&[u8]>, hint: Option<String>) -> Observation {
+/// body (still content-encoded), when history kept it; bodies parsed count
+/// against `budget`.
+pub fn observation(r: &ExecutionRecord, raw: Option<&[u8]>, hint: Option<String>, budget: &mut BodyBudget) -> Observation {
     let response = r.response.as_ref().map(|resp| {
         let ct = resp.body.content_type.clone();
         let complete = matches!(resp.body.completeness, BodyCompleteness::Complete) && !resp.body.display_truncated;
@@ -167,11 +181,13 @@ pub fn observation(r: &ExecutionRecord, raw: Option<&[u8]>, hint: Option<String>
             (_, None) if resp.body.wire_bytes == 0 => ObservedBody::Empty,
             (_, None) => ObservedBody::Unavailable("history keeps no response bodies (Settings → History)".into()),
             (_, Some(bytes)) => {
-                let limit = r.prepared.settings.limits.max_decoded_bytes;
+                // Decoding stops just past what is checked (a larger body
+                // is reported as too large).
+                let limit = r.prepared.settings.limits.max_decoded_bytes.min(MAX_BODY_CHECKED as u64 + 1);
                 match anvil_transport::decode::decode(resp.body.content_encoding.as_deref(), bytes, limit) {
-                    anvil_transport::decode::DecodeOutcome::Identity => body_of(ct.as_deref(), bytes, complete),
+                    anvil_transport::decode::DecodeOutcome::Identity => body_of(ct.as_deref(), bytes, complete, budget),
                     anvil_transport::decode::DecodeOutcome::Decoded { bytes, truncated_at_limit } => {
-                        body_of(ct.as_deref(), &bytes, complete && !truncated_at_limit)
+                        body_of(ct.as_deref(), &bytes, complete && !truncated_at_limit, budget)
                     }
                     _ => ObservedBody::Unavailable("the body could not be decoded".into()),
                 }

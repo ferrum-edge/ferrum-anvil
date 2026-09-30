@@ -121,9 +121,12 @@ export function DriftPage(props: { importId: string; fileName: string; notify: (
     }
   };
   const apply = async () => {
+    if (!plan) return;
+    // Exactly the previewed revision: the backend refuses it if the analysis changed since.
+    const digest = plan.revision.digest;
     setPlan(null);
     try {
-      const n = await api.driftReimportApply(props.importId, ids);
+      const n = await api.driftReimportApply(props.importId, ids, digest);
       props.notify(`Updated the import (${n} request${n === 1 ? "" : "s"} changed)`);
       props.onReimported();
       await run();
@@ -283,7 +286,6 @@ export function DriftPage(props: { importId: string; fileName: string; notify: (
                         .map(([k, v]) => `${k}×${v}`)
                         .join(" ")}
                     </td>
-                    <td className="k mono">{u.examples.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>

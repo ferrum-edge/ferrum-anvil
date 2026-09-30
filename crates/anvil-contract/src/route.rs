@@ -4,9 +4,11 @@
 //! a server's base path (`servers[*].url`, Swagger `basePath`, path- and
 //! operation-level servers; server variables match any segment). When no
 //! declared base path fits, up to three leading segments are tried as an
-//! unknown prefix (a gateway mounting the API under `/api`, say). Among
-//! matching templates the one with the most literal segments wins, then the
-//! longest base path, then the operation the request was imported from.
+//! unknown prefix (a gateway mounting the API under `/api`, say), alone or
+//! in front of a declared base path. Among matching templates the one with
+//! the most literal segments wins (a segment mixing text and a parameter
+//! counts half), then the longest base path, then the operation the request
+//! was imported from.
 
 use crate::locate::ptr;
 use crate::model::{OperationRef, operations};
@@ -16,12 +18,18 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+/// Distinct server base paths kept (after the ones differing only in
+/// variable names are merged).
+const MAX_BASES: usize = 64;
+
 #[derive(Debug, Clone)]
 enum Seg {
     Lit(String),
     Param,
     /// A segment mixing text and parameters (`{id}.json`, `label{fmt}`).
     Mixed(Regex),
+    /// A server variable limited to its `enum` and `default`.
+    Choice(Vec<String>),
 }
 
 impl Seg {
@@ -30,8 +38,36 @@ impl Seg {
             Seg::Lit(l) => l == s,
             Seg::Param => !s.is_empty(),
             Seg::Mixed(re) => re.is_match(s),
+            Seg::Choice(values) => values.iter().any(|v| v == s),
         }
     }
+
+    /// How specific a matching segment is: literal, mixed, parameter.
+    fn score(&self) -> usize {
+        match self {
+            Seg::Lit(_) | Seg::Choice(_) => 2,
+            Seg::Mixed(_) => 1,
+            Seg::Param => 0,
+        }
+    }
+
+    /// The same for every spelling of the variable names (`{a}` = `{b}`).
+    fn canonical(&self) -> String {
+        match self {
+            Seg::Lit(l) => format!("l:{l}"),
+            Seg::Param => "p".into(),
+            Seg::Mixed(re) => format!("m:{}", re.as_str()),
+            Seg::Choice(v) => format!("c:{}", v.join("\u{0}")),
+        }
+    }
+}
+
+/// A server base path: segments that match any variable value (to route),
+/// and segments that match only a variable's `enum` or `default` (to name
+/// the base of a path nothing declares).
+struct Base {
+    loose: Vec<Seg>,
+    strict: Vec<Seg>,
 }
 
 fn parse_segments(path: &str) -> Vec<Seg> {
@@ -78,7 +114,16 @@ fn server_base(url: &str) -> String {
 struct Template {
     path: String,
     segs: Vec<Seg>,
+    /// Sum of [`Seg::score`].
+    score: usize,
     ops: Vec<usize>,
+}
+
+impl Template {
+    fn new(path: &str, ops: Vec<usize>) -> Template {
+        let segs = parse_segments(path);
+        Template { path: path.to_string(), score: segs.iter().map(Seg::score).sum(), segs, ops }
+    }
 }
 
 /// A declared server: its URL and whether an origin matches it.
@@ -91,7 +136,9 @@ pub struct Server {
 pub struct Router<'a> {
     pub ops: Vec<OperationRef<'a>>,
     templates: Vec<Template>,
-    bases: Vec<(String, Vec<Seg>)>,
+    /// Template indexes by segment count.
+    by_len: HashMap<usize, Vec<usize>>,
+    bases: Vec<Base>,
     pub servers: Vec<Server>,
 }
 
@@ -116,7 +163,7 @@ impl<'a> Router<'a> {
                 Some(t) => templates[*t].ops.push(i),
                 None => {
                     by_path.insert(op.path.clone(), templates.len());
-                    templates.push(Template { path: op.path.clone(), segs: parse_segments(&op.path), ops: vec![i] });
+                    templates.push(Template::new(&op.path, vec![i]));
                 }
             }
         }
@@ -125,11 +172,16 @@ impl<'a> Router<'a> {
             for p in paths.keys().filter(|k| !k.starts_with("x-")) {
                 if !by_path.contains_key(p) {
                     by_path.insert(p.clone(), templates.len());
-                    templates.push(Template { path: p.clone(), segs: parse_segments(p), ops: vec![] });
+                    templates.push(Template::new(p, vec![]));
                 }
             }
         }
-        let mut urls: Vec<String> = vec![];
+        let mut by_len: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, t) in templates.iter().enumerate() {
+            by_len.entry(t.segs.len()).or_default().push(i);
+        }
+        // Server URLs with their variables.
+        let mut urls: Vec<(String, Option<&Value>)> = vec![];
         let mut seen_urls: HashSet<String> = HashSet::new();
         if spec.is_swagger2() {
             let base = spec.root.get("basePath").and_then(Value::as_str).unwrap_or("");
@@ -141,10 +193,10 @@ impl<'a> Router<'a> {
                     .map(|a| a.iter().filter_map(Value::as_str).collect())
                     .unwrap_or_default();
                 for s in if schemes.is_empty() { vec!["https"] } else { schemes } {
-                    urls.push(format!("{s}://{host}{base}"));
+                    urls.push((format!("{s}://{host}{base}"), None));
                 }
             } else {
-                urls.push(base.to_string());
+                urls.push((base.to_string(), None));
             }
         } else {
             let mut lists = vec![spec.root.get("servers")];
@@ -157,24 +209,30 @@ impl<'a> Router<'a> {
                     if let Some(u) = s.get("url").and_then(Value::as_str)
                         && seen_urls.insert(u.to_string())
                     {
-                        urls.push(u.to_string());
+                        urls.push((u.to_string(), s.get("variables")));
                     }
                 }
             }
         }
-        let mut bases: Vec<(String, Vec<Seg>)> = vec![(String::new(), vec![])];
+        let mut bases: Vec<Base> = vec![Base { loose: vec![], strict: vec![] }];
         let mut seen_bases: HashSet<String> = HashSet::from([String::new()]);
-        for u in &urls {
+        for (u, vars) in &urls {
+            if bases.len() >= MAX_BASES {
+                break;
+            }
             let b = server_base(u);
-            if seen_bases.insert(b.clone()) {
-                bases.push((b.clone(), parse_segments(&b)));
+            let strict = strict_segments(&b, *vars);
+            // `/{v}` and `/{w}` route alike: keep one of them.
+            let key: Vec<String> = parse_segments(&b).iter().chain(&strict).map(Seg::canonical).collect();
+            if seen_bases.insert(key.join("/")) {
+                bases.push(Base { loose: parse_segments(&b), strict });
             }
         }
         // Longest base first.
-        bases.sort_by_key(|(_, segs)| std::cmp::Reverse(segs.len()));
+        bases.sort_by_key(|b| std::cmp::Reverse(b.loose.len()));
         let servers = urls
             .iter()
-            .map(|u| {
+            .map(|(u, _)| {
                 let origin = u.split_once("://").map(|(scheme, rest)| {
                     let host = rest.split('/').next().unwrap_or("");
                     let mut re = format!("^{}://", regex::escape(&scheme.to_ascii_lowercase()));
@@ -193,7 +251,13 @@ impl<'a> Router<'a> {
                 Server { url: u.clone(), origin: origin.flatten() }
             })
             .collect();
-        Router { ops, templates, bases, servers }
+        Router { ops, templates, by_len, bases, servers }
+    }
+
+    /// Whether `base` (observed segments) is a declared server base path.
+    pub fn base_declared(&self, base: &str) -> bool {
+        let segs: Vec<String> = base.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+        self.bases.iter().any(|b| b.strict.len() == segs.len() && b.strict.iter().zip(&segs).all(|(s, r)| s.matches(r)))
     }
 
     /// Whether `origin` (`scheme://host[:port]`) is one of the declared
@@ -210,14 +274,15 @@ impl<'a> Router<'a> {
         let (_, path) = split_url(url);
         let segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
         let method = method.to_ascii_lowercase();
-        // (literal segments, base length, template index, base).
+        // (template score, base length, template index, base).
         let mut best: Option<(usize, usize, usize, String)> = None;
         let consider = |base_len: usize, base: String, rest: &[String], best: &mut Option<(usize, usize, usize, String)>| {
-            for (ti, t) in self.templates.iter().enumerate() {
-                if t.segs.len() != rest.len() || !t.segs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
+            for &ti in self.by_len.get(&rest.len()).into_iter().flatten() {
+                let t = &self.templates[ti];
+                if !t.segs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
                     continue;
                 }
-                let lits = t.segs.iter().filter(|s| matches!(s, Seg::Lit(_))).count();
+                let lits = t.score;
                 let better = match best {
                     None => true,
                     Some((bl, bb, bt, _)) => {
@@ -231,27 +296,36 @@ impl<'a> Router<'a> {
                 }
             }
         };
-        for (_, bsegs) in &self.bases {
-            if bsegs.len() <= segs.len() && bsegs.iter().zip(&segs).all(|(s, r)| s.matches(r)) {
-                let base = if bsegs.is_empty() { String::new() } else { format!("/{}", segs[..bsegs.len()].join("/")) };
-                consider(bsegs.len(), base, &segs[bsegs.len()..], &mut best);
-            }
-        }
-        if best.is_none() {
-            // An unknown prefix in front of the API (a gateway mount).
-            for k in 1..=3.min(segs.len().saturating_sub(1)) {
-                consider(0, format!("/{}", segs[..k].join("/")), &segs[k..], &mut best);
-                if best.is_some() {
-                    break;
+        // An unknown prefix of `k` segments (a gateway mount), then a
+        // declared base path; the prefix is tried only when nothing matches
+        // without it.
+        for k in 0..=3.min(segs.len().saturating_sub(1)) {
+            for b in &self.bases {
+                let bsegs = &b.loose;
+                let rest = &segs[k..];
+                if bsegs.len() <= rest.len() && bsegs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
+                    let n = k + bsegs.len();
+                    let base = if n == 0 { String::new() } else { format!("/{}", segs[..n].join("/")) };
+                    consider(bsegs.len(), base, &segs[n..], &mut best);
                 }
+            }
+            if best.is_some() {
+                break;
             }
         }
         let Some((_, _, ti, base)) = best else {
-            let base = self
-                .bases
-                .iter()
-                .find(|(_, b)| !b.is_empty() && b.len() <= segs.len() && b.iter().zip(&segs).all(|(s, r)| s.matches(r)))
-                .map(|(_, b)| format!("/{}", segs[..b.len()].join("/")))
+            // Only a base whose variables have their declared values names
+            // the base of an undeclared path.
+            // (An unknown prefix may come first, as above.)
+            let base = (0..=3.min(segs.len()))
+                .find_map(|k| {
+                    let rest = &segs[k..];
+                    self.bases
+                        .iter()
+                        .map(|b| &b.strict)
+                        .find(|b| !b.is_empty() && b.len() <= rest.len() && b.iter().zip(rest).all(|(s, r)| s.matches(r)))
+                        .map(|b| format!("/{}", segs[..k + b.len()].join("/")))
+                })
                 .unwrap_or_default();
             return Route::Path { base };
         };
@@ -268,6 +342,34 @@ impl<'a> Router<'a> {
     pub fn path_pointer(path: &str) -> String {
         ptr("/paths", path)
     }
+}
+
+/// The segments of a server base path with each whole-segment variable
+/// limited to its `enum` and `default` (none: it matches nothing).
+fn strict_segments(base: &str, vars: Option<&Value>) -> Vec<Seg> {
+    base.split('/')
+        .filter(|s| !s.is_empty())
+        .zip(parse_segments(base))
+        .map(|(raw, seg)| match seg {
+            Seg::Param => {
+                let name = raw.trim_start_matches('{').trim_end_matches('}');
+                let v = vars.and_then(|v| v.get(name));
+                let mut values: Vec<String> = v
+                    .and_then(|v| v.get("enum"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                if let Some(d) = v.and_then(|v| v.get("default")).and_then(Value::as_str) {
+                    values.push(d.to_string());
+                }
+                Seg::Choice(values)
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// The importer's operation key: the operationId, else `METHOD path`.
@@ -325,6 +427,48 @@ mod tests {
         assert_eq!(op_of(&r, r.route("GET", "https://api.example/v1/owners/1", None)), "path @/v1");
         // A gateway prefix nobody declared.
         assert_eq!(op_of(&r, r.route("GET", "https://gw.example/api/v1/pets/9", None)), "getPet @/api/v1");
+        assert_eq!(op_of(&r, r.route("GET", "https://gw.example/a/b/c/v1/pets/9", None)), "getPet @/a/b/c/v1");
+        // A variable base names an undeclared path's base only with its declared value.
+        assert_eq!(op_of(&r, r.route("GET", "https://eu.example/v2/owners/1", None)), "path @/v2");
+        assert_eq!(op_of(&r, r.route("GET", "https://eu.example/owners/1", None)), "path @");
+        assert!(r.base_declared("/v2") && r.base_declared("/v1") && !r.base_declared("/owners"));
+    }
+
+    #[test]
+    fn mixed_segments_rank_between_literals_and_parameters() {
+        let s = spec(
+            r#"{"openapi":"3.0.3","info":{"title":"t","version":"1"},"paths":{
+              "/r/{a}/{b}":{"get":{"operationId":"params"}},
+              "/r/{id}.json/{b}":{"get":{"operationId":"mixed"}},
+              "/r/x.json/{b}":{"get":{"operationId":"literal"}}}}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "/r/1.json/2", None)), "mixed @");
+        assert_eq!(op_of(&r, r.route("GET", "/r/x.json/2", None)), "literal @");
+        assert_eq!(op_of(&r, r.route("GET", "/r/1/2", None)), "params @");
+    }
+
+    #[test]
+    fn many_variable_servers_route_quickly() {
+        // Every operation declares its own server with a differently named
+        // variable: they are one base path.
+        let mut paths = serde_json::Map::new();
+        for i in 0..5_000 {
+            paths.insert(
+                format!("/r{i}/{{id}}"),
+                serde_json::json!({"get": {"servers": [{"url": format!("https://h{i}.example/{{v{i}}}/{{w{i}}}"), "variables": {}}]}}),
+            );
+        }
+        let doc = serde_json::json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths});
+        let s = spec(&doc.to_string());
+        let started = std::time::Instant::now();
+        let r = Router::new(&s);
+        assert!(r.bases.len() <= 3, "{} bases", r.bases.len());
+        for i in 0..2_000 {
+            let _ = r.route("GET", &format!("https://h.example/a/b/r{i}/7"), None);
+            let _ = r.route("GET", &format!("https://h.example/nothing/{i}/x/y/z"), None);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
     }
 
     #[test]

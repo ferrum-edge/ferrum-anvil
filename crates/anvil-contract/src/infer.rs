@@ -3,7 +3,10 @@
 //! Only the shape is kept: types, properties, which properties were always
 //! present, array items and a few string formats recognized in every
 //! sample. Observed values are never copied into a schema (no examples,
-//! enums or defaults), so a suggestion cannot leak a response's data.
+//! enums or defaults), so a suggestion cannot leak a response's data. An
+//! object whose keys look like data (an email, an id, more than 50 names)
+//! is a map: it becomes `additionalProperties` with the merged value shape,
+//! and its keys are not kept.
 
 use anvil_import::Dialect;
 use serde_json::{Map, Value, json};
@@ -15,6 +18,21 @@ const MAX_DEPTH: usize = 16;
 const MAX_PROPERTIES: usize = 200;
 /// Array items sampled per array.
 const MAX_ITEMS: usize = 50;
+/// Distinct names past which an object is taken to be a map.
+const MAX_NAMED_PROPERTIES: usize = 50;
+
+/// A member or parameter name from traffic that may appear in a message or a
+/// suggested description: ASCII letters, digits and `_ - . $ [ ]`, not
+/// starting with a digit, at most 64 characters and fewer than four digits.
+/// Anything else (an email, a token, an id) is data, not a name.
+pub fn safe_name(n: &str) -> bool {
+    let b = n.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && !b[0].is_ascii_digit()
+        && b.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'$' | b'[' | b']'))
+        && b.iter().filter(|c| c.is_ascii_digit()).count() < 4
+}
 
 /// An accumulating shape: merge samples in, then render for a dialect.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -31,6 +49,8 @@ pub struct Shape {
     objects: usize,
     /// Property name → (times present, shape).
     properties: Vec<(String, usize, Shape)>,
+    /// Some key looked like data: the object is a map.
+    map_like: bool,
     truncated: bool,
 }
 
@@ -73,6 +93,9 @@ impl Shape {
             }
             Value::Object(o) => {
                 self.objects += 1;
+                if o.keys().any(|k| !safe_name(k)) || o.len() > MAX_NAMED_PROPERTIES {
+                    self.map_like = true;
+                }
                 for (k, x) in o {
                     match self.properties.iter().position(|(n, _, _)| n == k) {
                         Some(i) => {
@@ -88,6 +111,38 @@ impl Shape {
                         None => self.truncated = true,
                     }
                 }
+            }
+        }
+    }
+
+    /// Fold `other` into this shape (samples of the same place).
+    fn merge(&mut self, other: &Shape) {
+        self.samples += other.samples;
+        self.nulls += other.nulls;
+        self.booleans += other.booleans;
+        self.integers += other.integers;
+        self.numbers += other.numbers;
+        self.strings += other.strings;
+        self.formats = match (self.formats.take(), &other.formats) {
+            (None, f) => f.clone(),
+            (f, None) => f,
+            (Some(a), Some(b)) => Some(a.intersection(b).copied().collect()),
+        };
+        self.arrays += other.arrays;
+        if let Some(oi) = &other.items {
+            self.items.get_or_insert_with(Box::default).merge(oi);
+        }
+        self.objects += other.objects;
+        self.map_like |= other.map_like;
+        self.truncated |= other.truncated;
+        for (k, seen, shape) in &other.properties {
+            match self.properties.iter().position(|(n, _, _)| n == k) {
+                Some(i) => {
+                    self.properties[i].1 += seen;
+                    self.properties[i].2.merge(shape);
+                }
+                None if self.properties.len() < MAX_PROPERTIES => self.properties.push((k.clone(), *seen, shape.clone())),
+                None => self.truncated = true,
             }
         }
     }
@@ -123,8 +178,12 @@ impl Shape {
             (many, Dialect::OpenApi31 | Dialect::OpenApi32) => {
                 out.insert("type".into(), json!(many));
             }
+            (_, Dialect::Swagger20) => {
+                // 2.0 has neither type lists nor `oneOf`: any type.
+                return if nullable { json!({"x-nullable": true}) } else { json!({}) };
+            }
             (many, _) => {
-                // 3.0 and 2.0 have no type lists.
+                // 3.0 has no type lists.
                 let branches: Vec<Value> = many.iter().map(|t| self.only(t).schema(dialect)).collect();
                 let mut s = json!({ "oneOf": branches });
                 if nullable {
@@ -138,7 +197,14 @@ impl Shape {
         {
             out.insert("format".into(), json!(f));
         }
-        if self.objects > 0 {
+        if self.objects > 0 && (self.map_like || self.properties.len() > MAX_NAMED_PROPERTIES) {
+            // A map: one shape for every value, no names.
+            let mut values = Shape::default();
+            for (_, _, shape) in &self.properties {
+                values.merge(shape);
+            }
+            out.insert("additionalProperties".into(), if shape_is_empty(&values) { json!({}) } else { values.schema(dialect) });
+        } else if self.objects > 0 {
             let mut props = Map::new();
             let mut required = vec![];
             for (name, seen, shape) in &self.properties {
@@ -189,6 +255,10 @@ impl Shape {
     }
 }
 
+fn shape_is_empty(s: &Shape) -> bool {
+    s.samples == 0
+}
+
 /// The JSON Schema type name of a value.
 pub fn json_type_name(v: &Value) -> &'static str {
     match v {
@@ -202,9 +272,21 @@ pub fn json_type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Allow `null` on a rendered schema, in the dialect's own way.
+/// Allow `null` on a rendered schema, in the dialect's own way. An `enum`
+/// gets `null` among its values (every dialect requires it there), and a
+/// 3.1/3.2 `const` becomes `anyOf` the constant or `null`.
 pub fn mark_nullable(s: &mut Value, dialect: Dialect) {
     let Some(o) = s.as_object_mut() else { return };
+    if let Some(Value::Array(e)) = o.get_mut("enum")
+        && !e.contains(&Value::Null)
+    {
+        e.push(Value::Null);
+    }
+    if matches!(dialect, Dialect::OpenApi31 | Dialect::OpenApi32) && o.contains_key("const") {
+        let inner = Value::Object(std::mem::take(o));
+        o.insert("anyOf".into(), json!([inner, { "type": "null" }]));
+        return;
+    }
     match dialect {
         Dialect::OpenApi31 | Dialect::OpenApi32 => match o.get("type").cloned() {
             Some(Value::String(t)) => {
@@ -325,6 +407,37 @@ mod tests {
         let samples = [json!("a"), json!(3)];
         assert_eq!(infer(&samples, Dialect::OpenApi31), json!({"type": ["string", "integer"]}));
         assert_eq!(infer(&samples, Dialect::OpenApi30), json!({"oneOf": [{"type": "string"}, {"type": "integer"}]}));
+        assert_eq!(infer(&samples, Dialect::Swagger20), json!({}), "2.0 has no oneOf");
+        assert_eq!(infer(&[json!("a"), json!(3), json!(null)], Dialect::Swagger20), json!({"x-nullable": true}));
+    }
+
+    #[test]
+    fn map_shaped_objects_keep_no_keys() {
+        let s = infer(&[json!({"alice@x.example": {"n": 1}, "bob@y.example": {"n": 2}})], Dialect::OpenApi31);
+        assert_eq!(
+            s,
+            json!({"type": "object", "additionalProperties": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}})
+        );
+        assert!(!s.to_string().contains("alice"));
+        let wide: Map<String, Value> = (0..60).map(|i| (format!("k{i}"), json!(true))).collect();
+        assert_eq!(
+            infer(&[Value::Object(wide)], Dialect::OpenApi30),
+            json!({"type": "object", "additionalProperties": {"type": "boolean"}})
+        );
+        assert!(safe_name("createdAt") && safe_name("items[]") && !safe_name("user_12345") && !safe_name("a@b") && !safe_name("9lives"));
+    }
+
+    #[test]
+    fn nullable_enums_and_consts_accept_null() {
+        let mut e = json!({"type": "string", "enum": ["a"]});
+        mark_nullable(&mut e, Dialect::OpenApi31);
+        assert_eq!(e, json!({"type": ["string", "null"], "enum": ["a", null]}));
+        let mut c = json!({"const": "a"});
+        mark_nullable(&mut c, Dialect::OpenApi32);
+        assert_eq!(c, json!({"anyOf": [{"const": "a"}, {"type": "null"}]}));
+        let mut e30 = json!({"type": "string", "enum": ["a"]});
+        mark_nullable(&mut e30, Dialect::OpenApi30);
+        assert_eq!(e30, json!({"type": "string", "enum": ["a", null], "nullable": true}));
     }
 
     #[test]
@@ -344,6 +457,7 @@ mod tests {
         let _ = infer(&[v], Dialect::OpenApi31);
         let wide: Map<String, Value> = (0..500).map(|i| (format!("k{i}"), json!(i))).collect();
         let s = infer(&[Value::Object(wide)], Dialect::OpenApi31);
-        assert_eq!(s["properties"].as_object().unwrap().len(), MAX_PROPERTIES);
+        assert!(s.get("properties").is_none(), "500 names is a map");
+        assert_eq!(s["additionalProperties"], json!({"type": "integer"}));
     }
 }

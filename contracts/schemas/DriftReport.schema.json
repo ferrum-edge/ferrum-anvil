@@ -417,7 +417,7 @@
           "type": "string"
         },
         "path": {
-          "description": "Observed paths with id-like segments generalized (`/users/{userId}`).",
+          "description": "The observed paths generalized: every segment that is not a short\nlower-case word is a parameter (`/users/{userId}`). Observed paths\nthemselves are not kept.",
           "type": "string"
         },
         "calls": {
@@ -432,21 +432,13 @@
             "format": "uint",
             "minimum": 0
           }
-        },
-        "examples": {
-          "description": "Some observed paths.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         }
       },
       "required": [
         "method",
         "path",
         "calls",
-        "statuses",
-        "examples"
+        "statuses"
       ]
     },
     "Suggestion": {

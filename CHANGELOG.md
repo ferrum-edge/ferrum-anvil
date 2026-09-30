@@ -14,7 +14,10 @@
   a count and a coverage table lists every operation. Suggested revisions
   are dialect-aware patches (additions recommended, relaxations not) with
   schemas inferred from the shape of observed bodies, never their values;
-  `revise` returns the revised description and an RFC 6902 JSON Patch.
+  undeclared paths keep only short lower-case words (other segments become
+  parameters) and map keys become `*`. `revise` returns the revised
+  description, an RFC 6902 JSON Patch and a digest; reimporting applies only
+  the previewed digest.
 - CLI: `anvil spec-drift <spec> --har FILE` (no profile) or
   `anvil spec-drift --import ID` (an imported spec's history) prints the
   report, writes `--revised`/`--patch`, and exits 2 at `--fail-on`.

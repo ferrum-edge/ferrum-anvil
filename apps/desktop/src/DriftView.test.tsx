@@ -59,7 +59,7 @@ const report = (): DriftReport => ({
       findings: 3,
     },
   ],
-  undeclared: [{ method: "GET", path: "/customers/{customerId}", calls: 1, statuses: { "200": 1 }, examples: ["/api/customers/42"] }],
+  undeclared: [{ method: "GET", path: "/customers/{customerId}", calls: 1, statuses: { "200": 1 } }],
   suggestions: [
     { id: "s404", title: "Document the 404 response of GET /orders/{id}", detail: "d", kind: "addition", recommended: true, pointer: "/p", ops: [], snippet: "paths: {}\n" },
     { id: "snull", title: "Allow null at Order.note", detail: "d", kind: "relaxation", recommended: false, pointer: "/c", ops: [], snippet: "components: {}\n" },
@@ -77,7 +77,7 @@ function backend(overrides: Record<string, (args: Record<string, unknown>) => un
       case "drift_report":
         return report();
       case "drift_reimport_plan":
-        return { revision: { text: "", json_patch: [], applied: args.suggestionIds, skipped: [] }, added: ["GET /customers/{customerId}"], updated: 1, conflicts: 0, removed: 0, unchanged: 3 };
+        return { revision: { text: "", json_patch: [], applied: args.suggestionIds, skipped: [], digest: "d1" }, added: ["GET /customers/{customerId}"], updated: 1, conflicts: 0, removed: 0, unchanged: 3 };
       case "drift_reimport_apply":
         return 2;
       default:
@@ -116,7 +116,7 @@ test("updating the import previews the reimport, then applies exactly the chosen
   expect(await screen.findByText(/New requests: GET \/customers\/\{customerId\}/)).toBeTruthy();
   expect(calls("drift_reimport_plan")).toEqual([{ importId: "i1", suggestionIds: ["s404", "snull"] }]);
   fireEvent.click(screen.getByRole("button", { name: "Update import" }));
-  await waitFor(() => expect(calls("drift_reimport_apply")).toEqual([{ importId: "i1", suggestionIds: ["s404", "snull"] }]));
+  await waitFor(() => expect(calls("drift_reimport_apply")).toEqual([{ importId: "i1", suggestionIds: ["s404", "snull"], digest: "d1" }]));
   await waitFor(() => expect(onReimported).toHaveBeenCalled());
   expect(notify).toHaveBeenCalledWith("Updated the import (2 requests changed)");
   // The report is read again afterwards.

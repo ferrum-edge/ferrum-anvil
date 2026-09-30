@@ -137,9 +137,13 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   them against the description. Findings name places, types and
   constraints, never body values; suggested schemas keep only the shape of
   what was seen, and an observed value enters a suggestion only as a short
-  enum token (`[A-Za-z0-9_.-]`, up to 64 characters). A revision is written
-  only to a file the user picks in the save dialog, or reimported after a
-  preview.
+  enum token (`[A-Za-z0-9_.-]`, up to 64 characters, 20 per enum). URLs
+  carry data too: an undeclared path keeps only short lower-case words
+  (ids, emails and tokens become parameters), observed paths are not kept,
+  keys of map-like objects are `*`, and property or query names that look
+  like values are left out. Parsed bodies are capped at 32 MiB per
+  analysis. A revision is written only to a file the user picks in the save
+  dialog, or reimported after a preview whose digest must still match.
 - **Malicious bundle trying to enable insecure settings:** import
   normalisation (TLS bypass, plain-HTTP marker trust, credential forwarding,
   0-RTT early data, legacy HMAC, scenario/plan trust) with warnings in the

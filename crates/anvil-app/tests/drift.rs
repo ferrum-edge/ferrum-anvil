@@ -83,7 +83,10 @@ async fn history_drift_is_found_and_a_reimport_of_the_revision_resolves_it() {
     let (rev, plan) = app.drift_reimport_plan(&done.import_id, &ids, 100).unwrap();
     assert_eq!(rev.applied.len(), ids.len());
     assert_eq!(plan.added.len(), 1, "GET /echo becomes a request");
-    let (_, changed) = app.drift_reimport_apply(&done.import_id, &ids, 100).unwrap();
+    // Only the previewed revision applies.
+    let err = app.drift_reimport_apply(&done.import_id, &ids[1..], 100, &rev.digest).unwrap_err();
+    assert!(err.to_string().contains("changed since the preview"), "{err}");
+    let (_, changed) = app.drift_reimport_apply(&done.import_id, &ids, 100, &rev.digest).unwrap();
     assert!(changed >= 1);
     // The stored original is the revision now, under the earlier id too.
     let revised = String::from_utf8(app.spec_original(&done.import_id).unwrap()).unwrap();

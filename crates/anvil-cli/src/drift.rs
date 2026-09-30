@@ -86,9 +86,10 @@ pub fn spec_drift_files(a: &SpecDriftArgs) -> Result<i32> {
     let spec_path = a.spec.as_ref().ok_or_else(|| anyhow!("a spec file is required"))?;
     let har_path = a.har.as_ref().ok_or_else(|| anyhow!("pass the traffic with --har FILE, or use --import for history"))?;
     let spec = Spec::parse(&read(spec_path, "spec", 32 << 20)?).map_err(|e| anyhow!("{}: {}", spec_path.display(), t(&e.to_string())))?;
-    let obs = anvil_contract::observe::from_har(&read(har_path, "HAR file", anvil_contract::observe::MAX_HAR_BYTES as u64)?)
+    let har = anvil_contract::observe::from_har(&read(har_path, "HAR file", anvil_contract::observe::MAX_HAR_BYTES as u64)?)
         .map_err(|e| anyhow!("{}: {}", har_path.display(), t(&e)))?;
-    let report = anvil_contract::analyze(&spec, &obs, &DriftOptions::default());
+    let mut report = anvil_contract::analyze(&spec, &har.observations, &DriftOptions::default());
+    report.notes.extend(har.note());
     finish(a, &spec, &report, &spec_path.display().to_string())
 }
 

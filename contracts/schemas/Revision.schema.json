@@ -25,12 +25,17 @@
       "items": {
         "type": "string"
       }
+    },
+    "digest": {
+      "description": "SHA-256 (hex) of the description and the applied suggestions with\ntheir operations: the same digest means the same revision, so a\npreview can be applied exactly as shown.",
+      "type": "string"
     }
   },
   "required": [
     "text",
     "json_patch",
     "applied",
-    "skipped"
+    "skipped",
+    "digest"
   ]
 }

@@ -114,11 +114,21 @@ proptest! {
     }
 
     #[test]
-    fn drift_never_panics(body in json_value(4), spec_part in json_value(3), path in "[a-z0-9/{}%.-]{0,24}", status in 100u16..600, method in "(GET|POST|PATCH|OPTIONS|HEAD|X)") {
+    fn drift_never_panics(
+        body in json_value(4),
+        spec_part in json_value(3),
+        path in "[a-z0-9/{}%.-]{0,24}",
+        status in 100u16..600,
+        method in "(GET|POST|PATCH|OPTIONS|HEAD|X|PROPFIND|QUERY|G T|\\u{e9})",
+        codes in proptest::collection::vec("[0-9xX\\u{e9}\\u{4e2d}\\u{1f600}a-z]{0,4}", 0..4),
+    ) {
         use anvil_contract::observe::{ObservedBody, ObservedResponse};
         let shop = include_str!("fixtures/shop-3.0.yaml");
         let doc = json!({"openapi": "3.1.0", "info": {"title": "f", "version": "1"}, "servers": [{"url": "https://x/{v}"}], "paths": {"/a/{id}": {"get": {"responses": {"200": {"content": {"application/json": {"schema": spec_part.clone()}}}, "4XX": spec_part.clone()}}, "parameters": [spec_part.clone()]}}, "components": {"schemas": {"S": spec_part.clone()}}});
-        for text in [shop.to_string(), doc.to_string()] {
+        // Response keys that are any string (multibyte included).
+        let responses: serde_json::Map<String, Value> = codes.iter().map(|c| (c.clone(), json!({"description": "d"}))).collect();
+        let odd = json!({"openapi": "3.2.0", "info": {"title": "f", "version": "1"}, "paths": {"/{p}": {"get": {"responses": responses}}}});
+        for text in [shop.to_string(), doc.to_string(), odd.to_string()] {
             let Ok(spec) = Spec::parse(text.as_bytes()) else { continue };
             let obs = anvil_contract::Observation {
                 id: "p".into(), at: None, method: method.clone(), url: format!("https://x/{path}?q=1&&=&%zz"),

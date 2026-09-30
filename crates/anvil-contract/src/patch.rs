@@ -39,6 +39,10 @@ impl PatchOp {
         PatchOp { op: PatchKind::Replace, path: path.into(), value: Some(value) }
     }
 
+    pub fn remove(path: impl Into<String>) -> Self {
+        PatchOp { op: PatchKind::Remove, path: path.into(), value: None }
+    }
+
     pub fn union(path: impl Into<String>, items: Vec<Value>) -> Self {
         PatchOp { op: PatchKind::Union, path: path.into(), value: Some(Value::Array(items)) }
     }

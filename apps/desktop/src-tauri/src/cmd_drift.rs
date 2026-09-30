@@ -74,11 +74,12 @@ pub async fn drift_reimport_plan(handle: AppHandle, import_id: String, suggestio
     .await
 }
 
-/// Reimport the revision; returns only a count (see `spec_reimport_apply`).
+/// Reimport the revision previewed with `digest`; returns only a count
+/// (see `spec_reimport_apply`).
 #[tauri::command]
-pub async fn drift_reimport_apply(handle: AppHandle, import_id: String, suggestion_ids: Vec<String>) -> R<usize> {
+pub async fn drift_reimport_apply(handle: AppHandle, import_id: String, suggestion_ids: Vec<String>, digest: String) -> R<usize> {
     blocking_unchecked(&handle, move |st| {
-        st.app()?.drift_reimport_apply(&id(&import_id)?, &suggestion_ids, LIMIT).map(|(_, n)| n).map_err(e)
+        st.app()?.drift_reimport_apply(&id(&import_id)?, &suggestion_ids, LIMIT, &digest).map(|(_, n)| n).map_err(e)
     })
     .await
 }

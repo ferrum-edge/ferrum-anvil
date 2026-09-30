@@ -7,10 +7,24 @@ use serde_json::Value;
 
 /// Response bodies larger than this are not parsed for schema checks.
 pub const MAX_BODY_CHECKED: usize = 1024 * 1024;
+/// Body bytes parsed for one analysis, across all exchanges.
+pub const MAX_BODIES_PARSED: usize = 32 * 1024 * 1024;
 /// HAR entries read at most.
 pub const MAX_HAR_ENTRIES: usize = 10_000;
 /// Largest HAR file read.
-pub const MAX_HAR_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_HAR_BYTES: usize = 64 * 1024 * 1024;
+
+/// What is left of [`MAX_BODIES_PARSED`] while collecting observations.
+#[derive(Debug, Clone)]
+pub struct BodyBudget {
+    left: usize,
+}
+
+impl Default for BodyBudget {
+    fn default() -> Self {
+        BodyBudget { left: MAX_BODIES_PARSED }
+    }
+}
 
 /// One exchange.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,26 +83,34 @@ pub fn is_json(ct: &str) -> bool {
     e == "application/json" || e.ends_with("+json") || e == "text/json"
 }
 
-/// Parse a response body for checks: JSON when the media type says so and
-/// the body is small enough.
-pub fn body_of(content_type: Option<&str>, bytes: &[u8], complete: bool) -> ObservedBody {
+/// Parse a response body for checks: JSON when the media type says so, the
+/// body is small enough and the analysis' budget is not spent.
+pub fn body_of(content_type: Option<&str>, bytes: &[u8], complete: bool, budget: &mut BodyBudget) -> ObservedBody {
     if bytes.is_empty() {
         return ObservedBody::Empty;
     }
     if !content_type.is_some_and(is_json) {
         return ObservedBody::Other;
     }
+    if bytes.len() > MAX_BODY_CHECKED {
+        return too_large();
+    }
     if !complete {
         return ObservedBody::Unavailable("only part of the body was captured".into());
     }
-    if bytes.len() > MAX_BODY_CHECKED {
-        return ObservedBody::Unavailable(format!("the body is larger than {} KiB", MAX_BODY_CHECKED / 1024));
+    if bytes.len() > budget.left {
+        return ObservedBody::Unavailable(format!("the analysis parses at most {} MiB of bodies", MAX_BODIES_PARSED >> 20));
     }
+    budget.left -= bytes.len();
     // Bounded by the size check and serde_json's nesting limit.
     match serde_json::from_slice(bytes) {
         Ok(v) => ObservedBody::Json(v),
         Err(_) => ObservedBody::Unavailable("the body is not valid JSON".into()),
     }
+}
+
+fn too_large() -> ObservedBody {
+    ObservedBody::Unavailable(format!("the body is larger than {} KiB", MAX_BODY_CHECKED / 1024))
 }
 
 /// Query parameter names of a URL, in order.
@@ -148,13 +170,29 @@ fn header_value<'a>(v: Option<&'a Value>, name: &str) -> Option<&'a str> {
         .and_then(|h| h.get("value").and_then(Value::as_str))
 }
 
+/// The exchanges of a HAR archive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HarCapture {
+    pub observations: Vec<Observation>,
+    /// Entries past [`MAX_HAR_ENTRIES`], not read.
+    pub dropped: usize,
+}
+
+impl HarCapture {
+    /// A note for the report when entries were dropped.
+    pub fn note(&self) -> Option<String> {
+        (self.dropped > 0).then(|| format!("only the first {MAX_HAR_ENTRIES} entries of the archive were read; {} were not", self.dropped))
+    }
+}
+
 /// Read the exchanges of a HAR 1.2 archive (browser dev tools, proxies).
 /// Performs no I/O; bounded like an import.
-pub fn from_har(bytes: &[u8]) -> Result<Vec<Observation>, String> {
+pub fn from_har(bytes: &[u8]) -> Result<HarCapture, String> {
     let opts = anvil_import::ImportOptions { max_bytes: MAX_HAR_BYTES, max_nodes: 5_000_000, ..anvil_import::ImportOptions::default() };
     let (doc, _) = anvil_import::parse_document(bytes, &opts).map_err(|e| e.to_string())?;
     let entries = doc.pointer("/log/entries").and_then(Value::as_array).ok_or("not a HAR archive (no log.entries)")?;
     let mut out = vec![];
+    let mut budget = BodyBudget::default();
     for (i, e) in entries.iter().take(MAX_HAR_ENTRIES).enumerate() {
         let req = e.get("request");
         let Some(method) = req.and_then(|r| r.get("method")).and_then(Value::as_str) else { continue };
@@ -192,21 +230,30 @@ pub fn from_har(bytes: &[u8]) -> Result<Vec<Observation>, String> {
                 .or_else(|| header_value(resp.and_then(|r| r.get("headers")), "content-type").map(str::to_string))
                 .filter(|c| !c.is_empty());
             let text = content.and_then(|c| c.get("text")).and_then(Value::as_str);
-            let raw: Option<Vec<u8>> = match (text, content.and_then(|c| c.get("encoding")).and_then(Value::as_str)) {
-                (Some(t), Some("base64")) => base64::engine::general_purpose::STANDARD.decode(t.trim()).ok(),
-                (Some(t), _) => Some(t.as_bytes().to_vec()),
-                (None, _) => None,
-            };
             let size = content.and_then(|c| c.get("size")).and_then(Value::as_i64).filter(|n| *n >= 0).map(|n| n as u64);
-            let body = match &raw {
-                Some(b) => body_of(ct.as_deref(), b, true),
-                None if size == Some(0) => ObservedBody::Empty,
-                None => ObservedBody::Unavailable("the archive does not include the body".into()),
+            // (body, decoded length when known).
+            let (body, raw_len) = match (text, content.and_then(|c| c.get("encoding")).and_then(Value::as_str)) {
+                (Some(t), Some("base64")) => {
+                    let t = t.trim();
+                    // Sized before decoding: a large body is never copied.
+                    let decoded = t.len() / 4 * 3;
+                    if decoded > MAX_BODY_CHECKED + 3 {
+                        (if ct.as_deref().is_some_and(is_json) { too_large() } else { ObservedBody::Other }, Some(decoded))
+                    } else {
+                        match base64::engine::general_purpose::STANDARD.decode(t) {
+                            Ok(b) => (body_of(ct.as_deref(), &b, true, &mut budget), Some(b.len())),
+                            Err(_) => (ObservedBody::Unavailable("the archive's body is not valid base64".into()), None),
+                        }
+                    }
+                }
+                (Some(t), _) => (body_of(ct.as_deref(), t.as_bytes(), true, &mut budget), Some(t.len())),
+                (None, _) if size == Some(0) => (ObservedBody::Empty, None),
+                (None, _) => (ObservedBody::Unavailable("the archive does not include the body".into()), None),
             };
             ObservedResponse {
                 status: status as u16,
                 headers: header_names(resp.and_then(|r| r.get("headers"))),
-                bytes: size.or(raw.as_ref().map(|b| b.len() as u64)),
+                bytes: size.or(raw_len.map(|n| n as u64)),
                 content_type: ct,
                 body,
             }
@@ -229,7 +276,7 @@ pub fn from_har(bytes: &[u8]) -> Result<Vec<Observation>, String> {
             latency_ms: e.get("time").and_then(Value::as_f64).filter(|t| *t >= 0.0),
         });
     }
-    Ok(out)
+    Ok(HarCapture { observations: out, dropped: entries.len().saturating_sub(MAX_HAR_ENTRIES) })
 }
 
 #[cfg(test)]
@@ -259,7 +306,7 @@ mod tests {
             {"request": {"method": "GET", "url": "https://api.example/v1/pets"}, "response": {"status": 0}},
             {"request": 5}
         ]}});
-        let obs = from_har(har.to_string().as_bytes()).unwrap();
+        let obs = from_har(har.to_string().as_bytes()).unwrap().observations;
         assert_eq!(obs.len(), 2);
         assert_eq!(obs[0].method, "POST");
         assert_eq!(obs[0].query, ["dry_run"]);
@@ -274,10 +321,38 @@ mod tests {
 
     #[test]
     fn bodies_are_parsed_only_when_useful() {
-        assert_eq!(body_of(Some("application/problem+json"), b"{\"a\":1}", true), ObservedBody::Json(json!({"a": 1})));
-        assert_eq!(body_of(Some("text/plain"), b"hi", true), ObservedBody::Other);
-        assert!(matches!(body_of(Some("application/json"), b"{\"a\":", true), ObservedBody::Unavailable(_)));
-        assert!(matches!(body_of(Some("application/json"), b"{}", false), ObservedBody::Unavailable(_)));
-        assert_eq!(body_of(Some("application/json"), b"", true), ObservedBody::Empty);
+        let b = &mut BodyBudget::default();
+        assert_eq!(body_of(Some("application/problem+json"), b"{\"a\":1}", true, b), ObservedBody::Json(json!({"a": 1})));
+        assert_eq!(body_of(Some("text/plain"), b"hi", true, b), ObservedBody::Other);
+        assert!(matches!(body_of(Some("application/json"), b"{\"a\":", true, b), ObservedBody::Unavailable(_)));
+        assert!(matches!(body_of(Some("application/json"), b"{}", false, b), ObservedBody::Unavailable(_)));
+        assert_eq!(body_of(Some("application/json"), b"", true, b), ObservedBody::Empty);
+    }
+
+    #[test]
+    fn parsed_bodies_share_one_budget() {
+        let body = format!("[{}]", vec!["1"; 400_000].join(","));
+        let mut b = BodyBudget::default();
+        let parsed =
+            (0..60).filter(|_| matches!(body_of(Some("application/json"), body.as_bytes(), true, &mut b), ObservedBody::Json(_))).count();
+        assert_eq!(parsed, MAX_BODIES_PARSED / body.len());
+        match body_of(Some("application/json"), body.as_bytes(), true, &mut b) {
+            ObservedBody::Unavailable(why) => assert!(why.contains("32 MiB"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn har_limits() {
+        let big = base64::engine::general_purpose::STANDARD.encode(vec![b' '; MAX_BODY_CHECKED + 10]);
+        let mut entries = vec![json!({"request": {"method": "GET", "url": "https://x/a"},
+            "response": {"status": 200, "content": {"mimeType": "application/json", "text": big, "encoding": "base64"}}})];
+        entries.extend((0..MAX_HAR_ENTRIES + 2).map(|_| json!({"request": {"method": "GET", "url": "https://x/b"}})));
+        let cap = from_har(json!({"log": {"entries": entries}}).to_string().as_bytes()).unwrap();
+        assert_eq!(cap.observations.len(), MAX_HAR_ENTRIES);
+        assert_eq!(cap.dropped, 3);
+        assert!(cap.note().unwrap().contains("10000"));
+        let r = cap.observations[0].response.as_ref().unwrap();
+        assert!(matches!(&r.body, ObservedBody::Unavailable(w) if w.contains("larger")), "{:?}", r.body);
     }
 }

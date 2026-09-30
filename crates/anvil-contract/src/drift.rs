@@ -14,15 +14,19 @@
 //! optional, a type widened, a budget raised) and may hide a bug in the
 //! API instead, so it is not recommended by default.
 //!
-//! Messages and suggestions carry no observed values except property,
-//! parameter and header names, status codes, media types, sizes and times:
-//! inferred schemas keep only the shape ([`crate::infer`]). An observed
-//! value becomes part of a suggestion only as a short enum token.
+//! Messages and suggestions carry no observed values except property and
+//! parameter names that look like names ([`safe_name`]), status codes,
+//! media types, sizes and times: inferred schemas keep only the shape
+//! ([`crate::infer`]), undeclared paths keep only short lower-case words
+//! (every other segment becomes a parameter), and keys of map-like objects
+//! become `*`. An observed value becomes part of a suggestion only as a
+//! short enum token.
 
-use crate::infer::{Shape, mark_nullable};
+use crate::infer::{Shape, mark_nullable, safe_name};
+use crate::lint::MAX_EXAMPLE_SCAN_STEPS;
 use crate::lint::SpecSummary;
 use crate::locate::ptr;
-use crate::model::{Direction, Media, OperationRef, parameters, request_body, responses, schema_types, swagger_media};
+use crate::model::{Direction, METHODS, Media, OperationRef, parameters, request_body, responses, schema_types, swagger_media};
 use crate::observe::{Observation, ObservedBody, essence, is_json, split_url};
 use crate::patch::{self, PatchOp};
 use crate::route::{Route, Router};
@@ -35,10 +39,23 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The extension an operation, path item or document declares its budget in.
 pub const EXPECTATIONS: &str = "x-anvil-expectations";
+
+/// Undeclared properties suggested per object schema.
+const MAX_PROPERTIES_PER_SCHEMA: usize = 50;
+/// Schema changes (properties, nulls, types, enums) suggested in all.
+const MAX_SCHEMA_FIXES: usize = 500;
+/// Observed enum values suggested per location.
+const MAX_ENUM_TOKENS: usize = 20;
+/// Body values walked for schema suggestions, across the analysis.
+const MAX_WALK_STEPS: usize = 2_000_000;
+/// Query parameter names kept per undeclared endpoint.
+const MAX_QUERY_NAMES: usize = 50;
+/// How an observed method that is not an HTTP token is shown.
+const INVALID_METHOD: &str = "(invalid method)";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DriftOptions {
@@ -184,12 +201,12 @@ pub struct OperationCoverage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct UndeclaredEndpoint {
     pub method: String,
-    /// Observed paths with id-like segments generalized (`/users/{userId}`).
+    /// The observed paths generalized: every segment that is not a short
+    /// lower-case word is a parameter (`/users/{userId}`). Observed paths
+    /// themselves are not kept.
     pub path: String,
     pub calls: usize,
     pub statuses: BTreeMap<String, usize>,
-    /// Some observed paths.
-    pub examples: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -227,21 +244,38 @@ pub struct Revision {
     pub applied: Vec<String>,
     /// Suggestion ids that were not found, and ops that could not apply.
     pub skipped: Vec<String>,
+    /// SHA-256 (hex) of the description and the applied suggestions with
+    /// their operations: the same digest means the same revision, so a
+    /// preview can be applied exactly as shown.
+    pub digest: String,
 }
 
 /// Apply the suggestions with `ids` (in report order) to `spec`.
 pub fn revise(spec: &Spec, report: &DriftReport, ids: &[String]) -> Revision {
+    let chosen: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let known: HashSet<&str> = report.suggestions.iter().map(|s| s.id.as_str()).collect();
     let mut doc = spec.root.clone();
     let mut applied = vec![];
-    let mut skipped: Vec<String> = ids.iter().filter(|id| !report.suggestions.iter().any(|s| &&s.id == id)).cloned().collect();
-    for s in report.suggestions.iter().filter(|s| ids.contains(&s.id)) {
+    let mut skipped: Vec<String> = ids.iter().filter(|id| !known.contains(id.as_str())).cloned().collect();
+    let mut digest = Sha256::new();
+    digest.update(spec.sha256.as_bytes());
+    for s in report.suggestions.iter().filter(|s| chosen.contains(s.id.as_str())) {
         if patch::apply(&mut doc, &s.ops) > 0 {
             skipped.push(s.id.clone());
         } else {
+            digest.update(b"\0");
+            digest.update(s.id.as_bytes());
+            digest.update(serde_json::to_vec(&s.ops).unwrap_or_default());
             applied.push(s.id.clone());
         }
     }
-    Revision { text: patch::render(&doc, spec.syntax), json_patch: patch::diff(&spec.root, &doc), applied, skipped }
+    Revision {
+        text: patch::render(&doc, spec.syntax),
+        json_patch: patch::diff(&spec.root, &doc),
+        applied,
+        skipped,
+        digest: hex::encode(digest.finalize()),
+    }
 }
 
 // ---------------------------------------------------------------- analysis
@@ -277,13 +311,13 @@ struct OpAcc {
 
 #[derive(Default)]
 struct EndpointAcc {
-    method: String,
-    base: String,
+    /// The prefix before the path, generalized, when it is not a declared
+    /// server base path.
+    unknown_prefix: Option<String>,
     /// The declared path, when only the method is new.
     template: Option<String>,
     calls: usize,
     statuses: BTreeMap<String, usize>,
-    examples: Vec<String>,
     responses: BTreeMap<(String, Option<String>), Shape>,
     query: BTreeSet<String>,
     request_type: Option<String>,
@@ -307,20 +341,29 @@ struct State<'a> {
     ops: Vec<OpAcc>,
     endpoints: BTreeMap<(String, String), EndpointAcc>,
     fixes: BTreeMap<FixKey, (String, Shape, BTreeSet<String>)>,
-    required: BTreeMap<(String, String), (usize, usize)>,
+    /// (schema holding `required`, name) → (seen, missing, owner).
+    required: BTreeMap<(String, String), (usize, usize, String)>,
     servers: BTreeMap<String, (usize, String)>,
     validators: HashMap<(String, bool), Option<jsonschema::Validator>>,
+    /// Members and items scanned by schema compiles.
+    scan_steps: usize,
+    /// Body values walked.
+    walk_steps: usize,
+    /// Undeclared properties suggested per object schema.
+    per_schema: HashMap<String, usize>,
     notes: BTreeMap<String, usize>,
     matched: usize,
     without_response: usize,
     ignored: usize,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
-    /// Schema findings by (operation, status, place in the body).
-    schema_places: HashMap<(String, String, String), BTreeSet<String>>,
-    /// Fixes to link to the schema findings about the same place, resolved
-    /// once at the end: (operation, status, place, suggestion key).
-    pending_links: BTreeSet<(String, String, String, String)>,
+    /// Schema findings by (operation, status, place in the body, error
+    /// category; see [`describe`]).
+    schema_places: HashMap<(String, String, String, String), BTreeSet<String>>,
+    /// Fixes to link to the schema findings about the same place and
+    /// category, resolved once at the end: (operation, status, place,
+    /// category, suggestion key).
+    pending_links: BTreeSet<(String, String, String, String, String)>,
 }
 
 /// Compare observations with the description.
@@ -338,6 +381,9 @@ pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -
         required: BTreeMap::new(),
         servers: BTreeMap::new(),
         validators: HashMap::new(),
+        scan_steps: 0,
+        walk_steps: 0,
+        per_schema: HashMap::new(),
         notes: BTreeMap::new(),
         matched: 0,
         without_response: 0,
@@ -383,10 +429,15 @@ fn reason(code: &str) -> &'static str {
 
 /// The declared response for `code`: exact, then `4XX`, then `default`.
 fn declared_response<'a, 'b>(resps: &'b [crate::model::Response<'a>], code: &str) -> Option<&'b crate::model::Response<'a>> {
+    let range = |declared: &str| {
+        // Bytes, not characters: a declared key may be any string.
+        let d = declared.as_bytes();
+        d.len() == 3 && d[1..].eq_ignore_ascii_case(b"xx") && code.as_bytes().first() == Some(&d[0])
+    };
     resps
         .iter()
         .find(|r| r.code == code)
-        .or_else(|| resps.iter().find(|r| r.code.len() == 3 && r.code[1..].eq_ignore_ascii_case("xx") && r.code[..1] == code[..1]))
+        .or_else(|| resps.iter().find(|r| range(&r.code)))
         .or_else(|| resps.iter().find(|r| r.code == "default"))
 }
 
@@ -435,27 +486,39 @@ fn short_id(key: &str) -> String {
     hex::encode(&Sha256::digest(key.as_bytes())[..6])
 }
 
-/// A generalized path: id-like segments become `{nameId}` parameters.
+/// A path segment kept as observed: lower-case ASCII letters, digits, `-`
+/// and `_`, at most 32 characters with at most one digit (`v1`, `orders`,
+/// `line-items`). Anything else (an id, an email, a token, a mixed-case or
+/// encoded value) could be data.
+fn literal_segment(seg: &str) -> bool {
+    let b = seg.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'-' | b'_'))
+        && b.iter().filter(|c| c.is_ascii_digit()).count() < 2
+}
+
+/// A generalized path: every segment that is not a [`literal_segment`]
+/// becomes a `{nameId}` parameter.
 fn generalize(path: &str) -> String {
     let mut out = String::new();
     // The last literal segment names the next parameter.
     let mut prev = "";
     let mut used = BTreeSet::new();
     for seg in path.split('/').filter(|s| !s.is_empty()) {
-        let digits = seg.chars().filter(char::is_ascii_digit).count();
-        let id_like = seg.chars().all(|c| c.is_ascii_digit())
-            || (seg.len() == 36 && seg.matches('-').count() == 4)
-            || (seg.len() >= 8 && digits >= 2 && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         out.push('/');
-        if id_like {
+        if !literal_segment(seg) {
             let base = prev.trim_end_matches('s');
             let mut name = if base.is_empty() || !base.chars().all(|c| c.is_ascii_alphanumeric()) {
                 "id".to_string()
             } else {
                 format!("{}Id", base.to_ascii_lowercase())
             };
+            let stem = name.clone();
+            let mut n = 1;
             while !used.insert(name.clone()) {
-                name.push('2');
+                n += 1;
+                name = format!("{stem}{n}");
             }
             out.push_str(&format!("{{{name}}}"));
             prev = "";
@@ -467,17 +530,37 @@ fn generalize(path: &str) -> String {
     if out.is_empty() { "/".into() } else { out }
 }
 
-/// A value-free description of a validation error: where in the body, and
-/// what is wrong there.
-fn describe(e: &jsonschema::ValidationError<'_>) -> (String, String) {
+/// Where in a body, as a message shows it.
+fn place(ipath: &str) -> String {
+    if ipath.is_empty() { "the body".to_string() } else { format!("`{ipath}`") }
+}
+
+/// A value-free description of a validation error: where in the body,
+/// what is wrong there, and the error's category (`type`, `enum`,
+/// `additional`, `required:<name>`, `other`) that fixes are linked by.
+///
+/// Only keys the schema names under `properties` are shown; array indexes
+/// and the keys of map-like objects (`additionalProperties`,
+/// `patternProperties`) become `*`.
+fn describe(e: &jsonschema::ValidationError<'_>) -> (String, String, String) {
     use jsonschema::error::ValidationErrorKind as K;
+    let schema_path = e.schema_path().as_str();
+    let tokens: Vec<&str> = schema_path.split('/').collect();
+    let named: HashSet<&str> = tokens.windows(2).filter(|w| w[0] == "properties").map(|w| w[1]).collect();
     let at: String = e
         .instance_path()
         .as_str()
         .split('/')
-        .map(|t| if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) { "*" } else { t })
+        .map(|t| if t.is_empty() || named.contains(t) { t } else { "*" })
         .collect::<Vec<_>>()
         .join("/");
+    let category = match e.kind() {
+        K::Type { .. } => "type".to_string(),
+        K::Required { property } => format!("required:{}", property.as_str().unwrap_or("?")),
+        K::AdditionalProperties { .. } => "additional".into(),
+        K::Enum { .. } | K::Constant { .. } => "enum".into(),
+        _ => "other".into(),
+    };
     let what = match e.kind() {
         K::Type { kind } => {
             let expected = match kind {
@@ -488,7 +571,13 @@ fn describe(e: &jsonschema::ValidationError<'_>) -> (String, String) {
         }
         K::Required { property } => format!("is missing required property `{}`", property.as_str().unwrap_or("?")),
         K::AdditionalProperties { unexpected } => {
-            format!("has undeclared properties {}", unexpected.iter().map(|u| format!("`{u}`")).collect::<Vec<_>>().join(", "))
+            // Keys that look like data are not named.
+            let names: Vec<String> = unexpected.iter().filter(|u| safe_name(u)).take(5).map(|u| format!("`{u}`")).collect();
+            match (names.is_empty(), names.len() < unexpected.len()) {
+                (true, _) => "has undeclared properties".to_string(),
+                (false, false) => format!("has undeclared properties {}", names.join(", ")),
+                (false, true) => format!("has undeclared properties {} and others", names.join(", ")),
+            }
         }
         K::Enum { .. } => "is not one of the declared values".into(),
         K::Constant { .. } => "is not the declared constant".into(),
@@ -510,9 +599,16 @@ fn describe(e: &jsonschema::ValidationError<'_>) -> (String, String) {
         K::AnyOf { .. } => "matches none of the `anyOf` schemas".into(),
         K::Not { .. } => "matches a schema it must not".into(),
         K::FalseSchema => "is not allowed".into(),
-        _ => format!("violates `{}`", e.schema_path().as_str().rsplit('/').next().unwrap_or("?")),
+        _ => format!("violates `{}`", schema_path.rsplit('/').next().unwrap_or("?")),
     };
-    (if at.is_empty() { "the body".to_string() } else { format!("`{at}`") }, what)
+    (place(&at), what, category)
+}
+
+/// An observed method as it is shown and keyed: an RFC 9110 token of at
+/// most 20 characters, upper case.
+fn method_token(m: &str) -> String {
+    let tchar = |c: &u8| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(c);
+    if !m.is_empty() && m.len() <= 20 && m.as_bytes().iter().all(tchar) { m.to_ascii_uppercase() } else { INVALID_METHOD.into() }
 }
 
 fn allows_null(s: &Value) -> bool {
@@ -568,6 +664,12 @@ impl<'a> State<'a> {
             let base = match &route {
                 Route::Operation { base, .. } | Route::Method { base, .. } | Route::Path { base } => base.clone(),
             };
+            // An undeclared prefix is kept only when nothing in it could be data.
+            let base = if self.router.base_declared(&base) {
+                base
+            } else {
+                Some(generalize(&base)).filter(|g| !g.contains('{') && g != "/").unwrap_or_default()
+            };
             let e = self.servers.entry(origin.clone()).or_insert((0, base));
             e.0 += 1;
             let key = format!("server|{origin}");
@@ -586,7 +688,7 @@ impl<'a> State<'a> {
                 self.matched += 1;
                 self.check_operation(op, o);
             }
-            Route::Method { .. } | Route::Path { .. } if o.method == "OPTIONS" => self.ignored += 1,
+            Route::Method { .. } | Route::Path { .. } if o.method.eq_ignore_ascii_case("OPTIONS") => self.ignored += 1,
             Route::Method { template, base } => self.undeclared(o, &path, base, Some(template)),
             Route::Path { base } => self.undeclared(o, &path, base, None),
         }
@@ -598,7 +700,8 @@ impl<'a> State<'a> {
     fn undeclared(&mut self, o: &Observation, path: &str, base: String, template: Option<String>) {
         let rest = path.strip_prefix(&base).unwrap_or(path);
         let pattern = template.clone().unwrap_or_else(|| generalize(rest));
-        let label = format!("{} {pattern}", o.method);
+        let method = method_token(&o.method);
+        let label = format!("{method} {pattern}");
         let (kind, message, pointer) = match &template {
             Some(t) => {
                 let declared: Vec<String> =
@@ -606,24 +709,25 @@ impl<'a> State<'a> {
                 let list = if declared.is_empty() { "no operations".into() } else { declared.join(", ") };
                 (
                     DriftKind::UndeclaredMethod,
-                    format!("{} is called on {t}, which declares only {list}", o.method),
+                    format!("{method} is called on {t}, which declares only {list}"),
                     Some(Router::path_pointer(t)),
                 )
             }
             None => (DriftKind::UndeclaredPath, format!("{label} is called, but the description has no such path"), None),
         };
-        let key = format!("endpoint|{}|{pattern}", o.method);
+        let key = format!("endpoint|{method}|{pattern}");
         self.finding(key.clone(), kind, o, message, Some(label), pointer);
         self.link(&key, &key);
-        let acc = self.endpoints.entry((o.method.clone(), pattern.clone())).or_default();
-        acc.method = o.method.clone();
-        acc.base = base;
+        let unknown_prefix = (!base.is_empty() && !self.router.base_declared(&base)).then(|| generalize(&base));
+        let acc = self.endpoints.entry((method, pattern.clone())).or_default();
+        acc.unknown_prefix = acc.unknown_prefix.take().or(unknown_prefix);
         acc.template = template;
         acc.calls += 1;
-        if acc.examples.len() < 3 && !acc.examples.iter().any(|e| e == path) {
-            acc.examples.push(path.to_string());
+        for q in o.query.iter().filter(|q| safe_name(q)) {
+            if acc.query.len() < MAX_QUERY_NAMES {
+                acc.query.insert(q.clone());
+            }
         }
-        acc.query.extend(o.query.iter().cloned());
         if o.request_bytes > 0 {
             acc.request_type = acc.request_type.clone().or_else(|| o.request_content_type.as_deref().map(essence));
         }
@@ -680,6 +784,10 @@ impl<'a> State<'a> {
         if !has_querystring {
             for q in &o.query {
                 if !params.iter().any(|p| p.location == "query" && &p.name == q) {
+                    if !safe_name(q) {
+                        self.note("undeclared query parameters whose names look like values were not reported");
+                        continue;
+                    }
                     let key = format!("query|{op_ptr}|{q}");
                     self.finding(
                         key.clone(),
@@ -743,7 +851,8 @@ impl<'a> State<'a> {
         {
             self.ops[i].large_request += 1;
             let key = format!("reqsize|{op_ptr}");
-            self.finding(key, DriftKind::RequestLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            self.finding(key.clone(), DriftKind::RequestLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            self.link(&key, &key);
         }
 
         // Response.
@@ -764,7 +873,8 @@ impl<'a> State<'a> {
         {
             self.ops[i].large += 1;
             let key = format!("size|{op_ptr}");
-            self.finding(key, DriftKind::ResponseLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            self.finding(key.clone(), DriftKind::ResponseLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            self.link(&key, &key);
         }
         let has_body = !matches!(r.body, ObservedBody::Empty) && r.bytes != Some(0);
         let ct = r.content_type.as_deref().map(essence).filter(|_| has_body);
@@ -843,24 +953,32 @@ impl<'a> State<'a> {
         if !is_json(&ct) && !is_json(&media.media_type) && media.media_type != "*/*" {
             return;
         }
-        let vkey = (media.schema_pointer.clone(), false);
+        // Media types whose schema is only a `$ref` to the same target share
+        // its validator (keyed by the first hop, as in the linter).
+        let target = match schema.as_object() {
+            Some(s) if s.len() == 1 => s.get("$ref").and_then(Value::as_str).and_then(crate::spec::internal_pointer),
+            _ => None,
+        };
+        let vkey = (target.unwrap_or_else(|| media.schema_pointer.clone()), false);
         if !self.validators.contains_key(&vkey) {
-            let v = schema::compile(spec, schema, Direction::Response).ok();
+            let v = schema::compile_within(spec, schema, Direction::Response, &mut self.scan_steps, MAX_EXAMPLE_SCAN_STEPS).ok();
             if v.is_none() {
-                self.note("some response schemas could not be compiled (an external or broken reference); their bodies were not checked");
+                self.note(if self.scan_steps > MAX_EXAMPLE_SCAN_STEPS {
+                    "the analysis' budget for scanning schemas is spent; bodies of the remaining schemas were not checked"
+                } else {
+                    "some response schemas could not be compiled (an external or broken reference); their bodies were not checked"
+                });
             }
             self.validators.insert(vkey.clone(), v);
         }
-        let messages: Vec<(String, String)> = match self.validators.get(&vkey).and_then(Option::as_ref) {
-            Some(v) => v.iter_errors(body).take(10).map(|e| describe(&e)).collect(),
-            None => vec![],
-        };
+        let Some(validator) = self.validators.get(&vkey).and_then(Option::as_ref) else { return };
+        let messages: Vec<(String, String, String)> = validator.iter_errors(body).take(10).map(|e| describe(&e)).collect();
         if messages.is_empty() {
             // Still record required-property presence for relaxations.
             self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, false);
             return;
         }
-        for (place, what) in &messages {
+        for (place, what, category) in &messages {
             let m = format!("{place} {what}");
             let key = format!("schema|{}|{m}", media.schema_pointer);
             self.finding(
@@ -871,18 +989,39 @@ impl<'a> State<'a> {
                 Some(label.clone()),
                 Some(media.schema_pointer.clone()),
             );
-            self.schema_places.entry((label.clone(), code.clone(), place.clone())).or_default().insert(key);
+            self.schema_places.entry((label.clone(), code.clone(), place.clone(), category.clone())).or_default().insert(key);
         }
         self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, true);
     }
 
+    /// The fix at `key`, created with `owner` unless a cap is reached.
+    fn fix(&mut self, key: &FixKey, owner: impl FnOnce() -> String) -> Option<&mut (String, Shape, BTreeSet<String>)> {
+        if !self.fixes.contains_key(key) {
+            if self.fixes.len() >= MAX_SCHEMA_FIXES {
+                self.note(format!("only {MAX_SCHEMA_FIXES} schema changes are suggested; check again after applying them"));
+                return None;
+            }
+            if let FixKey::AddProperty { at, .. } = key {
+                let n = self.per_schema.entry(at.clone()).or_default();
+                if *n >= MAX_PROPERTIES_PER_SCHEMA {
+                    self.note(format!("at most {MAX_PROPERTIES_PER_SCHEMA} undeclared properties are suggested per schema"));
+                    return None;
+                }
+                *n += 1;
+            }
+            self.fixes.insert(key.clone(), (owner(), Shape::default(), BTreeSet::new()));
+        }
+        self.fixes.get_mut(key)
+    }
+
     /// Walk a body along its schema, collecting fixes that would make the
     /// schema accept it. `failed`: the body did not validate (fixes are
-    /// linked to that response's schema findings).
+    /// linked to that response's schema findings of the same place and
+    /// category).
     #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
-        schema: &Value,
+        schema: &'a Value,
         at: &str,
         v: &Value,
         ipath: &str,
@@ -895,45 +1034,48 @@ impl<'a> State<'a> {
         if depth > 32 {
             return;
         }
-        let spec = self.spec;
+        self.walk_steps += 1;
+        if self.walk_steps > MAX_WALK_STEPS {
+            if self.walk_steps == MAX_WALK_STEPS + 1 {
+                self.note("the analysis' budget for walking bodies is spent; later bodies got no schema suggestions");
+            }
+            return;
+        }
+        let spec: &'a Spec = self.spec;
         let (s, at) = spec.deref(schema, at);
         if s.get("oneOf").is_some() || s.get("anyOf").is_some() {
             return;
         }
-        let owner = || -> String {
-            // The component the location is in, else the response.
-            match at.strip_prefix("/components/schemas/").or_else(|| at.strip_prefix("/definitions/")) {
-                Some(rest) => rest.split('/').next().unwrap_or(rest).replace("~1", "/").replace("~0", "~"),
-                None => format!("the {code} response of {label}"),
-            }
-        };
-        // Link a fix to the schema findings about the same place in the
-        // body (resolved once, in `finish`).
-        let fix_link = |st: &mut Self, key: &FixKey, at_path: &str| {
+        let owner = || schema_owner(&at, code, label);
+        // Link a fix to the schema findings about the same place and
+        // category (resolved once, in `finish`).
+        let fix_link = |st: &mut Self, key: String, at_path: &str, category: &str| {
             if failed {
-                let place = if at_path.is_empty() { "the body".to_string() } else { format!("`{at_path}`") };
-                st.pending_links.insert((label.to_string(), code.to_string(), place, fix_suggestion_key(key)));
+                st.pending_links.insert((label.to_string(), code.to_string(), place(at_path), category.to_string(), key));
             }
         };
         match v {
             Value::Null => {
                 if !allows_null(s) {
                     let key = FixKey::Nullable { at: at.clone() };
-                    self.fixes.entry(key.clone()).or_insert_with(|| (owner(), Shape::default(), BTreeSet::new())).2.insert(o.id.clone());
-                    fix_link(self, &key, ipath);
+                    if let Some(e) = self.fix(&key, owner) {
+                        e.2.insert(o.id.clone());
+                        fix_link(self, fix_suggestion_key(&key), ipath, "type");
+                    }
                 }
             }
             Value::Object(obj) => {
-                // Declared properties, across `allOf` branches.
-                let mut declared: Vec<(String, Value, String)> = vec![];
-                let mut required: Vec<(String, String)> = vec![];
+                // Declared properties, across `allOf` branches (the first
+                // declaration of a name wins).
+                let mut declared: HashMap<&'a str, (&'a Value, String)> = HashMap::new();
+                let mut required: Vec<(&'a str, String)> = vec![];
                 let mut holder = at.clone();
-                let mut additional: Option<(Value, String)> = None;
-                let mut parts: Vec<(Value, String)> = vec![(s.clone(), at.clone())];
+                let mut additional: Option<(&'a Value, String)> = None;
+                let mut patterned = false;
+                let mut parts: Vec<(&'a Value, String)> = vec![(s, at.clone())];
                 if let Some(all) = s.get("allOf").and_then(Value::as_array) {
                     for (k, b) in all.iter().enumerate() {
-                        let (b, bp) = spec.deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string()));
-                        parts.push((b.clone(), bp));
+                        parts.push(spec.deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())));
                     }
                 }
                 let mut found_holder = false;
@@ -943,48 +1085,59 @@ impl<'a> State<'a> {
                             holder = pp.clone();
                             found_holder = true;
                         }
+                        let base = ptr(pp, "properties");
                         for (n, ps) in props {
-                            declared.push((n.clone(), ps.clone(), ptr(&ptr(pp, "properties"), n)));
+                            declared.entry(n.as_str()).or_insert_with(|| (ps, ptr(&base, n)));
                         }
                     }
                     for r in part.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                        required.push((r.to_string(), pp.clone()));
+                        required.push((r, pp.clone()));
                     }
                     if let Some(ap) = part.get("additionalProperties").filter(|a| a.is_object()) {
-                        additional = Some((ap.clone(), ptr(pp, "additionalProperties")));
+                        additional = Some((ap, ptr(pp, "additionalProperties")));
                     }
+                    patterned |= part.get("patternProperties").is_some();
                 }
                 let object_like = s.get("type").and_then(Value::as_str) == Some("object") || !declared.is_empty() || parts.len() > 1;
                 if !object_like {
                     return;
                 }
+                // A schema that names no properties (a free-form object or
+                // a map) or matches names by pattern gets no property
+                // suggestions: its keys are likely data.
+                let names_properties = !declared.is_empty() && !patterned;
                 for (k, x) in obj {
-                    let child = ptr(ipath, k);
-                    if let Some((_, ps, pp)) = declared.iter().find(|(n, _, _)| n == k) {
-                        let (ps, pp) = (ps.clone(), pp.clone());
-                        self.walk(&ps, &pp, x, &child, depth + 1, label, code, o, failed);
+                    self.walk_steps += 1;
+                    if let Some((ps, pp)) = declared.get(k.as_str()) {
+                        let (ps, pp) = (*ps, pp.clone());
+                        self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
                     } else if let Some((ap, app)) = &additional {
-                        let (ap, app) = (ap.clone(), app.clone());
-                        self.walk(&ap, &app, x, &child, depth + 1, label, code, o, failed);
-                    } else {
+                        let (ap, app) = (*ap, app.clone());
+                        self.walk(ap, &app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
+                    } else if names_properties && safe_name(k) {
                         let key = FixKey::AddProperty { at: holder.clone(), name: k.clone() };
-                        let e = self.fixes.entry(key.clone()).or_insert_with(|| (owner(), Shape::default(), BTreeSet::new()));
-                        e.1.add(x);
-                        e.2.insert(o.id.clone());
-                        fix_link(self, &key, ipath);
+                        if let Some(e) = self.fix(&key, owner) {
+                            e.1.add(x);
+                            e.2.insert(o.id.clone());
+                            fix_link(self, fix_suggestion_key(&key), ipath, "additional");
+                        }
                     }
                 }
                 for (name, rp) in required {
                     let write_only = declared
-                        .iter()
-                        .find(|(n, _, _)| *n == name)
-                        .is_some_and(|(_, ps, _)| spec.deref(ps, "").0.get("writeOnly").and_then(Value::as_bool) == Some(true));
+                        .get(name)
+                        .is_some_and(|(ps, _)| spec.deref(ps, "").0.get("writeOnly").and_then(Value::as_bool) == Some(true));
                     if write_only {
                         continue;
                     }
-                    let e = self.required.entry((rp, name.clone())).or_default();
+                    let missing = !obj.contains_key(name);
+                    if missing {
+                        fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
+                    }
+                    let owner = schema_owner(&rp, code, label);
+                    let e = self.required.entry((rp, name.to_string())).or_insert((0, 0, owner));
                     e.0 += 1;
-                    if !obj.contains_key(&name) {
+                    if missing {
                         e.1 += 1;
                     }
                 }
@@ -1002,8 +1155,10 @@ impl<'a> State<'a> {
                 let (_, types, _) = schema_types(s);
                 if types.iter().any(|t| t == "integer") && !types.iter().any(|t| t == "number") {
                     let key = FixKey::Widen { at: at.clone() };
-                    self.fixes.entry(key.clone()).or_insert_with(|| (owner(), Shape::default(), BTreeSet::new())).2.insert(o.id.clone());
-                    fix_link(self, &key, ipath);
+                    if let Some(e) = self.fix(&key, owner) {
+                        e.2.insert(o.id.clone());
+                        fix_link(self, fix_suggestion_key(&key), ipath, "type");
+                    }
                 }
             }
             Value::String(text) => {
@@ -1013,11 +1168,16 @@ impl<'a> State<'a> {
                     && text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
                 {
                     let key = FixKey::Enum { at: at.clone() };
-                    let e = self.fixes.entry(key.clone()).or_insert_with(|| (owner(), Shape::default(), BTreeSet::new()));
-                    e.1.add(v);
-                    // The token itself is kept (see the module docs).
-                    e.2.insert(format!("value:{text}"));
-                    fix_link(self, &key, ipath);
+                    let token = format!("value:{text}");
+                    let Some(e) = self.fix(&key, owner) else { return };
+                    // The token itself is kept (see the module docs), a few
+                    // per location.
+                    if e.2.len() < MAX_ENUM_TOKENS {
+                        e.2.insert(token);
+                    } else if !e.2.contains(&token) {
+                        self.note(format!("at most {MAX_ENUM_TOKENS} new values are suggested per enum"));
+                    }
+                    fix_link(self, fix_suggestion_key(&key), ipath, "enum");
                 }
             }
             _ => {}
@@ -1025,8 +1185,8 @@ impl<'a> State<'a> {
     }
 
     fn finish(mut self, total: usize) -> DriftReport {
-        for (label, code, place, skey) in std::mem::take(&mut self.pending_links) {
-            let keys: Vec<String> = self.schema_places.get(&(label, code, place)).into_iter().flatten().cloned().collect();
+        for (label, code, place, category, skey) in std::mem::take(&mut self.pending_links) {
+            let keys: Vec<String> = self.schema_places.get(&(label, code, place, category)).into_iter().flatten().cloned().collect();
             for k in keys {
                 self.link(&k, &skey);
             }
@@ -1066,7 +1226,8 @@ impl<'a> State<'a> {
                     &key,
                     format!("Document the {code} response of {label}"),
                     format!(
-                        "{label} returned {code} {}; the description does not list it. The schema is inferred from the observed bodies (shape only).",
+                        "{label} returned {code} {}; the description does not list it. \
+                         The schema is inferred from the observed bodies (shape only).",
                         reason(code)
                     ),
                     SuggestionKind::Addition,
@@ -1142,9 +1303,23 @@ impl<'a> State<'a> {
         }
 
         // Undeclared endpoints.
+        let mut not_describable = 0;
         for ((method, pattern), acc) in &self.endpoints {
             let key = format!("endpoint|{method}|{pattern}");
+            // Where the dialect describes this method: a Path Item field, or
+            // (3.2) `additionalOperations`; other methods get no suggestion.
             let m = method.to_ascii_lowercase();
+            let member: Option<Vec<String>> = if METHODS.contains(&m.as_str()) || (d == Dialect::OpenApi32 && m == "query") {
+                Some(vec![m])
+            } else if d == Dialect::OpenApi32 && method != INVALID_METHOD {
+                Some(vec!["additionalOperations".into(), method.clone()])
+            } else {
+                None
+            };
+            let Some(member) = member else {
+                not_describable += 1;
+                continue;
+            };
             let mut resp = serde_json::Map::new();
             let codes: BTreeSet<&String> = acc.responses.keys().map(|(c, _)| c).collect();
             for code in codes {
@@ -1211,12 +1386,11 @@ impl<'a> State<'a> {
                 ),
                 None => (Router::path_pointer(pattern), pattern.clone()),
             };
-            let guessed_base =
-                !acc.base.is_empty() && !self.router.servers.iter().any(|s| s.url.trim_end_matches('/').ends_with(&acc.base));
-            let mut detail = format!("Seen {} time(s), e.g. {}.", acc.calls, acc.examples.join(", "));
-            if guessed_base {
-                detail.push_str(&format!(" The prefix {} is not a declared server path; it was left out.", acc.base));
+            let mut detail = format!("Seen {} time(s).", acc.calls);
+            if let Some(prefix) = &acc.unknown_prefix {
+                detail.push_str(&format!(" The prefix {prefix} is not a declared server path; it was left out."));
             }
+            let target = member.iter().fold(path_ptr.clone(), |p, t| ptr(&p, t));
             add(
                 &key,
                 format!("Document {method} {path_key}"),
@@ -1224,8 +1398,11 @@ impl<'a> State<'a> {
                 SuggestionKind::Addition,
                 true,
                 path_ptr.clone(),
-                vec![PatchOp::add(ptr(&path_ptr, &m), Value::Object(operation))],
+                vec![PatchOp::add(target, Value::Object(operation))],
             );
+        }
+        if not_describable > 0 {
+            self.notes.insert(format!("{} description has no place for some observed methods; they got no suggestion", d), not_describable);
         }
 
         // Schema fixes.
@@ -1251,7 +1428,10 @@ impl<'a> State<'a> {
                     mark_nullable(&mut widened, d);
                     let ops = patch::diff(&current, &widened)
                         .into_iter()
-                        .filter_map(|o| serde_json::from_value::<PatchOp>(json!({"op": o["op"], "path": format!("{at}{}", o["path"].as_str().unwrap_or("")), "value": o.get("value")})).ok())
+                        .filter_map(|o| {
+                            let path = format!("{at}{}", o["path"].as_str().unwrap_or(""));
+                            serde_json::from_value::<PatchOp>(json!({"op": o["op"], "path": path, "value": o.get("value")})).ok()
+                        })
                         .collect();
                     add(
                         &skey,
@@ -1309,17 +1489,18 @@ impl<'a> State<'a> {
             );
         }
         // Required properties that were sometimes missing.
-        let mut optional: BTreeMap<String, Vec<(String, usize, usize)>> = BTreeMap::new();
-        for ((at, name), (seen, missing)) in &self.required {
+        // Schema → (owner, [(name, missing, seen)]).
+        type Missing = (String, Vec<(String, usize, usize)>);
+        let mut optional: BTreeMap<String, Missing> = BTreeMap::new();
+        for ((at, name), (seen, missing, owner)) in &self.required {
             if *missing > 0 {
-                optional.entry(at.clone()).or_default().push((name.clone(), *missing, *seen));
+                optional.entry(at.clone()).or_insert_with(|| (owner.clone(), vec![])).1.push((name.clone(), *missing, *seen));
             }
         }
-        for (at, names) in optional {
+        for (at, (owner, names)) in optional {
             let current: Vec<Value> = spec.root.pointer(&ptr(&at, "required")).and_then(Value::as_array).cloned().unwrap_or_default();
             let keep: Vec<Value> = current.into_iter().filter(|r| !names.iter().any(|(n, _, _)| r.as_str() == Some(n))).collect();
             let key = format!("optional|{at}");
-            let owner = at.rsplit('/').next().unwrap_or("").to_string();
             let listed = names.iter().map(|(n, m, s)| format!("`{n}` (missing in {m} of {s})")).collect::<Vec<_>>().join(", ");
             add(
                 &key,
@@ -1332,21 +1513,13 @@ impl<'a> State<'a> {
                 SuggestionKind::Relaxation,
                 false,
                 at.clone(),
-                vec![PatchOp::replace(ptr(&at, "required"), Value::Array(keep))],
+                // An empty `required` is invalid before 3.1: drop it.
+                vec![if keep.is_empty() {
+                    PatchOp::remove(ptr(&at, "required"))
+                } else {
+                    PatchOp::replace(ptr(&at, "required"), Value::Array(keep))
+                }],
             );
-            // Link to the response schema findings naming these properties.
-            let keys: Vec<String> = self
-                .findings
-                .iter()
-                .filter(|(_, f)| {
-                    f.kind == Some(DriftKind::ResponseSchemaMismatch)
-                        && names.iter().any(|(n, _, _)| f.message.contains(&format!("required property `{n}`")))
-                })
-                .map(|(k, _)| k.clone())
-                .collect();
-            for k in keys {
-                self.link(&k, &key);
-            }
         }
 
         // Budgets and servers.
@@ -1383,7 +1556,8 @@ impl<'a> State<'a> {
                         &key,
                         format!("Raise the latency budget of {label} to {} ms", nice_ceil(s.max)),
                         format!(
-                            "Observed p95 {:.0} ms and slowest {:.0} ms against {max} ms. Raise it only if the budget, not the API, is wrong.",
+                            "Observed p95 {:.0} ms and slowest {:.0} ms against {max} ms. \
+                             Raise it only if the budget, not the API, is wrong.",
                             s.p95, s.max
                         ),
                         SuggestionKind::Relaxation,
@@ -1411,22 +1585,33 @@ impl<'a> State<'a> {
                     vec![PatchOp::add(x_ptr.clone(), json!({"max_latency_ms": v}))],
                 );
             }
-            if let Some(max) = b.max_response_bytes
-                && let Some(f) = self.findings.get_mut(&format!("size|{}", op.pointer))
-            {
-                f.message = format!(
-                    "{label} returned more than its {max}-byte budget in {} call(s) (largest {} bytes)",
-                    acc.large,
-                    acc.max_bytes.unwrap_or(0)
-                );
-            }
-            if let Some(max) = b.max_request_bytes
-                && let Some(f) = self.findings.get_mut(&format!("reqsize|{}", op.pointer))
-            {
-                f.message = format!(
-                    "{label} was sent more than its {max}-byte request budget in {} call(s) (largest {} bytes)",
+            let size_budgets = [
+                ("size", "max_response_bytes", b.max_response_bytes, acc.large, acc.max_bytes, "returned more than its", "response"),
+                (
+                    "reqsize",
+                    "max_request_bytes",
+                    b.max_request_bytes,
                     acc.large_request,
-                    acc.max_request.unwrap_or(0)
+                    acc.max_request,
+                    "was sent more than its",
+                    "request",
+                ),
+            ];
+            for (prefix, field, max, over, largest, verb, what) in size_budgets {
+                let key = format!("{prefix}|{}", op.pointer);
+                let (Some(max), Some(f)) = (max, self.findings.get_mut(&key)) else { continue };
+                let largest = largest.unwrap_or(0);
+                let of = if what == "request" { "request " } else { "" };
+                f.message = format!("{label} {verb} {max}-byte {of}budget in {over} call(s) (largest {largest} bytes)");
+                let raised = nice_ceil(largest as f64) as u64;
+                add(
+                    &key,
+                    format!("Raise the {what} size budget of {label} to {raised} bytes"),
+                    format!("The largest {what} was {largest} bytes against {max}. Raise it only if the budget, not the API, is wrong."),
+                    SuggestionKind::Relaxation,
+                    false,
+                    op.pointer.clone(),
+                    vec![PatchOp::replace(ptr(&x_ptr, field), json!(raised))],
                 );
             }
             let declared_statuses: Vec<String> = responses(spec, op).into_iter().map(|r| r.code).collect();
@@ -1489,7 +1674,7 @@ impl<'a> State<'a> {
         let undeclared = self
             .endpoints
             .into_iter()
-            .map(|((method, path), a)| UndeclaredEndpoint { method, path, calls: a.calls, statuses: a.statuses, examples: a.examples })
+            .map(|((method, path), a)| UndeclaredEndpoint { method, path, calls: a.calls, statuses: a.statuses })
             .collect();
         DriftReport {
             spec: SpecSummary {
@@ -1525,10 +1710,41 @@ fn fix_suggestion_key(k: &FixKey) -> String {
     }
 }
 
+/// The component a schema location is in, else the response.
+fn schema_owner(at: &str, code: &str, label: &str) -> String {
+    match at.strip_prefix("/components/schemas/").or_else(|| at.strip_prefix("/definitions/")) {
+        Some(rest) => rest.split('/').next().unwrap_or(rest).replace("~1", "/").replace("~0", "~"),
+        None => format!("the {code} response of {label}"),
+    }
+}
+
+/// A schema location as `Owner.a.*.b[]`: property names, `*` for a map's
+/// values, `[]` for array items, from the owner's root schema on.
 fn display_pointer(at: &str, owner: &str) -> String {
-    let props: Vec<String> =
-        at.split("/properties/").skip(1).map(|p| p.split('/').next().unwrap_or("").replace("~1", "/").replace("~0", "~")).collect();
-    if props.is_empty() { owner.to_string() } else { format!("{owner}.{}", props.join(".")) }
+    let toks: Vec<&str> = at.split('/').collect();
+    let root = if at.starts_with("/components/schemas/") {
+        4
+    } else if at.starts_with("/definitions/") {
+        3
+    } else {
+        toks.iter().position(|t| *t == "schema").map_or(toks.len(), |i| i + 1)
+    };
+    let mut out = owner.to_string();
+    let mut i = root;
+    while i < toks.len() {
+        match toks[i] {
+            "properties" if i + 1 < toks.len() => {
+                out.push('.');
+                out.push_str(&toks[i + 1].replace("~1", "/").replace("~0", "~"));
+                i += 1;
+            }
+            "additionalProperties" => out.push_str(".*"),
+            "items" => out.push_str("[]"),
+            _ => {}
+        }
+        i += 1;
+    }
+    out
 }
 
 fn shape_has_samples(s: &Shape) -> bool {
@@ -1589,6 +1805,18 @@ mod tests {
         assert_eq!(generalize("/users/123/orders/3f2504e0-4f89-11d3-9a0c-0305e82c3301"), "/users/{userId}/orders/{orderId}");
         assert_eq!(generalize("/v1/health"), "/v1/health");
         assert_eq!(generalize("/42/42"), "/{id}/{id2}");
+        // Anything that could be a value is a parameter.
+        assert_eq!(generalize("/users/jane.doe@example.com/Tokens/eyJhbGci.eyJzdWIi.sig/a%20b"), "/users/{userId}/{id}/{id2}/{id3}");
+        assert_eq!(generalize("/line-items/v2/oauth2/abc12"), "/line-items/v2/oauth2/{oauth2Id}");
+        assert_eq!(method_token("get"), "GET");
+        assert_eq!(method_token("GET /x"), INVALID_METHOD);
+        let null = Value::Null;
+        let resps: Vec<crate::model::Response> = ["é1", "4xx", "ñXX", "default"]
+            .iter()
+            .map(|c| crate::model::Response { code: c.to_string(), pointer: String::new(), value: &null, media: vec![] })
+            .collect();
+        assert_eq!(declared_response(&resps, "404").map(|r| r.code.as_str()), Some("4xx"));
+        assert_eq!(declared_response(&resps, "500").map(|r| r.code.as_str()), Some("default"));
         assert_eq!(nice_ceil(412.0), 500.0);
         assert_eq!(nice_ceil(180.0), 200.0);
         assert_eq!(nice_ceil(2100.0), 2500.0);

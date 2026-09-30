@@ -2010,17 +2010,15 @@ export interface Budget {
 export interface UndeclaredEndpoint {
   method: string;
   /**
-   * Observed paths with id-like segments generalized (`/users/{userId}`).
+   * The observed paths generalized: every segment that is not a short
+   * lower-case word is a parameter (`/users/{userId}`). Observed paths
+   * themselves are not kept.
    */
   path: string;
   calls: number;
   statuses: {
     [k: string]: number | undefined;
   };
-  /**
-   * Some observed paths.
-   */
-  examples: string[];
 }
 /**
  * A revision of the description.
@@ -5107,6 +5105,12 @@ export interface Revision {
    * Suggestion ids that were not found, and ops that could not apply.
    */
   skipped: string[];
+  /**
+   * SHA-256 (hex) of the description and the applied suggestions with
+   * their operations: the same digest means the same revision, so a
+   * preview can be applied exactly as shown.
+   */
+  digest: string;
 }
 /**
  * A rule as listed to users.

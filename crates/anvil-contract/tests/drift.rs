@@ -205,9 +205,17 @@ fn traffic_is_checked_the_same_way_in_every_dialect() {
         assert_eq!(get.calls, 4);
         assert_eq!(get.budget.max_latency_ms, Some(100.0));
         assert_eq!(get.statuses.get("404"), Some(&1));
-        assert!(
-            r.undeclared.iter().any(|u| u.method == "GET" && u.path == "/customers/{customerId}" && u.examples == ["/api/customers/42"])
+        assert!(r.undeclared.iter().any(|u| u.method == "GET" && u.path == "/customers/{customerId}" && u.calls == 1));
+        // A fix is linked to the finding of its own category and place.
+        let optional = r.suggestions.iter().find(|s| s.title.starts_with("Make `total` optional")).unwrap();
+        assert_eq!(
+            find(&r, DriftKind::ResponseSchemaMismatch, "required property `total`").suggestions,
+            std::slice::from_ref(&optional.id),
+            "{f}"
         );
+        let size = r.suggestions.iter().find(|s| s.title == "Raise the response size budget of GET /orders/{id} to 5000 bytes").unwrap();
+        assert!(!size.recommended);
+        assert_eq!(find(&r, DriftKind::ResponseLargerThanDeclared, "2000-byte").suggestions, std::slice::from_ref(&size.id));
     }
 }
 
@@ -230,12 +238,7 @@ fn applying_the_suggestions_resolves_the_drift_they_cover() {
         // the API's to fix, not the description's.
         let again = analyze(&revised, &traffic(), &DriftOptions::default());
         let mut left = kinds(&again);
-        for k in [
-            DriftKind::MissingRequiredParameter,
-            DriftKind::MissingResponseHeader,
-            DriftKind::DeprecatedOperationCalled,
-            DriftKind::ResponseLargerThanDeclared,
-        ] {
+        for k in [DriftKind::MissingRequiredParameter, DriftKind::MissingResponseHeader, DriftKind::DeprecatedOperationCalled] {
             left.remove(&k);
         }
         if f.contains("2.0") {
@@ -263,6 +266,108 @@ fn only_recommended_suggestions_leave_relaxations_open() {
     let rev = revise(&spec, &r, &["nope".to_string()]);
     assert_eq!(rev.skipped, ["nope"]);
     assert_eq!(rev.json_patch, Vec::<Value>::new());
+    // The digest names the revision: same choice, same digest.
+    let a = revise(&spec, &r, &recommended);
+    assert_eq!(a.digest, revise(&spec, &r, &recommended).digest);
+    assert_ne!(a.digest, revise(&spec, &r, &recommended[1..]).digest);
+    assert_ne!(a.digest, rev.digest);
+}
+
+fn titles_of(r: &DriftReport) -> Vec<String> {
+    r.suggestions.iter().map(|s| s.title.clone()).collect()
+}
+
+const STRICT: &str = r#"{"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "servers": [{"url": "https://api.example/v1"}],
+  "paths": {"/accounts/{id}": {"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+    "type": "object", "additionalProperties": false, "required": ["id"],
+    "properties": {"id": {"type": "string"}, "prefs": {"type": "object"},
+      "limits": {"type": "object", "additionalProperties": {"type": "object", "required": ["max"], "properties": {"max": {"type": "integer"}}}}}}}}}}}}}}"#;
+
+#[test]
+fn observed_values_never_reach_findings_suggestions_or_revisions() {
+    let spec = Spec::parse(STRICT.as_bytes()).unwrap();
+    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqYW5lIn0.c2lnbmF0dXJl";
+    let obs: Vec<Observation> = vec![
+        // Undeclared paths with a token, an email and a mixed-case id in them.
+        Obs::new("1", "GET", &format!("https://gw.example/Tenant-XY/v1/sessions/{jwt}?x9f3k2a8b1=1&page=2")).json(200, json!({})),
+        Obs::new("2", "GET", "https://api.example/v1/users/jane.doe@example.com/devices/AbCdEf").json(
+            200,
+            // A map keyed by emails, under an undeclared status.
+            json!({"jane.doe@example.com": {"seen": 3}, "john@example.com": {"seen": 1}}),
+        ),
+        // Undeclared keys that look like data, a map, a free-form object.
+        Obs::new("3", "GET", "https://api.example/v1/accounts/1").json(
+            200,
+            json!({"id": "1", "jane.doe@example.com": true, "token_9f8e7d6c": 1,
+                   "prefs": {"acct-771234": true}, "limits": {"u_998877": {"max": 1.5}, "x": {}}}),
+        ),
+        Obs::new("4", "PROPFIND", "https://api.example/v1/accounts/2").json(207, json!({"k@example.com": 1})),
+        Obs::new("5", "GET /x HTTP/1.1", "https://api.example/v1/accounts/3").empty(204),
+    ]
+    .into_iter()
+    .map(|o| o.0)
+    .collect();
+    for text in [STRICT.to_string(), STRICT.replace("3.1.0", "3.2.0")] {
+        let spec32 = Spec::parse(text.as_bytes()).unwrap();
+        let r = analyze(&spec32, &obs, &DriftOptions::default());
+        let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+        let rev = revise(&spec32, &r, &all);
+        let everything = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            serde_json::to_string(&r.findings).unwrap(),
+            serde_json::to_string(&r.suggestions).unwrap(),
+            serde_json::to_string(&r.undeclared).unwrap(),
+            serde_json::to_string(&r.notes).unwrap(),
+            rev.text
+        );
+        for secret in ["eyJ", "jane", "john", "example.com", "AbCdEf", "Tenant", "XY", "9f8e7d6c", "771234", "998877", "x9f3k2a8b1", "k@"] {
+            assert!(!everything.contains(secret), "{secret} leaked:\n{everything}");
+        }
+        // Map keys become `*`; the undeclared keys that are names are named.
+        find(&r, DriftKind::ResponseSchemaMismatch, "`/limits/*/max` is number");
+        find(&r, DriftKind::ResponseSchemaMismatch, "the body has undeclared properties");
+        assert!(r.undeclared.iter().any(|u| u.path == "/sessions/{sessionId}"), "{:#?}", r.undeclared);
+        let sessions = r.suggestions.iter().find(|s| s.title == "Document GET /sessions/{sessionId}").unwrap();
+        assert!(sessions.detail.contains("The prefix /{id}/v1 is not a declared server path"), "{}", sessions.detail);
+        assert!(titles_of(&r).contains(&"Declare the server https://gw.example".to_string()), "{:#?}", titles_of(&r));
+        assert!(titles_of(&r).contains(&"Make `max` optional in the 200 response of GET /accounts/{id}.limits.*".to_string()));
+        assert!(r.undeclared.iter().any(|u| u.path == "/users/{userId}/devices/{deviceId}"), "{:#?}", r.undeclared);
+        assert!(r.undeclared.iter().any(|u| u.method == "(invalid method)"), "{:#?}", r.undeclared);
+        let titles: Vec<&str> = r.suggestions.iter().map(|s| s.title.as_str()).collect();
+        assert!(!titles.iter().any(|t| t.contains("Document property")), "{titles:#?}");
+        assert!(titles.contains(&"Document GET /sessions/{sessionId}"), "{titles:#?}");
+        let propfind = titles.iter().any(|t| t.starts_with("Document PROPFIND"));
+        let is32 = text.contains("3.2.0");
+        assert_eq!(propfind, is32, "{titles:#?}");
+        if is32 {
+            let s = r.suggestions.iter().find(|s| s.title.starts_with("Document PROPFIND")).unwrap();
+            assert!(s.ops[0].path.ends_with("/additionalOperations/PROPFIND"), "{:?}", s.ops);
+        } else {
+            find(&r, DriftKind::UndeclaredMethod, "PROPFIND is called");
+        }
+        assert!(!titles.iter().any(|t| t.contains("(invalid method)")), "{titles:#?}");
+        // The inferred map is `additionalProperties`, not properties named by emails.
+        let users = r.suggestions.iter().find(|s| s.title.starts_with("Document GET /users")).unwrap();
+        assert!(users.snippet.contains("additionalProperties"), "{}", users.snippet);
+        let _ = &spec;
+    }
+}
+
+#[test]
+fn making_every_required_property_optional_drops_required() {
+    let text = r#"{"swagger": "2.0", "info": {"title": "t", "version": "1"}, "paths": {"/a": {"get": {"produces": ["application/json"],
+      "responses": {"200": {"description": "ok", "schema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}, "e": {"type": "string", "enum": ["a"]}}}}}}}}}"#;
+    let spec = Spec::parse(text.as_bytes()).unwrap();
+    let obs = vec![Obs::new("1", "GET", "/a").json(200, json!({"e": null})).0];
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    let all: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+    let rev = revise(&spec, &r, &all);
+    let doc: Value = serde_json::from_str(&rev.text).unwrap();
+    let schema = &doc["paths"]["/a"]["get"]["responses"]["200"]["schema"];
+    assert!(schema.get("required").is_none(), "{schema}");
+    assert_eq!(schema["properties"]["e"], json!({"type": "string", "enum": ["a", null], "x-nullable": true}));
+    let again = analyze(&Spec::parse(rev.text.as_bytes()).unwrap(), &obs, &DriftOptions::default());
+    assert!(again.findings.is_empty(), "{:#?}", again.findings);
 }
 
 #[test]
@@ -288,7 +393,7 @@ fn har_captures_are_checked_too() {
          "request": {"method": "GET", "url": "https://shop.example/api/orders/1", "headers": [{"name": "X-Tenant", "value": "t"}]},
          "response": {"status": 200, "headers": [{"name": "ETag", "value": "x"}], "content": {"size": 40, "mimeType": "application/json", "text": "{\"id\":1,\"total\":2,\"status\":\"open\",\"extra\":true}"}}}
     ]}});
-    let obs = anvil_contract::observe::from_har(har.to_string().as_bytes()).unwrap();
+    let obs = anvil_contract::observe::from_har(har.to_string().as_bytes()).unwrap().observations;
     let spec = Spec::parse(fixture("shop-3.1.yaml").as_bytes()).unwrap();
     let r = analyze(&spec, &obs, &DriftOptions::default());
     assert_eq!(r.matched, 1);

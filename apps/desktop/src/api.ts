@@ -744,7 +744,8 @@ export const api = {
   driftRevise: (importId: string, suggestionIds: string[]) => call<Revision>("drift_revise", { importId, suggestionIds }),
   driftReimportPlan: (importId: string, suggestionIds: string[]) => call<DriftPlan>("drift_reimport_plan", { importId, suggestionIds }),
   /** Reimport the revised description; returns how many requests changed. */
-  driftReimportApply: (importId: string, suggestionIds: string[]) => call<number>("drift_reimport_apply", { importId, suggestionIds }),
+  driftReimportApply: (importId: string, suggestionIds: string[], digest: string) =>
+    call<number>("drift_reimport_apply", { importId, suggestionIds, digest }),
   /** Write the revised description or its JSON Patch to a save-dialog grant (purpose `spec_revision_export`). */
   driftExport: (importId: string, suggestionIds: string[], format: "spec" | "patch", grant: string) =>
     call<number>("drift_export", { importId, suggestionIds, format, grant }),
