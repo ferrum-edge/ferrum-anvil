@@ -217,22 +217,18 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let bind_calls = calls.clone();
 
-        let (udp, tcp) = bind_ephemeral_pair_with(
-            "127.0.0.1:0",
-            bind_tcp_future,
-            move |addr| {
-                let attempt = {
-                    let mut calls = bind_calls.lock().unwrap();
-                    calls.push(addr);
-                    calls.len()
-                };
-                if attempt == 1 {
-                    Box::pin(UdpSocket::bind(occupied_addr)) as UdpBindFuture
-                } else {
-                    Box::pin(UdpSocket::bind(addr)) as UdpBindFuture
-                }
-            },
-        )
+        let (udp, tcp) = bind_ephemeral_pair_with("127.0.0.1:0", bind_tcp_future, move |addr| {
+            let attempt = {
+                let mut calls = bind_calls.lock().unwrap();
+                calls.push(addr);
+                calls.len()
+            };
+            if attempt == 1 {
+                Box::pin(UdpSocket::bind(occupied_addr)) as UdpBindFuture
+            } else {
+                Box::pin(UdpSocket::bind(addr)) as UdpBindFuture
+            }
+        })
         .await
         .unwrap();
 
