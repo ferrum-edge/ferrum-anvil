@@ -105,12 +105,20 @@ impl App {
             let current = tx.list::<StoredRuleset>(kind::API_RULESET, None)?;
             let mut next = ApiStandards { include_recommended: settings.api_standards.include_recommended, rulesets: current.clone() };
             // The result must load, as it will be used.
+            let include_recommended = settings.api_standards.include_recommended;
             let change = f(&mut next).and_then(|()| {
                 validate_standards(&next, &current)?;
-                if !(only_disables_or_removals(&current, &next.rulesets)
-                    || (next.include_recommended == settings.api_standards.include_recommended && next.rulesets == current))
-                {
-                    layered(&next)?;
+                if next.include_recommended == include_recommended && next.rulesets == current {
+                    return Ok(());
+                }
+                if let Err(e) = layered(&next) {
+                    // A set that already does not load may still shed rulesets:
+                    // a pure disable or removal cannot make it worse. A set
+                    // that loads may not be broken by one.
+                    let current_set = ApiStandards { include_recommended, rulesets: current.clone() };
+                    if !(only_disables_or_removals(&current, &next.rulesets) && layered(&current_set).is_err()) {
+                        return Err(e);
+                    }
                 }
                 Ok(())
             });
