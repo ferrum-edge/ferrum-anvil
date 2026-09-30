@@ -422,6 +422,32 @@ pub struct StoredRuleset {
     pub enabled: bool,
 }
 
+/// How one stored ruleset participates in the current standards view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RulesetLoadStatus {
+    Loaded,
+    Disabled,
+    Error,
+}
+
+/// Metadata for a stored ruleset, without its potentially large source text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StoredRulesetSummary {
+    pub id: Id,
+    pub name: String,
+    pub file_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub size: usize,
+    pub sha256: String,
+    pub enabled: bool,
+    pub order: usize,
+    pub load_status: RulesetLoadStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Largest ruleset file accepted by the CLI and profile storage.
 pub const MAX_STORED_RULESET_BYTES: usize = 1024 * 1024;
 /// Maximum number of profile-wide API standards records.

@@ -11,7 +11,7 @@ use anvil_contract::{LintOptions, LintReport, RuleInfo, RuleSet, RulesetSummary,
 use anvil_domain::Id;
 use anvil_domain::settings::{
     ApiStandards, ApiStandardsSettings, AppSettings, MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS, MAX_STORED_RULESETS_BYTES,
-    StoredRuleset,
+    RulesetLoadStatus, StoredRuleset, StoredRulesetSummary,
 };
 use anvil_storage::kind;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,8 @@ use sha2::{Digest, Sha256};
 /// The rules in effect, for listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandardsView {
-    pub standards: ApiStandards,
+    pub include_recommended: bool,
+    pub rulesets: Vec<StoredRulesetSummary>,
     pub sources: Vec<RulesetSummary>,
     pub rules: Vec<RuleInfo>,
     /// Rules a later ruleset turned off.
@@ -89,12 +90,52 @@ impl App {
     /// The layered rules, with where each came from.
     pub fn standards_view(&self) -> Result<StandardsView> {
         let standards = self.api_standards()?;
-        Ok(match layered(&standards) {
-            Ok(set) => {
-                StandardsView { sources: set.sources.clone(), rules: set.list(), disabled: set.disabled.clone(), standards, error: None }
-            }
-            Err(e) => StandardsView { sources: vec![], rules: vec![], disabled: vec![], standards, error: Some(e.to_string()) },
-        })
+        let mut set = if standards.include_recommended { RuleSet::recommended() } else { RuleSet::default() };
+        let mut rulesets = Vec::with_capacity(standards.rulesets.len());
+        let mut error = None;
+        for (order, ruleset) in standards.rulesets.iter().enumerate() {
+            let row_error = if !ruleset.enabled {
+                None
+            } else if error.is_some() {
+                error.clone()
+            } else {
+                match set.add(&ruleset.file_name, ruleset.text.as_bytes(), false) {
+                    Ok(()) => None,
+                    Err(err) => {
+                        let message = err.to_string();
+                        error = Some(message.clone());
+                        Some(message)
+                    }
+                }
+            };
+            rulesets.push(StoredRulesetSummary {
+                id: ruleset.id,
+                name: ruleset.name.clone(),
+                file_name: ruleset.file_name.clone(),
+                version: ruleset.version.clone(),
+                size: ruleset.text.len(),
+                sha256: ruleset.sha256.clone(),
+                enabled: ruleset.enabled,
+                order,
+                load_status: match (&row_error, ruleset.enabled) {
+                    (Some(_), _) => RulesetLoadStatus::Error,
+                    (None, false) => RulesetLoadStatus::Disabled,
+                    (None, true) => RulesetLoadStatus::Loaded,
+                },
+                error: row_error,
+            });
+        }
+        let (sources, rules, disabled) =
+            if error.is_some() { (vec![], vec![], vec![]) } else { (set.sources.clone(), set.list(), set.disabled.clone()) };
+        Ok(StandardsView { include_recommended: standards.include_recommended, sources, rules, disabled, rulesets, error })
+    }
+
+    /// The source text for one ruleset, fetched only when the user opens it.
+    pub fn api_ruleset_text(&self, id: &Id) -> Result<String> {
+        self.store
+            .get::<StoredRuleset>(kind::API_RULESET, id)?
+            .map(|ruleset| ruleset.text)
+            .ok_or_else(|| AppError::NotFound("ruleset".into()))
     }
 
     /// Change the standards in one write transaction (read, check, write),

@@ -227,6 +227,7 @@ pub fn run() {
             cmd_specs::spec_reimport_plan,
             cmd_specs::spec_reimport_apply,
             cmd_standards::standards_view,
+            cmd_standards::standards_ruleset_text,
             cmd_standards::standards_add,
             cmd_standards::standards_replace,
             cmd_standards::standards_remove,

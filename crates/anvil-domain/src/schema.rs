@@ -23,6 +23,8 @@ pub fn all() -> Vec<(&'static str, serde_json::Value)> {
         ("AppSettings", s::<crate::settings::AppSettings>()),
         ("ApiStandards", s::<crate::settings::ApiStandards>()),
         ("ApiStandardsSettings", s::<crate::settings::ApiStandardsSettings>()),
+        ("RulesetLoadStatus", s::<crate::settings::RulesetLoadStatus>()),
+        ("StoredRulesetSummary", s::<crate::settings::StoredRulesetSummary>()),
         ("EffectiveSettings", s::<crate::settings::EffectiveSettings>()),
         ("ExecutionRecord", s::<crate::execution::ExecutionRecord>()),
         ("ExecutionEvent", s::<crate::events::ExecutionEvent>()),

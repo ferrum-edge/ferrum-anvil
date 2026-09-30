@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RulesetLoadStatus",
+  "description": "How one stored ruleset participates in the current standards view.",
+  "type": "string",
+  "enum": [
+    "loaded",
+    "disabled",
+    "error"
+  ]
+}

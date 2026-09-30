@@ -4,6 +4,10 @@
 
 ### Changed
 
+- The desktop API standards view and mutations return ruleset metadata and
+  load status without source text. The selected ruleset's text is fetched on
+  demand when its details are opened.
+
 - Workspace bundles now omit profile-wide API standards unless explicitly
   included (`--include-standards` in the CLI or **Include API standards** in
   the desktop). Bundle imports keep those rulesets disabled, recompute their

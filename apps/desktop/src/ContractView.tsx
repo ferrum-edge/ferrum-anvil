@@ -1,7 +1,14 @@
 // API contract: check OpenAPI descriptions (imported ones, or a file) against
 // the API standards kept in the profile, and manage those rulesets.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type LintReport, type LintTarget, type SpecSourceRecord, type StandardsView, type StoredRuleset } from "./api";
+import {
+  api,
+  type LintReport,
+  type LintTarget,
+  type SpecSourceRecord,
+  type StandardsView,
+  type StoredRulesetSummary,
+} from "./api";
 import type { LintFinding, LintSeverity } from "./generated/contracts";
 import { SidebarResizer, Tabs, fmtAgo, humanize } from "./ui";
 import { DriftPage } from "./DriftView";
@@ -80,9 +87,13 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
     try {
       const f = await chooseRuleset();
       if (!f) return;
-      const r = await api.standardsAdd(f.token);
-      props.notify(`Added ruleset “${r.name}”`);
-      setSel({ kind: "ruleset", id: r.id });
+      const view = await api.standardsAdd(f.token);
+      setStandards(view);
+      const r = view.rulesets[view.rulesets.length - 1];
+      if (r) {
+        props.notify(`Added ruleset “${r.name}”`);
+        setSel({ kind: "ruleset", id: r.id });
+      }
     } catch (e) {
       props.notify(String((e as Error).message));
     }
@@ -97,14 +108,14 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
     }
   };
 
-  const rulesets = standards?.standards.rulesets ?? [];
+  const rulesets = standards?.rulesets ?? [];
   const selRuleset = sel?.kind === "ruleset" ? rulesets.find((r) => r.id === sel.id) : undefined;
   const selImport = sel?.kind === "import" ? sources.find((s) => s.source.import_id === sel.id) : undefined;
   const target: LintTarget | null =
     sel?.kind === "import" ? { kind: "import", import_id: sel.id } : sel?.kind === "file" ? { kind: "spec", input: { kind: "file", grant: sel.grant } } : null;
   const targetName = selImport ? selImport.file_name : sel?.kind === "file" ? sel.name : "";
   // A new standards set re-runs the shown check.
-  const rulesKey = standards ? JSON.stringify(standards.standards) : "";
+  const rulesKey = standards ? JSON.stringify([standards.include_recommended, standards.rulesets]) : "";
 
   return (
     <div className="main" style={props.hidden ? { display: "none" } : undefined}>
@@ -152,7 +163,7 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
             <input
               type="checkbox"
               aria-label="Include Anvil recommended rules"
-              checked={standards?.standards.include_recommended ?? true}
+              checked={standards?.include_recommended ?? true}
               disabled={!standards}
               onChange={(e) => void change(() => api.standardsSetRecommended(e.target.checked))}
             />
@@ -160,7 +171,11 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
             <span className="badge neutral">built-in</span>
           </label>
           {rulesets.map((r) => (
-            <div key={r.id} className={`tree-row${sel?.kind === "ruleset" && sel.id === r.id ? " selected" : ""}`}>
+            <div
+              key={r.id}
+              className={`tree-row${sel?.kind === "ruleset" && sel.id === r.id ? " selected" : ""}`}
+              title={r.error ?? `${r.size.toLocaleString()} bytes`}
+            >
               <input
                 type="checkbox"
                 aria-label={`Use ${r.name}`}
@@ -171,6 +186,7 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
                 {r.name}
               </span>
               {r.version && <span className="badge neutral">{r.version}</span>}
+              {r.load_status === "error" && <span className="badge bad">load error</span>}
             </div>
           ))}
           <div
@@ -478,9 +494,26 @@ function RulesPage(props: { view: StandardsView }) {
   );
 }
 
-function RulesetPage(props: { ruleset: StoredRuleset; view: StandardsView | null; onReplace: () => void; onRemove: () => void }) {
+function RulesetPage(props: {
+  ruleset: StoredRulesetSummary;
+  view: StandardsView | null;
+  onReplace: () => void;
+  onRemove: () => void;
+}) {
   const r = props.ruleset;
   const own = props.view?.rules.filter((x) => x.ruleset === r.name) ?? [];
+  const [text, setText] = useState<string | null>(null);
+  const [textError, setTextError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    void api
+      .standardsRulesetText(r.id)
+      .then((value) => current && setText(value))
+      .catch((error) => current && setTextError(String((error as Error).message)));
+    return () => {
+      current = false;
+    };
+  }, [r.id]);
   return (
     <div className="page narrow">
       <div className="page-head">
@@ -491,7 +524,7 @@ function RulesetPage(props: { ruleset: StoredRuleset; view: StandardsView | null
             {!r.enabled && <span className="badge warn">not used</span>}
           </div>
           <div className="page-meta">
-            {r.file_name} · added {new Date(r.added_at).toLocaleString()} · sha256 {r.sha256.slice(0, 12)}…
+            {r.file_name} · {r.size.toLocaleString()} bytes · sha256 {r.sha256.slice(0, 12)}…
           </div>
         </div>
         <div className="page-actions">
@@ -520,7 +553,13 @@ function RulesetPage(props: { ruleset: StoredRuleset; view: StandardsView | null
       </fieldset>
       <details>
         <summary>Ruleset text</summary>
-        <pre className="code">{r.text}</pre>
+        {textError ? (
+          <div className="bad-box small-text">Could not load ruleset text: {textError}</div>
+        ) : text === null ? (
+          <div className="empty-note">Loading ruleset text…</div>
+        ) : (
+          <pre className="code">{text}</pre>
+        )}
       </details>
     </div>
   );

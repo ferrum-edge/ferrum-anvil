@@ -13,7 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) =
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn(), save: vi.fn() }));
 
-import type { LintReport, SpecSourceRecord, StandardsView } from "./api";
+import type { LintReport, SpecSourceRecord, StandardsView, StoredRulesetSummary } from "./api";
 import { ContractView } from "./ContractView";
 
 const now = "2026-09-30T10:00:00Z";
@@ -60,10 +60,22 @@ const report = (): LintReport => ({
 
 let standards: StandardsView;
 const notify = vi.fn();
+const teamRuleset: StoredRulesetSummary = {
+  id: "r1",
+  name: "Team rules",
+  file_name: "team.yaml",
+  version: "2",
+  size: 1024,
+  sha256: "abc123",
+  enabled: true,
+  order: 0,
+  load_status: "loaded",
+};
 
 function backend(overrides: Record<string, (args: Record<string, unknown>) => unknown> = {}) {
   standards = {
-    standards: { include_recommended: true, rulesets: [] },
+    include_recommended: true,
+    rulesets: [],
     sources: [{ name: "Anvil recommended", source: "anvil:recommended", builtin: true, sha256: "x" }],
     rules: [{ id: "path-params-declared", severity: "error", given: "operation", formats: [], ruleset: "Anvil recommended", description: "Declared path params." }],
     disabled: [],
@@ -78,8 +90,10 @@ function backend(overrides: Record<string, (args: Record<string, unknown>) => un
       case "standards_lint":
         return report();
       case "standards_set_recommended":
-        standards = { ...standards, standards: { ...standards.standards, include_recommended: args.include as boolean } };
-        return standards.standards;
+        standards = { ...standards, include_recommended: args.include as boolean };
+        return standards;
+      case "standards_ruleset_text":
+        return "anvil_ruleset: 1\nname: Team rules\nrules: {}\n";
       default:
         throw new Error(`unexpected command ${cmd}`);
     }
@@ -172,6 +186,19 @@ test("rules in effect are listed with where they come from", async () => {
   fireEvent.click(await screen.findByText("Rules in effect"));
   expect(await screen.findByText("Declared path params.")).toBeTruthy();
   expect(screen.getByText(/Layered in order: Anvil recommended/)).toBeTruthy();
+});
+
+test("ruleset details fetch only that ruleset's text on demand", async () => {
+  backend();
+  standards = { ...standards, rulesets: [teamRuleset] };
+  render(<ContractView workspaceId="A" notify={notify} />);
+  fireEvent.click(await screen.findByText("Team rules"));
+  const text = "anvil_ruleset: 1\nname: Team rules\nrules: {}\n";
+  const shown = await screen.findByText(
+    (_, element) => element?.tagName === "PRE" && element.textContent === text,
+  );
+  expect(shown).toBeTruthy();
+  expect(calls("standards_ruleset_text")).toEqual([{ rulesetId: "r1" }]);
 });
 
 test("switching workspaces drops the previous workspace's selected import", async () => {
