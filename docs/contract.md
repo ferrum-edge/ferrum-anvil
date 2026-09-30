@@ -43,19 +43,28 @@ company ruleset.
   targets keep one pointer per member). Regular expressions, in rules and
   in the `pattern`/`patternProperties` of schemas, use the linear-time
   `regex` crate with a size limit; a schema whose pattern needs look-around
-  or a back-reference is not used to check examples. Before a schema is
-  used, its references are checked without recursion: a cycle of
-  references that does not descend into the value (`A: allOf [B]`, `B:
-  allOf [A]`, or `dependentSchemas` back to itself), a chain of more than 32
-  references or 512 levels of nesting along one, or a size over 100,000
-  nodes with every `$ref` expanded (repeated references count each time),
-  and the schema is not used either (the OpenAPI 3.0 polymorphism pattern
-  `Pet: oneOf [Cat]`, `Cat: allOf [Pet]` is such a cycle, so its examples
-  are counted as not checked), and the report counts the examples not checked
-  (`examples_not_checked`). Operations look at 2 million parameters,
-  responses and media types at most in all (inherited path-level parameters, the document's security requirements
-  and a shared response's headers count for each operation); past that the remaining operations are counted
-  in `skipped_operations` and not checked.
+  or a back-reference is not used to check examples.
+- **Example schemas are checked before use.** References are followed
+  without recursion, and a schema is not used when:
+  - references form a cycle that does not descend into the value
+    (`A: allOf [B]`, `B: allOf [A]`, or `dependentSchemas` back to itself).
+    The OpenAPI 3.0 polymorphism pattern `Pet: oneOf [Cat]`,
+    `Cat: allOf [Pet]` is such a cycle;
+  - a chain has more than 32 references, or 512 levels of nesting along
+    one;
+  - it expands to more than 100,000 nodes with every `$ref` expanded
+    (repeated references count each time);
+  - it and the schemas it references have more than 1,000,000 members and
+    items (a large `enum` passes; a pathological one is not scanned on
+    every compile).
+
+  Examples behind such a schema are counted in `examples_not_checked`. A
+  schema is compiled once however many media types `$ref` it.
+- **Operations are bounded too.** They look at 2 million parameters,
+  responses and media types at most in all. Inherited path-level
+  parameters, the document's security requirements and a shared response's
+  headers count for each operation. Past that, the remaining operations are
+  counted in `skipped_operations` and not checked.
 - **Unresolvable references are reported, not checked.** An external,
   missing, cyclic or too deep `$ref` is skipped: the parameter, response,
   body or path item behind it is not a target, so no rule reports on the

@@ -142,8 +142,12 @@ impl LintReport {
 
 /// Lint `spec` with `rules`.
 pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
-    let mut checker =
-        ExampleChecker { budget: if opts.validate_examples { MAX_EXAMPLE_CHECKS } else { 0 }, not_checked: 0, compiled: HashMap::new() };
+    let mut checker = ExampleChecker {
+        budget: if opts.validate_examples { MAX_EXAMPLE_CHECKS } else { 0 },
+        not_checked: 0,
+        compiled: HashMap::new(),
+        compiles: 0,
+    };
     let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
     let model = Model::build(spec, &mut examples);
     let mut out = Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0 };
@@ -391,6 +395,8 @@ struct ExampleChecker {
     budget: usize,
     not_checked: usize,
     compiled: HashMap<(String, bool), Option<jsonschema::Validator>>,
+    /// Compiles attempted.
+    compiles: usize,
 }
 
 impl ExampleChecker {
@@ -428,9 +434,15 @@ impl ExampleChecker {
             self.not_checked += examples.len();
             return vec![];
         }
-        let key = (m.schema_pointer.clone(), dir == Direction::Request);
+        // Media types that only `$ref` the same schema share its validator.
+        let target = match schema.as_object() {
+            Some(o) if o.len() == 1 => spec.resolve(schema, &m.schema_pointer).map(|(_, at)| at),
+            _ => None,
+        };
+        let key = (target.unwrap_or_else(|| m.schema_pointer.clone()), dir == Direction::Request);
         if !self.compiled.contains_key(&key) {
             self.budget -= 1;
+            self.compiles += 1;
             self.compiled.insert(key.clone(), schema::compile(spec, schema, dir).ok());
         }
         let Some(validator) = self.compiled.get(&key).and_then(Option::as_ref) else {
@@ -450,5 +462,35 @@ impl ExampleChecker {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn media_types_sharing_a_schema_compile_it_once() {
+        let mut paths = Map::new();
+        for i in 0..1_000 {
+            paths.insert(
+                format!("/p{i}"),
+                json!({"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Big"}, "example": 3}}}}}}),
+            );
+        }
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
+            "components": {"schemas": {"Big": {"type": "integer", "enum": (0..50_000).collect::<Vec<u32>>()}}}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let mut checker = ExampleChecker { budget: MAX_EXAMPLE_CHECKS, not_checked: 0, compiled: HashMap::new(), compiles: 0 };
+        let mut examples = |m: &Media<'_>, dir: Direction| checker.check(&spec, m, dir);
+        let model = Model::build(&spec, &mut examples);
+        assert_eq!(model.of_kind(TargetKind::MediaType).count(), 1_000);
+        drop(model);
+        assert_eq!(checker.compiles, 1);
+        // The one compile spent a unit of the budget: the last example is
+        // counted as not checked.
+        assert_eq!(checker.not_checked, 1);
     }
 }
