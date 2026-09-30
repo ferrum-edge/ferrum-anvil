@@ -492,7 +492,7 @@ impl App {
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
         let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let local = self.store.read_consistently(|r| local(r, &d))?;
-        check_id_namespaces(&d, &local)?;
+        check_id_namespaces(&d, &local, policy)?;
         let notes = restore_notes(&d, &local, policy)?;
         let plan = restore_plan(&d, &local, policy);
         Ok(report(plan, &manifest, &d, notes, None, port::file_sha256(bytes)))
@@ -1050,19 +1050,24 @@ fn foreign_secrets(d: &Decoded, existing: &Existing) -> Vec<String> {
 /// Every check a restore makes before writing: its plan, and a warning for
 /// each item that names a stored file the backup does not include.
 fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &ImportApproval) -> Result<(ImportPlan, Vec<String>)> {
-    check_id_namespaces(d, local)?;
+    check_id_namespaces(d, local, policy)?;
     let notes = restore_notes(d, local, policy)?;
     let plan = restore_plan(d, local, policy);
     refuse_unapproved(&plan, approval)?;
     Ok((plan, notes))
 }
 
-fn check_id_namespaces(d: &Decoded, local: &Local) -> Result<()> {
+fn check_id_namespaces(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<()> {
+    let replaced_workspaces = if policy == ConflictPolicy::Replace { d.workspace_ids() } else { HashSet::new() };
     for incoming in &d.spec_sources {
         if local
             .spec_sources
             .iter()
-            .any(|stored| stored.source.id_namespace == incoming.source.id_namespace && stored.workspace_id != incoming.workspace_id)
+            .any(|stored| {
+                stored.source.id_namespace == incoming.source.id_namespace
+                    && stored.workspace_id != incoming.workspace_id
+                    && !replaced_workspaces.contains(&stored.workspace_id)
+            })
         {
             return Err(AppError::Invalid(format!(
                 "spec import '{}' reuses an id namespace already used in another workspace; nothing was restored",
@@ -1318,7 +1323,32 @@ mod tests {
     }
 
     #[test]
-    fn restore_refuses_a_spec_namespace_used_by_another_local_workspace() {
+    fn replace_ignores_spec_namespaces_in_workspaces_it_replaces() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = new_test_app(source_dir.path());
+        let a = source.spec_import(SPEC.as_bytes(), "a.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let b = source.spec_import(SPEC.as_bytes(), "b.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let namespace_b = source.spec_source(&b.import_id).unwrap().source.id_namespace;
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = new_test_app(target_dir.path());
+        let original = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
+        target.restore(&original, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+        let mut source_a = target.spec_source(&a.import_id).unwrap();
+        source_a.source.id_namespace = namespace_b;
+        target.store.put(kind::SPEC_SOURCE, &a.import_id, Some(&a.workspace_id), None, 0.0, &source_a).unwrap();
+
+        target
+            .restore_approved(
+                &original,
+                Some("backup passphrase 1"),
+                ConflictPolicy::Replace,
+                &ImportApproval::for_file(&original, vec![a.workspace_id, b.workspace_id]),
+            )
+            .expect("the source using this namespace belongs to a workspace Replace will restore");
+    }
+
+    #[test]
+    fn replace_refuses_a_spec_namespace_used_by_an_untouched_workspace() {
         let source_dir = tempfile::tempdir().unwrap();
         let source = new_test_app(source_dir.path());
         let a = source.spec_import(SPEC.as_bytes(), "a.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
@@ -1334,7 +1364,15 @@ mod tests {
         let target = new_test_app(target_dir.path());
         let original = source.export_backup_with("backup passphrase 1", KdfParams::testing()).unwrap().0;
         target.restore(&original, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+        let untouched = target.spec_import(SPEC.as_bytes(), "untouched.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let mut untouched_source = target.spec_source(&untouched.import_id).unwrap();
+        untouched_source.source.id_namespace = namespace_b;
+        target
+            .store
+            .put(kind::SPEC_SOURCE, &untouched.import_id, Some(&untouched.workspace_id), None, 0.0, &untouched_source)
+            .unwrap();
         let before = target.backup_contents().unwrap();
+
         let preview_err = target.restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
         assert!(preview_err.to_string().contains("id namespace already used in another workspace"), "{preview_err}");
         let err = target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();

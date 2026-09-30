@@ -398,6 +398,10 @@ impl App {
                 collisions |= foreign_workspace_owns(&foreign_owners, kind::REVISION, &rev.id, &rec.workspace_id);
             }
             collisions |= foreign_workspace_owns(&foreign_owners, kind::SPEC_SOURCE, &result.source.import_id, &rec.workspace_id);
+            collisions |= s
+                .list::<SpecSourceRecord>(kind::SPEC_SOURCE, None)?
+                .iter()
+                .any(|source| source.source.id_namespace == result.source.id_namespace && source.workspace_id != rec.workspace_id);
             if collisions {
                 return Ok(Err(foreign_reimport_collision()));
             }
