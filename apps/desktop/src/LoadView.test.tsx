@@ -155,7 +155,7 @@ describe("ProtocolPanel", () => {
     const codes = screen.getByTestId("grpc-codes").textContent ?? "";
     expect(codes).toContain("7 PERMISSION_DENIED5");
     expect(codes).toContain("0 OK15");
-    expect(codes).toContain("-1 invalid: any code outside 0–16 2");
+    expect(codes).toContain("-1 invalid: any code outside 0–162");
     expect(screen.getByTestId("grpc-summary").textContent).toContain("Response without a terminal status (incomplete, never success)5");
   });
 
