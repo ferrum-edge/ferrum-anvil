@@ -271,17 +271,11 @@ pub fn revise(spec: &Spec, report: &DriftReport, ids: &[String]) -> Revision {
     let mut applied: Vec<&Suggestion> = vec![];
     let mut skipped: Vec<String> = ids.iter().filter(|id| !known.contains(id.as_str())).cloned().collect();
     for s in report.suggestions.iter().filter(|s| chosen.contains(s.id.as_str())) {
-        // All of a suggestion or none of it: after a failed op the
-        // document is rebuilt from the suggestions applied so far (rare,
-        // so the common case never copies the document).
-        if patch::apply(&mut doc, &s.ops) > 0 {
-            skipped.push(s.id.clone());
-            doc = spec.root.clone();
-            for a in &applied {
-                patch::apply(&mut doc, &a.ops);
-            }
-        } else {
+        // All of a suggestion or none of it.
+        if patch::apply_atomic(&mut doc, &s.ops) {
             applied.push(s);
+        } else {
+            skipped.push(s.id.clone());
         }
     }
     let text = patch::render(&doc, spec.syntax);
@@ -637,6 +631,13 @@ fn method_token(m: &str) -> String {
 }
 
 fn allows_null(s: &Value) -> bool {
+    // A constant or a list of values admits null only by naming it.
+    if let Some(c) = s.get("const") {
+        return c.is_null();
+    }
+    if let Some(Value::Array(values)) = s.get("enum") {
+        return values.contains(&Value::Null);
+    }
     let (_, types, nullable) = schema_types(s);
     nullable || (types.is_empty() && s.get("type").is_none())
 }
@@ -646,6 +647,8 @@ impl<'a> State<'a> {
         self.spec.dialect
     }
 
+    /// Record a difference; false when it was not recorded (too many
+    /// distinct ones), and then nothing about it is gathered either.
     fn finding(
         &mut self,
         key: String,
@@ -654,10 +657,10 @@ impl<'a> State<'a> {
         message: String,
         operation: Option<String>,
         pointer: Option<String>,
-    ) -> String {
+    ) -> bool {
         if !self.findings.contains_key(&key) && self.findings.len() >= MAX_FINDING_KEYS {
             self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
-            return key;
+            return false;
         }
         let f = self.findings.entry(key.clone()).or_default();
         if f.kind.is_none() {
@@ -667,7 +670,13 @@ impl<'a> State<'a> {
         if f.observations.len() < self.opts.max_examples && !f.observations.contains(&obs.id) {
             f.observations.push(obs.id.clone());
         }
-        key
+        true
+    }
+
+    /// No more distinct differences are recorded: body walks, which only
+    /// feed suggestions for them, stop.
+    fn findings_full(&self) -> bool {
+        self.findings.len() >= MAX_FINDING_KEYS
     }
 
     fn link(&mut self, finding: &str, suggestion_key: &str) {
@@ -703,18 +712,18 @@ impl<'a> State<'a> {
             } else {
                 Some(generalize(&base)).filter(|g| !g.contains('{') && g != "/").unwrap_or_default()
             };
-            let e = self.servers.entry(origin.clone()).or_insert((0, base));
-            e.0 += 1;
             let key = format!("server|{origin}");
-            self.finding(
+            if self.finding(
                 key.clone(),
                 DriftKind::UndeclaredServer,
                 o,
                 format!("Requests went to {origin}, which is not one of the declared servers"),
                 None,
                 Some(if self.spec.is_swagger2() { "/host".into() } else { "/servers".into() }),
-            );
-            self.link(&key, &format!("server|{origin}"));
+            ) {
+                self.link(&key, &key);
+                self.servers.entry(origin.clone()).or_insert((0, base)).0 += 1;
+            }
         }
         match route {
             Route::Operation { op, .. } => {
@@ -753,7 +762,9 @@ impl<'a> State<'a> {
             None => (DriftKind::UndeclaredPath, format!("{label} is called, but the description has no such path"), None),
         };
         let key = format!("endpoint|{method}|{pattern}");
-        self.finding(key.clone(), kind, o, message, Some(label), pointer);
+        if !self.finding(key.clone(), kind, o, message, Some(label), pointer) {
+            return;
+        }
         self.link(&key, &key);
         let unknown_prefix = (!base.is_empty() && !self.router.base_declared(&base)).then(|| generalize(&base));
         let acc = self.endpoints.entry((method, pattern.clone())).or_default();
@@ -830,16 +841,17 @@ impl<'a> State<'a> {
                         continue;
                     }
                     let key = format!("query|{op_ptr}|{q}");
-                    self.finding(
+                    if self.finding(
                         key.clone(),
                         DriftKind::UndeclaredQueryParameter,
                         o,
                         format!("{label} was called with query parameter `{q}`, which is not declared"),
                         Some(label.clone()),
                         Some(op_ptr.clone()),
-                    );
-                    self.link(&key, &key);
-                    self.ops[i].new_query.insert(q.clone());
+                    ) {
+                        self.link(&key, &key);
+                        self.ops[i].new_query.insert(q.clone());
+                    }
                 }
             }
         }
@@ -875,16 +887,17 @@ impl<'a> State<'a> {
                     declared.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>().join(", ")
                 };
                 let key = format!("reqtype|{op_ptr}|{e}");
-                self.finding(
+                if self.finding(
                     key.clone(),
                     DriftKind::UndeclaredRequestContentType,
                     o,
                     format!("{label} was sent a {e} body; the description declares {list}"),
                     Some(label.clone()),
                     body.as_ref().map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
-                );
-                self.link(&key, &key);
-                self.ops[i].new_request_types.insert(e);
+                ) {
+                    self.link(&key, &key);
+                    self.ops[i].new_request_types.insert(e);
+                }
             }
         }
         if let Some(max) = b.max_request_bytes
@@ -922,14 +935,16 @@ impl<'a> State<'a> {
         let resps = responses(spec, &op);
         let Some(resp) = declared_response(&resps, &code) else {
             let key = format!("status|{op_ptr}|{code}");
-            self.finding(
+            if !self.finding(
                 key.clone(),
                 DriftKind::UndeclaredStatus,
                 o,
                 format!("{label} returned {code}, which is not a documented response"),
                 Some(label.clone()),
                 Some(ptr(&op_ptr, "responses")),
-            );
+            ) {
+                return;
+            }
             self.link(&key, &key);
             let shape = self.ops[i].new_responses.entry((code, ct)).or_default();
             if let ObservedBody::Json(v) = &r.body {
@@ -966,14 +981,16 @@ impl<'a> State<'a> {
                 resp.media.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>().join(", ")
             };
             let key = format!("ctype|{}|{ct}", resp.pointer);
-            self.finding(
+            if !self.finding(
                 key.clone(),
                 DriftKind::UndeclaredContentType,
                 o,
                 format!("The {code} response of {label} was {ct}; the description declares {list}"),
                 Some(label.clone()),
                 Some(resp.pointer.clone()),
-            );
+            ) {
+                return;
+            }
             self.link(&key, &key);
             let entry =
                 self.ops[i].new_media.entry((resp.code.clone(), ct.clone())).or_insert_with(|| (resp.pointer.clone(), Shape::default()));
@@ -1025,6 +1042,9 @@ impl<'a> State<'a> {
         if first_only {
             self.note("for large bodies against long `required` lists only the first schema difference is reported");
         }
+        if self.findings_full() {
+            return;
+        }
         if messages.is_empty() {
             // Still record required-property presence for relaxations.
             self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, false);
@@ -1033,14 +1053,16 @@ impl<'a> State<'a> {
         for (place, what, category) in &messages {
             let m = format!("{place} {what}");
             let key = format!("schema|{}|{m}", media.schema_pointer);
-            self.finding(
+            if !self.finding(
                 key.clone(),
                 DriftKind::ResponseSchemaMismatch,
                 o,
                 format!("The {code} response of {label} does not match its schema: {m}"),
                 Some(label.clone()),
                 Some(media.schema_pointer.clone()),
-            );
+            ) {
+                return;
+            }
             self.schema_places.entry((label.clone(), code.clone(), place.clone(), category.clone())).or_default().insert(key);
         }
         self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, true);
@@ -1497,15 +1519,7 @@ impl<'a> State<'a> {
                 ),
                 FixKey::Nullable { at } => {
                     let current = spec.root.pointer(at).cloned().unwrap_or_else(|| json!({}));
-                    let mut widened = current.clone();
-                    mark_nullable(&mut widened, d);
-                    let ops = patch::diff(&current, &widened)
-                        .into_iter()
-                        .filter_map(|o| {
-                            let path = format!("{at}{}", o["path"].as_str().unwrap_or(""));
-                            serde_json::from_value::<PatchOp>(json!({"op": o["op"], "path": path, "value": o.get("value")})).ok()
-                        })
-                        .collect();
+                    let ops = nullable_ops(d, at, &current);
                     add(
                         &skey,
                         format!("Allow null at {}", display_pointer(at, owner)),
@@ -1517,11 +1531,13 @@ impl<'a> State<'a> {
                     );
                 }
                 FixKey::Widen { at } => {
-                    let t = match spec.root.pointer(at).and_then(|s| s.get("type")) {
-                        Some(Value::Array(a)) => {
-                            json!(a.iter().map(|x| if x == "integer" { json!("number") } else { x.clone() }).collect::<Vec<_>>())
-                        }
-                        _ => json!("number"),
+                    // 3.1 and 3.2 add `number` to the type (a union, so
+                    // allowing null too keeps both); older dialects have one
+                    // type, and their null is a separate flag.
+                    let op = if matches!(d, Dialect::OpenApi31 | Dialect::OpenApi32) {
+                        PatchOp::union(ptr(at, "type"), vec![json!("number")])
+                    } else {
+                        PatchOp::replace(ptr(at, "type"), json!("number"))
                     };
                     add(
                         &skey,
@@ -1530,7 +1546,7 @@ impl<'a> State<'a> {
                         SuggestionKind::Relaxation,
                         false,
                         at.clone(),
-                        vec![PatchOp::replace(ptr(at, "type"), t)],
+                        vec![op],
                     );
                 }
                 FixKey::Enum { at } => {
@@ -1540,12 +1556,6 @@ impl<'a> State<'a> {
             }
         }
         for (at, (owner, values)) in enum_groups {
-            let mut list = spec.root.pointer(&ptr(&at, "enum")).and_then(Value::as_array).cloned().unwrap_or_default();
-            for v in &values {
-                if !list.contains(&json!(v)) {
-                    list.push(json!(v));
-                }
-            }
             let key = fix_suggestion_key(&FixKey::Enum { at: at.clone() });
             add(
                 &key,
@@ -1558,7 +1568,8 @@ impl<'a> State<'a> {
                 SuggestionKind::Relaxation,
                 false,
                 at.clone(),
-                vec![PatchOp::replace(ptr(&at, "enum"), Value::Array(list))],
+                // A union: allowing null may add to the same list.
+                vec![PatchOp::union(ptr(&at, "enum"), values.iter().map(|v| json!(v)).collect())],
             );
         }
         // Required properties that were sometimes missing.
@@ -1798,6 +1809,34 @@ fn fix_suggestion_key(k: &FixKey) -> String {
         FixKey::Widen { at } => format!("widen|{at}"),
         FixKey::Enum { at } => format!("enum|{at}"),
     }
+}
+
+/// Ops allowing `null` on the schema `s` at `at`, written to compose with
+/// the other suggestions on the same schema (unions into `type` and
+/// `enum`, flags): whichever order they apply in, both hold.
+fn nullable_ops(d: Dialect, at: &str, s: &Value) -> Vec<PatchOp> {
+    let modern = matches!(d, Dialect::OpenApi31 | Dialect::OpenApi32);
+    let mut ops = vec![];
+    if let Some(c) = s.get("const").filter(|_| modern) {
+        ops.push(PatchOp::remove(ptr(at, "const")));
+        ops.push(PatchOp::union(ptr(at, "enum"), vec![c.clone(), Value::Null]));
+    } else if s.get("enum").is_some() {
+        ops.push(PatchOp::union(ptr(at, "enum"), vec![Value::Null]));
+    }
+    match d {
+        Dialect::Swagger20 => ops.push(PatchOp::replace(ptr(at, "x-nullable"), json!(true))),
+        Dialect::OpenApi30 => ops.push(PatchOp::replace(ptr(at, "nullable"), json!(true))),
+        _ if s.get("type").is_some() => ops.push(PatchOp::union(ptr(at, "type"), vec![json!("null")])),
+        _ => {}
+    }
+    if ops.is_empty() {
+        // Nothing to extend (null is refused some other way): offer `null`
+        // beside the schema.
+        let mut wrapped = s.clone();
+        mark_nullable(&mut wrapped, d);
+        ops.push(PatchOp::replace(at.to_string(), wrapped));
+    }
+    ops
 }
 
 /// The length of the longest `required` list anywhere in `root`.

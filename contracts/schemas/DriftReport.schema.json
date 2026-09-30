@@ -546,7 +546,7 @@
           "const": "replace"
         },
         {
-          "description": "Add the items of the value (a list) that the list at the path lacks;\nset the value when there is no list there yet.",
+          "description": "Add the items of the value (a list) that the list at the path lacks;\nset the value when there is nothing there yet. A single value there\n(`type: integer`, `produces: x`) becomes a one-item list first.",
           "type": "string",
           "const": "union"
         }

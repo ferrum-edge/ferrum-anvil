@@ -17,7 +17,8 @@ pub enum PatchKind {
     Replace,
     Remove,
     /// Add the items of the value (a list) that the list at the path lacks;
-    /// set the value when there is no list there yet.
+    /// set the value when there is nothing there yet. A single value there
+    /// (`type: integer`, `produces: x`) becomes a one-item list first.
     Union,
 }
 
@@ -123,7 +124,16 @@ pub fn apply(doc: &mut Value, ops: &[PatchOp]) -> usize {
                             }
                         }
                     }
-                    Some(_) => failed += 1,
+                    Some(Value::Object(_)) => failed += 1,
+                    Some(single) => {
+                        let mut list = if single.is_null() { vec![] } else { vec![single.take()] };
+                        for i in items {
+                            if !list.contains(&i) {
+                                list.push(i);
+                            }
+                        }
+                        *single = Value::Array(list);
+                    }
                     None => {
                         o.insert(last.clone(), Value::Array(items));
                     }
@@ -147,6 +157,104 @@ pub fn apply(doc: &mut Value, ops: &[PatchOp]) -> usize {
         }
     }
     failed
+}
+
+/// Apply all of `ops` or none of them: before each op, what it may change
+/// is recorded (the value at its target, or the member or list length it
+/// creates), and after a failed op the changes are undone in reverse. Only
+/// the targets are copied, never the document.
+pub fn apply_atomic(doc: &mut Value, ops: &[PatchOp]) -> bool {
+    let mut undo = Vec::with_capacity(ops.len());
+    for op in ops {
+        undo.push(undo_for(doc, op));
+        if apply(doc, std::slice::from_ref(op)) > 0 {
+            for u in undo.into_iter().rev() {
+                restore(doc, u);
+            }
+            return false;
+        }
+    }
+    true
+}
+
+/// How to undo one op.
+enum Undo {
+    Nothing,
+    /// Put this value back at the pointer.
+    Set(Vec<String>, Value),
+    /// Remove a member the op created (with any parents under it).
+    RemoveKey(Vec<String>, String),
+    /// Shorten a list the op appended to.
+    Truncate(Vec<String>, usize),
+    /// Put back a member the op removed, at its position.
+    Reinsert(Vec<String>, String, usize, Value),
+}
+
+fn undo_for(doc: &Value, op: &PatchOp) -> Undo {
+    let toks = tokens(&op.path);
+    if toks.is_empty() {
+        return Undo::Set(vec![], doc.clone());
+    }
+    let mut node = doc;
+    for (i, t) in toks.iter().enumerate() {
+        let last = i + 1 == toks.len();
+        match node {
+            Value::Object(o) => match o.get(t) {
+                Some(child) if last && op.op == PatchKind::Remove => {
+                    let at = o.keys().position(|k| k == t).unwrap_or(0);
+                    return Undo::Reinsert(toks[..i].to_vec(), t.clone(), at, child.clone());
+                }
+                Some(child) if last => return Undo::Set(toks.clone(), child.clone()),
+                Some(child) => node = child,
+                // A remove creates nothing; any other op creates this member.
+                None if op.op == PatchKind::Remove => return Undo::Nothing,
+                None => return Undo::RemoveKey(toks[..i].to_vec(), t.clone()),
+            },
+            Value::Array(a) => {
+                if t == "-" {
+                    return Undo::Truncate(toks[..i].to_vec(), a.len());
+                }
+                if last {
+                    // An insert or removal shifts the items: keep the list.
+                    return Undo::Set(toks[..i].to_vec(), node.clone());
+                }
+                match t.parse::<usize>().ok().and_then(|k| a.get(k)) {
+                    Some(child) => node = child,
+                    None => return Undo::Nothing,
+                }
+            }
+            // The op fails here without changing anything.
+            _ => return Undo::Nothing,
+        }
+    }
+    Undo::Nothing
+}
+
+fn restore(doc: &mut Value, u: Undo) {
+    match u {
+        Undo::Nothing => {}
+        Undo::Set(at, v) => {
+            if let Some(n) = walk_existing(doc, &at) {
+                *n = v;
+            }
+        }
+        Undo::RemoveKey(at, k) => {
+            if let Some(Value::Object(o)) = walk_existing(doc, &at) {
+                o.shift_remove(&k);
+            }
+        }
+        Undo::Truncate(at, len) => {
+            if let Some(Value::Array(a)) = walk_existing(doc, &at) {
+                a.truncate(len);
+            }
+        }
+        Undo::Reinsert(at, k, i, v) => {
+            if let Some(Value::Object(o)) = walk_existing(doc, &at) {
+                let i = i.min(o.len());
+                o.shift_insert(i, k, v);
+            }
+        }
+    }
 }
 
 /// The parent of the last token, creating missing objects (a list when the
@@ -255,6 +363,35 @@ pub fn render(v: &Value, syntax: Syntax) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_application_undoes_every_kind_of_change() {
+        let original = json!({"a": {"x": 1, "y": [1, 2], "z": "s"}, "b": [0, 1, 2], "t": "integer"});
+        let fail = PatchOp::remove("/no/such");
+        let changes = vec![
+            PatchOp::add("/a/new/deep/er", json!(1)),
+            PatchOp::add("/a/y/-", json!(3)),
+            PatchOp::remove("/a/x"),
+            PatchOp::replace("/a/z", json!({"k": 1})),
+            PatchOp::add("/b/1", json!(9)),
+            PatchOp::remove("/b/0"),
+            PatchOp::union("/t", vec![json!("null")]),
+            PatchOp::add("/a", json!({"merged": true})),
+        ];
+        for n in 1..=changes.len() {
+            let mut doc = original.clone();
+            let mut ops = changes[..n].to_vec();
+            ops.push(fail.clone());
+            assert!(!apply_atomic(&mut doc, &ops));
+            assert_eq!(doc, original, "after {n} changes");
+            // Member order is kept too.
+            assert_eq!(doc["a"].as_object().unwrap().keys().collect::<Vec<_>>(), ["x", "y", "z"]);
+        }
+        let mut doc = original.clone();
+        assert!(apply_atomic(&mut doc, &changes));
+        assert_eq!(doc["t"], json!(["integer", "null"]), "a single value becomes a list");
+        assert!(doc["a"].get("x").is_none() && doc["a"]["merged"] == json!(true));
+    }
 
     #[test]
     fn add_creates_parents_and_merges() {

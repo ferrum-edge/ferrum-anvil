@@ -446,7 +446,9 @@ change in the description's syntax.
   operation without one.
 - **Relaxations** loosen the contract and are never selected by default,
   because the API may be what needs fixing: allowing `null` (an `enum`
-  gets `null` among its values too), widening `integer` to `number`, adding
+  gets `null` among its values too, and a 3.1/3.2 `const` becomes an `enum`
+  of the constant and `null`), widening `integer` to `number` (3.1 and 3.2
+  add `number` to the type), adding
   observed values to an `enum` (short tokens only, 20 per enum at most),
   making a required property that was sometimes missing optional (an empty
   `required` is removed), and raising a latency, response size or request
@@ -480,8 +482,11 @@ checking the same traffic again leaves only differences the description
 cannot fix (a missing required parameter or response header, a deprecated
 operation called), which `tests/drift.rs` checks in all four dialects. A
 suggestion applies whole or not at all: if one of its operations cannot
-apply, none of it is in the revision and it is listed as skipped. The
-digest is of the description and the revised text.
+apply, none of it is in the revision and it is listed as skipped. Changes
+to one schema compose: allowing null, widening a type and adding enum
+values extend the `type` and `enum` lists rather than replacing them, so
+they hold together in any order. The digest is of the description and the
+revised text.
 
 A HAR capture is read up to 64 MiB and 10,000 entries (a note says how many
 were left out). Parsed bodies are also capped at 1,000,000 JSON values per

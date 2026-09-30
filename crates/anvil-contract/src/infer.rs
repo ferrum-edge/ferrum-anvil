@@ -279,20 +279,24 @@ pub fn json_type_name(v: &Value) -> &'static str {
 
 /// Allow `null` on a rendered schema, in the dialect's own way. An `enum`
 /// gets `null` among its values (every dialect requires it there), and a
-/// 3.1/3.2 `const` becomes `anyOf` the constant or `null`.
+/// 3.1/3.2 `const` becomes an `enum` of the constant and `null`.
 pub fn mark_nullable(s: &mut Value, dialect: Dialect) {
     let Some(o) = s.as_object_mut() else { return };
-    if let Some(Value::Array(e)) = o.get_mut("enum")
-        && !e.contains(&Value::Null)
-    {
-        e.push(Value::Null);
+    let modern = matches!(dialect, Dialect::OpenApi31 | Dialect::OpenApi32);
+    if modern && let Some(c) = o.shift_remove("const") {
+        o.insert("enum".into(), json!([c]));
     }
-    if matches!(dialect, Dialect::OpenApi31 | Dialect::OpenApi32) && o.contains_key("const") {
-        let inner = Value::Object(std::mem::take(o));
-        o.insert("anyOf".into(), json!([inner, { "type": "null" }]));
-        return;
-    }
+    let listed = match o.get_mut("enum") {
+        Some(Value::Array(e)) => {
+            if !e.contains(&Value::Null) {
+                e.push(Value::Null);
+            }
+            true
+        }
+        _ => false,
+    };
     match dialect {
+        Dialect::OpenApi31 | Dialect::OpenApi32 if listed && !o.contains_key("type") => {}
         Dialect::OpenApi31 | Dialect::OpenApi32 => match o.get("type").cloned() {
             Some(Value::String(t)) => {
                 o.insert("type".into(), json!([t, "null"]));
@@ -445,7 +449,7 @@ mod tests {
         assert_eq!(e, json!({"type": ["string", "null"], "enum": ["a", null]}));
         let mut c = json!({"const": "a"});
         mark_nullable(&mut c, Dialect::OpenApi32);
-        assert_eq!(c, json!({"anyOf": [{"const": "a"}, {"type": "null"}]}));
+        assert_eq!(c, json!({"enum": ["a", null]}));
         let mut e30 = json!({"type": "string", "enum": ["a"]});
         mark_nullable(&mut e30, Dialect::OpenApi30);
         assert_eq!(e30, json!({"type": "string", "enum": ["a", null], "nullable": true}));

@@ -217,8 +217,7 @@ impl<'a> Router<'a> {
                     let Some(u) = s.get("url").and_then(Value::as_str) else { continue };
                     if seen_urls.insert(u.to_string()) {
                         urls.push((u.to_string(), s.get("variables")));
-                    }
-                    if s.get("variables").is_some() {
+                    } else if s.get("variables").is_some() {
                         variants.push((u, s.get("variables")));
                     }
                 }
@@ -227,7 +226,8 @@ impl<'a> Router<'a> {
         let mut bases: Vec<Base> = vec![Base { loose: vec![], strict: vec![] }];
         // Routing form (`/{v}` and `/{w}` route alike) → index in `bases`.
         let mut seen_bases: HashMap<String, usize> = HashMap::from([(String::new(), 0)]);
-        let mut dropped_servers = 0;
+        // Distinct server URLs whose base path was not kept.
+        let mut dropped: HashSet<&str> = HashSet::new();
         let all = urls.iter().map(|(u, v)| (u.as_str(), *v)).chain(variants);
         for (u, vars) in all {
             let b = server_base(u);
@@ -250,7 +250,9 @@ impl<'a> Router<'a> {
                     seen_bases.insert(key, bases.len());
                     bases.push(Base { loose, strict });
                 }
-                None => dropped_servers += 1,
+                None => {
+                    dropped.insert(u);
+                }
             }
         }
         // Longest base first.
@@ -276,6 +278,7 @@ impl<'a> Router<'a> {
                 Server { url: u.clone(), origin: origin.flatten() }
             })
             .collect();
+        let dropped_servers = dropped.len();
         Router { ops, templates, by_len, bases, servers, dropped_servers }
     }
 
@@ -493,6 +496,16 @@ mod tests {
         let s = spec(&doc.to_string());
         let r = Router::new(&s);
         assert_eq!((r.bases.len(), r.dropped_servers), (MAX_BASES, 100 - (MAX_BASES - 1)));
+        // A dropped server with variables, declared twice, counts once.
+        let many: Vec<serde_json::Value> = (0..100)
+            .flat_map(|i| {
+                let s = serde_json::json!({"url": format!("https://h.example/b{i}/{{v}}"), "variables": {"v": {"default": "x"}}});
+                [s.clone(), s]
+            })
+            .collect();
+        let doc = serde_json::json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "servers": many, "paths": {}});
+        let s = spec(&doc.to_string());
+        assert_eq!(Router::new(&s).dropped_servers, 100 - (MAX_BASES - 1));
     }
 
     #[test]

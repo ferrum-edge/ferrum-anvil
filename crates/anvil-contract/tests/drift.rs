@@ -500,3 +500,65 @@ fn wide_recursive_schemas_are_walked_within_budget() {
     assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:#?}", r.notes);
     assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
 }
+
+#[test]
+fn null_and_fraction_on_the_same_field_both_hold() {
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/n": {"get": {"responses": {"200": {"description": "ok",
+        "content": {"application/json": {"schema": {"type": "object", "properties": {
+            "n": {"type": "integer"}, "k": {"const": "a"}, "e": {"type": "string", "enum": ["a"]}}}}}}}}}}});
+    for version in ["3.1.0", "3.0.3"] {
+        let mut d = doc.clone();
+        d["openapi"] = json!(version);
+        if version == "3.0.3" {
+            d["paths"]["/n"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("k");
+        }
+        let spec = Spec::parse(d.to_string().as_bytes()).unwrap();
+        let obs: Vec<Observation> = [json!({"n": null, "k": null, "e": null}), json!({"n": 2.5, "e": "b"})]
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| Obs::new(&i.to_string(), "GET", "/n").json(200, b).0)
+            .collect();
+        let r = analyze(&spec, &obs, &DriftOptions::default());
+        let ids: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+        // In report order and in reverse, every suggestion applies and all of them hold.
+        for order in [ids.clone(), ids.iter().rev().cloned().collect()] {
+            let mut reordered = r.clone();
+            reordered.suggestions.sort_by_key(|s| order.iter().position(|id| *id == s.id));
+            let rev = revise(&spec, &reordered, &ids);
+            assert!(rev.skipped.is_empty(), "{version}: {:?}", rev.skipped);
+            let again = analyze(&Spec::parse(rev.text.as_bytes()).unwrap(), &obs, &DriftOptions::default());
+            assert!(again.findings.is_empty(), "{version}: {:#?}\n{}", again.findings, rev.text);
+        }
+    }
+}
+
+#[test]
+fn many_failing_suggestions_do_not_copy_the_document() {
+    // A large description and 2,000 suggestions that each fail on their
+    // last op: each is undone without copying the document.
+    let mut paths = serde_json::Map::new();
+    for i in 0..20_000 {
+        paths.insert(format!("/r{i}"), json!({"get": {"responses": {"200": {"description": "ok"}}}}));
+    }
+    let doc = json!({"swagger": "2.0", "info": {"title": "t", "version": "1"}, "produces": "application/json", "paths": paths});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let obs: Vec<Observation> = (0..2_000).map(|i| Obs::new(&i.to_string(), "GET", &format!("/r{i}")).empty(404).0).collect();
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    assert_eq!(r.suggestions.len(), 2_000);
+    let ids: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+    let mut broken = r.clone();
+    for s in &mut broken.suggestions {
+        s.ops.push(anvil_contract::patch::PatchOp::remove("/no/such"));
+    }
+    let start = std::time::Instant::now();
+    let rev = revise(&spec, &broken, &ids);
+    assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
+    assert_eq!(rev.skipped.len(), 2_000);
+    assert!(rev.json_patch.is_empty());
+    // Unbroken, they all apply (a single `produces` value becomes a list).
+    let rev = revise(&spec, &r, &ids);
+    assert!(rev.skipped.is_empty(), "{:?}", rev.skipped);
+}
