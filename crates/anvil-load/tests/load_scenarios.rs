@@ -709,12 +709,8 @@ async fn load_013_udp_sends_more_than_it_receives_and_never_claims_delivery() {
     let sink = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let sink_addr = sink.local_addr().unwrap();
     let id = Id::new();
-    let r = run(
-        plan(Workload::Iterations { iterations: 2, concurrency: 1 }, vec![id]),
-        vec![(id, udp_ctx(sink_addr, &["x"], 150))],
-        None,
-    )
-    .await;
+    let r = run(plan(Workload::Iterations { iterations: 2, concurrency: 1 }, vec![id]), vec![(id, udp_ctx(sink_addr, &["x"], 150))], None)
+        .await;
     let d = datagram_metrics(&r);
     assert_eq!(d.datagrams_received, 0, "{d:?}");
     assert_eq!((d.datagrams_sent, d.exchanges_silent, d.echoed_payloads), (2, 2, 0), "{d:?}");

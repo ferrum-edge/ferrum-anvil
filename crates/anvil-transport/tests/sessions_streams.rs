@@ -4,8 +4,8 @@
 //! HTTP/3, gRPC-Web binary and text, malformed gRPC-Web bodies). Matrix IDs
 //! are kept in test names.
 
-use anvil_domain::execution::*;
 use anvil_domain::Id;
+use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, GrpcStatusSource, ProtocolStatus};
 use anvil_domain::request::{GrpcMode, GrpcWire};
 use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
