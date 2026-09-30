@@ -756,8 +756,9 @@ mod tests {
         assert!(err.to_string().contains("root folder was deleted"), "{err}");
     }
 
+    /// This exercises the namespace check that rejects reimports before writing.
     #[test]
-    fn reimport_cannot_reuse_another_workspaces_namespace() {
+    fn reimport_refuses_a_namespace_used_by_another_workspace() {
         let root = tempfile::tempdir().unwrap();
         let pm = ProfileManager::new(root.path());
         let (s, dek, _recovery) = pm.create_passphrase("t", "correct horse battery", KdfParams::testing()).unwrap();
@@ -780,12 +781,51 @@ mod tests {
         assert_eq!(app.requests(&b.workspace_id).unwrap(), before_requests);
     }
 
+    #[test]
+    fn reimport_refuses_a_request_id_owned_by_another_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let pm = ProfileManager::new(root.path());
+        let (s, dek, _recovery) = pm.create_passphrase("t", "correct horse battery", KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        let app = App::open(s.dir, h, dek).unwrap();
+        let a = app.spec_import(ADMIN.as_bytes(), "a.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let b = app
+            .spec_import(ADMIN_WITH_EXTRA.as_bytes(), "b.json", &ImportOptions::default(), SpecTarget::NewWorkspace)
+            .unwrap();
+        let b_namespace = app.spec_source(&b.import_id).unwrap().source.id_namespace;
+        let b_health = app.requests(&b.workspace_id).unwrap().into_iter().find(|request| request.name == "Health").unwrap();
+        let mut source_a = app.spec_source(&a.import_id).unwrap();
+        source_a.source.id_namespace = b_namespace;
+        app.store.put(kind::SPEC_SOURCE, &source_a.source.import_id, Some(&source_a.workspace_id), None, 0.0, &source_a).unwrap();
+        assert!(app.store.delete(kind::SPEC_SOURCE, &b.import_id).unwrap());
+        let before = app.backup_contents().unwrap();
+
+        let reimport = app.reimport(&a.import_id, ADMIN_WITH_EXTRA.as_bytes()).unwrap();
+        assert!(reimport.plan.added.iter().any(|request| request.meta.id == b_health.meta.id));
+        let err = app
+            .apply_reimport(reimport, ADMIN_WITH_EXTRA.as_bytes(), "a-v2.json", &ReimportApproval::default())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("overwrite an object in another workspace"), "{err}");
+        assert_eq!(app.backup_contents().unwrap(), before, "a refused reimport leaves every object unchanged");
+    }
+
     /// A Postman collection whose folder has a variable of its own.
     const ADMIN: &str = r#"{
   "info": { "name": "Admin API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
   "item": [
     { "name": "Admin", "variable": [{ "key": "scope", "value": "read" }], "item": [
       { "name": "Users", "request": { "method": "GET", "url": { "raw": "https://api.example.invalid/users/{{scope}}" } } }
+    ] }
+  ]
+}"#;
+
+    const ADMIN_WITH_EXTRA: &str = r#"{
+  "info": { "name": "Admin API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "item": [
+    { "name": "Admin", "variable": [{ "key": "scope", "value": "read" }], "item": [
+      { "name": "Users", "request": { "method": "GET", "url": { "raw": "https://api.example.invalid/users/{{scope}}" } } },
+      { "name": "Health", "request": { "method": "GET", "url": { "raw": "https://api.example.invalid/health" } } }
     ] }
   ]
 }"#;

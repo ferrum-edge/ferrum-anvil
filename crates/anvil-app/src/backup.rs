@@ -1060,15 +1060,11 @@ fn checked_plan(d: &Decoded, local: &Local, policy: ConflictPolicy, approval: &I
 fn check_id_namespaces(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<()> {
     let replaced_workspaces = if policy == ConflictPolicy::Replace { d.workspace_ids() } else { HashSet::new() };
     for incoming in &d.spec_sources {
-        if local
-            .spec_sources
-            .iter()
-            .any(|stored| {
-                stored.source.id_namespace == incoming.source.id_namespace
-                    && stored.workspace_id != incoming.workspace_id
-                    && !replaced_workspaces.contains(&stored.workspace_id)
-            })
-        {
+        if local.spec_sources.iter().any(|stored| {
+            stored.source.id_namespace == incoming.source.id_namespace
+                && stored.workspace_id != incoming.workspace_id
+                && !replaced_workspaces.contains(&stored.workspace_id)
+        }) {
             return Err(AppError::Invalid(format!(
                 "spec import '{}' reuses an id namespace already used in another workspace; nothing was restored",
                 incoming.file_name
@@ -1367,10 +1363,7 @@ mod tests {
         let untouched = target.spec_import(SPEC.as_bytes(), "untouched.txt", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
         let mut untouched_source = target.spec_source(&untouched.import_id).unwrap();
         untouched_source.source.id_namespace = namespace_b;
-        target
-            .store
-            .put(kind::SPEC_SOURCE, &untouched.import_id, Some(&untouched.workspace_id), None, 0.0, &untouched_source)
-            .unwrap();
+        target.store.put(kind::SPEC_SOURCE, &untouched.import_id, Some(&untouched.workspace_id), None, 0.0, &untouched_source).unwrap();
         let before = target.backup_contents().unwrap();
 
         let preview_err = target.restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap_err();
