@@ -1177,6 +1177,7 @@ impl OneShot {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn one_shot(
     conn: &mut Conn,
     plan: &GrpcPlan,
