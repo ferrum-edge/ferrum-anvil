@@ -221,7 +221,7 @@ async fn the_session_id_and_credentials_are_redacted_wherever_they_show() {
     init();
     let f = mcp::serve("127.0.0.1:0", McpOptions::default()).await.unwrap();
     let e = Engine::new();
-    let token = "mcp-bearer-7c1d9e4f";
+    let token = "tok-SENSITIVE-mcp-bearer";
     let mut c = mcp_ctx(&f.url(), call("session", "{}"));
     c.spec.auth = AuthConfig::Bearer { token: SensitiveValue::Template { value: token.into() }, prefix: "Bearer".into() };
     c.auth_layers = vec![("request".into(), c.spec.auth.clone())];

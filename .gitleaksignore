@@ -16,3 +16,8 @@ a7b38263c579e088c5fe03efd2f18aba50453414:crates/anvil-contract/tests/drift.rs:jw
 # fix/stream-residuals. The value is fake; the next commit switches it to the
 # allowlisted tok-SENSITIVE- canary prefix. CI scans full history, hence this fingerprint.
 4c929780cc834aaaa5f67af9a8ca1a38f7ec67ed:crates/anvil-engine/src/record.rs:generic-api-key:567
+# Exact-fingerprint ignore for a planted redaction canary in
+# crates/anvil-engine/tests/mcp.rs, first pushed in commit d64da595 on branch
+# feature/mcp-request-kind. The value is fake; the next commit switches it to
+# the allowlisted tok-SENSITIVE- canary prefix. CI scans full history.
+d64da595172a550838586dfbb1c291ccaaa88879:crates/anvil-engine/tests/mcp.rs:generic-api-key:224
