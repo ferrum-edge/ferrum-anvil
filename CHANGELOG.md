@@ -804,6 +804,8 @@
   When any of them ends the response, Anvil stops the stream with
   `H3_REQUEST_CANCELLED` instead of leaving it open, and the response body
   phase is recorded as timed out or canceled rather than failed.
+- Desktop development dependencies now override Mocha's vulnerable
+  `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted
