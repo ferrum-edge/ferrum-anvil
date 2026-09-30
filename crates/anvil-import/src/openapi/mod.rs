@@ -332,14 +332,7 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
 /// Render server variable `name` of `decl` once: the text the URL gets for
 /// it, with its `Variable` (or required variable) recorded. Every `enum`
 /// value read is charged.
-fn server_variable(
-    b: &mut Builder,
-    decl: &Map<String, Value>,
-    name: &str,
-    sptr: &str,
-    inline: bool,
-    vars: &mut Vec<Variable>,
-) -> String {
+fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr: &str, inline: bool, vars: &mut Vec<Variable>) -> String {
     let vptr = ptr(&ptr(sptr, "variables"), name);
     let d = decl.get(name);
     if d.is_none() {
@@ -932,11 +925,8 @@ fn import_operation(
     // ---- folder ----
     let tag_list = op.get("tags").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let tag_bytes = tag_list.iter().fold(0usize, |n, t| n.saturating_add(t.as_str().map_or(0, str::len)));
-    let op_tags: Vec<String> = if b.charge_text(optr, tag_bytes) {
-        tag_list.iter().filter_map(Value::as_str).map(str::to_string).collect()
-    } else {
-        vec![]
-    };
+    let op_tags: Vec<String> =
+        if b.charge_text(optr, tag_bytes) { tag_list.iter().filter_map(Value::as_str).map(str::to_string).collect() } else { vec![] };
     let folder = match b.opts.group_by {
         GroupBy::Tags => op_tags.first().map(|t| tags.folder(b, t, order, 0)),
         GroupBy::Paths => {

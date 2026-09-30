@@ -308,11 +308,7 @@ impl ImportReport {
         if self.redactions.len() >= MAX_ENTRIES {
             return self.truncated("redaction");
         }
-        self.redactions.push(Redaction {
-            pointer: bounded_pointer(pointer),
-            field: field.into(),
-            placeholder: placeholder.into(),
-        });
+        self.redactions.push(Redaction { pointer: bounded_pointer(pointer), field: field.into(), placeholder: placeholder.into() });
     }
 
     /// Declare a variable that must be supplied by the user.

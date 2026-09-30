@@ -230,10 +230,8 @@ mod tests {
 
     #[test]
     fn skips_comments_cdata_instructions_and_values() {
-        let hidden = format!(
-            "<?xml version=\"1.0\"?><!-- <x{a}/> --><r v=\"<x{a}/>\"><![CDATA[<x{a}/>]]><?pi <x{a}/> ?></r>",
-            a = attrs(9)
-        );
+        let hidden =
+            format!("<?xml version=\"1.0\"?><!-- <x{a}/> --><r v=\"<x{a}/>\"><![CDATA[<x{a}/>]]><?pi <x{a}/> ?></r>", a = attrs(9));
         assert_eq!(check_xml_limits(&hidden, &with(|l| l.attributes_per_element = 2)), Ok(()));
     }
 
@@ -249,12 +247,9 @@ mod tests {
         // The parser reports these; the scan stops without an error.
         let many = attrs(9);
         let two = with(|l| l.attributes_per_element = 2);
-        for doc in [
-            format!("<r a{many}"),
-            format!("<r a><c{many}/></r>"),
-            format!("<!DOCTYPE r><r{many}/>"),
-            format!("<!-- open <r{many}/>"),
-        ] {
+        for doc in
+            [format!("<r a{many}"), format!("<r a><c{many}/></r>"), format!("<!DOCTYPE r><r{many}/>"), format!("<!-- open <r{many}/>")]
+        {
             assert_eq!(check_xml_limits(&doc, &two), Ok(()), "{doc}");
         }
     }
