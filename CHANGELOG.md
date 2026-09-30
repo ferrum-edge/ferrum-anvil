@@ -848,6 +848,13 @@
   host itself, the cookie is kept for that host only. Cookies scoped to a
   registrable parent domain and host-only cookies are unchanged. The Public
   Suffix List is compiled in (the `psl` crate). (GHSA-vv3h-gm7f-3hm7)
+- Fixed GHSA-6g2g-2mvw-7h7v and GHSA-x6q9-gx98-c5wc: gRPC reflection now
+  has a 30-second absolute deadline, shortened by the call's total deadline,
+  including interactive sessions. Its cumulative budget counts wire and
+  decoded response bytes across every reflection request, and it accepts only
+  one response message per request. gRPC-Web percent decoding reads escape
+  digits as bytes, preserving malformed escapes without panicking on
+  multibyte UTF-8.
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

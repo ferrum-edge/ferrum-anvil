@@ -20,7 +20,7 @@ against it).
 
 | Boundary | Untrusted side | Controls |
 |---|---|---|
-| Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; no response can call IPC or change settings |
+| Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing; gRPC reflection enforces cumulative wire-plus-decoded byte and per-request message limits under its own absolute deadline; no response can call IPC or change settings |
 | Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size/node/ref limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
 | Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no open or save dialog, no filesystem plugin. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
@@ -37,6 +37,17 @@ against it).
   lookalikes. After redirects, attribution comes from the origin that
   produced the final response (its own profile and TLS requirement), never
   the original request's. See [diagnostics.md](diagnostics.md).
+
+### gRPC responses
+
+- Server reflection retains at most one response message per request and
+  applies the configured cumulative budget to wire and decoded bytes across
+  all reflection requests. Its own 30-second absolute deadline is shortened
+  by the call's total deadline, including for interactive sessions, so a peer
+  cannot extend the attempt by continuing to send data.
+- gRPC-Web trailer values are untrusted UTF-8. Percent escapes are decoded
+  from bytes, and malformed escapes are preserved without slicing UTF-8 at
+  arbitrary offsets.
 
 ### Requests and redirects
 
