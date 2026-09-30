@@ -63,9 +63,15 @@ against it).
     that crosses the cut is replaced whole, and the preview ends with the
     redaction marker where it starts, so a peer that echoes a credential
     cannot align it to leave most of it in the record. A secret form longer
-    than 64 KiB that crosses a cut is not covered. Diagnostic evidence
-    excerpts are still cut before the record's redaction runs (see Residual
-    risks).
+    than 64 KiB that crosses a cut is not covered. The stored record redacts
+    the transcript again with the record's redactor, but it sees only the
+    previews already cut: a secret the live redactor did not yet know when
+    the entry was recorded is caught when it lies wholly inside the preview,
+    and keeps its prefix when it crosses the cut. An OAuth issuer's
+    `error_description` has the token request's own credentials (client
+    secret, refresh token, authorization code and PKCE verifier) replaced
+    before it is cut to 200 characters. Diagnostic evidence excerpts are
+    still cut before the record's redaction runs (see Residual risks).
 - **Redirect hops:** every hop is evaluated for its own target. Unless
   `redirects.forward_credentials_cross_origin` is on, once a redirect leaves
   the request's origin (scheme, host or port):
@@ -132,15 +138,24 @@ against it).
     4 KiB as a local limit, shares one last-event-id buffer across events
     instead of copying it into each, and parses a chunk only until
     `max_events` events are in hand.
-  - Every write, flush and half-close a session awaits (scripted messages,
-    interactive commands, automatic Pong and Close frames, DTLS handshake
-    flights and datagrams, HBONE records and MASQUE capsules waiting for
-    flow-control credit) is raced against cancellation and the deadline that
-    applies to it (the total deadline for automation, the DTLS handshake
-    deadline, the raw TCP write deadline). An interrupted write drops or
-    resets the connection instead of writing more. A graceful Close frame or
-    `close_notify` has its own short bound (the WebSocket close wait, or
-    250 ms at cancel and at the deadline). Interactive sessions have no total
+  - Once a session is open, these writes are raced against cancellation
+    and the deadline that applies to them (the total deadline for
+    automation, the DTLS handshake deadline, the raw TCP write deadline):
+    WebSocket scripted messages, interactive commands and the Pong flush;
+    raw TCP scripted and interactive payloads and half-closes; DTLS
+    handshake flights and datagrams over UDP, HBONE and MASQUE; HBONE and
+    MASQUE datagrams waiting for flow-control credit. The Close frames and
+    `close_notify` a session sends have their own bound: the WebSocket close
+    wait for a graceful close, 250 ms at cancel and at the total deadline
+    (500 ms after a protocol error), 250 ms for the raw TCP shutdown. Writes
+    before the session opens (the handshake request) are bounded by the
+    connection and handshake timeouts; gRPC streams are outside this list.
+  - An interrupted write may have left a partial frame, so nothing is
+    written after it: raw TCP drops the connection without a shutdown (no
+    TLS `close_notify` or FIN written by the session), WebSocket over HTTP/3
+    resets its stream (`H3_REQUEST_CANCELLED`), and HBONE and MASQUE tunnels
+    are reset instead of finished. A raw TCP payload that was partly written
+    is reported as possibly dispatched. Interactive sessions have no total
     deadline: cancel (or a profile lock) is what ends them.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded

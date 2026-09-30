@@ -788,24 +788,32 @@
   to their display size, not after. A known secret that crosses the cut is
   replaced whole, and the preview ends with the redaction marker where the
   secret starts, instead of keeping all but the part past the cut in live
-  events and stored records (GHSA-jjvp-frqf-xw3p). Diagnostic evidence
-  excerpts are not covered yet (see the threat model's residual risks).
+  events and stored records (GHSA-jjvp-frqf-xw3p). An OAuth issuer's
+  `error_description` now has the token request's own credentials replaced
+  before it is cut to 200 characters. Diagnostic evidence excerpts are not
+  covered yet (see the threat model's residual risks).
 - An SSE stream can no longer make a session retain metadata out of
   proportion to its limits (GHSA-gwfc-m32p-636g). An `id:` or `event:`
-  value over 4 KiB stops the stream as a local limit; events share the last
-  event id instead of copying it; a chunk is parsed only until `max_events`
-  events are in hand; and a transcript entry keeps at most 256 bytes of an
-  event id or type (a longer one ends with `…`).
+  value over 4 KiB stops the stream as a local limit as soon as the partial
+  line is one, not once the line reaches the 1 MiB line bound; events share
+  the last event id instead of copying it, and the transcript redacts that
+  shared id once instead of once per event; a chunk is parsed only until
+  `max_events` events are in hand; and a transcript entry keeps at most
+  256 bytes of an event id or type (a longer one ends with `…`).
 - A session peer that stops reading, or withholds HTTP/2 or QUIC
   flow-control credit, can no longer keep a session running after it is
   canceled (or the profile locks) or past its deadline
   (GHSA-24m4-27gj-gvmx). WebSocket scripted messages, interactive commands
-  and automatic Pong and Close frames, raw TCP interactive sends and
-  half-closes, DTLS handshake flights and datagrams (over UDP, HBONE or
-  MASQUE), HBONE interactive datagrams and MASQUE capsules are raced
-  against cancellation and the applicable deadline; an interrupted write
-  drops or resets the connection. Graceful Close frames and `close_notify`
-  have their own short bound.
+  and automatic Pong and Close frames, raw TCP scripted and interactive
+  sends and half-closes (scripted sends now honour the total deadline too,
+  not only the write deadline), DTLS handshake flights and datagrams (over
+  UDP, HBONE or MASQUE), HBONE interactive datagrams and MASQUE capsules are
+  raced against cancellation and the applicable deadline. An interrupted
+  write is never followed by a clean end: raw TCP skips its shutdown,
+  WebSocket over HTTP/3 resets its stream, and HBONE and MASQUE tunnels
+  (DTLS ones included) are reset. A raw TCP payload that was partly written
+  is reported as possibly dispatched. Graceful Close frames and
+  `close_notify` have their own short bound.
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

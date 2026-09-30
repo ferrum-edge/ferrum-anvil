@@ -153,6 +153,10 @@ pub struct Transcript {
     received_bytes: u64,
     events: EventCtx,
     redact: Option<RedactFn>,
+    /// The last shared SSE event id and how entries show it: every event of
+    /// a stream shares the parser's id buffer, so it is redacted once, not
+    /// once per event.
+    shared_id: Option<(Arc<str>, String)>,
 }
 
 fn printable(s: &str) -> bool {
@@ -173,6 +177,7 @@ impl Transcript {
             received_bytes: 0,
             events,
             redact,
+            shared_id: None,
         }
     }
 
@@ -215,6 +220,19 @@ impl Transcript {
         if value.len() > floor_char_boundary(value, METADATA_PREVIEW_BYTES) {
             shown.push('…');
         }
+        shown
+    }
+
+    /// [`Transcript::metadata`] for an id shared across events, reusing the
+    /// last result while the id is the same buffer ([`Arc::ptr_eq`]).
+    fn shared_metadata(&mut self, id: &Arc<str>) -> String {
+        if let Some((cached, shown)) = &self.shared_id
+            && Arc::ptr_eq(cached, id)
+        {
+            return shown.clone();
+        }
+        let shown = self.metadata(id);
+        self.shared_id = Some((id.clone(), shown.clone()));
         shown
     }
 
@@ -290,6 +308,17 @@ impl Transcript {
     pub fn event(&mut self, direction: Direction, kind: &str, payload: &[u8], event_id: Option<&str>, event_type: Option<&str>) {
         self.count(direction, payload.len());
         let m = self.entry(direction, kind, payload, false, event_id, event_type);
+        self.push(m);
+    }
+
+    /// [`Transcript::event`] for an event id the stream's events share (the
+    /// SSE last event id): it is redacted and cut once while it stays the
+    /// same buffer, however many events carry it.
+    pub fn event_shared_id(&mut self, direction: Direction, kind: &str, payload: &[u8], event_id: Option<&Arc<str>>, event_type: &str) {
+        self.count(direction, payload.len());
+        let shown = event_id.map(|id| self.shared_metadata(id));
+        let mut m = self.entry(direction, kind, payload, false, None, Some(event_type));
+        m.event_id = shown;
         self.push(m);
     }
 
@@ -879,6 +908,32 @@ mod tests {
         assert_eq!(s.messages[0].event_id.as_deref(), Some(format!("{}…", &huge[..METADATA_PREVIEW_BYTES]).as_str()));
         assert_eq!(s.messages[0].event_type.as_deref(), Some("message"), "short values are kept whole");
         assert_eq!(live.lock().len(), 4);
+    }
+
+    #[test]
+    fn a_shared_event_id_is_redacted_once_for_every_event_carrying_it() {
+        let long_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = long_calls.clone();
+        let redact: RedactFn = Arc::new(move |s: &str| {
+            if s.len() >= 4096 {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            s.replace(SECRET, REDACTED)
+        });
+        let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), EventCtx::none(), Some(redact));
+        let id: Arc<str> = Arc::from("k".repeat(4096));
+        for _ in 0..1_000 {
+            t.event_shared_id(Direction::Received, "event", b"x", Some(&id), "message");
+        }
+        assert_eq!(long_calls.load(std::sync::atomic::Ordering::Relaxed), 1, "the shared id is redacted once");
+        // A new id buffer (even with the same text) is redacted again; a secret in it is still caught.
+        let with_secret: Arc<str> = Arc::from(format!("{SECRET}{}", "k".repeat(4096)));
+        t.event_shared_id(Direction::Received, "event", b"x", Some(&with_secret), "message");
+        let s = t.finish();
+        assert_eq!(s.messages.len(), 1_001.min(TranscriptLimits::default().max_messages));
+        let last = s.messages.last().unwrap();
+        assert!(last.event_id.as_deref().is_some_and(|v| v.starts_with(REDACTED) && !shows_secret_prefix(v)), "{:?}", last.event_id);
+        assert_eq!(s.messages[0].event_id.as_deref(), Some(format!("{}…", "k".repeat(METADATA_PREVIEW_BYTES)).as_str()));
     }
 
     #[test]

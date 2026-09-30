@@ -396,6 +396,12 @@ async fn send_bounded<C: DatagramChannel>(
     }
 }
 
+/// Whether the exchange ended in a way that can interrupt a send the path
+/// had not taken (a tunnel is then reset instead of finished).
+fn interrupted_path(kind: Option<FailureKind>) -> bool {
+    matches!(kind, Some(FailureKind::Canceled | FailureKind::TotalTimeout | FailureKind::DtlsHandshakeTimeout))
+}
+
 /// How long the closing `close_notify` may take to be handed to the path.
 const CLOSE_NOTIFY_WRITE: Duration = Duration::from_millis(250);
 
@@ -518,7 +524,9 @@ async fn run_tunneled(
     let session = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &[("tunnel", note)], events, cancel, commands).await;
     let failure_kind = obs.failure.as_ref().map(|f| f.kind);
     chan.set_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
-    let (tunnel, written, read) = chan.close(failure_kind == Some(FailureKind::Canceled)).await;
+    // A send the tunnel had not taken may have left a partial capsule: the
+    // stream is reset, not finished.
+    let (tunnel, written, read) = chan.close(interrupted_path(failure_kind)).await;
     crate::masque::note_dropped(&mut facts, &tunnel);
     obs.bytes.connection_bytes_written = Some(written);
     obs.bytes.connection_bytes_read = Some(read);
@@ -579,7 +587,7 @@ async fn run_hbone(
     let session = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &[("tunnel", note)], events, cancel, commands).await;
     let failure_kind = obs.failure.as_ref().map(|f| f.kind);
     chan.set_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
-    let (channel, written, read) = chan.close(matches!(failure_kind, Some(FailureKind::Canceled | FailureKind::TotalTimeout))).await;
+    let (channel, written, read) = chan.close(interrupted_path(failure_kind)).await;
     obs.bytes.connection_bytes_written = Some(written);
     obs.bytes.connection_bytes_read = Some(read);
     if let Some(t) = obs.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
@@ -1010,6 +1018,74 @@ async fn exchange<C: DatagramChannel>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A datagram path that takes datagrams, or (stalled) never takes one, as
+    /// a tunnel withholding flow-control credit does.
+    struct Path {
+        stalled: bool,
+        taken: usize,
+    }
+
+    impl DatagramChannel for Path {
+        async fn send(&mut self, _datagram: &[u8]) -> Result<Sent, TransportFailure> {
+            if self.stalled {
+                std::future::pending::<()>().await;
+            }
+            self.taken += 1;
+            Ok(Sent::Sent(None))
+        }
+
+        async fn recv(&mut self) -> Inbound {
+            std::future::pending().await
+        }
+    }
+
+    fn flight() -> Vec<Out> {
+        vec![Out::Packet(vec![22; 100]), Out::Connected, Out::Packet(vec![22; 50])]
+    }
+
+    fn hs_timeout() -> TransportFailure {
+        TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeTimeout, "handshake deadline")
+    }
+
+    async fn send_flight(path: &mut Path, cancel: &CancellationToken, deadline: Option<Instant>) -> Result<(), TransportFailure> {
+        let (mut notes, mut facts) = (PathNotes::default(), SessionFacts::default());
+        let outs = flight();
+        let sent = send_bounded(path, &outs, &mut notes, &mut facts, cancel, deadline, hs_timeout);
+        tokio::time::timeout(Duration::from_secs(5), sent).await.expect("the flight must end without the path taking it")
+    }
+
+    #[tokio::test]
+    async fn the_handshake_deadline_ends_a_flight_the_path_never_takes() {
+        let mut path = Path { stalled: true, taken: 0 };
+        let deadline = Some(Instant::now() + Duration::from_millis(200));
+        let f = send_flight(&mut path, &CancellationToken::new(), deadline).await.unwrap_err();
+        assert_eq!(f.kind, FailureKind::DtlsHandshakeTimeout);
+        assert!(interrupted_path(Some(f.kind)), "the tunnel is reset, not finished");
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_a_flight_the_path_never_takes() {
+        let mut path = Path { stalled: true, taken: 0 };
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            c.cancel();
+        });
+        let f = send_flight(&mut path, &cancel, None).await.unwrap_err();
+        assert_eq!(f.kind, FailureKind::Canceled);
+        assert!(interrupted_path(Some(f.kind)));
+    }
+
+    #[tokio::test]
+    async fn a_path_that_takes_datagrams_gets_the_whole_flight() {
+        let mut path = Path { stalled: false, taken: 0 };
+        let deadline = Some(Instant::now() + Duration::from_secs(5));
+        send_flight(&mut path, &CancellationToken::new(), deadline).await.unwrap();
+        assert_eq!(path.taken, 2, "every packet of the flight, nothing else");
+        assert!(!interrupted_path(None) && !interrupted_path(Some(FailureKind::DtlsHandshakeFailed)));
+    }
 
     #[test]
     fn certificate_request_is_found_in_a_plaintext_flight() {

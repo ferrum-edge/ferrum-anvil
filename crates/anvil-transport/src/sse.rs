@@ -105,6 +105,21 @@ pub struct SseParser {
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
+fn metadata_error(field: &str) -> String {
+    format!("an event-stream {field} field exceeded {MAX_EVENT_METADATA_BYTES} bytes")
+}
+
+/// The field of a partial line that is already an `id:` or `event:` value
+/// over [`MAX_EVENT_METADATA_BYTES`] (the raw bytes; the value the line
+/// ends with is at least as long).
+fn oversized_metadata(line: &[u8]) -> Option<&'static str> {
+    ["id", "event"].into_iter().find(|field| {
+        line.strip_prefix(field.as_bytes())
+            .and_then(|rest| rest.strip_prefix(b":"))
+            .is_some_and(|rest| rest.strip_prefix(b" ").unwrap_or(rest).len() > MAX_EVENT_METADATA_BYTES)
+    })
+}
+
 impl SseParser {
     pub fn new(max_line: usize) -> Self {
         SseParser { max_line: max_line.max(1024), ..Default::default() }
@@ -191,6 +206,17 @@ impl SseParser {
                         return Err(format!("an event-stream line exceeded {} bytes", self.max_line));
                     }
                     self.line.push(b);
+                    // An oversized id or type is refused as soon as it is
+                    // one, not once its line reaches the line bound.
+                    if self.line.len() > MAX_EVENT_METADATA_BYTES
+                        && let Some(field) = oversized_metadata(&self.line)
+                    {
+                        self.line.clear();
+                        self.data.clear();
+                        self.has_data = false;
+                        self.event_type.clear();
+                        return Err(metadata_error(field));
+                    }
                 }
             }
         }
@@ -225,7 +251,7 @@ impl SseParser {
                 self.data.clear();
                 self.has_data = false;
                 self.event_type.clear();
-                return Err(format!("an event-stream {field} field exceeded {MAX_EVENT_METADATA_BYTES} bytes"));
+                return Err(metadata_error(&field));
             }
             "event" => self.event_type = value,
             "data" => {
@@ -841,7 +867,7 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                         let mut stop = false;
                         for ev in batch.drain(..) {
                             total_events += 1;
-                            tr.event(Direction::Received, "event", ev.data.as_bytes(), ev.id.as_deref(), Some(ev.event_type.as_str()));
+                            tr.event_shared_id(Direction::Received, "event", ev.data.as_bytes(), ev.id.as_ref(), &ev.event_type);
                             if plan.max_events > 0 && total_events >= plan.max_events as u64 {
                                 stop = true;
                                 break;
@@ -1001,6 +1027,30 @@ mod tests {
         assert_eq!(ev[0].id.as_deref(), Some(at.as_str()));
         assert_eq!(ev[0].event_type, at);
         assert_eq!(p.last_event_id.as_deref(), Some(at.as_str()));
+    }
+
+    #[test]
+    fn an_oversized_id_or_type_is_refused_before_its_line_ends() {
+        for field in ["id", "event"] {
+            // A 1 MiB line bound: the refusal must come at the metadata bound, not the line bound.
+            let mut p = SseParser::new(1 << 20);
+            let mut out = vec![];
+            let partial = format!("{field}: {}", "v".repeat(MAX_EVENT_METADATA_BYTES + 1));
+            let err = p.feed(partial.as_bytes(), &mut out).unwrap_err();
+            assert!(err.contains(&format!("{field} field exceeded")), "{err}");
+            assert!(out.is_empty());
+            // Exactly at the bound, the partial line is still accepted.
+            let mut p = SseParser::new(1 << 20);
+            p.feed(format!("{field}: {}", "v".repeat(MAX_EVENT_METADATA_BYTES)).as_bytes(), &mut out).unwrap();
+        }
+        // Other fields (a name that only starts with `id` too) are bounded by the line bound only.
+        let mut p = SseParser::new(1 << 20);
+        let mut out = vec![];
+        p.feed(format!("identity: {}\n", "d".repeat(MAX_EVENT_METADATA_BYTES * 2)).as_bytes(), &mut out).unwrap();
+        p.feed(format!("data: {}\n\n", "d".repeat(MAX_EVENT_METADATA_BYTES * 4)).as_bytes(), &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data.len(), MAX_EVENT_METADATA_BYTES * 4);
+        assert_eq!(p.last_event_id, None);
     }
 
     #[test]

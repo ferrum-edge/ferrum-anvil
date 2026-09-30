@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(json, format!(r#"{{"password":"{REDACTED}","v":"{REDACTED}"}}"#));
         // A long body without secrets is cut at the preview size.
         let plain = "q".repeat(BODY_PREVIEW_BYTES + 10);
-        assert_eq!(redacted_body_preview(&redactor, plain.as_bytes(), false), plain[..BODY_PREVIEW_BYTES]);
+        assert_eq!(redacted_body_preview(&redactor, plain.as_bytes(), false), &plain[..BODY_PREVIEW_BYTES]);
         // A secret wholly before the cut is redacted and the rest is shown up to the cut.
         let early = format!("{secret}{}", "r".repeat(BODY_PREVIEW_BYTES));
         let shown = redacted_body_preview(&redactor, early.as_bytes(), false);

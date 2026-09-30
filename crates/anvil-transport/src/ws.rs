@@ -366,6 +366,7 @@ fn bridge_h3_stream<T>(
     stream: h3::client::RequestStream<T, Bytes>,
     stats: Arc<crate::stats::ConnStats>,
     stream_error: Arc<parking_lot::Mutex<Option<String>>>,
+    abort: CancellationToken,
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>)
 where
     T: h3::quic::BidiStream<Bytes> + Send + 'static,
@@ -376,19 +377,38 @@ where
     let (app, h3_side) = tokio::io::duplex(64 * 1024);
     let (mut rd, mut wr) = tokio::io::split(h3_side);
     let up_stats = stats.clone();
+    // `abort` (an interrupted write) resets the send side instead of
+    // finishing it, even while a send waits for flow-control credit.
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
-            match rd.read(&mut buf).await {
-                Ok(0) | Err(_) => {
+            let read = tokio::select! {
+                biased;
+                _ = abort.cancelled() => None,
+                r = rd.read(&mut buf) => Some(r),
+            };
+            let n = match read {
+                Some(Ok(0) | Err(_)) if !abort.is_cancelled() => {
                     let _ = send.finish().await;
                     break;
                 }
-                Ok(n) => {
-                    if send.send_data(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
-                        break;
-                    }
-                    up_stats.record_write(n);
+                Some(Ok(n)) if n > 0 && !abort.is_cancelled() => n,
+                _ => {
+                    send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                    break;
+                }
+            };
+            let sent = tokio::select! {
+                biased;
+                _ = abort.cancelled() => None,
+                r = send.send_data(Bytes::copy_from_slice(&buf[..n])) => Some(r),
+            };
+            match sent {
+                Some(Ok(())) => up_stats.record_write(n),
+                Some(Err(_)) => break,
+                None => {
+                    send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                    break;
                 }
             }
         }
@@ -644,7 +664,8 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     // ---- session over the HTTP/3 stream ----
     let stats = crate::stats::ConnStats::new();
     let stream_error = Arc::new(parking_lot::Mutex::new(None));
-    let (io, uplink) = bridge_h3_stream(stream, stats.clone(), stream_error.clone());
+    let write_interrupted = CancellationToken::new();
+    let (io, mut uplink) = bridge_h3_stream(stream, stats.clone(), stream_error.clone(), write_interrupted.clone());
     let cx = SessionCtx {
         plan,
         events,
@@ -658,10 +679,18 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         response,
         deflate,
         extensions,
+        write_interrupted: write_interrupted.clone(),
     };
     let mut out = run_session(io, rec, obs, facts, commands, cx).await;
-    // Let the last frames (normally our Close) leave before the connection closes.
-    let _ = tokio::time::timeout(Duration::from_millis(500), uplink).await;
+    if write_interrupted.is_cancelled() {
+        // The uplink resets the stream (H3_REQUEST_CANCELLED) instead of
+        // ending it: a partial frame must not be followed by a clean FIN.
+        let _ = tokio::time::timeout(Duration::from_millis(100), &mut uplink).await;
+        uplink.abort();
+    } else {
+        // Let the last frames (normally our Close) leave before the connection closes.
+        let _ = tokio::time::timeout(Duration::from_millis(500), &mut uplink).await;
+    }
     close_quic(&quic);
     if let Some(e) = stream_error.lock().take()
         && let Some(a) = out.attempts.last_mut()
@@ -958,6 +987,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         response,
         deflate,
         extensions,
+        write_interrupted: CancellationToken::new(),
     };
     run_session(TokioIo::new(upgraded), rec, obs, facts, commands, cx).await
 }
@@ -980,6 +1010,9 @@ struct SessionCtx<'a> {
     deflate: Option<DeflateConfig>,
     /// Extension evidence from the handshake; the session adds its traffic.
     extensions: Option<WsExtensions>,
+    /// Canceled when a write was interrupted (it may have left a partial
+    /// frame): the stream is then reset, not ended cleanly.
+    write_interrupted: CancellationToken,
 }
 
 /// The WebSocket session itself, over whichever stream the bootstrap opened
@@ -1008,6 +1041,7 @@ where
         response,
         deflate,
         extensions,
+        write_interrupted,
     } = cx;
     // ---- session ----
     let s_idx = rec.start(Phase::Session);
@@ -1099,7 +1133,8 @@ where
     loop {
         if let Some(stop) = write_stop.take() {
             // The stalled write may have been partly sent: nothing more is
-            // written, the connection is dropped.
+            // written, the connection is dropped (an HTTP/3 stream is reset).
+            write_interrupted.cancel();
             match stop {
                 WriteStop::Interrupted(Interrupted::Canceled) => {
                     close.get_or_insert(Close { code: None, reason: String::new(), closed_by: ClosedBy::Client });
@@ -1296,6 +1331,7 @@ where
                 if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "deadline"))).await.is_ok_and(|r| r.is_ok()) {
                     tr.control(Direction::Sent, "close", b"1001 deadline");
                 } else {
+                    write_interrupted.cancel();
                     tr.note("close_incomplete", "the Close frame could not be written at the deadline; the connection was dropped");
                 }
                 close.get_or_insert(Close { code: Some(1001), reason: "deadline".into(), closed_by: ClosedBy::Timeout });
@@ -1313,6 +1349,7 @@ where
                 if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "canceled"))).await.is_ok_and(|r| r.is_ok()) {
                     tr.control(Direction::Sent, "close", b"1001 canceled");
                 } else {
+                    write_interrupted.cancel();
                     tr.note("close_incomplete", "the Close frame could not be written on cancel; the connection was dropped");
                 }
                 close.get_or_insert(Close { code: Some(1001), reason: "canceled".into(), closed_by: ClosedBy::Client });
@@ -1601,6 +1638,7 @@ mod tests {
             response: response_record(101, http::Version::HTTP_11, vec![], body_capture(BodyCompleteness::NoBody, 0, &[], None)),
             deflate: None,
             extensions: None,
+            write_interrupted: CancellationToken::new(),
         };
         let rec = Recorder::new(0, events.clone());
         let obs = new_attempt(0, AttemptReason::Initial, "GET", &plan.display_url);
@@ -1698,6 +1736,23 @@ mod tests {
         assert_eq!(failure(&out), Some(FailureKind::TotalTimeout));
         let t = out.transcript.unwrap();
         assert!(t.messages.iter().any(|m| m.kind == "close_incomplete"), "{:?}", t.messages);
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_a_pong_the_peer_never_reads() {
+        let (io, mut peer) = tokio::io::duplex(64);
+        // The filler leaves 6 bytes of the pipe: the Pong to a 4-byte Ping (10 bytes masked) does not fit.
+        let plan = plan(vec![filler()], None);
+        // An unmasked server Ping with the payload "abcd".
+        peer.write_all(&[0x89, 0x04, b'a', b'b', b'c', b'd']).await.unwrap();
+        let out = session(io, &plan, &cancel_after(200), None).await;
+        let f = out.attempts[0].observation.failure.as_ref().expect("canceled");
+        assert_eq!(f.kind, FailureKind::Canceled);
+        assert!(f.message.contains("while a write was pending"), "the cancel must interrupt the Pong flush: {}", f.message);
+        let t = out.transcript.unwrap();
+        assert!(t.messages.iter().any(|m| m.kind == "ping" && m.direction == Direction::Received));
+        assert!(!t.messages.iter().any(|m| m.kind == "pong"), "the stalled Pong is not recorded as sent");
+        drop(peer);
     }
 
     #[tokio::test]
