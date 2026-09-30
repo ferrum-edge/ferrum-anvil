@@ -442,7 +442,7 @@ function LintedText(props: { kind: "json" | "xml"; text: string; onChange: (t: s
       alive = false;
     };
   }, [debounced, props.kind]);
-  const invalid = lint?.status === "invalid";
+  const invalid = lint?.status === "invalid" || lint?.status === "refused";
   return (
     <div className="col grow linted">
       <textarea
@@ -469,6 +469,12 @@ function LintedText(props: { kind: "json" | "xml"; text: string; onChange: (t: s
             </span>
           ))}
         {lint?.status === "skipped" && <span className="faint">{lint.reason}</span>}
+        {lint?.status === "refused" && (
+          <span className="lint-bad">
+            <Icon name="alertCircle" size={14} />
+            Not linted: {lint.reason}
+          </span>
+        )}
         {props.kind === "json" && lint?.status === "valid" && (
           <button
             className="btn small"

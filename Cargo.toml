@@ -18,6 +18,7 @@ members = [
     "crates/anvil-import",
     "crates/anvil-identity",
     "crates/anvil-contract",
+    "crates/anvil-xml-limits",
 ]
 # Vendored third-party crates are patched in below, not Anvil workspace members.
 exclude = ["vendor"]
@@ -44,6 +45,7 @@ anvil-app = { path = "crates/anvil-app" }
 anvil-import = { path = "crates/anvil-import" }
 anvil-identity = { path = "crates/anvil-identity" }
 anvil-contract = { path = "crates/anvil-contract" }
+anvil-xml-limits = { path = "crates/anvil-xml-limits" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"

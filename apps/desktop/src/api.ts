@@ -160,7 +160,12 @@ export interface LintIssue {
   column: number;
   message: string;
 }
-export type LintResult = { status: "valid" } | { status: "invalid"; issues: LintIssue[] } | { status: "skipped"; reason: string };
+export type LintResult =
+  | { status: "valid" }
+  | { status: "invalid"; issues: LintIssue[] }
+  | { status: "skipped"; reason: string }
+  /** Not parsed: the body is over the pre-parse XML limits. Sending treats it as a lint error. */
+  | { status: "refused"; reason: string };
 export interface SystemInfo {
   version: string;
   engine: string;

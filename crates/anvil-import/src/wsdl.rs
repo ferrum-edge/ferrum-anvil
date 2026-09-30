@@ -40,15 +40,18 @@ const ENVELOPE_BYTES_PER_INPUT_BYTE: usize = 4;
 const MAX_IN_SCOPE_NAMESPACES: usize = 256;
 /// `xmlns` declarations allowed in one document, counted before it is
 /// parsed. The parser copies the namespaces in scope for every element that
-/// declares one, so its work grows with the square of the declarations; with
-/// this cap it stays around a million entries (a few MiB), while any one
-/// element can still have [`MAX_IN_SCOPE_NAMESPACES`] in scope.
+/// declares one; with this cap and [`MAX_IN_SCOPE_NAMESPACES`] in scope it
+/// copies at most 1024 · 256 = 2^18 entries.
 const MAX_XMLNS_DECLARATIONS: usize = 4 * MAX_IN_SCOPE_NAMESPACES;
 /// What the pre-parse scan allows. The parser compares each attribute with
 /// every earlier one on the same element (names and full namespace URIs), so
 /// the attributes per element, the pairs over the whole document and the
 /// lengths compared are all bounded: at most about 2^24 pairs of 2 KiB URIs
-/// and 1 KiB names.
+/// and 1 KiB names. Resolving an element's namespaces checks each of the n
+/// in scope against those already copied (about n²/2 prefix comparisons), so
+/// the declarations in scope (as many as the importer later allows) and the
+/// sum of their squares over the declaring elements are bounded too: at most
+/// about 2^25 comparisons of 256-byte prefixes.
 const XML_LIMITS: XmlLimits = XmlLimits {
     attributes_per_element: 256,
     attribute_pairs: 1 << 24,
@@ -56,6 +59,8 @@ const XML_LIMITS: XmlLimits = XmlLimits {
     xmlns_declarations: MAX_XMLNS_DECLARATIONS,
     xmlns_prefix_bytes: 256,
     xmlns_uri_bytes: 2_048,
+    in_scope_namespaces: MAX_IN_SCOPE_NAMESPACES,
+    namespace_scope_work: 1 << 26,
 };
 /// The only SOAP transport imported.
 const SOAP_HTTP: &str = "http://schemas.xmlsoap.org/soap/http";
@@ -118,6 +123,8 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             XmlLimitExceeded::NamespaceDeclarations(l) => ("XML namespace declarations (xmlns)", l),
             XmlLimitExceeded::NamespacePrefixBytes(l) => ("bytes in one XML namespace prefix", l),
             XmlLimitExceeded::NamespaceUriBytes(l) => ("bytes in one XML namespace URI", l),
+            XmlLimitExceeded::InScopeNamespaces(l) => ("XML namespace declarations in scope of one element", l),
+            XmlLimitExceeded::NamespaceScopeWork(l) => ("XML namespace scope work (in-scope declarations squared, summed)", l),
         };
         ImportError::LimitExceeded { what: what.into(), limit }
     })?;
