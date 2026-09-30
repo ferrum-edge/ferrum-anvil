@@ -385,19 +385,20 @@ fn is_binary(s: &Value) -> bool {
 
 fn multipart_parts(sg: &mut SampleGen, schema: &Value, sptr: &str, v: &Value, enc: Option<&Map<String, Value>>) -> Vec<MultipartPart> {
     let (flat, fp) = sg.flatten(schema, sptr);
-    let props = flat.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
+    let (empty, null) = (Map::new(), Value::Null);
+    let props = flat.get("properties").and_then(Value::as_object).unwrap_or(&empty);
     let Value::Object(m) = v else { return vec![] };
     let mut parts = vec![];
     for (k, x) in m {
         let pptr = ptr(&ptr(&fp, "properties"), k);
-        let (ps, _) = sg.flatten(props.get(k).unwrap_or(&Value::Null), &pptr);
+        let (ps, _) = sg.flatten(props.get(k).unwrap_or(&null), &pptr);
         let e = enc.and_then(|e| e.get(k));
         if e.is_some_and(|e| e.get("headers").is_some()) {
             sg.report.unsupported("multipart_part_headers", &pptr, "per-part headers from `encoding` are not generated");
         }
         let ct = e.and_then(|e| str_of(e, "contentType")).map(str::to_string);
         let item = ps.get("items").map(|i| sg.flatten(i, &ptr(&pptr, "items")).0);
-        let binary = is_binary(&ps) || item.as_ref().is_some_and(is_binary);
+        let binary = is_binary(&ps) || item.as_deref().is_some_and(is_binary);
         if binary {
             sg.report.warn(
                 "file_part_requires_attachment",

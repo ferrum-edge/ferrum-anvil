@@ -18,10 +18,18 @@ fn var(b: &mut Builder, name: &str, secret: bool, reason: &str, at: &str) -> Str
     format!("{{{{{name}}}}}")
 }
 
+/// [`locate_scheme`], charged: a scheme is read (and parts of it copied) for
+/// every operation whose requirement names it, so each use charges its size
+/// to the import's text budget.
+fn find_scheme<'a>(ctx: &Ctx<'a>, b: &mut Builder, key: &str, at: &str) -> Option<(&'a Value, String)> {
+    let (scheme, sptr) = locate_scheme(ctx, b, key, at)?;
+    b.charge_value(at, scheme).then_some((scheme, sptr))
+}
+
 /// Locate a security scheme by requirement key. OpenAPI 3.2 also allows a
 /// URI reference; internal `#/…` references are resolved, anything else is
 /// reported as external.
-fn find_scheme<'a>(ctx: &Ctx<'a>, b: &mut Builder, key: &str, at: &str) -> Option<(&'a Value, String)> {
+fn locate_scheme<'a>(ctx: &Ctx<'a>, b: &mut Builder, key: &str, at: &str) -> Option<(&'a Value, String)> {
     let base = if ctx.dialect == crate::Dialect::Swagger20 { "/securityDefinitions" } else { "/components/securitySchemes" };
     let p = ptr(base, key);
     if let Some(s) = ctx.root.pointer(&p) {

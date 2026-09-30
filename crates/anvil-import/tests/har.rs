@@ -126,3 +126,31 @@ fn declared_post_data_media_type_is_kept() {
     let r = har_post(serde_json::json!([{ "name": "Content-Type", "value": "text/xml" }]), "text/xml; charset=utf-8", "<root/>");
     assert_eq!(content_types(&r), vec!["text/xml"]);
 }
+
+/// A HAR entry POSTing `body` as JSON to `url`.
+fn json_post(url: &str, body: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "request": {
+        "method": "POST",
+        "url": url,
+        "headers": [],
+        "postData": { "mimeType": "application/json", "text": body.to_string() },
+    } })
+}
+
+#[test]
+fn bodies_are_scrubbed_after_the_redaction_list_is_full() {
+    // The first body fills the report's list of redactions (10,000 entries);
+    // the second one is still scrubbed, though its redaction is not listed.
+    let bulk: Vec<serde_json::Value> = (0..10_000).map(|i| serde_json::json!({ "password": format!("bulk-secret-{i}") })).collect();
+    let entries = vec![
+        json_post("https://example.test/bulk", &serde_json::json!(bulk)),
+        json_post("https://example.test/login", &serde_json::json!({ "password": "hunter2-late" })),
+    ];
+    let doc = serde_json::json!({ "log": { "version": "1.2", "entries": entries } });
+    let r = anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap();
+    assert_eq!(r.report.redactions.len(), 10_000);
+    let login = by_name(&r, "POST /login");
+    assert_eq!(json_body(&login.spec)["password"], "{{password}}");
+    let all = serde_json::to_string(&r.requests).unwrap();
+    assert!(!all.contains("hunter2-late") && !all.contains("bulk-secret-"), "a secret was kept");
+}

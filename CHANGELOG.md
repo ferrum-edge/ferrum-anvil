@@ -846,6 +846,47 @@
 
 ### Security
 
+- Imports (GHSA-c9jq-p5rq-wj3h): more of the work a small spec can repeat
+  during preview is now charged or done once. OpenAPI samples charge the
+  schema lists they read on every visit to the import's byte budget: each
+  member looked at (optional members are skipped before their schema is
+  resolved), the `required` names (now a set, not a list scanned per
+  member), the `enum` values scanned and each `const`/`enum` comparison. A
+  `null` inserted for a required name counts as a generated value, so once a
+  budget is spent the remaining members are left out
+  (`sample_size_limit`). The structural lookups made while writing XML and
+  multipart payloads borrow the resolved schema instead of copying it, so
+  they no longer spend the byte budget and cut samples short. WSDL imports
+  read each binding, binding operation and portType operation once however
+  many ports use it, and charge the message parts and `soap:header`s each
+  operation writes. An XML document with more than 1024 `xmlns`
+  declarations, or an element with more than 256 attributes, is refused
+  before it is parsed (`LimitExceeded`): the parser copies the namespaces in
+  scope for every element that declares one and compares every attribute
+  with each earlier one. A quote-, comment- and CDATA-aware scan counts both
+  in one pass, which also bounds the attribute pairs of the whole document
+  (2^24), attribute names (1 KiB), namespace prefixes (256 bytes) and
+  namespace URIs (2 KiB), since the parser compares names and full URIs per
+  pair. Also charged or done once now: the pointer of every generated
+  value and every `$ref` resolution (a `$ref` over 2048 bytes is not
+  followed, `ref_too_long`), `type` arrays, `$ref` sibling keys,
+  `oneOf`/`anyOf` alternatives and discriminator mappings, and the lookups
+  and comparisons of `allOf` merges (non-string `required` entries are
+  ignored with `invalid_required`). Text copied into imported objects
+  (names, keys, request URLs and pointers, folder names, descriptions, SOAP
+  actions, server URLs and variables, OpenAPI 3.2 additional-operation
+  pointers, and each operation and security scheme every time it is
+  imported) has a budget of four times `max_bytes`; once it is spent, later
+  operations are skipped (`text_size_limit`). A Path Item `$ref` is read in
+  place instead of copied for every path, server variables are rendered
+  once per server (one environment variable per name), a WSDL port's folder
+  is created only once one of its operations is admitted, and a repeated
+  operation key takes its `#n` suffix from a counter. The report keeps at
+  most 1000 findings per code (`report_truncated`), clips stored pointers
+  (keeping a hash of the whole pointer) and messages, and indexes its
+  external references and required variables. HAR and cURL imports decide
+  whether a JSON body was scrubbed from a redaction count that the report's
+  list limit does not cap, so bodies stay scrubbed past 10,000 redactions.
 - Cookie domains that are a single, unknown label (`internal`, `lan`, `corp`)
   are no longer shared across matching hosts; a cookie may still be stored
   host-only when its single-label domain is the responding host. URL-encoded
