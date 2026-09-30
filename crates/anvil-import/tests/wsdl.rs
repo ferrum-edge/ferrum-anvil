@@ -168,14 +168,15 @@ fn deterministic() {
 }
 
 /// A one-operation document/literal WSDL (`S/P/Op`) whose request element is
-/// `tns:Req`; `{schema}` is replaced with more inline schema.
+/// `tns:Req`; `{schema}` is replaced with more inline schema and `{parts}`
+/// with the input message's parts.
 const WSDL_TEMPLATE: &str = r#"<?xml version="1.0"?>
 <definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
     xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:g" targetNamespace="urn:g" name="G">
   <types>
     <xsd:schema targetNamespace="urn:g" elementFormDefault="qualified">{schema}</xsd:schema>
   </types>
-  <message name="In"><part name="body" element="tns:Req"/></message>
+  <message name="In">{parts}</message>
   <portType name="PT"><operation name="Op"><input message="tns:In"/></operation></portType>
   <binding name="B" type="tns:PT">
     <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
@@ -185,7 +186,11 @@ const WSDL_TEMPLATE: &str = r#"<?xml version="1.0"?>
 </definitions>"#;
 
 fn op_envelope(schema: &str) -> (anvil_import::ImportResult, String) {
-    let doc = WSDL_TEMPLATE.replace("{schema}", schema);
+    op_envelope_with(schema, r#"<part name="body" element="tns:Req"/>"#)
+}
+
+fn op_envelope_with(schema: &str, parts: &str) -> (anvil_import::ImportResult, String) {
+    let doc = WSDL_TEMPLATE.replace("{schema}", schema).replace("{parts}", parts);
     let r = import(doc.as_bytes(), &opts()).unwrap();
     let (_, env, _) = soap(&r, "S/P/Op");
     (r, env)
@@ -216,15 +221,15 @@ const RECURSIVE_GROUPS: &str = r#"
 
 #[test]
 fn self_referencing_groups_stop_at_the_first_repetition() {
-    for refs in [1, 2] {
-        let schema = RECURSIVE_GROUPS
-            .replace("{attr_refs}", &r#"<xsd:attributeGroup ref="tns:Ids"/>"#.repeat(refs))
-            .replace("{group_refs}", &r#"<xsd:group ref="tns:Items"/>"#.repeat(refs));
-        let (r, env) = op_envelope(&schema);
-        assert!(has(&r, "recursive_schema"), "{refs} self-references");
-        assert_eq!(env.matches(" id=\"").count(), 1, "{refs} self-references:\n{env}");
-        assert_eq!(count(&env, "item"), 1, "{refs} self-references:\n{env}");
-    }
+    // One self-reference each (two would branch at every level; the fan-out
+    // test below covers branching within a bound).
+    let schema = RECURSIVE_GROUPS
+        .replace("{attr_refs}", r#"<xsd:attributeGroup ref="tns:Ids"/>"#)
+        .replace("{group_refs}", r#"<xsd:group ref="tns:Items"/>"#);
+    let (r, env) = op_envelope(&schema);
+    assert!(has(&r, "recursive_schema"));
+    assert_eq!(env.matches(" id=\"").count(), 1, "{env}");
+    assert_eq!(count(&env, "item"), 1, "{env}");
 }
 
 /// Groups `X0`..`X15` each reference the next one twice (2^16 leaves, within
@@ -253,26 +258,97 @@ fn branching_acyclic_groups_hit_the_shared_budget() {
         assert!(has(&r, "sample_size_limit"), "attributes: {attributes}");
         assert!(!has(&r, "recursive_schema"), "acyclic groups are not recursive");
         assert!(env.len() < 4 * 1024 * 1024, "envelope is {} bytes", env.len());
-        // Repeated attributes are not well-formed XML, so count the text.
-        let leaves = if attributes { env.matches(" leaf=\"").count() } else { count(&env, "leaf") };
-        assert!(leaves > 0 && leaves < 20_000, "{leaves} leaves");
+        if attributes {
+            // Every path reaches the same attribute: it is written once, so
+            // the envelope stays well-formed.
+            parse(&env);
+            assert_eq!(env.matches(" leaf=\"").count(), 1, "{env}");
+        } else {
+            let leaves = count(&env, "leaf");
+            assert!(leaves > 0 && leaves < 20_000, "{leaves} leaves");
+        }
     }
 }
 
 #[test]
-fn generated_envelope_bytes_are_capped() {
-    let big = "v".repeat(100 * 1024);
-    let refs = r#"<xsd:element ref="tns:Big"/>"#.repeat(200);
-    let mut schema = format!(r#"<xsd:element name="Big" type="xsd:string" fixed="{big}"/>"#);
-    schema.push_str(&format!(
-        r#"<xsd:element name="Req"><xsd:complexType><xsd:sequence>{refs}</xsd:sequence></xsd:complexType></xsd:element>"#
+fn branching_extension_bases_hit_the_shared_budget() {
+    // Each type extends the next one twice (2^16 bases without a budget).
+    let mut schema = String::new();
+    for i in 0..16 {
+        let ext = format!(r#"<xsd:complexContent><xsd:extension base="tns:T{}"/></xsd:complexContent>"#, i + 1);
+        schema.push_str(&format!(r#"<xsd:complexType name="T{i}">{ext}{ext}</xsd:complexType>"#));
+    }
+    schema.push_str(concat!(
+        r#"<xsd:complexType name="T16"><xsd:sequence><xsd:element name="leaf" type="xsd:string"/></xsd:sequence>"#,
+        r#"<xsd:attribute name="mark" type="xsd:string" use="required"/></xsd:complexType>"#,
+        r#"<xsd:element name="Req" type="tns:T0"/>"#,
     ));
     let (r, env) = op_envelope(&schema);
     assert!(has(&r, "sample_size_limit"));
+    assert!(env.len() < 4 * 1024 * 1024, "envelope is {} bytes", env.len());
+    let leaves = count(&env, "leaf");
+    assert!(leaves > 0 && leaves < 20_000, "{leaves} leaves");
+    assert_eq!(env.matches(" mark=\"").count(), 1, "{env}");
+}
+
+#[test]
+fn message_parts_are_charged_like_elements() {
+    let schema = concat!(
+        r#"<xsd:simpleType name="S"><xsd:restriction base="xsd:string">"#,
+        r#"<xsd:minLength value="4096"/></xsd:restriction></xsd:simpleType>"#,
+    );
+    let parts: String = (0..100_000).map(|i| format!(r#"<part name="p{i}" type="tns:S"/>"#)).collect();
+    let (r, env) = op_envelope_with(schema, &parts);
+    assert!(has(&r, "sample_size_limit"));
     assert!(env.len() < 9 * 1024 * 1024, "envelope is {} bytes", env.len());
-    // What was generated before the limit is kept and stays well-formed.
-    let copies = count(&env, "Big");
-    assert!(copies > 0 && copies < 200, "{copies} copies");
+    parse(&env);
+    // Parts whose element is missing are charged too.
+    let parts: String = (0..100_000).map(|i| format!(r#"<part name="p{i}" element="tns:Missing{i}"/>"#)).collect();
+    let (r, env) = op_envelope_with(schema, &parts);
+    assert!(has(&r, "sample_size_limit"));
+    assert!(env.len() < 4 * 1024 * 1024, "envelope is {} bytes", env.len());
+}
+
+/// `{ops}` operations of one binding share the message `In`, whose element
+/// repeats `Big` (a fixed value of `{big}`) 200 times.
+const MANY_OPERATIONS: &str = r#"<?xml version="1.0"?>
+<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:g" targetNamespace="urn:g" name="G">
+  <types>
+    <xsd:schema targetNamespace="urn:g">
+      <xsd:element name="Big" type="xsd:string" fixed="{big}"/>
+      <xsd:element name="Req"><xsd:complexType><xsd:sequence>{refs}</xsd:sequence></xsd:complexType></xsd:element>
+    </xsd:schema>
+  </types>
+  <message name="In"><part name="body" element="tns:Req"/></message>
+  <portType name="PT">{ops}</portType>
+  <binding name="B" type="tns:PT">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    {bops}
+  </binding>
+  <service name="S"><port name="P" binding="tns:B"><soap:address location="https://example.com/soap"/></port></service>
+</definitions>"#;
+
+#[test]
+fn the_import_wide_envelope_budget_is_shared_by_operations() {
+    // Ten operations, each asking for about 20 MB; with a 1 MiB input limit
+    // the whole import may generate 4 MiB.
+    let ops: String = (0..10).map(|i| format!(r#"<operation name="Op{i}"><input message="tns:In"/></operation>"#)).collect();
+    let body = r#"<input><soap:body use="literal"/></input>"#;
+    let bops: String = (0..10).map(|i| format!(r#"<operation name="Op{i}">{body}</operation>"#)).collect();
+    let doc = MANY_OPERATIONS
+        .replace("{big}", &"v".repeat(100 * 1024))
+        .replace("{refs}", &r#"<xsd:element ref="tns:Big"/>"#.repeat(200))
+        .replace("{ops}", &ops)
+        .replace("{bops}", &bops);
+    let r = import(doc.as_bytes(), &ImportOptions { max_bytes: 1024 * 1024, ..opts() }).unwrap();
+    let envelopes: Vec<String> = (0..10).map(|i| soap(&r, &format!("S/P/Op{i}")).1).collect();
+    let total: usize = envelopes.iter().map(String::len).sum();
+    assert!(total < 5 * 1024 * 1024, "the envelopes hold {total} bytes");
+    assert!(has(&r, "sample_size_limit"));
+    for env in &envelopes {
+        parse(env);
+    }
 }
 
 const REUSED_GROUPS: &str = r#"
@@ -297,6 +373,7 @@ fn reused_groups_still_expand_at_every_use() {
     let (r, env) = op_envelope(REUSED_GROUPS);
     assert!(!has(&r, "recursive_schema"));
     assert!(!has(&r, "sample_size_limit"));
+    parse(&env);
     assert_eq!(count(&env, "a"), 3, "{env}");
     assert_eq!(count(&env, "b"), 3, "{env}");
     assert_eq!(env.matches(" lang=\"").count(), 2, "{env}");

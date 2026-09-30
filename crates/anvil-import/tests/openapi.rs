@@ -522,6 +522,32 @@ fn branching_all_of_graphs_hit_the_sample_budget() {
 }
 
 #[test]
+fn copied_examples_share_an_import_byte_budget() {
+    // One 1 MB example referenced by 100 members of each of three payloads.
+    let mut schemas = serde_json::Map::new();
+    schemas.insert("Big".into(), json!({"type": "string", "example": "x".repeat(1024 * 1024)}));
+    let mut props = serde_json::Map::new();
+    for i in 0..100 {
+        props.insert(format!("p{i}"), json!({"$ref": "#/components/schemas/Big"}));
+    }
+    let names: Vec<String> = (0..100).map(|i| format!("p{i}")).collect();
+    schemas.insert("Root".into(), json!({"type": "object", "required": names, "properties": props}));
+    let body = json!({"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Root"}}}});
+    let op = |id: &str| json!({"operationId": id, "requestBody": body.clone(), "responses": {}});
+    let doc = json!({
+        "openapi": "3.0.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"post": op("a"), "put": op("b"), "patch": op("c")}},
+        "components": {"schemas": schemas}
+    });
+    // A 4 MiB input limit allows 32 MiB of copies for the whole import.
+    let r = import(doc.to_string().as_bytes(), &ImportOptions { max_bytes: 4 * 1024 * 1024, ..opts() }).unwrap();
+    assert!(has(&r, "sample_size_limit"));
+    let total: usize = r.requests.iter().map(|q| serde_json::to_string(&q.spec.body).map_or(0, |t| t.len())).sum();
+    assert!(total < 40 * 1024 * 1024, "the bodies hold {total} bytes");
+    assert_eq!(r.requests.len(), 3);
+}
+
+#[test]
 fn wide_schemas_hit_the_sample_budget() {
     let mut props = serde_json::Map::new();
     let mut req_names = vec![];

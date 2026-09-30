@@ -250,6 +250,53 @@ fn v4_duplicate_resource_ids_are_refused() {
 }
 
 #[test]
+fn v4_duplicate_ids_of_other_resources_skip_the_later_copy() {
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk", "_type": "workspace", "name": "W" },
+        { "_id": "req", "_type": "request", "parentId": "wrk", "name": "R1", "method": "GET", "url": "https://example.com/1" },
+        { "_id": "req", "_type": "request", "parentId": "wrk", "name": "R2", "method": "GET", "url": "https://example.com/2" },
+    ]));
+    let r = anvil_import::import(&doc, &opts()).unwrap();
+    assert_eq!(r.requests.len(), 1);
+    assert_eq!(r.requests[0].name, "R1");
+    assert!(has_at(&r, "duplicate_resource_id", "/resources/2"));
+    assert!(!has(&r, "orphan_resource"));
+}
+
+#[test]
+fn v4_base_environments_without_ids_do_not_adopt_parentless_resources() {
+    // Every base environment without an id would otherwise list all
+    // parentless resources as its sub-environments.
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk", "_type": "workspace", "name": "W" },
+        { "_type": "environment", "parentId": "wrk", "name": "E0", "data": {} },
+        { "_type": "environment", "parentId": "wrk", "name": "E1", "data": {} },
+        { "_type": "environment", "parentId": "wrk", "name": "E2", "data": {} },
+        { "_id": "r1", "_type": "request", "name": "R1", "method": "GET", "url": "https://example.com/1" },
+        { "_id": "r2", "_type": "request", "name": "R2", "method": "GET", "url": "https://example.com/2" },
+    ]));
+    let r = anvil_import::import(&doc, &opts()).unwrap();
+    let envs: Vec<&str> = r.environments.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(envs, vec!["E1", "E2"]);
+    assert!(r.requests.is_empty());
+    assert!(has_at(&r, "orphan_resource", "/resources/4") && has_at(&r, "orphan_resource", "/resources/5"));
+}
+
+#[test]
+fn v4_workspaces_without_ids_have_no_children() {
+    let doc = v4_export(serde_json::json!([
+        { "_type": "workspace", "name": "W1" },
+        { "_type": "workspace", "name": "W2" },
+        { "_id": "fld", "_type": "request_group", "name": "G" },
+        { "_id": "r1", "_type": "request", "name": "R1", "method": "GET", "url": "https://example.com/1" },
+    ]));
+    let r = anvil_import::import(&doc, &opts()).unwrap();
+    assert!(r.requests.is_empty());
+    assert!(!r.folders.iter().any(|f| f.name == "G"));
+    assert!(has_at(&r, "orphan_resource", "/resources/2") && has_at(&r, "orphan_resource", "/resources/3"));
+}
+
+#[test]
 fn v4_groups_without_ids_do_not_adopt_parentless_resources() {
     // Resources without a parent share the empty parent key; a group without
     // an id must not walk them (each would walk the others again).

@@ -15,12 +15,17 @@
 
 use super::refs::{Refs, ref_name};
 use crate::report::ImportReport;
-use crate::util::{SplitMix64, is_credential_name, json_type, ptr};
+use crate::util::{SplitMix64, clip, is_credential_name, json_type, ptr};
 use crate::{Dialect, ImportOptions, SampleMode};
 use base64::Engine as _;
 use serde_json::{Map, Number, Value, json};
+use std::cell::Cell;
+use std::collections::HashSet;
 
 const MAX_NESTING: usize = 48;
+/// Sample bytes (copied examples, defaults and merged schemas) allowed across
+/// one import, per input byte limit.
+pub(crate) const SAMPLE_BYTES_PER_INPUT_BYTE: usize = 8;
 const MAX_ARRAY_ITEMS: usize = 32;
 
 /// Keywords whose constraints the generator does not enforce.
@@ -49,6 +54,9 @@ pub(crate) struct SampleGen<'a, 'r> {
     max_nodes: usize,
     max_ref_depth: usize,
     budget_warned: bool,
+    /// Bytes the rest of the import may still copy from the document.
+    bytes: &'r Cell<usize>,
+    bytes_warned: bool,
 }
 
 pub(crate) fn is_31_plus(d: Dialect) -> bool {
@@ -56,7 +64,14 @@ pub(crate) fn is_31_plus(d: Dialect) -> bool {
 }
 
 impl<'a, 'r> SampleGen<'a, 'r> {
-    pub fn new(refs: Refs<'a>, report: &'r mut ImportReport, dialect: Dialect, opts: &ImportOptions, seed: u64) -> Self {
+    pub fn new(
+        refs: Refs<'a>,
+        report: &'r mut ImportReport,
+        dialect: Dialect,
+        opts: &ImportOptions,
+        seed: u64,
+        bytes: &'r Cell<usize>,
+    ) -> Self {
         SampleGen {
             refs,
             report,
@@ -69,6 +84,8 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             max_nodes: opts.max_sample_nodes,
             max_ref_depth: opts.max_ref_depth,
             budget_warned: false,
+            bytes,
+            bytes_warned: false,
         }
     }
 
@@ -83,15 +100,62 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     }
 
     /// Resolve a (possibly `$ref`) schema to an owned, `allOf`-merged object
-    /// for structural inspection (XML names, multipart part kinds).
+    /// for structural inspection (XML names, multipart part kinds). Each call
+    /// has a node budget of its own, so it never spends the payload's; the
+    /// copies still count toward the import's byte budget.
     pub fn flatten(&mut self, schema: &Value, at: &str) -> (Value, String) {
         let (s, p) = self.refs.resolve_or_self(schema, at, self.report);
-        let (s, p) = (s.clone(), p);
-        if s.get("allOf").is_some_and(Value::is_array) {
-            let merged = self.merge_all_of(&s, &p).unwrap_or(s);
-            return (merged, p);
+        let saved = (self.nodes, self.budget_warned);
+        (self.nodes, self.budget_warned) = (0, false);
+        let merged = if s.get("allOf").is_some_and(Value::is_array) { self.merge_all_of(s, &p) } else { None };
+        (self.nodes, self.budget_warned) = saved;
+        match merged {
+            Some(m) => (m, p),
+            None => (self.copy(&p, s).unwrap_or(Value::Null), p),
         }
-        (s, p)
+    }
+
+    /// A copy of `v` (an example, a default or part of a merged schema),
+    /// charged against the import's sample byte budget before it is made.
+    /// Once the budget is spent nothing more is copied or generated.
+    pub fn copy(&mut self, at: &str, v: &Value) -> Option<Value> {
+        if charge_copy(self.bytes, v) {
+            Some(v.clone())
+        } else {
+            self.bytes_spent(at);
+            None
+        }
+    }
+
+    /// [`copy`](Self::copy) for text.
+    pub fn copy_str(&mut self, at: &str, s: &str) -> Option<String> {
+        let left = self.bytes.get();
+        if s.len() >= left {
+            self.bytes_spent(at);
+            return None;
+        }
+        self.bytes.set(left - s.len() - 1);
+        Some(s.to_string())
+    }
+
+    /// Copy `obj` without the `skip` member.
+    fn copy_map_except(&mut self, at: &str, obj: &Map<String, Value>, skip: &str) -> Option<Map<String, Value>> {
+        let mut out = Map::new();
+        for (k, v) in obj {
+            if k != skip {
+                let v = self.copy(at, v)?;
+                out.insert(k.clone(), v);
+            }
+        }
+        Some(out)
+    }
+
+    fn bytes_spent(&mut self, at: &str) {
+        self.bytes.set(0);
+        if !self.bytes_warned {
+            self.bytes_warned = true;
+            self.report.warn("sample_size_limit", at, "generated samples reached the import's byte budget; the rest was omitted");
+        }
     }
 
     /// Whether a property schema (following `$ref`) carries a boolean flag.
@@ -108,6 +172,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     }
 
     fn charge(&mut self, at: &str) -> bool {
+        if self.bytes.get() == 0 {
+            self.bytes_spent(at);
+            return false;
+        }
         if self.nodes >= self.max_nodes {
             if !self.budget_warned {
                 self.budget_warned = true;
@@ -167,6 +235,9 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             && let Some(v) = self.explicit_value(obj, at, &types)
         {
             return Some(v);
+        }
+        if self.bytes.get() == 0 {
+            return None;
         }
 
         if obj.get("allOf").is_some_and(Value::is_array) {
@@ -238,10 +309,10 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         if modern && self.mode == SampleMode::Sample {
             // 3.1+: sibling example/default apply to the referencing site.
             if let Some(v) = example_of(obj, self.dialect) {
-                return Some(v);
+                return self.copy(at, v);
             }
             if let Some(d) = obj.get("default") {
-                return Some(d.clone());
+                return self.copy(at, d);
             }
         }
         let (target, tptr) = self.refs.resolve(schema, at, self.report)?;
@@ -259,10 +330,13 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         }
         self.stack.push(tptr.clone());
         let out = if has_siblings && modern {
-            let mut sib = obj.clone();
-            sib.remove("$ref");
-            let merged = json!({ "allOf": [target.clone(), Value::Object(sib)] });
-            self.gen_value(&merged, at, depth + 1, name)
+            match (self.copy(at, target), self.copy_map_except(at, obj, "$ref")) {
+                (Some(t), Some(sib)) => {
+                    let merged = json!({ "allOf": [t, Value::Object(sib)] });
+                    self.gen_value(&merged, at, depth + 1, name)
+                }
+                _ => None,
+            }
         } else {
             if has_siblings {
                 self.report.warn(
@@ -299,18 +373,18 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         let (v, what) = if let Some(v) = example_of(obj, self.dialect) {
             (v, "example")
         } else if let Some(v) = obj.get("default") {
-            (v.clone(), "default")
+            (v, "default")
         } else if let Some(v) = obj.get("const") {
-            (v.clone(), "const")
+            (v, "const")
         } else {
             let e = obj.get("enum").and_then(Value::as_array).filter(|e| !e.is_empty())?;
-            (e.iter().find(|x| !x.is_null()).unwrap_or(&e[0]).clone(), "enum")
+            (e.iter().find(|x| !x.is_null()).unwrap_or(&e[0]), "enum")
         };
-        if !types.is_empty() && !value_matches_types(&v, types, obj) {
+        if !types.is_empty() && !value_matches_types(v, types, obj) {
             self.report.warn(
                 "example_type_mismatch",
                 &ptr(at, what),
-                format!("{what} value is {} but the schema type is {}; used as written", json_type(&v), types.join("|")),
+                format!("{what} value is {} but the schema type is {}; used as written", json_type(v), types.join("|")),
             );
         }
         if let (Some(c), Some(e)) = (obj.get("const"), obj.get("enum").and_then(Value::as_array))
@@ -318,7 +392,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         {
             self.report.warn("contradictory_schema", at, "`const` is not one of the `enum` values");
         }
-        Some(v)
+        self.copy(&ptr(at, what), v)
     }
 
     fn gen_alternative(
@@ -360,12 +434,16 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             );
         }
         let alt = &alts[idx];
-        let mut base = obj.clone();
-        base.remove(key);
+        let mut base = self.copy_map_except(&kptr, obj, key)?;
         let discriminator = base.remove("discriminator");
         let structural = base.keys().any(|k| matches!(k.as_str(), "properties" | "required" | "type" | "allOf" | "items"));
-        let schema = if structural { json!({ "allOf": [Value::Object(base), alt.clone()] }) } else { alt.clone() };
-        let mut v = self.gen_value(&schema, &ptr_i(&kptr, idx), depth + 1, name)?;
+        let mut v = if structural {
+            let alt = self.copy(&kptr, alt)?;
+            let schema = json!({ "allOf": [Value::Object(base), alt] });
+            self.gen_value(&schema, &ptr_i(&kptr, idx), depth + 1, name)?
+        } else {
+            self.gen_value(alt, &ptr_i(&kptr, idx), depth + 1, name)?
+        };
         if let (Some(d), Value::Object(m)) = (discriminator, &mut v)
             && let Some(prop) = d.get("propertyName").and_then(Value::as_str)
         {
@@ -392,16 +470,16 @@ impl<'a, 'r> SampleGen<'a, 'r> {
 
     fn merge_all_of_at(&mut self, schema: &Value, at: &str, nesting: usize) -> Option<Value> {
         let obj = schema.as_object()?;
-        let mut acc = obj.clone();
-        acc.remove("allOf");
-        let branches = obj.get("allOf").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut acc = self.copy_map_except(at, obj, "allOf")?;
+        let branches = obj.get("allOf").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
         for (i, br) in branches.iter().enumerate() {
             let bptr = ptr_i(&ptr(at, "allOf"), i);
             if !self.charge(&bptr) {
                 return None;
             }
             let mut pushed = false;
-            let mut resolved = if Refs::ref_of(br).is_some() {
+            let mut with_siblings = None;
+            let target = if Refs::ref_of(br).is_some() {
                 let (t, tp) = self.refs.resolve(br, &bptr, self.report)?;
                 if self.stack.contains(&tp) {
                     self.report.warn("recursive_schema", &tp, "recursive allOf composition: expansion stops at the first repetition");
@@ -417,66 +495,85 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 }
                 self.stack.push(tp);
                 pushed = true;
-                let mut t = t.clone();
-                if let (Value::Object(tm), Some(bm)) = (&mut t, br.as_object()) {
+                // Keywords next to the `$ref` fill in what the target lacks.
+                if let (Some(tm), Some(bm)) = (t.as_object(), br.as_object())
+                    && bm.keys().any(|k| k != "$ref" && !tm.contains_key(k))
+                {
+                    let Some(Value::Object(mut m)) = self.copy(&bptr, t) else {
+                        self.stack.pop();
+                        return None;
+                    };
                     for (k, v) in bm {
-                        if k != "$ref" {
-                            tm.entry(k.clone()).or_insert_with(|| v.clone());
+                        if k != "$ref" && !m.contains_key(k) {
+                            let Some(v) = self.copy(&bptr, v) else {
+                                self.stack.pop();
+                                return None;
+                            };
+                            m.insert(k.clone(), v);
                         }
                     }
+                    with_siblings = Some(Value::Object(m));
                 }
                 t
             } else {
-                br.clone()
+                br
             };
-            if resolved.get("allOf").is_some_and(Value::is_array) {
-                if nesting >= MAX_NESTING {
-                    let msg = format!("allOf nesting deeper than {MAX_NESTING} levels was not expanded");
-                    self.report.warn("schema_depth_limit", &bptr, msg);
-                    if let Value::Object(m) = &mut resolved {
-                        m.remove("allOf");
+            let cur = with_siblings.as_ref().unwrap_or(target);
+            let nested = if !cur.get("allOf").is_some_and(Value::is_array) {
+                None
+            } else if nesting >= MAX_NESTING {
+                let msg = format!("allOf nesting deeper than {MAX_NESTING} levels was not expanded");
+                self.report.warn("schema_depth_limit", &bptr, msg);
+                None
+            } else {
+                let m = self.merge_all_of_at(cur, &bptr, nesting + 1);
+                if m.is_none() {
+                    if pushed {
+                        self.stack.pop();
                     }
-                } else {
-                    match self.merge_all_of_at(&resolved, &bptr, nesting + 1) {
-                        Some(m) => resolved = m,
-                        // The payload budget is spent: stop, as `gen_value` does.
-                        None if self.nodes >= self.max_nodes => {
-                            if pushed {
-                                self.stack.pop();
-                            }
-                            return None;
-                        }
-                        None => {}
-                    }
+                    return None;
                 }
-            }
+                m
+            };
             if pushed {
                 self.stack.pop();
             }
-            match resolved {
+            let kept = match nested.as_ref().unwrap_or(cur) {
                 Value::Object(m) => self.merge_into(&mut acc, m, at),
-                Value::Bool(false) => self.report.warn("unsatisfiable_schema", &bptr, "allOf contains `false`: no value can satisfy it"),
-                _ => {}
+                Value::Bool(false) => {
+                    self.report.warn("unsatisfiable_schema", &bptr, "allOf contains `false`: no value can satisfy it");
+                    true
+                }
+                _ => true,
+            };
+            if !kept {
+                return None;
             }
         }
         Some(Value::Object(acc))
     }
 
-    fn merge_into(&mut self, acc: &mut Map<String, Value>, src: Map<String, Value>, at: &str) {
+    /// Merge `src` into `acc`. Only what is kept is copied, and each copy is
+    /// charged first; `false` once the byte budget is spent. `allOf` members
+    /// were merged (or cut) by the caller.
+    fn merge_into(&mut self, acc: &mut Map<String, Value>, src: &Map<String, Value>, at: &str) -> bool {
         for (k, v) in src {
             match k.as_str() {
+                "allOf" => {}
                 "properties" => {
                     let dst = acc.entry("properties").or_insert_with(|| Value::Object(Map::new()));
                     if let (Value::Object(d), Value::Object(s)) = (dst, v) {
                         for (pk, pv) in s {
-                            match d.get_mut(&pk) {
-                                Some(existing) if *existing != pv => {
-                                    let combined = json!({ "allOf": [existing.clone(), pv] });
-                                    *existing = combined;
+                            match d.get_mut(pk) {
+                                Some(existing) if *existing != *pv => {
+                                    let Some(pv) = self.copy(at, pv) else { return false };
+                                    let prev = std::mem::take(existing);
+                                    *existing = json!({ "allOf": [prev, pv] });
                                 }
                                 Some(_) => {}
                                 None => {
-                                    d.insert(pk, pv);
+                                    let Some(pv) = self.copy(at, pv) else { return false };
+                                    d.insert(pk.clone(), pv);
                                 }
                             }
                         }
@@ -485,8 +582,14 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 "required" => {
                     let dst = acc.entry("required").or_insert_with(|| Value::Array(vec![]));
                     if let (Value::Array(d), Value::Array(s)) = (dst, v) {
+                        let mut names: HashSet<String> = d.iter().filter_map(Value::as_str).map(str::to_string).collect();
                         for x in s {
-                            if !d.contains(&x) {
+                            let known = match x.as_str() {
+                                Some(n) => !names.insert(n.to_string()),
+                                None => d.contains(x),
+                            };
+                            if !known {
+                                let Some(x) = self.copy(at, x) else { return false };
                                 d.push(x);
                             }
                         }
@@ -494,11 +597,12 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 }
                 "type" => match acc.get("type") {
                     None => {
-                        acc.insert(k, v);
+                        let Some(v) = self.copy(at, v) else { return false };
+                        acc.insert(k.clone(), v);
                     }
                     Some(existing) => {
                         let a = type_set(existing);
-                        let b = type_set(&v);
+                        let b = type_set(v);
                         let inter: Vec<String> = a
                             .iter()
                             .filter(|t| b.contains(t) || (*t == "integer" && b.iter().any(|x| x == "number")))
@@ -518,32 +622,32 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                         } else {
                             // The generator uses the first type; keep a plain string so
                             // merged schemas never look like 3.1 type arrays.
-                            acc.insert(k, Value::String(inter[0].clone()));
+                            acc.insert(k.clone(), Value::String(inter[0].clone()));
                         }
                     }
                 },
-                "minimum" | "minLength" | "minItems" | "minProperties" => merge_num(acc, &k, v, f64::max),
-                "maximum" | "maxLength" | "maxItems" | "maxProperties" => merge_num(acc, &k, v, f64::min),
-                "exclusiveMinimum" if v.is_number() => merge_num(acc, &k, v, f64::max),
-                "exclusiveMaximum" if v.is_number() => merge_num(acc, &k, v, f64::min),
-                "enum" => match (acc.get("enum").and_then(Value::as_array), v.as_array()) {
-                    (Some(a), Some(b)) => {
-                        let inter: Vec<Value> = a.iter().filter(|x| b.contains(x)).cloned().collect();
-                        if inter.is_empty() {
-                            self.report.warn("contradictory_schema", &ptr(at, "allOf"), "allOf branches have disjoint `enum` values");
+                "minimum" | "minLength" | "minItems" | "minProperties" => merge_num(acc, k, v, f64::max),
+                "maximum" | "maxLength" | "maxItems" | "maxProperties" => merge_num(acc, k, v, f64::min),
+                "exclusiveMinimum" if v.is_number() => merge_num(acc, k, v, f64::max),
+                "exclusiveMaximum" if v.is_number() => merge_num(acc, k, v, f64::min),
+                "enum" if acc.get("enum").is_some_and(Value::is_array) && v.is_array() => {
+                    if let (Some(Value::Array(a)), Value::Array(b)) = (acc.get_mut("enum"), v) {
+                        if a.iter().any(|x| b.contains(x)) {
+                            a.retain(|x| b.contains(x));
                         } else {
-                            acc.insert(k, Value::Array(inter));
+                            self.report.warn("contradictory_schema", &ptr(at, "allOf"), "allOf branches have disjoint `enum` values");
                         }
                     }
-                    _ => {
-                        acc.entry(k).or_insert(v);
-                    }
-                },
+                }
                 _ => {
-                    acc.entry(k).or_insert(v);
+                    if !acc.contains_key(k) {
+                        let Some(v) = self.copy(at, v) else { return false };
+                        acc.insert(k.clone(), v);
+                    }
                 }
             }
         }
+        true
     }
 
     fn gen_object(&mut self, obj: &Map<String, Value>, at: &str, depth: usize) -> Option<Value> {
@@ -658,26 +762,26 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             );
             count = MAX_ARRAY_ITEMS;
         }
-        let prefix: Vec<Value> = match (obj.get("prefixItems"), obj.get("items")) {
-            (Some(Value::Array(p)), _) => p.clone(),
-            (_, Some(Value::Array(p))) => p.clone(), // draft-4 tuple form
-            _ => vec![],
+        let prefix: &[Value] = match (obj.get("prefixItems"), obj.get("items")) {
+            (Some(Value::Array(p)), _) => p.as_slice(),
+            (_, Some(Value::Array(p))) => p.as_slice(), // draft-4 tuple form
+            _ => &[],
         };
         let items = match obj.get("items") {
-            Some(v @ (Value::Object(_) | Value::Bool(_))) => Some(v.clone()),
+            Some(v @ (Value::Object(_) | Value::Bool(_))) => Some(v),
             _ => None,
         };
         let count = count.max(if self.mode == SampleMode::Sample { prefix.len() } else { 0 });
         let mut out = Vec::new();
         for i in 0..count {
             let (s, p) = if i < prefix.len() {
-                (prefix[i].clone(), ptr_i(&ptr(at, if obj.contains_key("prefixItems") { "prefixItems" } else { "items" }), i))
-            } else if let Some(it) = &items {
-                (it.clone(), ptr(at, "items"))
+                (&prefix[i], ptr_i(&ptr(at, if obj.contains_key("prefixItems") { "prefixItems" } else { "items" }), i))
+            } else if let Some(it) = items {
+                (it, ptr(at, "items"))
             } else {
                 break;
             };
-            match self.gen_value(&s, &p, depth + 1, name) {
+            match self.gen_value(s, &p, depth + 1, name) {
                 Some(v) => out.push(v),
                 None => break,
             }
@@ -719,7 +823,8 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             return Value::String(String::new());
         }
         if let Some(p) = obj.get("pattern").and_then(Value::as_str) {
-            self.report.warn("pattern_not_enforced", &ptr(at, "pattern"), format!("the sample is not guaranteed to match pattern `{p}`"));
+            let msg = format!("the sample is not guaranteed to match pattern `{}`", clip(p, 200));
+            self.report.warn("pattern_not_enforced", &ptr(at, "pattern"), msg);
         }
         let fixed = |s: String| (s, true);
         let (s, fixed_shape) = match format {
@@ -894,13 +999,59 @@ fn ptr_i(base: &str, i: usize) -> String {
 
 /// Explicit example of a schema object: 3.1+ `examples` array (first), then
 /// `example`, then the widespread `x-example` extension.
-pub(crate) fn example_of(obj: &Map<String, Value>, dialect: Dialect) -> Option<Value> {
+pub(crate) fn example_of(obj: &Map<String, Value>, dialect: Dialect) -> Option<&Value> {
     if is_31_plus(dialect)
         && let Some(first) = obj.get("examples").and_then(Value::as_array).and_then(|a| a.first())
     {
-        return Some(first.clone());
+        return Some(first);
     }
-    obj.get("example").or_else(|| obj.get("x-example")).cloned()
+    obj.get("example").or_else(|| obj.get("x-example"))
+}
+
+/// Charge a copy of `v` against an import's sample byte budget; `false` (and
+/// the budget is spent) when it does not fit.
+pub(crate) fn charge_copy(bytes: &Cell<usize>, v: &Value) -> bool {
+    let left = bytes.get();
+    match size_within(v, left) {
+        Some(n) => {
+            bytes.set(left - n);
+            true
+        }
+        None => {
+            bytes.set(0);
+            false
+        }
+    }
+}
+
+/// Size estimate of a copy of `v` (its JSON text, roughly), or `None` when it
+/// exceeds `limit`. The walk stops as soon as the limit is passed, so it costs
+/// at most `limit`.
+fn size_within(v: &Value, limit: usize) -> Option<usize> {
+    fn walk(v: &Value, left: &mut usize) -> bool {
+        let own = match v {
+            Value::String(s) => s.len() + 2,
+            Value::Array(_) | Value::Object(_) => 2,
+            _ => 8,
+        };
+        if own > *left {
+            return false;
+        }
+        *left -= own;
+        match v {
+            Value::Array(a) => a.iter().all(|x| walk(x, left)),
+            Value::Object(o) => o.iter().all(|(k, x)| {
+                if k.len() + 3 > *left {
+                    return false;
+                }
+                *left -= k.len() + 3;
+                walk(x, left)
+            }),
+            _ => true,
+        }
+    }
+    let mut left = limit;
+    walk(v, &mut left).then(|| limit - left)
 }
 
 fn infer_type(obj: &Map<String, Value>) -> Option<&'static str> {
@@ -926,7 +1077,7 @@ fn type_set(v: &Value) -> Vec<String> {
     }
 }
 
-fn merge_num(acc: &mut Map<String, Value>, k: &str, v: Value, pick: fn(f64, f64) -> f64) {
+fn merge_num(acc: &mut Map<String, Value>, k: &str, v: &Value, pick: fn(f64, f64) -> f64) {
     let Some(new) = v.as_f64() else { return };
     let merged = match acc.get(k).and_then(Value::as_f64) {
         Some(old) => pick(old, new),
@@ -999,8 +1150,46 @@ mod tests {
         let refs = Refs { root, max_depth: 16, max_expansions: 10_000 };
         let mut rep = ImportReport::default();
         let opts = ImportOptions { mode, include_optional, ..Default::default() };
-        let v = SampleGen::new(refs, &mut rep, Dialect::OpenApi31, &opts, 7).generate(schema, "/s", None);
+        let bytes = Cell::new(1 << 20);
+        let v = SampleGen::new(refs, &mut rep, Dialect::OpenApi31, &opts, 7, &bytes).generate(schema, "/s", None);
         (v, rep)
+    }
+
+    #[test]
+    fn flatten_does_not_spend_the_payload_budget() {
+        let root = json!({"components": {"schemas": {"A": {"type": "object", "properties": {"a": {"type": "string"}}}}}});
+        let refs = Refs { root: &root, max_depth: 16, max_expansions: 10_000 };
+        let mut rep = ImportReport::default();
+        let opts = ImportOptions { max_sample_nodes: 2, ..Default::default() };
+        let bytes = Cell::new(1 << 20);
+        let mut sg = SampleGen::new(refs, &mut rep, Dialect::OpenApi31, &opts, 7, &bytes);
+        let schema = json!({"allOf": [{"$ref": "#/components/schemas/A"}, {"required": ["a"]}]});
+        for _ in 0..3 {
+            let (flat, _) = sg.flatten(&schema, "/s");
+            assert!(flat["properties"]["a"].is_object(), "{flat}");
+            assert_eq!(flat["required"], json!(["a"]));
+        }
+        // The payload's own two nodes are still there.
+        let v = sg.generate(&json!({"type": "array", "items": {"type": "string"}}), "/t", None);
+        assert_eq!(v.map(|v| v.as_array().map(Vec::len)), Some(Some(1)));
+    }
+
+    #[test]
+    fn copies_stop_at_the_import_byte_budget() {
+        let root = json!({});
+        let refs = Refs { root: &root, max_depth: 16, max_expansions: 10_000 };
+        let mut rep = ImportReport::default();
+        let opts = ImportOptions::default();
+        let bytes = Cell::new(10_000);
+        let mut sg = SampleGen::new(refs, &mut rep, Dialect::OpenApi31, &opts, 7, &bytes);
+        let schema = json!({"type": "string", "example": "x".repeat(4_000)});
+        assert!(sg.generate(&schema, "/a", None).is_some());
+        assert!(sg.generate(&schema, "/b", None).is_some());
+        // The third copy does not fit: nothing more is copied or generated.
+        assert!(sg.generate(&schema, "/c", None).is_none());
+        assert!(sg.generate(&json!({"type": "string"}), "/d", None).is_none());
+        assert_eq!(bytes.get(), 0);
+        assert!(rep.has_code("sample_size_limit"));
     }
 
     #[test]

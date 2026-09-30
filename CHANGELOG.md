@@ -789,23 +789,34 @@
   long scalar that many aliases repeat was charged one node per copy, so a
   small file could make the preview allocate far more than its size; it is
   now refused with `LimitExceeded` ("document string bytes").
-- WSDL imports: named `group` and `attributeGroup` references that lead back
-  to a group being expanded now stop at the first repetition
-  (`recursive_schema`), and every particle, group reference and attribute is
-  charged against the envelope's `max_sample_nodes` budget, alongside a cap
-  on the bytes an envelope (8 MiB) and a whole import (four times
-  `max_bytes`) may generate. Groups referencing themselves or each other
-  several times could make envelope generation grow exponentially.
-- OpenAPI imports: `allOf` merging now charges each branch against the
-  payload's `max_sample_nodes` budget before resolving or copying it, and a
-  `$ref` it follows counts toward `max_ref_depth` like a direct `$ref`
-  (`ref_depth_limit`). A long chain of schemas that each compose the next
-  recursed without either limit, and a branching one did exponential work.
-- Insomnia v4 imports: an export in which two resources share an `_id` is
-  refused (`Invalid`, naming both resources), and walking request groups
-  visits each resource at most once; a group without an `_id` no longer
-  adopts parentless resources. Repeated or self-referencing ids could make
-  the folder walk repeat subtrees exponentially.
+- WSDL imports: envelope generation is bounded by the envelope's
+  `max_sample_nodes` budget and by the bytes it may generate (8 MiB per
+  envelope, four times `max_bytes` per import, both charged before the text
+  is built). Every schema node looked at counts: group and attributeGroup
+  references, extension bases, particles, attributes, message parts and the
+  children of each construct. `group` and `attributeGroup` references back to
+  a group being expanded stop at the first repetition (`recursive_schema`).
+  An attribute is written once per element. Once the import's envelope budget
+  is spent, the remaining envelopes are left empty (`sample_size_limit`).
+  Branching or self-referencing groups and types could make generation grow
+  exponentially, and many message parts could exceed the envelope limit.
+- OpenAPI imports: `allOf` merging charges each branch against the payload's
+  `max_sample_nodes` budget, and a `$ref` it follows counts toward
+  `max_ref_depth` like a direct `$ref` (`ref_depth_limit`). Examples,
+  defaults, merged schemas and per-operation parameter copies now share a
+  byte budget for the whole import (eight times `max_bytes`), charged before
+  each copy is made. When it is spent, the remaining samples are left out
+  (`sample_size_limit`). Structural lookups (`flatten`) have a node budget of
+  their own and no longer use up the payload's. Long or branching
+  composition chains, and large examples reused many times, could previously
+  do unbounded work.
+- Insomnia v4 imports: an export in which a workspace, request group or
+  environment shares its `_id` with another resource is refused (`Invalid`,
+  naming both). A repeated id of any other resource skips the later copy
+  (`duplicate_resource_id`). A resource without an `_id` is never treated as
+  a parent, the walk lists each parent's children once, and each request or
+  group is imported at most once. Repeated, empty or self-referencing ids
+  could make the import repeat subtrees exponentially.
 - Desktop development dependencies now override Mocha's vulnerable
   `serialize-javascript` dependency with patched version 7.0.5.
 - A secret variable used only in what a session sends once it is open (a

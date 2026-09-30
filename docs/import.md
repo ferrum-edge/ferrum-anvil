@@ -27,7 +27,7 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 | Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
 | No invented credentials | Auth is imported as configs whose secrets are `{{variable}}` references, listed in `report.required_variables` and deliberately *not* defined, so a request fails validation (unresolved variable) until the user supplies a value. Credential-like body fields and parameters are never generated in samples. |
 | Credential redaction (migrations) | Literal credentials in HAR, cURL, Postman and Insomnia input (Authorization/Cookie/API-key-like headers, credential-like query parameters, form fields and JSON members, auth helper secrets, secret variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables and listed in `report.redactions`, unless `ImportOptions::include_credentials` is set (kept values are then marked sensitive). A value that is only variable references plus an auth scheme word (`Bearer {{token}}`) is not a literal secret and is kept. Detection is name-based and best effort; bodies that cannot be scanned (XML, arbitrary text, unparsable JSON) produce a `body_not_scanned` warning. |
-| Bounded work | `max_bytes` (input size), `max_nodes` (parsed JSON/YAML nodes — charged *during* deserialization, so YAML alias bombs are refused — and XML nodes), the string bytes a parsed JSON/YAML document keeps (string values and map keys, alias expansions included; at most twice `max_bytes`, charged before each copy), a fixed nesting-depth limit, `max_ref_depth` (direct `$ref`s and those followed while merging `allOf`), `max_ref_expansions` (whole import), `max_sample_nodes` (per payload; also charged per `allOf` branch, and per XSD particle, group reference and attribute), generated WSDL envelope bytes (8 MiB per envelope, four times `max_bytes` per import), `max_operations`. Malformed input yields an `ImportError`, never a panic (property-tested). |
+| Bounded work | `max_bytes` (input size), `max_nodes` (parsed JSON/YAML nodes — charged *during* deserialization, so YAML alias bombs are refused — and XML nodes), the string bytes a parsed JSON/YAML document keeps (string values and map keys, alias expansions included; at most twice `max_bytes`, charged before each copy), a fixed nesting-depth limit, `max_ref_depth` (direct `$ref`s and those followed while merging `allOf`), `max_ref_expansions` (whole import), `max_sample_nodes` (per payload; also charged per `allOf` branch, and for WSDL per schema node looked at: each child of a construct, each element, attribute, group reference, extension base and message part), bytes copied into OpenAPI samples (examples, defaults, merged schemas, per-operation parameters; eight times `max_bytes` per import), generated WSDL envelope bytes (8 MiB per envelope, four times `max_bytes` per import), `max_operations`. Byte budgets are charged before the copy is made. Malformed input yields an `ImportError`, never a panic (property-tested). |
 
 ## Report
 
@@ -449,8 +449,10 @@ extension (base content first) and restriction, `simpleContent`,
 appear with `<!--Optional:-->` when `include_optional` is set; repeated
 elements are annotated. Recursive types, and `group`/`attributeGroup`
 references back to a group being expanded, stop at the first repetition
-(`recursive_schema`). An envelope that reaches its node or byte budget keeps
-what was generated so far (`sample_size_limit`). Credential-like elements
+(`recursive_schema`). An attribute is written once per element. An envelope
+that reaches its node or byte budget keeps what was generated so far, still
+well-formed (`sample_size_limit`); once the import's envelope budget is
+spent, later envelopes are left empty. Credential-like elements
 (`password`, …) are left empty.
 
 Reported: HTTP GET/POST bindings and other non-SOAP bindings, non-HTTP SOAP
@@ -499,9 +501,12 @@ untouched); literal values are percent-encoded like `encodeURIComponent`,
 `{{variable}}` references are kept, and an empty value becomes a required
 variable. A body MIME type the body kind cannot express (a vendor `+json`
 type, `text/xml`, parameters such as `charset`) is kept as an explicit
-`Content-Type` header unless the request already sets one. Resource `_id`s in
-a v4 export must be unique (an export that repeats one is refused), and each
-resource is imported at most once.
+`Content-Type` header unless the request already sets one. In a v4 export,
+workspaces, request groups and environments need unique `_id`s: an export
+that repeats one of those is refused, and a repeated id of any other resource
+skips the later copy (`duplicate_resource_id`). A resource without an `_id`
+has no children, and each workspace, group, request and environment is
+imported at most once.
 
 Reported: other template tags (`{% response %}`, `{% base64 %}`, …) and
 Nunjucks filters (left in place), digest/NTLM/Hawk/IAM/netrc/ASAP auth,
