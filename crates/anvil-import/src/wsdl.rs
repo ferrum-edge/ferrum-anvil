@@ -60,7 +60,7 @@ const XML_LIMITS: XmlLimits = XmlLimits {
     xmlns_prefix_bytes: 256,
     xmlns_uri_bytes: 2_048,
     in_scope_namespaces: MAX_IN_SCOPE_NAMESPACES,
-    namespace_scope_work: 1 << 22,
+    namespace_scope_work: 1 << 26,
 };
 /// The only SOAP transport imported.
 const SOAP_HTTP: &str = "http://schemas.xmlsoap.org/soap/http";
