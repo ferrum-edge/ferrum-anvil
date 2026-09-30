@@ -1023,8 +1023,8 @@ async fn up() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::RoundOutcome::{ClientMissed, Early, GatewayMissed};
+    use super::*;
 
     fn req(method: &str, early_data: Option<&str>) -> (String, Option<String>) {
         (method.to_string(), early_data.map(str::to_string))
