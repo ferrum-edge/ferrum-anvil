@@ -704,18 +704,20 @@ async fn load_013_udp_sends_more_than_it_receives_and_never_claims_delivery() {
     let d = datagram_metrics(&r);
     assert_eq!((d.datagrams_sent, d.datagrams_received, d.repeated_payloads, d.echoed_payloads), (6, 12, 6, 12));
 
-    // Nothing listening: the exchange makes no delivery claim. Unix reports
-    // the loopback ICMP port unreachable to the connected socket (counted);
-    // Windows surfaces it differently, and the adapter records it only as
-    // the OS reports `ConnectionRefused` (as in the transport's PROTO-020 test).
-    let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    // A bound sink never replies. Keeping it bound prevents another parallel
+    // test's fixture from claiming the target port during this sub-case.
+    let sink = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let sink_addr = sink.local_addr().unwrap();
     let id = Id::new();
-    let r = run(plan(Workload::Iterations { iterations: 2, concurrency: 1 }, vec![id]), vec![(id, udp_ctx(port, &["x"], 150))], None).await;
+    let r = run(
+        plan(Workload::Iterations { iterations: 2, concurrency: 1 }, vec![id]),
+        vec![(id, udp_ctx(sink_addr, &["x"], 150))],
+        None,
+    )
+    .await;
     let d = datagram_metrics(&r);
     assert_eq!(d.datagrams_received, 0, "{d:?}");
-    if cfg!(unix) {
-        assert_eq!(d.icmp_unreachable_exchanges, 2, "{d:?}");
-    }
+    assert_eq!((d.datagrams_sent, d.exchanges_silent, d.echoed_payloads), (2, 2, 0), "{d:?}");
 }
 
 /// A UDP load whose datagram PROXY-protocol envelope is authenticated with a

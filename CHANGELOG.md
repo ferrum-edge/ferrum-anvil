@@ -244,6 +244,10 @@
 
 ### Fixed
 
+- UDP load-scenario silence coverage keeps its non-responding target socket
+  bound for the whole sub-case, so a parallel test fixture cannot take over
+  the port and produce a false reply. The separate ICMP-unreachable test
+  releases its reserved port immediately before sending.
 - The effective-request preview reports a multi-auth as varying per send
   when any of its profiles is HMAC, DPoP, JWT, WS-Security or JWT-SVID
   (nested sets included), and an SSE preview with such a multi-auth says

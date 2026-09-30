@@ -274,8 +274,11 @@ async fn proto_018_sse_history_is_bounded_but_counted() {
 #[tokio::test]
 async fn proto_020_udp_icmp_unreachable_is_recorded_as_such() {
     init();
-    // A port that was just released: nothing listens there.
-    let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // Use a just-released loopback UDP port to exercise the OS ICMP report.
+    // Drop it immediately before sending to minimize the chance another test
+    // binds the same port in parallel.
+    let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
     let plan = udp::UdpPlan {
         host: "127.0.0.1".into(),
         port,
@@ -289,6 +292,7 @@ async fn proto_020_udp_icmp_unreachable_is_recorded_as_such() {
         redact: None,
         envelope: None,
     };
+    drop(closed);
     let out = udp::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
     assert!(matches!(out.status, ProtocolStatus::Udp { datagrams_received: 0, .. }));
     let t = out.transcript.unwrap();
