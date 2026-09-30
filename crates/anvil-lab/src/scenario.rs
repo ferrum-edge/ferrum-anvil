@@ -75,11 +75,33 @@ pub fn summarize(o: &ExecutionOutput) -> ObservedSummary {
 
 pub struct Checks {
     pub items: Vec<Check>,
+    /// Set when the scenario's precondition was not reached within its
+    /// bounded attempts (see [`Checks::skip`]).
+    pub skip_reason: Option<String>,
 }
 
 impl Checks {
     pub fn new() -> Self {
-        Checks { items: vec![] }
+        Checks { items: vec![], skip_reason: None }
+    }
+
+    /// Report the scenario as skipped with `reason`: the condition it tests
+    /// was not observed, so it neither passes nor fails. A skip is never
+    /// counted as a pass, and any failed check still fails the scenario.
+    pub fn skip(&mut self, reason: impl Into<String>) {
+        self.skip_reason = Some(reason.into());
+    }
+
+    /// `failed` when any check failed, else `skipped` when a skip was
+    /// reported, else `passed`.
+    pub fn status(&self) -> &'static str {
+        if !self.all_passed() {
+            "failed"
+        } else if self.skip_reason.is_some() {
+            "skipped"
+        } else {
+            "passed"
+        }
     }
 
     pub fn add(&mut self, kind: CheckKind, name: impl Into<String>, passed: bool, detail: impl Into<String>) {
@@ -225,4 +247,20 @@ pub struct ScenarioResult {
     pub status: String,
     pub skip_reason: Option<String>,
     pub duration_ms: u128,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skip_never_passes_and_never_hides_a_failure() {
+        let mut c = Checks::new();
+        c.add(CheckKind::Diagnosis, "ok", true, "");
+        assert_eq!(c.status(), "passed");
+        c.skip("the window under test was not observed");
+        assert_eq!(c.status(), "skipped");
+        c.add(CheckKind::GroundTruth, "violation", false, "");
+        assert_eq!(c.status(), "failed");
+    }
 }

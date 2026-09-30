@@ -264,11 +264,54 @@ struct EarlyRound {
     log_from: usize,
 }
 
+/// A scenario's test of the gateway's side of a round that did send the
+/// request as early data: `Some(detail)` when the gateway handled it after its
+/// own handshake completed, so the window the scenario tests was missed.
+type GatewayMissed = fn(&Env, &EarlyRound) -> Option<String>;
+
+/// How the rounds ended.
+enum Rounds {
+    /// A round sent the request as early data and the gateway's side did not
+    /// rule it out: the scenario's checks judge it.
+    Early(EarlyRound),
+    /// Rounds sent the request as early data, but the gateway handled it after
+    /// its handshake every time: a coverage limitation (the reason), never a
+    /// pass or a failure. Holds the last such round's output.
+    GatewayWindowMissed(ExecutionOutput, String),
+    /// No round sent the request as early data (a failed check was added).
+    NoEarlyData,
+}
+
+/// Out of rounds: `Some(reason)` when some round did send the request as
+/// early data and the gateway handled it after its handshake every time (the
+/// window under test was not observed); `None` when no round sent it as early
+/// data at all, which stays a failure.
+fn window_unobserved(client_missed: &[usize], gateway_missed: &[usize]) -> Option<String> {
+    if gateway_missed.is_empty() {
+        return None;
+    }
+    let late = format!("the gateway handled the 0-RTT request after its handshake in round(s) {gateway_missed:?} (RFC 8470 section 6.4)");
+    let first = format!("the handshake finished before the request was written in round(s) {client_missed:?}");
+    Some(format!("{late}; {first}: its pre-handshake refusal was not exercised within {EARLY_ROUNDS} rounds"))
+}
+
+fn missed_rounds_reported(c: &mut Checks, missed: &[usize]) {
+    c.add(
+        CheckKind::Diagnosis,
+        "rounds where the handshake finished before the request was written were reported as such, and the backend agreed",
+        true,
+        format!("{} missed round(s): {missed:?}", missed.len()),
+    );
+}
+
 /// Fetch a ticket (the gateway's tickets must allow early data), then send
 /// `method` under an early-data policy listing `extra`, until the request
-/// itself travelled as 0-RTT early data or the rounds run out.
-async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str]) -> Option<EarlyRound> {
+/// itself travelled as 0-RTT early data and `gateway_missed` does not say the
+/// gateway handled it after its handshake, or the rounds run out.
+async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str], gateway_missed: GatewayMissed) -> Rounds {
     let mut missed = Vec::new();
+    let mut late = Vec::new();
+    let mut last_late = None;
     for round in 0..EARLY_ROUNDS {
         fresh(env);
         if round == 0 {
@@ -280,13 +323,20 @@ async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str]) -
         let log_from = gw_from(&env.gateway);
         let out = send(env, &ctx(env, method, HTTPS, HttpVersionPolicy::Http3Only, Some(extra))).await;
         if early(&out, 0).is_some_and(|e| e.offered) {
-            c.add(
-                CheckKind::Diagnosis,
-                "rounds where the handshake finished before the request was written were reported as such, and the backend agreed",
-                true,
-                format!("{} missed round(s): {missed:?}", missed.len()),
-            );
-            return Some(EarlyRound { out, backend_from, log_from });
+            let r = EarlyRound { out, backend_from, log_from };
+            if let Some(detail) = gateway_missed(env, &r) {
+                c.add(
+                    CheckKind::Diagnosis,
+                    format!("round {round}: the gateway handled the 0-RTT {method} after its handshake, as 1-RTT (RFC 8470 section 6.4)"),
+                    true,
+                    detail,
+                );
+                late.push(round);
+                last_late = Some(r.out);
+                continue;
+            }
+            missed_rounds_reported(c, &missed);
+            return Rounds::Early(r);
         }
         let reported =
             early(&out, 0).is_some_and(|e| e.not_used == Some(EarlyDataNotUsed::HandshakeCompletedFirst) && e.accepted.is_none());
@@ -301,13 +351,89 @@ async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str]) -
         );
         missed.push(round);
     }
+    if let (Some(reason), Some(out)) = (window_unobserved(&missed, &late), last_late) {
+        missed_rounds_reported(c, &missed);
+        return Rounds::GatewayWindowMissed(out, reason);
+    }
     c.add(
         CheckKind::GroundTruth,
         format!("the request went out as 0-RTT early data within {EARLY_ROUNDS} rounds"),
         false,
         format!("missed {missed:?}"),
     );
-    None
+    Rounds::NoEarlyData
+}
+
+/// The gateway log warning for its HTTP/3 0-RTT method refusal.
+const H3_REFUSAL: &str = "Rejected HTTP/3 0-RTT request";
+
+/// Where the gateway checked a PUT that the client sent as accepted 0-RTT
+/// data. The client's evidence (offered, accepted by QUIC) does not say: the
+/// gateway classifies each stream from its own handshake state when it accepts
+/// it, and handles a 0-RTT stream it accepts after its handshake completed as
+/// 1-RTT (RFC 8470 section 6.4; the v0.9.8 catalog's note on
+/// `gateway.admission.early_data_rejected`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayWindow {
+    /// The gateway saw the stream while its handshake was pending: it answered
+    /// the first attempt 425 or logged its 0-RTT method refusal. The negative
+    /// path ran, and the strict checks apply.
+    Pending,
+    /// The gateway handled the stream after its handshake completed: one 200,
+    /// no retry, no `request.too_early`, exactly one backend PUT without
+    /// `Early-Data`, no refusal logged. A missed negative-test window.
+    Completed,
+    /// Neither shape, for example the PUT reached the backend as early data:
+    /// never a missed window; the strict checks judge (and fail) it.
+    Unexplained,
+}
+
+/// The facts that tell the gateway's windows apart: Anvil's attempts and
+/// finding, and independent ground truth (backend and gateway logs).
+struct PutFacts<'a> {
+    /// The status of each attempt, in order.
+    statuses: Vec<Option<u16>>,
+    /// Some attempt was Anvil's one retry after `425 Too Early`.
+    retried: bool,
+    /// Anvil reported `request.too_early`.
+    too_early_finding: bool,
+    /// `(method, early-data header)` of the backend requests since the PUT.
+    backend: &'a [(String, Option<String>)],
+    /// Gateway log lines refusing a 0-RTT PUT since the PUT.
+    refusals: usize,
+}
+
+fn gateway_window(f: &PutFacts) -> GatewayWindow {
+    if f.statuses.first() == Some(&Some(425)) || f.refusals > 0 {
+        return GatewayWindow::Pending;
+    }
+    let one_rtt_put = matches!(f.backend, [(m, None)] if m == "PUT");
+    if f.statuses == [Some(200)] && !f.retried && !f.too_early_finding && one_rtt_put {
+        GatewayWindow::Completed
+    } else {
+        GatewayWindow::Unexplained
+    }
+}
+
+fn put_window(env: &Env, r: &EarlyRound) -> (GatewayWindow, String) {
+    let seen = backend_requests(env, r.backend_from);
+    let refusals = gw_lines(&env.gateway, r.log_from, H3_REFUSAL).iter().filter(|l| l.contains("PUT")).count();
+    let a = &r.out.record.attempts;
+    let facts = PutFacts {
+        statuses: a.iter().map(|x| x.response_status).collect(),
+        retried: a.iter().any(|x| x.reason == AttemptReason::TooEarlyRetry),
+        too_early_finding: codes(&r.out).iter().any(|x| x == "request.too_early"),
+        backend: &seen,
+        refusals,
+    };
+    (gateway_window(&facts), format!("{} backend={seen:?} refusals={refusals}", line(&r.out)))
+}
+
+/// EARLY-002's gateway side: a 0-RTT PUT the gateway handled after its
+/// handshake misses the window under test.
+fn put_handled_after_handshake(env: &Env, r: &EarlyRound) -> Option<String> {
+    let (window, detail) = put_window(env, r);
+    (window == GatewayWindow::Completed).then_some(detail)
 }
 
 fn no_gateway_attribution(c: &mut Checks, o: &ExecutionOutput) {
@@ -339,7 +465,7 @@ fn ctrl(env: &Env) -> Fut<'_> {
 fn early001(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let Some(EarlyRound { out: o, backend_from: from, .. }) = send_in_0rtt(env, &mut c, "GET", &[]).await else {
+        let Rounds::Early(EarlyRound { out: o, backend_from: from, .. }) = send_in_0rtt(env, &mut c, "GET", &[], |_, _| None).await else {
             return Outcome { main: None, recovery: None, checks: c, operator_log: vec![] };
         };
         let ed = early(&o, 0);
@@ -393,9 +519,24 @@ fn early002(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         // Anvil's policy allows PUT in early data; the gateway's allows GET only.
-        let Some(EarlyRound { out: o, backend_from: from, log_from }) = send_in_0rtt(env, &mut c, "PUT", &["PUT"]).await else {
-            return Outcome { main: None, recovery: None, checks: c, operator_log: vec![] };
+        let r = match send_in_0rtt(env, &mut c, "PUT", &["PUT"], put_handled_after_handshake).await {
+            Rounds::Early(r) => r,
+            Rounds::GatewayWindowMissed(o, reason) => {
+                // The client's 0-RTT was never refused: not a pass, not a failure.
+                no_gateway_attribution(&mut c, &o);
+                c.skip(reason);
+                return Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] };
+            }
+            Rounds::NoEarlyData => return Outcome { main: None, recovery: None, checks: c, operator_log: vec![] },
         };
+        let (window, detail) = put_window(env, &r);
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway saw the 0-RTT PUT while its handshake was pending (it answered 425 or logged its refusal)",
+            window == GatewayWindow::Pending,
+            detail,
+        );
+        let EarlyRound { out: o, backend_from: from, log_from } = r;
         c.success(CheckKind::Recovery, &o);
         let a = &o.record.attempts;
         c.add(
@@ -429,7 +570,7 @@ fn early002(env: &Env) -> Fut<'_> {
             seen == vec![("PUT".to_string(), None)],
             format!("{seen:?}"),
         );
-        let lines = gw_lines(&env.gateway, log_from, "Rejected HTTP/3 0-RTT request");
+        let lines = gw_lines(&env.gateway, log_from, H3_REFUSAL);
         c.add(
             CheckKind::GroundTruth,
             "the gateway log records its 0-RTT method refusal",
@@ -743,4 +884,80 @@ async fn up() -> anyhow::Result<()> {
     harness::wait_for_shutdown().await?;
     stop(env).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(early_data: Option<&str>) -> (String, Option<String>) {
+        ("PUT".to_string(), early_data.map(str::to_string))
+    }
+
+    fn facts<'a>(
+        statuses: &[u16],
+        retried: bool,
+        too_early: bool,
+        backend: &'a [(String, Option<String>)],
+        refusals: usize,
+    ) -> PutFacts<'a> {
+        PutFacts { statuses: statuses.iter().map(|s| Some(*s)).collect(), retried, too_early_finding: too_early, backend, refusals }
+    }
+
+    /// Issue #221 (lab run 36557709775, EARLY-002-untrusted on v0.9.8): the
+    /// client offered the PUT as 0-RTT and QUIC accepted it, but the gateway
+    /// checked the stream after its handshake completed and handled it as
+    /// 1-RTT: one 200, no retry, no `request.too_early`, one backend PUT
+    /// without `Early-Data`, no refusal logged. A missed window, not a failure.
+    #[test]
+    fn a_0rtt_put_handled_after_the_handshake_is_a_missed_window() {
+        let backend = [put(None)];
+        assert_eq!(gateway_window(&facts(&[200], false, false, &backend, 0)), GatewayWindow::Completed);
+    }
+
+    /// The negative path: the gateway saw the stream while its handshake was
+    /// pending, answered 425 and logged its refusal; Anvil's one retry after
+    /// the handshake got 200 and is the only PUT the backend saw.
+    #[test]
+    fn a_425_or_a_refusal_log_shows_the_pending_window() {
+        let backend = [put(None)];
+        assert_eq!(gateway_window(&facts(&[425, 200], true, true, &backend, 1)), GatewayWindow::Pending);
+        // Either signal is enough to run the strict checks, which judge the rest.
+        assert_eq!(gateway_window(&facts(&[425], false, true, &[], 0)), GatewayWindow::Pending);
+        assert_eq!(gateway_window(&facts(&[200], false, false, &backend, 1)), GatewayWindow::Pending);
+    }
+
+    /// A gateway that processed the 0-RTT PUT as early data (the backend saw
+    /// `Early-Data: 1`), or any other shape, is never a missed window: the
+    /// strict checks run and fail it.
+    #[test]
+    fn early_processing_is_never_a_missed_window() {
+        let one = [put(None)];
+        let marked = [put(Some("1"))];
+        let twice = [put(None), put(None)];
+        let get = [("GET".to_string(), None)];
+        for (f, why) in [
+            (facts(&[200], false, false, &marked, 0), "forwarded as early data"),
+            (facts(&[200], false, false, &twice, 0), "the backend saw two PUTs"),
+            (facts(&[200], false, false, &[], 0), "the backend saw nothing"),
+            (facts(&[200], false, false, &get, 0), "the backend saw another method"),
+            (facts(&[200, 200], true, false, &one, 0), "a retry without a 425"),
+            (facts(&[200], false, true, &one, 0), "a 425 finding on a 200"),
+            (facts(&[500], false, false, &one, 0), "another status"),
+            (facts(&[], false, false, &one, 0), "no response"),
+        ] {
+            assert_eq!(gateway_window(&f), GatewayWindow::Unexplained, "{why}");
+        }
+    }
+
+    /// Out of rounds: a coverage limitation (a skip) only when the request did
+    /// travel as early data and the gateway handled it after its handshake;
+    /// never sending it as early data stays a failure.
+    #[test]
+    fn exhaustion_separates_an_unobserved_window_from_no_early_data() {
+        assert_eq!(window_unobserved(&[0, 1, 2, 3, 4, 5], &[]), None);
+        let reason = window_unobserved(&[1], &[0, 2, 3, 4, 5]).expect("a coverage limitation");
+        assert!(reason.contains("round(s) [0, 2, 3, 4, 5]") && reason.contains("round(s) [1]"), "{reason}");
+        assert!(reason.contains("not exercised within 6 rounds"), "{reason}");
+    }
 }

@@ -240,6 +240,21 @@
 
 ### Fixed
 
+- The failure lab's EARLY-002 no longer fails when the gateway handles the
+  0-RTT PUT after its own handshake completed. Ferrum Edge classifies each
+  HTTP/3 stream when it accepts it and handles a 0-RTT stream accepted after
+  its handshake as 1-RTT (RFC 8470 section 6.4), so the client's "offered and
+  accepted" evidence does not prove the gateway saw the request early; lab
+  run 36557709775 got one 200 there and failed. EARLY-002 now requires `425`,
+  the one retry on the same connection, `request.too_early` and the gateway's
+  refusal log only once the gateway saw the PUT while its handshake was
+  pending (the first attempt's `425` or the refusal log shows it). A round of
+  exactly the permitted shape (one 200, no retry, one backend PUT without
+  `Early-Data`, no refusal logged) is a missed window and the next round is
+  tried; if every round that sent it as early data was one, the scenario is
+  skipped with that reason, never passed. Any other shape, such as a PUT
+  that reached the backend as early data, still fails. Lab scenarios can now
+  report such a skip (`Checks::skip`) (#221).
 - The effective-request preview reports a multi-auth as varying per send
   when any of its profiles is HMAC, DPoP, JWT, WS-Security or JWT-SVID
   (nested sets included), and an SSE preview with such a multi-auth says

@@ -68,7 +68,7 @@ cache (the vault-lock path), so the trusted and untrusted passes behave alike.
 |---|---|---|---|
 | CTRL-EARLY | GET over HTTP/3, no opt-in | success; no early-data evidence; no ticket kept | backend saw the GET without `Early-Data` |
 | EARLY-001 | GET (fetches tickets), then GET with the opt-in | first: `no_ticket`, 2 tickets, `max_early_data_size` 4294967295; second: resumed, 0-RTT offered and **accepted** (154 bytes), `early_data.accepted` (confirmed, `client_to_peer`, replay note) | backend saw the 0-RTT GET with **`Early-Data: 1`**, the ticket GET without |
-| EARLY-002 | GET, then PUT in 0-RTT (Anvil's policy lists PUT; the gateway's only GET) | attempt 0: 0-RTT accepted by QUIC, answered **425**; attempt 1 `too_early_retry` on the **same connection**, not early, **200**; `request.too_early` (confirmed, scope unknown, names "HTTP 200") | backend saw exactly one PUT (the retry) without `Early-Data`; gateway log `Rejected HTTP/3 0-RTT request: method PUT …` |
+| EARLY-002 | GET, then PUT in 0-RTT (Anvil's policy lists PUT; the gateway's only GET) | once the gateway saw the PUT while its handshake was pending: attempt 0: 0-RTT accepted by QUIC, answered **425**; attempt 1 `too_early_retry` on the **same connection**, not early, **200**; `request.too_early` (confirmed, scope unknown, names "HTTP 200"). A round the gateway handled after its handshake is a missed window (see *Gateway window*) | backend saw exactly one PUT (the retry) without `Early-Data`; gateway log `Rejected HTTP/3 0-RTT request: method PUT …` |
 | EARLY-003 | the same GET pair against `early-off` | tickets with `max_early_data_size` 0; second GET resumed, not offered (`ticket_without_early_data`), delivered after the handshake; `early_data.ticket_without_early_data` | backend saw both GETs, neither marked |
 | EARLY-004 | GET pair over TLS 1.3 / TCP (HTTP/1.1-only) to the HTTPS listener | resumed TLS 1.3 session (`resumed`, verification from the ticket's handshake), tickets never allow early data; `early_data.ticket_without_early_data` | backend saw both GETs, neither marked |
 | EARLY-005 | GET, then POST with the opt-in | POST not eligible: resumed, sent after the handshake (`method_not_eligible`), no 425 | backend saw the POST without `Early-Data` |
@@ -83,6 +83,23 @@ the request itself inside the 0-RTT window, so they try up to 6 rounds (each fro
 cache); a round that missed the window must be reported as `handshake_completed_first`, never as
 early data, and the backend must agree. In the recorded runs no round was missed (HTTP/3 setup
 ~20 µs, request written ~0.1 ms after `connect`).
+
+**Gateway window (EARLY-002).** The client's evidence (0-RTT offered and accepted by QUIC) does not
+show where the gateway checked the request. The gateway classifies each HTTP/3 stream from its own
+handshake state when it accepts it, and a 0-RTT stream it accepts after its handshake completed is
+handled as 1-RTT (v0.9.8 `src/http3/server.rs` 2130–2165 and `src/http3/peer_identity.rs` 130–142;
+RFC 8470 §6.4; the catalog note on `gateway.admission.early_data_rejected`). Lab run 36557709775 saw
+this on Ubuntu: one 200 for the 0-RTT PUT, which reached the backend once without `Early-Data`. So
+EARLY-002 requires 425 and the retry only once the gateway saw the PUT while its handshake was
+pending, which the first attempt's 425 or the gateway's refusal log shows; the strict checks
+(425, one retry on the same connection, 200, one backend PUT, `request.too_early`, the refusal log)
+then all apply. A round of exactly the permitted shape (one 200, no retry, no `request.too_early`,
+exactly one backend PUT without `Early-Data`, no refusal logged) is recorded as a missed window and
+the next round is tried. Any other shape, such as a PUT that reached the backend with `Early-Data: 1`,
+goes to the strict checks and fails. When the gateway handled the PUT after its handshake in every
+round that sent it as early data, EARLY-002 is **skipped** with that reason: the refusal was not
+exercised, which is neither a pass nor a failure. No round sending the PUT as early data at all still
+fails.
 
 **Gateway race before v0.9.8.** v0.9.5 and v0.9.7 can classify an HTTP/3 stream accepted before the
 gateway's own handshake-complete signal as early data (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8
