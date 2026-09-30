@@ -57,6 +57,15 @@ against it).
     where the explanation quotes it) get the same URL redaction.
   - A collection run drops a content-encoded response body it cannot check
     for sensitive run values.
+  - Session transcript previews (text and hex), SSE event ids and types, and
+    the effective-request body preview are redacted before they are cut to
+    their display size, over the text up to 64 KiB past the cut. A secret
+    that crosses the cut is replaced whole, and the preview ends with the
+    redaction marker where it starts, so a peer that echoes a credential
+    cannot align it to leave most of it in the record. A secret form longer
+    than 64 KiB that crosses a cut is not covered. Diagnostic evidence
+    excerpts are still cut before the record's redaction runs (see Residual
+    risks).
 - **Redirect hops:** every hop is evaluated for its own target. Unless
   `redirects.forward_credentials_cross_origin` is on, once a redirect leaves
   the request's origin (scheme, host or port):
@@ -114,6 +123,25 @@ against it).
   none of the tickets it receives afterwards. Outside the early-data opt-in
   no ticket and no TLS 1.2 session is kept at all (such a connection could
   never resume one): only the key-exchange group each server chose.
+- **Hostile or stalled session peers:** a WebSocket, SSE, raw TCP/TLS,
+  UDP/DTLS, HBONE or MASQUE peer cannot make a session hold unbounded
+  memory or outlive its cancellation and deadlines.
+  - Every transcript entry is bounded (a 2 KiB preview, 256 bytes of SSE
+    event id and type), so the retained history is bounded however large the
+    messages are. The SSE parser refuses an `id:` or `event:` value over
+    4 KiB as a local limit, shares one last-event-id buffer across events
+    instead of copying it into each, and parses a chunk only until
+    `max_events` events are in hand.
+  - Every write, flush and half-close a session awaits (scripted messages,
+    interactive commands, automatic Pong and Close frames, DTLS handshake
+    flights and datagrams, HBONE records and MASQUE capsules waiting for
+    flow-control credit) is raced against cancellation and the deadline that
+    applies to it (the total deadline for automation, the DTLS handshake
+    deadline, the raw TCP write deadline). An interrupted write drops or
+    resets the connection instead of writing more. A graceful Close frame or
+    `close_notify` has its own short bound (the WebSocket close wait, or
+    250 ms at cancel and at the deadline). Interactive sessions have no total
+    deadline: cancel (or a profile lock) is what ends them.
 - **Accidental load against third parties:** explicit preflight
   acknowledgement, destination list, imported plans untrusted, bounded
   arrivals and abort rules.
@@ -348,5 +376,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
+- Diagnostic evidence excerpts (a JSON `error`, a GraphQL or SOAP fault
+  message, a tunnel refusal body, a Ferrum Edge body signature) are cut to
+  160–300 characters before the record's secret-value redaction runs, so a
+  secret the response echoes across that cut can leave a prefix in the
+  finding.
 - Unsigned development builds cannot prove provenance; release signing is
   blocked on owner credentials (see [release.md](release.md)).

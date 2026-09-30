@@ -375,6 +375,32 @@ async fn send_all<C: DatagramChannel>(
     Ok(())
 }
 
+/// [`send_all`] raced against cancellation and `deadline`: a path that stops
+/// taking datagrams (a tunnel withholding flow-control credit) must not hold
+/// the handshake or the exchange past either. `on_deadline` is the failure
+/// when the deadline passes first. The caller treats the path as ended, as
+/// a datagram may have been partly handed to it.
+async fn send_bounded<C: DatagramChannel>(
+    chan: &mut C,
+    outs: &[Out],
+    notes: &mut PathNotes,
+    facts: &mut SessionFacts,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+    on_deadline: impl FnOnce() -> TransportFailure,
+) -> Result<(), TransportFailure> {
+    match guarded(send_all(chan, outs, notes, facts), cancel, deadline).await {
+        Ok(r) => r,
+        Err(Interrupted::Canceled) => {
+            Err(TransportFailure::new(Phase::Session, FailureKind::Canceled, "canceled while the datagram path was not taking datagrams"))
+        }
+        Err(Interrupted::Deadline) => Err(on_deadline()),
+    }
+}
+
+/// How long the closing `close_notify` may take to be handed to the path.
+const CLOSE_NOTIFY_WRITE: Duration = Duration::from_millis(250);
+
 pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
     let rec = Recorder::new(0, events.clone());
     events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
@@ -664,6 +690,14 @@ async fn exchange<C: DatagramChannel>(
     let mut peer_chain: Vec<CertificateSummary> = vec![];
     let mut peer_spiffe_id: Option<String> = None;
     let mut cert_requested = false;
+    let hs_timeout = || {
+        TransportFailure::new(
+            Phase::DtlsHandshake,
+            FailureKind::DtlsHandshakeTimeout,
+            format!("no DTLS handshake completed within {hs_ms} ms; UDP gives no signal whether the datagrams reached a DTLS listener"),
+        )
+        .with_deadline(Some(hs_ms))
+    };
     enum HsEv {
         In(Inbound),
         Timer,
@@ -685,7 +719,8 @@ async fn exchange<C: DatagramChannel>(
                 }
             }
         }
-        if let Err(mut f) = send_all(chan, &outs, &mut notes, facts).await {
+        // The flight goes out within the handshake deadline too.
+        if let Err(mut f) = send_bounded(chan, &outs, &mut notes, facts, cancel, Some(hs_deadline), hs_timeout).await {
             f.phase = Phase::DtlsHandshake;
             break Err(f);
         }
@@ -743,16 +778,7 @@ async fn exchange<C: DatagramChannel>(
                     break Err(classify_dimpl(&e, hs_ms));
                 }
             }
-            HsEv::Deadline => {
-                break Err(TransportFailure::new(
-                    Phase::DtlsHandshake,
-                    FailureKind::DtlsHandshakeTimeout,
-                    format!(
-                        "no DTLS handshake completed within {hs_ms} ms; UDP gives no signal whether the datagrams reached a DTLS listener"
-                    ),
-                )
-                .with_deadline(Some(hs_ms)));
-            }
+            HsEv::Deadline => break Err(hs_timeout()),
             HsEv::Canceled => {
                 break Err(TransportFailure::new(Phase::DtlsHandshake, FailureKind::Canceled, "canceled during the DTLS handshake"));
             }
@@ -821,6 +847,11 @@ async fn exchange<C: DatagramChannel>(
     let mut inbox = Inbox::default();
     // The path ended: nothing more can be sent through it (no close_notify).
     let mut path_ended = false;
+    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
+    let total_timeout = || {
+        TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, "the total deadline elapsed during the DTLS exchange")
+            .with_deadline(plan.timeouts.total_ms)
+    };
     for d in &plan.datagrams {
         if let Err(e) = dtls.send_application_data(d) {
             failure = Some(TransportFailure::new(
@@ -831,7 +862,7 @@ async fn exchange<C: DatagramChannel>(
             break;
         }
         let outs = drain(&mut dtls, &mut next_timeout);
-        if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+        if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
             failure = Some(f);
             path_ended = true;
             break;
@@ -841,7 +872,6 @@ async fn exchange<C: DatagramChannel>(
         tr.data(Direction::Sent, "datagram", d);
         inbox.record(&outs, &mut tr, facts);
     }
-    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
     let window = Duration::from_millis(plan.response_window_ms);
     let mut window_end = Instant::now() + window;
     enum Ev {
@@ -871,7 +901,7 @@ async fn exchange<C: DatagramChannel>(
                     break;
                 }
                 let outs = drain(&mut dtls, &mut next_timeout);
-                if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+                if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                     failure = Some(f);
                     path_ended = true;
                 }
@@ -896,7 +926,7 @@ async fn exchange<C: DatagramChannel>(
                 next_timeout = None;
                 if dtls.handle_timeout(Instant::now()).is_ok() {
                     let outs = drain(&mut dtls, &mut next_timeout);
-                    if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+                    if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                         failure = Some(f);
                         path_ended = true;
                     }
@@ -922,7 +952,7 @@ async fn exchange<C: DatagramChannel>(
                 if let Some(p) = payload {
                     if dtls.send_application_data(&p).is_ok() {
                         let outs = drain(&mut dtls, &mut next_timeout);
-                        if let Err(f) = send_all(chan, &outs, &mut notes, facts).await {
+                        if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                             failure = Some(f);
                             path_ended = true;
                         } else {
@@ -945,10 +975,11 @@ async fn exchange<C: DatagramChannel>(
             Ev::Canceled => failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the DTLS exchange was canceled")),
         }
     }
-    // Graceful close_notify (not retransmitted per RFC 6347 §4.2.7).
+    // Graceful close_notify (not retransmitted per RFC 6347 §4.2.7), within
+    // its own short bound: the path may not be taking datagrams.
     if !inbox.peer_closed && !path_ended && dtls.close().is_ok() {
         let outs = drain(&mut dtls, &mut next_timeout);
-        if send_all(chan, &outs, &mut notes, facts).await.is_ok() {
+        if tokio::time::timeout(CLOSE_NOTIFY_WRITE, send_all(chan, &outs, &mut notes, facts)).await.is_ok_and(|r| r.is_ok()) {
             tr.control(Direction::Sent, "close_notify", b"");
         }
     }

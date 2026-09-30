@@ -783,6 +783,29 @@
 
 ### Security
 
+- Session transcript previews (text and hex), SSE event ids and types, and
+  the effective-request body preview are now redacted before they are cut
+  to their display size, not after. A known secret that crosses the cut is
+  replaced whole, and the preview ends with the redaction marker where the
+  secret starts, instead of keeping all but the part past the cut in live
+  events and stored records (GHSA-jjvp-frqf-xw3p). Diagnostic evidence
+  excerpts are not covered yet (see the threat model's residual risks).
+- An SSE stream can no longer make a session retain metadata out of
+  proportion to its limits (GHSA-gwfc-m32p-636g). An `id:` or `event:`
+  value over 4 KiB stops the stream as a local limit; events share the last
+  event id instead of copying it; a chunk is parsed only until `max_events`
+  events are in hand; and a transcript entry keeps at most 256 bytes of an
+  event id or type (a longer one ends with `…`).
+- A session peer that stops reading, or withholds HTTP/2 or QUIC
+  flow-control credit, can no longer keep a session running after it is
+  canceled (or the profile locks) or past its deadline
+  (GHSA-24m4-27gj-gvmx). WebSocket scripted messages, interactive commands
+  and automatic Pong and Close frames, raw TCP interactive sends and
+  half-closes, DTLS handshake flights and datagrams (over UDP, HBONE or
+  MASQUE), HBONE interactive datagrams and MASQUE capsules are raced
+  against cancellation and the applicable deadline; an interrupted write
+  drops or resets the connection. Graceful Close frames and `close_notify`
+  have their own short bound.
 - A secret variable used only in what a session sends once it is open (a
   WebSocket message or subprotocol, a gRPC message, method or metadata
   value, an SSE `Last-Event-ID`, a raw TCP or UDP payload) is now redacted

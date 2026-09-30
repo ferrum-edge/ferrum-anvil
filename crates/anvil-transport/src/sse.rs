@@ -5,10 +5,15 @@
 //!   buffered unboundedly: raw bytes are captured only up to the capture
 //!   limit and the transcript keeps a bounded event history.
 //! * Parser bounds: one line may hold at most the line bound
-//!   (`min(max_response_bytes, 1 MiB)`, at least 1 KiB) and one event's data
-//!   (its `data:` lines joined with newlines) at most four times that. Past
-//!   either bound the attempt stops with `response_too_large_local`: an
-//!   event is never dispatched with some of its data lines dropped.
+//!   (`min(max_response_bytes, 1 MiB)`, at least 1 KiB), one event's data
+//!   (its `data:` lines joined with newlines) at most four times that, and an
+//!   `id:` or `event:` value at most [`MAX_EVENT_METADATA_BYTES`]. Past any
+//!   bound the attempt stops with `response_too_large_local`: an event is
+//!   never dispatched with some of its data lines dropped, nor with its id or
+//!   type shortened. Every event shares the one last-event-id buffer (it is
+//!   never copied per event), and a chunk is parsed only until `max_events`
+//!   events are in hand, so neither a large id nor a chunk of many tiny
+//!   events multiplies into allocations the limits do not bound.
 //! * A leading UTF-8 BOM is stripped wherever the transport splits its three
 //!   bytes; only the start of each connection's stream is checked.
 //! * Stop conditions are explicit: `max_events`, an idle timeout (no bytes at
@@ -64,11 +69,17 @@ use tokio_util::sync::CancellationToken;
 /// server chose it and it may hold anything.
 pub const INVALID_ID_NOTE: &str = "not reconnected: the server sent an event id that is not a valid Last-Event-ID header value (it holds a control character), and reconnecting without Last-Event-ID would ask the server to start the stream over";
 
+/// The longest `id:` or `event:` value the parser accepts, in bytes. Longer
+/// values stop the stream (local limit) instead of being cut: a cut id could
+/// not be sent back as `Last-Event-ID`.
+pub const MAX_EVENT_METADATA_BYTES: usize = 4 * 1024;
+
 /// One dispatched event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
-    /// The last event id in effect when the event was dispatched.
-    pub id: Option<String>,
+    /// The last event id in effect when the event was dispatched (shared
+    /// with the parser, not copied).
+    pub id: Option<Arc<str>>,
     pub event_type: String,
     pub data: String,
 }
@@ -81,7 +92,7 @@ pub struct SseParser {
     has_data: bool,
     event_type: String,
     /// Last event ID buffer (persists across events).
-    pub last_event_id: Option<String>,
+    pub last_event_id: Option<Arc<str>>,
     /// Reconnection time requested by the server (`retry:`).
     pub retry_ms: Option<u64>,
     bom_checked: bool,
@@ -118,10 +129,21 @@ impl SseParser {
     }
 
     /// Feed bytes; dispatched events are appended to `out`. Returns an error
-    /// when a single line exceeds the line bound or one event's data exceeds
-    /// [`SseParser::max_event_data`]; the oversized event is not dispatched
+    /// when a single line exceeds the line bound, one event's data exceeds
+    /// [`SseParser::max_event_data`] or an id or type exceeds
+    /// [`MAX_EVENT_METADATA_BYTES`]; the oversized event is not dispatched
     /// and the stream must not be fed further without [`SseParser::reset_stream`].
-    pub fn feed(&mut self, mut chunk: &[u8], out: &mut Vec<SseEvent>) -> Result<(), String> {
+    pub fn feed(&mut self, chunk: &[u8], out: &mut Vec<SseEvent>) -> Result<(), String> {
+        self.feed_limited(chunk, out, usize::MAX)
+    }
+
+    /// [`SseParser::feed`] that stops parsing as soon as `out` holds `limit`
+    /// events: the rest of the chunk is not parsed (and no event is built
+    /// for it), so the caller must end the stream then.
+    pub fn feed_limited(&mut self, mut chunk: &[u8], out: &mut Vec<SseEvent>, limit: usize) -> Result<(), String> {
+        if out.len() >= limit {
+            return Ok(());
+        }
         if !self.bom_checked {
             // The BOM may be split across chunks: hold back a matching prefix
             // until the stream's first bytes decide it.
@@ -140,15 +162,18 @@ impl SseParser {
                 // Not a BOM: the held-back bytes are ordinary stream bytes.
                 self.bom_checked = true;
                 let held = std::mem::take(&mut self.bom_matched);
-                self.feed_bytes(&BOM[..held], out)?;
+                self.feed_bytes(&BOM[..held], out, limit)?;
                 chunk = &chunk[i..];
             }
         }
-        self.feed_bytes(chunk, out)
+        self.feed_bytes(chunk, out, limit)
     }
 
-    fn feed_bytes(&mut self, chunk: &[u8], out: &mut Vec<SseEvent>) -> Result<(), String> {
+    fn feed_bytes(&mut self, chunk: &[u8], out: &mut Vec<SseEvent>, limit: usize) -> Result<(), String> {
         for &b in chunk {
+            if out.len() >= limit {
+                return Ok(());
+            }
             if self.pending_cr {
                 self.pending_cr = false;
                 if b == b'\n' {
@@ -196,6 +221,12 @@ impl SseParser {
             None => (line.clone(), String::new()),
         };
         match field.as_str() {
+            "event" | "id" if value.len() > MAX_EVENT_METADATA_BYTES => {
+                self.data.clear();
+                self.has_data = false;
+                self.event_type.clear();
+                return Err(format!("an event-stream {field} field exceeded {MAX_EVENT_METADATA_BYTES} bytes"));
+            }
             "event" => self.event_type = value,
             "data" => {
                 // `self.data` already holds the newline joining this line to
@@ -212,7 +243,7 @@ impl SseParser {
                 self.has_data = true;
             }
             // An id containing NUL is ignored (spec); a non-numeric retry too.
-            "id" if !value.contains('\0') => self.last_event_id = Some(value),
+            "id" if !value.contains('\0') => self.last_event_id = Some(Arc::from(value)),
             "retry" if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => self.retry_ms = value.parse().ok(),
             _ => {}
         }
@@ -413,7 +444,7 @@ fn sign_send(plan: &SsePlan) -> Result<Option<Vec<(HeaderName, HeaderValue)>>, T
 /// Request headers for an event stream, from `fields` (the send's headers,
 /// auth included). `pseudo` (HTTP/2, HTTP/3) drops connection-specific
 /// fields; HTTP/1.1 gets a `Host`.
-fn request_headers(plan: &SsePlan, fields: &[(HeaderName, HeaderValue)], pseudo: bool, last_event_id: Option<&String>) -> HeaderMap {
+fn request_headers(plan: &SsePlan, fields: &[(HeaderName, HeaderValue)], pseudo: bool, last_event_id: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (n, v) in fields {
         if pseudo
@@ -448,7 +479,7 @@ async fn open_tcp(
     fields: &[(HeaderName, HeaderValue)],
     rec: &mut Recorder,
     obs: &mut AttemptObservation,
-    last_event_id: Option<&String>,
+    last_event_id: Option<&str>,
     cancel: &CancellationToken,
     total_deadline: Option<Instant>,
 ) -> Result<Opened, (TransportFailure, DispatchState)> {
@@ -559,7 +590,7 @@ async fn open_h3(
     fields: &[(HeaderName, HeaderValue)],
     rec: &mut Recorder,
     obs: &mut AttemptObservation,
-    last_event_id: Option<&String>,
+    last_event_id: Option<&str>,
     cancel: &CancellationToken,
     total_deadline: Option<Instant>,
 ) -> Result<Opened, (TransportFailure, DispatchState)> {
@@ -667,7 +698,7 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
     let t0 = Instant::now();
     let mut tr = Transcript::new(t0, plan.transcript, events.clone(), plan.redact.clone());
     let mut parser = SseParser::new((plan.limits.max_response_bytes as usize).min(1 << 20));
-    parser.last_event_id = plan.last_event_id.clone();
+    parser.last_event_id = plan.last_event_id.as_deref().map(Arc::from);
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
     let mut attempts: Vec<AttemptOutput> = Vec::new();
     let mut facts = SessionFacts::default();
@@ -722,9 +753,9 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
         };
         let last_id = parser.last_event_id.clone();
         let opened_attempt = if use_h3 {
-            open_h3(plan, fields, &mut rec, &mut obs, last_id.as_ref(), cancel, total_deadline).await
+            open_h3(plan, fields, &mut rec, &mut obs, last_id.as_deref(), cancel, total_deadline).await
         } else {
-            open_tcp(plan, fields, &mut rec, &mut obs, last_id.as_ref(), cancel, total_deadline).await
+            open_tcp(plan, fields, &mut rec, &mut obs, last_id.as_deref(), cancel, total_deadline).await
         };
         let Opened { status, version, headers: resp_headers_map, mut source } = match opened_attempt {
             Ok(o) => o,
@@ -799,12 +830,18 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
                             continue;
                         }
                         // Events completed before a limit error in the same
-                        // chunk are still recorded.
-                        let fed = parser.feed(&d, &mut batch);
+                        // chunk are still recorded. The chunk is parsed only
+                        // until the events still wanted are in hand.
+                        let wanted = if plan.max_events > 0 {
+                            usize::try_from((plan.max_events as u64).saturating_sub(total_events)).unwrap_or(usize::MAX)
+                        } else {
+                            usize::MAX
+                        };
+                        let fed = parser.feed_limited(&d, &mut batch, wanted);
                         let mut stop = false;
                         for ev in batch.drain(..) {
                             total_events += 1;
-                            tr.event(Direction::Received, "event", ev.data.as_bytes(), ev.id.clone(), Some(ev.event_type.clone()));
+                            tr.event(Direction::Received, "event", ev.data.as_bytes(), ev.id.as_deref(), Some(ev.event_type.as_str()));
                             if plan.max_events > 0 && total_events >= plan.max_events as u64 {
                                 stop = true;
                                 break;
@@ -898,7 +935,7 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
         facts.notes.push(format!(
             "reconnecting after an abnormal end in {} ms with Last-Event-ID {}",
             delay.as_millis(),
-            parser.last_event_id.clone().unwrap_or_else(|| "(none)".into())
+            parser.last_event_id.as_deref().unwrap_or("(none)")
         ));
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -941,6 +978,63 @@ mod tests {
         assert_eq!(ev[0], SseEvent { id: Some("7".into()), event_type: "tick".into(), data: "a\nb".into() });
         assert_eq!(ev[1], SseEvent { id: Some("7".into()), event_type: "message".into(), data: "c".into() }, "id persists; default type");
         assert_eq!(p.retry_ms, Some(2500));
+    }
+
+    #[test]
+    fn ids_and_types_past_the_metadata_bound_stop_the_stream() {
+        let long = "i".repeat(MAX_EVENT_METADATA_BYTES + 1);
+        for field in ["id", "event"] {
+            let mut p = SseParser::new(1 << 20);
+            let mut out = vec![];
+            p.feed(b"data: before\n\n", &mut out).unwrap();
+            let err = p.feed(format!("{field}: {long}\ndata: after\n\n").as_bytes(), &mut out).unwrap_err();
+            assert!(err.contains(&format!("{field} field exceeded {MAX_EVENT_METADATA_BYTES} bytes")), "{err}");
+            assert_eq!(out.len(), 1, "{field}: the event after the oversized field is never dispatched");
+            assert_eq!(out[0].data, "before");
+            assert_eq!(p.last_event_id, None, "{field}: the oversized id is not kept");
+        }
+        // Exactly at the bound: accepted whole, never cut.
+        let at = "j".repeat(MAX_EVENT_METADATA_BYTES);
+        let mut p = SseParser::new(1 << 20);
+        let mut ev = vec![];
+        p.feed(format!("id: {at}\nevent: {at}\ndata: x\n\n").as_bytes(), &mut ev).unwrap();
+        assert_eq!(ev[0].id.as_deref(), Some(at.as_str()));
+        assert_eq!(ev[0].event_type, at);
+        assert_eq!(p.last_event_id.as_deref(), Some(at.as_str()));
+    }
+
+    #[test]
+    fn every_event_shares_the_last_event_id_instead_of_copying_it() {
+        let id = "k".repeat(MAX_EVENT_METADATA_BYTES);
+        let mut chunk = format!("id: {id}\n").into_bytes();
+        for _ in 0..1_000 {
+            chunk.extend_from_slice(b"data:\n\n");
+        }
+        let mut p = SseParser::new(1 << 20);
+        let mut out = vec![];
+        p.feed(&chunk, &mut out).unwrap();
+        assert_eq!(out.len(), 1_000);
+        let shared = p.last_event_id.clone().unwrap();
+        assert!(out.iter().all(|e| e.id.as_ref().is_some_and(|i| Arc::ptr_eq(i, &shared))), "one id buffer for every event");
+    }
+
+    #[test]
+    fn a_limited_feed_builds_only_the_events_wanted() {
+        let mut chunk = b"id: 1\n".to_vec();
+        for i in 0..10_000 {
+            chunk.extend_from_slice(format!("data: {i}\n\n").as_bytes());
+        }
+        let mut p = SseParser::new(1 << 20);
+        let mut out = vec![];
+        p.feed_limited(&chunk, &mut out, 1).unwrap();
+        assert_eq!(out.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["0"], "parsing stops at the limit");
+        p.feed_limited(b"data: more\n\n", &mut out, 1).unwrap();
+        assert_eq!(out.len(), 1, "nothing is parsed once the limit is reached");
+        // Unlimited: every event.
+        let mut p = SseParser::new(1 << 20);
+        let mut all = vec![];
+        p.feed(&chunk, &mut all).unwrap();
+        assert_eq!(all.len(), 10_000);
     }
 
     #[test]

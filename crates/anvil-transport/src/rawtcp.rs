@@ -166,6 +166,39 @@ enum Stop {
     Failed(TransportFailure, ClosedBy),
 }
 
+/// What bounds a write or a half-close: cancellation, the write deadline and
+/// the total deadline. A peer that stops reading must not hold the session.
+#[derive(Clone, Copy)]
+struct WriteBound<'a> {
+    cancel: &'a CancellationToken,
+    timeouts: &'a Timeouts,
+    total_deadline: Option<Instant>,
+}
+
+impl WriteBound<'_> {
+    /// Run `fut` within the bound; `Err` is how the session stops (the
+    /// interrupted write may have been partly sent).
+    async fn run<F: Future>(&self, fut: F, what: &str) -> Result<F::Output, Stop> {
+        let deadline = earliest(self.total_deadline, deadline_from(self.timeouts.request_write_ms));
+        guarded(fut, self.cancel, deadline).await.map_err(|i| self.stop(i, what))
+    }
+
+    fn stop(&self, i: Interrupted, what: &str) -> Stop {
+        if i == Interrupted::Canceled {
+            let f = TransportFailure::new(Phase::Session, FailureKind::Canceled, format!("canceled while {what}"));
+            return Stop::Failed(f, ClosedBy::Client);
+        }
+        if self.total_deadline.is_some_and(|d| Instant::now() >= d) {
+            let message = format!("the total deadline elapsed while {what} (peer not reading?)");
+            let f = TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, message).with_deadline(self.timeouts.total_ms);
+            return Stop::Failed(f, ClosedBy::Timeout);
+        }
+        let message = format!("the write deadline elapsed while {what} (peer not reading?)");
+        let ms = self.timeouts.request_write_ms;
+        Stop::Failed(TransportFailure::new(Phase::Session, FailureKind::RequestWriteTimeout, message).with_deadline(ms), ClosedBy::Client)
+    }
+}
+
 pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
     let interactive = commands.is_some();
     let mut rec = Recorder::new(0, events.clone());
@@ -238,6 +271,7 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
         tr.note("note", "expect_frames is ignored without a framing preset: TCP has no message boundaries");
     }
     let mut stop: Option<Stop> = None;
+    let bound = WriteBound { cancel, timeouts: &plan.timeouts, total_deadline };
 
     // ---- scripted sends ----
     for (payload, wire) in &frames {
@@ -272,12 +306,13 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
         }
     }
     if stop.is_none() && plan.half_close_after_send {
-        match wr.shutdown().await {
-            Ok(()) => {
+        match bound.run(wr.shutdown(), "half-closing the write side").await {
+            Ok(Ok(())) => {
                 half_closed = true;
                 tr.control(Direction::Sent, "half_close", b"write side closed (FIN); still reading");
             }
-            Err(e) => tr.note("error", &format!("half-close failed: {e}")),
+            Ok(Err(e)) => tr.note("error", &format!("half-close failed: {e}")),
+            Err(s) => stop = Some(s),
         }
     }
 
@@ -346,20 +381,21 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
             }
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    send_cmd(&mut wr, &mut tr, plan.framing, kind, text.as_bytes(), &mut bytes_sent, &mut stop, half_closed).await
+                    send_cmd(&mut wr, &mut tr, plan.framing, kind, text.as_bytes(), &mut bytes_sent, &mut stop, half_closed, &bound).await
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
-                    Ok(b) => send_cmd(&mut wr, &mut tr, plan.framing, kind, &b, &mut bytes_sent, &mut stop, half_closed).await,
+                    Ok(b) => send_cmd(&mut wr, &mut tr, plan.framing, kind, &b, &mut bytes_sent, &mut stop, half_closed, &bound).await,
                     Err(e) => tr.note("error", &format!("payload not sent: {e}")),
                 },
                 Some(SessionCommand::HalfClose) => {
                     if !half_closed {
-                        match wr.shutdown().await {
-                            Ok(()) => {
+                        match bound.run(wr.shutdown(), "half-closing the write side").await {
+                            Ok(Ok(())) => {
                                 half_closed = true;
                                 tr.control(Direction::Sent, "half_close", b"write side closed (FIN); still reading");
                             }
-                            Err(e) => tr.note("error", &format!("half-close failed: {e}")),
+                            Ok(Err(e)) => tr.note("error", &format!("half-close failed: {e}")),
+                            Err(s) => stop = Some(s),
                         }
                     }
                 }
@@ -430,6 +466,7 @@ async fn send_cmd<W: tokio::io::AsyncWrite + Unpin>(
     bytes_sent: &mut u64,
     stop: &mut Option<Stop>,
     half_closed: bool,
+    bound: &WriteBound<'_>,
 ) {
     if half_closed {
         tr.note("error", "payload not sent: the write side is already half-closed");
@@ -442,17 +479,17 @@ async fn send_cmd<W: tokio::io::AsyncWrite + Unpin>(
             return;
         }
     };
-    match async {
+    let written = async {
         wr.write_all(&wire).await?;
         wr.flush().await
-    }
-    .await
-    {
-        Ok(()) => {
+    };
+    match bound.run(written, "writing the payload").await {
+        Err(s) => *stop = Some(s),
+        Ok(Ok(())) => {
             *bytes_sent += wire.len() as u64;
             tr.data(Direction::Sent, kind, payload);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let mut f = TransportFailure::new(Phase::Session, FailureKind::RequestWriteFailed, format!("writing the payload failed: {e}"));
             f.io_error_kind = Some(format!("{:?}", e.kind()));
             *stop = Some(Stop::Failed(f, ClosedBy::Abnormal));
@@ -477,6 +514,80 @@ mod tests {
             assert_eq!(got, vec![Bytes::from_static(b"alpha"), Bytes::from_static(b"beta")], "{framing:?}");
             assert!(d.leftover().is_empty());
         }
+    }
+
+    /// A loopback peer that accepts the connection and never reads from it.
+    async fn peer_that_never_reads() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(sock);
+        });
+        (addr, held)
+    }
+
+    fn plan(addr: std::net::SocketAddr, request_write_ms: Option<u64>) -> TcpPlan {
+        TcpPlan {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            tls: None,
+            alpn: vec![],
+            proxy: None,
+            dns: DnsConfig::default(),
+            timeouts: Timeouts { request_write_ms, total_ms: None, ..Timeouts::default() },
+            framing: TcpFraming::None,
+            payloads: vec![],
+            half_close_after_send: false,
+            read_idle_ms: 60_000,
+            max_read_bytes: 1 << 20,
+            expect_frames: 0,
+            display_url: format!("tcp://{addr}"),
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            proxy_header: None,
+        }
+    }
+
+    /// An interactive send far larger than the socket buffers of a peer that never reads.
+    async fn stalled_send(plan: &TcpPlan, cancel: &CancellationToken) -> SessionOutput {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(SessionCommand::SendText { text: "z".repeat(32 << 20) }).await.unwrap();
+        let session = run(plan, &EventCtx::none(), cancel, Some(rx));
+        let out = tokio::time::timeout(Duration::from_secs(10), session).await.expect("the session must end without the peer reading");
+        drop(tx);
+        out
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_interactive_send_the_peer_never_reads() {
+        let (addr, held) = peer_that_never_reads().await;
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            c.cancel();
+        });
+        // No write deadline: only the cancel can end the send.
+        let out = stalled_send(&plan(addr, None), &cancel).await;
+        assert_eq!(out.attempts[0].observation.failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled));
+        held.abort();
+    }
+
+    #[tokio::test]
+    async fn the_write_deadline_ends_an_interactive_send_the_peer_never_reads() {
+        let (addr, held) = peer_that_never_reads().await;
+        let out = stalled_send(&plan(addr, Some(300)), &CancellationToken::new()).await;
+        assert_eq!(out.attempts[0].observation.failure.as_ref().map(|f| f.kind), Some(FailureKind::RequestWriteTimeout));
+        match out.status {
+            ProtocolStatus::Tcp { bytes_sent, closed_by, .. } => {
+                assert_eq!(bytes_sent, 0, "the stalled payload is not counted as sent");
+                assert_eq!(closed_by, ClosedBy::Client);
+            }
+            other => panic!("not a TCP status: {other:?}"),
+        }
+        held.abort();
     }
 
     #[test]
