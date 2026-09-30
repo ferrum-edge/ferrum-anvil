@@ -789,9 +789,7 @@ mod tests {
         let h = anvil_storage::vault::read_header(&s.dir).unwrap();
         let app = App::open(s.dir, h, dek).unwrap();
         let a = app.spec_import(ADMIN.as_bytes(), "a.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
-        let b = app
-            .spec_import(ADMIN_WITH_EXTRA.as_bytes(), "b.json", &ImportOptions::default(), SpecTarget::NewWorkspace)
-            .unwrap();
+        let b = app.spec_import(ADMIN_WITH_EXTRA.as_bytes(), "b.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
         let b_namespace = app.spec_source(&b.import_id).unwrap().source.id_namespace;
         let b_health = app.requests(&b.workspace_id).unwrap().into_iter().find(|request| request.name == "Health").unwrap();
         let mut source_a = app.spec_source(&a.import_id).unwrap();
@@ -802,9 +800,7 @@ mod tests {
 
         let reimport = app.reimport(&a.import_id, ADMIN_WITH_EXTRA.as_bytes()).unwrap();
         assert!(reimport.plan.added.iter().any(|request| request.meta.id == b_health.meta.id));
-        let err = app
-            .apply_reimport(reimport, ADMIN_WITH_EXTRA.as_bytes(), "a-v2.json", &ReimportApproval::default())
-            .unwrap_err();
+        let err = app.apply_reimport(reimport, ADMIN_WITH_EXTRA.as_bytes(), "a-v2.json", &ReimportApproval::default()).unwrap_err();
 
         assert!(err.to_string().contains("overwrite an object in another workspace"), "{err}");
         assert_eq!(app.backup_contents().unwrap(), before, "a refused reimport leaves every object unchanged");
