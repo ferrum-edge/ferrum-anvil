@@ -1079,16 +1079,13 @@ fn append_reflection_data(
     max_message_bytes: usize,
     max_response_bytes: usize,
 ) -> Result<Vec<Bytes>, TransportFailure> {
-    *wire_bytes = wire_bytes
-        .checked_add(data.len())
-        .filter(|total| *total <= max_response_bytes)
-        .ok_or_else(|| {
-            TransportFailure::new(
-                Phase::ResponseBody,
-                FailureKind::ResponseTooLargeLocal,
-                "the reflection response exceeded the local max_response_bytes limit",
-            )
-        })?;
+    *wire_bytes = wire_bytes.checked_add(data.len()).filter(|total| *total <= max_response_bytes).ok_or_else(|| {
+        TransportFailure::new(
+            Phase::ResponseBody,
+            FailureKind::ResponseTooLargeLocal,
+            "the reflection response exceeded the local max_response_bytes limit",
+        )
+    })?;
     buf.extend_from_slice(data);
     let mut messages = Vec::new();
     loop {
@@ -1102,10 +1099,8 @@ fn append_reflection_data(
                         "the reflection response contained more than one message",
                     ));
                 }
-                *decoded_bytes = decoded_bytes
-                    .checked_add(message.len())
-                    .filter(|total| *total <= max_response_bytes)
-                    .ok_or_else(|| {
+                *decoded_bytes =
+                    decoded_bytes.checked_add(message.len()).filter(|total| *total <= max_response_bytes).ok_or_else(|| {
                         TransportFailure::new(
                             Phase::ResponseBody,
                             FailureKind::ResponseTooLargeLocal,
@@ -2363,16 +2358,9 @@ mod tests {
         let mut wire_bytes = 0;
         let mut decoded_bytes = 0;
         let mut message_count = 0;
-        let messages = append_reflection_data(
-            &mut buf,
-            &response,
-            &mut wire_bytes,
-            &mut decoded_bytes,
-            &mut message_count,
-            64,
-            response.len(),
-        )
-        .unwrap();
+        let messages =
+            append_reflection_data(&mut buf, &response, &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, response.len())
+                .unwrap();
         assert_eq!(messages, vec![Bytes::from_static(b"response")]);
         assert_eq!(wire_bytes, response.len());
         assert_eq!(decoded_bytes, 8);
@@ -2381,27 +2369,11 @@ mod tests {
         let mut wire_bytes = 0;
         let mut decoded_bytes = 0;
         let mut message_count = 0;
-        let partial = append_reflection_data(
-            &mut buf,
-            &response[..5],
-            &mut wire_bytes,
-            &mut decoded_bytes,
-            &mut message_count,
-            64,
-            8,
-        )
-        .unwrap();
+        let partial =
+            append_reflection_data(&mut buf, &response[..5], &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, 8).unwrap();
         assert!(partial.is_empty());
-        let too_large = append_reflection_data(
-            &mut buf,
-            &response[5..],
-            &mut wire_bytes,
-            &mut decoded_bytes,
-            &mut message_count,
-            64,
-            8,
-        )
-        .unwrap_err();
+        let too_large =
+            append_reflection_data(&mut buf, &response[5..], &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, 8).unwrap_err();
         assert_eq!(too_large.kind, FailureKind::ResponseTooLargeLocal);
 
         let mut buf = BytesMut::new();
@@ -2409,16 +2381,8 @@ mod tests {
         let mut decoded_bytes = 0;
         let mut message_count = 0;
         let twice = [response.as_ref(), response.as_ref()].concat();
-        let extra = append_reflection_data(
-            &mut buf,
-            &twice,
-            &mut wire_bytes,
-            &mut decoded_bytes,
-            &mut message_count,
-            64,
-            twice.len(),
-        )
-        .unwrap_err();
+        let extra =
+            append_reflection_data(&mut buf, &twice, &mut wire_bytes, &mut decoded_bytes, &mut message_count, 64, twice.len()).unwrap_err();
         assert_eq!(extra.kind, FailureKind::HttpProtocolError);
     }
 
