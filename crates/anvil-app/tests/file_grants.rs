@@ -76,7 +76,9 @@ fn a_path_or_a_made_up_token_is_never_written() {
     let grants = FileGrants::default();
     for target in [&existing, &fresh] {
         let token = target.to_string_lossy().into_owned();
-        for purpose in [FilePurpose::BundleExport, FilePurpose::LoadReportExport, FilePurpose::RunReportExport] {
+        for purpose in
+            [FilePurpose::BundleExport, FilePurpose::LoadReportExport, FilePurpose::RunReportExport, FilePurpose::LintReportExport]
+        {
             assert_eq!(grants.write(&token, purpose, b"bundle").unwrap_err(), GrantError::Unknown);
         }
     }

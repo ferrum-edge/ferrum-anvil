@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anvil-load.workspace = true
 anvil-import.workspace = true
+anvil-contract.workspace = true
 anvil-domain.workspace = true
 anvil-app.workspace = true
 anvil-engine.workspace = true
