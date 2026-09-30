@@ -152,10 +152,8 @@ impl App {
         self.store.atomically(|tx| {
             let stored: AppSettings = tx.get(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default();
             let mut next = settings.clone();
-            next.api_standards = ApiStandardsSettings {
-                include_recommended: stored.api_standards.include_recommended,
-                legacy_rulesets: vec![],
-            };
+            next.api_standards =
+                ApiStandardsSettings { include_recommended: stored.api_standards.include_recommended, legacy_rulesets: vec![] };
             tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)
         })?;
         Ok(())

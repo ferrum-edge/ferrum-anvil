@@ -165,9 +165,8 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
     let source = new_app(root.path());
     let ws = source.create_workspace("Standards workspace").unwrap();
     let ruleset = source.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
-    let (bundle, _) = source
-        .export(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false)
-        .unwrap();
+    let (bundle, _) =
+        source.export(Some(&ws.meta.id), anvil_portability::ExportMode::EncryptedTransfer, Some("bundle passphrase"), false).unwrap();
 
     let target = new_app(root.path());
     let preview = target.import_preview(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
@@ -192,19 +191,13 @@ fn one_mebibyte_rulesets_are_stored_as_individual_records() {
     let body = format!("{TEAM}#{}\n", "x".repeat(anvil_app::standards::MAX_STORED_RULESET_BYTES - TEAM.len() - 2));
     assert_eq!(body.len(), anvil_app::standards::MAX_STORED_RULESET_BYTES);
     let stored = app.add_api_ruleset("large.yaml", body.as_bytes()).unwrap();
-    assert_eq!(
-        app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(),
-        Some(stored.clone())
-    );
+    assert_eq!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(), Some(stored.clone()));
 
     let too_large = format!("{body} ");
     assert!(app.add_api_ruleset("too-large.yaml", too_large.as_bytes()).is_err());
     let updated = app.replace_api_ruleset(&stored.id, "large-v2.yaml", TEAM.as_bytes()).unwrap();
     assert_eq!(updated.id, stored.id);
-    assert_eq!(
-        app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(),
-        Some(updated)
-    );
+    assert_eq!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap(), Some(updated));
     app.remove_api_ruleset(&stored.id).unwrap();
     assert!(app.store.get::<anvil_domain::settings::StoredRuleset>(kind::API_RULESET, &stored.id).unwrap().is_none());
 }
