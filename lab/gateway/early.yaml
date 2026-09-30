@@ -7,7 +7,8 @@
 # Settings:  early.conf (early data for GET: HTTP 17280, HTTPS+QUIC 17243, admin 17290) and
 #            early-off.conf (no early data: 17281 / 17244 / 17291) share this file.
 # Fixtures:  127.0.0.1:17300-17399. 17301 is the HTTP/1.1 echo backend whose request log is
-#            the ground truth for `Early-Data: 1`.
+#            the ground truth for `Early-Data: 1`. 17302 is a UDP relay to 17243 that holds
+#            the client's TLS Finished while its 0-RTT packets pass (EARLY-001, EARLY-002).
 version: "1"
 
 resource_counts:

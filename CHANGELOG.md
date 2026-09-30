@@ -285,13 +285,25 @@
   connection, `request.too_early` and the refusal log. A round of exactly
   the permitted shape (one 200, no retry, one backend request without
   `Early-Data`, no refusal logged) is a missed window and the next round is
-  tried; if every round that sent the request as early data was one, the
-  scenario is skipped with a reason starting `window not observed: `, never
-  passed. Any other shape still fails. Because a gateway that processes the
-  request early but forwards it unmarked looks like the permitted shape, a
-  scenario skipped this way in both the trusted and the untrusted pass of
-  one run fails both results. Lab scenarios can now report such a skip
-  (`Checks::skip`) (#221).
+  tried. Any other shape still fails (#221).
+- The failure lab's EARLY-001 and EARLY-002 now test the gateway's pending
+  0-RTT window deterministically, with no run-time skip. They reach the
+  gateway's HTTP/3 listener through a UDP relay fixture (`127.0.0.1:17302`)
+  that holds the client's Handshake-space packets (its TLS Finished) while
+  its 0-RTT packets pass, and releases the Finished on an event: the backend
+  receiving the request, or the gateway logging its refusal (at most 2 s
+  when neither happens). The gateway's handshake is therefore still pending
+  when it handles the 0-RTT stream. A request that reached the backend
+  before the release was processed while the handshake was pending: for
+  EARLY-002's PUT that is a hard failure, and EARLY-001 now requires its
+  admitted GET to arrive before the release. A round the gateway did not act
+  on within the hold is retried, and running out of rounds fails; the skip
+  and the rule that failed a skip in both passes are gone, and so is
+  `Checks::skip`. The client's 1-RTT data queued during the hold, such as
+  EARLY-002's retry, waits for the gateway's first datagram after the
+  Finished, and 20 ms more on releases before v0.9.8, whose accept loop can
+  take a 1-RTT stream that arrives with the Finished for early data
+  (ferrum-edge#5761) (#223).
 - UDP load-scenario silence coverage keeps its non-responding target socket
   bound for the whole sub-case, then checks ICMP-unreachable counts on a
   released port with up to five fresh-port retries for parallel UDP replies.
