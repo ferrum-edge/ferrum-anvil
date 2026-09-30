@@ -245,6 +245,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   contents are still type-checked and must belong to the backup's own
   workspaces, and the import trust normalisation applies to the backup's app
   settings too.
+- **Restored spec provenance:** a spec source's optional root folder must be
+  present in the backup, belong to that source's workspace, and be a
+  top-level import root. Reimport checks the same relationship before reading
+  the baseline or scope and again in the write transaction, so provenance
+  cannot direct a reimport at another workspace's folder.
 - **App settings from a backup:** app settings are the lowest settings layer
   of every workspace's requests, and normalisation cannot judge their DNS
   overrides, resolver and other defaults. Replace therefore restores them

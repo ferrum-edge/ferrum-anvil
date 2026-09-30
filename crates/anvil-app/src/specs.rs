@@ -76,6 +76,7 @@ pub struct SpecSourceRecord {
 }
 
 const ROOT_DELETED: &str = "the import's root folder was deleted; import the source again";
+const ROOT_INVALID: &str = "the import's root folder is invalid; import the source again";
 const CHANGED: &str = "the import's requests or configuration changed since the diff; re-run the reimport diff";
 
 /// A reimport compared with what is stored.
@@ -258,6 +259,9 @@ impl App {
     /// with the linked requests and the scoped configuration.
     fn reimport(&self, import_id: &Id, bytes: &[u8]) -> Result<Reimport> {
         let rec = self.spec_source(import_id)?;
+        if !self.store.read_consistently(|s| valid_root(s, &rec))? {
+            return Err(AppError::Invalid(ROOT_INVALID.into()));
+        }
         let mut opts = rec.source.options.clone();
         opts.id_namespace = Some(rec.source.id_namespace);
         let r = run(bytes, &opts)?;
@@ -355,7 +359,7 @@ impl App {
             // transaction; a change made since would be overwritten.
             let unchanged = Stored { requests: previous.clone(), scope: current.clone() };
             let source = s.get::<SpecSourceRecord>(kind::SPEC_SOURCE, &rec.source.import_id)?;
-            if source.is_none() || stored(&s.as_read(), &rec, &ids)?.ok() != Some(unchanged) {
+            if source.is_none() || !valid_root(&s.as_read(), &rec)? || stored(&s.as_read(), &rec, &ids)?.ok() != Some(unchanged) {
                 return Ok(Err(AppError::Invalid(CHANGED.into())));
             }
             for f in new_folders.iter().chain(&changed_folders) {
@@ -459,6 +463,9 @@ impl App {
 /// import root's own environments, that still exist).
 fn stored(s: &StoreRead<'_>, rec: &SpecSourceRecord, ids: &HashSet<Id>) -> anvil_storage::store::Result<Result<Stored>> {
     let mut ids = ids.clone();
+    if !valid_root(s, rec)? {
+        return Ok(Err(AppError::Invalid(ROOT_INVALID.into())));
+    }
     let (description, settings, variables, auth) = match rec.root_folder_id {
         None => {
             let Some(w) = s.get::<Workspace>(kind::WORKSPACE, &rec.workspace_id)? else {
@@ -480,6 +487,14 @@ fn stored(s: &StoreRead<'_>, rec: &SpecSourceRecord, ids: &HashSet<Id>) -> anvil
         s.list::<Environment>(kind::ENVIRONMENT, Some(&rec.workspace_id))?.into_iter().filter(|e| ids.contains(&e.meta.id)).collect();
     let folders = s.list::<Folder>(kind::FOLDER, Some(&rec.workspace_id))?.into_iter().filter(|f| ids.contains(&f.meta.id)).collect();
     Ok(Ok(Stored { requests, scope: ImportedScope { description, settings, variables, auth, environments, folders } }))
+}
+
+/// A reimport root is provenance, so accept it only when it is still the
+/// top-level import root in the source record's workspace.
+fn valid_root(s: &StoreRead<'_>, rec: &SpecSourceRecord) -> anvil_storage::store::Result<bool> {
+    let Some(id) = rec.root_folder_id else { return Ok(true) };
+    let Some(folder) = s.get::<Folder>(kind::FOLDER, &id)? else { return Ok(false) };
+    Ok(folder.workspace_id == rec.workspace_id && folder.parent_id.is_none() && folder.import_root)
 }
 
 /// The scoped configuration `r` generates, as the import stores it. On an
@@ -615,6 +630,27 @@ mod tests {
         assert_ne!(rec.source.import_id, done.import_id);
         assert_eq!(rec.file_name, "audit-v2.json");
         assert_eq!(app.get_attachment(&rec.original_sha256).unwrap().as_deref(), Some(newer.as_bytes()));
+    }
+
+    #[test]
+    fn a_reimport_refuses_a_root_in_another_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let pm = ProfileManager::new(root.path());
+        let (s, dek, _recovery) = pm.create_passphrase("t", "correct horse battery", KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        let app = App::open(s.dir, h, dek).unwrap();
+        let victim = app.create_workspace("Victim").unwrap();
+        let folder = app.create_folder(&victim.meta.id, None, "Private").unwrap();
+        let imported = app.spec_import(ADMIN.as_bytes(), "admin.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+        let mut rec = app.spec_source(&imported.import_id).unwrap();
+        rec.root_folder_id = Some(folder.meta.id);
+        app.store.put(kind::SPEC_SOURCE, &rec.source.import_id, Some(&rec.workspace_id), None, 0.0, &rec).unwrap();
+
+        assert!(app.spec_reimport_plan(&imported.import_id, ADMIN.as_bytes()).is_err());
+        assert!(app
+            .spec_reimport_apply(&imported.import_id, ADMIN.as_bytes(), "admin-v2.json", &ReimportApproval::default())
+            .is_err());
+        assert_eq!(app.folder(&folder.meta.id).unwrap(), folder);
     }
 
     /// A Postman collection whose folder has a variable of its own.

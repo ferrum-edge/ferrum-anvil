@@ -788,6 +788,14 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
     }
     for x in &d.spec_sources {
         owned("spec import", &x.file_name, &x.workspace_id)?;
+        if let Some(root_id) = x.root_folder_id {
+            let root = g.folders.iter().find(|folder| folder.meta.id == root_id);
+            if !root.is_some_and(|folder| {
+                folder.workspace_id == x.workspace_id && folder.parent_id.is_none() && folder.import_root
+            }) {
+                return Err(invalid(format!("spec import '{}' has an invalid root folder", x.file_name)));
+            }
+        }
     }
     for x in &d.run_reports {
         owned("run report", &x.name, &x.workspace_id)?;
@@ -1223,4 +1231,41 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::ProfileManager;
+    use crate::specs::SpecTarget;
+    use anvil_import::ImportOptions;
+
+    const SPEC: &str = r#"curl https://example.invalid/health"#;
+
+    #[test]
+    fn backup_spec_roots_must_be_owned_import_roots_in_the_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let pm = ProfileManager::new(root.path());
+        let (profile, dek, _) = pm.create_passphrase("test", "correct horse battery", KdfParams::testing()).unwrap();
+        let header = anvil_storage::vault::read_header(&profile.dir).unwrap();
+        let app = App::open(profile.dir, header, dek).unwrap();
+        let destination = app.create_workspace("Destination").unwrap();
+        let victim = app.create_workspace("Victim").unwrap();
+        let foreign = app.create_folder(&victim.meta.id, None, "Private").unwrap();
+        let imported = app
+            .spec_import(
+                SPEC.as_bytes(),
+                "source.txt",
+                &ImportOptions::default(),
+                SpecTarget::Workspace { workspace_id: destination.meta.id },
+            )
+            .unwrap();
+        let mut contents = app.backup_contents().unwrap();
+
+        decode(&contents).expect("a legitimate import root is included in its backup");
+        let source = contents.objects.iter_mut().find(|row| row.kind == kind::SPEC_SOURCE).unwrap();
+        source.value["root_folder_id"] = serde_json::to_value(foreign.meta.id).unwrap();
+        assert!(decode(&contents).is_err(), "a source cannot reference a folder outside its backup workspace");
+        assert_eq!(imported.workspace_id, destination.meta.id);
+    }
 }
