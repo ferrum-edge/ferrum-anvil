@@ -836,6 +836,22 @@
 
 ### Security
 
+- Imports (GHSA-c9jq-p5rq-wj3h): more of the work a small spec can repeat
+  during preview is now charged or done once. OpenAPI samples charge the
+  schema lists they read on every visit to the import's byte budget: each
+  member looked at (optional members are skipped before their schema is
+  resolved), the `required` names (now a set, not a list scanned per
+  member), the `enum` values scanned and each `const`/`enum` comparison. A
+  `null` inserted for a required name counts as a generated value, so once a
+  budget is spent the remaining members are left out
+  (`sample_size_limit`). The structural lookups made while writing XML and
+  multipart payloads borrow the resolved schema instead of copying it, so
+  they no longer spend the byte budget and cut samples short. WSDL imports
+  read each binding, binding operation and portType operation once however
+  many ports use it, and charge the message parts and `soap:header`s each
+  operation writes. An XML document with more than 1024 `xmlns`
+  occurrences is refused before it is parsed (`LimitExceeded`), since the
+  parser copies the namespaces in scope for every element that declares one.
 - Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
   `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
   secret value from the parts it keeps: the authorization scheme word,

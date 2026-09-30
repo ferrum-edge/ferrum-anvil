@@ -297,9 +297,13 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   JSON/YAML parsing charges nodes and the string bytes it keeps (YAML aliases
   included). OpenAPI `allOf` merging charges the payload budget and the
   `$ref` depth, and copied examples, defaults and merged schemas share a byte
-  budget for the whole import. WSDL envelopes charge the schema nodes they
+  budget for the whole import, as do the members, `required` names and
+  `enum`/`const` values a sample reads on each visit and the `null`s it
+  inserts for required names. WSDL envelopes charge the schema nodes they
   look at and the bytes they generate (per envelope and per import) and cut
-  recursive groups. An Insomnia v4 export with a repeated workspace, group or
+  recursive groups; a binding is read once however many ports share it, and
+  `xmlns` occurrences are counted before the XML parser copies any namespace
+  list. An Insomnia v4 export with a repeated workspace, group or
   environment id is refused, and each resource is walked once. These are
   budgets, not a proof that every code path is linear: a preview can still
   take time and memory proportional to those limits.

@@ -37,6 +37,12 @@ const ENVELOPE_BYTES_PER_INPUT_BYTE: usize = 4;
 /// Namespaces one element may have in scope. Every prefixed name is looked
 /// up among them, so the number is bounded before any lookup happens.
 const MAX_IN_SCOPE_NAMESPACES: usize = 256;
+/// `xmlns` occurrences allowed in the text of one document, counted before
+/// it is parsed. The parser copies the namespaces in scope for every element
+/// that declares one, so its work grows with the square of the declarations;
+/// with this cap it stays around a million entries (a few MiB), while any
+/// one element can still have [`MAX_IN_SCOPE_NAMESPACES`] in scope.
+const MAX_XMLNS_DECLARATIONS: usize = 4 * MAX_IN_SCOPE_NAMESPACES;
 
 type QName = (String, String);
 
@@ -77,10 +83,21 @@ fn path(n: Node) -> String {
 }
 
 fn doc_text(n: Node) -> String {
-    child(n, WSDL_NS, "documentation").and_then(|d| d.text()).map(|t| t.trim().to_string()).unwrap_or_default()
+    text_of(child(n, WSDL_NS, "documentation"))
+}
+
+/// The trimmed text of a `documentation` element.
+fn text_of(doc: Option<Node>) -> String {
+    doc.and_then(|d| d.text()).map(|t| t.trim().to_string()).unwrap_or_default()
 }
 
 pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
+    // Counted in the raw text, before the parser copies any namespace list.
+    // Every occurrence counts (in text and comments too), so this can only
+    // over-count the declarations.
+    if text.match_indices("xmlns").nth(MAX_XMLNS_DECLARATIONS).is_some() {
+        return Err(ImportError::LimitExceeded { what: "XML namespace declarations (xmlns)".into(), limit: MAX_XMLNS_DECLARATIONS });
+    }
     let limit = u32::try_from(b.opts.max_nodes).unwrap_or(u32::MAX);
     let opts = ParsingOptions { allow_dtd: false, nodes_limit: limit, ..ParsingOptions::default() };
     let doc = Document::parse_with_options(text, opts).map_err(|e| match e {
@@ -140,17 +157,23 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     let port_types = by_name("portType");
     let bindings = by_name("binding");
     // Indexes built once, so no port or operation walks a list again.
-    let binding_ops = child_lists(root, "binding", "operation");
-    let port_type_ops = by_name_attr(child_lists(root, "portType", "operation"));
-    let message_parts = by_name_attr(child_lists(root, "message", "part"));
+    let binding_index = index_bindings(root);
+    let port_type_op_lists = child_lists(root, "portType", "operation");
+    let port_type_op_children: HashMap<NodeId, PortTypeOp> =
+        port_type_op_lists.values().flatten().map(|op| (op.id(), PortTypeOp::of(*op))).collect();
+    let port_type_ops = by_name_attr(&port_type_op_lists);
+    let message_part_lists = child_lists(root, "message", "part");
+    let message_parts = by_name_attr(&message_part_lists);
 
     let mut endpoint_vars: Vec<Variable> = vec![];
     let mut used_bindings: HashSet<String> = HashSet::new();
     let ctx = WsdlCtx {
         messages: &messages,
         port_types: &port_types,
-        binding_ops: &binding_ops,
+        bindings: &binding_index,
         port_type_ops: &port_type_ops,
+        port_type_op_children: &port_type_op_children,
+        message_part_lists: &message_part_lists,
         message_parts: &message_parts,
         schemas: &schemas,
         tns: &tns,
@@ -175,7 +198,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 continue;
             };
             used_bindings.insert(blocal.clone());
-            let is_soap = child(binding, SOAP11_BIND, "binding").is_some() || child(binding, SOAP12_BIND, "binding").is_some();
+            let is_soap = binding_index.get(&binding.id()).is_some_and(|x| matches!(x.kind, BindingKind::Soap(..)));
             let address = port
                 .children()
                 .find(|c| c.is_element() && c.tag_name().name() == "address")
@@ -230,28 +253,139 @@ fn child_lists<'a, 'i>(root: Node<'a, 'i>, local: &str, item: &str) -> HashMap<N
 }
 
 /// The lists of `child_lists` keyed by `name` (the first of a name wins).
-fn by_name_attr<'a, 'i>(lists: HashMap<NodeId, Vec<Node<'a, 'i>>>) -> HashMap<NodeId, HashMap<String, Node<'a, 'i>>> {
+fn by_name_attr<'a, 'i>(lists: &HashMap<NodeId, Vec<Node<'a, 'i>>>) -> HashMap<NodeId, HashMap<String, Node<'a, 'i>>> {
     lists
-        .into_iter()
+        .iter()
         .map(|(id, items)| {
             let mut m = HashMap::new();
             for it in items {
                 if let Some(n) = it.attribute("name") {
-                    m.entry(n.to_string()).or_insert(it);
+                    m.entry(n.to_string()).or_insert(*it);
                 }
             }
-            (id, m)
+            (*id, m)
         })
         .collect()
+}
+
+/// A binding's protocol, from its own extension elements.
+#[derive(Clone, Copy)]
+enum BindingKind<'a, 'i> {
+    /// SOAP 1.1 or 1.2, with its `soap:binding` element.
+    Soap(SoapVersion, Node<'a, 'i>),
+    Http,
+    Other,
+}
+
+/// A binding, read once: every port that uses it (and every operation it
+/// has) looks it up here instead of walking its children again.
+struct BindingInfo<'a, 'i> {
+    kind: BindingKind<'a, 'i>,
+    ops: Vec<BindingOp<'a, 'i>>,
+}
+
+/// A binding operation and the children an import looks up, found once.
+/// Only SOAP bindings' operations have them.
+struct BindingOp<'a, 'i> {
+    node: Node<'a, 'i>,
+    /// `soap:operation` (in the binding's SOAP namespace).
+    soap_op: Option<Node<'a, 'i>>,
+    /// `wsdl:input`.
+    input: Option<Node<'a, 'i>>,
+    /// The input's `soap:body`.
+    body: Option<Node<'a, 'i>>,
+    /// The input's `soap:header`s, in document order.
+    headers: Vec<Node<'a, 'i>>,
+    /// The names in the body's `parts` attribute, when it has one.
+    parts_filter: Option<HashSet<String>>,
+}
+
+/// Each binding of `root`, indexed in one pass over its children (and one
+/// over each of its operations' and their inputs' children).
+fn index_bindings<'a, 'i>(root: Node<'a, 'i>) -> HashMap<NodeId, BindingInfo<'a, 'i>> {
+    children(root, WSDL_NS).filter(|c| c.tag_name().name() == "binding").map(|c| (c.id(), index_binding(c))).collect()
+}
+
+fn index_binding<'a, 'i>(binding: Node<'a, 'i>) -> BindingInfo<'a, 'i> {
+    let (mut soap11, mut soap12, mut http) = (None, None, false);
+    let mut ops = vec![];
+    for c in binding.children().filter(|c| c.is_element()) {
+        let local = c.tag_name().name();
+        match c.tag_name().namespace() {
+            Some(SOAP11_BIND) if local == "binding" => soap11 = soap11.or(Some(c)),
+            Some(SOAP12_BIND) if local == "binding" => soap12 = soap12.or(Some(c)),
+            Some(HTTP_BIND) if local == "binding" => http = true,
+            Some(WSDL_NS) if local == "operation" => ops.push(c),
+            _ => {}
+        }
+    }
+    let kind = match (soap11, soap12) {
+        (Some(sb), _) => BindingKind::Soap(SoapVersion::Soap11, sb),
+        (None, Some(sb)) => BindingKind::Soap(SoapVersion::Soap12, sb),
+        (None, None) if http => BindingKind::Http,
+        (None, None) => BindingKind::Other,
+    };
+    let bind_ns = match kind {
+        BindingKind::Soap(SoapVersion::Soap11, _) => Some(SOAP11_BIND),
+        BindingKind::Soap(..) => Some(SOAP12_BIND),
+        _ => None,
+    };
+    BindingInfo { kind, ops: ops.into_iter().map(|op| index_binding_op(op, bind_ns)).collect() }
+}
+
+fn index_binding_op<'a, 'i>(op: Node<'a, 'i>, bind_ns: Option<&str>) -> BindingOp<'a, 'i> {
+    let mut o = BindingOp { node: op, soap_op: None, input: None, body: None, headers: vec![], parts_filter: None };
+    let Some(ns) = bind_ns else { return o };
+    for c in op.children() {
+        if o.soap_op.is_none() && is(&c, ns, "operation") {
+            o.soap_op = Some(c);
+        }
+        if o.input.is_none() && is(&c, WSDL_NS, "input") {
+            o.input = Some(c);
+        }
+    }
+    for c in o.input.into_iter().flat_map(|i| i.children()) {
+        if is(&c, ns, "header") {
+            o.headers.push(c);
+        } else if o.body.is_none() && is(&c, ns, "body") {
+            o.body = Some(c);
+        }
+    }
+    o.parts_filter = o.body.and_then(|e| e.attribute("parts")).map(|p| p.split_whitespace().map(str::to_string).collect());
+    o
+}
+
+/// A portType operation's `input` and `documentation`, found once.
+struct PortTypeOp<'a, 'i> {
+    input: Option<Node<'a, 'i>>,
+    doc: Option<Node<'a, 'i>>,
+}
+
+impl<'a, 'i> PortTypeOp<'a, 'i> {
+    fn of(op: Node<'a, 'i>) -> Self {
+        let mut o = PortTypeOp { input: None, doc: None };
+        for c in op.children() {
+            if o.input.is_none() && is(&c, WSDL_NS, "input") {
+                o.input = Some(c);
+            } else if o.doc.is_none() && is(&c, WSDL_NS, "documentation") {
+                o.doc = Some(c);
+            }
+        }
+        o
+    }
 }
 
 struct WsdlCtx<'r, 'a, 'i> {
     messages: &'r HashMap<String, Node<'a, 'i>>,
     port_types: &'r HashMap<String, Node<'a, 'i>>,
-    /// Binding → its operations.
-    binding_ops: &'r HashMap<NodeId, Vec<Node<'a, 'i>>>,
+    /// Binding → its protocol and operations.
+    bindings: &'r HashMap<NodeId, BindingInfo<'a, 'i>>,
     /// Port type → its operations by name.
     port_type_ops: &'r HashMap<NodeId, HashMap<String, Node<'a, 'i>>>,
+    /// Port type operation → its input and documentation.
+    port_type_op_children: &'r HashMap<NodeId, PortTypeOp<'a, 'i>>,
+    /// Message → its parts, in document order.
+    message_part_lists: &'r HashMap<NodeId, Vec<Node<'a, 'i>>>,
     /// Message → its parts by name.
     message_parts: &'r HashMap<NodeId, HashMap<String, Node<'a, 'i>>>,
     schemas: &'r SchemaSet<'a, 'i>,
@@ -262,22 +396,22 @@ struct WsdlCtx<'r, 'a, 'i> {
 
 fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<Id>, key_prefix: &str, label: &str, url_var: &str) {
     let bpath = path(binding);
-    let ops: &[Node] = ctx.binding_ops.get(&binding.id()).map(Vec::as_slice).unwrap_or_default();
-    let (version, soap_binding) = if let Some(sb) = child(binding, SOAP11_BIND, "binding") {
-        (SoapVersion::Soap11, sb)
-    } else if let Some(sb) = child(binding, SOAP12_BIND, "binding") {
-        (SoapVersion::Soap12, sb)
-    } else {
-        let what = if child(binding, HTTP_BIND, "binding").is_some() { "HTTP GET/POST binding" } else { "non-SOAP binding" };
-        let n = ops.len();
-        b.report.counts.operations_found += n;
-        b.report.counts.skipped_operations += n;
-        b.report.unsupported(
-            "wsdl_binding_unsupported",
-            &bpath,
-            format!("{what} is not supported; only SOAP 1.1/1.2 bindings are imported"),
-        );
-        return;
+    let Some(info) = ctx.bindings.get(&binding.id()) else { return };
+    let ops = info.ops.as_slice();
+    let (version, soap_binding) = match info.kind {
+        BindingKind::Soap(version, sb) => (version, sb),
+        kind => {
+            let what = if matches!(kind, BindingKind::Http) { "HTTP GET/POST binding" } else { "non-SOAP binding" };
+            let n = ops.len();
+            b.report.counts.operations_found += n;
+            b.report.counts.skipped_operations += n;
+            b.report.unsupported(
+                "wsdl_binding_unsupported",
+                &bpath,
+                format!("{what} is not supported; only SOAP 1.1/1.2 bindings are imported"),
+            );
+            return;
+        }
     };
     let transport = soap_binding.attribute("transport").unwrap_or("");
     if !transport.is_empty() && transport != "http://schemas.xmlsoap.org/soap/http" {
@@ -294,10 +428,12 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
             "the binding's portType is not defined in this document; envelopes have empty bodies",
         );
     }
-    let bind_ns = if version == SoapVersion::Soap11 { SOAP11_BIND } else { SOAP12_BIND };
-    for (i, &bop) in ops.iter().enumerate() {
-        let oname = bop.attribute("name").unwrap_or("").to_string();
-        let opath = path(bop);
+    // Every lookup below reads the indexes built once for the document; the
+    // lists an operation walks (message parts, headers) are charged to its
+    // envelope's budget item by item.
+    for (i, bop) in ops.iter().enumerate() {
+        let oname = bop.node.attribute("name").unwrap_or("").to_string();
+        let opath = path(bop.node);
         if b.operations_full() {
             // No later operation can be admitted: count them without walking them.
             b.skip_operations(&opath, ops.len() - i);
@@ -314,8 +450,8 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
             b.skipped();
             continue;
         };
-        let input = child(pt_op, WSDL_NS, "input");
-        let Some(input) = input else {
+        let pt = ctx.port_type_op_children.get(&pt_op.id());
+        let Some(input) = pt.and_then(|p| p.input) else {
             b.report.unsupported(
                 "wsdl_notification_operation",
                 &opath,
@@ -324,11 +460,9 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
             b.skipped();
             continue;
         };
-        let soap_op = child(bop, bind_ns, "operation");
-        let action = soap_op.and_then(|o| o.attribute("soapAction")).map(str::to_string);
-        let style = soap_op.and_then(|o| o.attribute("style")).map(str::to_string).unwrap_or_else(|| default_style.clone());
-        let bin = child(bop, WSDL_NS, "input");
-        let body_el = bin.and_then(|i| child(i, bind_ns, "body"));
+        let action = bop.soap_op.and_then(|o| o.attribute("soapAction")).map(str::to_string);
+        let style = bop.soap_op.and_then(|o| o.attribute("style")).map(str::to_string).unwrap_or_else(|| default_style.clone());
+        let body_el = bop.body;
         let use_ = body_el.and_then(|e| e.attribute("use")).unwrap_or("literal");
         if use_ == "encoded" {
             b.report.unsupported(
@@ -338,8 +472,7 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
             );
         }
         let rpc_ns = body_el.and_then(|e| e.attribute("namespace")).unwrap_or(ctx.tns).to_string();
-        let parts_filter: Option<HashSet<String>> =
-            body_el.and_then(|e| e.attribute("parts")).map(|p| p.split_whitespace().map(str::to_string).collect());
+        let parts_filter = bop.parts_filter.as_ref();
 
         let key = format!("{key_prefix}/{oname}");
         let seed = b.opts.seed ^ fnv1a64(&key);
@@ -362,11 +495,12 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
                         }
                         // Every part looked at is charged, so generation stops
                         // with the envelope's budget.
-                        for p in children(msg, WSDL_NS).filter(|p| p.tag_name().name() == "part") {
+                        let parts = ctx.message_part_lists.get(&msg.id()).map(Vec::as_slice).unwrap_or_default();
+                        for &p in parts {
                             if !g.charge(p) {
                                 break;
                             }
-                            if parts_filter.as_ref().is_none_or(|f| p.attribute("name").is_some_and(|n| f.contains(n))) {
+                            if parts_filter.is_none_or(|f| p.attribute("name").is_some_and(|n| f.contains(n))) {
                                 g.part(p, rpc, indent, &mut body_xml);
                             }
                         }
@@ -376,7 +510,7 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
                     }
                     None => g.report.warn("unresolved_message", &opath, "the input message is not defined in this document; empty body"),
                 }
-                for h in bin.into_iter().flat_map(|i| i.children()).filter(|c| is(c, bind_ns, "header")) {
+                for &h in &bop.headers {
                     if !g.charge(h) {
                         break;
                     }
@@ -401,7 +535,7 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
         let mut spec = RequestSpec::http("POST", &format!("{{{{{url_var}}}}}"));
         spec.body = Body::Soap { version, envelope, action };
         let req = b.add_request(Some(folder), &oname, &key, spec, &opath);
-        req.description = doc_text(pt_op);
+        req.description = text_of(pt.and_then(|p| p.doc));
         req.tags = vec![vlabel.to_string()];
     }
 }

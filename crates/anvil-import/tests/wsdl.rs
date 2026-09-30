@@ -407,3 +407,60 @@ fn elements_with_too_many_namespaces_in_scope_are_refused() {
     }
     assert!(import(doc(200).as_bytes(), &opts()).is_ok());
 }
+
+/// One binding that every port in `{ports}` uses; `{pad}` stands for padding
+/// before what an import looks up in the binding, its operation, the
+/// operation's input and the portType operation.
+const SHARED_BINDING: &str = r#"<?xml version="1.0"?>
+<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:w" targetNamespace="urn:w" name="W">
+  <types><xsd:schema targetNamespace="urn:w"><xsd:element name="Req" type="xsd:string"/></xsd:schema></types>
+  <message name="In"><part name="body" element="tns:Req"/></message>
+  <portType name="PT"><operation name="Op">{pad}<input message="tns:In"/></operation></portType>
+  <binding name="B" type="tns:PT">
+    {pad}<soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <operation name="Op">{pad}<soap:operation soapAction="urn:w/Op"/><input>{pad}<soap:body use="literal"/></input></operation>
+  </binding>
+  <service name="S">{ports}</service>
+</definitions>"#;
+
+#[test]
+fn ports_sharing_a_binding_read_it_once() {
+    // 2000 ports use a binding padded with 100k elements in four places:
+    // looking its children up again for every port and operation took about
+    // 1.6e9 steps. The indexes read each list once.
+    let port = |i: usize| format!(r#"<port name="P{i}" binding="tns:B"><soap:address location="https://example.com/{i}"/></port>"#);
+    let ports: String = (0..2_000).map(port).collect();
+    let doc = SHARED_BINDING.replace("{pad}", &"<ext/>".repeat(100_000)).replace("{ports}", &ports);
+    let r = import(doc.as_bytes(), &opts()).unwrap();
+    assert_eq!(r.requests.len(), 2_000);
+    for key in ["S/P0/Op", "S/P1999/Op"] {
+        let (version, env, action) = soap(&r, key);
+        assert_eq!(version, SoapVersion::Soap11);
+        assert_eq!(action.as_deref(), Some("urn:w/Op"));
+        assert!(parse(&env).descendants().any(|n| n.has_tag_name(("urn:w", "Req"))), "{env}");
+    }
+}
+
+#[test]
+fn namespace_declarations_are_counted_before_parsing() {
+    // The parser copies the root's 200 namespaces for every child that
+    // declares one of its own, before any element is checked.
+    let doc = |kids: usize| {
+        let decls: String = (0..200).map(|i| format!(r#" xmlns:p{i}="urn:p{i}""#)).collect();
+        let kids = r#"<x xmlns:q="urn:q"/>"#.repeat(kids);
+        format!(r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:x"{decls}>{kids}</definitions>"#)
+    };
+    // 1 + 200 + 823 = 1024 declarations are parsed; one more is refused
+    // before parsing, and so is a million.
+    assert!(import(doc(823).as_bytes(), &opts()).is_ok());
+    for kids in [824, 1_000_000] {
+        match import(doc(kids).as_bytes(), &opts()) {
+            Err(ImportError::LimitExceeded { what, limit }) => {
+                assert_eq!(limit, 1024);
+                assert!(what.contains("xmlns"), "{what}");
+            }
+            other => panic!("expected the declaration limit, got {:?}", other.map(|r| r.requests.len())),
+        }
+    }
+}

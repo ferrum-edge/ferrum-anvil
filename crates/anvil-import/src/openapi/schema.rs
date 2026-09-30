@@ -19,6 +19,7 @@ use crate::util::{SplitMix64, clip, is_credential_name, json_type, ptr};
 use crate::{Dialect, ImportOptions, SampleMode};
 use base64::Engine as _;
 use serde_json::{Map, Number, Value, json};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashSet;
 
@@ -107,11 +108,15 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         self.gen_value(schema, at, 0, name)
     }
 
-    /// Resolve a (possibly `$ref`) schema to an owned, `allOf`-merged object
-    /// for structural inspection (XML names, multipart part kinds). All the
-    /// calls for one payload share a node budget of their own, so they never
-    /// spend the payload's; the copies count toward the import's byte budget.
-    pub fn flatten(&mut self, schema: &Value, at: &str) -> (Value, String) {
+    /// Resolve a (possibly `$ref`) schema to an `allOf`-merged object for
+    /// structural inspection (XML names, multipart part kinds). All the calls
+    /// for one payload share a node budget of their own, so they never spend
+    /// the payload's. Only a merge copies (charged to the import's byte
+    /// budget); with nothing to merge the resolved schema is borrowed.
+    pub fn flatten<'v>(&mut self, schema: &'v Value, at: &str) -> (Cow<'v, Value>, String)
+    where
+        'a: 'v,
+    {
         let (s, p) = self.refs.resolve_or_self(schema, at, self.report);
         let payload = (self.nodes, self.budget_warned);
         (self.nodes, self.budget_warned) = self.flat_budget;
@@ -119,8 +124,8 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         self.flat_budget = (self.nodes, self.budget_warned);
         (self.nodes, self.budget_warned) = payload;
         match merged {
-            Some(m) => (m, p),
-            None => (self.copy(&p, s).unwrap_or(Value::Null), p),
+            Some(m) => (Cow::Owned(m), p),
+            None => (Cow::Borrowed(s), p),
         }
     }
 
@@ -162,6 +167,14 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             }
         }
         Some(out)
+    }
+
+    /// Charge looking at `n` bytes of the schema (member names, `required`
+    /// names, `enum` values). Nothing is generated, but the work repeats on
+    /// every visit of the schema, so it draws on the import's byte budget
+    /// like generated output: the total stays proportional to the input.
+    fn charge_scan(&mut self, at: &str, n: usize) -> bool {
+        self.take_bytes(at, n)
     }
 
     fn bytes_spent(&mut self, at: &str) {
@@ -393,7 +406,12 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             (v, "const")
         } else {
             let e = obj.get("enum").and_then(Value::as_array).filter(|e| !e.is_empty())?;
-            (e.iter().find(|x| !x.is_null()).unwrap_or(&e[0]), "enum")
+            let first = e.iter().position(|x| !x.is_null());
+            // Every value looked at is charged.
+            if !self.charge_scan(at, first.map_or(e.len(), |i| i + 1)) {
+                return None;
+            }
+            (&e[first.unwrap_or(0)], "enum")
         };
         if !types.is_empty() && !value_matches_types(v, types, obj) {
             self.report.warn(
@@ -402,10 +420,17 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 format!("{what} value is {} but the schema type is {}; used as written", json_type(v), types.join("|")),
             );
         }
-        if let (Some(c), Some(e)) = (obj.get("const"), obj.get("enum").and_then(Value::as_array))
-            && !e.contains(c)
-        {
-            self.report.warn("contradictory_schema", at, "`const` is not one of the `enum` values");
+        if let (Some(c), Some(e)) = (obj.get("const"), obj.get("enum").and_then(Value::as_array)) {
+            // Each comparison may walk all of `const`: its size is charged
+            // once per `enum` value before any comparison is made.
+            let cost = size_within(c, self.bytes.get()).and_then(|n| n.checked_mul(e.len()));
+            if !cost.is_some_and(|n| self.charge_scan(at, n)) {
+                self.bytes_spent(at);
+                return None;
+            }
+            if !e.contains(c) {
+                self.report.warn("contradictory_schema", at, "`const` is not one of the `enum` values");
+            }
         }
         self.copy(&ptr(at, what), v)
     }
@@ -668,17 +693,28 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     fn gen_object(&mut self, obj: &Map<String, Value>, at: &str, depth: usize) -> Option<Value> {
         let empty = Map::new();
         let props = obj.get("properties").and_then(Value::as_object).unwrap_or(&empty);
-        let required: Vec<&str> =
-            obj.get("required").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        let listed = obj.get("required").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        // Reading the `required` names (into a set, and later against the
+        // members) is charged up front: a byte per name plus its length.
+        let cost = listed.iter().fold(0usize, |n, r| n.saturating_add(r.as_str().map_or(0, str::len)).saturating_add(1));
+        if !self.charge_scan(at, cost) {
+            return None;
+        }
+        let required: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
+        let required_set: HashSet<&str> = required.iter().copied().collect();
         let mut out = Map::new();
         let pbase = ptr(at, "properties");
         for (k, ps) in props {
-            let pp = ptr(&pbase, k);
-            if self.flag(ps, &pp, "readOnly") {
+            // Every member looked at is charged, generated or not.
+            if !self.charge_scan(at, k.len().saturating_add(1)) {
+                break;
+            }
+            let req = required_set.contains(k.as_str());
+            if !req && !self.include_optional {
                 continue;
             }
-            let req = required.contains(&k.as_str());
-            if !req && !self.include_optional {
+            let pp = ptr(&pbase, k);
+            if self.flag(ps, &pp, "readOnly") {
                 continue;
             }
             match self.gen_value(ps, &pp, depth + 1, Some(k)) {
@@ -686,6 +722,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                     out.insert(k.clone(), v);
                 }
                 None if req => {
+                    // The null stands in for a value and is charged like one;
+                    // once a budget is spent the member is left out instead.
+                    if !self.charge(&pp) {
+                        break;
+                    }
                     self.report.warn(
                         "required_member_unsatisfied",
                         &pp,
@@ -697,22 +738,23 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             }
         }
         let ap = obj.get("additionalProperties");
+        let rptr = ptr(at, "required");
         for r in &required {
             if props.contains_key(*r) {
                 continue;
             }
+            // As above: each null is charged to both budgets before it is inserted.
+            if !self.charge(&rptr) {
+                break;
+            }
             if ap == Some(&Value::Bool(false)) {
                 self.report.warn(
                     "contradictory_schema",
-                    &ptr(at, "required"),
+                    &rptr,
                     format!("'{r}' is required but not allowed by additionalProperties: false"),
                 );
             } else {
-                self.report.warn(
-                    "required_member_undeclared",
-                    &ptr(at, "required"),
-                    format!("'{r}' is required but has no schema; null used"),
-                );
+                self.report.warn("required_member_undeclared", &rptr, format!("'{r}' is required but has no schema; null used"));
             }
             out.insert((*r).to_string(), Value::Null);
         }
@@ -1195,6 +1237,24 @@ mod tests {
         sg.reset_budget();
         let (flat, _) = sg.flatten(&schema, "/s");
         assert!(flat["properties"]["a"].is_object(), "{flat}");
+    }
+
+    #[test]
+    fn flatten_borrows_when_nothing_is_merged() {
+        let root = json!({"components": {"schemas": {"A": {"type": "string", "description": "x".repeat(4_000)}}}});
+        let refs = Refs { root: &root, max_depth: 16, max_expansions: 10_000 };
+        let mut rep = ImportReport::default();
+        let opts = ImportOptions::default();
+        let bytes = Cell::new(1_000);
+        let mut sg = SampleGen::new(refs, &mut rep, Dialect::OpenApi31, &opts, 7, &bytes);
+        let schema = json!({"$ref": "#/components/schemas/A"});
+        let (flat, at) = sg.flatten(&schema, "/s");
+        // The resolved schema is borrowed: it is bigger than the whole budget,
+        // yet nothing is charged and it is not replaced by `null`.
+        assert!(matches!(flat, Cow::Borrowed(_)));
+        assert_eq!(flat["type"], json!("string"));
+        assert_eq!(at, "/components/schemas/A");
+        assert_eq!(bytes.get(), 1_000);
     }
 
     #[test]

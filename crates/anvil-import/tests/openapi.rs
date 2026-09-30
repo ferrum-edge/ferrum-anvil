@@ -619,3 +619,95 @@ fn input_size_limit() {
     let r = import(&fixture(PETSTORE), &ImportOptions { max_nodes: 50, ..opts() });
     assert!(matches!(r, Err(ImportError::LimitExceeded { .. })));
 }
+
+/// A JSON body of 32 × 32 × 32 copies of `#/components/schemas/X`: about
+/// 20k visits of `X` within the default payload budget.
+fn repeated_doc(x: serde_json::Value) -> Vec<u8> {
+    let mut schema = json!({"$ref": "#/components/schemas/X"});
+    for _ in 0..3 {
+        schema = json!({"type": "array", "minItems": 32, "items": schema});
+    }
+    let mut schemas = serde_json::Map::new();
+    schemas.insert("X".into(), x);
+    schemas.insert("Root".into(), schema);
+    doc_with_schemas(schemas, "Root")
+}
+
+fn count_nulls(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Null => 1,
+        serde_json::Value::Array(a) => a.iter().map(count_nulls).sum(),
+        serde_json::Value::Object(o) => o.values().map(count_nulls).sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn wide_objects_charge_every_member_looked_at() {
+    // 60k optional members, each a `$ref`, and 60k required names none of
+    // them declares: every member used to be resolved and compared with
+    // every name (3.6e9 comparisons) before being skipped.
+    let mut props = serde_json::Map::new();
+    for i in 0..60_000 {
+        props.insert(format!("o{i}"), json!({"$ref": "#/components/schemas/Leaf"}));
+    }
+    let names: Vec<String> = (0..60_000).map(|i| format!("r{i}")).collect();
+    let mut schemas = serde_json::Map::new();
+    schemas.insert("Leaf".into(), json!({"type": "string"}));
+    schemas.insert("Root".into(), json!({"type": "object", "required": names, "properties": props}));
+    let r = import(&doc_with_schemas(schemas, "Root"), &opts()).unwrap();
+    // Skipped members are not resolved: only the body's own `$ref` is.
+    assert!(r.report.counts.refs_resolved < 10, "{} $refs resolved", r.report.counts.refs_resolved);
+    let body = json_body(&req(&r, "a").spec);
+    let members = body.as_object().expect("an object body");
+    assert!(members.keys().all(|k| k.starts_with('r')), "optional members were generated");
+    // Each undeclared name's null is charged, so the payload budget holds.
+    assert!(members.len() <= opts().max_sample_nodes, "{} members", members.len());
+    assert!(has(&r, "sample_size_limit"));
+}
+
+#[test]
+fn nulls_for_undeclared_required_names_are_charged() {
+    // `X` requires 10k names it never declares, and the body repeats it about
+    // 20k times: 2e8 nulls when they were not charged.
+    let names: Vec<String> = (0..10_000).map(|i| format!("u{i}")).collect();
+    let r = import(&repeated_doc(json!({"type": "object", "required": names})), &opts()).unwrap();
+    assert!(has(&r, "sample_size_limit"));
+    let nulls = count_nulls(&json_body(&req(&r, "a").spec));
+    assert!((1..=opts().max_sample_nodes).contains(&nulls), "{nulls} nulls");
+}
+
+#[test]
+fn enum_and_const_scans_are_charged() {
+    // Each visit of `X` scans 200k `enum` values for the first non-null one,
+    // or compares `const` with 500k `enum` values; the body visits `X` about
+    // 20k times. The scans are charged, so a 4 MiB input limit (16 MiB for
+    // the import) stops them after a few visits.
+    let mut values = vec![serde_json::Value::Null; 200_000];
+    values.push(json!("a"));
+    let o = ImportOptions { max_bytes: 4 * 1024 * 1024, ..opts() };
+    for x in [json!({"enum": values}), json!({"const": 0, "enum": vec![1; 500_000]})] {
+        let r = import(&repeated_doc(x), &o).unwrap();
+        assert!(has(&r, "sample_size_limit"));
+        assert_eq!(r.requests.len(), 1);
+    }
+}
+
+#[test]
+fn structural_lookups_borrow_what_they_do_not_merge() {
+    // 40 attributes whose schema carries a 200 KB description. Copying it for
+    // every lookup spent a 1 MiB input's 4 MiB byte budget in the first
+    // payload and lost the attribute hints.
+    let mut extra = serde_json::Map::new();
+    let leaf = json!({"type": "string", "description": "x".repeat(200 * 1024), "xml": {"attribute": true}});
+    extra.insert("Leaf".into(), leaf);
+    let doc = wide_doc(40, json!({"$ref": "#/components/schemas/Leaf"}), extra, "application/xml", 2);
+    let r = import(&doc, &ImportOptions { max_bytes: 1024 * 1024, ..opts() }).unwrap();
+    assert!(!has(&r, "sample_size_limit"));
+    for op in ["op0", "op1"] {
+        match &req(&r, op).spec.body {
+            Body::Xml { text } => assert!(text.contains(" p0=\"") && text.contains(" p39=\""), "{text}"),
+            other => panic!("expected an XML body, got {other:?}"),
+        }
+    }
+}
