@@ -514,7 +514,9 @@ async fn send_in_0rtt(env: &Env, c: &mut Checks, method: &str, extra: &[&str], g
     }
     c.add(
         CheckKind::GroundTruth,
-        format!("the request went out as 0-RTT early data and the gateway saw it while its handshake was pending, within {EARLY_ROUNDS} rounds"),
+        format!(
+            "the request went out as 0-RTT early data and the gateway saw it while its handshake was pending, within {EARLY_ROUNDS} rounds"
+        ),
         false,
         exhausted(&rounds_of(&outcomes, RoundOutcome::ClientMissed), &rounds_of(&outcomes, RoundOutcome::GatewayMissed)),
     );
