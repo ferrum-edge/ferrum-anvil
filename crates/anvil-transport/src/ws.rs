@@ -399,16 +399,25 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
     // ---- QUIC + HTTP/3 connection ----
-    let connected =
-        match crate::h3::quic_connect(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
-            .await
-        {
-            Ok(c) => c,
-            Err((f, cobs)) => {
-                obs.connection = cobs;
-                return early(rec, obs, f, DispatchState::NotDispatched, facts);
-            }
-        };
+    let connected = match crate::h3::quic_connect(
+        &mut rec,
+        &plan.host,
+        plan.port,
+        &plan.dns,
+        &plan.timeouts,
+        &plan.limits,
+        &tls,
+        crate::h3::client_endpoint,
+        cancel,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err((f, cobs)) => {
+            obs.connection = cobs;
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+    };
     let crate::h3::QuicConnected { quic, mut send, observation: cobs } = connected;
     obs.connection = Some(cobs);
     let close_quic = |quic: &quinn::Connection| quic.close(0x100u32.into(), b""); // H3_NO_ERROR

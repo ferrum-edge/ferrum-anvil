@@ -78,6 +78,18 @@ impl From<usize> for PayloadLen {
 impl Frame<PayloadLen> {
     pub const MAX_ENCODED_SIZE: usize = VarInt::MAX_SIZE * 7;
 
+    /// The type and payload length a frame header declares, read without its
+    /// payload: `None` until the whole header is in `buf`, and for a frame
+    /// that has no length (a WebTransport stream).
+    pub(crate) fn peek_header<T: Buf>(buf: &mut T) -> Option<(FrameType, u64)> {
+        let ty = FrameType::decode(buf).ok()?;
+        if ty == FrameType::WEBTRANSPORT_BI_STREAM {
+            return None;
+        }
+        let len = buf.get_var().ok()?;
+        Some((ty, len))
+    }
+
     /// Decodes a Frame from the stream according to <https://www.rfc-editor.org/rfc/rfc9114#section-7.1>
     pub fn decode<T: Buf>(buf: &mut T) -> Result<Self, FrameError> {
         let remaining = buf.remaining();
@@ -328,6 +340,30 @@ impl FrameType {
     }
     pub fn encode<B: BufMut>(&self, buf: &mut B) {
         buf.write_var(self.0);
+    }
+
+    pub(crate) fn value(&self) -> u64 {
+        self.0
+    }
+
+    /// Whether frames of this type are decoded (or rejected) rather than
+    /// ignored as unknown (RFC 9114 section 7.2.8).
+    pub(crate) fn is_known(&self) -> bool {
+        matches!(
+            *self,
+            FrameType::DATA
+                | FrameType::HEADERS
+                | FrameType::H2_PRIORITY
+                | FrameType::CANCEL_PUSH
+                | FrameType::SETTINGS
+                | FrameType::PUSH_PROMISE
+                | FrameType::H2_PING
+                | FrameType::GOAWAY
+                | FrameType::H2_WINDOW_UPDATE
+                | FrameType::H2_CONTINUATION
+                | FrameType::MAX_PUSH_ID
+                | FrameType::WEBTRANSPORT_BI_STREAM
+        )
     }
 
     #[cfg(test)]

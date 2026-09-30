@@ -692,7 +692,7 @@ pub(crate) async fn open(
             &plan.tls,
             crate::h3::client_endpoint,
             cancel,
-            H3ClientOptions { h3_datagrams: true },
+            H3ClientOptions { h3_datagrams: true, ..H3ClientOptions::new(&plan.limits) },
         );
         tokio::select! {
             r = connect => Some(r),

@@ -13,7 +13,7 @@ use crate::stream::{BufRecvStream, WriteBuf};
 use crate::{
     buf::BufList,
     proto::{
-        frame::{self, Frame, PayloadLen},
+        frame::{self, Frame, FrameType, PayloadLen},
         stream::StreamId,
     },
     quic::{BidiStream, RecvStream, SendStream},
@@ -32,6 +32,16 @@ impl<S, B> FrameStream<S, B> {
         Self {
             stream,
             decoder: FrameDecoder::default(),
+            remaining_data: 0,
+        }
+    }
+
+    /// A frame stream that accepts frames other than DATA with a payload of
+    /// at most `max_payload` bytes (see [`FrameStreamError::TooLarge`]).
+    pub fn with_max_payload(stream: BufRecvStream<S, B>, max_payload: u64) -> Self {
+        Self {
+            stream,
+            decoder: FrameDecoder::with_max_payload(max_payload),
             remaining_data: 0,
         }
     }
@@ -77,7 +87,7 @@ where
                     Poll::Ready(false) => continue,
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(true) => {
-                        if self.stream.buf_mut().has_remaining() {
+                        if self.stream.buf_mut().has_remaining() || self.decoder.skip > 0 {
                             // Reached the end of receive stream, but there is still some data:
                             // The frame is incomplete.
                             Poll::Ready(Err(FrameStreamError::UnexpectedEnd))
@@ -202,12 +212,33 @@ where
     }
 }
 
-#[derive(Default)]
+/// The largest payload of a frame other than DATA that a stream without its
+/// own limit (the control stream) buffers: those frames carry a few integers.
+pub const DEFAULT_MAX_FRAME_PAYLOAD: u64 = 64 * 1024;
+
 pub struct FrameDecoder {
     expected: Option<usize>,
+    /// The largest payload of a frame other than DATA buffered for decoding.
+    max_payload: u64,
+    /// Payload bytes of an unknown frame over `max_payload` still to discard.
+    skip: u64,
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self::with_max_payload(DEFAULT_MAX_FRAME_PAYLOAD)
+    }
 }
 
 impl FrameDecoder {
+    fn with_max_payload(max_payload: u64) -> Self {
+        Self {
+            expected: None,
+            max_payload,
+            skip: 0,
+        }
+    }
+
     fn decode<B: Buf>(
         &mut self,
         src: &mut BufList<B>,
@@ -219,9 +250,46 @@ impl FrameDecoder {
                 return Ok(None);
             }
 
+            if self.skip > 0 {
+                // An unknown frame too large to buffer: its payload is
+                // dropped as it arrives.
+                let n = src
+                    .remaining()
+                    .min(usize::try_from(self.skip).unwrap_or(usize::MAX));
+                src.advance(n);
+                self.skip -= n as u64;
+                continue;
+            }
+
             if let Some(min) = self.expected {
                 if src.remaining() < min {
                     return Ok(None);
+                }
+            }
+
+            // The declared payload length is checked before the payload is
+            // buffered: a frame other than DATA is only decoded once all of
+            // it has arrived.
+            let header = {
+                let mut cur = src.cursor();
+                Frame::peek_header(&mut cur).map(|(ty, len)| (ty, len, cur.position()))
+            };
+            if let Some((ty, len, header_len)) = header {
+                if ty != FrameType::DATA && len > self.max_payload {
+                    if !ty.is_known() {
+                        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
+                        //# Endpoints MUST
+                        //# NOT consider these frames to have any meaning upon receipt.
+                        src.advance(header_len);
+                        self.expected = None;
+                        self.skip = len;
+                        continue;
+                    }
+                    return Err(FrameStreamError::TooLarge {
+                        frame_type: ty.value(),
+                        size: len,
+                        max_size: self.max_payload,
+                    });
                 }
             }
 
@@ -290,6 +358,16 @@ pub enum FrameStreamError {
     Proto(FrameProtocolError),
     Quic(StreamErrorIncoming),
     UnexpectedEnd,
+    /// A frame other than DATA declared a payload larger than the stream
+    /// accepts; it was not buffered.
+    TooLarge {
+        /// The frame type
+        frame_type: u64,
+        /// The declared payload length
+        size: u64,
+        /// The largest payload the stream accepts
+        max_size: u64,
+    },
 }
 
 #[derive(Debug, PartialEq)]

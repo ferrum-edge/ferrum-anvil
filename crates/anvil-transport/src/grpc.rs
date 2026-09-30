@@ -1450,9 +1450,18 @@ async fn connect(
                     None,
                 ));
             };
-            let c =
-                crate::h3::quic_connect(rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
-                    .await?;
+            let c = crate::h3::quic_connect(
+                rec,
+                &plan.host,
+                plan.port,
+                &plan.dns,
+                &plan.timeouts,
+                &plan.limits,
+                &tls,
+                crate::h3::client_endpoint,
+                cancel,
+            )
+            .await?;
             return Ok(Connected { conn: Conn::H3(c.send), stats: ConnStats::new(), observation: c.observation, quic: Some(c.quic) });
         }
         Leg::Tcp(t) => t,
