@@ -324,13 +324,7 @@ fn held(hold: Option<Hold>) -> String {
         Some(h) => format!(
             "held {:?} with {} datagrams queued, released {:?}; before it: {} backend request(s), {} refusal line(s); \
              {} Handshake datagram(s) also carried 1-RTT data, {} unreadable datagram(s) held",
-            h.held_for,
-            h.datagrams,
-            h.released,
-            h.backend_before,
-            h.refusals_before,
-            h.relay.coalesced_1rtt,
-            h.relay.unparsed
+            h.held_for, h.datagrams, h.released, h.backend_before, h.refusals_before, h.relay.coalesced_1rtt, h.relay.unparsed
         ),
     }
 }
