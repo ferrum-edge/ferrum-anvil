@@ -875,6 +875,12 @@
   `grpc.reflection_unavailable` says that auth preparation failed for it
   instead of reporting a transport failure and advising the operator to
   allow reflection.
+- Windows: the DNS fixture binds a UDP socket and a TCP listener to one
+  ephemeral port, and the replay-guard fixture does the same for its QUIC
+  endpoint and TCP listener. Both now retry the whole pair on a fresh
+  OS-assigned port when either bind lands in an excluded or reserved port
+  range (WSAEACCES, os error 10013) or on a port another socket holds,
+  instead of failing the test with a bind error.
 
 ### Security
 

@@ -151,8 +151,9 @@ fn event_stream(reconnected: bool) -> http::Response<Body> {
         .expect("static response")
 }
 
-/// A UDP port for QUIC and the same TCP port, on 127.0.0.1. Another socket
-/// may hold that TCP port: a new UDP port is then tried.
+/// A UDP port for QUIC and the same TCP port, on 127.0.0.1. Either bind can
+/// fail (another socket may hold that TCP port, or the port may sit in a
+/// Windows excluded range): the pair is then tried again on a fresh port.
 async fn bind(tls: &TlsServerOptions, quic: bool) -> anyhow::Result<(Option<quinn::Endpoint>, TcpListener)> {
     if !quic {
         return Ok((None, TcpListener::bind("127.0.0.1:0").await?));
@@ -165,7 +166,13 @@ async fn bind(tls: &TlsServerOptions, quic: bool) -> anyhow::Result<(Option<quin
     let server_cfg = quinn::ServerConfig::with_crypto(Arc::new(quic_cfg));
     let mut last = None;
     for _ in 0..16 {
-        let endpoint = quinn::Endpoint::server(server_cfg.clone(), "127.0.0.1:0".parse()?)?;
+        let endpoint = match quinn::Endpoint::server(server_cfg.clone(), "127.0.0.1:0".parse()?) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                last = Some(error);
+                continue;
+            }
+        };
         match TcpListener::bind(endpoint.local_addr()?).await {
             Ok(l) => return Ok((Some(endpoint), l)),
             Err(e) => {
