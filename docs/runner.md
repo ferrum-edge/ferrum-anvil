@@ -176,16 +176,26 @@ are allowed). The path is checked before the body is parsed. A failed
 extraction names its variable (`extraction for 'id': …`).
 
 The body is also checked before it is parsed, because the XML parser's work
-on namespaces and attributes can grow with the square of the body's size. A
-body with more than 8192 `xmlns` declarations, an element with more than 256
-attributes, more than 2^22 attribute pairs over the whole document
-(n·(n−1)/2 for an element with n attributes), an attribute name over 256
-bytes, a namespace prefix over 128 bytes, a namespace URI over 512 bytes, or
-more than 4,000,000 nodes is not evaluated: the assertion fails with "could
-not evaluate: XML too complex to evaluate safely (…)", naming the limit, and
-an extraction from it fails the same way. Every declaration counts, so a
-service that declares the same prefix again on each of more than 8192
-elements reaches the cap.
+on namespaces and attributes can grow faster than the body. A body is not
+evaluated when any of these holds:
+
+- it has more than 8192 `xmlns` declarations;
+- any element has more than 128 declarations in scope (its own and its
+  ancestors'; a prefix declared again counts again);
+- the squares of the declarations in scope, summed over the elements that
+  declare one, exceed 2^26;
+- any element has more than 256 attributes;
+- the whole document has more than 2^22 attribute pairs (n·(n−1)/2 for an
+  element with n attributes);
+- an attribute name is over 256 bytes, a namespace prefix over 64 bytes or
+  a namespace URI over 512 bytes;
+- it has more than 4,000,000 nodes.
+
+The assertion then fails with "could not evaluate: XML too complex to
+evaluate safely (…)", naming the limit, and an extraction from it fails the
+same way. A service that declares the same prefix again on each of many
+sibling elements stays well within the scope bounds, but every declaration
+counts toward the 8192.
 
 ## Cancellation, lock and abort
 

@@ -6,9 +6,13 @@
 //!
 //! The scan counts the attributes of each start tag, the attribute pairs of
 //! the whole document and its `xmlns` declarations, and bounds the length of
-//! attribute names, namespace prefixes and namespace URIs. It skips comments,
-//! CDATA sections, processing instructions and quoted attribute values. It
-//! depends on nothing and allocates nothing, so every crate that parses XML
+//! attribute names, namespace prefixes and namespace URIs. It follows the
+//! open elements to bound the namespaces in scope of each element and the
+//! work of resolving them (see [`XmlLimits::namespace_scope_work`]). It skips
+//! comments, CDATA sections, processing instructions and quoted attribute
+//! values. It depends on nothing, and its only allocation is a stack with one
+//! entry per open element that declares a namespace (at most
+//! [`XmlLimits::in_scope_namespaces`] entries). Every crate that parses XML
 //! runs it first, each with the limits its input calls for: WSDL imports,
 //! request body lint, XPath assertions and extractions, SOAP fault detection
 //! in response diagnostics, and WS-Security header insertion.
@@ -37,6 +41,19 @@ pub struct XmlLimits {
     pub xmlns_prefix_bytes: usize,
     /// Bytes in one declared namespace URI (as written).
     pub xmlns_uri_bytes: usize,
+    /// Namespace declarations in scope of one element: its own and those of
+    /// its open ancestors (a prefix declared again counts again, so this is
+    /// an upper bound on the namespaces in scope). The parser looks every
+    /// prefixed element and attribute name up among them one by one.
+    pub in_scope_namespaces: usize,
+    /// Work of resolving namespace scopes: the square of the declarations in
+    /// scope, summed over the elements that declare a namespace. For each such
+    /// element the parser copies the parent's namespaces and checks each
+    /// against those already copied (about n²/2 prefix comparisons for n in
+    /// scope), so a nested chain of n declarations costs about n³/6 and this
+    /// budget bounds it. Siblings that declare the same prefix again each
+    /// cost only the square of their own small scope.
+    pub namespace_scope_work: usize,
 }
 
 /// A limit the scan found exceeded, with that limit.
@@ -48,6 +65,8 @@ pub enum XmlLimitExceeded {
     NamespaceDeclarations(usize),
     NamespacePrefixBytes(usize),
     NamespaceUriBytes(usize),
+    InScopeNamespaces(usize),
+    NamespaceScopeWork(usize),
 }
 
 impl std::fmt::Display for XmlLimitExceeded {
@@ -59,6 +78,10 @@ impl std::fmt::Display for XmlLimitExceeded {
             Self::NamespaceDeclarations(l) => write!(f, "more than {l} namespace declarations (xmlns)"),
             Self::NamespacePrefixBytes(l) => write!(f, "a namespace prefix longer than {l} bytes"),
             Self::NamespaceUriBytes(l) => write!(f, "a namespace URI longer than {l} bytes"),
+            Self::InScopeNamespaces(l) => write!(f, "more than {l} namespace declarations in scope of one element"),
+            Self::NamespaceScopeWork(l) => {
+                write!(f, "namespace scopes costing more than {l} to resolve (declarations in scope, squared, per declaring element)")
+            }
         }
     }
 }
@@ -67,7 +90,7 @@ impl std::error::Error for XmlLimitExceeded {}
 
 /// Check `text` against `limits` in one pass, before it is parsed.
 pub fn check_xml_limits(text: &str, limits: &XmlLimits) -> Result<(), XmlLimitExceeded> {
-    let mut scan = Scan { b: text.as_bytes(), limits: *limits, xmlns: 0, pairs: 0 };
+    let mut scan = Scan { b: text.as_bytes(), limits: *limits, xmlns: 0, pairs: 0, depth: 0, scopes: Vec::new(), in_scope: 0, work: 0 };
     let mut i = 0;
     while let Some(at) = scan.find_byte(i, b'<') {
         let rest = &scan.b[at..];
@@ -81,6 +104,7 @@ pub fn check_xml_limits(text: &str, limits: &XmlLimits) -> Result<(), XmlLimitEx
             // A DOCTYPE (the parser refuses it) or malformed markup.
             None
         } else if rest.starts_with(b"</") {
+            scan.end_tag();
             scan.find_byte(at + 2, b'>').map(|e| e + 1)
         } else {
             scan.start_tag(at + 1)?
@@ -98,6 +122,14 @@ struct Scan<'t> {
     limits: XmlLimits,
     xmlns: usize,
     pairs: usize,
+    /// Open elements.
+    depth: usize,
+    /// (depth, declarations) of each open element that declares a namespace.
+    scopes: Vec<(usize, usize)>,
+    /// Declarations of the open elements.
+    in_scope: usize,
+    /// Namespace scope work so far.
+    work: usize,
 }
 
 fn is_space(c: u8) -> bool {
@@ -120,6 +152,42 @@ impl Scan<'_> {
         i
     }
 
+    /// An end tag closes the innermost open element and its declarations.
+    /// Text whose end tags do not match its start tags is refused by the
+    /// parser where they stop matching.
+    fn end_tag(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+        if let Some(&(depth, declared)) = self.scopes.last()
+            && depth == self.depth
+        {
+            self.scopes.pop();
+            self.in_scope -= declared;
+        }
+    }
+
+    /// The start tag ending at `>` declared `declared` namespaces.
+    fn close_start_tag(&mut self, declared: usize, empty: bool) -> Result<(), XmlLimitExceeded> {
+        let l = self.limits;
+        if declared > 0 {
+            let n = self.in_scope + declared;
+            if n > l.in_scope_namespaces {
+                return Err(XmlLimitExceeded::InScopeNamespaces(l.in_scope_namespaces));
+            }
+            self.work = self.work.saturating_add(n.saturating_mul(n));
+            if self.work > l.namespace_scope_work {
+                return Err(XmlLimitExceeded::NamespaceScopeWork(l.namespace_scope_work));
+            }
+            if !empty {
+                self.scopes.push((self.depth, declared));
+                self.in_scope = n;
+            }
+        }
+        if !empty {
+            self.depth += 1;
+        }
+        Ok(())
+    }
+
     /// Check the attributes of the start tag whose name begins at `i`;
     /// `Ok(Some(end))` is just past its `>`, `Ok(None)` ends the scan.
     fn start_tag(&mut self, mut i: usize) -> Result<Option<usize>, XmlLimitExceeded> {
@@ -129,16 +197,22 @@ impl Scan<'_> {
             i += 1;
         }
         let mut attributes = 0usize;
+        let mut declared = 0usize;
+        let mut empty = false;
         loop {
             i = self.skip_space(i);
             match b.get(i) {
                 None => return Ok(None),
-                Some(b'>') => return Ok(Some(i + 1)),
+                Some(b'>') => {
+                    self.close_start_tag(declared, empty)?;
+                    return Ok(Some(i + 1));
+                }
                 Some(b'/') => {
+                    empty = true;
                     i += 1;
                     continue;
                 }
-                Some(_) => {}
+                Some(_) => empty = false,
             }
             let name = i;
             while b.get(i).is_some_and(|&c| !is_space(c) && !matches!(c, b'=' | b'>' | b'/')) {
@@ -175,6 +249,7 @@ impl Scan<'_> {
                 _ => None,
             };
             if let Some(prefix) = prefix {
+                declared += 1;
                 self.xmlns += 1;
                 if self.xmlns > l.xmlns_declarations {
                     return Err(XmlLimitExceeded::NamespaceDeclarations(l.xmlns_declarations));
@@ -190,8 +265,56 @@ impl Scan<'_> {
     }
 }
 
+/// Documents for the call sites' regression tests (feature `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::XmlLimits;
+
+    /// Elements with the most namespace work `limits` allow, to be placed
+    /// inside a root that declares `outer` namespaces: a chain of nested
+    /// elements that each declare one more prefix, as deep as the in-scope
+    /// bound allows, then siblings inside it that each declare one until the
+    /// scope work budget or the declaration count is spent, then `lookups`
+    /// elements named with the outermost prefix, which the parser finds last
+    /// in the innermost scope. The prefixes are as long as the limits allow
+    /// and differ only in their last bytes, so each comparison reads them
+    /// whole.
+    pub fn namespace_worst_case(limits: &XmlLimits, outer: usize, lookups: usize) -> String {
+        let len = limits.xmlns_prefix_bytes.min(limits.attribute_name_bytes.saturating_sub(6));
+        assert!(len >= 8, "prefixes of at least 8 bytes");
+        let prefix = |i: usize| format!("p{}{i:06}", "q".repeat(len - 7));
+        let mut work = outer * outer;
+        let mut declared = outer;
+        let mut s = String::new();
+        let mut depth = 0;
+        while outer + depth + 2 <= limits.in_scope_namespaces
+            && declared < limits.xmlns_declarations
+            && work + (outer + depth + 1).pow(2) <= limits.namespace_scope_work
+        {
+            depth += 1;
+            work += (outer + depth).pow(2);
+            declared += 1;
+            s.push_str(&format!("<c xmlns:{}=\"urn:a\">", prefix(depth)));
+        }
+        let n = outer + depth + 1;
+        let mut sibling = depth;
+        while declared < limits.xmlns_declarations && work + n * n <= limits.namespace_scope_work {
+            sibling += 1;
+            work += n * n;
+            declared += 1;
+            s.push_str(&format!("<s xmlns:{}=\"urn:a\"/>", prefix(sibling)));
+        }
+        if depth > 0 {
+            s.push_str(&format!("<{}:e/>", prefix(1)).repeat(lookups));
+        }
+        s.push_str(&"</c>".repeat(depth));
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::namespace_worst_case;
     use super::*;
 
     const WIDE: XmlLimits = XmlLimits {
@@ -201,6 +324,8 @@ mod tests {
         xmlns_declarations: 10,
         xmlns_prefix_bytes: 16,
         xmlns_uri_bytes: 64,
+        in_scope_namespaces: 10,
+        namespace_scope_work: 1_000,
     };
 
     fn attrs(n: usize) -> String {
@@ -279,5 +404,78 @@ mod tests {
         assert_eq!(XmlLimitExceeded::NamespaceDeclarations(4).to_string(), "more than 4 namespace declarations (xmlns)");
         assert_eq!(XmlLimitExceeded::AttributesPerElement(256).to_string(), "more than 256 attributes on one element");
         assert_eq!(XmlLimitExceeded::NamespaceUriBytes(512).to_string(), "a namespace URI longer than 512 bytes");
+    }
+
+    fn decl(i: usize) -> String {
+        format!(" xmlns:p{i}=\"urn:p{i}\"")
+    }
+
+    #[test]
+    fn bounds_the_namespaces_in_scope_of_each_element() {
+        let three = with(|l| l.in_scope_namespaces = 3);
+        // Two on the root and one on the child are in scope of the child.
+        let ok = format!("<r{}{}><c{}/></r>", decl(0), decl(1), decl(2));
+        assert_eq!(check_xml_limits(&ok, &three), Ok(()));
+        let over = format!("<r{}{}><c{}><d{}/></c></r>", decl(0), decl(1), decl(2), decl(3));
+        assert_eq!(check_xml_limits(&over, &three), Err(XmlLimitExceeded::InScopeNamespaces(3)));
+        // Declarations go out of scope with their element, whether it ends
+        // with an end tag or is empty.
+        let closed = format!("<r{}><a{}{}></a><b{}/><c{}{}/></r>", decl(0), decl(1), decl(2), decl(3), decl(4), decl(5));
+        assert_eq!(check_xml_limits(&closed, &three), Ok(()));
+        // A prefix declared again counts again.
+        let again = "<r xmlns:p=\"urn:a\"><c xmlns:p=\"urn:b\"><d xmlns:p=\"urn:c\"><e xmlns:p=\"urn:d\"/></d></c></r>";
+        assert_eq!(check_xml_limits(again, &three), Err(XmlLimitExceeded::InScopeNamespaces(3)));
+        // End tags inside comments, CDATA and values close nothing.
+        let hidden = format!("<r{}><!-- </r> --><![CDATA[</r>]]><a v=\"</r>\"{}><b{}/></a></r>", decl(0), decl(1), decl(2));
+        assert_eq!(check_xml_limits(&hidden, &three), Ok(()));
+        assert_eq!(check_xml_limits(&hidden, &with(|l| l.in_scope_namespaces = 2)), Err(XmlLimitExceeded::InScopeNamespaces(2)));
+    }
+
+    #[test]
+    fn charges_the_square_of_the_scope_of_each_declaring_element() {
+        // A chain of 1, 2 and 3 in scope costs 1 + 4 + 9.
+        let chain = format!("<r{}><c{}><d{}/></c></r>", decl(0), decl(1), decl(2));
+        assert_eq!(check_xml_limits(&chain, &with(|l| l.namespace_scope_work = 14)), Ok(()));
+        assert_eq!(check_xml_limits(&chain, &with(|l| l.namespace_scope_work = 13)), Err(XmlLimitExceeded::NamespaceScopeWork(13)));
+        // Elements that declare nothing cost nothing.
+        let plain = format!("<r{}>{}</r>", decl(0), "<c><d/></c>".repeat(100));
+        assert_eq!(check_xml_limits(&plain, &with(|l| l.namespace_scope_work = 1)), Ok(()));
+    }
+
+    #[test]
+    fn siblings_that_declare_the_same_prefix_again_stay_cheap() {
+        // Ten in scope on the root; each of 10,000 children adds one: 100 + 10,000 * 121.
+        let decls: String = (0..10).map(decl).collect();
+        let doc = format!("<r{decls}>{}</r>", "<i xmlns:m=\"urn:m\">v</i>".repeat(10_000));
+        let l = XmlLimits { xmlns_declarations: 20_000, in_scope_namespaces: 11, namespace_scope_work: 100 + 10_000 * 121, ..WIDE };
+        assert_eq!(check_xml_limits(&doc, &l), Ok(()));
+        let tight = XmlLimits { namespace_scope_work: 100 + 10_000 * 121 - 1, ..l };
+        assert_eq!(check_xml_limits(&doc, &tight), Err(XmlLimitExceeded::NamespaceScopeWork(tight.namespace_scope_work)));
+    }
+
+    #[test]
+    fn the_worst_case_document_is_at_the_limits() {
+        for (in_scope, work, declarations) in [(10, 1_000, 100), (128, 1 << 24, 4_096), (256, 1 << 26, 1_024), (128, 1 << 22, 1_024)] {
+            let l = XmlLimits {
+                attributes_per_element: 256,
+                attribute_pairs: 1 << 20,
+                attribute_name_bytes: 1_024,
+                xmlns_declarations: declarations,
+                xmlns_prefix_bytes: 64,
+                xmlns_uri_bytes: 512,
+                in_scope_namespaces: in_scope,
+                namespace_scope_work: work,
+            };
+            for outer in [0, 2] {
+                let decls: String = (0..outer).map(decl).collect();
+                let doc = format!("<r{decls}>{}</r>", namespace_worst_case(&l, outer, 10));
+                assert_eq!(check_xml_limits(&doc, &l), Ok(()), "{l:?} outer {outer}");
+                // Each bound it is at is exact: one less refuses the document.
+                let fewer = [XmlLimits { in_scope_namespaces: in_scope - 1, ..l }, XmlLimits { namespace_scope_work: work / 2, ..l }];
+                for tighter in fewer {
+                    assert!(check_xml_limits(&doc, &tighter).is_err(), "{tighter:?} outer {outer}");
+                }
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "anvil-xml-limits"
-description = "Linear, allocation-free pre-parse scan bounding the XML attribute and namespace work roxmltree does before its own limits apply"
+description = "Linear pre-parse scan bounding the XML attribute and namespace work roxmltree does before its own limits apply"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,7 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# `test_support::namespace_worst_case`, for the call sites' regression tests.
+test-support = []

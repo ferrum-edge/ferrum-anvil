@@ -52,22 +52,36 @@ against it).
 ### XML responses and bodies
 
 - **XML that multiplies parser work** (GHSA-mvjp-hhjj-mh63): the XML parser
-  copies the namespaces in scope for every element that declares one and
-  compares each attribute with every earlier one on its element, names and
-  full namespace URIs, and its node limit counts neither. Wherever Anvil
+  compares each attribute with every earlier one on its element (names and
+  full namespace URIs). For each element that declares a namespace it copies
+  the n namespaces in scope and checks each against those already copied
+  (about n²/2 prefix comparisons, so a nested chain of n declarations costs
+  about n³/6). It looks every element and prefixed attribute name up among
+  the namespaces in scope. Its node limit counts none of this. Wherever Anvil
   parses XML (WSDL imports, request body lint, XPath assertions and
   extractions, SOAP fault detection in diagnostics, WS-Security header
   insertion), one shared, quote-, comment- and CDATA-aware scan
-  (`anvil-xml-limits`) first counts the `xmlns` declarations, the attributes
-  of each element and the attribute pairs of the document, and bounds the
-  length of attribute names, namespace prefixes and namespace URIs, with
-  limits chosen for that site's input. Every site parses with DTDs refused,
+  (`anvil-xml-limits`) runs first, with limits chosen for that site's input.
+  It counts the `xmlns` declarations, the attributes of each element and the
+  attribute pairs of the document. It follows the open elements to bound the
+  declarations in scope of any element and the sum of their squares over the
+  declaring elements. It also bounds the length of attribute names, namespace
+  prefixes and namespace URIs. Siblings that declare the same prefix again
+  each cost only their own small scope. Every site parses with DTDs refused,
   which the scan relies on, and with a node limit. Over a limit, nothing is
-  parsed: lint reports a finding ("XML too complex to lint safely"), an
-  XPath assertion or extraction fails ("XML too complex to evaluate
-  safely"), diagnostics skip SOAP fault detection with a
-  `partial_visibility` warning, and WS-Security refuses the envelope. The
-  work left is bounded in proportion to those limits, not proven linear.
+  parsed:
+  - lint returns `refused` ("too complex to lint safely"), which a send
+    treats like a lint error;
+  - an XPath assertion or extraction fails ("XML too complex to evaluate
+    safely");
+  - a SOAP envelope in a response is not inspected for a fault, its
+    application outcome is `not_evaluated` and a `partial_visibility`
+    warning says why (XML whose root is not an `Envelope` cannot carry a
+    fault and is not parsed for one);
+  - WS-Security refuses the envelope.
+
+  The remaining work is bounded in proportion to those limits, not proven
+  linear.
 
 ### Requests and redirects
 

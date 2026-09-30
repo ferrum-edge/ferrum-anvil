@@ -22,12 +22,15 @@ const B64_ENC: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-s
 /// XML nodes one envelope may have, as a request body lint allows.
 const MAX_ENVELOPE_NODES: u32 = 1_000_000;
 /// What an envelope may contain before it is parsed (it can come from an
-/// imported collection). The parser copies the namespaces in scope for every
-/// element that declares one and compares each attribute with every earlier
-/// one on its element, names and full namespace URIs, so both are bounded
-/// before it runs, as for a request body lint: names, prefixes and URIs as
-/// long as a WSDL import allows, at most 2^20 attribute pairs and
-/// (4096/2)^2 = 2^22 copied namespace references (8 MiB).
+/// imported collection). The parser compares each attribute with every
+/// earlier one on its element, names and full namespace URIs; for each
+/// element that declares a namespace it copies the n in scope, checking each
+/// against those already copied (about n²/2 prefix comparisons); and it looks
+/// every element and prefixed attribute name up among the namespaces in
+/// scope. As for a request body lint: names, prefixes and URIs as long as a
+/// WSDL import allows, about 2^20 attribute comparisons, 2^23 prefix
+/// comparisons while copying scopes, 2^19 copied namespace references, and
+/// 129 comparisons per name looked up.
 const ENVELOPE_XML_LIMITS: XmlLimits = XmlLimits {
     attributes_per_element: 256,
     attribute_pairs: 1 << 20,
@@ -35,6 +38,8 @@ const ENVELOPE_XML_LIMITS: XmlLimits = XmlLimits {
     xmlns_declarations: 4_096,
     xmlns_prefix_bytes: 256,
     xmlns_uri_bytes: 2_048,
+    in_scope_namespaces: 128,
+    namespace_scope_work: 1 << 24,
 };
 
 /// PasswordDigest = Base64(SHA-1(nonce_bytes || created || password)).
@@ -268,7 +273,8 @@ mod tests {
     fn refuses_envelopes_too_complex_to_parse() {
         let started = std::time::Instant::now();
         let envelopes = [
-            (envelope(16, &nested_namespaces(5_000)), "more than 4096 namespace declarations"),
+            (envelope(16, &nested_namespaces(5_000)), "more than 128 namespace declarations in scope of one element"),
+            (envelope(16, &r#"<m:i xmlns:m="urn:m">v</m:i>"#.repeat(5_000)), "more than 4096 namespace declarations (xmlns)"),
             (envelope(2_000, &wide_elements(1, 300)), "more than 256 attributes on one element"),
             // Each element is within the per-element bound; together they are not.
             (envelope(2_000, &wide_elements(60, 200)), "attribute pairs"),
@@ -285,11 +291,23 @@ mod tests {
     #[test]
     fn inserts_into_envelopes_within_the_limits() {
         let envelopes =
-            [envelope(16, "<m:Ping>1</m:Ping>"), envelope(2_000, &wide_elements(20, 200)), envelope(16, &nested_namespaces(1_000))];
+            [envelope(16, "<m:Ping>1</m:Ping>"), envelope(2_000, &wide_elements(20, 200)), envelope(16, &nested_namespaces(126))];
         for env in &envelopes {
             let out = String::from_utf8(insert(env).unwrap()).unwrap();
             assert!(out.contains("<soap:Header><wsse:Security"), "{}", &out[..200]);
             assert!(out.ends_with("</soap:Body></soap:Envelope>"));
         }
+    }
+
+    /// The most namespace work the limits allow inside an envelope that
+    /// declares two: the deepest chain of the longest prefixes, siblings until
+    /// the scope budget is spent, and names the parser finds last in scope.
+    #[test]
+    fn inserts_into_an_envelope_at_the_namespace_limits_promptly() {
+        let env = envelope(16, &anvil_xml_limits::test_support::namespace_worst_case(&ENVELOPE_XML_LIMITS, 2, 10_000));
+        let started = std::time::Instant::now();
+        let out = String::from_utf8(insert(&env).unwrap()).unwrap();
+        assert!(out.contains("<soap:Header><wsse:Security"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 }

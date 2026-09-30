@@ -222,7 +222,8 @@ fn wide_elements(elements: usize, attributes: usize, uri_bytes: usize) -> Vec<u8
 fn xml_too_complex_to_evaluate_fails_assertions_and_extractions() {
     let started = Instant::now();
     let bodies = [
-        (nested_namespaces(20_000), "more than 8192 namespace declarations"),
+        (nested_namespaces(20_000), "more than 128 namespace declarations in scope of one element"),
+        (format!("<r>{}</r>", r#"<i xmlns:m="urn:m">v</i>"#.repeat(9_000)).into_bytes(), "more than 8192 namespace declarations (xmlns)"),
         (wide_elements(1, 300, 16), "more than 256 attributes on one element"),
         // Each element is within the per-element bound; together they are not.
         (wide_elements(200, 250, 500), "attribute pairs"),
@@ -248,7 +249,7 @@ fn xml_within_the_limits_is_evaluated() {
     let wide = wide_elements(20, 250, 500);
     let r = &observe(&wide, &[xpath_assertion("//c/@a249", Comparison::Exists)])[0];
     assert!(r.passed, "{}", r.message);
-    assert_eq!(xpath(&nested_namespaces(1_000), "//e/@missing").unwrap(), None);
+    assert_eq!(xpath(&nested_namespaces(128), "//e/@missing").unwrap(), None);
     // A service may declare the same prefix again on every element.
     let redeclared = format!("<r>{}</r>", r#"<m:i xmlns:m="urn:m">v</m:i>"#.repeat(5_000));
     assert_eq!(xpath(redeclared.as_bytes(), "/r/i[5000]").unwrap().as_deref(), Some("v"));

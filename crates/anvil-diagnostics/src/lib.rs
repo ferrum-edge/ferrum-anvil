@@ -185,7 +185,9 @@ pub fn assess_application(protocol: Protocol, status: &ProtocolStatus, body: &Bo
         ProtocolStatus::Http { status, .. } | ProtocolStatus::Sse { http_status: status, .. } => {
             if *status >= 400 {
                 ApplicationState::Failure
-            } else if !body_complete {
+            } else if !body_complete || body.xml_not_inspected.is_some() {
+                // A fault past a cut, or in an envelope too complex to
+                // inspect, would go unseen.
                 ApplicationState::NotEvaluated
             } else if body.soap_fault.is_some() || body.graphql.is_some() {
                 ApplicationState::Failure

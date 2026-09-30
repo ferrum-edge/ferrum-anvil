@@ -72,9 +72,10 @@ pub struct BodyFacts {
     pub soap_fault: Option<SoapFault>,
     pub graphql: Option<GraphQlResult>,
     pub is_html: bool,
-    /// Why an XML body was not parsed for a SOAP fault: the pre-parse scan
-    /// found it over the limits (`SOAP_FAULT_XML_LIMITS`), so no fault can be
-    /// reported from it.
+    /// Why a SOAP envelope (an XML body whose root element is `Envelope`)
+    /// was not inspected for a fault: it is over the pre-parse limits
+    /// (`SOAP_FAULT_XML_LIMITS`) or the node limit. A fault in it would go
+    /// unseen, so the application outcome is not evaluated.
     pub xml_not_inspected: Option<String>,
 }
 
@@ -95,18 +96,25 @@ const MAX_PARSE: usize = 256 * 1024;
 /// XML nodes parsed to find a SOAP fault.
 const SOAP_FAULT_MAX_NODES: u32 = 50_000;
 /// What an XML response body may contain before it is parsed for a SOAP
-/// fault (every XML response up to [`MAX_PARSE`] bytes is). The parser copies
-/// the namespaces in scope for every element that declares one and compares
-/// each attribute with every earlier one on its element, names and full
-/// namespace URIs; with these bounds that stays under 2^18 comparisons of at
-/// most 768 bytes and (1024/2)^2 = 2^18 copied namespace references (512 KiB).
+/// fault (every XML response up to [`MAX_PARSE`] bytes whose root is an
+/// `Envelope` is). The parser compares each attribute with every earlier one
+/// on its element, names and full namespace URIs; for each element that
+/// declares a namespace it copies the n in scope, checking each against those
+/// already copied (about n²/2 prefix comparisons); and it looks every element
+/// and prefixed attribute name up among the namespaces in scope. With these
+/// bounds that stays under 2^18 attribute comparisons of at most 768 bytes,
+/// 2^21 prefix comparisons of at most 64 bytes while copying scopes,
+/// 1024 · 128 = 2^17 copied namespace references, and 129 comparisons per
+/// name looked up.
 const SOAP_FAULT_XML_LIMITS: XmlLimits = XmlLimits {
     attributes_per_element: 256,
     attribute_pairs: 1 << 18,
     attribute_name_bytes: 256,
     xmlns_declarations: 1_024,
-    xmlns_prefix_bytes: 128,
+    xmlns_prefix_bytes: 64,
     xmlns_uri_bytes: 512,
+    in_scope_namespaces: 128,
+    namespace_scope_work: 1 << 22,
 };
 
 fn floor_char_boundary(s: &str, i: usize) -> usize {
@@ -204,17 +212,49 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
 }
 
 /// SOAP 1.1/1.2 fault detection. DTDs are refused, so no entity expansion
-/// or external resolution can occur. `Err` says why the body was not parsed
-/// (it is over the pre-parse limits). A body that is not XML, or has more
-/// than `SOAP_FAULT_MAX_NODES` nodes, has no fault.
+/// or external resolution can occur. Only a document whose root element is
+/// an `Envelope` can carry a fault; any other body is not parsed. `Err` says
+/// why an envelope was not inspected: it is over the pre-parse limits or
+/// has more than `SOAP_FAULT_MAX_NODES` nodes. An envelope that is not
+/// well-formed has no fault.
 fn soap_fault(xml: &[u8], redact: Redact<'_>) -> Result<Option<SoapFault>, String> {
     let Ok(text) = std::str::from_utf8(xml) else { return Ok(None) };
+    if !root_is_envelope(text) {
+        return Ok(None);
+    }
     // Counted in one pass before the parser does work that grows with the
     // square of the namespace declarations or of an element's attributes.
     // The scan stops at a DOCTYPE, which the parser then refuses.
     check_xml_limits(text, &SOAP_FAULT_XML_LIMITS).map_err(|e| e.to_string())?;
     let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: SOAP_FAULT_MAX_NODES, ..Default::default() };
-    Ok(roxmltree::Document::parse_with_options(text, opts).ok().and_then(|doc| fault_in(&doc, redact)))
+    match roxmltree::Document::parse_with_options(text, opts) {
+        Ok(doc) => Ok(fault_in(&doc, redact)),
+        Err(roxmltree::Error::NodesLimitReached) => Err(format!("more than {SOAP_FAULT_MAX_NODES} nodes")),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Whether the first element of `text`, after the XML declaration, comments
+/// and processing instructions, is named `Envelope` (with any prefix). A
+/// DOCTYPE first is not: the parser refuses it.
+fn root_is_envelope(text: &str) -> bool {
+    let mut rest = text.trim_start();
+    loop {
+        let skipped = if let Some(r) = rest.strip_prefix("<?") {
+            r.find("?>").map(|e| &r[e + 2..])
+        } else if let Some(r) = rest.strip_prefix("<!--") {
+            r.find("-->").map(|e| &r[e + 3..])
+        } else {
+            break;
+        };
+        match skipped {
+            Some(r) => rest = r.trim_start(),
+            None => return false,
+        }
+    }
+    let Some(tag) = rest.strip_prefix('<') else { return false };
+    let name = &tag[..tag.find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/').unwrap_or(tag.len())];
+    name.rsplit(':').next() == Some("Envelope")
 }
 
 fn fault_in(doc: &roxmltree::Document<'_>, redact: Redact<'_>) -> Option<SoapFault> {
@@ -317,5 +357,21 @@ mod tests {
         let g = f.graphql.unwrap();
         assert_eq!(g.error_count, 1);
         assert!(g.has_data);
+    }
+
+    /// GHSA-mvjp-hhjj-mh63: an envelope with the most namespace work the
+    /// limits allow (the deepest chain of the longest prefixes, then siblings
+    /// until the scope budget is spent, then lookups that scan the whole
+    /// scope) is inspected, promptly.
+    #[test]
+    fn an_envelope_at_the_namespace_limits_is_inspected_promptly() {
+        let worst = anvil_xml_limits::test_support::namespace_worst_case(&SOAP_FAULT_XML_LIMITS, 0, 2_000);
+        let xml = format!("<Envelope><Body><Fault><faultcode>Server</faultcode></Fault>{worst}</Body></Envelope>");
+        assert!(xml.len() <= MAX_PARSE, "{} bytes", xml.len());
+        let started = std::time::Instant::now();
+        let f = body_facts(Some("text/xml"), xml.as_bytes());
+        assert_eq!(f.xml_not_inspected, None);
+        assert_eq!(f.soap_fault.map(|x| x.code).as_deref(), Some("Server"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 }

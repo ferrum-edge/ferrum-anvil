@@ -18,6 +18,7 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+anvil-xml-limits = { workspace = true, features = ["test-support"] }
 chrono.workspace = true
 jsonschema.workspace = true
 sha2.workspace = true

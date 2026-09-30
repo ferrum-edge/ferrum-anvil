@@ -511,6 +511,39 @@ fn namespace_declarations_are_counted_before_parsing() {
     }
 }
 
+/// A WSDL 1.1 `definitions` root around `inner`.
+fn definitions(inner: &str) -> String {
+    format!(r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:x">{inner}</definitions>"#)
+}
+
+/// GHSA-mvjp-hhjj-mh63: the most namespace work the importer's limits allow
+/// (the deepest chain of the longest prefixes, siblings until the
+/// declarations are spent, names the parser finds last in scope) parses
+/// promptly. The limits are those of `XML_LIMITS` in src/wsdl.rs.
+#[test]
+fn a_document_at_the_namespace_limits_imports_promptly() {
+    let limits = anvil_xml_limits::XmlLimits {
+        attributes_per_element: 256,
+        attribute_pairs: 1 << 24,
+        attribute_name_bytes: 1_024,
+        xmlns_declarations: 1_024,
+        xmlns_prefix_bytes: 256,
+        xmlns_uri_bytes: 2_048,
+        in_scope_namespaces: 256,
+        namespace_scope_work: 1 << 26,
+    };
+    let worst = anvil_xml_limits::test_support::namespace_worst_case(&limits, 1, 1_000);
+    let started = std::time::Instant::now();
+    assert!(import(definitions(&worst).as_bytes(), &opts()).is_ok());
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+    // A chain one declaration deeper than the scope allows is refused before parsing.
+    let deeper = definitions(&format!(r#"<c xmlns:x="urn:x">{worst}</c>"#));
+    match import(deeper.as_bytes(), &opts()) {
+        Err(ImportError::LimitExceeded { what, limit }) => assert!(what.contains("in scope") && limit == 256, "{what} {limit}"),
+        other => panic!("expected the in-scope limit, got {:?}", other.map(|r| r.requests.len())),
+    }
+}
+
 #[test]
 fn namespace_uris_and_attribute_pairs_are_bounded_before_parsing() {
     let refused = |doc: &str, word: &str, want: usize| match import(doc.as_bytes(), &opts()) {

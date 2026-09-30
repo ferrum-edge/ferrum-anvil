@@ -25,6 +25,7 @@ percent-encoding.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
+anvil-xml-limits = { workspace = true, features = ["test-support"] }
 proptest.workspace = true
 
 [lints]

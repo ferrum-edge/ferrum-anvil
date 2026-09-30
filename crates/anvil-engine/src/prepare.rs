@@ -481,9 +481,16 @@ pub(crate) fn prepare_http_with_redaction_names(
         && spec.lint_policy != LintSendPolicy::Off
     {
         let res = if kind == "json" { lint::json(&text) } else { lint::xml(&text) };
-        if let LintResult::Invalid { issues } = res {
-            let i = &issues[0];
-            let msg = format!("{} body is not well-formed at line {}, column {}: {}", kind.to_uppercase(), i.line, i.column, i.message);
+        let finding = match res {
+            LintResult::Invalid { issues } => {
+                let i = &issues[0];
+                Some(format!("{} body is not well-formed at line {}, column {}: {}", kind.to_uppercase(), i.line, i.column, i.message))
+            }
+            // Not parsed at all, so there is no position to report.
+            LintResult::Refused { reason } => Some(format!("{} body was not linted: {reason}", kind.to_uppercase())),
+            LintResult::Valid | LintResult::Skipped { .. } => None,
+        };
+        if let Some(msg) = finding {
             if spec.lint_policy == LintSendPolicy::Block && !send_anyway {
                 return Err(local(FailureKind::LintBlocked, msg, "body"));
             }
