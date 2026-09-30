@@ -1093,6 +1093,17 @@ struct OneShot {
 
 const REFLECTION_TIMEOUT_MS: u64 = 30_000;
 
+fn reflection_deadline(total_deadline: Option<Instant>, now: Instant) -> (Instant, u64) {
+    let cap = now + Duration::from_millis(REFLECTION_TIMEOUT_MS);
+    let deadline = total_deadline.map(|deadline| deadline.min(cap)).unwrap_or(cap);
+    let deadline_ms = deadline
+        .saturating_duration_since(now)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    (deadline, deadline_ms)
+}
+
 /// The cumulative wire and decoded bytes received during one reflection attempt.
 struct ReflectionBudget {
     used_bytes: usize,
@@ -1178,6 +1189,7 @@ async fn one_shot(
     stats: &Arc<ConnStats>,
     cancel: &CancellationToken,
     reflection_deadline: Option<Instant>,
+    reflection_deadline_ms: u64,
     budget: &mut ReflectionBudget,
 ) -> OneShot {
     let body = frame(msg);
@@ -1185,7 +1197,7 @@ async fn one_shot(
     if reflection_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         out.failure = Some(
             TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout, "the server reflection deadline elapsed")
-                .with_deadline(Some(REFLECTION_TIMEOUT_MS)),
+                .with_deadline(Some(reflection_deadline_ms)),
         );
         return out;
     }
@@ -1222,7 +1234,7 @@ async fn one_shot(
             Phase::AwaitResponseHeaders,
             FailureKind::TotalTimeout,
             "the server reflection deadline elapsed",
-        ).with_deadline(Some(REFLECTION_TIMEOUT_MS))),
+        ).with_deadline(Some(reflection_deadline_ms))),
         _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during server reflection")),
     };
     let head = match head {
@@ -1252,7 +1264,7 @@ async fn one_shot(
             }
             ReflectionBodyEvent::Deadline => {
                 Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "the server reflection deadline elapsed")
-                    .with_deadline(Some(REFLECTION_TIMEOUT_MS))))
+                    .with_deadline(Some(reflection_deadline_ms))))
             }
             ReflectionBodyEvent::Canceled => {
                 Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled during server reflection")))
@@ -1305,11 +1317,7 @@ async fn reflect(
     // Reflection has its own absolute cap, including interactive calls whose
     // session deadline is intentionally unbounded. The call deadline can only
     // shorten this limit.
-    let reflection_deadline = Some(
-        total_deadline
-            .map(|deadline| deadline.min(Instant::now() + Duration::from_millis(REFLECTION_TIMEOUT_MS)))
-            .unwrap_or_else(|| Instant::now() + Duration::from_millis(REFLECTION_TIMEOUT_MS)),
-    );
+    let (reflection_deadline, reflection_deadline_ms) = reflection_deadline(total_deadline, Instant::now());
     let mut budget = ReflectionBudget { used_bytes: 0, max_bytes: usize::try_from(plan.limits.max_response_bytes).unwrap_or(usize::MAX) };
     let services = ["grpc.reflection.v1.ServerReflection", "grpc.reflection.v1alpha.ServerReflection"];
     let mut last: Option<(OneShot, ReflectionOutcome)> = None;
@@ -1329,7 +1337,18 @@ async fn reflect(
                 break;
             }
             let request = q.encode_to_vec();
-            let r = one_shot(conn, plan, &path, &request, stats, cancel, reflection_deadline, &mut budget).await;
+            let r = one_shot(
+                conn,
+                plan,
+                &path,
+                &request,
+                stats,
+                cancel,
+                Some(reflection_deadline),
+                reflection_deadline_ms,
+                &mut budget,
+            )
+            .await;
             let outcome = |problem: String, r: &OneShot| ReflectionOutcome {
                 service: svc.trim_end_matches(".ServerReflection").to_string(),
                 http_status: r.status,
@@ -2447,6 +2466,14 @@ mod tests {
     }
 
     #[test]
+    fn interactive_reflection_uses_the_absolute_cap() {
+        let now = Instant::now();
+        let (deadline, deadline_ms) = reflection_deadline(None, now);
+        assert_eq!(deadline_ms, REFLECTION_TIMEOUT_MS);
+        assert_eq!(deadline, now + Duration::from_millis(REFLECTION_TIMEOUT_MS));
+    }
+
+    #[test]
     fn percent_decode_handles_unicode_and_malformed_escapes() {
         assert_eq!(percent_decode("%E2%82%AC"), "€");
         assert_eq!(percent_decode("%€"), "%€");
@@ -2456,7 +2483,11 @@ mod tests {
 
     #[test]
     fn grpc_web_binary_and_text_trailers_percent_decode_messages() {
-        let trailer = frame(0x80, b"grpc-status: 13\r\ngrpc-message: %E2%82%AC%zz\r\n");
+        let payload = "grpc-status: 13\r\ngrpc-message: %E2%82%AC%zz%€\r\n".as_bytes();
+        let mut trailer = BytesMut::with_capacity(5 + payload.len());
+        trailer.extend_from_slice(&[0x80]);
+        trailer.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        trailer.extend_from_slice(payload);
         for text in [false, true] {
             let mut body = BytesMut::new();
             if text {
@@ -2472,7 +2503,7 @@ mod tests {
             };
             let entries = grpc_web::parse_trailer_block(&payload).unwrap();
             let message = grpc_web::trailer_value(&entries, "grpc-message").unwrap();
-            assert_eq!(percent_decode(message), "€%zz");
+            assert_eq!(percent_decode(message), "€%zz%€");
         }
     }
 
