@@ -1184,12 +1184,8 @@ async fn one_shot(
     let mut out = OneShot::empty(None, None);
     if reflection_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         out.failure = Some(
-            TransportFailure::new(
-                Phase::AwaitResponseHeaders,
-                FailureKind::TotalTimeout,
-                "the server reflection deadline elapsed",
-            )
-            .with_deadline(Some(REFLECTION_TIMEOUT_MS)),
+            TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout, "the server reflection deadline elapsed")
+                .with_deadline(Some(REFLECTION_TIMEOUT_MS)),
         );
         return out;
     }
@@ -1251,37 +1247,23 @@ async fn one_shot(
         let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(30_000)));
         let item = match next_reflection_body_item(&mut body, idle, reflection_deadline, cancel).await {
             ReflectionBodyEvent::Item(item) => item,
-            ReflectionBodyEvent::Idle => Some(Err(TransportFailure::new(
-                Phase::ResponseBody,
-                FailureKind::BodyIdleTimeout,
-                "the reflection response stalled",
-            ))),
-            ReflectionBodyEvent::Deadline => Some(Err(
-                TransportFailure::new(
-                    Phase::ResponseBody,
-                    FailureKind::TotalTimeout,
-                    "the server reflection deadline elapsed",
-                )
-                .with_deadline(Some(REFLECTION_TIMEOUT_MS)),
-            )),
-            ReflectionBodyEvent::Canceled => Some(Err(TransportFailure::new(
-                Phase::ResponseBody,
-                FailureKind::Canceled,
-                "canceled during server reflection",
-            ))),
+            ReflectionBodyEvent::Idle => {
+                Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the reflection response stalled")))
+            }
+            ReflectionBodyEvent::Deadline => {
+                Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "the server reflection deadline elapsed")
+                    .with_deadline(Some(REFLECTION_TIMEOUT_MS))))
+            }
+            ReflectionBodyEvent::Canceled => {
+                Some(Err(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled during server reflection")))
+            }
         };
         match item {
             None => break,
             Some(Ok(fr)) => {
                 if fr.is_data() {
                     let data = fr.into_data().unwrap_or_default();
-                    match append_reflection_data(
-                        &mut buf,
-                        &data,
-                        budget,
-                        &mut message_count,
-                        plan.max_message_bytes,
-                    ) {
+                    match append_reflection_data(&mut buf, &data, budget, &mut message_count, plan.max_message_bytes) {
                         Ok(messages) => out.messages.extend(messages),
                         Err(failure) => {
                             out.failure = Some(failure);
@@ -1328,10 +1310,7 @@ async fn reflect(
             .map(|deadline| deadline.min(Instant::now() + Duration::from_millis(REFLECTION_TIMEOUT_MS)))
             .unwrap_or_else(|| Instant::now() + Duration::from_millis(REFLECTION_TIMEOUT_MS)),
     );
-    let mut budget = ReflectionBudget {
-        used_bytes: 0,
-        max_bytes: usize::try_from(plan.limits.max_response_bytes).unwrap_or(usize::MAX),
-    };
+    let mut budget = ReflectionBudget { used_bytes: 0, max_bytes: usize::try_from(plan.limits.max_response_bytes).unwrap_or(usize::MAX) };
     let services = ["grpc.reflection.v1.ServerReflection", "grpc.reflection.v1alpha.ServerReflection"];
     let mut last: Option<(OneShot, ReflectionOutcome)> = None;
     'svc: for svc in services {
