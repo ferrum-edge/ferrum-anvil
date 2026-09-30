@@ -120,6 +120,15 @@ pub struct LintReport {
     pub unresolved_refs: Vec<String>,
     #[serde(default)]
     pub unresolved_ref_count: usize,
+    /// Body examples not checked: their schema uses an external reference
+    /// or an unsupported pattern, refers to itself without descending into
+    /// the value, or expands too far through its references.
+    #[serde(default)]
+    pub examples_not_checked: usize,
+    /// Operations left out because the description is too large to lint
+    /// completely (see `model::MAX_MODEL_WORK`).
+    #[serde(default)]
+    pub skipped_operations: usize,
 }
 
 impl LintReport {
@@ -132,7 +141,8 @@ impl LintReport {
 /// Lint `spec` with `rules`.
 pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
     let mut example_budget = if opts.validate_examples { MAX_EXAMPLE_CHECKS } else { 0 };
-    let mut examples = |m: &Media<'_>, dir: Direction| example_errors(spec, m, dir, &mut example_budget);
+    let mut examples_not_checked = 0usize;
+    let mut examples = |m: &Media<'_>, dir: Direction| example_errors(spec, m, dir, &mut example_budget, &mut examples_not_checked);
     let model = Model::build(spec, &mut examples);
     let mut out = Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0 };
     let (mut run, mut skipped) = (0, 0);
@@ -176,6 +186,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
             .then(a.rule.cmp(&b.rule))
             .then(a.message.cmp(&b.message))
     });
+    let skipped_operations = model.skipped_operations;
     let (unresolved_refs, unresolved_ref_count) = spec.unresolved();
     let mut dropped = out.dropped;
     if findings.len() > opts.max_findings {
@@ -200,6 +211,8 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
         dropped,
         unresolved_refs,
         unresolved_ref_count,
+        examples_not_checked,
+        skipped_operations,
     }
 }
 
@@ -369,7 +382,7 @@ fn show_plain(v: &Value) -> String {
 }
 
 /// Validate a media type's examples against its schema.
-fn example_errors(spec: &Spec, m: &Media<'_>, dir: Direction, budget: &mut usize) -> Vec<String> {
+fn example_errors(spec: &Spec, m: &Media<'_>, dir: Direction, budget: &mut usize, not_checked: &mut usize) -> Vec<String> {
     let (Some(schema), Some(obj)) = (m.schema, m.object) else { return vec![] };
     let json_media = {
         let e = m.media_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
@@ -398,7 +411,10 @@ fn example_errors(spec: &Spec, m: &Media<'_>, dir: Direction, budget: &mut usize
     if examples.is_empty() || *budget == 0 {
         return vec![];
     }
-    let Ok(validator) = schema::compile(spec, schema, dir) else { return vec![] };
+    let Ok(validator) = schema::compile(spec, schema, dir) else {
+        *not_checked += examples.len();
+        return vec![];
+    };
     let mut out = vec![];
     for (name, v) in examples {
         if *budget == 0 {

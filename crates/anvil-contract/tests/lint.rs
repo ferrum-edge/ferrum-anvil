@@ -231,7 +231,8 @@ fn sarif_locations_are_uris() {
     use anvil_contract::sarif::artifact_location;
     assert_eq!(artifact_location("specs/my api#1.yaml"), json!({"uri": "specs/my%20api%231.yaml", "uriBaseId": "%SRCROOT%"}));
     assert_eq!(artifact_location("/home/me/api.yaml"), json!({"uri": "file:///home/me/api.yaml"}));
-    assert_eq!(artifact_location("C:\\work\\api é.yaml"), json!({"uri": "file:///C%3A/work/api%20%C3%A9.yaml"}));
+    assert_eq!(artifact_location("C:\\work\\api é.yaml"), json!({"uri": "file:///C:/work/api%20%C3%A9.yaml"}));
+    assert_eq!(artifact_location("-"), json!({"uri": "stdin"}));
 }
 
 #[test]
@@ -286,4 +287,55 @@ fn wide_documents_lint_in_linear_time() {
         &r.findings[..r.findings.len().min(3)]
     );
     assert_eq!(r.spec.operations, 20_001);
+}
+
+#[test]
+fn inherited_parameters_are_bounded_and_shared_path_items_are_checked_per_path() {
+    // One 3.2 path item with 3,000 operations inheriting 3,000 path-level
+    // parameters: 9M parameter visits, past the work budget.
+    let params: Vec<serde_json::Value> = (0..3_000).map(|i| json!({"name": format!("p{i}"), "in": "query", "description": "d"})).collect();
+    let ops: serde_json::Map<String, serde_json::Value> = (0..3_000)
+        .map(|i| (format!("X{i}"), json!({"operationId": format!("x{i}"), "responses": {"200": {"description": "ok"}}})))
+        .collect();
+    let doc = json!({"openapi": "3.2.0", "info": {"title": "t", "version": "1"}, "paths": {"/wide": {"parameters": params, "additionalOperations": ops}}});
+    let start = std::time::Instant::now();
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
+    assert!(r.skipped_operations > 1_000, "{}", r.skipped_operations);
+
+    // Two paths sharing one Path Item: each path's own template is checked.
+    let text = r##"openapi: 3.1.0
+info: { title: t, version: '1' }
+paths:
+  /a/{id}: { $ref: '#/components/pathItems/P' }
+  /b/{key}: { $ref: '#/components/pathItems/P' }
+components:
+  pathItems:
+    P:
+      get:
+        operationId: g
+        parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+        responses: { '200': { description: ok } }
+"##;
+    let r = run(text, &RuleSet::recommended());
+    let undeclared: Vec<&str> = r.findings.iter().filter(|f| f.rule == "path-params-declared").map(|f| f.message.as_str()).collect();
+    assert_eq!(undeclared, ["GET /b/{key} uses path parameter(s) key that are not declared."]);
+    assert!(r.findings.iter().any(|f| f.rule == "path-params-used" && f.label == "GET /b/{key}"));
+}
+
+#[test]
+fn examples_behind_an_exploding_schema_are_counted_not_checked() {
+    let mut schemas = serde_json::Map::new();
+    for i in 0..40 {
+        let next = format!("#/components/schemas/S{}", i + 1);
+        schemas.insert(format!("S{i}"), json!({"allOf": [{"$ref": next}, {"$ref": next}]}));
+    }
+    schemas.insert("S40".into(), json!({"type": "object"}));
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "components": {"schemas": schemas},
+        "paths": {"/a": {"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/S0"}, "examples": {"a": {"value": {}}, "b": {"value": {}}}}}}}}}}});
+    let start = std::time::Instant::now();
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(r.examples_not_checked, 2);
 }

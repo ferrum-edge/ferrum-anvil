@@ -36,7 +36,15 @@ company ruleset.
   targets keep one pointer per member). Regular expressions, in rules and
   in the `pattern`/`patternProperties` of schemas, use the linear-time
   `regex` crate with a size limit; a schema whose pattern needs look-around
-  or a back-reference is not used to check examples.
+  or a back-reference is not used to check examples. Before a schema is
+  used, its size with every `$ref` expanded is measured (repeated
+  references count each time): one over 100,000 nodes, or one that refers
+  to itself without descending into the value (`A: allOf [B]`, `B: allOf
+  [A]`), is not used either, and the report counts the examples not checked
+  (`examples_not_checked`). Operations look at 2 million parameters,
+  responses and media types at most in all (inherited path-level parameters
+  count for each operation); past that the remaining operations are counted
+  in `skipped_operations` and not checked.
 - **Unresolvable references are reported, not checked.** An external,
   missing, cyclic or too deep `$ref` is skipped: the parameter, response,
   body or path item behind it is not a target, so no rule reports on the
@@ -137,7 +145,7 @@ joined by commas.
 ### Targets
 
 Every target has `extensions` (its `x-*` members). Targets reached through a
-`$ref` are reported once, where they are defined.
+`$ref` are reported once, where they are defined. An operation reached through several paths (one Path Item `$ref`'d by each) is a target per path, since each path has its own template.
 
 | Target | One per | Fields |
 |---|---|---|
@@ -245,13 +253,17 @@ finding at or above `--fail-on` (default `error`), `2` otherwise, `3` a
 local error (unreadable file, invalid spec or ruleset). With `--output`, the
 report goes to the file and a summary line to stderr. Text output escapes
 control characters and bidirectional overrides in everything that comes
-from the spec or a ruleset, so a message cannot inject a CI workflow
-command or a terminal escape sequence.
+from the spec or a ruleset (errors included), so a message cannot inject a
+CI workflow command or a terminal escape sequence; JSON and SARIF output
+escape C1 controls, line separators and bidirectional overrides as
+`\uXXXX`. The CLI reads ruleset files up to 1 MiB; the desktop keeps
+rulesets up to 128 KiB.
 
 SARIF 2.1.0 output names each rule (with its fix as help text and its
 `http(s)` documentation link) and each finding's file, line and column
 (`columnKind` `unicodeCodePoints`). A relative spec path is a URI relative to
-`%SRCROOT%`, an absolute one a `file:` URI. Dropped findings and unresolved
+`%SRCROOT%`, an absolute one a `file:` URI (`file:///C:/…` on Windows), and
+standard input `stdin`. Dropped findings and unresolved
 references are tool notifications. Code scanning then annotates the pull
 request:
 

@@ -53,6 +53,20 @@
       "format": "uint",
       "minimum": 0,
       "default": 0
+    },
+    "examples_not_checked": {
+      "description": "Body examples not checked: their schema uses an external reference\nor an unsupported pattern, refers to itself without descending into\nthe value, or expands too far through its references.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0,
+      "default": 0
+    },
+    "skipped_operations": {
+      "description": "Operations left out because the description is too large to lint\ncompletely (see `model::MAX_MODEL_WORK`).",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0,
+      "default": 0
     }
   },
   "required": [

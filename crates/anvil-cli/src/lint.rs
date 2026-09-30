@@ -91,7 +91,7 @@ pub fn lint_spec(a: &LintSpecArgs) -> Result<i32> {
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
             files.push((name, read_limited(p, "ruleset")?));
         }
-        RuleSet::load(&files).map_err(|e| anyhow!("{e}"))?
+        RuleSet::load(&files).map_err(|e| anyhow!("{}", t(&e.to_string())))?
     };
     if a.list_rules {
         print_rules(&rules);
@@ -99,13 +99,15 @@ pub fn lint_spec(a: &LintSpecArgs) -> Result<i32> {
     }
     let path = a.spec.as_ref().ok_or_else(|| anyhow!("a spec file is required"))?;
     let bytes = read_limited(path, "spec")?;
-    let spec = Spec::parse(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    let spec = Spec::parse(&bytes).map_err(|e| anyhow!("{}: {}", t(&path.display().to_string()), t(&e.to_string())))?;
     let report = anvil_contract::lint(&spec, &rules, &LintOptions { validate_examples: !a.no_examples, ..LintOptions::default() });
     let display_name = path.display().to_string();
     let out = match a.format {
         Format::Text => text(&report, &display_name, a.fail_on),
-        Format::Json => serde_json::to_string_pretty(&report)? + "\n",
-        Format::Sarif => serde_json::to_string_pretty(&anvil_contract::sarif::to_sarif(&report, &display_name.replace('\\', "/")))? + "\n",
+        Format::Json => anvil_contract::json_safe(&serde_json::to_string_pretty(&report)?) + "\n",
+        Format::Sarif => {
+            anvil_contract::json_safe(&serde_json::to_string_pretty(&anvil_contract::sarif::to_sarif(&report, &display_name))?) + "\n"
+        }
     };
     match &a.output {
         Some(p) => {
@@ -174,6 +176,18 @@ fn text(r: &LintReport, name: &str, fail_on: FailOn) -> String {
     }
     if r.dropped > 0 {
         s.push_str(&format!("… {} more findings not shown\n", r.dropped));
+    }
+    if r.examples_not_checked > 0 {
+        s.push_str(&format!(
+            "note: {} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far\n",
+            r.examples_not_checked
+        ));
+    }
+    if r.skipped_operations > 0 {
+        s.push_str(&format!(
+            "note: the description is too large to lint completely: {} operation(s) were not checked\n",
+            r.skipped_operations
+        ));
     }
     if r.unresolved_ref_count > 0 {
         let first: Vec<String> = r.unresolved_refs.iter().take(5).map(|p| t(p)).collect();

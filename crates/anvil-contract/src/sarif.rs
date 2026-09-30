@@ -21,10 +21,15 @@ fn encode_path(p: &str) -> String {
 /// A SARIF artifact location for a file path: a `file:` URI when absolute,
 /// else relative to `%SRCROOT%` (the repository, for code scanning).
 pub fn artifact_location(path: &str) -> Value {
+    if path == "-" {
+        return json!({"uri": "stdin"});
+    }
     let p = path.replace('\\', "/");
     let drive = p.len() > 2 && p.as_bytes()[1] == b':' && p.as_bytes()[0].is_ascii_alphabetic();
-    if p.starts_with('/') || drive {
-        let p = if drive { format!("/{p}") } else { p };
+    if drive {
+        // `file:///C:/…`: the drive's colon stays as it is.
+        json!({"uri": format!("file:///{}:{}", &p[..1], encode_path(&p[2..]))})
+    } else if p.starts_with('/') {
         json!({"uri": format!("file://{}", encode_path(&p))})
     } else {
         json!({"uri": encode_path(p.trim_start_matches("./")), "uriBaseId": "%SRCROOT%"})
@@ -93,6 +98,18 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
         notes.push(
             json!({"level": "warning", "message": {"text": format!("{} more findings were counted but not listed", report.dropped)}}),
         );
+    }
+    if report.examples_not_checked > 0 {
+        notes.push(json!({"level": "note", "message": {"text": format!(
+            "{} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far",
+            report.examples_not_checked
+        )}}));
+    }
+    if report.skipped_operations > 0 {
+        notes.push(json!({"level": "warning", "message": {"text": format!(
+            "the description is too large to lint completely: {} operation(s) were not checked",
+            report.skipped_operations
+        )}}));
     }
     if report.unresolved_ref_count > 0 {
         notes.push(json!({"level": "warning", "message": {"text": format!(

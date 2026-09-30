@@ -350,6 +350,14 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
           {(report.unresolved_ref_count ?? 0) > 5 ? ", …" : ""}
         </div>
       )}
+      {(report.skipped_operations ?? 0) > 0 && (
+        <div className="warn-box">The description is too large to check completely: {report.skipped_operations} operation(s) were not checked.</div>
+      )}
+      {(report.examples_not_checked ?? 0) > 0 && (
+        <p className="hint">
+          {report.examples_not_checked} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far.
+        </p>
+      )}
       {report.dropped > 0 && <p className="hint">{report.dropped} more findings are counted above but not listed. Fix the most severe first, or export the report.</p>}
     </div>
   );

@@ -451,13 +451,20 @@ fn referenced_schemas(root: &Value, base: &str) -> HashSet<String> {
 pub struct Model<'a> {
     pub spec: &'a Spec,
     pub targets: Vec<Target>,
+    /// Operations left out because the work budget ran out.
+    pub skipped_operations: usize,
 }
+
+/// Parameters, responses and media types looked at across all operations
+/// (path-level ones count again for every operation that inherits them).
+/// Past this, the remaining operations are left out and counted.
+pub const MAX_MODEL_WORK: usize = 2_000_000;
 
 impl<'a> Model<'a> {
     pub fn build(spec: &'a Spec, examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>) -> Model<'a> {
-        let mut b = ModelBuilder { spec, targets: vec![], seen: HashSet::new() };
+        let mut b = ModelBuilder { spec, targets: vec![], seen: HashSet::new(), work: 0, skipped_operations: 0 };
         b.build(examples);
-        Model { spec, targets: b.targets }
+        Model { spec, targets: b.targets, skipped_operations: b.skipped_operations }
     }
 
     pub fn of_kind(&self, kind: TargetKind) -> impl Iterator<Item = &Target> {
@@ -479,11 +486,16 @@ struct ModelBuilder<'a> {
     /// (kind, pointer) of targets already emitted: a parameter or response
     /// shared through `$ref` is one target.
     seen: HashSet<(TargetKind, String)>,
+    work: usize,
+    skipped_operations: usize,
 }
 
 impl<'a> ModelBuilder<'a> {
     fn push(&mut self, kind: TargetKind, pointer: String, label: String, view: Value) {
-        if !self.seen.insert((kind, pointer.clone())) {
+        // An operation reached through several paths (one Path Item `$ref`'d
+        // by each) is a target per path: its path template differs.
+        let key = if kind == TargetKind::Operation { format!("{pointer}#{label}") } else { pointer.clone() };
+        if !self.seen.insert((kind, key)) {
             return;
         }
         let Value::Object(view) = view else { return };
@@ -637,6 +649,10 @@ impl<'a> ModelBuilder<'a> {
 
         // Operations and everything under them.
         for op in &ops {
+            if self.work > MAX_MODEL_WORK {
+                self.skipped_operations += 1;
+                continue;
+            }
             self.operation(op, &declared_tag_set, &scheme_names, &id_counts, examples);
         }
 
@@ -741,6 +757,12 @@ impl<'a> ModelBuilder<'a> {
         let params = parameters(spec, op);
         let body = request_body(spec, op);
         let resps = responses(spec, op);
+        self.work += 1
+            + params.len()
+            + resps.iter().map(|r| 1 + r.media.len()).sum::<usize>()
+            + body.as_ref().map_or(0, |b| b.media.len())
+            + op.item.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
+            + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len);
         let tags = list_of_strings(op.op.get("tags")).unwrap_or_default();
         let template = template_params(&op.path);
         let path_params: Vec<&str> = params.iter().filter(|p| p.location == "path").map(|p| p.name.as_str()).collect();
@@ -809,8 +831,9 @@ impl<'a> ModelBuilder<'a> {
             json!({"method": op.method, "method_upper": op.method.to_ascii_uppercase(), "path": op.path, "operation_id": operation_id});
 
         for p in &params {
-            // A Swagger 2.0 body parameter is the request body target.
-            if p.location == "body" {
+            // A Swagger 2.0 body parameter is the request body target; a
+            // shared (inherited or `$ref`'d) parameter is one target.
+            if p.location == "body" || self.seen.contains(&(TargetKind::Parameter, p.pointer.clone())) {
                 continue;
             }
             let schema = p.value.get("schema").unwrap_or(p.value);

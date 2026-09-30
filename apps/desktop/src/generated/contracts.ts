@@ -3332,6 +3332,17 @@ export interface LintReport {
    */
   unresolved_refs?: string[];
   unresolved_ref_count?: number;
+  /**
+   * Body examples not checked: their schema uses an external reference
+   * or an unsupported pattern, refers to itself without descending into
+   * the value, or expands too far through its references.
+   */
+  examples_not_checked?: number;
+  /**
+   * Operations left out because the description is too large to lint
+   * completely (see `model::MAX_MODEL_WORK`).
+   */
+  skipped_operations?: number;
 }
 /**
  * The linted document.
