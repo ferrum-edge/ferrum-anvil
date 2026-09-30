@@ -205,6 +205,7 @@ impl Function {
                 let o: SchemaOpts = options(name, opts)?;
                 let validator = jsonschema::options()
                     .with_draft(jsonschema::Draft::Draft202012)
+                    .with_pattern_options(crate::schema::linear_patterns())
                     .build(&o.schema)
                     .map_err(|e| format!("invalid JSON Schema for `schema`: {e}"))?;
                 Function::Schema { validator: Box::new(validator) }
@@ -306,7 +307,9 @@ impl Function {
             }
             Function::Unique => {
                 let Some(Value::Array(items)) = value else { return None };
-                items.iter().enumerate().find(|(i, x)| items[..*i].contains(x)).map(|(_, x)| format!("has duplicate item {}", show(x)))
+                // Serialized items in a set: linear, whatever the list's length.
+                let mut seen = std::collections::HashSet::new();
+                items.iter().find(|x| !seen.insert(x.to_string())).map(|x| format!("has duplicate item {}", show(x)))
             }
             Function::Xor { fields } => {
                 let set: Vec<&String> = fields.iter().filter(|f| sibling(f).is_some_and(|v| !v.is_null())).collect();

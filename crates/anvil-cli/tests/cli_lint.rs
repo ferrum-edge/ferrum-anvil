@@ -64,3 +64,19 @@ fn lint_spec_exit_codes_and_formats() {
     let list = String::from_utf8_lossy(&out.stdout);
     assert!(list.contains("acme-secured") && list.contains("off    operation-description"), "{list}");
 }
+
+#[test]
+fn text_output_escapes_control_characters_from_the_spec() {
+    let data = tempfile::tempdir().unwrap();
+    let spec = data.path().join("evil.json");
+    std::fs::write(
+        &spec,
+        r#"{"openapi":"3.1.0","info":{"title":"t\n::error file=x::pwned\u001b[31m","version":"1"},"paths":{"/a\n::stop-commands::x":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+    )
+    .unwrap();
+    let out = anvil(data.path(), &["lint-spec", spec.to_str().unwrap(), "--fail-on", "never"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.lines().all(|l| !l.starts_with("::")), "{text}");
+    assert!(!text.contains('\u{1b}'), "{text}");
+    assert!(text.contains("\\n::stop-commands::x"), "{text}");
+}

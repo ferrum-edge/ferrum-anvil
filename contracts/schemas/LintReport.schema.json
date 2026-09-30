@@ -40,6 +40,19 @@
       "type": "integer",
       "format": "uint",
       "minimum": 0
+    },
+    "unresolved_refs": {
+      "description": "Locations of `$ref`s that could not be followed (external, dangling,\ncyclic or too deep; at most 1,000). The objects behind them were not\nchecked.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved_ref_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0,
+      "default": 0
     }
   },
   "required": [

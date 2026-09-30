@@ -130,7 +130,7 @@ pub fn operations(spec: &Spec) -> Vec<OperationRef<'_>> {
             continue;
         }
         let pptr = ptr("/paths", path);
-        let (item, item_pointer) = spec.deref(raw_item, &pptr);
+        let Some((item, item_pointer)) = spec.usable(raw_item, &pptr) else { continue };
         for m in METHODS {
             if let Some(op) = item.get(*m).filter(|o| o.is_object()) {
                 out.push(OperationRef {
@@ -184,20 +184,24 @@ pub struct Param<'a> {
 /// Path-level parameters merged with the operation's (the operation wins on
 /// the same name and location).
 pub fn parameters<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Vec<Param<'a>> {
-    let mut out: Vec<Param<'a>> = vec![];
+    let mut out: Vec<Option<Param<'a>>> = vec![];
+    // (name, in) → index in `out`: a later entry replaces an earlier one.
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
     let lists =
         [(op.item.get("parameters"), ptr(&op.item_pointer, "parameters")), (op.op.get("parameters"), ptr(&op.pointer, "parameters"))];
     for (list, base) in lists {
         let Some(list) = list.and_then(Value::as_array) else { continue };
         for (i, raw) in list.iter().enumerate() {
-            let (p, pointer) = spec.deref(raw, &ptr(&base, &i.to_string()));
+            let Some((p, pointer)) = spec.usable(raw, &ptr(&base, &i.to_string())) else { continue };
             let name = p.get("name").and_then(Value::as_str).unwrap_or("").to_string();
             let location = p.get("in").and_then(Value::as_str).unwrap_or("").to_string();
-            out.retain(|x| !(x.name == name && x.location == location));
-            out.push(Param { name, location, value: p, pointer });
+            if let Some(prev) = index.insert((name.clone(), location.clone()), out.len()) {
+                out[prev] = None;
+            }
+            out.push(Some(Param { name, location, value: p, pointer }));
         }
     }
-    out
+    out.into_iter().flatten().collect()
 }
 
 /// Names inside `{…}` in a path template.
@@ -258,7 +262,7 @@ fn content_media<'a>(spec: &'a Spec, owner: &'a Value, owner_ptr: &str) -> Vec<M
     let cptr = ptr(owner_ptr, "content");
     for (mt, obj) in content {
         let mptr = ptr(&cptr, mt);
-        let (obj, mptr) = spec.deref(obj, &mptr);
+        let Some((obj, mptr)) = spec.usable(obj, &mptr) else { continue };
         let schema = obj.get("schema");
         out.push(Media { media_type: mt.clone(), pointer: mptr.clone(), object: Some(obj), schema, schema_pointer: ptr(&mptr, "schema") });
     }
@@ -312,7 +316,7 @@ pub fn request_body<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Option<Request
         return None;
     }
     let raw = op.op.get("requestBody")?;
-    let (value, pointer) = spec.deref(raw, &ptr(&op.pointer, "requestBody"));
+    let (value, pointer) = spec.usable(raw, &ptr(&op.pointer, "requestBody"))?;
     Some(RequestBody {
         required: value.get("required").and_then(Value::as_bool).unwrap_or(false),
         media: content_media(spec, value, &pointer),
@@ -329,7 +333,7 @@ pub fn responses<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Vec<Response<'a>>
         if code.starts_with("x-") {
             continue;
         }
-        let (value, pointer) = spec.deref(raw, &ptr(&base, code));
+        let Some((value, pointer)) = spec.usable(raw, &ptr(&base, code)) else { continue };
         let media = if spec.is_swagger2() {
             match value.get("schema") {
                 Some(schema) => swagger_media(spec, op.op, "produces")
@@ -419,15 +423,20 @@ pub fn schema_types(schema: &Value) -> (Value, Vec<String>, bool) {
     (first, types, nullable)
 }
 
-/// Every internal `$ref` target in the document.
-fn referenced_pointers(root: &Value) -> HashSet<String> {
+/// Names of the component schemas (Swagger `definitions`, under `base`)
+/// that an internal `$ref` points at or into. Linear in the document.
+fn referenced_schemas(root: &Value, base: &str) -> HashSet<String> {
+    let prefix = format!("{base}/");
     let mut out = HashSet::new();
     let mut stack = vec![root];
     while let Some(v) = stack.pop() {
         match v {
             Value::Object(o) => {
-                if let Some(t) = o.get("$ref").and_then(Value::as_str).and_then(internal_pointer) {
-                    out.insert(t);
+                if let Some(t) = o.get("$ref").and_then(Value::as_str).and_then(internal_pointer)
+                    && let Some(rest) = t.strip_prefix(&prefix)
+                {
+                    let token = rest.split('/').next().unwrap_or(rest);
+                    out.insert(token.replace("~1", "/").replace("~0", "~"));
                 }
                 stack.extend(o.values());
             }
@@ -485,7 +494,8 @@ impl<'a> ModelBuilder<'a> {
         let spec = self.spec;
         let root = &spec.root;
         let ops = operations(spec);
-        let referenced = referenced_pointers(root);
+        let schema_base = if spec.is_swagger2() { "/definitions" } else { "/components/schemas" };
+        let referenced = referenced_schemas(root, schema_base);
         let declared_tags: Vec<String> = root
             .get("tags")
             .and_then(Value::as_array)
@@ -493,11 +503,18 @@ impl<'a> ModelBuilder<'a> {
             .unwrap_or_default();
         let scheme_names: HashSet<String> = security_schemes(spec).map(|(m, _)| m.keys().cloned().collect()).unwrap_or_default();
         let mut id_counts: HashMap<&str, usize> = HashMap::new();
+        let mut used_tags: HashSet<&str> = HashSet::new();
+        let mut used_schemes: HashSet<String> = HashSet::new();
+        let mut methods_by_path: HashMap<&str, Vec<&str>> = HashMap::new();
         for op in &ops {
             if let Some(id) = op.operation_id() {
                 *id_counts.entry(id).or_default() += 1;
             }
+            used_tags.extend(op.op.get("tags").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str));
+            used_schemes.extend(requirement_names(effective_security(spec, op)));
+            methods_by_path.entry(op.path.as_str()).or_default().push(op.method.as_str());
         }
+        let declared_tag_set: HashSet<String> = declared_tags.iter().cloned().collect();
 
         // Servers (document level; 2.0 from schemes × host + basePath).
         let mut server_urls = vec![];
@@ -587,7 +604,7 @@ impl<'a> ModelBuilder<'a> {
                         "parent": opt_str(t, "parent"),
                         "kind": opt_str(t, "kind"),
                         "has_external_docs": t.get("externalDocs").is_some(),
-                        "used": ops.iter().any(|o| o.op.get("tags").and_then(Value::as_array).is_some_and(|a| a.iter().any(|x| x.as_str() == Some(name)))),
+                        "used": used_tags.contains(name),
                         "extensions": extensions(t),
                     }),
                 );
@@ -597,8 +614,8 @@ impl<'a> ModelBuilder<'a> {
         // Paths.
         if let Some(paths) = root.get("paths").and_then(Value::as_object) {
             for (path, raw) in paths.iter().filter(|(k, _)| !k.starts_with("x-")) {
-                let (item, pointer) = spec.deref(raw, &ptr("/paths", path));
-                let methods: Vec<&str> = ops.iter().filter(|o| &o.path == path).map(|o| o.method.as_str()).collect();
+                let Some((item, pointer)) = spec.usable(raw, &ptr("/paths", path)) else { continue };
+                let methods: Vec<&str> = methods_by_path.get(path.as_str()).cloned().unwrap_or_default();
                 let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
                 let static_segments: Vec<&str> = segments.iter().copied().filter(|s| !s.contains('{')).collect();
                 self.push(
@@ -620,13 +637,13 @@ impl<'a> ModelBuilder<'a> {
 
         // Operations and everything under them.
         for op in &ops {
-            self.operation(op, &declared_tags, &scheme_names, &id_counts, examples);
+            self.operation(op, &declared_tag_set, &scheme_names, &id_counts, examples);
         }
 
         // Security schemes.
         if let Some((schemes, base)) = security_schemes(spec) {
             for (name, raw) in schemes {
-                let (s, pointer) = spec.deref(raw, &ptr(&base, name));
+                let Some((s, pointer)) = spec.usable(raw, &ptr(&base, name)) else { continue };
                 let flows: Vec<String> = match s.get("flows").and_then(Value::as_object) {
                     Some(f) => f.keys().cloned().collect(),
                     None => s.get("flow").and_then(Value::as_str).map(|f| vec![f.to_string()]).unwrap_or_default(),
@@ -646,7 +663,7 @@ impl<'a> ModelBuilder<'a> {
                         "openid_connect_url": opt_str(s, "openIdConnectUrl"),
                         "description": opt_str(s, "description"),
                         "deprecated": opt_bool(s, "deprecated"),
-                        "used": ops.iter().any(|o| requirement_names(effective_security(spec, o)).contains(name)),
+                        "used": used_schemes.contains(name),
                         "extensions": extensions(s),
                     }),
                 );
@@ -657,7 +674,7 @@ impl<'a> ModelBuilder<'a> {
         if let Some((schemas, base)) = component_schemas(spec) {
             for (name, raw) in schemas {
                 let pointer = ptr(&base, name);
-                let is_referenced = referenced.iter().any(|r| r == &pointer || r.starts_with(&format!("{pointer}/")));
+                let is_referenced = referenced.contains(name);
                 let (ty, types, nullable) = schema_types(raw);
                 let properties: Vec<String> =
                     raw.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default();
@@ -714,7 +731,7 @@ impl<'a> ModelBuilder<'a> {
     fn operation(
         &mut self,
         op: &OperationRef<'a>,
-        declared_tags: &[String],
+        declared_tags: &HashSet<String>,
         scheme_names: &HashSet<String>,
         id_counts: &HashMap<&str, usize>,
         examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
@@ -733,10 +750,12 @@ impl<'a> ModelBuilder<'a> {
         let class = |c: &str, first: char| c.starts_with(first);
         // The same name and location twice in one parameter list.
         let mut dup_params = BTreeSet::new();
-        for list in [op.item.get("parameters"), op.op.get("parameters")] {
+        let levels =
+            [(op.item.get("parameters"), ptr(&op.item_pointer, "parameters")), (op.op.get("parameters"), ptr(&op.pointer, "parameters"))];
+        for (list, base) in levels {
             let mut this_level = HashSet::new();
-            for raw in list.and_then(Value::as_array).into_iter().flatten() {
-                let (p, _) = spec.deref(raw, "");
+            for (i, raw) in list.and_then(Value::as_array).into_iter().flatten().enumerate() {
+                let Some((p, _)) = spec.usable(raw, &ptr(&base, &i.to_string())) else { continue };
                 let name = p.get("name").and_then(Value::as_str).unwrap_or("");
                 let location = p.get("in").and_then(Value::as_str).unwrap_or("");
                 if !this_level.insert((name, location)) {
@@ -853,7 +872,7 @@ impl<'a> ModelBuilder<'a> {
             self.push(TargetKind::Response, r.pointer.clone(), format!("{} response of {label}", r.code), view);
             if let Some(h) = r.value.get("headers").and_then(Value::as_object) {
                 for (name, raw) in h {
-                    let (hv, hptr) = spec.deref(raw, &ptr(&ptr(&r.pointer, "headers"), name));
+                    let Some((hv, hptr)) = spec.usable(raw, &ptr(&ptr(&r.pointer, "headers"), name)) else { continue };
                     let schema = hv.get("schema").unwrap_or(hv);
                     let (ty, _, _) = schema_types(schema);
                     let mut view = json!({

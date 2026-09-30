@@ -3325,6 +3325,13 @@ export interface LintReport {
    * Findings dropped past [`LintOptions::max_findings`].
    */
   dropped: number;
+  /**
+   * Locations of `$ref`s that could not be followed (external, dangling,
+   * cyclic or too deep; at most 1,000). The objects behind them were not
+   * checked.
+   */
+  unresolved_refs?: string[];
+  unresolved_ref_count?: number;
 }
 /**
  * The linted document.

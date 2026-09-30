@@ -63,6 +63,7 @@ fn json_value(depth: u32) -> impl Strategy<Value = Value> {
             Just("body".to_string()),
             Just("application/json".to_string()),
             "[a-z{}$#/_-]{0,8}".prop_map(|s| s),
+            "[\\PC\\n\\u{202e}\\u{85}]{0,6}".prop_map(|s| s),
         ]
         .prop_map(Value::String),
     ];
@@ -113,7 +114,7 @@ proptest! {
     }
 
     #[test]
-    fn locator_never_panics(text in "[ -~\n\t{}\\[\\]:,'\"#|>-]{0,400}") {
+    fn locator_never_panics(text in "[ -~\n\t{}\\[\\]:,'\"#|>\\u{e9}\\u{4e2d}\\u{1f600}-]{0,400}") {
         let l = Locator::new(&text, Syntax::Yaml);
         let _ = l.position("/a/0/b");
         let l = Locator::new(&text, Syntax::Json);

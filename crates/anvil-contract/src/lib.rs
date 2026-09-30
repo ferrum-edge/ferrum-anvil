@@ -32,6 +32,22 @@ pub use model::TargetKind;
 pub use ruleset::{RuleInfo, RuleSet, RulesetError, RulesetSummary, Severity};
 pub use spec::{Spec, SpecError};
 
+/// Text from a spec, a ruleset or traffic, made safe to print to a terminal
+/// or a CI log: control characters (C0, C1, including newlines, which would
+/// let a line start a CI workflow command) and bidirectional overrides are
+/// escaped.
+pub fn terminal_safe(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// JSON Schemas of the contracts the desktop renderer reads (written by
 /// `anvil schema` next to `anvil_domain::schema::all()`).
 pub fn contract_schemas() -> Vec<(&'static str, serde_json::Value)> {

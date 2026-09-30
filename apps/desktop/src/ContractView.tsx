@@ -143,6 +143,7 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
               Add
             </button>
           </div>
+          {standards?.error && <div className="bad-box small-text">The rulesets do not load: {standards.error}. Disable or remove the one at fault.</div>}
           <label className="tree-row check" title="Anvil's built-in rules, applied before your rulesets">
             <input
               type="checkbox"
@@ -339,6 +340,14 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
           <button className="btn" onClick={() => setShown(shown + PAGE)}>
             Show {Math.min(PAGE, findings.length - shown)} more of {findings.length - shown}
           </button>
+        </div>
+      )}
+      {(report.unresolved_ref_count ?? 0) > 0 && (
+        <div className="warn-box">
+          {report.unresolved_ref_count} <code>$ref</code>
+          {report.unresolved_ref_count === 1 ? " was" : "s were"} not followed (external, missing or cyclic), so what they point to was not checked:{" "}
+          <span className="mono">{(report.unresolved_refs ?? []).slice(0, 5).join(", ")}</span>
+          {(report.unresolved_ref_count ?? 0) > 5 ? ", …" : ""}
         </div>
       )}
       {report.dropped > 0 && <p className="hint">{report.dropped} more findings are counted above but not listed. Fix the most severe first, or export the report.</p>}

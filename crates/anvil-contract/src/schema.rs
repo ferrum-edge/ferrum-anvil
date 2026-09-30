@@ -30,8 +30,17 @@ pub fn compile(spec: &Spec, schema: &Value, direction: Direction) -> Result<json
     jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .should_validate_formats(true)
+        .with_pattern_options(linear_patterns())
         .build(&wrapper)
         .map_err(|e| format!("the schema cannot be compiled: {e}"))
+}
+
+/// `pattern` and `patternProperties` use the linear-time `regex` engine (not
+/// the backtracking default), size-limited: a hostile pattern cannot stall a
+/// check. Patterns that need look-around or back-references do not compile,
+/// and a schema using one is not checked.
+pub fn linear_patterns() -> jsonschema::PatternOptions<jsonschema::Regex> {
+    jsonschema::PatternOptions::regex().size_limit(1 << 20).dfa_size_limit(1 << 20)
 }
 
 /// The converted schema with the `$ref` targets it reaches, as one document.
@@ -262,6 +271,23 @@ mod tests {
         let v = compile(&s, &json!({"type": "object", "properties": {"at": {"type": "string", "format": "date-time"}, "n": {"type": "integer", "format": "int64"}}}), Direction::Response).unwrap();
         assert!(v.is_valid(&json!({"at": "2026-09-30T10:00:00Z", "n": 5})));
         assert!(!v.is_valid(&json!({"at": "yesterday"})));
+    }
+
+    #[test]
+    fn patterns_are_linear_and_cycles_terminate() {
+        let s = spec(
+            r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},"components":{"schemas":{
+              "A":{"allOf":[{"$ref":"#/components/schemas/B"}],"properties":{"x":{"type":"string","pattern":"^(a*)*b$"}}},
+              "B":{"allOf":[{"$ref":"#/components/schemas/A"}]}}}}"##,
+        );
+        let a = s.root.pointer("/components/schemas/A").unwrap();
+        if let Ok(v) = compile(&s, a, Direction::Response) {
+            let start = std::time::Instant::now();
+            let _ = v.is_valid(&json!({"x": "a".repeat(64)}));
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        }
+        // A back-reference needs a backtracking engine: the schema is not compiled.
+        assert!(compile(&s, &json!({"type": "string", "pattern": "(a)\\1"}), Direction::Response).is_err());
     }
 
     #[test]

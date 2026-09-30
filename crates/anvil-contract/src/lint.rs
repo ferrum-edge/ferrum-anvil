@@ -113,6 +113,13 @@ pub struct LintReport {
     pub findings: Vec<LintFinding>,
     /// Findings dropped past [`LintOptions::max_findings`].
     pub dropped: usize,
+    /// Locations of `$ref`s that could not be followed (external, dangling,
+    /// cyclic or too deep; at most 1,000). The objects behind them were not
+    /// checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_refs: Vec<String>,
+    #[serde(default)]
+    pub unresolved_ref_count: usize,
 }
 
 impl LintReport {
@@ -169,6 +176,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
             .then(a.rule.cmp(&b.rule))
             .then(a.message.cmp(&b.message))
     });
+    let (unresolved_refs, unresolved_ref_count) = spec.unresolved();
     let mut dropped = out.dropped;
     if findings.len() > opts.max_findings {
         dropped += findings.len() - opts.max_findings;
@@ -190,6 +198,8 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
         counts: out.counts,
         findings,
         dropped,
+        unresolved_refs,
+        unresolved_ref_count,
     }
 }
 

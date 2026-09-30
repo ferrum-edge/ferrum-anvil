@@ -4,7 +4,7 @@
 //! Exit codes: 0 no finding at or above `--fail-on` · 2 findings at or
 //! above it · 3 local error (unreadable file, invalid spec or ruleset).
 
-use anvil_contract::{LintOptions, LintReport, RuleSet, Severity, Spec};
+use anvil_contract::{LintOptions, LintReport, RuleSet, Severity, Spec, terminal_safe as t};
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
 use std::io::{Read, Write};
@@ -119,11 +119,11 @@ pub fn lint_spec(a: &LintSpecArgs) -> Result<i32> {
 
 fn print_rules(rules: &RuleSet) {
     for s in &rules.sources {
-        println!("# {}{} ({})", s.name, s.version.as_ref().map(|v| format!(" {v}")).unwrap_or_default(), s.source);
+        println!("# {}{} ({})", t(&s.name), s.version.as_ref().map(|v| format!(" {}", t(v))).unwrap_or_default(), t(&s.source));
     }
     for r in rules.list() {
         let formats = if r.formats.is_empty() { String::new() } else { format!(" [{}]", r.formats.join(", ")) };
-        println!("{:<5}  {:<34} {:<16} {}{formats}", r.severity.label(), r.id, r.given, r.description.unwrap_or_default());
+        println!("{:<5}  {:<34} {:<16} {}{formats}", r.severity.label(), r.id, t(&r.given), t(&r.description.unwrap_or_default()));
     }
     for d in &rules.disabled {
         println!("off    {d}");
@@ -147,26 +147,42 @@ fn summary(r: &LintReport, fail_on: FailOn) -> String {
     )
 }
 
+/// Everything from the spec or a ruleset goes through `terminal_safe`: a
+/// newline in a message must not start a line a CI runner would read as a
+/// workflow command, and escape sequences must not reach the terminal.
 fn text(r: &LintReport, name: &str, fail_on: FailOn) -> String {
     let mut s = String::new();
-    let title = r.spec.title.clone().unwrap_or_else(|| "untitled".into());
-    let version = r.spec.version.as_ref().map(|v| format!(" {v}")).unwrap_or_default();
+    let name = t(name);
+    let title = t(r.spec.title.as_deref().unwrap_or("untitled"));
+    let version = r.spec.version.as_ref().map(|v| format!(" {}", t(v))).unwrap_or_default();
     s.push_str(&format!("{name} — {title}{version} ({}), {} operations\n", r.spec.dialect, r.spec.operations));
-    let rulesets: Vec<String> =
-        r.rulesets.iter().map(|x| format!("{}{}", x.name, x.version.as_ref().map(|v| format!(" {v}")).unwrap_or_default())).collect();
+    let rulesets: Vec<String> = r
+        .rulesets
+        .iter()
+        .map(|x| format!("{}{}", t(&x.name), x.version.as_ref().map(|v| format!(" {}", t(v))).unwrap_or_default()))
+        .collect();
     s.push_str(&format!("rulesets: {} · {} rules run\n\n", rulesets.join(", "), r.rules_run));
     for f in &r.findings {
         let at = match (f.line, f.column) {
             (Some(l), Some(c)) => format!("{name}:{l}:{c}"),
-            _ => format!("{name}#{}", f.pointer),
+            _ => format!("{name}#{}", t(&f.pointer)),
         };
-        s.push_str(&format!("{at}  {}  {}\n    {}\n", f.severity.label(), f.rule, f.message));
+        s.push_str(&format!("{at}  {}  {}\n    {}\n", f.severity.label(), f.rule, t(&f.message)));
         if let Some(h) = &f.how_to_fix {
-            s.push_str(&format!("    fix: {h}\n"));
+            s.push_str(&format!("    fix: {}\n", t(h)));
         }
     }
     if r.dropped > 0 {
         s.push_str(&format!("… {} more findings not shown\n", r.dropped));
+    }
+    if r.unresolved_ref_count > 0 {
+        let first: Vec<String> = r.unresolved_refs.iter().take(5).map(|p| t(p)).collect();
+        s.push_str(&format!(
+            "note: {} $ref(s) could not be followed (external, dangling or cyclic); the objects behind them were not checked: {}{}\n",
+            r.unresolved_ref_count,
+            first.join(", "),
+            if r.unresolved_ref_count > first.len() { ", …" } else { "" }
+        ));
     }
     if !r.findings.is_empty() {
         s.push('\n');

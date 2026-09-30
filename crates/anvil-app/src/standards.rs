@@ -6,17 +6,19 @@
 //! then every enabled ruleset. A ruleset is checked in that context when it
 //! is added, enabled or replaced, so a stored set always loads.
 
-use crate::{App, AppError, Result};
+use crate::{App, AppError, Result, settings_id};
 use anvil_contract::{LintOptions, LintReport, RuleInfo, RuleSet, RulesetSummary, Spec};
 use anvil_domain::Id;
 use anvil_domain::settings::{ApiStandards, AppSettings, StoredRuleset};
+use anvil_storage::kind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Largest ruleset kept (the settings are read on every send).
-pub const MAX_STORED_RULESET_BYTES: usize = 256 * 1024;
+/// Largest ruleset kept. The settings are read on every send, so the
+/// rulesets together stay under 1 MiB.
+pub const MAX_STORED_RULESET_BYTES: usize = 128 * 1024;
 /// Most rulesets kept.
-pub const MAX_STORED_RULESETS: usize = 16;
+pub const MAX_STORED_RULESETS: usize = 8;
 
 /// The rules in effect, for listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +28,11 @@ pub struct StandardsView {
     pub rules: Vec<RuleInfo>,
     /// Rules a later ruleset turned off.
     pub disabled: Vec<String>,
+    /// Why the stored rulesets do not load (a backup restored from another
+    /// build, say); `sources` and `rules` are then empty, and the rulesets
+    /// can still be disabled or removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 fn layered(std: &ApiStandards) -> std::result::Result<RuleSet, AppError> {
@@ -44,19 +51,28 @@ impl App {
     /// The layered rules, with where each came from.
     pub fn standards_view(&self) -> Result<StandardsView> {
         let standards = self.api_standards()?;
-        let set = layered(&standards)?;
-        Ok(StandardsView { sources: set.sources.clone(), rules: set.list(), disabled: set.disabled.clone(), standards })
+        Ok(match layered(&standards) {
+            Ok(set) => {
+                StandardsView { sources: set.sources.clone(), rules: set.list(), disabled: set.disabled.clone(), standards, error: None }
+            }
+            Err(e) => StandardsView { sources: vec![], rules: vec![], disabled: vec![], standards, error: Some(e.to_string()) },
+        })
     }
 
+    /// Change the standards in one write transaction (read, check, write),
+    /// so concurrent changes and settings saves never undo each other.
     fn update_standards(&self, f: impl FnOnce(&mut ApiStandards) -> Result<()>) -> Result<ApiStandards> {
-        let mut settings = self.settings()?;
-        let mut next = settings.api_standards.clone();
-        f(&mut next)?;
-        // The result must load, as it will be used.
-        layered(&next)?;
-        settings.api_standards = next.clone();
-        self.save_settings(&settings)?;
-        Ok(next)
+        self.store.atomically(|tx| {
+            let mut settings: AppSettings = tx.get(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default();
+            let mut next = settings.api_standards.clone();
+            // The result must load, as it will be used.
+            if let Err(e) = f(&mut next).and_then(|()| layered(&next).map(|_| ())) {
+                return Ok(Err(e));
+            }
+            settings.api_standards = next.clone();
+            tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &settings)?;
+            Ok(Ok(next))
+        })?
     }
 
     /// Add a ruleset file (enabled, after the others).
@@ -117,9 +133,13 @@ impl App {
     /// API standards: those change only through the functions above, so a
     /// dialog opened before a ruleset was added never drops it.
     pub fn save_settings_keeping_standards(&self, settings: &AppSettings) -> Result<()> {
-        let mut next = settings.clone();
-        next.api_standards = self.api_standards()?;
-        self.save_settings(&next)
+        self.store.atomically(|tx| {
+            let stored: AppSettings = tx.get(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default();
+            let mut next = settings.clone();
+            next.api_standards = stored.api_standards;
+            tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)
+        })?;
+        Ok(())
     }
 
     /// Lint a description with the profile's standards.

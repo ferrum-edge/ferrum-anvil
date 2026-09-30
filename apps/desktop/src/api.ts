@@ -498,6 +498,8 @@ export interface StandardsView {
   rules: RuleInfo[];
   /** Rules a later ruleset turned off. */
   disabled: string[];
+  /** Why the stored rulesets do not load; they can still be disabled or removed. */
+  error?: string | null;
 }
 /** What to lint: an import's stored original, or a spec file chosen in the native dialog. */
 export type LintTarget = { kind: "import"; import_id: string } | { kind: "spec"; input: SpecInput };

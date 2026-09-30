@@ -5,6 +5,32 @@ use crate::ruleset::Severity;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// Percent-encode everything but unreserved characters and `/`.
+fn encode_path(p: &str) -> String {
+    let mut out = String::new();
+    for b in p.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// A SARIF artifact location for a file path: a `file:` URI when absolute,
+/// else relative to `%SRCROOT%` (the repository, for code scanning).
+pub fn artifact_location(path: &str) -> Value {
+    let p = path.replace('\\', "/");
+    let drive = p.len() > 2 && p.as_bytes()[1] == b':' && p.as_bytes()[0].is_ascii_alphabetic();
+    if p.starts_with('/') || drive {
+        let p = if drive { format!("/{p}") } else { p };
+        json!({"uri": format!("file://{}", encode_path(&p))})
+    } else {
+        json!({"uri": encode_path(p.trim_start_matches("./")), "uriBaseId": "%SRCROOT%"})
+    }
+}
+
 fn level(s: Severity) -> &'static str {
     match s {
         Severity::Error => "error",
@@ -27,7 +53,7 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
             if let Some(h) = &f.how_to_fix {
                 r["help"] = json!({"text": h});
             }
-            if let Some(u) = &f.docs_url {
+            if let Some(u) = f.docs_url.as_ref().filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
                 r["helpUri"] = json!(u);
             }
             r
@@ -45,7 +71,7 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
             if let Some(c) = f.column {
                 region["startColumn"] = json!(c);
             }
-            let mut physical = json!({"artifactLocation": {"uri": artifact_uri}});
+            let mut physical = json!({"artifactLocation": artifact_location(artifact_uri)});
             if f.line.is_some() {
                 physical["region"] = region;
             }
@@ -62,6 +88,18 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
             })
         })
         .collect();
+    let mut notes = vec![];
+    if report.dropped > 0 {
+        notes.push(
+            json!({"level": "warning", "message": {"text": format!("{} more findings were counted but not listed", report.dropped)}}),
+        );
+    }
+    if report.unresolved_ref_count > 0 {
+        notes.push(json!({"level": "warning", "message": {"text": format!(
+            "{} $ref(s) could not be followed (external, dangling or cyclic); the objects behind them were not checked",
+            report.unresolved_ref_count
+        )}}));
+    }
     json!({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -71,7 +109,10 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
                 "informationUri": "https://github.com/ferrum-edge/ferrum-anvil",
                 "rules": rules.into_values().collect::<Vec<_>>(),
             }},
+            "columnKind": "unicodeCodePoints",
+            "invocations": [{"executionSuccessful": true, "toolExecutionNotifications": notes}],
             "results": results,
+            "properties": {"counts": report.counts, "dropped": report.dropped, "unresolvedRefs": report.unresolved_refs},
         }],
     })
 }

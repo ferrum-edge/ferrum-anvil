@@ -113,3 +113,25 @@ fn a_settings_save_from_elsewhere_keeps_the_standards() {
     assert!(now.autosave);
     assert_eq!(now.api_standards.rulesets.len(), 1, "the dialog's stale copy did not drop the ruleset");
 }
+
+#[test]
+fn stored_standards_that_do_not_load_can_still_be_seen_and_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let good = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    // A restore from another build can store a ruleset this build refuses.
+    let mut settings = app.settings().unwrap();
+    let mut bad = settings.api_standards.rulesets[0].clone();
+    bad.id = anvil_domain::Id::new();
+    bad.text = "anvil_ruleset: 2\n".into();
+    settings.api_standards.rulesets.push(bad.clone());
+    app.save_settings(&settings).unwrap();
+    let view = app.standards_view().unwrap();
+    assert!(view.error.as_deref().unwrap().contains("version 2"), "{:?}", view.error);
+    assert!(view.rules.is_empty() && view.standards.rulesets.len() == 2);
+    assert!(app.lint_spec(SPEC.as_bytes()).is_err());
+    app.remove_api_ruleset(&bad.id).unwrap();
+    let view = app.standards_view().unwrap();
+    assert!(view.error.is_none());
+    assert_eq!(view.standards.rulesets[0].id, good.id);
+}

@@ -28,10 +28,21 @@ company ruleset.
   under the importer's bounds (size, node count, nesting depth, see
   [import.md](import.md#trust-and-safety-policy)). External `$ref`s are never
   fetched; `extends` names built-in rulesets only.
-- **Bounded.** `$ref` chains (32) and resolutions (250,000 per spec), rules
-  per rule set (2,000), ruleset size (1 MiB), example validations (1,000 per
-  lint), property nesting (24 levels) and findings are capped. Regular
-  expressions use the `regex` crate (linear time, size-limited).
+- **Bounded.** `$ref` chains (32 deep), rules per rule set (2,000), ruleset
+  size (1 MiB), example validations (1,000 per lint), property nesting (24
+  levels) and findings are capped, and every walk over the document is
+  linear in its size. A member name longer than 4 KiB, or member names whose
+  JSON Pointers add up to more than 64 MiB, refuse the spec (positions and
+  targets keep one pointer per member). Regular expressions, in rules and
+  in the `pattern`/`patternProperties` of schemas, use the linear-time
+  `regex` crate with a size limit; a schema whose pattern needs look-around
+  or a back-reference is not used to check examples.
+- **Unresolvable references are reported, not checked.** An external,
+  missing, cyclic or too deep `$ref` is skipped: the parameter, response,
+  body or path item behind it is not a target, so no rule reports on the
+  `$ref` object itself. The report lists where they are
+  (`unresolved_refs`, with a count), and so do the text, SARIF and desktop
+  outputs.
 - **Checked rulesets.** Every rule, target, function and option is checked
   when a ruleset is loaded; an unknown key or a misspelled target is an
   error naming the rule, never a rule that silently passes.
@@ -219,6 +230,11 @@ its enclosing member.
 At most `max_findings` (default 5,000) are kept, most severe first; the rest
 are still counted (`dropped`).
 
+**Not covered.** Webhooks and callbacks are not targets (their operations
+are not walked). A Swagger 2.0 document without `schemes` is taken to be
+served over `https` (the importer does the same and reports it), and one
+without `host` has no `server` target.
+
 ## CLI
 
 `anvil lint-spec <SPEC> [--ruleset FILE]... [--format text|json|sarif]
@@ -227,11 +243,17 @@ are still counted (`dropped`).
 stdin. Without `--ruleset`, the recommended rules apply. Exit codes: `0` no
 finding at or above `--fail-on` (default `error`), `2` otherwise, `3` a
 local error (unreadable file, invalid spec or ruleset). With `--output`, the
-report goes to the file and a summary line to stderr.
+report goes to the file and a summary line to stderr. Text output escapes
+control characters and bidirectional overrides in everything that comes
+from the spec or a ruleset, so a message cannot inject a CI workflow
+command or a terminal escape sequence.
 
-SARIF 2.1.0 output names each rule (with its fix as help text and
-documentation link) and each finding's file, line and column, so code
-scanning annotates the pull request:
+SARIF 2.1.0 output names each rule (with its fix as help text and its
+`http(s)` documentation link) and each finding's file, line and column
+(`columnKind` `unicodeCodePoints`). A relative spec path is a URI relative to
+`%SRCROOT%`, an absolute one a `file:` URI. Dropped findings and unresolved
+references are tool notifications. Code scanning then annotates the pull
+request:
 
 ```yaml
 - run: anvil lint-spec api/openapi.yaml --ruleset standards/acme.yaml --format sarif --output lint.sarif --fail-on never
@@ -257,7 +279,10 @@ ruleset added with **Add** (a file chosen with purpose `ruleset`), in order.
 A ruleset is checked together with the others when it is added, replaced,
 enabled or disabled, or when the recommended rules are left out; a change
 that would not load (an overlay changing a rule no remaining ruleset
-defines, say) is refused and nothing is kept. Up to 16 rulesets of 256 KiB
-each are kept. **Rules in effect** lists every rule with its severity,
+defines, say) is refused and nothing is kept; each change is one write
+transaction, so it never undoes a concurrent one. Up to 8 rulesets of 128
+KiB each are kept (the settings are read on every send). When the stored
+rulesets do not load (restored from a backup of another build, say), the
+view says why and they can still be disabled or removed. **Rules in effect** lists every rule with its severity,
 target and ruleset. The settings dialog never changes the standards: they
 change only through their own commands (`standards_*`).

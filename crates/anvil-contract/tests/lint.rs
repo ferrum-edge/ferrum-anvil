@@ -1,6 +1,7 @@
 //! API-standards linting across dialects, positions, rule forms and outputs.
 
 use anvil_contract::{LintOptions, LintReport, RuleSet, Severity, Spec, lint};
+use serde_json::json;
 use std::collections::BTreeSet;
 
 const ACME: &str = include_str!("../../../samples/api-standards/acme-api-standards.yaml");
@@ -183,7 +184,10 @@ fn sarif_output_names_rules_and_regions() {
     for res in results {
         let idx = res["ruleIndex"].as_u64().unwrap() as usize;
         assert_eq!(rules[idx]["id"], res["ruleId"]);
-        assert_eq!(res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"], "api/orders.yaml");
+        assert_eq!(
+            res["locations"][0]["physicalLocation"]["artifactLocation"],
+            json!({"uri": "api/orders.yaml", "uriBaseId": "%SRCROOT%"})
+        );
         assert!(res["locations"][0]["physicalLocation"]["region"]["startLine"].as_u64().unwrap() > 0);
     }
     let email = rules.iter().find(|r| r["id"] == "acme-problem-json").unwrap();
@@ -220,4 +224,66 @@ components:
     assert_eq!(p.len(), 1, "{p:?}");
     assert_eq!(p[0].pointer, "/components/parameters/Q");
     assert_eq!(p[0].line, Some(22));
+}
+
+#[test]
+fn sarif_locations_are_uris() {
+    use anvil_contract::sarif::artifact_location;
+    assert_eq!(artifact_location("specs/my api#1.yaml"), json!({"uri": "specs/my%20api%231.yaml", "uriBaseId": "%SRCROOT%"}));
+    assert_eq!(artifact_location("/home/me/api.yaml"), json!({"uri": "file:///home/me/api.yaml"}));
+    assert_eq!(artifact_location("C:\\work\\api é.yaml"), json!({"uri": "file:///C%3A/work/api%20%C3%A9.yaml"}));
+}
+
+#[test]
+fn unresolvable_references_are_reported_not_checked() {
+    let text = r##"openapi: 3.1.0
+info: { title: t, version: '1', description: d, contact: { name: n }, license: { name: MIT } }
+servers: [{ url: https://x.example }]
+tags: [{ name: t, description: t }]
+paths:
+  /a:
+    get:
+      operationId: a
+      summary: a
+      description: a
+      tags: [t]
+      parameters:
+        - $ref: 'common.yaml#/parameters/Q'
+        - $ref: '#/components/parameters/Missing'
+      responses:
+        '200': { $ref: '#/components/responses/Gone' }
+        '201': { description: ok }
+"##;
+    let r = run(text, &RuleSet::recommended());
+    assert!(r.findings.is_empty(), "{:#?}", r.findings);
+    assert_eq!(r.unresolved_ref_count, 3);
+    assert!(r.unresolved_refs.contains(&"/paths/~1a/get/parameters/0".to_string()));
+    let sarif = anvil_contract::sarif::to_sarif(&r, "a.yaml");
+    assert!(sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"][0]["message"]["text"].as_str().unwrap().contains("3 $ref"));
+}
+
+#[test]
+fn wide_documents_lint_in_linear_time() {
+    // 100k parameters on one operation, 20k operations, 20k tags and schemas.
+    let params: Vec<serde_json::Value> =
+        (0..100_000).map(|i| json!({"name": format!("p{i}"), "in": "query", "description": "d"})).collect();
+    let mut paths = serde_json::Map::new();
+    paths.insert("/wide".into(), json!({"get": {"operationId": "wide", "summary": "s", "tags": ["t0"], "parameters": params, "responses": {"200": {"description": "ok"}}}}));
+    for i in 0..20_000 {
+        paths.insert(format!("/p{i}"), json!({"get": {"operationId": format!("o{i}"), "summary": "s", "tags": [format!("t{i}")], "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": format!("#/components/schemas/S{i}")}}}}}}}));
+    }
+    let tags: Vec<serde_json::Value> = (0..20_000).map(|i| json!({"name": format!("t{i}"), "description": "d"})).collect();
+    let schemas: serde_json::Map<String, serde_json::Value> =
+        (0..20_000).map(|i| (format!("S{i}"), json!({"type": "object", "properties": {"a": {"type": "string"}}}))).collect();
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1", "description": "d", "contact": {"name": "n"}, "license": {"name": "MIT"}},
+        "servers": [{"url": "https://x.example"}], "tags": tags, "paths": paths, "components": {"schemas": schemas}});
+    let start = std::time::Instant::now();
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
+    assert!(
+        r.findings.iter().all(|f| f.rule != "schema-unused" && f.rule != "operation-tag-defined"),
+        "{:?}",
+        &r.findings[..r.findings.len().min(3)]
+    );
+    assert_eq!(r.spec.operations, 20_001);
 }

@@ -124,11 +124,14 @@ The mechanics are in [import.md](import.md#persisting-an-import-anvil-app)
 and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 
 - **Hostile ruleset or spec given to the linter:** a ruleset is data, never
-  code: rules name built-in functions only, regular expressions use the
-  linear-time `regex` crate with a size limit, `extends` names built-in
-  rulesets only and nothing is fetched or read; specs are parsed under the
-  import bounds and `$ref` resolution is internal and capped
-  ([contract.md](contract.md#guarantees)).
+  code: rules name built-in functions only, regular expressions (in rules
+  and in schema patterns) use the linear-time `regex` crate with a size
+  limit, `extends` names built-in rulesets only and nothing is fetched or
+  read; specs are parsed under the import bounds plus a member-name budget,
+  `$ref` resolution is internal and depth-capped, and every walk is linear
+  ([contract.md](contract.md#guarantees)). Text output escapes control
+  characters, so a spec cannot inject CI workflow commands or terminal
+  escape sequences.
 - **Malicious bundle trying to enable insecure settings:** import
   normalisation (TLS bypass, plain-HTTP marker trust, credential forwarding,
   0-RTT early data, legacy HMAC, scenario/plan trust) with warnings in the
