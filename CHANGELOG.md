@@ -846,6 +846,13 @@
 
 ### Security
 
+- Cookie domains that are a single, unknown label (`internal`, `lan`, `corp`)
+  are no longer shared across matching hosts; a cookie may still be stored
+  host-only when its single-label domain is the responding host. URL-encoded
+  and multipart text fields named as credentials are now treated as
+  secret-bearing for cross-origin redirects, even when their literal values
+  were not marked sensitive. This also applies to 301/302 redirects that keep
+  the body, such as for PUT, PATCH and DELETE.
 - Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
   `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
   secret value from the parts it keeps: the authorization scheme word,

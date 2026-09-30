@@ -411,6 +411,30 @@ async fn redirect_that_would_resend_a_sensitive_form_field_to_another_origin_is_
 }
 
 #[tokio::test]
+async fn redirect_that_would_resend_a_credential_named_form_field_is_not_followed() {
+    init();
+    let a = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let b = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    for status in [307u16, 308] {
+        a.log.clear();
+        b.log.clear();
+        let mut ctx = ctx_for(&a.url(&format!("/redirect?to={}&status={status}", url_encode(&b.url("/echo")))));
+        ctx.spec.method = "POST".into();
+        ctx.spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("password", "literal-p@ssword")] };
+        let o = run(&e, &ctx).await;
+        assert_eq!(o.record.attempts.len(), 1, "{status}");
+        assert_eq!(a.log.count_requests(), 1, "{status}");
+        assert_eq!(b.log.count_requests(), 0, "{status}: credential-named form data stays at its origin");
+        assert!(
+            inferred(&o).iter().any(|i| i.contains("not followed") && i.contains("body holding a secret")),
+            "{status}: {:?}",
+            inferred(&o)
+        );
+    }
+}
+
+#[tokio::test]
 async fn secret_body_follows_a_same_origin_redirect() {
     init();
     let a = fx::serve("127.0.0.1:0", None).await.unwrap();

@@ -243,6 +243,20 @@ pub fn prepare_http(
     send_anyway: bool,
     allowed_schemes: &[&str],
 ) -> Result<PreparedHttp, TransportFailure> {
+    prepare_http_with_redaction_names(spec, r, attachments, settings, &[], send_anyway, allowed_schemes)
+}
+
+/// Prepare an HTTP request using configured credential names to identify
+/// credential-bearing form fields for cross-origin redirect handling.
+pub(crate) fn prepare_http_with_redaction_names(
+    spec: &RequestSpec,
+    r: &Resolver,
+    attachments: &dyn AttachmentResolver,
+    settings: &EffectiveSettings,
+    redaction_names: &[String],
+    send_anyway: bool,
+    allowed_schemes: &[&str],
+) -> Result<PreparedHttp, TransportFailure> {
     let mut inferred = Vec::new();
     let method = r.resolve(spec.method.trim(), "method")?.to_ascii_uppercase();
     if method.is_empty() || !method.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'_') {
@@ -332,6 +346,8 @@ pub fn prepare_http(
                 let v = r.resolve(&f.value, &format!("body.fields[{i}].value"))?;
                 if f.sensitive {
                     r.mark_sensitive(&k, &v);
+                }
+                if f.sensitive || crate::redact::is_credential_name(&k, redaction_names) {
                     sensitive_body_field = true;
                 }
                 parts.push(format!(
@@ -348,11 +364,17 @@ pub fn prepare_http(
             let boundary = format!("----AnvilFormBoundary{}", hex::encode(b));
             let mut out: Vec<u8> = Vec::new();
             for (i, p) in parts.iter().enumerate().filter(|(_, p)| p.enabled) {
-                let name = r.resolve(&p.name, &format!("body.parts[{i}].name"))?.replace('"', "%22");
+                let resolved_name = r.resolve(&p.name, &format!("body.parts[{i}].name"))?;
+                let name = resolved_name.replace('"', "%22");
                 out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
                 match &p.content {
                     MultipartContent::Text { value } => {
                         let v = r.resolve(value, &format!("body.parts[{i}].value"))?;
+                        // Multipart parts carry no sensitive flag; a credential-like name alone
+                        // keeps the body off cross-origin redirects.
+                        if crate::redact::is_credential_name(&resolved_name, redaction_names) {
+                            sensitive_body_field = true;
+                        }
                         out.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes());
                         if let Some(ct) = &p.content_type {
                             out.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
@@ -620,14 +642,67 @@ mod tests {
         spec.body = Body::FormUrlEncoded { fields: vec![pin] };
         assert!(prepared(&spec).body_uses_secret);
 
-        // The same literal in a field not marked sensitive does not.
+        // Credential-named literal fields are sensitive even when the user
+        // did not mark them explicitly.
         spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), KeyValue::new("password", literal)] };
-        assert!(!prepared(&spec).body_uses_secret);
+        assert!(prepared(&spec).body_uses_secret);
+
+        let vars = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        let custom_name = prepare_http_with_redaction_names(
+            &RequestSpec {
+                body: Body::FormUrlEncoded { fields: vec![KeyValue::new("access_code", "1234")] },
+                ..RequestSpec::http("POST", "https://api.example.com/login")
+            },
+            &vars,
+            &attachments,
+            &EffectiveSettings::default(),
+            &["access_code".into()],
+            false,
+            &["https"],
+        )
+        .unwrap();
+        assert!(custom_name.body_uses_secret, "configured credential names mark literal fields");
 
         // A disabled sensitive field is not sent, so it does not either.
         let disabled = KeyValue { enabled: false, ..password };
         spec.body = Body::FormUrlEncoded { fields: vec![KeyValue::new("user", "alice"), disabled] };
         assert!(!prepared(&spec).body_uses_secret);
+    }
+
+    #[test]
+    fn credential_name_fields_do_not_register_literal_values_as_secrets() {
+        use anvil_domain::request::KeyValue;
+        let value = "John Smith";
+        let spec = RequestSpec {
+            body: Body::FormUrlEncoded { fields: vec![KeyValue::new("author", value)] },
+            ..RequestSpec::http("POST", "https://api.example.com/submit")
+        };
+        let resolver = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+        let request = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap();
+
+        assert!(resolver.used_secrets.lock().is_empty(), "a heuristic name does not register its value as a secret");
+        let redactor = crate::redact::Redactor::for_execution(&resolver, &[]);
+        let preview = redactor.text(&String::from_utf8_lossy(&request.body));
+        let decoded_value = url::form_urlencoded::parse(preview.as_bytes()).find(|(name, _)| name == "author").map(|(_, value)| value);
+        assert_eq!(decoded_value.as_deref(), Some(value), "the preview still shows the author value");
+    }
+
+    #[test]
+    fn a_multipart_credential_named_text_part_marks_the_body() {
+        let spec = RequestSpec {
+            body: Body::Multipart {
+                parts: vec![anvil_domain::request::MultipartPart {
+                    name: "password".into(),
+                    enabled: true,
+                    content: MultipartContent::Text { value: "literal-password".into() },
+                    content_type: None,
+                }],
+            },
+            ..RequestSpec::http("POST", "https://api.example.com/login")
+        };
+        assert!(prepared(&spec).body_uses_secret);
     }
 
     #[test]
