@@ -8,8 +8,9 @@
   included (`--include-standards` in the CLI or **Include API standards** in
   the desktop). Bundle imports keep those rulesets disabled, recompute their
   hashes, and enforce profile-wide limits together with local records.
-- API standards records append after existing records on import and are only
-  rewritten when changed; full backups continue to restore their order and
+- Bundle imports append new API standards records after existing ones. Replace
+  keeps a matching local ruleset's enabled flag and position; only new
+  rulesets arrive disabled. Full backups continue to restore their order and
   enabled flags.
 
 ### Added

@@ -25,6 +25,7 @@ use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
 use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use serde_json::json;
+use sha2::Digest;
 use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
@@ -861,6 +862,51 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
     let restored = c.settings().unwrap();
     assert_eq!(restored.theme, Theme::Light);
     assert_eq!(restored.defaults.dns_overrides, settings.defaults.dns_overrides);
+}
+
+#[test]
+fn replace_restore_checks_matching_rulesets_at_their_stored_position() {
+    let root = tempfile::tempdir().unwrap();
+    let source = new_app(root.path(), "source");
+    source.create_workspace("Backup standards").unwrap();
+    let team_text = r#"anvil_ruleset: 1
+name: Team
+version: '3'
+rules:
+  info-contact: error
+  team-summary:
+    severity: error
+    given: operation
+    then: { field: summary, function: truthy }
+"#;
+    let team = source.add_api_ruleset("team.yaml", team_text.as_bytes()).unwrap();
+    let overlay_text = "anvil_ruleset: 1\nname: Overlay\nrules:\n  team-summary: off\n";
+    let overlay = source.add_api_ruleset("overlay.yaml", overlay_text.as_bytes()).unwrap();
+    let unchanged_backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let mut changed = team.clone();
+    changed.text = "anvil_ruleset: 1\nname: Team\nversion: '4'\nrules:\n  info-contact: error\n".into();
+    changed.sha256 = hex::encode(sha2::Sha256::digest(changed.text.as_bytes()));
+    source.store.put(kind::API_RULESET, &changed.id, None, None, 0.0, &changed).unwrap();
+    let changed_backup = source.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+
+    let target = new_app(root.path(), "target");
+    target.create_workspace("Local workspace").unwrap();
+    target.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
+    target.store.put(kind::API_RULESET, &overlay.id, None, None, 9.0, &overlay).unwrap();
+    let preview = target.restore_preview(&changed_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
+    let report = target.restore(&changed_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
+
+    let unchanged_target = new_app(root.path(), "unchanged");
+    unchanged_target.create_workspace("Local workspace").unwrap();
+    unchanged_target.store.put(kind::API_RULESET, &team.id, None, None, 7.0, &team).unwrap();
+    unchanged_target.store.put(kind::API_RULESET, &overlay.id, None, None, 9.0, &overlay).unwrap();
+    let preview = unchanged_target.restore_preview(&unchanged_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
+    let report = unchanged_target.restore(&unchanged_backup, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert!(!report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
 }
 
 #[test]

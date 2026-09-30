@@ -209,7 +209,9 @@ profiles, spec-import records or load reports, and its bundle kind is
   `--include-standards` for the same opt-in. The manifest and both export and
   import previews show the number carried. Imported bundle rulesets start
   disabled, so they cannot change linting until enabled in API standards.
-  Full backups always carry rulesets and restore their enabled state and order.
+  Replace keeps a matching local ruleset's enabled flag and position; only
+  new bundle rulesets arrive disabled. Full backups always carry rulesets and
+  restore their enabled state and order.
 - Each workspace's load plans, except one that names a request, dataset or
   environment deleted since (an import would refuse it; the export lists it
   among its excluded items).
@@ -574,9 +576,11 @@ different owner; Merge keeps those.
 - Contracts (`contracts/schemas`) are generated from the Rust types. Additive
   fields use serde defaults so older records keep loading.
 - On profile open, the app-level settings migration moves legacy API
-  standards rulesets into `api_ruleset` object records in one transaction,
-  then clears the old field. It is idempotent: each legacy id is written only
-  when no ruleset record with that id already exists.
+  standards rulesets into `api_ruleset` object records in one transaction.
+  Each legacy id is written only when no ruleset record with that id already
+  exists. Rulesets skipped because an individual, count or combined-size
+  limit has been reached remain in the legacy field, so no ruleset is lost
+  and a later profile open retries the migration.
 
 ## History retention
 

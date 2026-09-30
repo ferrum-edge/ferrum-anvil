@@ -266,15 +266,22 @@ impl App {
                 warnings.push(format!("{} duplicate API ruleset(s) with matching SHA-256 will be skipped.", before - graph.rulesets.len()));
             }
         }
-        let replacing: HashSet<Id> = graph.rulesets.iter().map(|r| r.id).collect();
-        let mut combined: Vec<_> =
-            local_rulesets.iter().filter(|r| !(policy == ConflictPolicy::Replace && replacing.contains(&r.id))).cloned().collect();
-        combined.extend(graph.rulesets.iter().filter(|r| !(policy == ConflictPolicy::Merge && existing.objects.contains(&r.id))).cloned());
+        let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace {
+            graph.rulesets.iter().map(|r| r.id).collect()
+        } else {
+            HashSet::new()
+        };
+        let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
+            graph.rulesets.iter().filter(|r| existing.objects.contains(&r.id)).map(|r| r.id).collect()
+        } else {
+            HashSet::new()
+        };
+        let combined = crate::standards::combine_rulesets_in_stored_order(&local_rulesets, &graph.rulesets, &replacing, true, &skipped);
         if let Err(e) = crate::standards::validate_standards(
             &anvil_domain::settings::ApiStandards { include_recommended, rulesets: combined.clone() },
             &local_rulesets,
         ) {
-            warnings.push(format!("Imported API standards exceed profile limits: {e}"));
+            warnings.push(format!("Imported API standards exceed profile limits: {e}; the import will be refused"));
         }
         if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended) {
             warnings.push(format!("Imported API standards would not load: {e}"));
@@ -423,14 +430,17 @@ impl App {
             }
             let settings: anvil_domain::settings::AppSettings = s.get(kind::APP_SETTINGS, &crate::settings_id())?.unwrap_or_default();
             let include_recommended = settings.api_standards.include_recommended;
-            let replacing: HashSet<Id> = g.rulesets.iter().map(|r| r.id).collect();
-            let retained: Vec<_> = local_rulesets
-                .iter()
-                .filter(|r| !(policy != ConflictPolicy::Merge && replacing.contains(&r.id)))
-                .cloned()
-                .collect();
-            let mut combined = retained;
-            combined.extend(g.rulesets.iter().filter(|r| !skip(&r.id)).cloned());
+            let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace {
+                g.rulesets.iter().map(|r| r.id).collect()
+            } else {
+                HashSet::new()
+            };
+            let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
+                g.rulesets.iter().filter(|r| skip(&r.id)).map(|r| r.id).collect()
+            } else {
+                HashSet::new()
+            };
+            let combined = crate::standards::combine_rulesets_in_stored_order(&local_rulesets, &g.rulesets, &replacing, true, &skipped);
             if let Err(e) = crate::standards::validate_standards(
                 &anvil_domain::settings::ApiStandards { include_recommended, rulesets: combined.clone() },
                 &local_rulesets,

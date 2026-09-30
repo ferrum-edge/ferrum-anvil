@@ -40,6 +40,37 @@ pub(crate) fn layered_for_port(rulesets: &[StoredRuleset], include_recommended: 
     Ok(set)
 }
 
+/// The rulesets that a write will leave in storage order. Replacements keep
+/// their local position; new records follow in incoming order.
+pub(crate) fn combine_rulesets_in_stored_order(
+    local: &[StoredRuleset],
+    incoming: &[StoredRuleset],
+    replacements: &std::collections::HashSet<Id>,
+    retain_local: bool,
+    skipped_incoming: &std::collections::HashSet<Id>,
+) -> Vec<StoredRuleset> {
+    let mut combined = Vec::with_capacity(local.len() + incoming.len());
+    let mut placed = std::collections::HashSet::new();
+    for current in local {
+        if replacements.contains(&current.id) {
+            if let Some(replacement) = incoming.iter().find(|ruleset| ruleset.id == current.id) {
+                combined.push(replacement.clone());
+                placed.insert(replacement.id);
+            } else if retain_local {
+                combined.push(current.clone());
+            }
+        } else if retain_local {
+            combined.push(current.clone());
+        }
+    }
+    for ruleset in incoming {
+        if !placed.contains(&ruleset.id) && !skipped_incoming.contains(&ruleset.id) {
+            combined.push(ruleset.clone());
+        }
+    }
+    combined
+}
+
 fn layered(std: &ApiStandards) -> std::result::Result<RuleSet, AppError> {
     layered_for_port(&std.rulesets, std.include_recommended)
 }

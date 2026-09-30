@@ -495,7 +495,7 @@ impl App {
     /// Dry run of [`App::restore`]: authenticate, validate and plan without
     /// changing anything.
     pub fn restore_preview(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
-        let (manifest, mut d) = open_for_restore(bytes, passphrase, policy)?;
+        let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         let local = self.store.read_consistently(|r| local(r, &d))?;
         check_id_namespaces(&d, &local, policy)?;
         let notes = restore_notes(&d, &local, policy)?;
@@ -512,11 +512,11 @@ impl App {
     /// Restore a full backup. Nothing is written unless the whole file
     /// authenticates under `passphrase` and every item in it is valid. Then a
     /// checkpoint is taken and every item is written in one transaction:
-    /// `Replace` overwrites items with the same id, `Merge` keeps them
-    /// (including this profile's settings). Replace without kept settings
-    /// also replaces local rulesets. App
-    /// settings apply to every workspace's requests, so `Replace` keeps this
-    /// profile's too while it holds a workspace the backup does not claim.
+    /// `Replace` overwrites items with matching ids. `Merge` keeps existing
+    /// items, including app settings. Replace without kept settings also
+    /// replaces local rulesets. App settings apply to every workspace's
+    /// requests, so Replace keeps this profile's settings while it holds a
+    /// workspace the backup does not claim.
     ///
     /// The whole restore is refused, before anything is written, when:
     /// - `approval` was given for another file (its `bundle_sha256`), or
@@ -562,7 +562,7 @@ impl App {
         proceed: &dyn Fn() -> bool,
     ) -> Result<ImportReport> {
         approval.check_file(bytes, "restored")?;
-        let (manifest, mut d) = open_for_restore(bytes, passphrase, policy)?;
+        let (manifest, d) = open_for_restore(bytes, passphrase, policy)?;
         if !proceed() {
             return Err(AppError::Canceled);
         }
@@ -579,21 +579,27 @@ impl App {
             };
             let keep_settings = keeps_local_settings(&d, &local, policy);
             let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
-            let replacing: HashSet<Id> = d.graph.rulesets.iter().map(|r| r.id).collect();
-            let mut combined: Vec<_> = local_rulesets
-                .iter()
-                .filter(|r| {
-                    !(policy == ConflictPolicy::Replace && !keep_settings)
-                        && !(policy != ConflictPolicy::Merge && replacing.contains(&r.id))
-                })
-                .cloned()
-                .collect();
-            combined.extend(
+            let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace && keep_settings {
+                d.graph.rulesets.iter().map(|r| r.id).collect()
+            } else {
+                HashSet::new()
+            };
+            let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
                 d.graph
                     .rulesets
                     .iter()
-                    .filter(|r| !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))))
-                    .cloned(),
+                    .filter(|r| local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
+                    .map(|r| r.id)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            let combined = crate::standards::combine_rulesets_in_stored_order(
+                &local_rulesets,
+                &d.graph.rulesets,
+                &replacing,
+                policy != ConflictPolicy::Replace || keep_settings,
+                &skipped,
             );
             if let Err(e) = crate::standards::validate_standards(
                 &anvil_domain::settings::ApiStandards {
@@ -1051,28 +1057,33 @@ fn include_recommended(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bo
 /// this profile's app settings.
 fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<Vec<String>> {
     let mut notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
-    let replacing: HashSet<Id> = d.graph.rulesets.iter().map(|r| r.id).collect();
-    let mut combined: Vec<_> = local
-        .rulesets
-        .iter()
-        .filter(|r| {
-            !(policy == ConflictPolicy::Replace && !keeps_local_settings(d, local, policy))
-                && !(policy != ConflictPolicy::Merge && replacing.contains(&r.id))
-        })
-        .cloned()
-        .collect();
-    combined.extend(
+    let replacements: HashSet<Id> = if policy == ConflictPolicy::Replace && keeps_local_settings(d, local, policy) {
+        d.graph.rulesets.iter().map(|r| r.id).collect()
+    } else {
+        HashSet::new()
+    };
+    let skipped: HashSet<Id> = if policy == ConflictPolicy::Merge {
         d.graph
             .rulesets
             .iter()
-            .filter(|r| !(policy == ConflictPolicy::Merge && local.items.contains(&(kind::API_RULESET.into(), r.id.to_string()))))
-            .cloned(),
+            .filter(|r| local.items.contains(&(kind::API_RULESET.into(), r.id.to_string())))
+            .map(|r| r.id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let combined = crate::standards::combine_rulesets_in_stored_order(
+        &local.rulesets,
+        &d.graph.rulesets,
+        &replacements,
+        policy != ConflictPolicy::Replace || keeps_local_settings(d, local, policy),
+        &skipped,
     );
     if let Err(e) = crate::standards::validate_standards(
         &anvil_domain::settings::ApiStandards { include_recommended: include_recommended(d, local, policy), rulesets: combined.clone() },
         &local.rulesets,
     ) {
-        notes.push(format!("Restored API standards exceed profile limits: {e}"));
+        notes.push(format!("Restored API standards exceed profile limits: {e}; the restore will be refused"));
     }
     if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(d, local, policy)) {
         notes.push(format!("Restored API standards would not load: {e}"));

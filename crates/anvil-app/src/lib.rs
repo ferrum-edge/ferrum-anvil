@@ -159,6 +159,7 @@ impl App {
                 let mut ids: std::collections::HashSet<String> = existing.into_iter().map(|row| row.id).collect();
                 let mut count = ids.len();
                 let mut total_bytes: usize = existing_rulesets.iter().map(|ruleset| ruleset.text.len()).sum();
+                let mut retry = Vec::new();
                 for ruleset in legacy {
                     let id = ruleset.id.to_string();
                     if ids.contains(&id) {
@@ -170,6 +171,7 @@ impl App {
                     }
                     if ruleset.text.len() > anvil_domain::settings::MAX_STORED_RULESET_BYTES {
                         tracing::warn!(id = %id, bytes = ruleset.text.len(), "skipping oversized legacy API ruleset during migration");
+                        retry.push(ruleset);
                         continue;
                     }
                     if count >= anvil_domain::settings::MAX_STORED_RULESETS {
@@ -178,6 +180,7 @@ impl App {
                             limit = anvil_domain::settings::MAX_STORED_RULESETS,
                             "skipping excess legacy API ruleset during migration"
                         );
+                        retry.push(ruleset);
                         continue;
                     }
                     let next_total = total_bytes.saturating_add(ruleset.text.len());
@@ -188,6 +191,7 @@ impl App {
                             limit = anvil_domain::settings::MAX_STORED_RULESETS_BYTES,
                             "skipping legacy API ruleset that exceeds the profile size limit"
                         );
+                        retry.push(ruleset);
                         continue;
                     }
                     tx.put(anvil_storage::kind::API_RULESET, &ruleset.id, None, None, order, &ruleset)?;
@@ -196,6 +200,7 @@ impl App {
                     count += 1;
                     total_bytes = next_total;
                 }
+                settings.api_standards.legacy_rulesets = retry;
                 tx.put(anvil_storage::kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &settings)?;
             }
             Ok(())
