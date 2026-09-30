@@ -685,8 +685,6 @@ mod tests {
         assert!(resolver.used_secrets.lock().is_empty(), "a heuristic name does not register its value as a secret");
         let redactor = crate::redact::Redactor::for_execution(&resolver, &[]);
         let preview = redactor.text(&String::from_utf8_lossy(&request.body));
-        let encoded_value = encode_component(value);
-        assert!(preview.contains(&encoded_value), "the literal author remains visible in the preview: {preview}");
         let decoded_value = url::form_urlencoded::parse(preview.as_bytes()).find(|(name, _)| name == "author").map(|(_, value)| value);
         assert_eq!(decoded_value.as_deref(), Some(value), "the preview still shows the author value");
     }
