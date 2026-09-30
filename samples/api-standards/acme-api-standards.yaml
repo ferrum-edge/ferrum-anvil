@@ -1,0 +1,118 @@
+# An example company ruleset: what every Acme API description must look like.
+# Lint with it:   anvil lint-spec openapi.yaml --ruleset acme-api-standards.yaml
+# or add it in the desktop under Standards → Add ruleset…
+# The format is described in docs/contract.md.
+anvil_ruleset: 1
+name: Acme API standards
+version: "2026.09"
+description: Naming, versioning, security and error-format rules for Acme's public and partner APIs.
+extends: [anvil:recommended]
+
+rules:
+  # Tighten or relax inherited rules.
+  info-contact: error
+  operation-operation-id: error
+  operation-description: off
+
+  acme-owner-email:
+    description: The owning team is reachable by email.
+    severity: error
+    given: info
+    then: { field: contact.email, function: pattern, options: { match: "@acme\\.example$" } }
+    message: "info.contact.email must be an @acme.example address of the owning team."
+    how_to_fix: Set `info.contact.email` to the team's shared mailbox.
+    docs_url: https://wiki.acme.example/api-standards#ownership
+
+  acme-version-in-path:
+    description: Paths start with a major version.
+    severity: error
+    given: path
+    then: { field: path, function: pattern, options: { match: "^/v[0-9]+/" } }
+    message: "Path {{path}} does not start with a major version such as /v1/."
+    how_to_fix: Move the operation under `/v1/…` (or put the version in the server URL and drop this rule).
+
+  acme-path-kebab-case:
+    description: Path segments are kebab-case.
+    severity: warn
+    given: path
+    then: { field: static_segments.*, function: casing, options: { type: kebab } }
+    message: "Path segment '{{value}}' of {{path}} is not kebab-case."
+    how_to_fix: "Rename the segment, e.g. `petOwners` → `pet-owners`."
+
+  acme-operation-id-camel-case:
+    description: operationIds are camelCase.
+    severity: warn
+    given: operation
+    then: { field: operation_id, function: casing, options: { type: camel } }
+    message: "operationId '{{operation_id}}' is not camelCase."
+
+  acme-property-camel-case:
+    description: JSON property names are camelCase.
+    severity: error
+    given: property
+    then: { field: name, function: casing, options: { type: camel } }
+    message: "Property '{{name}}' ({{parent}}) is not camelCase."
+    how_to_fix: "Rename it, e.g. `created_at` → `createdAt`."
+
+  acme-query-param-camel-case:
+    description: Query parameters are camelCase.
+    severity: warn
+    given: parameter
+    where: { field: in, function: enumeration, options: { values: [query] } }
+    then: { field: name, function: casing, options: { type: camel } }
+
+  acme-secured:
+    description: Every operation requires authentication.
+    severity: error
+    given: operation
+    where: { field: path, function: pattern, options: { not_match: "^/(v[0-9]+/)?health$" } }
+    then: { field: has_security, function: truthy }
+    message: "{{label}} is not protected by any security scheme."
+    how_to_fix: Add a `security` requirement (or a global one) that uses the company OAuth 2 scheme.
+
+  acme-client-errors-documented:
+    description: Operations document at least one 4xx response.
+    severity: warn
+    given: operation
+    then: { field: response_codes, function: includes, options: { pattern: "^4" } }
+    message: "{{label}} documents no 4xx response."
+
+  acme-problem-json:
+    description: Error responses use RFC 9457 problem details.
+    severity: error
+    given: media_type
+    where:
+      - { field: direction, function: enumeration, options: { values: [response] } }
+      - { field: code, function: pattern, options: { match: "^[45]" } }
+    then: { field: media_type, function: enumeration, options: { values: [application/problem+json] } }
+    message: "The {{code}} response of {{method_upper}} {{path}} uses {{media_type}}; errors must be application/problem+json."
+
+  acme-tags-alphabetical:
+    description: Top-level tags are sorted.
+    severity: info
+    given: document
+    then: { field: tags, function: alphabetical }
+
+  acme-no-inline-request-schemas:
+    description: Request bodies reference a component schema.
+    severity: info
+    given: media_type
+    where: { field: direction, function: enumeration, options: { values: [request] } }
+    then: { field: schema_is_ref, function: truthy }
+    message: "The request body schema of {{method_upper}} {{path}} ({{media_type}}) is inline; define it under components and reference it."
+
+  acme-rate-limit-header:
+    description: Successful responses declare the rate-limit header.
+    severity: info
+    given: response
+    where: { field: is_success, function: truthy }
+    then: { field: headers, function: includes, options: { values: [RateLimit] } }
+    message: "The {{label}} does not declare the RateLimit header."
+
+  acme-x-owner-extension:
+    description: Every operation names its owning squad in x-acme-owner (OpenAPI 3 only).
+    severity: hint
+    formats: [oas3]
+    given: operation
+    then: { field: raw.x-acme-owner, function: defined }
+    message: "{{label}} has no x-acme-owner extension."

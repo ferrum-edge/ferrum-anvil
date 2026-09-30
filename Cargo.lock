@@ -200,6 +200,7 @@ dependencies = [
 name = "anvil-app"
 version = "0.1.0"
 dependencies = [
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -267,6 +268,7 @@ version = "0.1.0"
 dependencies = [
  "anvil-app",
  "anvil-auth",
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -289,11 +291,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvil-contract"
+version = "0.1.0"
+dependencies = [
+ "anvil-import",
+ "hex",
+ "jsonschema",
+ "proptest",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "anvil-desktop"
 version = "0.1.0"
 dependencies = [
  "anvil-app",
  "anvil-auth",
+ "anvil-contract",
  "anvil-diagnostics",
  "anvil-domain",
  "anvil-engine",
@@ -370,6 +390,7 @@ dependencies = [
  "p12-keystore",
  "parking_lot",
  "percent-encoding",
+ "psl",
  "rand 0.10.3",
  "regex",
  "roxmltree",
@@ -5477,6 +5498,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl"
+version = "2.1.238"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e6aa2cd4e8e062e78ac5d7df6206e2f8e39b624f658efd6f34f9aa1928ac5da"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
 name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8880,14 +8910,14 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
- "synstructure 0.14.0",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
 ]
 
 [[package]]

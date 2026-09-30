@@ -1025,6 +1025,12 @@ pub(crate) fn grpc_call(
     for (i, kv) in spec.metadata.iter().enumerate().filter(|(_, kv)| kv.enabled) {
         let n = r.resolve(kv.name.trim(), &format!("grpc.metadata[{i}].name"))?.to_ascii_lowercase();
         let v = r.resolve(&kv.value, &format!("grpc.metadata[{i}].value"))?;
+        // Metadata marked sensitive is redacted by name and by value, as a
+        // request header marked sensitive is: registered before anything
+        // (the preview, the session's redactor, the record) is redacted.
+        if kv.sensitive {
+            r.mark_sensitive(&n, &v);
+        }
         if HeaderName::from_bytes(n.as_bytes()).is_err() || n.starts_with(':') || n.starts_with("grpc-") {
             return Err(local(
                 FailureKind::InvalidHeader,
@@ -1822,13 +1828,6 @@ async fn run_prepared(
     workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
-    // The handshake responses' cookies, kept in the workspace jar unless the
-    // engine was locked or the workspace deleted since the execution started.
-    if let Some(c) = &prep.cookies {
-        for r in out.attempts.iter().filter_map(|a| a.response.as_ref()) {
-            c.jars.store(c.epoch, &c.isolation, &c.target, r);
-        }
-    }
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
     let mut redactor = prep.redactor;
     redactor.refresh_used_secrets(resolver);
@@ -1838,6 +1837,12 @@ async fn run_prepared(
     if let Some(signed) = &prep.signed_secrets {
         for s in signed.lock().iter() {
             redactor.add_secret(s);
+        }
+    }
+    let mut skipped_secret_cookie_name = false;
+    if let Some(c) = &prep.cookies {
+        for r in out.attempts.iter().filter_map(|a| a.response.as_ref()) {
+            skipped_secret_cookie_name |= c.jars.store(c.epoch, &c.isolation, &c.target, r, &redactor);
         }
     }
     // A call signed once server reflection resolved its schema, or the last
@@ -1868,6 +1873,9 @@ async fn run_prepared(
         }
     }
     let mut inferred = prep.inferred;
+    if skipped_secret_cookie_name && !inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE) {
+        inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+    }
     inferred.extend(out.facts.notes.iter().cloned());
     if let Some(d) = &out.facts.grpc_status_details {
         inferred.push(format!("grpc-status-details-bin: {d}"));

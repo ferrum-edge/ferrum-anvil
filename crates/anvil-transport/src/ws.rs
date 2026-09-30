@@ -108,6 +108,60 @@ struct Close {
     closed_by: ClosedBy,
 }
 
+/// How long a Close frame the client sends on its way out (cancel, total
+/// deadline) may take to be written.
+const FINAL_CLOSE_WRITE: Duration = Duration::from_millis(250);
+
+/// Why a pending write ended the session.
+enum WriteStop {
+    /// The session was canceled, or its total deadline passed, while a write
+    /// was pending (the peer was not reading).
+    Interrupted(Interrupted),
+    /// A Close frame was not written within the close wait.
+    CloseStalled { code: u16, reason: String },
+}
+
+/// How a guarded send ended.
+enum Wrote {
+    Done,
+    Failed(tungstenite::Error),
+    Stopped(WriteStop),
+}
+
+/// Send one message (write and flush), raced against cancellation and
+/// `deadline` ([`guarded`]).
+async fn send_guarded<S: AsyncRead + AsyncWrite + Unpin>(
+    ws: &mut WebSocketStream<S>,
+    msg: Message,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Wrote {
+    match guarded(ws.send(msg), cancel, deadline).await {
+        Ok(Ok(())) => Wrote::Done,
+        Ok(Err(e)) => Wrote::Failed(e),
+        Err(i) => Wrote::Stopped(WriteStop::Interrupted(i)),
+    }
+}
+
+/// Send a Close frame within `wait` (and the total deadline): a graceful
+/// close must not wait on a peer that is not reading.
+async fn send_close_guarded<S: AsyncRead + AsyncWrite + Unpin>(
+    ws: &mut WebSocketStream<S>,
+    code: u16,
+    reason: &str,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
+    wait: Duration,
+) -> Wrote {
+    let bound = Instant::now() + wait;
+    match send_guarded(ws, close_frame(code, reason), cancel, earliest(total_deadline, Some(bound))).await {
+        Wrote::Stopped(WriteStop::Interrupted(Interrupted::Deadline)) if total_deadline.is_none_or(|d| bound < d) => {
+            Wrote::Stopped(WriteStop::CloseStalled { code, reason: reason.to_string() })
+        }
+        w => w,
+    }
+}
+
 /// Wait up to `ms` for the peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
 async fn await_extended_connect(
     flag: Option<tokio::sync::watch::Receiver<bool>>,
@@ -312,6 +366,7 @@ fn bridge_h3_stream<T>(
     stream: h3::client::RequestStream<T, Bytes>,
     stats: Arc<crate::stats::ConnStats>,
     stream_error: Arc<parking_lot::Mutex<Option<String>>>,
+    abort: CancellationToken,
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>)
 where
     T: h3::quic::BidiStream<Bytes> + Send + 'static,
@@ -322,19 +377,38 @@ where
     let (app, h3_side) = tokio::io::duplex(64 * 1024);
     let (mut rd, mut wr) = tokio::io::split(h3_side);
     let up_stats = stats.clone();
+    // `abort` (an interrupted write) resets the send side instead of
+    // finishing it, even while a send waits for flow-control credit.
     let up = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
-            match rd.read(&mut buf).await {
-                Ok(0) | Err(_) => {
+            let read = tokio::select! {
+                biased;
+                _ = abort.cancelled() => None,
+                r = rd.read(&mut buf) => Some(r),
+            };
+            let n = match read {
+                Some(Ok(0) | Err(_)) if !abort.is_cancelled() => {
                     let _ = send.finish().await;
                     break;
                 }
-                Ok(n) => {
-                    if send.send_data(Bytes::copy_from_slice(&buf[..n])).await.is_err() {
-                        break;
-                    }
-                    up_stats.record_write(n);
+                Some(Ok(n)) if n > 0 && !abort.is_cancelled() => n,
+                _ => {
+                    send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                    break;
+                }
+            };
+            let sent = tokio::select! {
+                biased;
+                _ = abort.cancelled() => None,
+                r = send.send_data(Bytes::copy_from_slice(&buf[..n])) => Some(r),
+            };
+            match sent {
+                Some(Ok(())) => up_stats.record_write(n),
+                Some(Err(_)) => break,
+                None => {
+                    send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                    break;
                 }
             }
         }
@@ -399,16 +473,25 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
     // ---- QUIC + HTTP/3 connection ----
-    let connected =
-        match crate::h3::quic_connect(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
-            .await
-        {
-            Ok(c) => c,
-            Err((f, cobs)) => {
-                obs.connection = cobs;
-                return early(rec, obs, f, DispatchState::NotDispatched, facts);
-            }
-        };
+    let connected = match crate::h3::quic_connect(
+        &mut rec,
+        &plan.host,
+        plan.port,
+        &plan.dns,
+        &plan.timeouts,
+        &plan.limits,
+        &tls,
+        crate::h3::client_endpoint,
+        cancel,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err((f, cobs)) => {
+            obs.connection = cobs;
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+    };
     let crate::h3::QuicConnected { quic, mut send, observation: cobs } = connected;
     obs.connection = Some(cobs);
     let close_quic = |quic: &quinn::Connection| quic.close(0x100u32.into(), b""); // H3_NO_ERROR
@@ -480,8 +563,8 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let h_idx = rec.start(Phase::AwaitResponseHeaders);
     let headers_deadline = deadline_from(plan.timeouts.response_headers_ms);
     let resp = tokio::select! {
-        r = stream.recv_response() => r.map_err(|e| TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
-            format!("the HTTP/3 stream ended before an answer to the extended CONNECT: {e}"))),
+        r = stream.recv_response() => r.map_err(|e| crate::h3::stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
+            "the HTTP/3 stream ended before an answer to the extended CONNECT")),
         _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
             "no answer to the WebSocket extended CONNECT before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
         _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
@@ -590,7 +673,8 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     // ---- session over the HTTP/3 stream ----
     let stats = crate::stats::ConnStats::new();
     let stream_error = Arc::new(parking_lot::Mutex::new(None));
-    let (io, uplink) = bridge_h3_stream(stream, stats.clone(), stream_error.clone());
+    let write_interrupted = CancellationToken::new();
+    let (io, mut uplink) = bridge_h3_stream(stream, stats.clone(), stream_error.clone(), write_interrupted.clone());
     let cx = SessionCtx {
         plan,
         events,
@@ -604,10 +688,18 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         response,
         deflate,
         extensions,
+        write_interrupted: write_interrupted.clone(),
     };
     let mut out = run_session(io, rec, obs, facts, commands, cx).await;
-    // Let the last frames (normally our Close) leave before the connection closes.
-    let _ = tokio::time::timeout(Duration::from_millis(500), uplink).await;
+    if write_interrupted.is_cancelled() {
+        // The uplink resets the stream (H3_REQUEST_CANCELLED) instead of
+        // ending it: a partial frame must not be followed by a clean FIN.
+        let _ = tokio::time::timeout(Duration::from_millis(100), &mut uplink).await;
+        uplink.abort();
+    } else {
+        // Let the last frames (normally our Close) leave before the connection closes.
+        let _ = tokio::time::timeout(Duration::from_millis(500), &mut uplink).await;
+    }
     close_quic(&quic);
     if let Some(e) = stream_error.lock().take()
         && let Some(a) = out.attempts.last_mut()
@@ -904,6 +996,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         response,
         deflate,
         extensions,
+        write_interrupted: CancellationToken::new(),
     };
     run_session(TokioIo::new(upgraded), rec, obs, facts, commands, cx).await
 }
@@ -926,6 +1019,9 @@ struct SessionCtx<'a> {
     deflate: Option<DeflateConfig>,
     /// Extension evidence from the handshake; the session adds its traffic.
     extensions: Option<WsExtensions>,
+    /// Canceled when a write was interrupted (it may have left a partial
+    /// frame): the stream is then reset, not ended cleanly.
+    write_interrupted: CancellationToken,
 }
 
 /// The WebSocket session itself, over whichever stream the bootstrap opened
@@ -954,6 +1050,7 @@ where
         response,
         deflate,
         extensions,
+        write_interrupted,
     } = cx;
     // ---- session ----
     let s_idx = rec.start(Phase::Session);
@@ -980,7 +1077,10 @@ where
     let mut close_deadline: Option<Instant> = None;
 
     // Scripted messages (automation, and the opening of interactive sessions).
+    // Every write below is raced against cancellation and the deadline that
+    // applies to it: a peer that stops reading must not hold the session.
     let mut send_error: Option<tungstenite::Error> = None;
+    let mut write_stop: Option<WriteStop> = None;
     for m in &plan.script {
         let (msg, kind, payload): (Message, &str, Vec<u8>) = match m {
             WsMessage::Text { text } => (Message::Text(text.clone().into()), "text", text.clone().into_bytes()),
@@ -1001,9 +1101,20 @@ where
             WsMessage::Close { code, reason } => (close_frame(*code, reason), "close", format!("{code} {reason}").into_bytes()),
         };
         let is_close = matches!(msg, Message::Close(_));
-        if let Err(e) = ws.send(msg).await {
-            send_error = Some(e);
-            break;
+        let wrote = match m {
+            WsMessage::Close { code, reason } => send_close_guarded(&mut ws, *code, reason, cancel, total_deadline, close_wait).await,
+            _ => send_guarded(&mut ws, msg, cancel, total_deadline).await,
+        };
+        match wrote {
+            Wrote::Done => {}
+            Wrote::Failed(e) => {
+                send_error = Some(e);
+                break;
+            }
+            Wrote::Stopped(s) => {
+                write_stop = Some(s);
+                break;
+            }
         }
         match kind {
             "text" | "binary" => tr.data(Direction::Sent, kind, &payload),
@@ -1029,6 +1140,40 @@ where
         Canceled,
     }
     loop {
+        if let Some(stop) = write_stop.take() {
+            // The stalled write may have been partly sent: nothing more is
+            // written, the connection is dropped (an HTTP/3 stream is reset).
+            write_interrupted.cancel();
+            match stop {
+                WriteStop::Interrupted(Interrupted::Canceled) => {
+                    close.get_or_insert(Close { code: None, reason: String::new(), closed_by: ClosedBy::Client });
+                    failure = Some(TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::Canceled,
+                        "canceled while a write was pending (the peer was not reading); the connection was dropped",
+                    ));
+                }
+                WriteStop::Interrupted(Interrupted::Deadline) => {
+                    close.get_or_insert(Close { code: None, reason: String::new(), closed_by: ClosedBy::Timeout });
+                    failure = Some(
+                        TransportFailure::new(
+                            Phase::Session,
+                            FailureKind::TotalTimeout,
+                            "the total deadline elapsed while a write was pending (the peer was not reading); the connection was dropped",
+                        )
+                        .with_deadline(plan.timeouts.total_ms),
+                    );
+                }
+                WriteStop::CloseStalled { code, reason } => {
+                    close.get_or_insert(Close { code: Some(code), reason, closed_by: ClosedBy::Client });
+                    tr.note(
+                        "close_incomplete",
+                        "the Close frame was not written within the close wait (the peer was not reading); the connection was dropped",
+                    );
+                }
+            }
+            break;
+        }
         if let Some(e) = pending_error.take() {
             let st = ErrorState { close: &mut close, failure: &mut failure, violation: &mut violation };
             classify_ws_error(e, st, &mut ws, &mut tr, peer_close_seen, &stats).await;
@@ -1052,8 +1197,11 @@ where
                     Message::Binary(b) => tr.data(Direction::Received, "binary", &b),
                     Message::Ping(p) => {
                         tr.control(Direction::Received, "ping", &p);
-                        let _ = ws.flush().await; // tungstenite queued the Pong
-                        tr.control(Direction::Sent, "pong", &p);
+                        // tungstenite queued the Pong.
+                        match guarded(ws.flush(), cancel, total_deadline).await {
+                            Ok(_) => tr.control(Direction::Sent, "pong", &p),
+                            Err(i) => write_stop = Some(WriteStop::Interrupted(i)),
+                        }
                     }
                     Message::Pong(p) => tr.control(Direction::Received, "pong", &p),
                     Message::Close(frame) => {
@@ -1076,14 +1224,21 @@ where
                     }
                     Message::Frame(_) => {}
                 }
-                if !interactive && expect > 0 && tr.received_count() >= expect && client_close_sent.is_none() && !peer_close_seen {
-                    match ws.send(close_frame(1000, "")).await {
-                        Ok(()) => {
+                if write_stop.is_none()
+                    && !interactive
+                    && expect > 0
+                    && tr.received_count() >= expect
+                    && client_close_sent.is_none()
+                    && !peer_close_seen
+                {
+                    match send_close_guarded(&mut ws, 1000, "", cancel, total_deadline, close_wait).await {
+                        Wrote::Done => {
                             tr.control(Direction::Sent, "close", b"1000");
                             client_close_sent = Some((1000, String::new()));
                             close_deadline = Some(Instant::now() + close_wait);
                         }
-                        Err(e) => pending_error = Some(e),
+                        Wrote::Failed(e) => pending_error = Some(e),
+                        Wrote::Stopped(s) => write_stop = Some(s),
                     }
                 }
             }
@@ -1100,69 +1255,72 @@ where
                 break;
             }
             Ev::Cmd(c) => {
-                let r = match c {
+                let wrote = match c {
                     Some(SessionCommand::SendText { text }) => {
-                        let r = ws.send(Message::Text(text.clone().into())).await;
-                        if r.is_ok() {
+                        let w = send_guarded(&mut ws, Message::Text(text.clone().into()), cancel, total_deadline).await;
+                        if matches!(w, Wrote::Done) {
                             tr.data(Direction::Sent, "text", text.as_bytes());
                         }
-                        r
+                        w
                     }
                     Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                         Ok(b) => {
-                            let r = ws.send(Message::Binary(Bytes::from(b.clone()))).await;
-                            if r.is_ok() {
+                            let w = send_guarded(&mut ws, Message::Binary(Bytes::from(b.clone())), cancel, total_deadline).await;
+                            if matches!(w, Wrote::Done) {
                                 tr.data(Direction::Sent, "binary", &b);
                             }
-                            r
+                            w
                         }
                         Err(e) => {
                             tr.note("error", &format!("binary message not sent: {e}"));
-                            Ok(())
+                            Wrote::Done
                         }
                     },
                     Some(SessionCommand::Ping) => {
-                        let r = ws.send(Message::Ping(Bytes::from_static(b"anvil"))).await;
-                        if r.is_ok() {
+                        let w = send_guarded(&mut ws, Message::Ping(Bytes::from_static(b"anvil")), cancel, total_deadline).await;
+                        if matches!(w, Wrote::Done) {
                             tr.control(Direction::Sent, "ping", b"anvil");
                         }
-                        r
+                        w
                     }
                     Some(SessionCommand::HalfClose) => {
                         tr.note("unsupported_command", "WebSocket has no half-close; send Close instead");
-                        Ok(())
+                        Wrote::Done
                     }
                     Some(SessionCommand::Close { code, reason }) => {
-                        let r = ws.send(close_frame(code, &reason)).await;
-                        if r.is_ok() {
+                        let w = send_close_guarded(&mut ws, code, &reason, cancel, total_deadline, close_wait).await;
+                        if matches!(w, Wrote::Done) {
                             tr.control(Direction::Sent, "close", format!("{code} {reason}").trim().as_bytes());
                             client_close_sent = Some((code, reason));
                             close_deadline = Some(Instant::now() + close_wait);
                         }
-                        r
+                        w
                     }
                     None => {
                         // The session handle was dropped: close politely.
-                        let r = ws.send(close_frame(1000, "session ended")).await;
-                        if r.is_ok() {
+                        let w = send_close_guarded(&mut ws, 1000, "session ended", cancel, total_deadline, close_wait).await;
+                        if matches!(w, Wrote::Done) {
                             tr.control(Direction::Sent, "close", b"1000 session ended");
                             client_close_sent = Some((1000, "session ended".into()));
                             close_deadline = Some(Instant::now() + close_wait);
                         }
-                        r
+                        w
                     }
                 };
-                if let Err(e) = r {
-                    pending_error = Some(e);
+                match wrote {
+                    Wrote::Done => {}
+                    Wrote::Failed(e) => pending_error = Some(e),
+                    Wrote::Stopped(s) => write_stop = Some(s),
                 }
             }
-            Ev::Idle => match ws.send(close_frame(1000, "")).await {
-                Ok(()) => {
+            Ev::Idle => match send_close_guarded(&mut ws, 1000, "", cancel, total_deadline, close_wait).await {
+                Wrote::Done => {
                     tr.control(Direction::Sent, "close", b"1000 (idle)");
                     client_close_sent = Some((1000, String::new()));
                     close_deadline = Some(Instant::now() + close_wait);
                 }
-                Err(e) => pending_error = Some(e),
+                Wrote::Failed(e) => pending_error = Some(e),
+                Wrote::Stopped(s) => write_stop = Some(s),
             },
             Ev::CloseWait => {
                 if close.is_none() {
@@ -1178,8 +1336,13 @@ where
                 break;
             }
             Ev::Deadline => {
-                let _ = ws.send(close_frame(1001, "deadline")).await;
-                tr.control(Direction::Sent, "close", b"1001 deadline");
+                // Its own short bound: the deadline has passed already.
+                if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "deadline"))).await.is_ok_and(|r| r.is_ok()) {
+                    tr.control(Direction::Sent, "close", b"1001 deadline");
+                } else {
+                    write_interrupted.cancel();
+                    tr.note("close_incomplete", "the Close frame could not be written at the deadline; the connection was dropped");
+                }
                 close.get_or_insert(Close { code: Some(1001), reason: "deadline".into(), closed_by: ClosedBy::Timeout });
                 failure = Some(
                     TransportFailure::new(
@@ -1192,8 +1355,12 @@ where
                 break;
             }
             Ev::Canceled => {
-                let _ = tokio::time::timeout(Duration::from_millis(250), ws.send(close_frame(1001, "canceled"))).await;
-                tr.control(Direction::Sent, "close", b"1001 canceled");
+                if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "canceled"))).await.is_ok_and(|r| r.is_ok()) {
+                    tr.control(Direction::Sent, "close", b"1001 canceled");
+                } else {
+                    write_interrupted.cancel();
+                    tr.note("close_incomplete", "the Close frame could not be written on cancel; the connection was dropped");
+                }
                 close.get_or_insert(Close { code: Some(1001), reason: "canceled".into(), closed_by: ClosedBy::Client });
                 failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the WebSocket session was canceled"));
                 break;
@@ -1429,4 +1596,193 @@ async fn send_close_and_drain<S: AsyncRead + AsyncWrite + Unpin>(
         }
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::DuplexStream;
+
+    fn plan(script: Vec<WsMessage>, total_ms: Option<u64>) -> WsPlan {
+        WsPlan {
+            bootstrap: WsBootstrap::Http1Upgrade,
+            secure: false,
+            host: "127.0.0.1".into(),
+            port: 9,
+            authority: "127.0.0.1:9".into(),
+            request_target: "/".into(),
+            headers: vec![],
+            subprotocols: vec![],
+            deflate: None,
+            script,
+            expect_messages: 0,
+            idle_close_ms: 5_000,
+            max_message_bytes: 16 * 1024 * 1024,
+            timeouts: Timeouts { total_ms, ..Timeouts::default() },
+            limits: Limits::default(),
+            dns: DnsConfig::default(),
+            proxy: None,
+            tls: None,
+            display_url: "ws://127.0.0.1:9/".into(),
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            proxy_header: None,
+        }
+    }
+
+    /// The session phase over an in-memory pipe (the handshake is not part of it).
+    async fn session(io: DuplexStream, plan: &WsPlan, cancel: &CancellationToken, commands: Option<CommandRx>) -> SessionOutput {
+        let events = EventCtx::none();
+        let interactive = commands.is_some();
+        let cx = SessionCtx {
+            plan,
+            events: &events,
+            cancel,
+            interactive,
+            total_deadline: if interactive { None } else { deadline_from(plan.timeouts.total_ms) },
+            stats: crate::stats::ConnStats::new(),
+            written_before: 0,
+            read_before: 0,
+            status: 101,
+            response: response_record(101, http::Version::HTTP_11, vec![], body_capture(BodyCompleteness::NoBody, 0, &[], None)),
+            deflate: None,
+            extensions: None,
+            write_interrupted: CancellationToken::new(),
+        };
+        let rec = Recorder::new(0, events.clone());
+        let obs = new_attempt(0, AttemptReason::Initial, "GET", &plan.display_url);
+        let run = run_session(io, rec, obs, SessionFacts::default(), commands, cx);
+        tokio::time::timeout(Duration::from_secs(5), run).await.expect("the session must end although the peer never reads")
+    }
+
+    fn cancel_after(ms: u64) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            c.cancel();
+        });
+        cancel
+    }
+
+    /// Far larger than the pipe: the write only finishes if the peer reads.
+    fn big_text() -> WsMessage {
+        WsMessage::Text { text: "x".repeat(1 << 20) }
+    }
+
+    fn failure(out: &SessionOutput) -> Option<FailureKind> {
+        out.attempts[0].observation.failure.as_ref().map(|f| f.kind)
+    }
+
+    fn closed(out: &SessionOutput) -> (Option<u16>, ClosedBy) {
+        match &out.status {
+            ProtocolStatus::WebSocket { close_code, closed_by, .. } => (*close_code, *closed_by),
+            other => panic!("not a WebSocket status: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_a_scripted_write_the_peer_never_reads() {
+        let (io, _peer) = tokio::io::duplex(1024);
+        let plan = plan(vec![big_text()], None);
+        let out = session(io, &plan, &cancel_after(100), None).await;
+        assert_eq!(failure(&out), Some(FailureKind::Canceled));
+        assert_eq!(closed(&out), (None, ClosedBy::Client), "no Close frame follows a partly written message");
+        assert_eq!(out.transcript.unwrap().sent_count, 0, "the stalled message is not recorded as sent");
+    }
+
+    #[tokio::test]
+    async fn the_total_deadline_ends_a_scripted_write_the_peer_never_reads() {
+        let (io, _peer) = tokio::io::duplex(1024);
+        let plan = plan(vec![big_text()], Some(200));
+        let out = session(io, &plan, &CancellationToken::new(), None).await;
+        assert_eq!(failure(&out), Some(FailureKind::TotalTimeout));
+        assert_eq!(closed(&out), (None, ClosedBy::Timeout));
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_interactive_send_the_peer_never_reads() {
+        let (io, _peer) = tokio::io::duplex(1024);
+        let plan = plan(vec![], None);
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(SessionCommand::SendText { text: "x".repeat(1 << 20) }).await.unwrap();
+        let out = session(io, &plan, &cancel_after(200), Some(rx)).await;
+        assert_eq!(failure(&out), Some(FailureKind::Canceled));
+        assert_eq!(out.transcript.unwrap().sent_count, 0);
+        drop(tx);
+    }
+
+    /// A 52-byte text is 58 bytes on the wire (masked): it fits a 64-byte pipe, a Close frame after it does not.
+    fn filler() -> WsMessage {
+        WsMessage::Text { text: "y".repeat(52) }
+    }
+
+    #[tokio::test]
+    async fn a_close_command_the_peer_never_reads_is_bounded_by_the_close_wait() {
+        let (io, _peer) = tokio::io::duplex(64);
+        let mut plan = plan(vec![filler()], None);
+        plan.idle_close_ms = 250;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(SessionCommand::Close { code: 1000, reason: String::new() }).await.unwrap();
+        // Never canceled: only the close wait bounds the Close frame.
+        let out = session(io, &plan, &CancellationToken::new(), Some(rx)).await;
+        assert_eq!(failure(&out), None);
+        assert_eq!(closed(&out), (Some(1000), ClosedBy::Client));
+        let t = out.transcript.unwrap();
+        assert_eq!(t.sent_count, 1);
+        assert!(t.messages.iter().any(|m| m.kind == "close_incomplete"), "{:?}", t.messages);
+        assert!(!t.messages.iter().any(|m| m.kind == "close" && m.direction == Direction::Sent), "the Close frame was not written");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn the_close_sent_at_the_total_deadline_has_its_own_short_bound() {
+        let (io, _peer) = tokio::io::duplex(64);
+        let plan = plan(vec![filler()], Some(300));
+        let started = Instant::now();
+        let out = session(io, &plan, &CancellationToken::new(), None).await;
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(failure(&out), Some(FailureKind::TotalTimeout));
+        let t = out.transcript.unwrap();
+        assert!(t.messages.iter().any(|m| m.kind == "close_incomplete"), "{:?}", t.messages);
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_a_pong_the_peer_never_reads() {
+        let (io, mut peer) = tokio::io::duplex(64);
+        // The filler leaves 6 bytes of the pipe: the Pong to a 4-byte Ping (10 bytes masked) does not fit.
+        let plan = plan(vec![filler()], None);
+        // An unmasked server Ping with the payload "abcd".
+        peer.write_all(&[0x89, 0x04, b'a', b'b', b'c', b'd']).await.unwrap();
+        let out = session(io, &plan, &cancel_after(200), None).await;
+        let f = out.attempts[0].observation.failure.as_ref().expect("canceled");
+        assert_eq!(f.kind, FailureKind::Canceled);
+        assert!(f.message.contains("while a write was pending"), "the cancel must interrupt the Pong flush: {}", f.message);
+        let t = out.transcript.unwrap();
+        assert!(t.messages.iter().any(|m| m.kind == "ping" && m.direction == Direction::Received));
+        assert!(!t.messages.iter().any(|m| m.kind == "pong"), "the stalled Pong is not recorded as sent");
+        drop(peer);
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_reads_gets_every_scripted_message_and_a_clean_close() {
+        let (io, peer) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            let mut server = WebSocketStream::from_raw_socket(peer, Role::Server, None).await;
+            // Echo text; after the client's Close, the next poll sends the reply and ends the stream.
+            while let Some(Ok(m)) = server.next().await {
+                if let Message::Text(t) = m {
+                    let _ = server.send(Message::Text(t)).await;
+                }
+            }
+        });
+        let mut plan = plan(vec![big_text()], Some(10_000));
+        plan.expect_messages = 1;
+        let out = session(io, &plan, &CancellationToken::new(), None).await;
+        assert_eq!(failure(&out), None);
+        assert_eq!(closed(&out), (Some(1000), ClosedBy::Client));
+        let t = out.transcript.unwrap();
+        assert_eq!((t.sent_count, t.received_count), (1, 1));
+        assert_eq!(t.received_bytes, 1 << 20);
+    }
 }

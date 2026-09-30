@@ -184,7 +184,7 @@ pub(crate) fn detect_parsed(bytes: &[u8], opts: &ImportOptions) -> Result<(Detec
     if looks_like_xml(text) {
         return Ok((detect_xml(text), Parsed::Xml(text.to_string())));
     }
-    let (v, syntax) = structured::parse(text, opts.max_nodes)?;
+    let (v, syntax) = structured::parse(text, structured::Limits::for_input(opts.max_nodes, opts.max_bytes))?;
     Ok((detect_value(&v, syntax), Parsed::Structured(v)))
 }
 

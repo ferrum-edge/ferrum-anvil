@@ -692,7 +692,7 @@ pub(crate) async fn open(
             &plan.tls,
             crate::h3::client_endpoint,
             cancel,
-            H3ClientOptions { h3_datagrams: true },
+            H3ClientOptions { h3_datagrams: true, ..H3ClientOptions::new(&plan.limits) },
         );
         tokio::select! {
             r = connect => Some(r),
@@ -962,9 +962,37 @@ pub(crate) fn note_dropped(facts: &mut SessionFacts, tunnel: &MasqueTunnel) {
 
 // ------------------------------------------------------------ UDP session ---
 
-/// Send one UDP payload through the tunnel and record it (or why it was not sent).
-async fn send_recorded(chan: &mut MasqueChannel, tr: &mut Transcript, sent: &mut u64, payload: &[u8]) -> Result<(), TransportFailure> {
-    match chan.send(payload).await? {
+/// Send one UDP payload through the tunnel and record it (or why it was not
+/// sent). A DATAGRAM capsule waits for stream flow-control credit, so the
+/// send is raced against cancellation and `deadline`; an interrupted send
+/// ends the exchange (the capsule may have been partly sent).
+async fn send_recorded(
+    chan: &mut MasqueChannel,
+    tr: &mut Transcript,
+    sent: &mut u64,
+    payload: &[u8],
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(), TransportFailure> {
+    let outcome = match guarded(chan.send(payload), cancel, deadline).await {
+        Ok(r) => r?,
+        Err(i) => {
+            let f = match i {
+                Interrupted::Canceled => TransportFailure::new(
+                    Phase::Session,
+                    FailureKind::Canceled,
+                    "the CONNECT-UDP exchange was canceled while the tunnel was not taking a datagram",
+                ),
+                Interrupted::Deadline => TransportFailure::new(
+                    Phase::Session,
+                    FailureKind::TotalTimeout,
+                    "the total deadline elapsed while the tunnel was not taking a datagram",
+                ),
+            };
+            return Err(f);
+        }
+    };
+    match outcome {
         Sent::Sent(note) => {
             *sent += 1;
             tr.data(Direction::Sent, "datagram", payload);
@@ -1010,8 +1038,12 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
     let mut dropped_noted = false;
 
+    // A send the tunnel did not take before cancel or the deadline.
+    let mut interrupted_send = false;
+    let interrupted = |f: &TransportFailure| matches!(f.kind, FailureKind::Canceled | FailureKind::TotalTimeout);
     for d in &plan.datagrams {
-        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, d).await {
+        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, d, cancel, total_deadline).await {
+            interrupted_send = interrupted(&f);
             failure = Some(f);
             break;
         }
@@ -1064,14 +1096,16 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
             Ev::In(Inbound::PortUnreachable(e) | Inbound::Error(e)) => tr.note("error", &format!("receive error: {e}")),
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, text.as_bytes()).await {
+                    if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, text.as_bytes(), cancel, total_deadline).await {
+                        interrupted_send = interrupted(&f);
                         failure = Some(f);
                     }
                     window_end = Instant::now() + window;
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &b).await {
+                        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &b, cancel, total_deadline).await {
+                            interrupted_send = interrupted(&f);
                             failure = Some(f);
                         }
                         window_end = Instant::now() + window;
@@ -1109,7 +1143,9 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
     }
 
     // ---- end of the tunnel ----
-    let canceled = matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled));
+    // A send the tunnel did not take may have left a partial capsule: no FIN
+    // follows it.
+    let canceled = matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled)) || interrupted_send;
     let (tunnel, written, read) = chan.close(canceled).await;
     if facts.repeated_datagrams > 0 {
         facts.notes.push(format!(

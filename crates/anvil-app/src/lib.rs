@@ -15,6 +15,7 @@ pub mod port;
 pub mod profiles;
 pub mod runner;
 pub mod specs;
+pub mod standards;
 pub mod token_files;
 pub mod workspace;
 

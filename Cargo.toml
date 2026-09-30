@@ -17,6 +17,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/anvil-import",
     "crates/anvil-identity",
+    "crates/anvil-contract",
 ]
 # Vendored third-party crates are patched in below, not Anvil workspace members.
 exclude = ["vendor"]
@@ -42,11 +43,12 @@ anvil-load = { path = "crates/anvil-load" }
 anvil-app = { path = "crates/anvil-app" }
 anvil-import = { path = "crates/anvil-import" }
 anvil-identity = { path = "crates/anvil-identity" }
+anvil-contract = { path = "crates/anvil-contract" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
 schemars = { version = "1.2.2", features = ["uuid1", "chrono04"] }
 uuid = { version = "1.26.1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }

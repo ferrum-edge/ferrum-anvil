@@ -28,7 +28,7 @@ pub fn password_digest(nonce: &[u8], created: &str, password: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(h.finalize())
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 

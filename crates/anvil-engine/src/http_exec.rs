@@ -917,7 +917,11 @@ pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, 
         if prep.settings.cookies
             && let Some(r) = &out.response
         {
-            engine.store_cookies(epoch, &ctx.isolation, &current.target, r);
+            if engine.store_cookies(epoch, &ctx.isolation, &current.target, r, &redactor)
+                && !prep.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE)
+            {
+                prep.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+            }
         }
 
         // ---- redirects ----
