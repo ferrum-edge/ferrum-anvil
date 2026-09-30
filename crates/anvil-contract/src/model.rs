@@ -357,12 +357,6 @@ pub fn responses<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Vec<Response<'a>>
     out
 }
 
-/// The security requirements in effect for an operation: its own, else the
-/// document's. `None` when neither declares any.
-pub fn effective_security<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Option<&'a Vec<Value>> {
-    op.op.get("security").and_then(Value::as_array).or_else(|| spec.root.get("security").and_then(Value::as_array))
-}
-
 fn requirement_names(reqs: Option<&Vec<Value>>) -> Vec<String> {
     let mut names = BTreeSet::new();
     for r in reqs.into_iter().flatten() {

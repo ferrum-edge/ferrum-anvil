@@ -119,10 +119,14 @@ struct Part {
     refs: Vec<(String, bool)>,
 }
 
-fn scan(v: &Value) -> Part {
+/// Scan at most `limit` objects and lists (`nodes` then exceeds `limit`).
+fn scan(v: &Value, limit: usize) -> Part {
     let mut part = Part { nodes: 0, depth: 0, refs: vec![] };
     let mut stack: Vec<(&Value, bool, usize)> = vec![(v, false, 1)];
     while let Some((v, down, d)) = stack.pop() {
+        if part.nodes > limit {
+            break;
+        }
         part.depth = part.depth.max(d);
         match v {
             Value::Object(o) => {
@@ -154,8 +158,17 @@ const ROOT: &str = "#root";
 /// `$ref` expanded (repeated references count each time). Both passes are
 /// iterative, so neither nesting nor reference chains use the call stack.
 fn measure(spec: &Spec, schema: &Value) -> Result<usize, String> {
-    let mut parts: HashMap<String, Part> = HashMap::from([(ROOT.to_string(), scan(schema))]);
-    let part_of = |parts: &mut HashMap<String, Part>, key: &str| -> Result<bool, String> {
+    let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
+    // Every reached schema counts at least once in the expanded size, so
+    // scanning stops as soon as the schemas scanned so far exceed the limit
+    // (targets nested in one another are scanned once each, not more).
+    let root = scan(schema, MAX_EXPANDED_NODES);
+    let mut scanned = root.nodes;
+    if scanned > MAX_EXPANDED_NODES {
+        return Err(too_big());
+    }
+    let mut parts: HashMap<String, Part> = HashMap::from([(ROOT.to_string(), root)]);
+    let mut part_of = |parts: &mut HashMap<String, Part>, key: &str| -> Result<bool, String> {
         if parts.contains_key(key) {
             return Ok(true);
         }
@@ -164,7 +177,12 @@ fn measure(spec: &Spec, schema: &Value) -> Result<usize, String> {
         }
         match spec.root.pointer(key) {
             Some(v) => {
-                parts.insert(key.to_string(), scan(v));
+                let part = scan(v, MAX_EXPANDED_NODES - scanned);
+                scanned += part.nodes;
+                if scanned > MAX_EXPANDED_NODES {
+                    return Err(too_big());
+                }
+                parts.insert(key.to_string(), part);
                 Ok(true)
             }
             None => Ok(false),
@@ -219,7 +237,6 @@ fn measure(spec: &Spec, schema: &Value) -> Result<usize, String> {
 
     // 3. Sizes, memoized per target; a reference back to a schema being
     //    measured (a cycle through the value) adds nothing more.
-    let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let mut size: HashMap<String, usize> = HashMap::new();
     let mut open: HashSet<String> = HashSet::from([ROOT.to_string()]);
     let mut stack: Vec<(String, usize, usize)> = vec![(ROOT.to_string(), 0, 0)];
@@ -518,6 +535,27 @@ mod tests {
         // Recursion through the value is fine.
         let tree = compile(&s, &json!({"$ref": "#/components/schemas/Tree"}), Direction::Response).unwrap();
         assert!(tree.is_valid(&json!({"children": [{"children": []}]})));
+    }
+
+    #[test]
+    fn nested_targets_are_not_rescanned() {
+        // /x, /x/a, /x/a/a … each referenced, over a large subtree.
+        let mut leaf = json!({"type": "object"});
+        let wide: serde_json::Map<String, Value> = (0..60_000).map(|i| (format!("k{i}"), json!({"type": "string"}))).collect();
+        leaf["properties"] = Value::Object(wide);
+        let mut v = leaf;
+        for _ in 0..100 {
+            v = json!({"a": v});
+        }
+        let refs: Vec<Value> = (0..100).map(|d| json!({"$ref": format!("#/x{}", "/a".repeat(d))})).collect();
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "x": v});
+        let s = spec(&doc.to_string());
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let e = compile(&s, &json!({"anyOf": refs}), Direction::Response).unwrap_err();
+            assert!(e.contains("expands to more than"), "{e}");
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
     }
 
     #[test]

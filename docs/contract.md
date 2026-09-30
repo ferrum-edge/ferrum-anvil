@@ -42,7 +42,9 @@ company ruleset.
   allOf [A]`, or `dependentSchemas` back to itself), a chain of more than 32
   references or 512 levels of nesting along one, or a size over 100,000
   nodes with every `$ref` expanded (repeated references count each time),
-  and the schema is not used either, and the report counts the examples not checked
+  and the schema is not used either (the OpenAPI 3.0 polymorphism pattern
+  `Pet: oneOf [Cat]`, `Cat: allOf [Pet]` is such a cycle, so its examples
+  are counted as not checked), and the report counts the examples not checked
   (`examples_not_checked`). Operations look at 2 million parameters,
   responses and media types at most in all (inherited path-level parameters, the document's security requirements
   and a shared response's headers count for each operation); past that the remaining operations are counted
