@@ -505,7 +505,8 @@ fn wide_recursive_schemas_are_walked_within_budget() {
 fn null_and_fraction_on_the_same_field_both_hold() {
     let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/n": {"get": {"responses": {"200": {"description": "ok",
         "content": {"application/json": {"schema": {"type": "object", "properties": {
-            "n": {"type": "integer"}, "k": {"const": "a"}, "e": {"type": "string", "enum": ["a"]}}}}}}}}}}});
+            "n": {"type": "integer"}, "k": {"const": "a"}, "e": {"type": "string", "enum": ["a"]},
+            "ke": {"enum": ["a", "b"], "const": "a"}}}}}}}}}}});
     for version in ["3.1.0", "3.0.3"] {
         let mut d = doc.clone();
         d["openapi"] = json!(version);
@@ -516,7 +517,7 @@ fn null_and_fraction_on_the_same_field_both_hold() {
                 .remove("k");
         }
         let spec = Spec::parse(d.to_string().as_bytes()).unwrap();
-        let obs: Vec<Observation> = [json!({"n": null, "k": null, "e": null}), json!({"n": 2.5, "e": "b"})]
+        let obs: Vec<Observation> = [json!({"n": null, "k": null, "e": null, "ke": null}), json!({"n": 2.5, "e": "b", "ke": "a"})]
             .into_iter()
             .enumerate()
             .map(|(i, b)| Obs::new(&i.to_string(), "GET", "/n").json(200, b).0)
@@ -531,6 +532,12 @@ fn null_and_fraction_on_the_same_field_both_hold() {
             assert!(rev.skipped.is_empty(), "{version}: {:?}", rev.skipped);
             let again = analyze(&Spec::parse(rev.text.as_bytes()).unwrap(), &obs, &DriftOptions::default());
             assert!(again.findings.is_empty(), "{version}: {:#?}\n{}", again.findings, rev.text);
+            if version == "3.1.0" {
+                // `enum` and `const` together: null joins what both allowed, not the wider enum.
+                let doc: Value = serde_json::from_str(&rev.text).unwrap();
+                let ke = &doc["paths"]["/n"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["ke"];
+                assert_eq!(ke, &json!({"enum": ["a", null]}), "{}", rev.text);
+            }
         }
     }
 }

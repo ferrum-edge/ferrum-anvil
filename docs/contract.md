@@ -459,7 +459,9 @@ A schema that names no properties (a free-form object or a map) or uses
 suggested per schema, 500 schema changes, 50 query parameters per operation
 and 2,000 suggestions in all; at most 500 undeclared endpoints, 50
 undeclared servers and 20,000 distinct differences are collected. Each cap
-adds a note when it is reached. A suggestion's id is derived from the
+adds a note when it is reached; past the 20,000th difference, the counts of
+the differences already collected keep growing, but nothing new about them
+(suggestions, body walks) is gathered, so the report is partial. A suggestion's id is derived from the
 description and the change it makes, so it changes whenever the change does. Each
 finding links to the suggestions that resolve it: a schema change is linked
 to the validation errors of its own kind (a type, an enum, an undeclared or

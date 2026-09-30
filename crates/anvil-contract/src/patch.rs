@@ -249,6 +249,8 @@ fn restore(doc: &mut Value, u: Undo) {
             }
         }
         Undo::Reinsert(at, k, i, v) => {
+            // Positions are kept because serde_json's `preserve_order`
+            // feature is on across the workspace (maps are ordered).
             if let Some(Value::Object(o)) = walk_existing(doc, &at) {
                 let i = i.min(o.len());
                 o.shift_insert(i, k, v);

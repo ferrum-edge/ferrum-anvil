@@ -1819,7 +1819,14 @@ fn nullable_ops(d: Dialect, at: &str, s: &Value) -> Vec<PatchOp> {
     let mut ops = vec![];
     if let Some(c) = s.get("const").filter(|_| modern) {
         ops.push(PatchOp::remove(ptr(at, "const")));
-        ops.push(PatchOp::union(ptr(at, "enum"), vec![c.clone(), Value::Null]));
+        match s.get("enum").and_then(Value::as_array) {
+            // Both constrain: what they allow together, and null.
+            Some(values) => {
+                let kept = if values.contains(c) { vec![c.clone(), Value::Null] } else { vec![Value::Null] };
+                ops.push(PatchOp::replace(ptr(at, "enum"), Value::Array(kept)));
+            }
+            None => ops.push(PatchOp::union(ptr(at, "enum"), vec![c.clone(), Value::Null])),
+        }
     } else if s.get("enum").is_some() {
         ops.push(PatchOp::union(ptr(at, "enum"), vec![Value::Null]));
     }

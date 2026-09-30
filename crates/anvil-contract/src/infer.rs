@@ -284,7 +284,12 @@ pub fn mark_nullable(s: &mut Value, dialect: Dialect) {
     let Some(o) = s.as_object_mut() else { return };
     let modern = matches!(dialect, Dialect::OpenApi31 | Dialect::OpenApi32);
     if modern && let Some(c) = o.shift_remove("const") {
-        o.insert("enum".into(), json!([c]));
+        // With an `enum` too, only what both allow is kept.
+        let allowed = match o.get("enum").and_then(Value::as_array) {
+            Some(values) if !values.contains(&c) => vec![],
+            _ => vec![c],
+        };
+        o.insert("enum".into(), Value::Array(allowed));
     }
     let listed = match o.get_mut("enum") {
         Some(Value::Array(e)) => {
@@ -450,6 +455,12 @@ mod tests {
         let mut c = json!({"const": "a"});
         mark_nullable(&mut c, Dialect::OpenApi32);
         assert_eq!(c, json!({"enum": ["a", null]}));
+        let mut both = json!({"enum": ["a", "b"], "const": "a"});
+        mark_nullable(&mut both, Dialect::OpenApi31);
+        assert_eq!(both, json!({"enum": ["a", null]}));
+        let mut apart = json!({"enum": ["b"], "const": "a"});
+        mark_nullable(&mut apart, Dialect::OpenApi31);
+        assert_eq!(apart, json!({"enum": [null]}));
         let mut e30 = json!({"type": "string", "enum": ["a"]});
         mark_nullable(&mut e30, Dialect::OpenApi30);
         assert_eq!(e30, json!({"type": "string", "enum": ["a", null], "nullable": true}));
