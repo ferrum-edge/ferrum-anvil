@@ -399,16 +399,25 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
     // ---- QUIC + HTTP/3 connection ----
-    let connected =
-        match crate::h3::quic_connect(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
-            .await
-        {
-            Ok(c) => c,
-            Err((f, cobs)) => {
-                obs.connection = cobs;
-                return early(rec, obs, f, DispatchState::NotDispatched, facts);
-            }
-        };
+    let connected = match crate::h3::quic_connect(
+        &mut rec,
+        &plan.host,
+        plan.port,
+        &plan.dns,
+        &plan.timeouts,
+        &plan.limits,
+        &tls,
+        crate::h3::client_endpoint,
+        cancel,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err((f, cobs)) => {
+            obs.connection = cobs;
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+    };
     let crate::h3::QuicConnected { quic, mut send, observation: cobs } = connected;
     obs.connection = Some(cobs);
     let close_quic = |quic: &quinn::Connection| quic.close(0x100u32.into(), b""); // H3_NO_ERROR
@@ -480,8 +489,8 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let h_idx = rec.start(Phase::AwaitResponseHeaders);
     let headers_deadline = deadline_from(plan.timeouts.response_headers_ms);
     let resp = tokio::select! {
-        r = stream.recv_response() => r.map_err(|e| TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
-            format!("the HTTP/3 stream ended before an answer to the extended CONNECT: {e}"))),
+        r = stream.recv_response() => r.map_err(|e| crate::h3::stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
+            "the HTTP/3 stream ended before an answer to the extended CONNECT")),
         _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
             "no answer to the WebSocket extended CONNECT before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
         _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,

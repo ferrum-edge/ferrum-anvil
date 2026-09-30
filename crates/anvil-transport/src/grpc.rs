@@ -798,8 +798,10 @@ fn channel_key(isolation: &str, plan: &GrpcPlan, leg: Leg) -> String {
     // A connection's PROXY header is fixed for its lifetime, so channels with
     // different header plans (or none) are never shared.
     let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
+    // A connection advertises (and HTTP/3 enforces) the header limit it was
+    // opened with, so a call with a smaller one never reuses it.
     format!(
-        "{}|{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}",
+        "{}|{:?}|{}:{}|{}|{}|{:?}|{}|{}|{}|fs={}",
         isolation,
         leg,
         plan.host.to_ascii_lowercase(),
@@ -809,7 +811,8 @@ fn channel_key(isolation: &str, plan: &GrpcPlan, leg: Leg) -> String {
         plan.version,
         plan.wire.is_web(),
         crate::certs::sha256_hex(dns.as_bytes()),
-        header
+        header,
+        crate::h3::field_section_limit(&plan.limits)
     )
 }
 
@@ -961,10 +964,11 @@ fn start(
                 let (send_half, mut recv_half) = stream.split();
                 tokio::spawn(h3_uplink(send_half, body, ctl.clone()));
                 let resp = tokio::select! {
-                    r = recv_half.recv_response() => r.map_err(|e| TransportFailure::new(
+                    r = recv_half.recv_response() => r.map_err(|e| crate::h3::stream_failure(
+                        &e,
                         Phase::AwaitResponseHeaders,
                         FailureKind::ResetBeforeResponse,
-                        format!("the HTTP/3 stream ended before response headers: {e}"),
+                        "the HTTP/3 stream ended before response headers",
                     ))?,
                     _ = ctl.abort.cancelled() => {
                         recv_half.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
@@ -1043,13 +1047,8 @@ async fn h3_downlink(mut recv: H3Recv, tx: mpsc::Sender<Result<Frame<Bytes>, Tra
             }
             Down::Data(Ok(None)) => break,
             Down::Data(Err(e)) => {
-                let _ = tx
-                    .send(Err(TransportFailure::new(
-                        Phase::ResponseBody,
-                        FailureKind::BodyReset,
-                        format!("the HTTP/3 response stream ended abnormally: {e}"),
-                    )))
-                    .await;
+                let what = "the HTTP/3 response stream ended abnormally";
+                let _ = tx.send(Err(crate::h3::stream_failure(&e, Phase::ResponseBody, FailureKind::BodyReset, what))).await;
                 return;
             }
             Down::Abort => {
@@ -1058,19 +1057,23 @@ async fn h3_downlink(mut recv: H3Recv, tx: mpsc::Sender<Result<Frame<Bytes>, Tra
             }
         }
     }
-    match recv.recv_trailers().await {
+    // h3 returns the trailers only once the stream ends, so an abort stops
+    // this stream alone rather than waiting for the peer.
+    let trailers = tokio::select! {
+        t = recv.recv_trailers() => t,
+        _ = ctl.abort.cancelled() => {
+            recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+            return;
+        }
+    };
+    match trailers {
         Ok(Some(t)) => {
             let _ = tx.send(Ok(Frame::trailers(t))).await;
         }
         Ok(None) => {}
         Err(e) => {
-            let _ = tx
-                .send(Err(TransportFailure::new(
-                    Phase::ResponseBody,
-                    FailureKind::BodyReset,
-                    format!("the HTTP/3 response trailers could not be read: {e}"),
-                )))
-                .await;
+            let what = "the HTTP/3 response trailers could not be read";
+            let _ = tx.send(Err(crate::h3::stream_failure(&e, Phase::ResponseBody, FailureKind::BodyReset, what))).await;
         }
     }
 }
@@ -1576,9 +1579,18 @@ async fn connect(
                     None,
                 ));
             };
-            let c =
-                crate::h3::quic_connect(rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel)
-                    .await?;
+            let c = crate::h3::quic_connect(
+                rec,
+                &plan.host,
+                plan.port,
+                &plan.dns,
+                &plan.timeouts,
+                &plan.limits,
+                &tls,
+                crate::h3::client_endpoint,
+                cancel,
+            )
+            .await?;
             return Ok(Connected { conn: Conn::H3(c.send), stats: ConnStats::new(), observation: c.observation, quic: Some(c.quic) });
         }
         Leg::Tcp(t) => t,
@@ -2347,6 +2359,44 @@ mod tests {
         message Req { string name = 1; google.protobuf.Timestamp at = 2; }
         message Rep { string text = 1; }
         service S { rpc U(Req) returns (Rep); rpc B(stream Req) returns (stream Rep); }"#;
+
+    #[test]
+    fn a_channel_is_keyed_on_the_header_limit_it_advertises() {
+        let pool = pool_from_proto_sources(&[("t.proto".into(), PROTO.into())]).unwrap();
+        let plan = |max_response_header_bytes| GrpcPlan {
+            tls: None,
+            host: "127.0.0.1".into(),
+            port: 50051,
+            authority: "127.0.0.1:50051".into(),
+            path_prefix: String::new(),
+            service: "t.v1.S".into(),
+            method: "U".into(),
+            mode: GrpcMode::Unary,
+            schema: Schema::Pool(pool.clone()),
+            messages: vec![],
+            headers: vec![],
+            sign: None,
+            sign_reflection: None,
+            deadline_ms: None,
+            timeouts: Timeouts::default(),
+            limits: Limits { max_response_header_bytes, ..Limits::default() },
+            dns: DnsConfig::default(),
+            proxy: None,
+            display_url: String::new(),
+            max_message_bytes: 1024,
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            wire: GrpcWire::Grpc,
+            version: HttpVersionPolicy::Http3Only,
+            proxy_header: None,
+            channels: None,
+        };
+        let key = |limit| channel_key("w", &plan(limit), Leg::Quic);
+        assert_ne!(key(16 * 1024), key(64 * 1024), "a larger limit is its own channel");
+        // Keyed on the limit HTTP/3 advertises: raw values it clamps alike share.
+        assert_eq!(key(0), key(1));
+        assert_eq!(key(u64::MAX), key(1 << 62));
+    }
 
     #[test]
     fn proto_sources_compile_in_memory_with_well_known_imports() {

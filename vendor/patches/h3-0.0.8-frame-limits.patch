@@ -1,0 +1,289 @@
+--- a/src/client/connection.rs
++++ b/src/client/connection.rs
+@@ -216,7 +216,12 @@ where
+ 
+         let request_stream = RequestStream {
+             inner: connection::RequestStream::new(
+-                FrameStream::new(BufRecvStream::new(stream)),
++                // A HEADERS frame is refused before it is buffered once its
++                // encoded size exceeds the field-section limit.
++                FrameStream::with_max_payload(
++                    BufRecvStream::new(stream),
++                    self.max_field_section_size,
++                ),
+                 self.max_field_section_size,
+                 self.conn_state.clone(),
+                 self.send_grease_frame,
+--- a/src/client/stream.rs
++++ b/src/client/stream.rs
+@@ -99,7 +99,14 @@ where
+     pub async fn recv_response(&mut self) -> Result<Response<()>, StreamError> {
+         let mut frame = future::poll_fn(|cx| self.inner.stream.poll_next(cx))
+             .await
+-            .map_err(|e| self.handle_frame_stream_error_on_request_stream(e))?
++            .map_err(|e| {
++                let e = self.handle_frame_stream_error_on_request_stream(e);
++                if let StreamError::HeaderTooBig { .. } = e {
++                    // Refused before it was buffered (see `FrameStreamError::TooLarge`).
++                    self.inner.stop_sending(Code::H3_REQUEST_CANCELLED);
++                }
++                e
++            })?
+             .ok_or_else(|| {
+                 //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+                 //# Receipt of an invalid sequence of frames MUST be treated as a
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -570,6 +570,14 @@ where
+                     InternalConnectionError::got_frame_error(frame_error),
+                 )));
+             }
++            Err(FrameStreamError::TooLarge { .. }) => {
++                return Poll::Ready(Err(self.handle_connection_error(
++                    InternalConnectionError::new(
++                        Code::H3_EXCESSIVE_LOAD,
++                        "received a frame larger than allowed on the control stream".to_string(),
++                    ),
++                )));
++            }
+             Ok(None) =>
+             //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+             //# If either control
+--- a/src/error/connection_error_creators.rs
++++ b/src/error/connection_error_creators.rs
+@@ -7,6 +7,7 @@ use bytes::Buf;
+ use crate::{
+     connection::ConnectionInner,
+     frame::FrameStreamError,
++    proto::frame::FrameType,
+     quic::{self, ConnectionErrorIncoming, StreamErrorIncoming},
+     shared_state::ConnectionState,
+ };
+@@ -204,6 +205,23 @@ where
+                     "received incomplete frame".to_string(),
+                 ))
+             }
++            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
++            //# An HTTP/3 implementation MAY impose a limit on the maximum size of
++            //# the message header it will accept on an individual HTTP message.
++            FrameStreamError::TooLarge {
++                frame_type,
++                size,
++                max_size,
++            } if frame_type == FrameType::HEADERS.value() => StreamError::HeaderTooBig {
++                actual_size: size,
++                max_size,
++            },
++            FrameStreamError::TooLarge { .. } => {
++                self.handle_connection_error_on_stream(InternalConnectionError::new(
++                    Code::H3_EXCESSIVE_LOAD,
++                    "received a frame larger than allowed".to_string(),
++                ))
++            }
+         }
+     }
+ }
+--- a/src/frame.rs
++++ b/src/frame.rs
+@@ -13,7 +13,7 @@ use crate::stream::{BufRecvStream, WriteBuf};
+ use crate::{
+     buf::BufList,
+     proto::{
+-        frame::{self, Frame, PayloadLen},
++        frame::{self, Frame, FrameType, PayloadLen},
+         stream::StreamId,
+     },
+     quic::{BidiStream, RecvStream, SendStream},
+@@ -36,6 +36,16 @@ impl<S, B> FrameStream<S, B> {
+         }
+     }
+ 
++    /// A frame stream that accepts frames other than DATA with a payload of
++    /// at most `max_payload` bytes (see [`FrameStreamError::TooLarge`]).
++    pub fn with_max_payload(stream: BufRecvStream<S, B>, max_payload: u64) -> Self {
++        Self {
++            stream,
++            decoder: FrameDecoder::with_max_payload(max_payload),
++            remaining_data: 0,
++        }
++    }
++
+     /// Unwraps the Framed streamer and returns the underlying stream **without** data loss for
+     /// partially received/read frames.
+     pub fn into_inner(self) -> BufRecvStream<S, B> {
+@@ -77,7 +87,7 @@ where
+                     Poll::Ready(false) => continue,
+                     Poll::Pending => Poll::Pending,
+                     Poll::Ready(true) => {
+-                        if self.stream.buf_mut().has_remaining() {
++                        if self.stream.buf_mut().has_remaining() || self.decoder.skip > 0 {
+                             // Reached the end of receive stream, but there is still some data:
+                             // The frame is incomplete.
+                             Poll::Ready(Err(FrameStreamError::UnexpectedEnd))
+@@ -202,12 +212,33 @@ where
+     }
+ }
+ 
+-#[derive(Default)]
++/// The largest payload of a frame other than DATA that a stream without its
++/// own limit (the control stream) buffers: those frames carry a few integers.
++pub const DEFAULT_MAX_FRAME_PAYLOAD: u64 = 64 * 1024;
++
+ pub struct FrameDecoder {
+     expected: Option<usize>,
++    /// The largest payload of a frame other than DATA buffered for decoding.
++    max_payload: u64,
++    /// Payload bytes of an unknown frame over `max_payload` still to discard.
++    skip: u64,
++}
++
++impl Default for FrameDecoder {
++    fn default() -> Self {
++        Self::with_max_payload(DEFAULT_MAX_FRAME_PAYLOAD)
++    }
+ }
+ 
+ impl FrameDecoder {
++    fn with_max_payload(max_payload: u64) -> Self {
++        Self {
++            expected: None,
++            max_payload,
++            skip: 0,
++        }
++    }
++
+     fn decode<B: Buf>(
+         &mut self,
+         src: &mut BufList<B>,
+@@ -219,12 +250,49 @@ impl FrameDecoder {
+                 return Ok(None);
+             }
+ 
++            if self.skip > 0 {
++                // An unknown frame too large to buffer: its payload is
++                // dropped as it arrives.
++                let n = src
++                    .remaining()
++                    .min(usize::try_from(self.skip).unwrap_or(usize::MAX));
++                src.advance(n);
++                self.skip -= n as u64;
++                continue;
++            }
++
+             if let Some(min) = self.expected {
+                 if src.remaining() < min {
+                     return Ok(None);
+                 }
+             }
+ 
++            // The declared payload length is checked before the payload is
++            // buffered: a frame other than DATA is only decoded once all of
++            // it has arrived.
++            let header = {
++                let mut cur = src.cursor();
++                Frame::peek_header(&mut cur).map(|(ty, len)| (ty, len, cur.position()))
++            };
++            if let Some((ty, len, header_len)) = header {
++                if ty != FrameType::DATA && len > self.max_payload {
++                    if !ty.is_known() {
++                        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
++                        //# Endpoints MUST
++                        //# NOT consider these frames to have any meaning upon receipt.
++                        src.advance(header_len);
++                        self.expected = None;
++                        self.skip = len;
++                        continue;
++                    }
++                    return Err(FrameStreamError::TooLarge {
++                        frame_type: ty.value(),
++                        size: len,
++                        max_size: self.max_payload,
++                    });
++                }
++            }
++
+             let (pos, decoded) = {
+                 let mut cur = src.cursor();
+                 let decoded = Frame::decode(&mut cur);
+@@ -290,6 +358,16 @@ pub enum FrameStreamError {
+     Proto(FrameProtocolError),
+     Quic(StreamErrorIncoming),
+     UnexpectedEnd,
++    /// A frame other than DATA declared a payload larger than the stream
++    /// accepts; it was not buffered.
++    TooLarge {
++        /// The frame type
++        frame_type: u64,
++        /// The declared payload length
++        size: u64,
++        /// The largest payload the stream accepts
++        max_size: u64,
++    },
+ }
+ 
+ #[derive(Debug, PartialEq)]
+--- a/src/proto/frame.rs
++++ b/src/proto/frame.rs
+@@ -78,6 +78,18 @@ impl From<usize> for PayloadLen {
+ impl Frame<PayloadLen> {
+     pub const MAX_ENCODED_SIZE: usize = VarInt::MAX_SIZE * 7;
+ 
++    /// The type and payload length a frame header declares, read without its
++    /// payload: `None` until the whole header is in `buf`, and for a frame
++    /// that has no length (a WebTransport stream).
++    pub(crate) fn peek_header<T: Buf>(buf: &mut T) -> Option<(FrameType, u64)> {
++        let ty = FrameType::decode(buf).ok()?;
++        if ty == FrameType::WEBTRANSPORT_BI_STREAM {
++            return None;
++        }
++        let len = buf.get_var().ok()?;
++        Some((ty, len))
++    }
++
+     /// Decodes a Frame from the stream according to <https://www.rfc-editor.org/rfc/rfc9114#section-7.1>
+     pub fn decode<T: Buf>(buf: &mut T) -> Result<Self, FrameError> {
+         let remaining = buf.remaining();
+@@ -330,6 +342,30 @@ impl FrameType {
+         buf.write_var(self.0);
+     }
+ 
++    pub(crate) fn value(&self) -> u64 {
++        self.0
++    }
++
++    /// Whether frames of this type are decoded (or rejected) rather than
++    /// ignored as unknown (RFC 9114 section 7.2.8).
++    pub(crate) fn is_known(&self) -> bool {
++        matches!(
++            *self,
++            FrameType::DATA
++                | FrameType::HEADERS
++                | FrameType::H2_PRIORITY
++                | FrameType::CANCEL_PUSH
++                | FrameType::SETTINGS
++                | FrameType::PUSH_PROMISE
++                | FrameType::H2_PING
++                | FrameType::GOAWAY
++                | FrameType::H2_WINDOW_UPDATE
++                | FrameType::H2_CONTINUATION
++                | FrameType::MAX_PUSH_ID
++                | FrameType::WEBTRANSPORT_BI_STREAM
++        )
++    }
++
+     #[cfg(test)]
+     pub(crate) const RESERVED: FrameType = FrameType(0x1f * 1337 + 0x21);
+ }
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -123,7 +123,9 @@ where
+     pub async fn accept(&mut self) -> Result<Option<RequestResolver<C, B>>, ConnectionError> {
+         // Accept the incoming stream
+         let stream = match poll_fn(|cx| self.poll_accept_request_stream_internal(cx)).await? {
+-            Some(s) => FrameStream::new(BufRecvStream::new(s)),
++            Some(s) => {
++                FrameStream::with_max_payload(BufRecvStream::new(s), self.max_field_section_size)
++            }
+             None => {
+                 // We always send a last GoAway frame to the client, so it knows which was the last
+                 // non-rejected request.

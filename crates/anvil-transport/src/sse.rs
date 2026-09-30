@@ -571,8 +571,17 @@ async fn open_h3(
         return Err((f, DispatchState::NotDispatched));
     };
     let connected = {
-        let connect =
-            crate::h3::quic_connect(rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, &tls, crate::h3::client_endpoint, cancel);
+        let connect = crate::h3::quic_connect(
+            rec,
+            &plan.host,
+            plan.port,
+            &plan.dns,
+            &plan.timeouts,
+            &plan.limits,
+            &tls,
+            crate::h3::client_endpoint,
+            cancel,
+        );
         tokio::select! {
             r = connect => Some(r),
             _ = sleep_until_opt(total_deadline) => None,

@@ -27,6 +27,7 @@ use crate::tickets::{HandshakeGuard, ResumptionContext, TicketCache, TicketTrans
 use crate::tls;
 use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::*;
+use anvil_domain::settings::Limits;
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -522,6 +523,8 @@ pub(crate) fn stream_failure(e: &h3::error::StreamError, phase: Phase, kind: Fai
     let mut f = TransportFailure::new(phase, kind, format!("{what}: {e}"));
     match e {
         S::RemoteTerminate { code } | S::StreamError { code, .. } => f.quic_error_code = Some(code.value()),
+        // Response headers or trailers over the local field-section limit.
+        S::HeaderTooBig { .. } if phase != Phase::RequestWrite => f.kind = FailureKind::ResponseHeadersTooLarge,
         _ => {}
     }
     f
@@ -545,13 +548,46 @@ pub(crate) struct QuicConnected {
     pub observation: ConnectionObservation,
 }
 
-/// HTTP/3 client options beyond the defaults.
-#[derive(Debug, Clone, Copy, Default)]
+/// HTTP/3 client options.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct H3ClientOptions {
     /// Advertise `SETTINGS_H3_DATAGRAM = 1` (RFC 9297 §2.1.1), so the peer
     /// may send HTTP/3 datagrams in QUIC DATAGRAM frames. quinn advertises
     /// the QUIC `max_datagram_frame_size` transport parameter by default.
     pub h3_datagrams: bool,
+    /// The largest response field section (headers or trailers) accepted, in
+    /// bytes. It is advertised as `SETTINGS_MAX_FIELD_SECTION_SIZE` (RFC 9114
+    /// §4.2.2) and bounds both the decoded section and, before it is
+    /// buffered, the encoded HEADERS frame: a larger one fails the request
+    /// with `response_headers_too_large`.
+    pub max_field_section_size: u64,
+}
+
+/// The smallest response field-section limit, as HTTP/1 floors its buffer.
+const MIN_FIELD_SECTION: u64 = 8192;
+/// The largest value a SETTINGS parameter can carry (a QUIC varint, RFC 9000 §16).
+const MAX_FIELD_SECTION: u64 = (1 << 62) - 1;
+
+/// The field-section limit HTTP/3 enforces and advertises for `limits`:
+/// `max_response_header_bytes`, at least 8 KiB and at most what a SETTINGS
+/// varint can carry. The raw value comes from settings layers and imports,
+/// so it may be 0 or `u64::MAX`.
+pub(crate) fn field_section_limit(limits: &Limits) -> u64 {
+    limits.max_response_header_bytes.clamp(MIN_FIELD_SECTION, MAX_FIELD_SECTION)
+}
+
+impl H3ClientOptions {
+    /// No HTTP/3 datagrams; response headers and trailers bounded by
+    /// [`field_section_limit`].
+    pub(crate) fn new(limits: &Limits) -> Self {
+        H3ClientOptions { h3_datagrams: false, max_field_section_size: field_section_limit(limits) }
+    }
+
+    fn builder(self) -> h3::client::Builder {
+        let mut b = h3::client::builder();
+        b.max_field_section_size(self.max_field_section_size).enable_datagram(self.h3_datagrams);
+        b
+    }
 }
 
 /// What the peer's HTTP/3 SETTINGS frame allows.
@@ -596,11 +632,12 @@ pub(crate) async fn quic_connect(
     port: u16,
     dns_cfg: &dns::DnsConfig,
     timeouts: &anvil_domain::settings::Timeouts,
+    limits: &Limits,
     prepared: &Arc<tls::PreparedTls>,
     endpoint: impl FnOnce(bool) -> Result<quinn::Endpoint, TransportFailure>,
     cancel: &CancellationToken,
 ) -> Result<QuicConnected, (TransportFailure, Option<ConnectionObservation>)> {
-    quic_connect_with(rec, host, port, dns_cfg, timeouts, prepared, endpoint, cancel, H3ClientOptions::default()).await
+    quic_connect_with(rec, host, port, dns_cfg, timeouts, prepared, endpoint, cancel, H3ClientOptions::new(limits)).await
 }
 
 /// [`quic_connect`] with explicit HTTP/3 client options.
@@ -693,7 +730,7 @@ pub(crate) async fn quic_connect_with(
     cobs.protocol = Some("h3".into());
     cobs.local_address = ep.local_addr().ok().map(|a| a.to_string());
     let ph = rec.start(Phase::ProtocolHandshake);
-    let built = h3::client::builder().enable_datagram(options.h3_datagrams).build(h3_quinn::Connection::new(quic.clone())).await;
+    let built = options.builder().build(h3_quinn::Connection::new(quic.clone())).await;
     let (mut driver, send) = match built {
         Ok(x) => x,
         Err(e) => {
@@ -882,6 +919,13 @@ async fn write_request(
     Written { stream: Some(stream), error }
 }
 
+/// Response headers or trailers over the local `max_response_header_bytes`.
+fn headers_too_large(phase: Phase, what: &str, limits: &Limits) -> TransportFailure {
+    let max = field_section_limit(limits);
+    let message = format!("the HTTP/3 response {what} exceed the local max_response_header_bytes limit ({max} bytes)");
+    TransportFailure::new(phase, FailureKind::ResponseHeadersTooLarge, message)
+}
+
 fn phase_status(kind: FailureKind) -> PhaseStatus {
     match kind {
         FailureKind::Canceled => PhaseStatus::Canceled,
@@ -989,10 +1033,11 @@ fn resumable_tls(
 async fn h3_setup(
     rec: &mut Recorder,
     quic: &quinn::Connection,
+    limits: &Limits,
     detail: Option<&str>,
 ) -> Result<(h3::client::Connection<h3_quinn::Connection, Bytes>, SendReq), TransportFailure> {
     let ph = rec.start(Phase::ProtocolHandshake);
-    match h3::client::builder().build(h3_quinn::Connection::new(quic.clone())).await {
+    match H3ClientOptions::new(limits).builder().build(h3_quinn::Connection::new(quic.clone())).await {
         Ok(x) => {
             match detail {
                 Some(d) => rec.finish_with(ph, PhaseStatus::Completed, d),
@@ -1272,7 +1317,8 @@ impl H3Transport {
                     track.obs.offered = true;
                     track.obs.not_used = None;
                     cobs.protocol = Some("h3".into());
-                    let (driver, send) = match h3_setup(rec, &quic, Some("HTTP/3 set up in 0-RTT (before the handshake completed)")).await {
+                    let detail = Some("HTTP/3 set up in 0-RTT (before the handshake completed)");
+                    let (driver, send) = match h3_setup(rec, &quic, &plan.limits, detail).await {
                         Ok(x) => x,
                         Err(f) => {
                             quic.close(H3_NO_ERROR.into(), b"");
@@ -1336,7 +1382,7 @@ impl H3Transport {
         }
         cobs.tls = Some(tls_obs);
         cobs.protocol = Some("h3".into());
-        let (driver, send) = match h3_setup(rec, &quic, None).await {
+        let (driver, send) = match h3_setup(rec, &quic, &plan.limits, None).await {
             Ok(x) => x,
             Err(f) => return Err((f, Some(cobs), track)),
         };
@@ -1461,7 +1507,11 @@ impl H3Transport {
         let header_bytes = logical_header_bytes(plan, &uri);
         obs.bytes.request_headers_logical = header_bytes;
         let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-        let key = format!("{}|h3://{}:{}|{}", plan.isolation, plan.host.to_ascii_lowercase(), plan.port, prepared.fingerprint);
+        // The field-section limit is part of the key: a connection advertises
+        // (and enforces) the limit it was opened with, so a request with a
+        // smaller one never reuses a connection that accepts more.
+        let (host, fs) = (plan.host.to_ascii_lowercase(), field_section_limit(&plan.limits));
+        let key = format!("{}|h3://{host}:{}|{}|fs={fs}", plan.isolation, plan.port, prepared.fingerprint);
 
         // Those of the execution (else taken now, first): what this attempt
         // opens is pooled, and the tickets it receives are kept, only if
@@ -1513,6 +1563,7 @@ impl H3Transport {
                     plan.port,
                     &plan.dns,
                     &plan.timeouts,
+                    &plan.limits,
                     &prepared,
                     |v6| self.endpoint(v6),
                     cancel,
@@ -1639,6 +1690,11 @@ impl H3Transport {
                         use futures::FutureExt;
                         match s.recv_response().now_or_never() {
                             Some(Err(e)) if is_zero_rtt_rejected(&e) => true,
+                            Some(Err(h3::error::StreamError::HeaderTooBig { .. })) => {
+                                obs.connection = Some(cobs);
+                                let f = headers_too_large(Phase::AwaitResponseHeaders, "headers", &plan.limits);
+                                return (fail_attempt(rec, obs, f, DispatchState::Sent, Some(track_z), events), None);
+                            }
                             Some(Err(e)) => {
                                 obs.connection = Some(cobs);
                                 let f = stream_failure(
@@ -1697,7 +1753,8 @@ impl H3Transport {
                 drop(send);
                 drop(driver);
                 track_z.obs.resent_after_handshake = true;
-                let (driver, send) = match h3_setup(&mut rec, &quic, Some("set up again after the server rejected 0-RTT")).await {
+                let detail = Some("set up again after the server rejected 0-RTT");
+                let (driver, send) = match h3_setup(&mut rec, &quic, &plan.limits, detail).await {
                     Ok(x) => x,
                     Err(f) => {
                         obs.connection = Some(cobs);
@@ -1844,6 +1901,13 @@ impl H3Transport {
         let resp = tokio::select! {
             r = async { match head { Some(h) => Ok(h), None => stream.recv_response().await } } => match r {
                 Ok(r) => r,
+                // The server answered: h3 refused the HEADERS (and stopped
+                // the stream) before buffering or keeping them.
+                Err(h3::error::StreamError::HeaderTooBig { .. }) => {
+                    rec.finish(h_idx, PhaseStatus::Failed);
+                    let f = headers_too_large(Phase::AwaitResponseHeaders, "headers", &plan.limits);
+                    return (fail_attempt(rec, obs, f, DispatchState::Sent, track, events), None);
+                }
                 Err(e) => {
                     rec.finish(h_idx, PhaseStatus::Failed);
                     let f = stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse, "the HTTP/3 stream ended before a response");
@@ -1904,6 +1968,12 @@ impl H3Transport {
                         }
                     }
                     Ok(None) => break,
+                    // Trailers whose HEADERS frame is over the limit.
+                    Err(h3::error::StreamError::HeaderTooBig { .. }) => {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(headers_too_large(Phase::ResponseBody, "trailers", &plan.limits));
+                        break;
+                    }
                     Err(e) => {
                         completeness = BodyCompleteness::Incomplete;
                         failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyReset, format!("the HTTP/3 response stream ended abnormally: {e}")));
@@ -1915,6 +1985,11 @@ impl H3Transport {
                     failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "response body stalled").with_deadline(plan.timeouts.body_idle_ms));
                     break;
                 }
+                _ = sleep_until_opt(total_deadline) => {
+                    completeness = BodyCompleteness::Incomplete;
+                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "total deadline elapsed while reading the response body").with_deadline(plan.timeouts.total_ms));
+                    break;
+                }
                 _ = cancel.cancelled() => {
                     completeness = BodyCompleteness::Canceled;
                     failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while reading the body"));
@@ -1924,19 +1999,53 @@ impl H3Transport {
         }
         let mut trailers = Vec::new();
         let mut trailers_received = false;
-        if failure.is_none()
-            && let Ok(Some(t)) = stream.recv_trailers().await
-        {
-            trailers_received = true;
-            trailers = t
-                .iter()
-                .map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() })
-                .collect();
+        if failure.is_none() {
+            // h3 hands the trailers over only once the stream ends (FIN): that
+            // wait is bounded like the body's.
+            let idle_deadline = idle.map(|d| Instant::now() + d);
+            tokio::select! {
+                r = stream.recv_trailers() => match r {
+                    Ok(Some(t)) => {
+                        trailers_received = true;
+                        trailers = t.iter().map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() }).collect();
+                    }
+                    Ok(None) => {}
+                    Err(h3::error::StreamError::HeaderTooBig { .. }) => {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(headers_too_large(Phase::ResponseBody, "trailers", &plan.limits));
+                    }
+                    Err(e) => {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyReset, format!("the HTTP/3 response stream ended abnormally after its trailers: {e}")));
+                    }
+                },
+                _ = sleep_until_opt(idle_deadline) => {
+                    completeness = BodyCompleteness::Incomplete;
+                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the HTTP/3 response stream did not end after its trailers").with_deadline(plan.timeouts.body_idle_ms));
+                }
+                _ = sleep_until_opt(total_deadline) => {
+                    completeness = BodyCompleteness::Incomplete;
+                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "total deadline elapsed while waiting for the end of the response").with_deadline(plan.timeouts.total_ms));
+                }
+                _ = cancel.cancelled() => {
+                    completeness = BodyCompleteness::Canceled;
+                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while waiting for the end of the response"));
+                }
+            }
+        }
+        if failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
+            // Stop the response now: finishing the report never waits for
+            // the peer (a dropped stream would be stopped with code 0).
+            stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
         }
         if (plan.method == http::Method::HEAD || status == 204 || status == 304) && failure.is_none() {
             completeness = BodyCompleteness::NoBody;
         }
-        rec.finish(b_idx, if failure.is_none() { PhaseStatus::Completed } else { PhaseStatus::Failed });
+        let body_status = match &failure {
+            None => PhaseStatus::Completed,
+            Some(f) => phase_status(f.kind),
+        };
+        rec.finish(b_idx, body_status);
         obs.bytes.response_body_wire = Some(wire);
         obs.failure = failure;
         obs.duration_us = rec.us();
@@ -1971,6 +2080,16 @@ impl H3Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_field_section_limit_is_clamped_to_what_settings_can_carry() {
+        let limit = |max_response_header_bytes| field_section_limit(&Limits { max_response_header_bytes, ..Limits::default() });
+        assert_eq!(limit(0), 8192, "0 would refuse every response");
+        assert_eq!(limit(1), 8192);
+        assert_eq!(limit(256 * 1024), 256 * 1024);
+        assert_eq!(limit(u64::MAX), (1 << 62) - 1, "a larger SETTINGS value panics in h3's varint encoder");
+        assert!(quinn::VarInt::from_u64(limit(u64::MAX)).is_ok(), "it is a valid SETTINGS value");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn dropping_the_transport_ends_the_sweeper_at_once() {
