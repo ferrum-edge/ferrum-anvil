@@ -132,6 +132,14 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   ([contract.md](contract.md#guarantees)). Text output escapes control
   characters, so a spec cannot inject CI workflow commands or terminal
   escape sequences.
+- **Contract drift leaking response data:** drift reads response bodies
+  from encrypted history (only when the history policy keeps them) to check
+  them against the description. Findings name places, types and
+  constraints, never body values; suggested schemas keep only the shape of
+  what was seen, and an observed value enters a suggestion only as a short
+  enum token (`[A-Za-z0-9_.-]`, up to 64 characters). A revision is written
+  only to a file the user picks in the save dialog, or reimported after a
+  preview.
 - **Malicious bundle trying to enable insecure settings:** import
   normalisation (TLS bypass, plain-HTTP marker trust, credential forwarding,
   0-RTT early data, legacy HMAC, scenario/plan trust) with warnings in the

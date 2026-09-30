@@ -295,6 +295,8 @@ name = "anvil-contract"
 version = "0.1.0"
 dependencies = [
  "anvil-import",
+ "base64 0.23.1",
+ "chrono",
  "hex",
  "jsonschema",
  "proptest",
@@ -303,6 +305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_path",
+ "serde_norway",
  "sha2 0.11.0",
  "thiserror 2.0.21",
 ]

@@ -140,6 +140,70 @@ export type EvidenceSource =
 export type Owner =
   ("gateway_operator" | "api_owner" | "network_administrator" | "identity_provider" | "unknown") | "caller";
 /**
+ * Exact dialect. Every OpenAPI minor version is its own dialect: 3.2 is
+ * never treated as 3.1, and an unknown future version is refused rather
+ * than guessed.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "Dialect".
+ */
+export type Dialect =
+  | (
+      | "swagger20"
+      | "open_api30"
+      | "open_api31"
+      | "open_api32"
+      | "wsdl11"
+      | "postman_v20"
+      | "postman_v21"
+      | "postman_environment"
+      | "postman_globals"
+      | "insomnia_v4"
+      | "insomnia_v5"
+      | "curl"
+      | "har"
+      | "unknown"
+    )
+  | "open_api_unsupported"
+  | "wsdl20"
+  | "postman_v1";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DriftKind".
+ */
+export type DriftKind =
+  | "undeclared_path"
+  | "undeclared_method"
+  | "undeclared_status"
+  | "undeclared_content_type"
+  | "response_schema_mismatch"
+  | "undeclared_request_content_type"
+  | "undeclared_query_parameter"
+  | "missing_required_parameter"
+  | "missing_response_header"
+  | "slower_than_declared"
+  | "response_larger_than_declared"
+  | "request_larger_than_declared"
+  | "undeclared_server"
+  | "deprecated_operation_called";
+/**
+ * How serious a lint finding is (`off` in a ruleset turns a rule off).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "LintSeverity".
+ */
+export type LintSeverity = "hint" | "info" | "warn" | "error";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "SuggestionKind".
+ */
+export type SuggestionKind = "addition" | "relaxation";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "PatchKind".
+ */
+export type PatchKind = "remove" | "add" | "replace" | "union";
+/**
  * A field that may carry sensitive material (password, token, key).
  *
  * * `Template` — text that may contain `{{variable}}` references. A literal
@@ -829,41 +893,6 @@ export type IntegrationProfile1 = {
   kind: "ferrum_gateway";
 };
 /**
- * Exact dialect. Every OpenAPI minor version is its own dialect: 3.2 is
- * never treated as 3.1, and an unknown future version is refused rather
- * than guessed.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "Dialect".
- */
-export type Dialect =
-  | (
-      | "swagger20"
-      | "open_api30"
-      | "open_api31"
-      | "open_api32"
-      | "wsdl11"
-      | "postman_v20"
-      | "postman_v21"
-      | "postman_environment"
-      | "postman_globals"
-      | "insomnia_v4"
-      | "insomnia_v5"
-      | "curl"
-      | "har"
-      | "unknown"
-    )
-  | "open_api_unsupported"
-  | "wsdl20"
-  | "postman_v1";
-/**
- * How serious a lint finding is (`off` in a ruleset turns a rule off).
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "LintSeverity".
- */
-export type LintSeverity = "hint" | "info" | "warn" | "error";
-/**
  * What a rule applies to.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1526,6 +1555,7 @@ export interface AnvilContracts {
   AppSettings?: AppSettings;
   Dataset?: Dataset;
   DiagnosticFinding?: DiagnosticFinding;
+  DriftReport?: DriftReport;
   EffectiveSettings?: EffectiveSettings;
   Environment?: Environment;
   ExecutionEvent?: ExecutionEvent;
@@ -1539,6 +1569,7 @@ export interface AnvilContracts {
   RequestDefinition?: RequestDefinition;
   RequestRevision?: RequestRevision;
   RequestSpec?: RequestSpec;
+  Revision?: Revision;
   RuleInfo?: RuleInfo;
   RulesetSummary?: RulesetSummary;
   RunEvent?: RunEvent;
@@ -1839,6 +1870,197 @@ export interface Evidence {
 export interface Remediation {
   text: string;
   owner: Owner;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DriftReport".
+ */
+export interface DriftReport {
+  spec: SpecSummary;
+  observations: number;
+  /**
+   * Routed to a declared operation.
+   */
+  matched: number;
+  /**
+   * Exchanges that got no response (checked for routing only).
+   */
+  without_response: number;
+  /**
+   * CORS preflights (`OPTIONS` without a declared operation), not checked.
+   */
+  ignored: number;
+  from?: string | null;
+  to?: string | null;
+  /**
+   * Most severe first, then most frequent.
+   */
+  findings: DriftFinding[];
+  /**
+   * Every declared operation, exercised or not.
+   */
+  operations: OperationCoverage[];
+  undeclared: UndeclaredEndpoint[];
+  suggestions: Suggestion[];
+  /**
+   * Limits of the analysis (bodies not available, and why).
+   */
+  notes: string[];
+}
+/**
+ * The linted document.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "SpecSummary".
+ */
+export interface SpecSummary {
+  title?: string | null;
+  version?: string | null;
+  dialect: Dialect;
+  declared_version?: string | null;
+  sha256: string;
+  size_bytes: number;
+  operations: number;
+}
+/**
+ * One kind of difference, seen in one or more exchanges.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DriftFinding".
+ */
+export interface DriftFinding {
+  kind: DriftKind;
+  severity: LintSeverity;
+  message: string;
+  /**
+   * `GET /pets/{id}`, when an operation (or observed endpoint) is concerned.
+   */
+  operation?: string | null;
+  /**
+   * Where in the description, when it names an existing object.
+   */
+  pointer?: string | null;
+  line?: number | null;
+  /**
+   * Exchanges that showed it.
+   */
+  count: number;
+  /**
+   * Some of those exchanges' ids.
+   */
+  observations: string[];
+  /**
+   * Suggestions that would resolve it.
+   */
+  suggestions: string[];
+}
+/**
+ * How an operation was exercised.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "OperationCoverage".
+ */
+export interface OperationCoverage {
+  operation: string;
+  operation_id?: string | null;
+  method: string;
+  path: string;
+  pointer: string;
+  line?: number | null;
+  calls: number;
+  /**
+   * Observed status → count.
+   */
+  statuses: {
+    [k: string]: number | undefined;
+  };
+  declared_statuses: string[];
+  latency_ms?: LatencyStats | null;
+  max_response_bytes?: number | null;
+  budget: Budget;
+  findings: number;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "LatencyStats".
+ */
+export interface LatencyStats {
+  p50: number;
+  p95: number;
+  max: number;
+}
+/**
+ * An operation's declared budget (`x-anvil-expectations`, the most
+ * specific of operation, path item and document).
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "Budget".
+ */
+export interface Budget {
+  max_latency_ms?: number | null;
+  max_response_bytes?: number | null;
+  max_request_bytes?: number | null;
+}
+/**
+ * Calls to a path or method the description does not declare.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "UndeclaredEndpoint".
+ */
+export interface UndeclaredEndpoint {
+  method: string;
+  /**
+   * Observed paths with id-like segments generalized (`/users/{userId}`).
+   */
+  path: string;
+  calls: number;
+  statuses: {
+    [k: string]: number | undefined;
+  };
+  /**
+   * Some observed paths.
+   */
+  examples: string[];
+}
+/**
+ * A revision of the description.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "Suggestion".
+ */
+export interface Suggestion {
+  /**
+   * Stable for the same description and observations.
+   */
+  id: string;
+  title: string;
+  detail: string;
+  kind: SuggestionKind;
+  /**
+   * Selected by default (additions are, relaxations are not).
+   */
+  recommended: boolean;
+  /**
+   * The main location it changes.
+   */
+  pointer: string;
+  line?: number | null;
+  ops: PatchOp[];
+  /**
+   * The change as a fragment of the description, in its syntax.
+   */
+  snippet: string;
+}
+/**
+ * One change at an RFC 6901 pointer.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "PatchOp".
+ */
+export interface PatchOp {
+  op: PatchKind;
+  path: string;
+  value?: unknown;
 }
 /**
  * Fully-resolved settings used for one execution, with the layer each value
@@ -3343,21 +3565,6 @@ export interface LintReport {
    * completely (see `model::MAX_MODEL_WORK`).
    */
   skipped_operations?: number;
-}
-/**
- * The linted document.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "SpecSummary".
- */
-export interface SpecSummary {
-  title?: string | null;
-  version?: string | null;
-  dialect: Dialect;
-  declared_version?: string | null;
-  sha256: string;
-  size_bytes: number;
-  operations: number;
 }
 /**
  * A ruleset that took part in a [`RuleSet`].
@@ -4878,6 +5085,28 @@ export interface RequestRevision {
    */
   spec_sha256: string;
   spec: RequestSpec;
+}
+/**
+ * A description revised with chosen suggestions.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "Revision".
+ */
+export interface Revision {
+  /**
+   * The whole revised description, in the original syntax. YAML is
+   * written anew: comments and formatting of the original are not kept.
+   */
+  text: string;
+  /**
+   * RFC 6902 operations from the original to the revision.
+   */
+  json_patch: unknown[];
+  applied: string[];
+  /**
+   * Suggestion ids that were not found, and ops that could not apply.
+   */
+  skipped: string[];
 }
 /**
  * A rule as listed to users.

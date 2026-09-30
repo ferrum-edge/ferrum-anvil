@@ -18,17 +18,24 @@
 //! * **Deterministic.** The same spec and rules give the same report.
 
 pub mod checks;
+pub mod drift;
+pub mod infer;
 pub mod lint;
 pub mod locate;
 pub mod model;
+pub mod observe;
+pub mod patch;
+pub mod route;
 pub mod ruleset;
 pub mod sarif;
 pub mod schema;
 pub mod spec;
 
+pub use drift::{DriftFinding, DriftKind, DriftOptions, DriftReport, Revision, Suggestion, SuggestionKind, analyze, revise};
 pub use lint::{LintFinding, LintOptions, LintReport, SeverityCounts, SpecSummary, lint};
 pub use locate::Position;
 pub use model::TargetKind;
+pub use observe::{Observation, ObservedBody, ObservedResponse};
 pub use ruleset::{RuleInfo, RuleSet, RulesetError, RulesetSummary, Severity};
 pub use spec::{Spec, SpecError};
 
@@ -69,7 +76,13 @@ pub fn contract_schemas() -> Vec<(&'static str, serde_json::Value)> {
     fn s<T: schemars::JsonSchema>() -> serde_json::Value {
         serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes")
     }
-    vec![("LintReport", s::<LintReport>()), ("RuleInfo", s::<RuleInfo>()), ("RulesetSummary", s::<RulesetSummary>())]
+    vec![
+        ("LintReport", s::<LintReport>()),
+        ("RuleInfo", s::<RuleInfo>()),
+        ("RulesetSummary", s::<RulesetSummary>()),
+        ("DriftReport", s::<DriftReport>()),
+        ("Revision", s::<Revision>()),
+    ]
 }
 
 #[cfg(test)]

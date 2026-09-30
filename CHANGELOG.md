@@ -4,6 +4,26 @@
 
 ### Added
 
+- Contract drift: compare observed traffic with an OpenAPI description
+  (`anvil_contract::analyze`). Exchanges are routed to operations through
+  the declared server base paths and checked for undeclared paths, methods,
+  statuses, media types, request body types and query parameters; JSON
+  bodies that do not match their schema; missing required parameters and
+  response headers; deprecated operations; unknown servers; and calls slower
+  or larger than an `x-anvil-expectations` budget. Findings are grouped with
+  a count and a coverage table lists every operation. Suggested revisions
+  are dialect-aware patches (additions recommended, relaxations not) with
+  schemas inferred from the shape of observed bodies, never their values;
+  `revise` returns the revised description and an RFC 6902 JSON Patch.
+- CLI: `anvil spec-drift <spec> --har FILE` (no profile) or
+  `anvil spec-drift --import ID` (an imported spec's history) prints the
+  report, writes `--revised`/`--patch`, and exits 2 at `--fail-on`.
+- Desktop: an imported spec in the Contract view has a **Live traffic** tab
+  (differences, suggestions to select, coverage, undeclared endpoints) that
+  saves the revision or its JSON Patch (file purpose
+  `spec_revision_export`) or reimports it as the import's new version after
+  a preview. The response panel shows a **Contract** tab for a send of a
+  request that belongs to an OpenAPI import.
 - API standards: check OpenAPI descriptions against a team's own rules.
   A ruleset (YAML or JSON, `anvil_ruleset: 1`) targets version-neutral
   objects (operations, parameters, responses, media types, schemas,

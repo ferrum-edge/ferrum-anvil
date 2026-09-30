@@ -114,6 +114,26 @@ proptest! {
     }
 
     #[test]
+    fn drift_never_panics(body in json_value(4), spec_part in json_value(3), path in "[a-z0-9/{}%.-]{0,24}", status in 100u16..600, method in "(GET|POST|PATCH|OPTIONS|HEAD|X)") {
+        use anvil_contract::observe::{ObservedBody, ObservedResponse};
+        let shop = include_str!("fixtures/shop-3.0.yaml");
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "f", "version": "1"}, "servers": [{"url": "https://x/{v}"}], "paths": {"/a/{id}": {"get": {"responses": {"200": {"content": {"application/json": {"schema": spec_part.clone()}}}, "4XX": spec_part.clone()}}, "parameters": [spec_part.clone()]}}, "components": {"schemas": {"S": spec_part.clone()}}});
+        for text in [shop.to_string(), doc.to_string()] {
+            let Ok(spec) = Spec::parse(text.as_bytes()) else { continue };
+            let obs = anvil_contract::Observation {
+                id: "p".into(), at: None, method: method.clone(), url: format!("https://x/{path}?q=1&&=&%zz"),
+                operation_hint: Some("getOrder#2".into()), request_content_type: Some("application/json".into()), request_bytes: 3,
+                query: vec!["q".into()], request_headers: vec![], latency_ms: Some(1.0),
+                response: Some(ObservedResponse { status, content_type: Some("application/json".into()), headers: vec![], bytes: Some(1), body: ObservedBody::Json(body.clone()) }),
+            };
+            let r = anvil_contract::analyze(&spec, &[obs.clone(), obs], &Default::default());
+            let ids: Vec<String> = r.suggestions.iter().map(|s| s.id.clone()).collect();
+            let rev = anvil_contract::revise(&spec, &r, &ids);
+            prop_assert!(Spec::parse(rev.text.as_bytes()).is_ok() || rev.text.is_empty());
+        }
+    }
+
+    #[test]
     fn locator_never_panics(text in "[ -~\n\t{}\\[\\]:,'\"#|>\\u{e9}\\u{4e2d}\\u{1f600}-]{0,400}") {
         let l = Locator::new(&text, Syntax::Yaml);
         let _ = l.position("/a/0/b");

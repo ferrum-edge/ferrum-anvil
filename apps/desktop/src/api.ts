@@ -5,7 +5,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ApiStandards,
   AppSettings,
+  DriftReport,
   LintReport,
+  Revision,
   RuleInfo,
   RulesetSummary,
   StoredRuleset,
@@ -254,6 +256,7 @@ export type FilePurpose =
   | "load_report_export"
   | "run_report_export"
   | "lint_report_export"
+  | "spec_revision_export"
   | "jwt_svid_file"
   | "linked_file"
   | "linked_file_relocate";
@@ -501,6 +504,24 @@ export interface StandardsView {
   /** Why the stored rulesets do not load; they can still be disabled or removed. */
   error?: string | null;
 }
+export type { DriftReport, Revision };
+/** One send checked against the description of the import its request belongs to. */
+export interface ExecutionDrift {
+  import_id: string;
+  file_name: string;
+  title?: string | null;
+  report: DriftReport;
+}
+/** What reimporting a revised description would do to the collection. */
+export interface DriftPlan {
+  revision: Revision;
+  /** Names of the requests new operations become. */
+  added: string[];
+  updated: number;
+  conflicts: number;
+  removed: number;
+  unchanged: number;
+}
 /** What to lint: an import's stored original, or a spec file chosen in the native dialog. */
 export type LintTarget = { kind: "import"; import_id: string } | { kind: "spec"; input: SpecInput };
 
@@ -716,6 +737,17 @@ export const api = {
   standardsSetEnabled: (rulesetId: string, enabled: boolean) => call<ApiStandards>("standards_set_enabled", { rulesetId, enabled }),
   standardsSetRecommended: (include: boolean) => call<ApiStandards>("standards_set_recommended", { include }),
   lintSpec: (target: LintTarget) => call<LintReport>("standards_lint", { target }),
+  /** The import's collection history compared with its description. */
+  driftReport: (importId: string) => call<DriftReport>("drift_report", { importId }),
+  /** One recorded send checked against its import's description; null when it belongs to none. */
+  driftCheckExecution: (executionId: string) => call<ExecutionDrift | null>("drift_check_execution", { executionId }),
+  driftRevise: (importId: string, suggestionIds: string[]) => call<Revision>("drift_revise", { importId, suggestionIds }),
+  driftReimportPlan: (importId: string, suggestionIds: string[]) => call<DriftPlan>("drift_reimport_plan", { importId, suggestionIds }),
+  /** Reimport the revised description; returns how many requests changed. */
+  driftReimportApply: (importId: string, suggestionIds: string[]) => call<number>("drift_reimport_apply", { importId, suggestionIds }),
+  /** Write the revised description or its JSON Patch to a save-dialog grant (purpose `spec_revision_export`). */
+  driftExport: (importId: string, suggestionIds: string[], format: "spec" | "patch", grant: string) =>
+    call<number>("drift_export", { importId, suggestionIds, format, grant }),
   /** Lint again and write JSON or SARIF to a save-dialog grant (purpose `lint_report_export`). */
   exportLintReport: (target: LintTarget, format: "json" | "sarif", artifact: string, grant: string) =>
     call<number>("standards_report_export", { target, format, artifact, grant }),

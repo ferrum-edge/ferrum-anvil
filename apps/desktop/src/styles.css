@@ -762,3 +762,14 @@ input.field.small-field { height: var(--h-sm); padding: 0 8px; }
 @media (max-height: 620px) {
   .brand-logo { aspect-ratio: 3 / 1; }
 }
+
+/* API contract: suggested revisions and coverage */
+.spec-tabs { margin-bottom: 14px; }
+.suggestion { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); margin: 8px 0; }
+.suggestion > label.check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.suggestion-detail { font-size: 12px; color: var(--text-3); padding-left: 24px; }
+.suggestion details { padding-left: 24px; }
+.suggestion details > summary { font-size: 12px; color: var(--text-2); }
+.suggestion pre.code { margin-top: 6px; max-height: 320px; overflow: auto; }
+table.grid.coverage td:nth-child(2) { width: 1%; text-align: right; }
+h4.subhead { margin: 14px 0 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-3); font-weight: 600; }

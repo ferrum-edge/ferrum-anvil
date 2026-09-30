@@ -66,6 +66,9 @@ pub enum FilePurpose {
     RunReportExport,
     /// Write an API-standards lint report (JSON or SARIF).
     LintReportExport,
+    /// Write a description revised with contract-drift suggestions, or its
+    /// JSON Patch.
+    SpecRevisionExport,
     /// Bind a JWT-SVID token file that the backend reads at send time.
     JwtSvidFile,
     /// Bind a linked local file that a saved request or dataset names, so
@@ -91,9 +94,11 @@ pub enum Access {
 impl FilePurpose {
     pub fn access(self) -> Access {
         match self {
-            FilePurpose::BundleExport | FilePurpose::LoadReportExport | FilePurpose::RunReportExport | FilePurpose::LintReportExport => {
-                Access::Write
-            }
+            FilePurpose::BundleExport
+            | FilePurpose::LoadReportExport
+            | FilePurpose::RunReportExport
+            | FilePurpose::LintReportExport
+            | FilePurpose::SpecRevisionExport => Access::Write,
             FilePurpose::BundleImport
             | FilePurpose::Attachment
             | FilePurpose::PemFile
@@ -125,6 +130,7 @@ impl FilePurpose {
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
             | FilePurpose::LintReportExport
+            | FilePurpose::SpecRevisionExport
             | FilePurpose::JwtSvidFile
             | FilePurpose::LinkedFile
             | FilePurpose::LinkedFileRelocate => 0,
