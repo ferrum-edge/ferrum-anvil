@@ -13,12 +13,7 @@ fn read_json(path: &Path) -> Value {
 }
 
 fn strings(value: &Value) -> BTreeSet<String> {
-    value
-        .as_array()
-        .expect("contract list")
-        .iter()
-        .map(|entry| entry.as_str().expect("string entry").to_owned())
-        .collect()
+    value.as_array().expect("contract list").iter().map(|entry| entry.as_str().expect("string entry").to_owned()).collect()
 }
 
 fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
@@ -73,12 +68,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
     let local = read_json(&root.join("catalog/ferrum/ferrum-edge-0.9.8/outcomes.json"));
-    let contract_tokens: BTreeSet<String> = errors["x_gateway_error_tokens"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["token"].as_str().unwrap().to_owned())
-        .collect();
+    let contract_tokens: BTreeSet<String> =
+        errors["x_gateway_error_tokens"].as_array().unwrap().iter().map(|entry| entry["token"].as_str().unwrap().to_owned()).collect();
     let local_tokens = strings(&local["public_tokens"]);
     let (missing, extra) = differences(&contract_tokens, &local_tokens);
     assert!(missing.is_empty() && extra.is_empty(), "0.9.8 public_tokens drift; missing: {missing:?}; extra: {extra:?}");
@@ -92,18 +83,10 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let (missing, extra) = differences(&contract_tokens, &diagnostic_tokens);
     assert!(missing.is_empty() && extra.is_empty(), "ferrum.token.* wording drift; missing: {missing:?}; extra: {extra:?}");
 
-    let contract_classes: BTreeSet<String> = errors["error_classes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["value"].as_str().unwrap().to_owned())
-        .collect();
-    let local_classes: BTreeSet<String> = local["error_class_semantics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["class"].as_str().unwrap().to_owned())
-        .collect();
+    let contract_classes: BTreeSet<String> =
+        errors["error_classes"].as_array().unwrap().iter().map(|entry| entry["value"].as_str().unwrap().to_owned()).collect();
+    let local_classes: BTreeSet<String> =
+        local["error_class_semantics"].as_array().unwrap().iter().map(|entry| entry["class"].as_str().unwrap().to_owned()).collect();
     let (missing, extra) = differences(&contract_classes, &local_classes);
     assert!(missing.is_empty() && extra.is_empty(), "0.9.8 error_classes drift; missing: {missing:?}; extra: {extra:?}");
     let local_class_meanings: BTreeMap<&str, &str> = local["error_class_semantics"]
@@ -153,15 +136,10 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         .map(|entry| (entry["name"].as_str().unwrap().to_ascii_lowercase(), entry["semantics"].as_str().unwrap()))
         .collect();
     let gateway_error_meaning = local_header_meanings.get("x-gateway-error").expect("X-Gateway-Error meaning");
-    let missing_header_tokens: Vec<String> = contract_tokens
-        .iter()
-        .filter(|token| !gateway_error_meaning.contains(token.as_str()))
-        .cloned()
-        .collect();
+    let missing_header_tokens: Vec<String> =
+        contract_tokens.iter().filter(|token| !gateway_error_meaning.contains(token.as_str())).cloned().collect();
     assert!(missing_header_tokens.is_empty(), "X-Gateway-Error meaning omits pinned tokens: {missing_header_tokens:?}");
-    let upstream_status_meaning = local_header_meanings
-        .get("x-gateway-upstream-status")
-        .expect("X-Gateway-Upstream-Status meaning");
+    let upstream_status_meaning = local_header_meanings.get("x-gateway-upstream-status").expect("X-Gateway-Upstream-Status meaning");
     assert!(upstream_status_meaning.contains("degraded"), "X-Gateway-Upstream-Status meaning drifted: {upstream_status_meaning}");
 
     let shared_schema = read_json(&vendor.join("schemas/diagnostic-finding/v1.schema.json"));

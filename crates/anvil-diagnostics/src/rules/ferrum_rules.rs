@@ -517,10 +517,9 @@ mod tests {
 
     #[test]
     fn token_scope_and_owner_cover_the_pinned_vocabulary() {
-        let contract: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../contracts/ferrum-contracts/vocabularies/gateway-errors.json"
-        ))
-        .expect("pinned gateway error vocabulary");
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/ferrum-contracts/vocabularies/gateway-errors.json"))
+                .expect("pinned gateway error vocabulary");
         let tokens = contract["x_gateway_error_tokens"].as_array().expect("token list");
         let expected: std::collections::BTreeSet<&str> = [
             "connection_failure",
