@@ -220,7 +220,7 @@ impl App {
         Ok(self.store.list(kind::SPEC_SOURCE, Some(ws))?)
     }
 
-    fn spec_source(&self, import_id: &Id) -> Result<SpecSourceRecord> {
+    pub(crate) fn spec_source(&self, import_id: &Id) -> Result<SpecSourceRecord> {
         self.store.get(kind::SPEC_SOURCE, import_id)?.ok_or_else(|| AppError::NotFound(format!("import {import_id}")))
     }
 
@@ -649,7 +649,7 @@ fn existing_object(s: &StoreRead<'_>, r: &ImportResult, root: Option<&Folder>) -
 mod tests {
     use super::*;
     use crate::profiles::ProfileManager;
-    use anvil_domain::request::SensitiveValue;
+    use anvil_domain::secret::SensitiveValue;
     use anvil_domain::workspace::Variable;
     use anvil_storage::KdfParams;
 
