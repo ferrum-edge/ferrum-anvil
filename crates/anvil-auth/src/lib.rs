@@ -468,6 +468,24 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
                 now,
             )?;
             out.secrets.push(password.to_string());
+            // A PasswordText password is sent XML-escaped.
+            let escaped = wsse::xml_escape(password);
+            if escaped != password.as_str() {
+                out.secrets.push(escaped);
+            }
+            // The SAML assertion is a credential too: it is embedded
+            // verbatim, trimmed, so both forms are redacted.
+            if let Some(assertion) = saml_assertion {
+                out.secrets.push(assertion.to_string());
+                let trimmed = assertion.trim();
+                if trimmed != assertion.as_str() {
+                    out.secrets.push(trimmed.to_string());
+                }
+                let escaped = wsse::xml_escape(trimmed);
+                if escaped != trimmed {
+                    out.secrets.push(escaped);
+                }
+            }
             out.body = Some(body);
         }
         ResolvedAuth::JwtSvid { token, header_name, prefix } => {
@@ -484,7 +502,57 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
 
 #[cfg(test)]
 mod tests {
-    use super::encode_query_component;
+    use super::*;
+
+    #[test]
+    fn ws_security_registers_the_saml_assertion_and_the_escaped_password_as_secrets() {
+        let assertion = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">audit-only-assertion-3v9k</saml:Assertion>"#;
+        let password = "audit-only-pw-<&>-5c1d";
+        let auth = ResolvedAuth::Wsse {
+            username: "alice".into(),
+            password: Zeroizing::new(password.into()),
+            password_type: WssePasswordType::PasswordText,
+            timestamp_ttl_secs: None,
+            saml_assertion: Some(Zeroizing::new(format!("\n  {assertion}\n"))),
+        };
+        let envelope = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+        let req = SignableRequest {
+            method: "POST".into(),
+            scheme: "https".into(),
+            authority: "soap.example.test".into(),
+            raw_path: "/ws".into(),
+            raw_query: String::new(),
+            headers: vec![],
+            body: envelope.as_bytes().to_vec(),
+        };
+        let applied = apply(&auth, &req, Utc::now()).unwrap();
+        let body = String::from_utf8(applied.body.clone().expect("a WS-Security body")).unwrap();
+        // What is sent: the trimmed assertion and the escaped password.
+        let escaped = wsse::xml_escape(password);
+        assert!(body.contains(assertion), "the assertion is not embedded as it is sent");
+        assert!(body.contains(&escaped), "the password is not sent XML-escaped");
+        let escaped_assertion = wsse::xml_escape(assertion);
+        for (what, form) in [
+            ("trimmed assertion", assertion),
+            ("XML-escaped assertion", escaped_assertion.as_str()),
+            ("escaped password", escaped.as_str()),
+            ("password", password),
+        ] {
+            assert!(applied.secrets.iter().any(|s| s == form), "the {what} is not registered for redaction");
+        }
+        // Every secret sent in the body is covered by one registered form.
+        assert!(!applied.secrets.iter().fold(body, |b, s| b.replace(s.as_str(), "")).contains("audit-only"), "a secret is not registered");
+        // Without an assertion, nothing more than the password forms.
+        let auth = ResolvedAuth::Wsse {
+            username: "alice".into(),
+            password: Zeroizing::new("plain-password".into()),
+            password_type: WssePasswordType::PasswordDigest,
+            timestamp_ttl_secs: Some(300),
+            saml_assertion: None,
+        };
+        let secrets = apply(&auth, &req, Utc::now()).unwrap().secrets;
+        assert!(secrets == ["plain-password"], "{} secrets are registered, not only the password", secrets.len());
+    }
 
     #[test]
     fn query_components_encode_everything_but_unreserved_ascii() {

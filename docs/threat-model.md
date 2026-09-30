@@ -44,8 +44,19 @@ against it).
   stripping; redaction by name and by exact secret value across records,
   history, reports, exports and support bundles; a warning for keys in query
   strings.
-  - Headers, query parameters and form fields the user marks sensitive are
-    redacted by name and by value.
+  - Headers, query parameters, form fields and gRPC metadata the user marks
+    sensitive are redacted by name and by value, in the effective-request
+    preview as in records and history.
+  - A credential header (`Authorization`, `Cookie`, `Set-Cookie`, ...) keeps
+    only the parts that describe its credential: the scheme word, cookie
+    names and `Set-Cookie` attributes. Those are scrubbed of every known
+    secret value as well, so a server that echoes a credential it received
+    into a cookie name, a cookie attribute or an authorization scheme does
+    not get it into records, history or exports.
+  - Every credential an auth profile sends is a known secret, including a
+    WS-Security SAML assertion (as stored and as embedded, trimmed) and a
+    PasswordText password in the XML-escaped form it is sent in, so the
+    effective-request preview of the body it rewrites shows neither.
   - URL path segments, query names and values, and fragments are compared
     after percent-decoding, and a component that hides a secret is replaced
     whole, so no reversible encoding of it is kept. A URL that still reveals
@@ -79,6 +90,8 @@ against it).
   The workspace cookie jar is separate: on each hop it sends the stored
   cookies that match that hop's target under cookie rules, which do not
   separate ports (nor schemes, for cookies without `Secure`). A `Set-Cookie`
+  whose name contains a known request secret is refused by the jar, including
+  names that contain a percent-encoded form of the secret. A `Set-Cookie`
   whose `Domain` is a public suffix (`com`, `co.uk`, a private-section
   suffix such as `github.io`; from the Public Suffix List compiled into
   Anvil) is not stored, so one site cannot set a cookie that the jar sends

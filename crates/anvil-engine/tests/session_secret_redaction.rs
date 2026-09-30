@@ -13,7 +13,7 @@ use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::*;
 use anvil_domain::request::*;
 use anvil_domain::secret::REDACTED;
-use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
+use anvil_domain::settings::{HttpVersionPolicy, SettingsOverrides, TimeoutOverrides};
 use anvil_engine::context::MemoryAttachments;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
@@ -70,10 +70,11 @@ fn stream(o: &ExecutionOutput) -> &StreamTranscript {
 /// Neither a live event nor the stored record holds `secret`.
 fn assert_not_leaked(label: &str, o: &ExecutionOutput, events: &[ExecutionEvent], secret: &str) {
     assert!(!events.is_empty(), "{label}: no live events were emitted");
+    // The messages never quote the evidence: it would hold the secret.
     let live = serde_json::to_string(events).unwrap();
-    assert!(!live.contains(secret), "{label}: a live event holds the secret: {live}");
+    assert!(!live.contains(secret), "{label}: a live event holds the secret");
     let record = serde_json::to_string(&o.record).unwrap();
-    assert!(!record.contains(secret), "{label}: the stored record holds the secret: {record}");
+    assert!(!record.contains(secret), "{label}: the stored record holds the secret");
 }
 
 fn ws_spec(url: &str, subprotocols: Vec<String>, text: &str) -> RequestSpec {
@@ -145,6 +146,11 @@ fn received_bytes(log: &anvil_fixtures::GroundTruthLog) -> u64 {
     log.entries().iter().map(|e| if let GroundTruth::MessageReceived { bytes } = e.event { bytes } else { 0 }).sum()
 }
 
+/// The value of the header `name` in `headers`.
+fn value_of(headers: &[HeaderEntry], name: &str) -> Option<String> {
+    headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.clone())
+}
+
 fn received_header(f: &fx::Fixture, path: &str, name: &str) -> Option<String> {
     f.log.entries().into_iter().rev().find_map(|e| match e.event {
         GroundTruth::RequestReceived { path: p, headers, .. } if p.starts_with(path) => {
@@ -200,6 +206,47 @@ async fn a_secret_in_grpc_metadata_is_redacted_live_and_in_the_record() {
     assert_eq!(received_header(&f, "/anvil.lab.v1.Echo/Unary", "x-client-note").as_deref(), Some(secret), "the metadata was not sent");
     assert!(stream(&o).received_count > 0, "{:?}", o.record.attempts.last().and_then(|a| a.failure.as_ref()));
     assert_not_leaked("gRPC metadata", &o, &events, secret);
+}
+
+/// Metadata marked sensitive holding a literal (no secret variable) under a
+/// name no rule recognises is redacted by name and by value, as a request
+/// header marked sensitive is: in the preview, the live events and the stored
+/// record (which a history export serializes as it is), in every wire format.
+#[tokio::test]
+async fn literal_grpc_metadata_marked_sensitive_is_redacted_in_the_preview_and_the_record() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "grpc-literal-metadata-6t1z";
+    let url = format!("grpc://{}", f.addr);
+    let cases = [
+        (GrpcWire::Grpc, HttpVersionPolicy::Auto),
+        (GrpcWire::GrpcWeb, HttpVersionPolicy::Auto),
+        (GrpcWire::GrpcWebText, HttpVersionPolicy::H2c),
+    ];
+    for (wire, version) in cases {
+        let label = format!("{wire:?}");
+        let marked = KeyValue { sensitive: true, ..KeyValue::new("x-private-session", secret) };
+        let metadata = vec![marked, KeyValue::new("x-visible-meta", "shown-meta-value")];
+        let mut c = grpc_ctx(&url, r#"{"message":"hi"}"#, metadata, ("unused_secret", "unused-secret-value"));
+        c.spec.grpc.as_mut().unwrap().wire = wire;
+        c.settings_layers.push(("run".into(), SettingsOverrides { http_version: Some(version), ..Default::default() }));
+
+        let p = e.preview(&c).unwrap_or_else(|f| panic!("{label}: the preview failed: {}", f.message));
+        assert!(!serde_json::to_string(&p).unwrap().contains(secret), "{label}: the preview holds the marked metadata value");
+        let shown = |name: &str| value_of(&p.headers, name);
+        assert_eq!(shown("x-private-session").as_deref(), Some(REDACTED), "{label}: the preview does not redact the marked metadata");
+        assert_eq!(shown("x-visible-meta").as_deref(), Some("shown-meta-value"), "{label}: the preview does not keep ordinary metadata");
+
+        let (o, events) = run_with_events(&e, &c).await;
+        let sent = received_header(&f, "/anvil.lab.v1.Echo/Unary", "x-private-session");
+        assert!(sent.as_deref() == Some(secret), "{label}: the marked metadata was not sent");
+        assert_not_leaked(&label, &o, &events, secret);
+        assert!(stream(&o).received_count > 0, "{label}: {:?}", o.record.attempts.last().and_then(|a| a.failure.as_ref()));
+        let prepared = |name: &str| value_of(&o.record.prepared.headers, name);
+        assert_eq!(prepared("x-private-session").as_deref(), Some(REDACTED), "{label}: the record does not redact the marked metadata");
+        assert_eq!(prepared("x-visible-meta").as_deref(), Some("shown-meta-value"), "{label}: the record does not keep ordinary metadata");
+    }
 }
 
 #[tokio::test]

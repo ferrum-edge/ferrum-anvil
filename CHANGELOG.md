@@ -812,6 +812,31 @@
 
 ### Security
 
+- Redaction of credential headers (`Authorization`, `Proxy-Authorization`,
+  `Cookie`, `Set-Cookie` and other sensitive names) now scrubs every known
+  secret value from the parts it keeps: the authorization scheme word,
+  cookie names and `Set-Cookie` attributes. Before, a response that echoed
+  a credential the request sent into one of those parts kept it in the
+  execution record, run history and history-inclusive exports. The whole
+  value is scrubbed before it is split, so a secret that spans a `;`, `=`
+  or space is replaced whole; a header value marked sensitive as a whole
+  (scheme included) is now shown as `‹redacted›` without its scheme.
+  Mixed and double percent-encoded secret echoes in `Set-Cookie` names,
+  Path and Domain attributes are redacted too. A `Set-Cookie` whose name
+  contains a secret used by that execution is not kept in the workspace cookie
+  jar, so it cannot appear in a later request's `Cookie` header or notes. History
+  recorded before this change is not rewritten.
+  (GHSA-vvjj-4xxf-966f)
+- gRPC metadata marked sensitive is now redacted by name and by value, like
+  a request header marked sensitive, in the effective-request preview, the
+  live session events, the execution record and run history, for gRPC and
+  both gRPC-Web modes. Before, a literal value under a name that is not a
+  known credential name was shown as is. (GHSA-653v-gxx9-r5pv)
+- The WS-Security SAML assertion (as stored and as embedded, trimmed) and
+  the XML-escaped form of a PasswordText password are now known secrets of
+  the request, so the effective-request preview of a WS-Security body and
+  the execution record redact them. Before, an assertion taken directly
+  from the vault was shown in the preview. (GHSA-6j83-rrqr-953h)
 - A redirect that would resend a request body to another origin is no
   longer followed when the body has a form field marked sensitive, even
   when its value is a literal rather than a secret variable. Before, only

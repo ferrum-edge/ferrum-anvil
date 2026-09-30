@@ -86,6 +86,8 @@ pub struct Engine {
 /// Source of `Engine::id`.
 static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) const SECRET_COOKIE_NAME_NOTE: &str = "a response cookie was not stored because its name contains a request secret";
+
 /// The workspace cookie jars (one per isolation), with the engine's epoch
 /// that fences what is stored in them. Cloned into an interactive session's
 /// task, which stores its handshake cookies after the `&Engine` it was
@@ -126,22 +128,40 @@ impl CookieJars {
     /// `epoch` (a lock while the request was in flight) or the isolation's
     /// jar was removed since then (its workspace was deleted). A cookie
     /// scoped to a public suffix is not kept (see [`scoped_cookie`]).
-    pub(crate) fn store(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
+    pub(crate) fn store(
+        &self,
+        epoch: SensitiveEpoch,
+        isolation: &str,
+        t: &prepare::Target,
+        r: &ResponseRecord,
+        redactor: &redact::Redactor,
+    ) -> bool {
         let set_cookie = r.header_values("set-cookie");
         if set_cookie.is_empty() {
-            return;
+            return false;
         }
-        let Ok(url) = url::Url::parse(&t.url()) else { return };
+        let Ok(url) = url::Url::parse(&t.url()) else { return false };
         let mut jars = self.jars.lock();
         // Checked under the jars' lock: a lock or a workspace delete either
         // advanced its counter before this point or empties the jar after it.
         if self.epoch.load(Ordering::SeqCst) != epoch.epoch || epoch.jar != Some(jars.generation(isolation)) {
-            return;
+            return false;
         }
         let jar = jars.by_isolation.entry(isolation.to_string()).or_default();
-        for cookie in set_cookie.into_iter().filter_map(|v| scoped_cookie(v, &url)) {
+        let mut skipped_secret_name = false;
+        for v in set_cookie {
+            let secret_name = v.split(';').next().and_then(|pair| pair.split_once('=')).is_some_and(|(name, _)| {
+                let name = name.trim();
+                redactor.text(name) != name || redactor.hides_secret(name)
+            });
+            if secret_name {
+                skipped_secret_name = true;
+                continue;
+            }
+            let Some(cookie) = scoped_cookie(v, &url) else { continue };
             let _ = jar.insert(cookie, &url);
         }
+        skipped_secret_name
     }
 
     fn generation(&self, isolation: &str) -> u64 {
@@ -425,8 +445,15 @@ impl Engine {
     /// Keep the response's cookies in the workspace jar, unless the jar was
     /// cleared since `epoch` (a lock or a workspace delete while the request
     /// was in flight).
-    pub fn store_cookies(&self, epoch: SensitiveEpoch, isolation: &str, t: &prepare::Target, r: &ResponseRecord) {
-        self.cookies.store(epoch, isolation, t, r);
+    pub fn store_cookies(
+        &self,
+        epoch: SensitiveEpoch,
+        isolation: &str,
+        t: &prepare::Target,
+        r: &ResponseRecord,
+        redactor: &redact::Redactor,
+    ) -> bool {
+        self.cookies.store(epoch, isolation, t, r, redactor)
     }
 
     /// The workspace cookie jars, for a session task to store into.
@@ -578,7 +605,9 @@ mod tests {
     #[tokio::test]
     async fn a_cookie_scoped_to_a_public_suffix_is_not_stored() {
         let e = Engine::new();
-        let store = |url: &str, values: &[&str]| e.store_cookies(e.execution_epoch("ws"), "ws", &target(url), &with_set_cookie(values));
+        let store = |url: &str, values: &[&str]| {
+            e.store_cookies(e.execution_epoch("ws"), "ws", &target(url), &with_set_cookie(values), &redact::Redactor::default())
+        };
         let header = |url: &str| e.cookie_header("ws", &target(url));
 
         store("https://www.attacker.com/", &["tld=1; Domain=com", "dotted=1; Domain=.COM", "fqdn=1; Domain=com."]);
