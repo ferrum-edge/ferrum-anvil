@@ -62,7 +62,7 @@ fn rulesets_layer_in_order_and_lint_imported_specs() {
     assert!(err.to_string().contains("info-contact"), "Team overrides a recommended rule: {err}");
     let view = app.standards_view().unwrap();
     assert!(view.rules.iter().any(|r| r.id == "team-summary" && r.ruleset == "Team"));
-    assert_eq!(view.standards.rulesets.len(), 1);
+    assert_eq!(view.rulesets.len(), 1);
 
     // Replacing keeps the id, position and enabled state.
     let v2 = TEAM.replace("version: '3'", "version: '4'");
@@ -129,12 +129,45 @@ fn stored_standards_that_do_not_load_can_still_be_seen_and_removed() {
     app.store.put(anvil_storage::kind::API_RULESET, &bad.id, None, None, 1.0, &bad).unwrap();
     let view = app.standards_view().unwrap();
     assert!(view.error.as_deref().unwrap().contains("version 2"), "{:?}", view.error);
-    assert!(view.rules.is_empty() && view.standards.rulesets.len() == 2);
+    assert!(view.rules.is_empty() && view.rulesets.len() == 2);
+    assert_eq!(view.rulesets[0].load_status, anvil_domain::settings::RulesetLoadStatus::Loaded);
+    assert_eq!(view.rulesets[1].load_status, anvil_domain::settings::RulesetLoadStatus::Error);
+    assert!(view.rulesets[1].error.as_deref().unwrap().contains("version 2"));
     assert!(app.lint_spec(SPEC.as_bytes()).is_err());
     app.remove_api_ruleset(&bad.id).unwrap();
     let view = app.standards_view().unwrap();
     assert!(view.error.is_none());
-    assert_eq!(view.standards.rulesets[0].id, good.id);
+    assert_eq!(view.rulesets[0].id, good.id);
+}
+
+#[test]
+fn standards_view_returns_metadata_and_ruleset_text_is_fetched_by_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let team = app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
+    let disabled = app.add_api_ruleset("overlay.yaml", OVERLAY.as_bytes()).unwrap();
+    app.set_api_ruleset_enabled(&disabled.id, false).unwrap();
+
+    let view = app.standards_view().unwrap();
+    assert!(view.include_recommended);
+    assert_eq!(view.rulesets.len(), 2);
+    assert_eq!(view.rulesets[0].id, team.id);
+    assert_eq!(view.rulesets[0].name, "Team");
+    assert_eq!(view.rulesets[0].file_name, "team.yaml");
+    assert_eq!(view.rulesets[0].version.as_deref(), Some("3"));
+    assert_eq!(view.rulesets[0].size, TEAM.len());
+    assert_eq!(view.rulesets[0].sha256, team.sha256);
+    assert!(view.rulesets[0].enabled);
+    assert_eq!(view.rulesets[0].order, 0);
+    assert_eq!(view.rulesets[0].load_status, anvil_domain::settings::RulesetLoadStatus::Loaded);
+    assert_eq!(view.rulesets[1].load_status, anvil_domain::settings::RulesetLoadStatus::Disabled);
+    let json = serde_json::to_value(&view).unwrap();
+    assert!(json.get("standards").is_none());
+    assert!(json["rulesets"][0].get("text").is_none());
+
+    assert_eq!(app.api_ruleset_text(&team.id).unwrap(), TEAM);
+    assert_eq!(app.api_ruleset_text(&disabled.id).unwrap(), OVERLAY);
+    assert!(app.api_ruleset_text(&anvil_domain::Id::new()).is_err());
 }
 
 #[test]

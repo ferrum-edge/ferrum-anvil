@@ -1693,6 +1693,19 @@ export interface StoredRuleset {
   added_at: string;
   enabled?: boolean;
 }
+/** Metadata for a stored ruleset, without its potentially large source text. */
+export interface StoredRulesetSummary {
+  id: Id;
+  name: string;
+  file_name: string;
+  version?: string | null;
+  size: number;
+  sha256: string;
+  enabled: boolean;
+  order: number;
+  load_status: RulesetLoadStatus;
+  error?: string | null;
+}
 /**
  * API standards settings stored in `AppSettings`.
  *
@@ -3682,6 +3695,8 @@ export interface RulesetSummary {
    */
   sha256: string;
 }
+/** How one stored ruleset participates in the current standards view. */
+export type RulesetLoadStatus = "loaded" | "disabled" | "error";
 /**
  * Counts of every finding, including any dropped past the limit.
  */

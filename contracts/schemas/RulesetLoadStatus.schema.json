@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RulesetLoadStatus",
+  "type": "string",
+  "enum": [
+    "loaded",
+    "disabled",
+    "error"
+  ]
+}

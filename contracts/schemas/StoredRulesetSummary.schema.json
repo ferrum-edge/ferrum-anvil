@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StoredRulesetSummary",
+  "description": "Metadata for a stored ruleset, without its potentially large source text.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id"
+    },
+    "name": {
+      "type": "string"
+    },
+    "file_name": {
+      "type": "string"
+    },
+    "version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "size": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "order": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "load_status": {
+      "$ref": "#/$defs/RulesetLoadStatus"
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "file_name",
+    "size",
+    "sha256",
+    "enabled",
+    "order",
+    "load_status"
+  ],
+  "$defs": {
+    "Id": {
+      "description": "Stable object identifier. UUIDv7 so ids sort roughly by creation time.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "RulesetLoadStatus": {
+      "type": "string",
+      "enum": [
+        "loaded",
+        "disabled",
+        "error"
+      ]
+    }
+  }
+}

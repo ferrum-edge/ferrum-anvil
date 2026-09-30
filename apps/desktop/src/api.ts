@@ -10,7 +10,7 @@ import type {
   Revision,
   RuleInfo,
   RulesetSummary,
-  StoredRuleset,
+  StoredRulesetSummary,
   AttachmentRef,
   Dataset,
   LoadCounts,
@@ -515,10 +515,11 @@ export interface SpecSourceRecord {
 }
 
 // ----------------------------------------------------------- API standards
-export type { ApiStandards, LintReport, RuleInfo, RulesetSummary, StoredRuleset };
+export type { ApiStandards, LintReport, RuleInfo, RulesetSummary, StoredRulesetSummary };
 /** The layered rules in effect (`anvil_app::standards::StandardsView`). */
 export interface StandardsView {
-  standards: ApiStandards;
+  include_recommended: boolean;
+  rulesets: StoredRulesetSummary[];
   sources: RulesetSummary[];
   rules: RuleInfo[];
   /** Rules a later ruleset turned off. */
@@ -792,12 +793,14 @@ export const api = {
   specSources: (workspaceId: string) => call<SpecSourceRecord[]>("spec_sources", { workspaceId }),
 
   standards: () => call<StandardsView>("standards_view"),
+  standardsRulesetText: (rulesetId: string) => call<string>("standards_ruleset_text", { rulesetId }),
   /** Keep the ruleset file chosen in the native dialog (purpose `ruleset`); refused when it does not load with the others. */
-  standardsAdd: (grant: string) => call<StoredRuleset>("standards_add", { grant }),
-  standardsReplace: (rulesetId: string, grant: string) => call<StoredRuleset>("standards_replace", { rulesetId, grant }),
-  standardsRemove: (rulesetId: string) => call<ApiStandards>("standards_remove", { rulesetId }),
-  standardsSetEnabled: (rulesetId: string, enabled: boolean) => call<ApiStandards>("standards_set_enabled", { rulesetId, enabled }),
-  standardsSetRecommended: (include: boolean) => call<ApiStandards>("standards_set_recommended", { include }),
+  standardsAdd: (grant: string) => call<StandardsView>("standards_add", { grant }),
+  standardsReplace: (rulesetId: string, grant: string) => call<StandardsView>("standards_replace", { rulesetId, grant }),
+  standardsRemove: (rulesetId: string) => call<StandardsView>("standards_remove", { rulesetId }),
+  standardsSetEnabled: (rulesetId: string, enabled: boolean) =>
+    call<StandardsView>("standards_set_enabled", { rulesetId, enabled }),
+  standardsSetRecommended: (include: boolean) => call<StandardsView>("standards_set_recommended", { include }),
   lintSpec: (target: LintTarget) => call<LintReport>("standards_lint", { target }),
   /** The import's collection history compared with its description. */
   driftReport: (importId: string) => call<DriftReport>("drift_report", { importId }),
