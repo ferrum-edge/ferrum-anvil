@@ -443,22 +443,27 @@ impl Run<'_> {
         }
         let child = self.cancel.child_token();
         let keep = Mutex::new(None);
-        let exec = http_exec::execute_viewing(self.engine, &c, events, child.clone(), view, Some(&keep));
-        let out = match self.deadline {
-            None => exec.await,
-            Some(d) => {
-                tokio::pin!(exec);
-                let first = tokio::select! {
-                    out = &mut exec => Some(out),
-                    () = tokio::time::sleep_until(d + DEADLINE_GRACE) => None,
-                };
-                match first {
-                    Some(out) => out,
-                    None => {
-                        // Attempts after a redirect or a retry each got the
-                        // whole remainder: end the exchange now.
-                        child.cancel();
-                        exec.await
+        let out = {
+            // Boxed, as `Engine::execute` boxes each protocol's execution: an
+            // HTTP execution's future is large, and the session's future would
+            // otherwise hold one for each of its exchanges. Dropped at the end
+            // of this block, before `keep` is read.
+            let mut exec = Box::pin(http_exec::execute_viewing(self.engine, &c, events, child.clone(), view, Some(&keep)));
+            match self.deadline {
+                None => exec.await,
+                Some(d) => {
+                    let first = tokio::select! {
+                        out = &mut exec => Some(out),
+                        () = tokio::time::sleep_until(d + DEADLINE_GRACE) => None,
+                    };
+                    match first {
+                        Some(out) => out,
+                        None => {
+                            // Attempts after a redirect or a retry each got the
+                            // whole remainder: end the exchange now.
+                            child.cancel();
+                            exec.await
+                        }
                     }
                 }
             }

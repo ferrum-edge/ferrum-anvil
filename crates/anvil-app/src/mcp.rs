@@ -55,7 +55,8 @@ impl App {
         }
         list.assertions.clear();
         list.extractions.clear();
-        let out = self.send(Some(*request_id), ws, Some(list), opts, EventCtx::none(), cancel).await?;
+        // Boxed: the send's future is not held inside this one's.
+        let out = Box::pin(self.send(Some(*request_id), ws, Some(list), opts, EventCtx::none(), cancel)).await?;
         let Some(message) = anvil_engine::mcp::operation_response(&out) else {
             return Err(AppError::Invalid(format!("tools/list got no JSON-RPC response: {}", out.record.outcome.summary)));
         };
