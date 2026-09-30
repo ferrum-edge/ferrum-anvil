@@ -193,7 +193,11 @@ test("ruleset details fetch only that ruleset's text on demand", async () => {
   standards = { ...standards, rulesets: [teamRuleset] };
   render(<ContractView workspaceId="A" notify={notify} />);
   fireEvent.click(await screen.findByText("Team rules"));
-  expect(await screen.findByText("anvil_ruleset: 1\nname: Team rules\nrules: {}\n")).toBeTruthy();
+  const text = "anvil_ruleset: 1\nname: Team rules\nrules: {}\n";
+  const shown = await screen.findByText(
+    (_, element) => element?.tagName === "PRE" && element.textContent === text,
+  );
+  expect(shown).toBeTruthy();
   expect(calls("standards_ruleset_text")).toEqual([{ rulesetId: "r1" }]);
 });
 
