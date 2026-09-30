@@ -8,8 +8,10 @@ use anvil_contract::{DriftOptions, DriftReport, Observation, Spec, analyze, revi
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+/// A fixture with `\n` line endings whatever the checkout's (Windows checks
+/// out CRLF): tests edit fixtures by string replacement.
 fn fixture(name: &str) -> String {
-    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap().replace("\r\n", "\n")
 }
 
 struct Obs(Observation);
@@ -218,6 +220,9 @@ fn applying_the_suggestions_resolves_the_drift_they_cover() {
         let rev = revise(&spec, &r, &all);
         assert!(rev.skipped.is_empty(), "{f}: {:?}", rev.skipped);
         // The revision parses in the original syntax, and so does its JSON Patch.
+        // A CRLF copy of the description revises to the same document.
+        let crlf = Spec::parse(fixture(f).replace('\n', "\r\n").as_bytes()).unwrap();
+        assert_eq!(revise(&crlf, &analyze(&crlf, &traffic(), &DriftOptions::default()), &all).json_patch, rev.json_patch, "{f}");
         let revised = Spec::parse(rev.text.as_bytes()).unwrap_or_else(|e| panic!("{f}: {e}\n{}", rev.text));
         assert_eq!(revised.syntax, spec.syntax);
         assert!(!rev.json_patch.is_empty());
