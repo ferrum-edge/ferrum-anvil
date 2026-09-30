@@ -93,6 +93,7 @@ fn run(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trusted
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     })
 }
 

@@ -212,6 +212,10 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         (_, t) => t,
     };
 
+    // Excerpts a finding quotes from the response are redacted before they
+    // are cut: the findings are redacted again below, but a secret that
+    // crossed a cut would no longer match there.
+    let redact_excerpt = |s: &str| redactor.text(s);
     let diag_input = DiagnosticInput {
         protocol: ctx.spec.protocol,
         method: &a.prepared_method,
@@ -226,6 +230,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         credentials_stripped_on_redirect: a.credentials_stripped,
         protocol_fallback_from: a.protocol_fallback_from.clone(),
         workload: a.workload_api.as_ref(),
+        redact: Some(&redact_excerpt),
     };
     let mut diagnosis = anvil_diagnostics::diagnose(&diag_input);
     for d in a.extra_findings {
@@ -465,6 +470,7 @@ pub fn local_failure_with(
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: workload.as_ref(),
+        redact: Some(&|s: &str| redactor.text(s)),
     });
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let summary = diag.findings.first().map(|x| x.title.clone()).unwrap_or_else(|| "Not sent".into());

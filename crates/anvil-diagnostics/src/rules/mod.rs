@@ -40,6 +40,12 @@ impl<'a> Ctx<'a> {
         self.final_attempt().map(|a| a.index).unwrap_or(0)
     }
 
+    /// At most `max_chars` of a text the finding quotes, redacted before
+    /// it is cut ([`crate::facts::excerpt`]).
+    pub fn excerpt(&self, s: &str, max_chars: usize) -> String {
+        crate::facts::excerpt(self.input.redact, s, max_chars)
+    }
+
     pub fn target_host(&self) -> String {
         self.final_attempt().and_then(|a| url_host(&a.url)).unwrap_or_else(|| "the destination".to_string())
     }

@@ -239,7 +239,7 @@ pub async fn establish_with(
     obs.local_address = local_addr.map(|a| a.to_string());
     let remote_addr = connected.remote;
 
-    let mut io: BoxIo = Box::new(CountingIo::new(connected.stream, stats.clone()));
+    let mut io: BoxIo = Box::new(CountingIo::new(net::AbortableTcp::new(connected.stream, stats.clone()), stats.clone()));
 
     // ---- Proxy tunnel ----
     if let Some(p) = proxy {
@@ -401,7 +401,7 @@ pub async fn establish_resumable(
     let local_addr = connected.stream.local_addr().ok();
     obs.local_address = local_addr.map(|a| a.to_string());
     let remote_addr = connected.remote;
-    let mut io: BoxIo = Box::new(CountingIo::new(connected.stream, stats.clone()));
+    let mut io: BoxIo = Box::new(CountingIo::new(net::AbortableTcp::new(connected.stream, stats.clone()), stats.clone()));
     if let Some(h) = header
         && let Err(f) = write_pre_tls_header(rec, &mut io, &h, local_addr, Some(remote_addr), timeouts, &mut obs).await
     {

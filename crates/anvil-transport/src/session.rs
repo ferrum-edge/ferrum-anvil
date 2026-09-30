@@ -236,6 +236,15 @@ impl Transcript {
         shown
     }
 
+    /// Forget the redacted form of the shared SSE event id. Called at the
+    /// start of every connection attempt: the redactor may know more secrets
+    /// by then (each reconnection is signed afresh, and its credentials are
+    /// registered), so an id the stream keeps across attempts is redacted
+    /// again the next time an event carries it.
+    pub fn reset_shared_metadata(&mut self) {
+        self.shared_id = None;
+    }
+
     fn push(&mut self, m: StreamMessage) {
         self.events.emit(ExecutionEvent::Message { execution_id: self.events.execution_id, message: m.clone() });
         let head_cap = self.limits.max_messages / 2;
@@ -934,6 +943,26 @@ mod tests {
         let last = s.messages.last().unwrap();
         assert!(last.event_id.as_deref().is_some_and(|v| v.starts_with(REDACTED) && !shows_secret_prefix(v)), "{:?}", last.event_id);
         assert_eq!(s.messages[0].event_id.as_deref(), Some(format!("{}…", "k".repeat(METADATA_PREVIEW_BYTES)).as_str()));
+    }
+
+    /// The shared id is redacted once per attempt, with what the redactor
+    /// knows then: after the reset a new attempt makes, a secret learned in
+    /// between (a reconnection's fresh credentials) is caught in it too.
+    #[test]
+    fn a_shared_event_id_is_redacted_afresh_on_each_connection_attempt() {
+        let known: Arc<parking_lot::Mutex<Vec<String>>> = Arc::default();
+        let learned = known.clone();
+        let redact: RedactFn = Arc::new(move |s: &str| learned.lock().iter().fold(s.to_string(), |s, x| s.replace(x.as_str(), REDACTED)));
+        let mut t = Transcript::new(Instant::now(), TranscriptLimits::default(), EventCtx::none(), Some(redact));
+        let id: Arc<str> = Arc::from(format!("id-{SECRET}"));
+        t.event_shared_id(Direction::Received, "event", b"x", Some(&id), "message");
+        // The next attempt's credentials are registered; the stream keeps the same id buffer.
+        known.lock().push(SECRET.to_string());
+        t.reset_shared_metadata();
+        t.event_shared_id(Direction::Received, "event", b"y", Some(&id), "message");
+        let s = t.finish();
+        assert_eq!(s.messages[0].event_id.as_deref(), Some(format!("id-{SECRET}").as_str()), "not a secret when it was shown");
+        assert_eq!(s.messages[1].event_id.as_deref(), Some(format!("id-{REDACTED}").as_str()));
     }
 
     #[test]

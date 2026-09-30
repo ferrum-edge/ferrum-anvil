@@ -597,8 +597,9 @@ const SECRET_FORM_FIELDS: &[&str] =
     &["client_secret", "refresh_token", "code", "code_verifier", "password", "assertion", "client_assertion"];
 
 /// The credentials a token request carries (form fields and the Basic
-/// client secret), longest first, so an error description that echoes one
-/// is redacted before it is cut.
+/// client secret) in every form an issuer may echo them in ([`echo_forms`]),
+/// longest first, so an error description that echoes one is redacted before
+/// it is cut.
 fn request_secrets(form: &[(String, String)], basic: Option<&(String, String)>) -> Vec<Zeroizing<String>> {
     let mut secrets: Vec<Zeroizing<String>> = form
         .iter()
@@ -606,16 +607,53 @@ fn request_secrets(form: &[(String, String)], basic: Option<&(String, String)>) 
         .map(|(_, v)| v)
         .chain(basic.map(|(_, secret)| secret))
         .filter(|v| v.len() >= 4)
-        .map(|v| Zeroizing::new(v.clone()))
+        .flat_map(|v| echo_forms(v.as_str()))
         .collect();
-    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.as_str().cmp(b.as_str())));
+    secrets.dedup_by(|a, b| a.as_str() == b.as_str());
     secrets
 }
 
+/// A credential as sent, and percent-encoded as a URL component (upper- and
+/// lower-case hex) and as a form value: the encoded forms the record's
+/// redactor knows, since the token request sends its credentials
+/// form-encoded and an issuer may echo them that way.
+fn echo_forms(secret: &str) -> Vec<Zeroizing<String>> {
+    let upper = crate::encode_query_component(secret);
+    let lower = lower_hex(&upper);
+    let form: String = url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+    let mut forms = vec![Zeroizing::new(secret.to_string())];
+    for f in [upper, lower, form] {
+        if !forms.iter().any(|x| x.as_str() == f) {
+            forms.push(Zeroizing::new(f));
+        }
+    }
+    forms
+}
+
+/// `encoded` with the hex digits of its percent escapes in lower case.
+fn lower_hex(encoded: &str) -> String {
+    let mut out = String::with_capacity(encoded.len());
+    let mut hex_left = 0;
+    for c in encoded.chars() {
+        if hex_left > 0 {
+            out.push(c.to_ascii_lowercase());
+            hex_left -= 1;
+        } else {
+            if c == '%' {
+                hex_left = 2;
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A remote-supplied description, printable and bounded. The request's own
-/// secrets are replaced before the cut: one that crosses it is replaced
-/// whole, never left as a prefix (the cut never splits the marker either).
-/// The record's redaction then covers every other secret.
+/// secrets (raw or percent-encoded) are replaced before the cut: one that
+/// crosses it is replaced whole, never left as a prefix (the cut never
+/// splits the marker either). The record's redaction then covers every
+/// other secret.
 fn sanitize_text(s: &str, secrets: &[Zeroizing<String>]) -> String {
     let mut text: String = s.chars().filter(|c| !c.is_control()).take(DESCRIPTION_SCAN_CHARS).collect();
     for secret in secrets {
@@ -840,6 +878,27 @@ mod tests {
             assert!(!(4..=secret.len()).any(|n| description.contains(&secret[..n])), "a secret prefix survived the cut");
             assert!(description.starts_with(&format!("{pad}{REDACTED}")), "the secret is replaced whole where it starts");
         }
+    }
+
+    /// An issuer may echo a credential the way the token request sent it,
+    /// form-encoded, or percent-encoded in either case: each form crossing the
+    /// cut is replaced whole too.
+    #[test]
+    fn an_encoded_echo_of_a_secret_crossing_the_description_cut_leaves_no_prefix() {
+        let secret = "Cs+8f/2e client=secret";
+        let form = vec![("client_secret".to_string(), secret.to_string())];
+        let secrets = request_secrets(&form, None);
+        let echoes = ["Cs%2B8f%2F2e%20client%3Dsecret", "Cs%2b8f%2f2e%20client%3dsecret", "Cs%2B8f%2F2e+client%3Dsecret"];
+        for echo in echoes {
+            assert!(secrets.iter().any(|s| s.as_str() == echo), "{echo} is not a known form of the secret");
+            for keep in [4, echo.len() - 1] {
+                let pad = "p".repeat(DESCRIPTION_CHARS - keep);
+                let description = sanitize_text(&format!("{pad}{echo} was refused"), &secrets);
+                assert!(!(4..=echo.len()).any(|n| description.contains(&echo[..n])), "a prefix of {echo} survived the cut");
+                assert!(description.starts_with(&format!("{pad}{REDACTED}")), "{echo} is replaced whole where it starts");
+            }
+        }
+        assert_eq!(secrets.len(), 4, "the secret and its three encoded forms, each once");
     }
 
     #[test]

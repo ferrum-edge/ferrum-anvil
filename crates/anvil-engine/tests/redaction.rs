@@ -275,6 +275,7 @@ fn authorization_endpoint_evidence_is_redacted_as_a_url() {
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        redact: None,
     });
     let mut finding = diagnosis.findings.into_iter().find(|f| f.code == "auth.browser_session_required").expect("login redirect finding");
     assert!(finding.explanation.contains("path%2Dsecret-7f3a"), "precondition: {}", finding.explanation);

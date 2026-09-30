@@ -141,7 +141,8 @@ pub struct Diagnosis {
 
 /// Run every rule over the input and render findings.
 pub fn diagnose(input: &DiagnosticInput<'_>) -> Diagnosis {
-    let body = input.response.map(|r| facts::body_facts(r.body.content_type.as_deref(), input.body)).unwrap_or_default();
+    let body =
+        input.response.map(|r| facts::body_facts_redacted(r.body.content_type.as_deref(), input.body, input.redact)).unwrap_or_default();
     let mut drafts: Vec<Draft> = Vec::new();
     let mut warnings: Vec<OutcomeWarning> = Vec::new();
     let ctx = rules::Ctx { input, body: &body };

@@ -460,9 +460,12 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
         Stop::Failed(f, by) => (by, Some(f)),
     };
     // Close our side (best effort, bounded), unless a write was interrupted:
-    // what it left may be a partial frame, so the connection is dropped
-    // without a TLS close_notify or FIN written after it.
-    if !half_closed && !bound.interrupted.load(Ordering::Relaxed) {
+    // what it left may be a partial frame, so no TLS close_notify is written
+    // and the connection is reset (RST) rather than ended with a FIN, which
+    // the peer would read as the clean end of a complete payload.
+    if bound.interrupted.load(Ordering::Relaxed) {
+        stats.request_abortive_close();
+    } else if !half_closed {
         let _ = tokio::time::timeout(Duration::from_millis(250), wr.shutdown()).await;
     }
     drop((rd, wr));
@@ -650,12 +653,12 @@ mod tests {
     #[tokio::test]
     async fn the_total_deadline_ends_a_scripted_send_without_a_write_deadline() {
         let (addr, held) = peer_that_never_reads().await;
-        // 96 payloads of 1 MiB, far more than socket buffers hold (and if they
+        // 32 payloads of 1 MiB, far more than socket buffers hold (and if they
         // did, the failure would not come from a write). No write deadline:
         // only the total deadline can end the send.
         let chunk = Bytes::from(vec![b'w'; 1 << 20]);
         let mut p = plan(addr, None, Some(500));
-        p.payloads = vec![chunk; 96];
+        p.payloads = vec![chunk; 32];
         let out = session(&p, &CancellationToken::new(), None).await;
         let (kind, phase, message) = failure(&out);
         assert_eq!(kind, FailureKind::TotalTimeout);
@@ -664,12 +667,32 @@ mod tests {
         assert_eq!(out.attempts[0].observation.dispatch, DispatchState::MayHaveBeenSent);
         match out.status {
             ProtocolStatus::Tcp { bytes_sent, closed_by, .. } => {
-                assert!(bytes_sent < 96 << 20, "the stalled payload is not counted as sent");
+                assert!(bytes_sent < 32 << 20, "the stalled payload is not counted as sent");
                 assert_eq!(closed_by, ClosedBy::Timeout);
             }
             other => panic!("not a TCP status: {other:?}"),
         }
         held.abort();
+    }
+
+    /// A write the cancel interrupted may have left a partial payload: the
+    /// connection is reset, so the peer never sees it end cleanly (a FIN
+    /// after what arrived would present a cut payload as complete).
+    #[tokio::test]
+    async fn an_interrupted_write_resets_the_connection_instead_of_ending_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let out = stalled_interactive(&plan(addr, None, None), &cancel_after(500)).await;
+        let (kind, _, message) = failure(&out);
+        assert_eq!(kind, FailureKind::Canceled);
+        assert!(message.contains("while writing the payload"), "{message}");
+        // The peer reads what reached it, then the reset.
+        let mut peer = accepted.await.unwrap();
+        let mut received = Vec::new();
+        let end = tokio::time::timeout(Duration::from_secs(20), peer.read_to_end(&mut received)).await.expect("the peer sees the end");
+        let e = end.expect_err("the connection ended cleanly (FIN) after a partly written payload");
+        assert!(matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted), "{e:?}");
     }
 
     #[tokio::test]
