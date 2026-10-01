@@ -551,10 +551,10 @@ mod tests {
     /// The `ai_prompt_shield` MCP refusals new in 0.9.10 (a non-UTF-8 request
     /// charset, an unparseable body that may carry a tool call) match from
     /// their public body in the 0.9.10 catalog only. The content-encoding
-    /// message existed at 0.9.9 but only the 0.9.10 catalog records it.
+    /// message existed at 0.9.9 and matches both that catalog and 0.9.10's.
     #[test]
     fn outcomes_new_in_0_9_10_match_only_their_own_catalog() {
-        for reason in ["unsupported_charset", "jsonrpc_request_unparseable", "unsupported_content_encoding"] {
+        for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
             let text = format!(r#"{{"error":"MCP request body could not be inspected","message":"{reason}"}}"#);
             let bf = body_facts(Some("application/json"), text.as_bytes());
             let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None };
@@ -563,6 +563,14 @@ mod tests {
             assert_eq!(ids(newest), ["plugin.ai_prompt_shield.mcp_body_uninspectable"], "{reason}");
             assert!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()).is_empty(), "{reason}");
         }
+
+        let text = r#"{"error":"MCP request body could not be inspected","message":"unsupported_content_encoding"}"#;
+        let bf = body_facts(Some("application/json"), text.as_bytes());
+        let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None };
+        let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(catalog_for("ferrum-edge-0.9.10").unwrap()), ["plugin.ai_prompt_shield.mcp_body_uninspectable"]);
+        assert_eq!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()), ["plugin.ai_prompt_shield.mcp_body_uninspectable"]);
+        assert!(ids(catalog_for("ferrum-edge-0.9.8").unwrap()).is_empty());
     }
 
     #[test]

@@ -223,7 +223,7 @@ Anvil embeds one source-audited catalog per supported gateway release:
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
 | `ferrum-edge-0.9.10` (default for new profiles) | v0.9.10, `ee040d5` | **553** | [audit/gateway-0.9.10-delta.md](audit/gateway-0.9.10-delta.md) (delta on top of the 0.9.9 audit) |
-| `ferrum-edge-0.9.9` | v0.9.9, `234717c` | **552** | [audit/gateway-0.9.9-delta.md](audit/gateway-0.9.9-delta.md) (delta on top of the 0.9.8 audit) |
+| `ferrum-edge-0.9.9` | v0.9.9, `234717c` | **553** | [audit/gateway-0.9.9-delta.md](audit/gateway-0.9.9-delta.md) (delta on top of the 0.9.8 audit) |
 | `ferrum-edge-0.9.8` | v0.9.8, `e27f210` | **540** | [audit/gateway-0.9.8-delta.md](audit/gateway-0.9.8-delta.md) (delta on top of the 0.9.7 audit) |
 | `ferrum-edge-0.9.7` | v0.9.7, `8fed134` | **538** | [audit/gateway-0.9.7-delta.md](audit/gateway-0.9.7-delta.md) (delta on top of the 0.9.5 audit) |
 | `ferrum-edge-0.9.5` | v0.9.5, `20e7603` | **528** | [audit/gateway-source-audit.md](audit/gateway-source-audit.md) |
@@ -456,8 +456,9 @@ only presentation; every card shows its own confidence.
   catalogs, outcomes new in 0.9.9 (the `;` path-parameter refusal, MCP tool-call
   rate limits) do not match the 0.9.8 catalog, the `ai_prompt_shield` MCP
   refusals new in 0.9.10 (non-UTF-8 charset, unparseable body) match only the
-  0.9.10 catalog, release notes follow the profile's release, and an unknown
-  release gets no catalog.
+  0.9.10 catalog, and the v0.9.9 content-encoding refusal matches the 0.9.9
+  and 0.9.10 catalogs but not 0.9.8. Release notes follow the profile's
+  release, and an unknown release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
   (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,

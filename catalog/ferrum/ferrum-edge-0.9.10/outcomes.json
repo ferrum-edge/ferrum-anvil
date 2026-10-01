@@ -29503,7 +29503,7 @@
       "remediation": "Caller: send the MCP request as plain UTF-8 JSON (no charset parameter, or charset=utf-8), without a byte-order mark, comments or other non-standard JSON, and without a content encoding; operator can confirm the reason in the transaction metadata (ai_shield_rejected).",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "The message is the bare reason code, the same value the transaction metadata records as ai_shield_rejected. unsupported_charset and jsonrpc_request_unparseable are new in v0.9.10; unsupported_content_encoding already existed at v0.9.9 (src/plugins/ai_prompt_shield.rs:1858@234717c) but the 0.9.9 catalog does not record it, and that catalog stays as audited. For the two new reasons warn mode forwards the request and records ai_shield_warnings=<reason> (no client signal); the content-encoding refusal applies in warn mode too. ai_prompt_shield (priority 2925) runs before mcp_gateway (2992): for the same non-UTF-8 charset an enforcing shield answers this 400, and mcp_gateway alone answers -32600 (plugin.mcp_gateway.invalid_request). Bodies not recognizable as a document that could carry a tools/call (an empty bridged body, a REST body, base64 grpc-web-text, malformed JSON naming no call) still pass uninspected. Body family: plain_error_json"
+      "notes": "The message is the bare reason code, the same value the transaction metadata records as ai_shield_rejected. unsupported_charset and jsonrpc_request_unparseable are new in v0.9.10; unsupported_content_encoding already existed at v0.9.9 (src/plugins/ai_prompt_shield.rs:1858@234717c). The original 0.9.9 catalog omitted it; issue #282 backfilled it into the current 0.9.9 catalog. For the two new reasons warn mode forwards the request and records ai_shield_warnings=<reason> (no client signal); the content-encoding refusal applies in warn mode too. ai_prompt_shield (priority 2925) runs before mcp_gateway (2992): for the same non-UTF-8 charset an enforcing shield answers this 400, and mcp_gateway alone answers -32600 (plugin.mcp_gateway.invalid_request). Bodies not recognizable as a document that could carry a tools/call (an empty bridged body, a REST body, base64 grpc-web-text, malformed JSON naming no call) still pass uninspected. Body family: plain_error_json"
     }
   ],
   "drift": [
@@ -29563,9 +29563,9 @@
       "change_id": "catalog_gaps_backfilled",
       "kind": "catalog_fix",
       "refs": "v0.9.9 -> v0.9.10",
-      "client_visible_effect": "Not a gateway change: ai_prompt_shield scan_fields: mcp_arguments already answered a non-identity Content-Encoding with 400 {\"error\":\"MCP request body could not be inspected\",\"message\":\"unsupported_content_encoding\"} at v0.9.9, uncatalogued. It is recorded in the 0.9.10 catalog only, as a message of plugin.ai_prompt_shield.mcp_body_uninspectable; the 0.9.9 catalog stays as audited.",
+      "client_visible_effect": "Not a gateway change: ai_prompt_shield scan_fields: mcp_arguments already answered a non-identity Content-Encoding with 400 {\"error\":\"MCP request body could not be inspected\",\"message\":\"unsupported_content_encoding\"} at v0.9.9, uncatalogued in the original 0.9.9 catalog. It is recorded in the 0.9.10 catalog as a message of plugin.ai_prompt_shield.mcp_body_uninspectable, and issue #282 backfilled the outcome into the current 0.9.9 catalog.",
       "evidence": "src/plugins/ai_prompt_shield.rs:1858@234717c, :498@234717c",
-      "anvil_impact": "Documentation accuracy; the 0.9.9 catalog is unchanged.",
+      "anvil_impact": "Documentation accuracy and per-release catalog matching; no gateway behavior changed.",
       "outcome_ids": [
         "plugin.ai_prompt_shield.mcp_body_uninspectable"
       ]

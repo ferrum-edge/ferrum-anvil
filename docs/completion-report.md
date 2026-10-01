@@ -40,7 +40,7 @@ pass.
 - **Evidence-based diagnostics.**
   - Deterministic rules run over typed evidence.
   - Each finding has a confidence (confirmed/likely/unknown/conflicting), a scope (the leg it concerns), an owner, what it does not prove, alternatives and next steps.
-  - Source-audited catalogs back the Ferrum-specific findings: 553 Ferrum Edge 0.9.10 outcomes, 552 Ferrum Edge 0.9.9 outcomes, 540 Ferrum Edge 0.9.8 outcomes, 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
+  - Source-audited catalogs back the Ferrum-specific findings: 553 Ferrum Edge 0.9.10 outcomes, 553 Ferrum Edge 0.9.9 outcomes, 540 Ferrum Edge 0.9.8 outcomes, 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
   - Markers count only for declared gateways and are capped at "likely". The coarse `X-Gateway-Error` values (seven in 0.9.5 and 0.9.7; eight from 0.9.8 with `request_timeout`) are never refined into precise causes.
   - No cloud service or LLM is involved.
   - See `docs/diagnostics.md` and `catalog/`.

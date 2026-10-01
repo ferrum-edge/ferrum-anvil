@@ -5,7 +5,7 @@
 | Compatibility ids | `ferrum-edge-0.9.5`, `ferrum-edge-0.9.7`, `ferrum-edge-0.9.8` (unchanged) and `ferrum-edge-0.9.9` (new, the default for new profiles and the lab's default pin) |
 | Releases compared | tag `v0.9.8` = `e27f2109216352c3fe9e67a7014611f3f66daa91` (`e27f210`) → tag `v0.9.9` = `234717ce41965cd1e2b5c6c761a25475c5d7628c` (`234717c`, the merge commit of release PR #5953) |
 | Audit date | 2026-10-01 |
-| Machine-readable inventory | [`catalog/ferrum/ferrum-edge-0.9.9/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.9/outcomes.json): **552** outcomes (540 + 12 added, none removed), 16 changed, 1,404 source citations |
+| Machine-readable inventory | [`catalog/ferrum/ferrum-edge-0.9.9/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.9/outcomes.json): **553** outcomes (540 + 13 added, none removed), 16 changed, 1,406 source citations |
 | Baseline audit | [`gateway-0.9.8-delta.md`](gateway-0.9.8-delta.md) and [`catalog/ferrum/ferrum-edge-0.9.8/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.8/outcomes.json) |
 | Source diff | 129 files under `src/` differ; 27,607 insertions and 3,989 deletions (`src/plugins/mcp_gateway.rs` 2,403 changed lines, `src/proxy/mod.rs` 2,103, `src/diagnostic_ref.rs` 2,097 new, `src/proxy/gateway_listener.rs` 1,901) |
 | Wire libraries | rustls 0.23.45, hyper 1.9.0, h2 0.4.19, h3 0.0.8, quinn 0.11.9, reqwest 0.13.3 and hyper-util 0.1.21 unchanged in `Cargo.lock`; hyper is now vendored with three Ferrum patches (`vendor/hyper-1.9.0-ferrum-patched/`: the upgraded-stream `CONNECT_ERROR` reset, the HTTP/2 body-pipe capacity claim, the HTTP/1 TLS read-ahead) |
@@ -208,3 +208,16 @@ no explicit port to the mesh Sidecar inbound listener.
 - The admission re-check `-32014`: it needs a plugin that rewrites an MCP request after admission.
 - Library-owned details (HTTP/2 and HTTP/3 reset codes, FIN vs RST, HTTP/1 framing) belong to the
   vendored hyper, h2, h3 and quinn.
+
+## Addendum: catalog gap backfilled for issue #282
+
+The original v0.9.9 audit omitted an `ai_prompt_shield` refusal already
+present in that release. With `scan_fields: mcp_arguments`, a non-identity
+`Content-Encoding` on an in-scope MCP POST is refused with HTTP 400 and
+`{"error":"MCP request body could not be inspected","message":"unsupported_content_encoding"}`
+before dispatch, including when the action is `warn`. The body builder is at
+`src/plugins/ai_prompt_shield.rs:498`, and the refusal is at `:1858` in
+Ferrum Edge v0.9.9 (`234717c`). The catalog now records this as
+`plugin.ai_prompt_shield.mcp_body_uninspectable`; this is a catalog correction,
+not a gateway behavior change. The 0.9.10 catalog also records the two newer
+reasons, `unsupported_charset` and `jsonrpc_request_unparseable`.

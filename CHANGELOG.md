@@ -13,11 +13,11 @@
   still carry a tool call (GHSA-f2jp-59r9-fp64), and records that
   `mcp_gateway` answers a non-UTF-8 charset with its JSON-RPC `-32600`.
   It also records `unsupported_content_encoding`, a refusal Edge has sent
-  since v0.9.9 that the 0.9.9 catalog does not record (backfilled in 0.9.10
-  only, as the 0.9.8 catalog did for its gaps).
-  Profiles declaring an older release do not match the new refusals.
+  since v0.9.9. Issue #282 backfills it into the 0.9.9 catalog as well; the
+  0.9.8 catalog still does not match it. Profiles declaring v0.9.9 match this
+  existing refusal but do not match the two new v0.9.10 refusals.
 - Diagnostics: a `ferrum-edge-0.9.9` compatibility catalog for Ferrum Edge
-  v0.9.9 (552 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
+  v0.9.9 (553 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
   It knows the release's new public signals: the `400` refusals of an empty
   path segment and of a `;` path parameter on a route without
   `allow_path_parameters` (GHSA-fcqw-793q-wg5x), the `421 Misdirected

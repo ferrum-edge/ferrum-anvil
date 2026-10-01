@@ -5,7 +5,7 @@
 | Compatibility ids | `ferrum-edge-0.9.5`, `ferrum-edge-0.9.7`, `ferrum-edge-0.9.8`, `ferrum-edge-0.9.9` (unchanged) and `ferrum-edge-0.9.10` (new, the default for new profiles and the lab's default pin) |
 | Releases compared | tag `v0.9.9` = `234717ce41965cd1e2b5c6c761a25475c5d7628c` (`234717c`) → tag `v0.9.10` = `ee040d5e3281fde424aa65f5b18004852c5b53b0` (`ee040d5`, the merge commit of release PR #5956) |
 | Audit date | 2026-10-01 |
-| Machine-readable inventory | [`catalog/ferrum/ferrum-edge-0.9.10/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.10/outcomes.json): **553** outcomes (552 + 1 added, none removed), 2 changed, 1,416 source citations |
+| Machine-readable inventory | [`catalog/ferrum/ferrum-edge-0.9.10/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.10/outcomes.json): **553** outcomes (553 carried, none added or removed), 2 changed, 1,416 source citations |
 | Baseline audit | [`gateway-0.9.9-delta.md`](gateway-0.9.9-delta.md) and [`catalog/ferrum/ferrum-edge-0.9.9/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.9/outcomes.json) |
 | Source diff | 4 files under `src/` differ; 412 insertions and 62 deletions (`src/plugins/ai_prompt_shield.rs` +166/−15, `src/plugins/ai_transcript_audit.rs` +121/−46, `src/plugins/utils/mcp_jsonrpc.rs` +113, `src/plugins/mcp_gateway.rs` +12/−1) |
 | Merges | #5954 (`7b42fe4`, "Fail closed on uninspectable MCP prompt-shield batches"; GHSA-4f9m-cfqg-fhx9, GHSA-f2jp-59r9-fp64) and the release PR #5956 (`9dae5c9`, `ee040d5`) |
@@ -19,7 +19,7 @@ All `path:line` citations below are at `v0.9.10` (`ee040d5`) unless marked other
 
 - **Read-only.** Both tags were read with `git show` / `git diff` from a clone of
   `ferrum-edge/ferrum-edge`. The gateway repository was never checked out, built or run.
-- **Mechanical carry-forward.** Every source citation of the 552 carried outcomes was remapped
+- **Mechanical carry-forward.** Every source citation of the 553 carried outcomes was remapped
   through the `v0.9.9..v0.9.10` line map of its file. Only the four files above differ; 57
   citations point into them, and none landed in a changed hunk. The cited line text is identical in
   both trees. The prose `path:line` references to those files were remapped the same way
@@ -41,8 +41,10 @@ All `path:line` citations below are at `v0.9.10` (`ee040d5`) unless marked other
   `docs/plugins.md`.
 - **Mechanical checks of the result.** The catalog was generated from the 0.9.9 catalog by a script
   that refuses any citation landing in a changed hunk and checks the text of every new citation.
-  Every public body of the new outcome was matched against all 0.9.9 and 0.9.10 outcomes: it matches
-  only the new outcome, and only in the 0.9.10 catalog. The drift test
+  The public bodies for the two new refusal reasons were matched against all 0.9.9 and 0.9.10
+  outcomes: they match only `plugin.ai_prompt_shield.mcp_body_uninspectable` in the 0.9.10 catalog.
+  The pre-existing `unsupported_content_encoding` reason also matches the 0.9.9 catalog after
+  issue #282 backfilled that catalog. The drift test
   (`crates/anvil-diagnostics/tests/catalog_drift.rs`) checks the five catalogs for internal
   consistency in CI.
 - **Not verified live.** This change was prepared without running the lab or any test. GitHub CI
@@ -91,9 +93,10 @@ The three reasons:
   records `ai_shield_warnings=jsonrpc_request_unparseable` and forwards the request.
 - **`unsupported_content_encoding`**. Not new: v0.9.9 already refused a non-identity
   `Content-Encoding` with this body, in every action including `warn`
-  (`src/plugins/ai_prompt_shield.rs:1858@234717c`). The 0.9.9 catalog did not record it. It is
-  recorded here as the outcome's third reason (`drift` `catalog_gaps_backfilled`, the precedent of
-  the 0.9.8 catalog), and the 0.9.9 catalog stays as audited.
+  (`src/plugins/ai_prompt_shield.rs:1858@234717c`). At the time of this audit, the 0.9.9 catalog
+  did not record it, so this entry noted the gap using the 0.9.8 precedent. Issue #282 backfilled
+  it into the 0.9.9 catalog too; see the addendum to
+  [`gateway-0.9.9-delta.md`](gateway-0.9.9-delta.md).
 
 `ai_prompt_shield` runs at priority 2925, before `mcp_gateway` at 2992. On a route with both, an
 enforcing shield answers this 400 for a non-UTF-8 charset; without the shield, `mcp_gateway`
@@ -118,9 +121,10 @@ their arguments when the body is within the scan ceiling.
 ## Anvil changes this delta drives
 
 - **Catalogs.** `anvil_diagnostics::ferrum` embeds `ferrum-edge-0.9.10` and makes it the default for
-  new profiles (desktop dialog, CLI `--trust-ferrum`). The new refusal matches only a profile
-  declaring `ferrum-edge-0.9.10`. A new unit test, `outcomes_new_in_0_9_10_match_only_their_own_catalog`,
-  checks all three messages against the 0.9.10 and 0.9.9 catalogs.
+  new profiles (desktop dialog, CLI `--trust-ferrum`). The two new reasons match only a profile
+  declaring `ferrum-edge-0.9.10`; the content-encoding refusal matches profiles declaring 0.9.9 or
+  0.9.10, but not 0.9.8. The unit test `outcomes_new_in_0_9_10_match_only_their_own_catalog`
+  checks these release boundaries.
 - **Wording.** No new finding codes: the new outcome is worded from the catalog through
   `ferrum.outcome`, and no `X-Gateway-Error` token is new.
 - **Contracts.** No re-vendoring: `PIN` stays `contracts-edge-0.9.9`. The contract drift test
