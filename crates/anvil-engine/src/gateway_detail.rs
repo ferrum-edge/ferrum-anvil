@@ -302,6 +302,11 @@ impl Lookup<'_> {
 /// Look up the reference of a recorded response again, exactly as an
 /// execution's own lookup does (for example after the gateway's retention
 /// ended). `attempt` is the recorded attempt that produced `response`.
+///
+/// Callers must take `access` from an [`ExecutionContext`] built by
+/// `App::build_context`, never from a stored profile directly: that is where a
+/// restored workspace's lookups are paused until device identity is allowed
+/// again, and passing stored access here would skip that seal.
 pub async fn lookup_recorded(
     engine: &Engine,
     ctx: &ExecutionContext,
