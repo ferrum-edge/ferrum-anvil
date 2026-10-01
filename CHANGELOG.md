@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-01
+
+### Changed
+
+- No functional changes. Released to exercise the in-app upgrade from 0.1.0
+  (signed update, verified and installed by the app).
+
 ## [0.1.0] - 2026-10-01
 
 ### Changed
