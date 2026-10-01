@@ -117,6 +117,19 @@ cargo run -p anvil-lab -- up core                 # keep a lab up for manual tes
 | What's built and what's open | [docs/completion-report.md](docs/completion-report.md) |
 | Sample workspace | [samples/](samples/) |
 
+## Contracts
+
+Ferrum Edge contracts are maintained in the organization's central store:
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts), which
+publishes shared vocabularies, JSON schemas and fixtures.
+Anvil consumes gateway vocabularies and headers, the DiagnosticFinding schema
+and fixtures, and the diagnostic-ref v1 schema and fixtures.
+These files are pinned to `contracts-edge-0.9.9` in
+[`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and vendored
+under [`contracts/ferrum-contracts`](contracts/ferrum-contracts).
+See [docs/ferrum-contracts.md](docs/ferrum-contracts.md) for the detailed pin and update process.
+Shared contract changes belong in ferrum-contracts first, then are re-vendored here; they are never edited locally.
+
 ## License
 
 Free for noncommercial use under [PolyForm Noncommercial 1.0.0](LICENSE).

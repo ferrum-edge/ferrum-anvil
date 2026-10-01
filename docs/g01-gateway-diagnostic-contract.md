@@ -34,8 +34,9 @@ The contract is implemented in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767
 [`docs/admin_api.md` "Diagnostic References"](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/admin_api.md#diagnostic-references),
 [`docs/error_classification.md`](https://github.com/ferrum-edge/ferrum-edge/blob/v0.9.9/docs/error_classification.md#gateway-diagnostic-references),
 `src/diagnostic_ref.rs`, the `DiagnosticRefLookup` schemas in `openapi.yaml`,
-and the `ferrum.diagnostic_ref.v1` schema in `ferrum-contracts`
-`contracts-edge-0.9.9` (vendored by Anvil under
+and the `ferrum.diagnostic_ref.v1` schema in
+[`ferrum-contracts` at `contracts-edge-0.9.9`](https://github.com/ferrum-edge/ferrum-contracts/tree/contracts-edge-0.9.9)
+(vendored by Anvil under
 `contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json`, with its
 fixtures).
 
