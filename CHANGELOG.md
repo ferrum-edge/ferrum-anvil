@@ -30,7 +30,16 @@
   hint), rate-limited, malformed and mismatched lookups are reported and keep
   the public evidence's confidence. The header alone is never trusted, and
   the token is sent only to the admin listener, redacted, and never logged
-  or recorded.
+  or recorded. The admin URL must be `https` (always verified, whatever the
+  request's TLS profile bypasses or overrides) or plain `http` to a loopback
+  address literal, or the lookup is refused before sending; it is bounded
+  at 2 s to connect and 5 s in all, retries once when the record has no
+  detail yet, and never follows a redirect. A record must carry every key
+  the schema requires, and one with an error class outside the pinned
+  vocabulary is capped at likely. Bundle imports drop gateway profiles'
+  lookups with a warning (full backups keep them), an imported profile that
+  covers an existing profile's hosts is reported, and a record names the
+  profile used when several match its destination.
 - Failure matrix: TRUST-009 (cross-tenant lookup), TRUST-010 (expired
   reference) and TRUST-011 (spoofed reference) are no longer blocked: engine
   tests cover them, and on Ferrum Edge v0.9.9 and later the lab's `core`

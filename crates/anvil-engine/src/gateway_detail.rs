@@ -1,15 +1,22 @@
 //! Ferrum Edge diagnostic reference lookups (G01; Ferrum Edge v0.9.9 and
 //! later): `GET <admin base URL>/diagnostics/v1/refs/<ref>` with the trusted
 //! gateway profile's lookup credential, through the engine transport (the
-//! request's TLS profile, proxy, DNS and timeouts, never a separate client).
+//! request's DNS settings and trust roots, never a separate client).
 //!
 //! A lookup runs only for a destination the user declared as a Ferrum gateway
 //! with a lookup configured, and only for a well-formed reference on its
-//! final response. The credential is a sensitive value (a vault secret or a
-//! template) resolved for the lookup alone: it is sent only to the configured
-//! admin listener, added to the execution's redactor, and never logged or
-//! recorded. The record is checked and bound to the response before the rules
-//! see it ([`anvil_diagnostics::gateway_detail`]).
+//! final response. It is refused before anything is sent unless the admin
+//! listener is reached over verified TLS (`https`, whatever the request's own
+//! TLS profile bypasses or overrides), or over plain HTTP straight to a
+//! loopback address literal. It is bounded on its own: connect within
+//! [`CONNECT_MS`], everything within [`TOTAL_MS`] (or the request's shorter
+//! timeouts).
+//!
+//! The credential is a sensitive value (a vault secret or a template)
+//! resolved for the lookup alone: it is sent only to the configured admin
+//! listener, added to the execution's redactor, and never logged or recorded.
+//! The record is checked and bound to the response before the rules see it
+//! ([`anvil_diagnostics::gateway_detail`]).
 
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::prepare::{self, Target};
@@ -17,16 +24,25 @@ use crate::redact::Redactor;
 use crate::vars::Resolver;
 use crate::{Engine, SensitiveEpoch};
 use anvil_diagnostics::gateway_detail::{self as gd, Binding, GatewayDetail, LookupOutcome, ResponseRef};
-use anvil_domain::execution::{AttemptReason, ResponseRecord, TlsVerification};
+use anvil_domain::execution::{AttemptObservation, AttemptReason, ResponseRecord, TlsVerification};
 use anvil_domain::integration::DiagnosticDetailAccess;
-use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy, Limits};
+use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy, Limits, Timeouts};
 use anvil_transport::dns::DnsConfig;
 use anvil_transport::http::HttpPlan;
 use anvil_transport::recorder::EventCtx;
+use anvil_transport::tls::{PreparedTls, TlsSettings};
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
+
+/// Connect bound of a lookup (or the request's connect timeout, if shorter).
+pub const CONNECT_MS: u64 = 2_000;
+/// Bound of a whole lookup, a retry included (or the request's timeouts, if shorter).
+pub const TOTAL_MS: u64 = 5_000;
+/// Wait before asking once more for a record whose detail is not recorded yet.
+pub const DETAIL_RETRY_MS: u64 = 250;
 
 /// One execution's lookup context.
 pub(crate) struct Lookup<'a> {
@@ -37,14 +53,52 @@ pub(crate) struct Lookup<'a> {
     pub resolver: &'a Resolver,
 }
 
+/// One lookup request: where it goes, with which credential, for which response.
+struct AdminRequest<'a> {
+    target: &'a Target,
+    endpoint: &'a str,
+    authorization: &'a http::HeaderValue,
+    binding: &'a Binding,
+}
+
+/// Whether the admin listener may be asked at all: over `https` (always
+/// verified), or over plain HTTP straight to a loopback address literal
+/// (127.0.0.0/8 or ::1). Decided from the URL alone, before anything is sent.
+fn admin_channel_allowed(t: &Target) -> Result<(), String> {
+    if t.scheme == "https" || t.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
+        return Ok(());
+    }
+    Err(format!(
+        "refused before sending: a plain-HTTP admin URL is allowed only to a loopback address (127.0.0.0/8 or ::1), not {}; use https",
+        t.host
+    ))
+}
+
+/// The request's timeouts, each bounded for a lookup: connect by
+/// [`CONNECT_MS`], every other phase and the whole attempt by `total_ms`. A
+/// timeout the request leaves off is the bound itself.
+fn bounded(t: Timeouts, total_ms: u64) -> Timeouts {
+    let cap = |v: Option<u64>, max: u64| Some(v.filter(|v| *v > 0).map_or(max, |v| v.min(max)));
+    Timeouts {
+        dns_ms: cap(t.dns_ms, total_ms),
+        connect_ms: cap(t.connect_ms, CONNECT_MS.min(total_ms)),
+        tls_handshake_ms: cap(t.tls_handshake_ms, total_ms),
+        request_write_ms: cap(t.request_write_ms, total_ms),
+        response_headers_ms: cap(t.response_headers_ms, total_ms),
+        body_idle_ms: cap(t.body_idle_ms, total_ms),
+        total_ms: cap(t.total_ms, total_ms),
+    }
+}
+
 impl Lookup<'_> {
-    /// Look up the reference `response` carries. `sent_at` is when the request
-    /// that produced it was sent; `redactor` learns the credential.
+    /// Look up the reference `response` carries. `attempt` is the recorded
+    /// attempt that produced it (its start and end bound the record's
+    /// creation time); `redactor` learns the credential.
     pub(crate) async fn run(
         &self,
         access: &DiagnosticDetailAccess,
         response: &ResponseRecord,
-        sent_at: DateTime<Utc>,
+        attempt: &AttemptObservation,
         redactor: &mut Redactor,
         cancel: &CancellationToken,
     ) -> GatewayDetail {
@@ -53,7 +107,9 @@ impl Lookup<'_> {
             ResponseRef::Invalid(value) => return GatewayDetail::InvalidReference { value: redactor.text(&value) },
             ResponseRef::Present(r) => r,
         };
-        let binding = Binding::new(response, reference.clone(), access.namespace.as_deref(), sent_at, Utc::now());
+        let took = chrono::Duration::microseconds(i64::try_from(attempt.duration_us).unwrap_or(i64::MAX));
+        let completed = attempt.started_at.checked_add_signed(took).unwrap_or(attempt.started_at);
+        let binding = Binding::new(response, reference.clone(), access.namespace.as_deref(), attempt.started_at, completed);
         let (endpoint, channel_authenticated, outcome) = self.ask(access, &binding, redactor, cancel).await;
         GatewayDetail::Looked { reference: reference.value, endpoint, channel_authenticated, outcome }
     }
@@ -89,6 +145,9 @@ impl Lookup<'_> {
         if !base.query.is_empty() {
             return (endpoint, false, failed("the admin URL must not have a query".into()));
         }
+        if let Err(reason) = admin_channel_allowed(&base) {
+            return (endpoint, false, failed(reason));
+        }
         let token = match self.credential(access) {
             Ok(t) => t,
             Err(reason) => return (endpoint, false, failed(reason)),
@@ -101,23 +160,52 @@ impl Lookup<'_> {
         authorization.set_sensitive(true);
         let path = format!("{}{}{}", base.path.trim_end_matches('/'), gd::LOOKUP_PATH, binding.reference.value);
         let target = Target { path, query: String::new(), ..base };
-        let plan = match self.plan(&target, &endpoint, authorization) {
+        let request = AdminRequest { target: &target, endpoint: &endpoint, authorization: &authorization, binding };
+        let started = Instant::now();
+        let first = self.once(&request, TOTAL_MS, redactor, cancel).await;
+        // Ferrum Edge records the detail when the request's transaction ends
+        // (a streamed response when its body ends): a record without it is
+        // asked for once more, shortly, within the same overall bound.
+        let pending = matches!(&first.1, LookupOutcome::Resolved(view) if view.detail.is_none());
+        let spent = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX).saturating_add(DETAIL_RETRY_MS);
+        let budget = TOTAL_MS.saturating_sub(spent);
+        if !pending || budget == 0 || cancel.is_cancelled() {
+            return (endpoint, first.0, first.1);
+        }
+        tokio::time::sleep(Duration::from_millis(DETAIL_RETRY_MS)).await;
+        let again = self.once(&request, budget, redactor, cancel).await;
+        // Only a bound record replaces the first one.
+        let (channel_authenticated, outcome) = if matches!(again.1, LookupOutcome::Resolved(_)) { again } else { first };
+        (endpoint, channel_authenticated, outcome)
+    }
+
+    /// One lookup request within `budget_ms`: (channel authenticated, outcome).
+    async fn once(
+        &self,
+        request: &AdminRequest<'_>,
+        budget_ms: u64,
+        redactor: &Redactor,
+        cancel: &CancellationToken,
+    ) -> (bool, LookupOutcome) {
+        let failed = |reason: String| LookupOutcome::Failed { reason };
+        let plan = match self.plan(request, budget_ms) {
             Ok(p) => p,
-            Err(reason) => return (endpoint, false, failed(reason)),
+            Err(reason) => return (false, failed(reason)),
         };
         let mut outs = self.engine.http.execute(&plan, 0, AttemptReason::Initial, &EventCtx::none(), cancel).await;
-        let Some(out) = outs.pop() else { return (endpoint, false, failed("the lookup made no attempt".into())) };
+        let Some(out) = outs.pop() else { return (false, failed("the lookup made no attempt".into())) };
         // Only verified TLS, or a direct loopback connection, authenticates
         // who answered the lookup.
-        let channel_authenticated = out.observation.connection.as_ref().is_some_and(|c| {
-            c.tls.as_ref().is_some_and(|t| matches!(t.verification, TlsVerification::Verified)) || gd::direct_loopback(c)
-        });
+        let channel_authenticated =
+            out.observation.connection.as_ref().is_some_and(|c| {
+                c.tls.as_ref().is_some_and(|t| matches!(t.verification, TlsVerification::Verified)) || gd::direct_loopback(c)
+            });
         let outcome = match (out.response, out.observation.failure) {
             (_, Some(f)) => failed(format!("the lookup failed ({:?}): {}", f.kind, redactor.text(&f.message))),
             (None, None) => failed("the lookup returned no response".into()),
             (Some(r), None) => match r.status {
                 200 => match gd::parse_view(&out.body) {
-                    Ok(view) => match gd::check_binding(&view, binding) {
+                    Ok(view) => match gd::check_binding(&view, request.binding) {
                         Ok(()) => LookupOutcome::Resolved(Box::new(view)),
                         Err(m) => LookupOutcome::Mismatch(m),
                     },
@@ -129,37 +217,63 @@ impl Lookup<'_> {
                     LookupOutcome::NotFound { owner_replica: owner }
                 }
                 429 => LookupOutcome::RateLimited,
+                // Redirects are never followed: the credential goes to the configured listener only.
                 s => failed(format!("the lookup answered HTTP {s}")),
             },
         };
-        (endpoint, channel_authenticated, outcome)
+        (channel_authenticated, outcome)
     }
 
-    fn plan(&self, target: &Target, endpoint: &str, authorization: http::HeaderValue) -> Result<HttpPlan, String> {
-        let mut inferred = vec![];
-        let tls = if target.scheme == "https" {
-            let choice = crate::http_exec::tls_for(self.engine, self.epoch, self.ctx, self.settings, target, &mut inferred);
-            Some(choice.map_err(|e| format!("TLS for the lookup could not be prepared: {}", e.message))?.0)
+    /// TLS for the admin listener: always verified, with the trust roots of the
+    /// request's TLS profile (if it selects one), but never its verification
+    /// bypass, SNI override, SPIFFE expectation or client identity.
+    fn admin_tls(&self) -> Result<Arc<PreparedTls>, String> {
+        let profile = self.settings.tls_profile_id.and_then(|id| self.ctx.tls_profiles.iter().find(|p| p.id == id));
+        let (key, s) = match profile {
+            Some(p) => (
+                format!("diagnostics|{}|{}", p.id, p.updated_at.timestamp_millis()),
+                TlsSettings {
+                    verify: true,
+                    use_system_roots: p.use_system_roots,
+                    extra_roots_pem: p.extra_roots_pem.clone(),
+                    min_version: p.min_version,
+                    ..Default::default()
+                },
+            ),
+            None => ("default-strict".to_string(), TlsSettings::strict_system()),
+        };
+        self.engine
+            .prepared_tls(self.epoch, &self.ctx.isolation, &key, &s)
+            .map_err(|e| format!("TLS for the lookup could not be prepared: {}", e.message))
+    }
+
+    fn plan(&self, request: &AdminRequest<'_>, budget_ms: u64) -> Result<HttpPlan, String> {
+        let target = request.target;
+        let https = target.scheme == "https";
+        let tls = if https { Some(self.admin_tls()?) } else { None };
+        // An https lookup may cross the request's forward proxy: its TLS is
+        // verified end to end. Plain HTTP goes straight to loopback, never
+        // through a proxy.
+        let proxy = if https {
+            let mut inferred = vec![];
+            crate::http_exec::proxy_for(self.engine, self.epoch, self.ctx, self.settings, target, &mut inferred)
+                .map_err(|e| format!("the proxy for the lookup could not be prepared: {}", e.message))?
         } else {
             None
         };
-        // The admin listener is reached like the request's own origin: through
-        // the request's proxy profile (and its NO_PROXY list).
-        let proxy = crate::http_exec::proxy_for(self.engine, self.epoch, self.ctx, self.settings, target, &mut inferred)
-            .map_err(|e| format!("the proxy for the lookup could not be prepared: {}", e.message))?;
         let bound = gd::MAX_LOOKUP_BODY_BYTES as u64;
         let accept = http::HeaderValue::from_static("application/json");
         Ok(HttpPlan {
             method: http::Method::GET,
-            https: target.scheme == "https",
+            https,
             host: target.host.clone(),
             port: target.port,
             authority: target.authority.clone(),
             request_target: target.request_target(),
-            headers: vec![(http::header::AUTHORIZATION, authorization), (http::header::ACCEPT, accept)],
+            headers: vec![(http::header::AUTHORIZATION, request.authorization.clone()), (http::header::ACCEPT, accept)],
             body: Bytes::new(),
             version: HttpVersionPolicy::Auto,
-            timeouts: self.settings.timeouts,
+            timeouts: bounded(self.settings.timeouts, budget_ms),
             limits: Limits { max_response_bytes: bound, capture_bytes: bound, ..self.settings.limits },
             keepalive: true,
             dns: DnsConfig {
@@ -170,7 +284,7 @@ impl Lookup<'_> {
             proxy,
             tls,
             isolation: format!("{}|diagnostics", self.ctx.isolation),
-            display_url: format!("{endpoint}{}", gd::LOOKUP_PATH),
+            display_url: format!("{}{}", request.endpoint, gd::LOOKUP_PATH),
             // The admin listener is another listener: never the request's PROXY header.
             proxy_header: None,
             proxy_header_withheld: None,
@@ -182,18 +296,67 @@ impl Lookup<'_> {
 
 /// Look up the reference of a recorded response again, exactly as an
 /// execution's own lookup does (for example after the gateway's retention
-/// ended). `sent_at` is when the request that produced `response` was sent.
+/// ended). `attempt` is the recorded attempt that produced `response`.
 pub async fn lookup_recorded(
     engine: &Engine,
     ctx: &ExecutionContext,
     access: &DiagnosticDetailAccess,
     response: &ResponseRecord,
-    sent_at: DateTime<Utc>,
+    attempt: &AttemptObservation,
     cancel: &CancellationToken,
 ) -> GatewayDetail {
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
     let lookup = Lookup { engine, epoch: engine.epoch_for(ctx), ctx, settings: &settings, resolver: &resolver };
-    lookup.run(access, response, sent_at, &mut redactor, cancel).await
+    lookup.run(access, response, attempt, &mut redactor, cancel).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(url: &str) -> Target {
+        prepare::parse_target(url, &["https", "http"], &mut vec![]).unwrap()
+    }
+
+    #[test]
+    fn plain_http_is_allowed_only_to_a_loopback_literal() {
+        let allowed = [
+            "https://gateway.example:9443",
+            "https://192.0.2.10",
+            "http://127.0.0.1:18090",
+            "http://127.8.9.10",
+            "http://[::1]:9000",
+        ];
+        for ok in allowed {
+            assert!(admin_channel_allowed(&target(ok)).is_ok(), "{ok}");
+        }
+        for refused in ["http://localhost:18090", "http://192.0.2.10:9000", "http://gateway.example", "http://[::ffff:127.0.0.1]:9000"] {
+            let e = admin_channel_allowed(&target(refused)).unwrap_err();
+            assert!(e.contains("refused before sending"), "{refused}: {e}");
+        }
+    }
+
+    #[test]
+    fn lookups_are_bounded_whatever_the_request_allows() {
+        let off = Timeouts {
+            dns_ms: None,
+            connect_ms: None,
+            tls_handshake_ms: None,
+            request_write_ms: None,
+            response_headers_ms: None,
+            body_idle_ms: None,
+            total_ms: None,
+        };
+        let b = bounded(off, TOTAL_MS);
+        assert_eq!((b.connect_ms, b.total_ms, b.response_headers_ms), (Some(CONNECT_MS), Some(TOTAL_MS), Some(TOTAL_MS)));
+        let b = bounded(Timeouts::default(), TOTAL_MS);
+        assert_eq!((b.connect_ms, b.total_ms, b.dns_ms), (Some(CONNECT_MS), Some(TOTAL_MS), Some(TOTAL_MS)));
+        let short = Timeouts { connect_ms: Some(500), total_ms: Some(1_000), ..Timeouts::default() };
+        let b = bounded(short, TOTAL_MS);
+        assert_eq!((b.connect_ms, b.total_ms), (Some(500), Some(1_000)), "the request's shorter timeouts apply");
+        // A retry gets only what is left of the overall bound.
+        assert_eq!(bounded(Timeouts::default(), 1_200).connect_ms, Some(1_200));
+    }
 }

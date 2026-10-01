@@ -248,8 +248,8 @@ async fn trust_010_expired_reference_keeps_the_public_evidence() {
     stays_public(&o);
 
     let response = o.record.response.as_ref().expect("the gateway answered");
-    let sent_at = o.record.attempts.last().expect("one attempt").started_at;
-    let again = anvil_engine::gateway_detail::lookup_recorded(&e, &c, &lookup, response, sent_at, &CancellationToken::new()).await;
+    let attempt = o.record.attempts.last().expect("one attempt");
+    let again = anvil_engine::gateway_detail::lookup_recorded(&e, &c, &lookup, response, attempt, &CancellationToken::new()).await;
     match again {
         GatewayDetail::Looked { reference, outcome: LookupOutcome::NotFound { owner_replica: None }, .. } => assert_eq!(reference, REF),
         other => panic!("{other:?}"),
@@ -294,6 +294,92 @@ async fn trust_011_spoofed_reference_is_never_trusted() {
     assert!(finding(&o, "ferrum.detail.mismatch").explanation.contains(forged));
     stays_public(&o);
     token_stays_in_the_lookup(&o, &f);
+}
+
+/// TRUST-011, continued: no lookup for a destination the lookup's profile does
+/// not cover, none after a redirect to an untrusted origin, an admin listener
+/// that redirects is asked exactly once and never followed, and a plain-HTTP
+/// admin URL off loopback is refused before anything is sent.
+#[tokio::test]
+async fn trust_011_lookups_stay_on_the_configured_path() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = vault_ref();
+    let admin = Admin::start(200, vec![], record(REF, 502, "ferrum")).await;
+
+    // The profile with the lookup covers another host: this destination is untrusted.
+    let mut other_host = ctx(&gateway_url(&f, REF), Some(access(&admin, None, &secret)), &secret);
+    let IntegrationKind::FerrumGateway { hosts, .. } = &mut other_host.integrations[0].kind;
+    *hosts = vec![HostBinding { host: "gateway.example".into(), port: None }];
+    let o = run(&e, &other_host).await;
+    assert!(!codes(&o).iter().any(|c| c.starts_with("ferrum.detail.")), "{:?}", codes(&o));
+    assert!(admin.heads().is_empty(), "no lookup for a destination the profile does not cover");
+
+    // The trusted gateway redirects to an untrusted origin whose 502 carries a reference.
+    let untrusted = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let to: String = url::form_urlencoded::byte_serialize(gateway_url(&untrusted, REF).as_bytes()).collect();
+    let mut redirected = ExecutionContext::standalone(RequestSpec::http("GET", &f.url(&format!("/redirect?to={to}"))));
+    redirected.integrations = ctx(&f.url("/"), Some(access(&admin, None, &secret)), &secret).integrations;
+    let IntegrationKind::FerrumGateway { hosts, .. } = &mut redirected.integrations[0].kind;
+    *hosts = vec![HostBinding { host: "127.0.0.1".into(), port: Some(f.addr.port()) }];
+    redirected.secrets = ctx(&f.url("/"), None, &secret).secrets;
+    let o = run(&e, &redirected).await;
+    assert_eq!(o.record.response.as_ref().map(|r| r.status), Some(502), "the redirect was followed");
+    assert!(!codes(&o).iter().any(|c| c.starts_with("ferrum.detail.")), "{:?}", codes(&o));
+    assert!(admin.heads().is_empty(), "no lookup for the untrusted origin that answered");
+
+    // An admin listener answering 3xx: one request, never followed.
+    let elsewhere = format!("{}/diagnostics/v1/refs/{REF}", admin.url);
+    let redirecting = Admin::start(302, vec![("Location".into(), elsewhere)], String::new()).await;
+    let o = run(&e, &ctx(&gateway_url(&f, REF), Some(access(&redirecting, None, &secret)), &secret)).await;
+    assert!(finding(&o, "ferrum.detail.lookup_failed").explanation.contains("302"));
+    assert_eq!(redirecting.heads().len(), 1, "asked exactly once");
+    assert!(admin.heads().is_empty(), "the redirect was not followed");
+    stays_public(&o);
+
+    // Plain HTTP to a host name (even localhost) is refused before sending.
+    let named = Admin { url: admin.url.replace("127.0.0.1", "localhost"), heads: admin.heads.clone() };
+    let o = run(&e, &ctx(&gateway_url(&f, REF), Some(access(&named, None, &secret)), &secret)).await;
+    let refused = finding(&o, "ferrum.detail.lookup_failed");
+    assert!(refused.explanation.contains("refused before sending"), "{}", refused.explanation);
+    assert!(admin.heads().is_empty(), "nothing was sent");
+    stays_public(&o);
+    token_stays_in_the_lookup(&o, &f);
+}
+
+/// A record whose detail is not recorded yet is asked for once more, then
+/// reported as the gateway's authorship alone.
+#[tokio::test]
+async fn g01_a_record_without_detail_is_asked_for_once_more() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = vault_ref();
+    let mut pending: serde_json::Value = serde_json::from_str(&record(REF, 502, "ferrum")).unwrap();
+    pending["detail_available"] = false.into();
+    pending["detail"] = serde_json::Value::Null;
+    let admin = Admin::start(200, vec![], pending.to_string()).await;
+    let o = run(&e, &ctx(&gateway_url(&f, REF), Some(access(&admin, None, &secret)), &secret)).await;
+    assert_eq!(admin.heads().len(), 2, "one retry");
+    assert_eq!(finding(&o, "ferrum.detail.authored").confidence, Confidence::Confirmed);
+}
+
+/// Two profiles for one destination: the record names the one used and the one ignored.
+#[tokio::test]
+async fn g01_a_shadowed_gateway_profile_is_named() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = vault_ref();
+    let mut c = ctx(&gateway_url(&f, REF), None, &secret);
+    let mut imported = c.integrations[0].clone();
+    imported.id = anvil_domain::Id::new();
+    imported.name = "imported gateway".into();
+    c.integrations.push(imported);
+    let o = run(&e, &c).await;
+    let note = o.record.prepared.inferred.iter().find(|n| n.contains("several Ferrum gateway profiles")).expect("a note");
+    assert!(note.contains("'lab gateway' is used") && note.contains("'imported gateway' ignored"), "{note}");
 }
 
 /// References are off by default: a gateway-marked error without one is

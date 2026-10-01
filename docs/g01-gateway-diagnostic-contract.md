@@ -198,15 +198,20 @@ Implemented (see [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g
   variable): a dedicated, short-lived admin JWT with role `viewer`, scope
   `diagnostics:read` and an `ns` claim, never a general admin token. It is
   sent only to that admin listener, added to the execution's redactor, never
-  logged or written to a record, replaced by a placeholder in safe-share
-  exports, and never handed to load workers.
+  logged or written to a record, and never handed to load workers. A bundle
+  import drops the lookup (a full backup keeps it).
 - For a response from a destination that matches such a profile, Anvil looks
-  up a well-formed reference as soon as the response arrives, through the
-  same transport, TLS, proxy and DNS settings as the request. An untrusted
-  destination's reference is never looked up, and a malformed one is
-  reported, not looked up.
+  up a well-formed reference as soon as the response arrives. The admin URL
+  must be `https` (always verified, whatever the request's TLS profile
+  bypasses or overrides) or plain `http` to a loopback address literal;
+  anything else is refused before sending. The lookup is bounded at 2 s to
+  connect and 5 s in all, retries once when the record has no detail yet,
+  and never follows a redirect. An untrusted destination's reference is
+  never looked up, and a malformed one is reported, not looked up.
 - The header alone is never evidence. The record is used only when it is a
-  valid `ferrum.diagnostic_ref.v1` body that binds to this exact response:
+  complete, valid `ferrum.diagnostic_ref.v1` body (with an error class from
+  the pinned vocabulary, or it is capped at `likely`) that binds to this
+  exact response:
   the same reference (and replica), status, `X-Gateway-Error` value (or
   none), client protocol and, when the profile names one, namespace, created
   while the request was in flight (five minutes of clock difference are

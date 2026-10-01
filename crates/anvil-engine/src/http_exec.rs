@@ -409,13 +409,29 @@ pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust
     (FerrumTrust::NotConfigured, false)
 }
 
+/// Whether one of a Ferrum gateway profile's frontend hosts matches `target`.
+fn profile_matches(i: &IntegrationProfile, target: &Target) -> bool {
+    let IntegrationKind::FerrumGateway { hosts, .. } = &i.kind;
+    hosts.iter().any(|h| host_matches(&h.host, &target.host) && h.port.map(|p| p == target.port).unwrap_or(true))
+}
+
 /// The first Ferrum gateway profile whose frontend hosts match `target`: the
 /// one [`trust_for`] takes its trust from.
 fn profile_for<'a>(ctx: &'a ExecutionContext, target: &Target) -> Option<&'a IntegrationProfile> {
-    ctx.integrations.iter().find(|i| {
-        let IntegrationKind::FerrumGateway { hosts, .. } = &i.kind;
-        hosts.iter().any(|h| host_matches(&h.host, &target.host) && h.port.map(|p| p == target.port).unwrap_or(true))
-    })
+    ctx.integrations.iter().find(|i| profile_matches(i, target))
+}
+
+/// A note naming the Ferrum gateway profiles that also match `target` but are
+/// not used (only the first match is), so that one profile (an imported one,
+/// say) never shadows another silently.
+fn shadowed_profiles(ctx: &ExecutionContext, target: &Target) -> Option<String> {
+    let matching: Vec<String> = ctx.integrations.iter().filter(|i| profile_matches(i, target)).map(|i| format!("'{}'", i.name)).collect();
+    let (used, ignored) = matching.split_first()?;
+    if ignored.is_empty() {
+        return None;
+    }
+    let (at, ignored) = (&target.authority, ignored.join(", "));
+    Some(format!("several Ferrum gateway profiles match {at}: {used} is used and {ignored} ignored; remove the profile you do not want"))
 }
 
 /// The diagnostic reference lookup of the profile that `target` matches, if
@@ -1221,10 +1237,12 @@ pub(crate) async fn execute_viewing(
     let gateway_detail = match (&trust, detail_access_for(ctx, &last_hop.target), last.response.as_ref()) {
         (FerrumTrust::Trusted { .. }, Some(access), Some(response)) if !cancel.is_cancelled() => {
             let lookup = crate::gateway_detail::Lookup { engine, epoch, ctx, settings: &prep.settings, resolver: &resolver };
-            Some(lookup.run(access, response, last.observation.started_at, &mut redactor, &cancel).await)
+            Some(lookup.run(access, response, &last.observation, &mut redactor, &cancel).await)
         }
         _ => None,
     };
+    let mut inferred = prep.inferred.clone();
+    inferred.extend(shadowed_profiles(ctx, &last_hop.target));
     let used_secrets = resolver.used_secrets.lock().clone();
     for s in &used_secrets {
         redactor.add_secret(s);
@@ -1252,7 +1270,7 @@ pub(crate) async fn execute_viewing(
         tls_profile: last_hop.tls_profile.clone(),
         proxy: last_hop.proxy.as_ref().map(|p| p.label.clone()),
         tls_verification_enabled: last_hop.tls.as_ref().map(|t| t.verify).unwrap_or(true),
-        inferred: prep.inferred.clone(),
+        inferred,
         lint_bypassed: prep.http.lint_bypassed.clone(),
         attempts,
         last,

@@ -73,6 +73,54 @@ pub const REJECTION_PHASES: [&str; 4] = ["circuit_breaker_open", "concurrency_li
 pub const ROUTE_TIMEOUT_PHASES: [&str; 3] = ["before_dispatch", "dispatch", "retry_backoff"];
 /// `detail.rejection.source`.
 pub const REJECTION_SOURCES: [&str; 3] = ["plugin", "gateway", "routing"];
+/// `error_class` and `attempts[].error_class`: the 19 classes of the pinned
+/// `vocabularies/gateway-errors.json`. A record naming another class is read,
+/// but never confirmed.
+pub const ERROR_CLASSES: [&str; 19] = [
+    "connection_timeout",
+    "connection_refused",
+    "connection_reset",
+    "connection_closed",
+    "dns_lookup_error",
+    "tls_error",
+    "read_write_timeout",
+    "client_disconnect",
+    "protocol_error",
+    "response_body_too_large",
+    "gateway_buffer_capacity",
+    "request_body_too_large",
+    "connection_pool_error",
+    "port_exhaustion",
+    "graceful_remote_close",
+    "dispatch_policy_rejected",
+    "backend_connection_limit",
+    "trust_withdrawn",
+    "request_error",
+];
+/// Keys every record carries (some may be `null`).
+pub const REQUIRED_KEYS: [&str; 10] = [
+    "schema_version",
+    "ref",
+    "namespace",
+    "created_at",
+    "expires_at",
+    "protocol",
+    "status",
+    "gateway_error",
+    "detail_available",
+    "detail",
+];
+/// Keys every non-null `detail` carries (some may be `null`).
+pub const DETAIL_REQUIRED_KEYS: [&str; 8] = [
+    "error_class",
+    "body_error_class",
+    "rejection_phase",
+    "route_timeout_phase",
+    "backend_dispatch",
+    "proxy_id",
+    "backend_target",
+    "duration_bucket",
+];
 /// `detail.attempts[].tls.failure`.
 pub const TLS_FAILURES: [&str; 11] = [
     "certificate_verification",
@@ -151,7 +199,8 @@ pub struct Binding {
     pub status: u16,
     /// The response's `X-Gateway-Error` value(s), lowercased; `None` without one.
     pub gateway_error: Option<String>,
-    /// `http1`, `http2` or `http3`; `None` when the response's version is unknown.
+    /// `http1`, `http2` or `http3`; `None` when the response's version is
+    /// unknown, which no record binds to.
     pub protocol: Option<&'static str>,
     /// The namespace the profile expects, when it names one.
     pub namespace: Option<String>,
@@ -162,7 +211,8 @@ pub struct Binding {
 
 impl Binding {
     /// Bind response `r`, whose request was sent at `sent_at` and which was
-    /// received by `received_by`, to its reference.
+    /// complete at `received_by` (the recorded attempt's end, never the time
+    /// of a later lookup), to its reference.
     pub fn new(
         r: &ResponseRecord,
         reference: DiagnosticRef,
@@ -387,12 +437,37 @@ impl Attempt {
     }
 }
 
-/// Parse and check a lookup body. Error texts never quote the body.
+/// Whether `class` is one of the pinned vocabulary's error classes.
+pub fn known_error_class(class: &str) -> bool {
+    ERROR_CLASSES.contains(&class)
+}
+
+/// The error classes a record names that the pinned vocabulary does not know.
+pub fn unknown_error_classes(view: &RefView) -> Vec<String> {
+    let Some(d) = &view.detail else { return vec![] };
+    let named = d.error_class.iter().chain(d.attempts.iter().filter_map(|a| a.error_class.as_ref()));
+    let mut unknown: Vec<String> = named.filter(|c| !known_error_class(c)).cloned().collect();
+    unknown.dedup();
+    unknown
+}
+
+/// Parse and check a lookup body: every key the schema requires is present
+/// (`null` where it allows), and every value Anvil reads is checked. Error
+/// texts never quote the body.
 pub fn parse_view(body: &[u8]) -> Result<RefView, String> {
     if body.len() > MAX_LOOKUP_BODY_BYTES {
         return Err(format!("the record exceeds {MAX_LOOKUP_BODY_BYTES} bytes"));
     }
-    let view: RefView = serde_json::from_slice(body).map_err(|e| format!("not a {SCHEMA_VERSION} record (line {})", e.line()))?;
+    let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("not a {SCHEMA_VERSION} record (line {})", e.line()))?;
+    if let Some(key) = REQUIRED_KEYS.iter().find(|k| raw.get(**k).is_none()) {
+        return Err(format!("the record has no {key}"));
+    }
+    if let Some(detail) = raw.get("detail").filter(|d| !d.is_null())
+        && let Some(key) = DETAIL_REQUIRED_KEYS.iter().find(|k| detail.get(**k).is_none())
+    {
+        return Err(format!("the record's detail has no {key}"));
+    }
+    let view: RefView = serde_json::from_value(raw).map_err(|_| format!("not a {SCHEMA_VERSION} record"))?;
     view.validate()?;
     Ok(view)
 }
@@ -424,10 +499,9 @@ pub fn check_binding(view: &RefView, b: &Binding) -> Result<(), Mismatch> {
     if view.gateway_error != b.gateway_error {
         return mismatch("gateway_error", b.gateway_error.as_deref().unwrap_or("none"), view.gateway_error.as_deref().unwrap_or("none"));
     }
-    if let Some(p) = b.protocol
-        && view.protocol != p
-    {
-        return mismatch("protocol", p, &view.protocol);
+    // A response whose protocol is not known never binds.
+    if b.protocol != Some(view.protocol.as_str()) {
+        return mismatch("protocol", b.protocol.unwrap_or("unknown"), &view.protocol);
     }
     if let Some(ns) = &b.namespace
         && &view.namespace != ns
@@ -589,6 +663,28 @@ mod tests {
         // A record created long before this request is a replay of another response.
         let old = parse_view(record("2026-01-01T00:00:00Z").as_bytes()).expect("valid record");
         assert_eq!(field(&r, None, &old), "created_at");
+        // A response whose protocol Anvil does not know binds to nothing.
+        let unknown = response(502, "HTTP/?", &[("x-gateway-error", "connection_failure")]);
+        assert_eq!(field(&unknown, None, &view), "protocol");
+    }
+
+    #[test]
+    fn every_required_key_must_be_present() {
+        let good = record(&Utc::now().to_rfc3339());
+        for key in ["\"gateway_error\":\"connection_failure\",", "\"proxy_id\":\"core\",", "\"body_error_class\":null,"] {
+            let bad = good.replacen(key, "", 1);
+            assert_ne!(bad, good, "{key} not found");
+            assert!(parse_view(bad.as_bytes()).is_err(), "accepted a record without {key}");
+        }
+    }
+
+    #[test]
+    fn error_classes_outside_the_pinned_vocabulary_are_named() {
+        let good = record(&Utc::now().to_rfc3339());
+        assert!(unknown_error_classes(&parse_view(good.as_bytes()).unwrap()).is_empty());
+        let future = good.replace("connection_refused", "quantum_tunnel_collapse");
+        let view = parse_view(future.as_bytes()).expect("a label outside the vocabulary is still a well-formed record");
+        assert_eq!(unknown_error_classes(&view), ["quantum_tunnel_collapse"]);
     }
 
     #[test]

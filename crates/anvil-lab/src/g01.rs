@@ -294,7 +294,7 @@ fn trust_010(env: &Env) -> Scenario<'_> {
             return Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] };
         };
         let cancel = CancellationToken::new();
-        let later = anvil_engine::gateway_detail::lookup_recorded(&env.engine, &x, access, response, sent.started_at, &cancel).await;
+        let later = anvil_engine::gateway_detail::lookup_recorded(&env.engine, &x, access, response, sent, &cancel).await;
         let expired = matches!(&later, GatewayDetail::Looked { outcome: LookupOutcome::NotFound { .. }, .. });
         c.add(CheckKind::GroundTruth, "after its retention the gateway no longer resolves the reference", expired, format!("{later:?}"));
         let findings = rediagnose(&o, &later);

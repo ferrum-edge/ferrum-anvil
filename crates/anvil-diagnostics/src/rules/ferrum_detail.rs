@@ -9,7 +9,7 @@
 use super::Ctx;
 use crate::Draft;
 use crate::facts::FerrumTrust;
-use crate::gateway_detail::{Detail, GatewayDetail, LookupOutcome, Mismatch, RefView, direct_loopback};
+use crate::gateway_detail::{Detail, GatewayDetail, LookupOutcome, Mismatch, RefView, direct_loopback, unknown_error_classes};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
 
 const RULE: &str = "ferrum.detail";
@@ -161,6 +161,9 @@ fn with_record(mut d: Draft, view: &RefView) -> Draft {
 }
 
 fn resolved(view: &RefView, ceiling: Confidence, status: u16) -> Draft {
+    // An error class outside the pinned vocabulary is shown, never confirmed.
+    let unknown = unknown_error_classes(view);
+    let ceiling = if unknown.is_empty() { ceiling } else { ceiling.min(Confidence::Likely) };
     let k = kind(view);
     let (scope, owner) = scope_owner(view.detail.as_ref(), &k);
     let code = match k {
@@ -185,7 +188,12 @@ fn resolved(view: &RefView, ceiling: Confidence, status: u16) -> Draft {
             ));
         }
     }
-    if ceiling < Confidence::Confirmed {
+    if !unknown.is_empty() {
+        d = d.not_proven(format!(
+            "What error class {} means: it is not in the Ferrum Edge vocabulary this Anvil build pins.",
+            unknown.join(", ")
+        ));
+    } else if ceiling < Confidence::Confirmed {
         d = d.not_proven(
             "That only the gateway could have answered this record: the request or its lookup did not use verified TLS or loopback.",
         );
@@ -505,6 +513,16 @@ mod tests {
         let invalid = GatewayDetail::InvalidReference { value: "not-a-ref".into() };
         let f = diagnose(&r, "127.0.0.1:18080", Some(&invalid), true);
         assert_eq!(find(&f, "ferrum.detail.invalid_reference").confidence, Confidence::Unknown);
+    }
+
+    /// An error class outside the pinned vocabulary is never confirmed.
+    #[test]
+    fn an_unknown_error_class_is_capped_at_likely() {
+        let r = response(502, Some("connection_failure"));
+        let f = diagnose(&r, "127.0.0.1:18080", Some(&record(&refused_record().replace("tls_error", "quantum_tunnel_collapse"))), true);
+        let d = find(&f, "ferrum.detail.failure");
+        assert_eq!(d.confidence, Confidence::Likely);
+        assert!(d.does_not_prove.iter().any(|x| x.contains("quantum_tunnel_collapse")), "{:?}", d.does_not_prove);
     }
 
     /// An untrusted destination never gets a detail finding, even with a lookup outcome.

@@ -760,6 +760,7 @@ function DiagnosticLookupForm({ p, onChange }: { p: IntegrationProfile; onChange
         The gateway adds <code>X-Ferrum-Diagnostic-Ref</code> to its error responses when <code>FERRUM_DIAGNOSTIC_REFS</code> is <code>errors</code> or <code>all</code> (off by
         default). Anvil looks the reference up with this token and uses the record only when it matches the response; only then can a gateway finding be “confirmed”. Use a dedicated,
         short-lived admin JWT with role <code>viewer</code>, scope <code>diagnostics:read</code> and an <code>ns</code> claim for the gateway's namespace, never a general admin token.
+        The admin URL must be <code>https</code> (always verified), or <code>http</code> to a loopback address such as <code>127.0.0.1</code>. Imported profiles never bring a lookup.
       </p>
     </fieldset>
   );

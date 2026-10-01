@@ -6907,6 +6907,16 @@
      "kind": "integration_test"
     },
     {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 299,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 304,
+     "kind": "integration_test"
+    },
+    {
      "path": "crates/anvil-lab/src/g01.rs",
      "line": 314,
      "kind": "lab"

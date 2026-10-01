@@ -254,6 +254,17 @@ fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
         assert!(missing.is_empty() && extra.is_empty(), "{field} drift; missing: {missing:?}; extra: {extra:?}");
     }
     assert_eq!(defs["Detail"]["properties"]["attempts"]["maxItems"], gateway_detail::MAX_ATTEMPTS);
+    // Anvil requires the keys the schema requires.
+    let (missing, extra) = differences(&strings(&schema["required"]), &local(&gateway_detail::REQUIRED_KEYS));
+    assert!(missing.is_empty() && extra.is_empty(), "required keys drift; missing: {missing:?}; extra: {extra:?}");
+    let (missing, extra) = differences(&strings(&defs["Detail"]["required"]), &local(&gateway_detail::DETAIL_REQUIRED_KEYS));
+    assert!(missing.is_empty() && extra.is_empty(), "detail required keys drift; missing: {missing:?}; extra: {extra:?}");
+    // A record's error classes are confirmed only within the pinned vocabulary.
+    let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
+    let classes: BTreeSet<String> =
+        errors["error_classes"].as_array().unwrap().iter().map(|entry| entry["value"].as_str().unwrap().to_owned()).collect();
+    let (missing, extra) = differences(&classes, &local(&gateway_detail::ERROR_CLASSES));
+    assert!(missing.is_empty() && extra.is_empty(), "error class drift; missing: {missing:?}; extra: {extra:?}");
 
     // `created_at` must be an RFC 3339 time: assert formats, as the contract's own checks do.
     let validator = jsonschema::options().should_validate_formats(true).build(&schema).expect("pinned diagnostic-ref schema compiles");

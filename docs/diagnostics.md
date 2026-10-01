@@ -349,23 +349,39 @@ admin listener and the token Anvil sends to it:
   safe-share export replaces a literal with a placeholder; load workers never
   receive the lookup at all.
 - With `namespace` set, a record of another namespace is not used.
+- The admin URL must be `https` (always verified: the request's TLS profile
+  contributes only its trust roots, never a verification bypass, SNI override,
+  SPIFFE expectation or client identity), or plain `http` to a loopback
+  address literal (`127.0.0.0/8` or `::1`, not `localhost`). Anything else is
+  refused before a byte is sent. Only an `https` lookup may cross the
+  request's forward proxy, and redirects from the admin listener are never
+  followed.
+- A bundle import drops every gateway profile's lookup and says so: configure
+  it again with your own admin URL and token. A full backup keeps it. When
+  several profiles match one destination, the first one is used and the
+  record names the others (an import that adds such a profile is reported
+  too).
 
 ### When Anvil looks a reference up, and what it believes
 
 For the final response of a request to a destination matching the profile,
 Anvil looks up a well-formed reference as soon as the response arrives,
-through the same transport, TLS profile, proxy and DNS settings as the
-request. The header alone is never evidence: a backend, a plugin or a server
+through the engine transport and the request's DNS settings. A lookup is
+bounded on its own: connect within 2 s and everything within 5 s (or the
+request's shorter timeouts), including one retry 250 ms later when the
+record has no detail yet. The header alone is never evidence: a backend, a plugin or a server
 that is not Ferrum Edge can send it. A destination without a profile is never
 looked up, and a malformed reference (or several different ones) is reported
 without a lookup.
 
 A record is gateway evidence only when it is a valid
-`ferrum.diagnostic_ref.v1` body (closed vocabularies only, checked against
-the pinned schema) that **binds to this response**: the same reference (and
-replica), status, `X-Gateway-Error` value or none, client protocol and, when
-the profile names one, namespace, created while the request was in flight
-(five minutes of clock difference allowed). Its finding cites the record as
+`ferrum.diagnostic_ref.v1` body (every key the schema requires, closed
+vocabularies only, checked against the pinned schema) that **binds to this
+response**: the same reference (and replica), status, `X-Gateway-Error` value
+or none, a known client protocol and, when the profile names one, namespace,
+created while the recorded attempt was in flight (five minutes of clock
+difference allowed). A record whose error class is not in the pinned
+vocabulary is shown but capped at *likely*. Its finding cites the record as
 `gateway_detail` evidence and is `confirmed` only when both the request and
 the lookup used verified TLS or a direct loopback connection (nothing else
 could have answered on either path); otherwise it is `likely`. The marker and
