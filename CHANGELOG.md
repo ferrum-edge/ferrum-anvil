@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-01
+
 ### Changed
 
 - The desktop API standards view and mutations return ruleset metadata and
