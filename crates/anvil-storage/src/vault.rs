@@ -582,10 +582,7 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
 fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
     let message = error.to_string();
     let normalized = message.to_ascii_lowercase();
-    if normalized.contains("user canceled the operation")
-        || normalized.contains("access denied")
-        || normalized.contains("user denied")
-    {
+    if normalized.contains("user canceled the operation") || normalized.contains("access denied") || normalized.contains("user denied") {
         VaultError::KeychainAccessDenied
     } else {
         VaultError::KeychainUnavailable(message)
