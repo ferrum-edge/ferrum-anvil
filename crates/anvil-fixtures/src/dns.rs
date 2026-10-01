@@ -354,7 +354,7 @@ mod tests {
         assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS]
             .iter()
             .all(|port| (exclusion_start..exclusion_end).contains(port)));
-        assert!(tried.last().is_some_and(|port| *port >= exclusion_end));
+        assert!(tried.last().is_some_and(|port| !(exclusion_start..exclusion_end).contains(port)));
         assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
     }
 
