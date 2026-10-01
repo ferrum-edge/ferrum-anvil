@@ -86,6 +86,9 @@
 
 ### Fixed
 
+- Diagnostics: cancellation findings now use the local-client scope only when
+  dispatch recorded no request bytes; canceled requests that may have reached
+  the peer use the client-to-peer scope.
 - DTLS over MASQUE: when the tunnel ends while a handshake flight is being
   written, the failure is now always `DtlsHandshakeFailed` in the
   `DtlsHandshake` phase, with the write error as its message. It used to be
