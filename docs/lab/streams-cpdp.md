@@ -1,7 +1,7 @@
 # Failure lab: `streams` and `cpdp` profiles
 
 These two profiles run Anvil's shared engine against a **real, pinned Ferrum Edge release
-binary** (v0.9.9 by default, v0.9.8, v0.9.7 or v0.9.5 with `--release`), with no gateway mocks. Every
+binary** (v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`), with no gateway mocks. Every
 scenario passes on both releases with the same expectations; observations recorded below as
 "0.9.5" were re-observed on 0.9.7.
 

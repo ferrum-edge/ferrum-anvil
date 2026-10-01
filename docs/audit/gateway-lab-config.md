@@ -10,11 +10,13 @@ Configs: `lab/gateway/` (8 profiles, listed in section 4). Structural lint:
 Later status: the same configs validate and run unchanged against v0.9.7 (the lint's field sets
 are identical in both releases; `anvil-lab --release v0.9.5` still runs v0.9.5). v0.9.8 was the
 default pin from 2026-09-27; its `src/config/types.rs` is byte-identical to v0.9.7's and no plugin
-key the lab uses changed. v0.9.9 is the default pin since 2026-10-01; it only adds `Proxy` fields
-and plugin keys the lab does not use (`lab/gateway/lint-profiles.rb`). The citations below remain
+key the lab uses changed. v0.9.9 was the default pin from 2026-10-01; it only adds `Proxy` fields
+and plugin keys the lab does not use (`lab/gateway/lint-profiles.rb`). v0.9.10 is the default pin
+since 2026-10-01; it changes no config struct or plugin key. The citations below remain
 v0.9.5 citations; see [`gateway-0.9.7-delta.md`](gateway-0.9.7-delta.md),
-[`gateway-0.9.8-delta.md`](gateway-0.9.8-delta.md) and
-[`gateway-0.9.9-delta.md`](gateway-0.9.9-delta.md) for what changed. The binary is now fetched and
+[`gateway-0.9.8-delta.md`](gateway-0.9.8-delta.md),
+[`gateway-0.9.9-delta.md`](gateway-0.9.9-delta.md) and
+[`gateway-0.9.10-delta.md`](gateway-0.9.10-delta.md) for what changed. The binary is now fetched and
 verified by `lab/scripts/fetch-gateway.sh`, and the lab runs as described in
 [`../lab/README.md`](../lab/README.md).
 

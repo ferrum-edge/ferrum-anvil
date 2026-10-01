@@ -4,6 +4,18 @@
 
 ### Added
 
+- Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
+  v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
+  It knows the release's new `ai_prompt_shield` MCP refusals: `400`
+  `{"error":"MCP request body could not be inspected"}` with message
+  `unsupported_charset` for a non-UTF-8 request charset (GHSA-4f9m-cfqg-fhx9)
+  or `jsonrpc_request_unparseable` for a body it could not parse that may
+  still carry a tool call (GHSA-f2jp-59r9-fp64), and records that
+  `mcp_gateway` answers a non-UTF-8 charset with its JSON-RPC `-32600`.
+  It also records `unsupported_content_encoding`, a refusal Edge has sent
+  since v0.9.9 that the 0.9.9 catalog does not record (backfilled in 0.9.10
+  only, as the 0.9.8 catalog did for its gaps).
+  Profiles declaring an older release do not match the new refusals.
 - Diagnostics: a `ferrum-edge-0.9.9` compatibility catalog for Ferrum Edge
   v0.9.9 (552 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
   It knows the release's new public signals: the `400` refusals of an empty
@@ -69,6 +81,16 @@
   macOS arm64, with the release runs and updater key evidence; Windows and Linux
   remain untested.
 
+- New Ferrum gateway profiles default to `ferrum-edge-0.9.10` (desktop dialog
+  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.10
+  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
+  asset). v0.9.9, v0.9.8, v0.9.7 and v0.9.5 stay supported with `--release`;
+  the nightly lab runs all five. No lab scenario changes: the lab sends no
+  non-UTF-8 charset and configures no `ai_prompt_shield`. The vendored
+  contracts stay at `contracts-edge-0.9.9`, which `ferrum-contracts` maps to
+  Edge v0.9.10 too; the contract drift test now checks the 0.9.9 and 0.9.10
+  catalogs against it. `anvil-lab` lists supported releases in version order
+  (`v0.9.10` after `v0.9.9`).
 - New Ferrum gateway profiles default to `ferrum-edge-0.9.9` (desktop dialog
   and CLI), and the failure lab's default pin is Ferrum Edge v0.9.9
   (`lab/gateway/RELEASE.lock`, the release's published sha256 for every

@@ -1,14 +1,14 @@
 # Failure lab: policy, admission and drain profiles
 
 Three real-gateway profiles for the WAF/policy and gateway-admission families of the failure matrix.
-Every stimulus drives a pinned Ferrum Edge release binary (v0.9.9 by default, v0.9.8, v0.9.7 or v0.9.5 with
+Every stimulus drives a pinned Ferrum Edge release binary (v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
 `--release`) with controllable local fixtures. No response is faked, and no failure is
 injected as an enum. Behaviour recorded below as "0.9.5" was re-observed on 0.9.7: every scenario
 passes on both releases with the same expectations, except `GW-010-BOT.allow-edge`, whose verdict is
 release-dependent (see [gateway-0.9.7-delta.md](../audit/gateway-0.9.7-delta.md)). v0.9.8 and later strip
 an injected `X-Gateway-Upstream-Status` (GW-019-ERROR/OK/FORGED); those expectations follow the source
 audit ([gateway-0.9.8-delta.md](../audit/gateway-0.9.8-delta.md); unchanged in
-[gateway-0.9.9-delta.md](../audit/gateway-0.9.9-delta.md)).
+[gateway-0.9.9-delta.md](../audit/gateway-0.9.9-delta.md) and [gateway-0.9.10-delta.md](../audit/gateway-0.9.10-delta.md)).
 
 | Profile | Gateway listeners | Fixture ports | Config | Scenarios |
 |---|---|---|---|---|

@@ -1,7 +1,7 @@
 # Failure lab: `mesh` profile (Ferrum Mesh client)
 
-Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (v0.9.9 by
-default, v0.9.7 or v0.9.5 with `--release`) in **mesh mode**. There is no Kubernetes, no control plane and
+Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (v0.9.10 by
+default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`) in **mesh mode**. There is no Kubernetes, no control plane and
 no traffic capture: every gateway runs the localized file source (`FERRUM_MESH_CONFIG_PROTOCOL=file`,
 Ferrum Edge `docs/mesh.md` "Localized file source (no control plane)") with file-based SVIDs
 (`FERRUM_GATEWAY_SVID_*`, "File-Based SVIDs: Two-Process Local Mesh"), and Anvil

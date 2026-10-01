@@ -222,14 +222,15 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.9` (default for new profiles) | v0.9.9, `234717c` | **552** | [audit/gateway-0.9.9-delta.md](audit/gateway-0.9.9-delta.md) (delta on top of the 0.9.8 audit) |
+| `ferrum-edge-0.9.10` (default for new profiles) | v0.9.10, `ee040d5` | **553** | [audit/gateway-0.9.10-delta.md](audit/gateway-0.9.10-delta.md) (delta on top of the 0.9.9 audit) |
+| `ferrum-edge-0.9.9` | v0.9.9, `234717c` | **552** | [audit/gateway-0.9.9-delta.md](audit/gateway-0.9.9-delta.md) (delta on top of the 0.9.8 audit) |
 | `ferrum-edge-0.9.8` | v0.9.8, `e27f210` | **540** | [audit/gateway-0.9.8-delta.md](audit/gateway-0.9.8-delta.md) (delta on top of the 0.9.7 audit) |
 | `ferrum-edge-0.9.7` | v0.9.7, `8fed134` | **538** | [audit/gateway-0.9.7-delta.md](audit/gateway-0.9.7-delta.md) (delta on top of the 0.9.5 audit) |
 | `ferrum-edge-0.9.5` | v0.9.5, `20e7603` | **528** | [audit/gateway-source-audit.md](audit/gateway-source-audit.md) |
 
 Each catalog inventories the release's client-observable outcomes, the public
 `X-Gateway-Error` tokens (**7** in 0.9.5 and 0.9.7; 0.9.8 adds
-`request_timeout`, so **8**, unchanged in 0.9.9), the **19**
+`request_timeout`, so **8**, unchanged in 0.9.9 and 0.9.10), the **19**
 internal error classes, the gateway-written headers, and each outcome's
 `shared_signal_with` siblings. Its `drift` section records the reconciliation
 with the previous release, and `marker_semantics` holds the release-specific
@@ -451,14 +452,16 @@ only presentation; every card shows its own confidence.
   wording, every catalog on disk is embedded and internally consistent, and
   the desktop profile dialog offers exactly the embedded releases.
 - Per-release selection tests: a 0.9.7-only signal is not matched against
-  the 0.9.5 catalog, `request_timeout` (0.9.8 and 0.9.9) is unknown to the older
-  catalogs, 0.9.9-only outcomes (the `;` path-parameter refusal, MCP tool-call
-  rate limits) match only the 0.9.9 catalog, release notes follow the profile's release, and an unknown
+  the 0.9.5 catalog, `request_timeout` (0.9.8 and later) is unknown to the older
+  catalogs, outcomes new in 0.9.9 (the `;` path-parameter refusal, MCP tool-call
+  rate limits) do not match the 0.9.8 catalog, the `ai_prompt_shield` MCP
+  refusals new in 0.9.10 (non-UTF-8 charset, unparseable body) match only the
+  0.9.10 catalog, release notes follow the profile's release, and an unknown
   release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
   (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,
-  v0.9.9). Every lab profile's trusted profile declares the running release's
+  v0.9.10). Every lab profile's trusted profile declares the running release's
   compatibility id, and the lab refuses to run a release without its own
   catalog. Every scenario runs trusted and untrusted: no `ferrum.*`
   gateway attribution may appear when the destination is untrusted, and
