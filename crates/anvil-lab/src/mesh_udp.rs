@@ -5,7 +5,9 @@
 //! to the `:authority` (Ferrum Edge `src/proxy/hbone_proxy.rs`
 //! `handle_hbone_udp_request` / `relay_hbone_udp`,
 //! `src/proxy/mesh_udp_frame.rs`; the record framing is identical in v0.9.5,
-//! v0.9.7 and v0.9.8).
+//! v0.9.7, v0.9.8 and v0.9.9). From v0.9.9 a relay that ends on a socket
+//! error resets the CONNECT stream with `RST_STREAM(CONNECT_ERROR)` instead of
+//! a clean `END_STREAM` (#5781); MESH-026/027 check it on that release.
 //!
 //! * The STRICT sidecar relays to the workload's declared `udp` ports on
 //!   loopback (mesh-sidecar.json 17802-17805): an echo (MESH-018), a silent
@@ -57,6 +59,22 @@ pub(crate) fn counts(o: &ExecutionOutput) -> Option<(u64, u64)> {
 
 pub(crate) fn channel(o: &ExecutionOutput) -> Option<&HboneDatagramChannel> {
     tunnel_of(o).and_then(|t| t.datagrams.as_ref())
+}
+
+/// From v0.9.9 the endpoint resets the CONNECT stream of a datagram relay
+/// that ended on a socket error with `RST_STREAM(CONNECT_ERROR)` instead of a
+/// clean `END_STREAM` (ferrum-edge#5781, #5856); earlier releases end it
+/// cleanly, so the check applies to v0.9.9 and later only.
+fn relay_error_reset(c: &mut Checks, o: &ExecutionOutput) {
+    if !crate::gateway::release_at_least("v0.9.9") {
+        return;
+    }
+    c.add(
+        CheckKind::Diagnosis,
+        "the endpoint reset the CONNECT stream with CONNECT_ERROR (its relay ended on a socket error)",
+        channel(o).is_some_and(|ch| matches!(ch.closed_by, ClosedBy::Abnormal) && ch.reset_code.as_deref() == Some("CONNECT_ERROR")),
+        format!("{:?}", channel(o)),
+    );
 }
 
 pub(crate) fn received(o: &ExecutionOutput) -> Vec<String> {
@@ -332,7 +350,7 @@ fn mesh022(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-023: sidecar, a UDP port no workload declares: refused at relay
-/// synthesis (0.9.5 / 0.9.7: the generic 404; 0.9.8: the UDP destination 403;
+/// synthesis (0.9.5 / 0.9.7: the generic 404; from 0.9.8: the UDP destination 403;
 /// reason `port_not_declared`).
 fn mesh023(env: &Env) -> Fut<'_> {
     Box::pin(async move {
@@ -407,7 +425,8 @@ fn mesh025(env: &Env) -> Fut<'_> {
 
 /// MESH-026: mid-session: the workload closes its socket after its first
 /// reply; the relay's next datagram meets a closed port and the endpoint ends
-/// the tunnel. Anvil reports the endpoint's end, not a destination fault.
+/// the tunnel (cleanly before v0.9.9, with `RST_STREAM(CONNECT_ERROR)` from
+/// v0.9.9). Anvil reports the endpoint's end, not a destination fault.
 fn mesh026(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -453,6 +472,7 @@ fn mesh026(env: &Env) -> Fut<'_> {
             channel(&o).is_some_and(|ch| matches!(ch.closed_by, ClosedBy::Peer | ClosedBy::Abnormal) && ch.records_received == 1),
             format!("{:?}", channel(&o)),
         );
+        relay_error_reset(&mut c, &o);
         c.absent_prefix(&o, "exchange.");
         let got = sizes(&closing, 0);
         let closed = closing.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "udp_socket_closed".into() });
@@ -464,7 +484,8 @@ fn mesh026(env: &Env) -> Fut<'_> {
         );
         // bytes_in: "first" + "second" handed to the (then closed) port; bytes_out: the one reply.
         // 0.9.8 logs a relay that ends on the port's ICMP error as "ended on a
-        // socket error" (#5765) instead of "completed".
+        // socket error" (#5765) instead of "completed"; 0.9.9 also resets the
+        // CONNECT stream for it (#5781).
         let log = wait_op_lines(&env.sidecar, from, &["HBONE UDP tunnel relay", "\"bytes_in\":11", "\"bytes_out\":5"]).await;
         c.add(
             CheckKind::GroundTruth,
@@ -477,8 +498,9 @@ fn mesh026(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-027: a declared UDP port nothing listens on: the endpoint relays the
-/// datagram, its socket gets the ICMP error, and it ends the tunnel. Anvil
-/// reports no response and the endpoint's end; it never sees the ICMP.
+/// datagram, its socket gets the ICMP error, and it ends the tunnel (reset
+/// with `CONNECT_ERROR` from v0.9.9). Anvil reports no response and the
+/// endpoint's end; it never sees the ICMP.
 fn mesh027(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -494,6 +516,7 @@ fn mesh027(env: &Env) -> Fut<'_> {
         c.absent_prefix(&o, "udp.icmp_port_unreachable");
         c.absent_prefix(&o, "exchange.");
         tunnel_opened(&mut c, &o, &authority);
+        relay_error_reset(&mut c, &o);
         let log = wait_op_lines(&env.sidecar, from, &["HBONE UDP tunnel relay", "\"bytes_in\":6", "\"bytes_out\":0"]).await;
         c.add(
             CheckKind::GroundTruth,
@@ -507,7 +530,7 @@ fn mesh027(env: &Env) -> Fut<'_> {
 
 /// MESH-028: Ambient, the loopback workload over UDP: refused at relay
 /// synthesis (Ambient never relays to loopback), 404 on 0.9.5 / 0.9.7 and 403
-/// on 0.9.8.
+/// from 0.9.8.
 fn mesh028(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();

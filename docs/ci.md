@@ -128,13 +128,13 @@ release asset for the runner's OS and architecture with `gh release download`
 (authenticated by the workflow's `github.token`) into `lab/bin/<release>/`.
 It refuses to keep a binary whose SHA-256 differs from its lock:
 
-- `lab/gateway/RELEASE.lock`: the default pin (v0.9.8);
+- `lab/gateway/RELEASE.lock`: the default pin (v0.9.9);
 - `lab/gateway/releases/<release>.lock`: every supported release (v0.9.5,
-  v0.9.7 and v0.9.8).
+  v0.9.7, v0.9.8 and v0.9.9).
 
 Each lock pins macOS (arm64, x86_64), Linux (x86_64, arm64) and Windows
 (x86_64) assets. The workflow passes the release in `ANVIL_LAB_RELEASE`: pull
-requests use the default pin, the nightly run adds v0.9.7 and v0.9.5, and a manual run
+requests use the default pin, the nightly run adds v0.9.8, v0.9.7 and v0.9.5, and a manual run
 takes a `release` input. `anvil-lab verify` prints the gateway's identity and
 `anvil-lab` re-verifies the checksum before every run. Results in
 `results/lab/**` (and the gateway logs under `lab/.run/`) are uploaded as one

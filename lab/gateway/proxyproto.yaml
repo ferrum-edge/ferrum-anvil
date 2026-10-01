@@ -1,12 +1,13 @@
-# Ferrum Anvil failure lab - profile "proxyproto" (ferrum-edge v0.9.8, file mode)
+# Ferrum Anvil failure lab - profile "proxyproto" (ferrum-edge v0.9.9, file mode)
 #
 # Scenarios: crates/anvil-lab/src/proxyproto.rs, docs/lab/proxyproto.md.
 # Gateway:   HTTP 127.0.0.1:18980, HTTPS 18981, admin 18990, streams 127.0.0.1:18901-18904.
 # Fixtures:  127.0.0.1:19901-19904, HTTP echo 19930.
 #
-# pp-http is an ordinary HTTP route. Ferrum's HTTP listeners never read a PROXY header
-# (stream_proxy_protocol is rejected for HTTP-family proxies; they use X-Forwarded-For), so
-# the PP-HTTP scenarios send one there to show what a listener that does not expect it does.
+# pp-http is an ordinary HTTP route. Ferrum's HTTP listeners read no PROXY header here
+# (stream_proxy_protocol is rejected for HTTP-family proxies; they use X-Forwarded-For; v0.9.9's
+# FERRUM_FRONTEND_PROXY_PROTOCOL_HTTP(S) opt-in stays off), so the PP-HTTP scenarios send one
+# there to show what a listener that does not expect it does.
 #
 # The TCP backends require PROXY v2 themselves: backend_proxy_protocol: v2 makes the gateway
 # re-advertise the client identity it resolved (the forwarded source after trust gating, or

@@ -55,8 +55,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
             _ => panic!("malformed PIN line: {line}"),
         }
     }
-    assert_eq!(tag, Some("contracts-edge-0.9.8"));
-    assert_eq!(commit, Some("89ef3917ce6bba142dce50b84f2033d81eb429dd"));
+    assert_eq!(tag, Some("contracts-edge-0.9.9"));
+    assert_eq!(commit, Some("25c4e9e00033d7941a1dd0ab733fa74e735546ae"));
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
         "vocabularies/gateway-headers.json",
@@ -87,12 +87,12 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
-    let local = read_json(&root.join("catalog/ferrum/ferrum-edge-0.9.8/outcomes.json"));
+    let local = read_json(&root.join("catalog/ferrum/ferrum-edge-0.9.9/outcomes.json"));
     let contract_tokens: BTreeSet<String> =
         errors["x_gateway_error_tokens"].as_array().unwrap().iter().map(|entry| entry["token"].as_str().unwrap().to_owned()).collect();
     let local_tokens = strings(&local["public_tokens"]);
     let (missing, extra) = differences(&contract_tokens, &local_tokens);
-    assert!(missing.is_empty() && extra.is_empty(), "0.9.8 public_tokens drift; missing: {missing:?}; extra: {extra:?}");
+    assert!(missing.is_empty() && extra.is_empty(), "0.9.9 public_tokens drift; missing: {missing:?}; extra: {extra:?}");
 
     let diagnostic_tokens: BTreeSet<String> = read_json(&root.join("catalog/diagnostics/findings.en.json"))["findings"]
         .as_object()
@@ -108,7 +108,7 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let local_classes: BTreeSet<String> =
         local["error_class_semantics"].as_array().unwrap().iter().map(|entry| entry["class"].as_str().unwrap().to_owned()).collect();
     let (missing, extra) = differences(&contract_classes, &local_classes);
-    assert!(missing.is_empty() && extra.is_empty(), "0.9.8 error_classes drift; missing: {missing:?}; extra: {extra:?}");
+    assert!(missing.is_empty() && extra.is_empty(), "0.9.9 error_classes drift; missing: {missing:?}; extra: {extra:?}");
     let local_class_meanings: BTreeMap<&str, &str> = local["error_class_semantics"]
         .as_array()
         .unwrap()
@@ -132,20 +132,34 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     }
     assert!(class_meaning_drift.is_empty(), "error_class token meaning drift: {class_meaning_drift:?}");
 
-    // Compare the headers Anvil's Ferrum rules actually read. Unreleased headers
-    // are excluded from this released-contract check and asserted separately.
+    // Compare the headers Anvil's Ferrum rules actually read. A gateway
+    // diagnostic header still unreleased on the pin needs an explicit decision
+    // when the pin changes, and a released one Anvil does not read yet is
+    // listed here and asserted separately.
+    let unreleased: Vec<&str> = headers["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "gateway_diagnostic" && entry["availability"] == "unreleased")
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert!(unreleased.is_empty(), "unreleased gateway diagnostic headers need an explicit decision: {unreleased:?}");
+    // X-Ferrum-Diagnostic-Ref is released in Ferrum Edge v0.9.9 (#5845). Anvil
+    // does not read it until the authenticated lookup is adopted
+    // (docs/diagnostics.md, G01), so its rules still read only the two markers.
+    let entries = headers["headers"].as_array().unwrap();
+    let diagnostic_ref = entries.iter().find(|entry| entry["name"] == "X-Ferrum-Diagnostic-Ref").expect("X-Ferrum-Diagnostic-Ref");
+    assert_eq!(diagnostic_ref["availability"], "v0.9.9", "X-Ferrum-Diagnostic-Ref is released in Ferrum Edge v0.9.9");
+    assert_eq!(diagnostic_ref["role"], "gateway_diagnostic");
+    let not_read_yet: BTreeSet<String> = ["x-ferrum-diagnostic-ref"].into_iter().map(String::from).collect();
     let contract_headers: BTreeSet<String> = headers["headers"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|entry| entry["role"] == "gateway_diagnostic" && entry["availability"] != "unreleased")
+        .filter(|entry| entry["role"] == "gateway_diagnostic")
         .map(|entry| entry["name"].as_str().unwrap().to_ascii_lowercase())
+        .filter(|name| !not_read_yet.contains(name))
         .collect();
-    assert_eq!(
-        headers["headers"].as_array().unwrap().iter().find(|entry| entry["name"] == "X-Ferrum-Diagnostic-Ref").unwrap()["availability"],
-        "unreleased",
-        "X-Ferrum-Diagnostic-Ref requires an explicit decision when the pin changes"
-    );
     let local_header_names: BTreeSet<String> = ["x-gateway-error", "x-gateway-upstream-status"].into_iter().map(String::from).collect();
     let (missing, extra) = differences(&contract_headers, &local_header_names);
     assert!(missing.is_empty() && extra.is_empty(), "gateway diagnostic header drift; missing: {missing:?}; extra: {extra:?}");
@@ -161,6 +175,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     assert!(missing_header_tokens.is_empty(), "X-Gateway-Error meaning omits pinned tokens: {missing_header_tokens:?}");
     let upstream_status_meaning = local_header_meanings.get("x-gateway-upstream-status").expect("X-Gateway-Upstream-Status meaning");
     assert!(upstream_status_meaning.contains("degraded"), "X-Gateway-Upstream-Status meaning drifted: {upstream_status_meaning}");
+    let diagnostic_ref_meaning = local_header_meanings.get("x-ferrum-diagnostic-ref").expect("X-Ferrum-Diagnostic-Ref meaning");
+    assert!(diagnostic_ref_meaning.contains("v0.9.9"), "X-Ferrum-Diagnostic-Ref meaning drifted: {diagnostic_ref_meaning}");
 
     let shared_schema = read_json(&vendor.join("schemas/diagnostic-finding/v1.schema.json"));
     let local_schema = read_json(&root.join("contracts/schemas/DiagnosticFinding.schema.json"));

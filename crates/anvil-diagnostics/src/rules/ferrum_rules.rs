@@ -1,5 +1,5 @@
 //! Ferrum-specific rules. Current public markers are coarse and, per the
-//! v0.9.5, v0.9.7 and v0.9.8 audits, can be influenced by others than the
+//! v0.9.5, v0.9.7, v0.9.8 and v0.9.9 audits, can be influenced by others than the
 //! gateway core (the gateway stamps `backend_error` onto a backend's own 5xx;
 //! a backend could author `X-Gateway-Upstream-Status` before 0.9.8, and a
 //! plugin rejection still can). Rules therefore:
@@ -43,10 +43,10 @@ fn owner_from(s: &str) -> Owner {
 fn token_scope(t: &str) -> SourceScope {
     match t {
         "connection_failure" | "backend_timeout" => SourceScope::GatewayToUpstream,
-        // 0.9.8: the route's total deadline expired before any backend held
+        // 0.9.8 and 0.9.9: the route's total deadline expired before any backend held
         // the attempt, a gateway-side deadline decision.
         "request_timeout" => SourceScope::GatewayAdmission,
-        // On 0.9.5, 0.9.7 and 0.9.8 `backend_error` is stamped on the application's own 5xx
+        // On 0.9.5 to 0.9.9 `backend_error` is stamped on the application's own 5xx
         // (upstream application), on failed upstream exchanges (gateway to
         // upstream) and on gateway-local refusals such as retained-buffer
         // capacity or response-phase policy rejections (live: UP-015,
@@ -341,7 +341,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     let body_ceiling = Confidence::Likely.min(ceiling);
 
     // The gateway's own Via hop is written only by its backend-response
-    // builder; 0.9.5, 0.9.7 and 0.9.8 never add it to pre-dispatch authentication or
+    // builder; 0.9.5 to 0.9.9 never add it to pre-dispatch authentication or
     // authorization rejections (lab-verified on both). A body that matches such a
     // rejection but arrived with that hop was relayed from behind the
     // gateway, so the gateway-rejection candidates are contradicted.
@@ -728,7 +728,7 @@ mod tests {
             (INVALID, "plugin.mcp_gateway.invalid_params"),
             (UNKNOWN, "plugin.mcp_gateway.unknown_item"),
         ];
-        for compat in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8"] {
+        for compat in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8", "ferrum-edge-0.9.9"] {
             for (body, outcome) in cases {
                 let f = diagnose_as(Protocol::Http, &r, body.as_bytes(), compat);
                 let codes: Vec<&String> = f.iter().map(|x| &x.code).collect();
@@ -852,25 +852,25 @@ mod tests {
     fn unknown_release_gets_no_catalog_and_only_shared_token_semantics() {
         let body = br#"{"error":"Backend timeout"}"#;
         let r = response(504, "application/json", &[("x-gateway-error", "backend_timeout")]);
-        let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.9");
+        let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.10");
         let u = find(&f, "ferrum.catalog.unavailable").expect("catalog-unavailable finding");
         assert_eq!(u.confidence, Confidence::Unknown);
-        assert!(u.explanation.contains("ferrum-edge-0.9.9") && u.explanation.contains("ferrum-edge-0.9.7"), "{}", u.explanation);
+        assert!(u.explanation.contains("ferrum-edge-0.9.10") && u.explanation.contains("ferrum-edge-0.9.7"), "{}", u.explanation);
         assert!(!f.iter().any(|x| x.code.starts_with("ferrum.outcome") || x.code == "ferrum.backend_passthrough"), "{:?}", codes(&f));
         let t = find(&f, "ferrum.token.backend_timeout").expect("shared token meaning still applies");
         assert_eq!(t.confidence, Confidence::Likely);
         let text = format!("{} {:?}", t.explanation, t.does_not_prove);
         assert!(
-            !text.contains("0.9.5") && !text.contains("0.9.7") && !text.contains("0.9.8"),
+            !text.contains("0.9.5") && !text.contains("0.9.7") && !text.contains("0.9.8") && !text.contains("0.9.9"),
             "no release-specific claim for an unaudited release: {text}"
         );
         // A token outside the shared vocabulary stays unknown.
         let r = response(502, "application/json", &[("x-gateway-error", "upstream_reset")]);
-        let f = diagnose_as(Protocol::Http, &r, br#"{"error":"x"}"#, "ferrum-edge-0.9.9");
-        assert!(find(&f, "ferrum.marker.unknown_token").is_some_and(|x| x.explanation.contains("no catalog for ferrum-edge-0.9.9")));
+        let f = diagnose_as(Protocol::Http, &r, br#"{"error":"x"}"#, "ferrum-edge-0.9.10");
+        assert!(find(&f, "ferrum.marker.unknown_token").is_some_and(|x| x.explanation.contains("no catalog for ferrum-edge-0.9.10")));
         // A plain success with no marker needs no catalog at all.
         let r = response(200, "application/json", &[]);
-        assert!(find(&diagnose_as(Protocol::Http, &r, b"{}", "ferrum-edge-0.9.9"), "ferrum.catalog.unavailable").is_none());
+        assert!(find(&diagnose_as(Protocol::Http, &r, b"{}", "ferrum-edge-0.9.10"), "ferrum.catalog.unavailable").is_none());
     }
 
     /// The route-timeout 504 body exists only in the 0.9.7 audit; the same
@@ -889,33 +889,35 @@ mod tests {
         assert!(!candidates(&old).iter().any(|i| i.starts_with("upstream.route_request_timeout")), "{:?}", candidates(&old));
     }
 
-    /// 0.9.8 tells the two route-timeout 504s apart by their token: request_timeout
-    /// when no backend held the attempt, backend_timeout when one did.
+    /// 0.9.8 and 0.9.9 tell the two route-timeout 504s apart by their token:
+    /// request_timeout when no backend held the attempt, backend_timeout when one did.
     #[test]
-    fn route_timeout_504_token_separates_the_0_9_8_outcomes() {
+    fn route_timeout_504_token_separates_the_0_9_8_and_0_9_9_outcomes() {
         let body = br#"{"error":"Request timeout"}"#;
-        let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
-        let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.8");
-        assert_eq!(candidates(&f), ["upstream.route_request_timeout.not_dispatched"]);
-        let o = find(&f, "ferrum.outcome").expect("a single catalog outcome");
-        assert_eq!(o.confidence, Confidence::Likely);
-        assert_eq!(o.scope, anvil_domain::diagnostics::SourceScope::GatewayAdmission, "no backend held the attempt");
-        let t = find(&f, "ferrum.token.request_timeout").expect("token finding");
-        assert_eq!(t.confidence, Confidence::Likely);
-        assert_eq!(t.scope, anvil_domain::diagnostics::SourceScope::GatewayAdmission);
-        assert_eq!(t.owner, anvil_domain::diagnostics::Owner::Unknown);
-        assert!(t.explanation.contains("Ferrum Edge 0.9.8"), "{}", t.explanation);
-        assert!(t.does_not_prove.iter().any(|d| d.contains("earlier attempt")), "{:?}", t.does_not_prove);
-        let upstream = anvil_domain::diagnostics::SourceScope::GatewayToUpstream;
-        assert!(!f.iter().any(|x| x.code.starts_with("ferrum.") && x.scope == upstream), "no backend-leg claim: {:?}", codes(&f));
+        for (compat, label) in [("ferrum-edge-0.9.8", "Ferrum Edge 0.9.8"), ("ferrum-edge-0.9.9", "Ferrum Edge 0.9.9")] {
+            let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
+            let f = diagnose_as(Protocol::Http, &r, body, compat);
+            assert_eq!(candidates(&f), ["upstream.route_request_timeout.not_dispatched"], "{compat}");
+            let o = find(&f, "ferrum.outcome").expect("a single catalog outcome");
+            assert_eq!(o.confidence, Confidence::Likely);
+            assert_eq!(o.scope, anvil_domain::diagnostics::SourceScope::GatewayAdmission, "no backend held the attempt");
+            let t = find(&f, "ferrum.token.request_timeout").expect("token finding");
+            assert_eq!(t.confidence, Confidence::Likely);
+            assert_eq!(t.scope, anvil_domain::diagnostics::SourceScope::GatewayAdmission);
+            assert_eq!(t.owner, anvil_domain::diagnostics::Owner::Unknown);
+            assert!(t.explanation.contains(label), "{}", t.explanation);
+            assert!(t.does_not_prove.iter().any(|d| d.contains("earlier attempt")), "{:?}", t.does_not_prove);
+            let upstream = anvil_domain::diagnostics::SourceScope::GatewayToUpstream;
+            assert!(!f.iter().any(|x| x.code.starts_with("ferrum.") && x.scope == upstream), "no backend-leg claim: {:?}", codes(&f));
 
-        let r = response(504, "application/json", &[("x-gateway-error", "backend_timeout")]);
-        let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.8");
-        assert_eq!(candidates(&f), ["upstream.route_request_timeout.backend_held"]);
+            let r = response(504, "application/json", &[("x-gateway-error", "backend_timeout")]);
+            let f = diagnose_as(Protocol::Http, &r, body, compat);
+            assert_eq!(candidates(&f), ["upstream.route_request_timeout.backend_held"], "{compat}");
+        }
 
         // Releases without the token report it as unknown instead of guessing.
         let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
-        for compat in ["ferrum-edge-0.9.7", "ferrum-edge-0.9.9"] {
+        for compat in ["ferrum-edge-0.9.7", "ferrum-edge-0.9.10"] {
             let f = diagnose_as(Protocol::Http, &r, body, compat);
             assert!(find(&f, "ferrum.marker.unknown_token").is_some(), "{compat}: {:?}", codes(&f));
             assert!(find(&f, "ferrum.token.request_timeout").is_none(), "{compat}");
@@ -941,7 +943,14 @@ mod tests {
             "{}",
             t98.explanation
         );
-        for f in [t95, t97, t98] {
+        let t99 = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.9");
+        let t99 = find(&t99, "ferrum.token.backend_timeout").unwrap();
+        assert!(
+            t99.explanation.contains("Ferrum Edge 0.9.9") && t99.explanation.contains("a backend held the request"),
+            "{}",
+            t99.explanation
+        );
+        for f in [t95, t97, t98, t99] {
             assert_eq!(f.confidence, Confidence::Likely);
             assert!(f.does_not_prove.iter().any(|d| d == "That the backend received the request."), "{:?}", f.does_not_prove);
         }
@@ -951,12 +960,16 @@ mod tests {
     fn records_name_the_catalog_actually_used() {
         let v = crate::render::catalog().version.clone();
         let t = |id: &str| FerrumTrust::Trusted { profile_name: "p".into(), compatibility_id: id.into(), channel_authenticated: true };
+        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.9")), format!("findings:{v} ferrum:ferrum-edge-0.9.9"));
         assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.8")), format!("findings:{v} ferrum:ferrum-edge-0.9.8"));
         assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.7")), format!("findings:{v} ferrum:ferrum-edge-0.9.7"));
         assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.5")), format!("findings:{v} ferrum:ferrum-edge-0.9.5"));
         assert_eq!(crate::catalog_version_for(&t("ferrum-edge-2.0")), format!("findings:{v} ferrum:ferrum-edge-2.0(no-catalog)"));
         assert_eq!(crate::catalog_version_for(&FerrumTrust::NotConfigured), format!("findings:{v} ferrum:none"));
-        assert_eq!(crate::catalog_version(), format!("findings:{v} ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,ferrum-edge-0.9.8"));
+        assert_eq!(
+            crate::catalog_version(),
+            format!("findings:{v} ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,ferrum-edge-0.9.8,ferrum-edge-0.9.9")
+        );
     }
 
     fn codes(f: &[DiagnosticFinding]) -> Vec<&str> {

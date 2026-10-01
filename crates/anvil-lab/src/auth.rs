@@ -914,10 +914,28 @@ fn auth020(env: &Env) -> Fut<'_> {
     })
 }
 
+/// A `;` path parameter in the signed path. From v0.9.9 the gateway refuses
+/// it with 400 before any plugin unless the proxy sets
+/// `allow_path_parameters` (GHSA-fcqw-793q-wg5x, ferrum-edge#5936), a field
+/// the older supported releases reject; there AUTH-021 signs a path with the
+/// other sub-delims and checks the refusal separately.
+const AUTH021_PARAM_PATH: &str = "/auth/hmac/echo/a;b=c/x:y@z";
+
+fn auth021_path() -> &'static str {
+    if crate::gateway::release_at_least("v0.9.9") { "/auth/hmac/echo/a,b=c/x:y@z" } else { AUTH021_PARAM_PATH }
+}
+
 fn auth021(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let (path, query) = ("/auth/hmac/echo/a;b=c/x:y@z", "b=2&a=1&a=0&empty=&z=%41");
+        let (path, query) = (auth021_path(), "b=2&a=1&a=0&empty=&z=%41");
+        if path != AUTH021_PARAM_PATH {
+            let before = env.fx.echo.log.count_requests();
+            let refused = go(env, &ctx(env, "GET", &format!("{AUTH021_PARAM_PATH}?{query}"), hmac_cfg(env))).await;
+            signal(&mut c, &refused, 400, "Request path contains a path parameter");
+            gateway_outcome(&mut c, env, &refused);
+            backend_untouched(&mut c, env, before);
+        }
         let before = env.fx.echo.log.count_requests();
         let o = go(env, &ctx(env, "GET", &format!("{path}?{query}"), hmac_cfg(env))).await;
         c.success(CheckKind::Diagnosis, &o);
@@ -1778,7 +1796,7 @@ fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
         (
             "AUTH-025.nonce",
             "DPoP server-nonce challenge",
-            "infeasible on {release}: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4, re-checked in the 0.9.7 and 0.9.8 source); AUTH-025 covers the replay half live",
+            "infeasible on {release}: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit §5.4, re-checked in the 0.9.7, 0.9.8 and 0.9.9 source); AUTH-025 covers the replay half live",
         ),
     ]
 }

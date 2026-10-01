@@ -2,7 +2,7 @@
 //! (`CONNECT` with `x-ferrum-mesh-protocol: udp`, `[u16 length][payload]`
 //! records) with a DTLS session inside it. Ferrum Edge's datagram relay
 //! (`src/proxy/hbone_proxy.rs` `relay_hbone_udp`, the same forwarding in
-//! v0.9.5, v0.9.7 and v0.9.8) forwards each record as one UDP datagram and never looks inside,
+//! v0.9.5 to v0.9.9) forwards each record as one UDP datagram and never looks inside,
 //! so the DTLS handshake is end to end between Anvil and the workload.
 //!
 //! * The STRICT sidecar relays to the workload's declared `udp` ports
@@ -217,7 +217,7 @@ fn mesh032(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-033: DTLS to an undeclared port at the sidecar: the relay-synthesis
-/// refusal (404 on 0.9.5 / 0.9.7, 403 on 0.9.8) before any tunnel, exactly as
+/// refusal (404 on 0.9.5 / 0.9.7, 403 from 0.9.8) before any tunnel, exactly as
 /// for UDP; no DTLS attempted.
 fn mesh033(env: &Env) -> Fut<'_> {
     Box::pin(async move {

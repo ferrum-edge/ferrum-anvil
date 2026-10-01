@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "mcp" (ferrum-edge v0.9.8, v0.9.7 and v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "mcp" (ferrum-edge v0.9.9, v0.9.8, v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: crates/anvil-lab/src/mcp.rs, docs/lab/mcp.md.
 # Settings:  mcp.conf (proxy HTTP 127.0.0.1:17180, admin 127.0.0.1:17190).

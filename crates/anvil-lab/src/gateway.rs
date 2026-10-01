@@ -34,7 +34,7 @@ pub struct Lock {
 
 impl Lock {
     /// The Anvil compatibility id (and diagnostics catalog) of this release,
-    /// e.g. `v0.9.8` -> `ferrum-edge-0.9.8`.
+    /// e.g. `v0.9.9` -> `ferrum-edge-0.9.9`.
     pub fn compatibility_id(&self) -> String {
         compatibility_id_for(&self.release)
     }
@@ -162,7 +162,7 @@ pub fn compatibility_id() -> String {
     current_lock().catalog_compatibility_id().unwrap_or_else(|e| panic!("trusted lab profile: {e:#}"))
 }
 
-/// Whether the release under test is `min` or a later one (`v0.9.8`-style
+/// Whether the release under test is `min` or a later one (`v0.9.9`-style
 /// tags), for scenarios whose public signal changed in a release.
 pub fn release_at_least(min: &str) -> bool {
     release_order(&current_lock().release) >= release_order(min)
@@ -172,7 +172,7 @@ fn release_order(tag: &str) -> Vec<u64> {
     tag.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
 
-/// `Ferrum Edge 0.9.8`-style name of the release under test, for skip reasons.
+/// `Ferrum Edge 0.9.9`-style name of the release under test, for skip reasons.
 pub fn release_label() -> String {
     format!("Ferrum Edge {}", current_lock().release.trim_start_matches('v'))
 }
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn every_supported_release_has_a_lock_and_a_catalog() {
         let releases = available_releases();
-        assert!(releases.len() >= 3, "{releases:?}");
+        assert!(releases.len() >= 4, "{releases:?}");
         for r in releases {
             let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));
             assert_eq!(l.release, r);
@@ -548,7 +548,8 @@ mod tests {
     #[test]
     fn releases_order_numerically() {
         assert!(release_order("v0.9.8") > release_order("v0.9.7"));
-        assert!(release_order("v0.9.10") > release_order("v0.9.8"));
+        assert!(release_order("v0.9.9") > release_order("v0.9.8"));
+        assert!(release_order("v0.9.10") > release_order("v0.9.9"));
         assert!(release_order("v1.0.0") > release_order("v0.9.10"));
         assert_eq!(release_order(" v0.9.8"), release_order("0.9.8"));
     }
@@ -556,8 +557,8 @@ mod tests {
     #[test]
     fn release_names_normalize_and_map_to_compatibility_ids() {
         assert_eq!(normalize_release(Some(" 0.9.5 ".into())), Some("v0.9.5".into()));
-        assert_eq!(normalize_release(Some("v0.9.8".into())), Some("v0.9.8".into()));
+        assert_eq!(normalize_release(Some("v0.9.9".into())), Some("v0.9.9".into()));
         assert_eq!(normalize_release(Some("".into())), None);
-        assert_eq!(compatibility_id_for("v0.9.8"), "ferrum-edge-0.9.8");
+        assert_eq!(compatibility_id_for("v0.9.9"), "ferrum-edge-0.9.9");
     }
 }

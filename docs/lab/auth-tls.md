@@ -1,7 +1,7 @@
 # Gateway failure lab: `auth` and `tls` profiles
 
-These two profiles drive a **real, pinned Ferrum Edge release binary** (v0.9.8
-by default, v0.9.7 or v0.9.5 with `--release`) with controllable fixtures, and
+These two profiles drive a **real, pinned Ferrum Edge release binary** (v0.9.9
+by default, v0.9.8, v0.9.7 or v0.9.5 with `--release`) with controllable fixtures, and
 check what Anvil's shared engine concludes from the public evidence alone.
 Nothing is faked: no injected headers, no injected failure enums, no fixture
 pretending to be the gateway. Every result records the gateway release, source
@@ -165,7 +165,7 @@ records redact `WWW-Authenticate`.
 | AUTH-018.skew | AUTH-018 | Date header 10 min old → 401 `Missing or expired Date header` | No confirmed clock claim |
 | AUTH-019 | AUTH-019 | Body changed after signing → 401 `Digest header does not match request body` | The same edit through Anvil re-signs the final bytes and succeeds |
 | AUTH-020 | AUTH-020 | Captured signed request replayed → 200 then 401 `Signed request has already been used` | Anvil's own signer never reuses a nonce (three back-to-back sends accepted) |
-| AUTH-021 | AUTH-021 | `a;b=c/x:y@z` path and `b=2&a=1&a=0&empty=&z=%41` query | Accepted; the backend received the raw query byte for byte; a reordered query fails verification |
+| AUTH-021 | AUTH-021 | `a;b=c/x:y@z` path (`a,b=c/x:y@z` from v0.9.9) and `b=2&a=1&a=0&empty=&z=%41` query | Accepted; the backend received the raw query byte for byte; a reordered query fails verification. From v0.9.9 the `;` path is refused first: 400 `Request path contains a path parameter`, backend untouched (GHSA-fcqw-793q-wg5x; the hmac route does not set `allow_path_parameters`, which older releases reject) |
 | AUTH-022 | AUTH-022 | Both `Digest` and `Content-Digest` → 401 `Ambiguous …` | Anvil refuses locally to sign a request that already carries a digest header (nothing sent) |
 | AUTH-023 | AUTH-023 | Legacy `ferrum-hmac-v1` without the unsafe opt-in | Refused locally; nothing reaches the gateway |
 | AUTH-024 | AUTH-024 | DPoP-bound ES256 token + per-send proof | Accepted; binding facts (jkt/htu/jti) recorded without the key; missing proof → `DPoP proof required`, proof for another URL and proof from an unbound key are rejected |

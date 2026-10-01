@@ -1,5 +1,5 @@
 # Ferrum Anvil failure lab - profile "proxyproto", authenticated datagram instance
-# (ferrum-edge v0.9.8, file mode). Gateway: HTTP 18982, HTTPS 18983 (unused), admin 18991,
+# (ferrum-edge v0.9.9, file mode). Gateway: HTTP 18982, HTTPS 18983 (unused), admin 18991,
 # streams 127.0.0.1:18911-18912. Fixtures: 127.0.0.1:19913-19914.
 version: "1"
 
