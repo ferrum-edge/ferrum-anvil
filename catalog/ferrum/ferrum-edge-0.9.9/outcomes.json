@@ -701,6 +701,17 @@
       "evidence": "CHANGELOG [0.9.9]; per-PR review",
       "anvil_impact": "None.",
       "outcome_ids": []
+    },
+    {
+      "change_id": "catalog_gaps_backfilled",
+      "kind": "catalog_fix",
+      "refs": "v0.9.8 -> v0.9.9",
+      "client_visible_effect": "Not a gateway change: ai_prompt_shield scan_fields: mcp_arguments already answered a non-identity Content-Encoding with 400 {\"error\":\"MCP request body could not be inspected\",\"message\":\"unsupported_content_encoding\"} at v0.9.9, but the original 0.9.9 catalog omitted it. It is now recorded in the 0.9.9 catalog from that release's source.",
+      "evidence": "src/plugins/ai_prompt_shield.rs:1858@234717c, :498@234717c",
+      "anvil_impact": "Documentation accuracy; no gateway behavior changed.",
+      "outcome_ids": [
+        "plugin.ai_prompt_shield.mcp_body_uninspectable"
+      ]
     }
   ],
   "fixture_index": {
@@ -29559,6 +29570,50 @@
       "owner": "caller",
       "fixture_ids": [],
       "notes": "New in v0.9.9. A body with duplicate member names gets plugin.ai_prompt_shield.uninspectable's error with its own message. Through an OpenAPI bridge, a redacted path argument fails the call with -32602 (plugin.mcp_gateway.invalid_params). Body family: plain_error_json"
+    },
+    {
+      "id": "plugin.ai_prompt_shield.mcp_body_uninspectable",
+      "family": "ai_policy",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/plugins/ai_prompt_shield.rs",
+          "line": 498,
+          "symbol": "reject_uninspectable_mcp_body",
+          "sha": "234717c"
+        },
+        {
+          "path": "src/plugins/ai_prompt_shield.rs",
+          "line": 1858,
+          "symbol": "before_proxy (content encoding)",
+          "sha": "234717c"
+        }
+      ],
+      "condition": "Since v0.9.9: ai_prompt_shield with scan_fields: mcp_arguments refuses an in-scope MCP POST with a non-identity Content-Encoding, because the request body cannot be inspected (message unsupported_content_encoding). This refusal applies with any action, including warn.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 400,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json (proxy default)"
+        },
+        "body_shape": "{\"error\":\"MCP request body could not be inspected\",\"message\":\"unsupported_content_encoding\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "Pre-dispatch (request body phase)."
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its ai_prompt_shield plugin refused the MCP request because it could not inspect the content-encoded body. Nothing was sent upstream.",
+      "must_not_claim": "That the MCP server or the tool refused the call, or that the body contained PII.",
+      "remediation": "Caller: send the MCP request without Content-Encoding (or with identity); operator can confirm the reason in the transaction metadata (ai_shield_rejected).",
+      "owner": "caller",
+      "fixture_ids": [],
+      "notes": "This refusal existed at v0.9.9 but was missing from its original catalog. It is backfilled here from the v0.9.9 source. The same refusal is included in the v0.9.10 catalog alongside that release's new uninspectable-body reasons. Body family: plain_error_json"
     },
     {
       "id": "protocol.ws.backend_extension_negotiation_failed",
