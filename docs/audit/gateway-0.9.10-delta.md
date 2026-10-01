@@ -146,5 +146,5 @@ by the four changed files.
 - The new refusal and the `mcp_gateway` charset refusal: no lab profile configures
   `ai_prompt_shield` with `scan_fields: mcp_arguments` or sends a non-UTF-8 charset.
 - That the lab's existing expectations hold on v0.9.10: they are expected to, since nothing they
-  exercise changed. Evidence comes from the pull request's `core` run and a dispatched `all` run on
-  v0.9.10.
+  exercise changed. Evidence comes from the pull request's CI lab run and the `all`-profile lab run
+  dispatched on this branch (Lab workflow run 36868042232, default pin v0.9.10).

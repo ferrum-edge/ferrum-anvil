@@ -12,6 +12,9 @@
   or `jsonrpc_request_unparseable` for a body it could not parse that may
   still carry a tool call (GHSA-f2jp-59r9-fp64), and records that
   `mcp_gateway` answers a non-UTF-8 charset with its JSON-RPC `-32600`.
+  It also records `unsupported_content_encoding`, a refusal Edge has sent
+  since v0.9.9 that the 0.9.9 catalog does not record (backfilled in 0.9.10
+  only, as the 0.9.8 catalog did for its gaps).
   Profiles declaring an older release do not match the new refusals.
 - Diagnostics: a `ferrum-edge-0.9.9` compatibility catalog for Ferrum Edge
   v0.9.9 (552 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
@@ -63,6 +66,15 @@
 
 - Documentation: link Anvil's contract pin to the immutable Ferrum contract
   release and describe the central store, consumed files and re-vendoring rule.
+- Documentation: reconcile the completion report's current-state statements
+  with `main`: 14 lab profiles including `mcp`, the four supported Edge
+  releases (0.9.5/0.9.7/0.9.8/0.9.9), eight `X-Gateway-Error` tokens from
+  0.9.8, and the published `anvil-v0.1.1` preview assets, checksums and
+  updater signatures against still-missing platform signing (#276).
+- CLI help: `spec-drift --import` now points to the import id printed by
+  `import-spec` (there is no `--json` flag), and `doctor` lists the checks it
+  performs (data dir, system trust store, profiles, engine/catalog) instead of
+  claiming a keychain self-check (#277).
 - Keychain unlock now explains when macOS refuses access to a stored profile key
   after an app update, and how to allow Ferrum Anvil in Keychain Access and retry.
 - REL-003 records the verified signed in-app update from 0.1.0 to 0.1.1 on
@@ -96,6 +108,9 @@
 
 ### Fixed
 
+- Diagnostics: cancellation findings now use the local-client scope only when
+  dispatch recorded no request bytes; canceled requests that may have reached
+  the peer use the client-to-peer scope.
 - DTLS over MASQUE: when the tunnel ends while a handshake flight is being
   written, the failure is now always `DtlsHandshakeFailed` in the
   `DtlsHandshake` phase, with the write error as its message. It used to be
@@ -106,6 +121,11 @@
   and code markers are dropped, bullets read "•" and links read
   "text (url)". The notes are still text: nothing is rendered as markup and
   links are not clickable.
+- The ignored Python `websockets` permessage-deflate interoperability test
+  now runs on `websockets` 14 and 15 as well as 13.x: its fixture
+  feature-detects the negotiated extensions (`.extensions` on 13.x, the new
+  asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
+  version range is documented where the run instructions live (#275).
 
 ## [0.1.1] - 2026-10-01
 

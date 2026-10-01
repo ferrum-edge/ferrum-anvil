@@ -7,7 +7,11 @@
 //! ANVIL_INTEROP_PYTHON=python3.11 cargo test -p anvil-engine --test ws_deflate_interop -- --ignored
 //! ```
 //!
-//! Without such a Python the test fails (it never passes silently).
+//! The fixture supports `websockets` 13.x through 15.x; it feature-detects the
+//! negotiated extensions as `.extensions` (the 13.x legacy server protocol) or
+//! `.protocol.extensions` (the 14/15 asyncio `ServerConnection`). It has run
+//! against `websockets==13.1`; the 14/15 path follows those releases' API. Without a suitable
+//! Python the test fails (it never passes silently).
 
 use anvil_domain::execution::Direction;
 use anvil_domain::outcome::{ClosedBy, ProtocolStatus, WsExtensions, WsNegotiation};
@@ -28,7 +32,12 @@ from websockets.extensions.permessage_deflate import ServerPerMessageDeflateFact
 kwargs = json.loads(sys.argv[1])
 
 async def echo(ws, path=None):
-    print("negotiated", repr(ws.extensions), flush=True)
+    # websockets 13.x passes the legacy server protocol (`.extensions`);
+    # websockets 14/15 pass a ServerConnection (`.protocol.extensions`).
+    exts = getattr(ws, "extensions", None)
+    if exts is None:
+        exts = ws.protocol.extensions
+    print("negotiated", repr(exts), flush=True)
     async for m in ws:
         await ws.send(m)
 
