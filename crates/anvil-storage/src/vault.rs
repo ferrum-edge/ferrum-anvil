@@ -56,6 +56,10 @@ const STALE_TEMPORARY_AGE: std::time::Duration = std::time::Duration::from_secs(
 pub enum VaultError {
     #[error("the passphrase or recovery key is not correct")]
     WrongSecret,
+    #[error(
+        "the operating system refused access to the stored key. This can happen after an app update, especially when the build is unsigned. On macOS, open Keychain Access, find this profile's Anvil key, and allow Ferrum Anvil under Access Control. Then retry the unlock, or re-enter your login password if prompted."
+    )]
+    KeychainAccessDenied,
     #[error("the OS credential store is unavailable ({0}); use a passphrase-protected profile instead")]
     KeychainUnavailable(String),
     #[error("this profile is not protected by {0}")]
@@ -571,6 +575,20 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
     forget_keychain_account(dir, h, &account)
 }
 
+/// Maps a keyring error to a vault error. The user refusing access (the OS
+/// prompt was denied or cancelled, common after an unsigned app update)
+/// is distinct from a store that is genuinely unavailable.
+#[cfg(feature = "os-keychain")]
+fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
+    let message = error.to_string();
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("user canceled the operation") || normalized.contains("access denied") || normalized.contains("user denied") {
+        VaultError::KeychainAccessDenied
+    } else {
+        VaultError::KeychainUnavailable(message)
+    }
+}
+
 /// Delete `account`'s entry if it holds this profile's key, or the marker
 /// that replaced it. Succeeds when the entry is gone or is not this
 /// profile's.
@@ -582,7 +600,7 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
 #[cfg(feature = "os-keychain")]
 fn delete_retired_entry(h: &ProfileHeader, account: &str) -> Result<(), VaultError> {
     let entry = keychain_entry(account)?;
-    let unavailable = |e: keyring_core::Error| VaultError::KeychainUnavailable(e.to_string());
+    let unavailable = |e: keyring_core::Error| keychain_error(&e);
     let secret = match entry.get_secret() {
         Ok(secret) => Zeroizing::new(secret),
         Err(keyring_core::Error::NoEntry) => return Ok(()),
@@ -670,7 +688,7 @@ fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
 fn tag_keychain_entry(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
-    let unavailable = |e: keyring_core::Error| VaultError::KeychainUnavailable(e.to_string());
+    let unavailable = |e: keyring_core::Error| keychain_error(&e);
     let secret = match entry.get_secret() {
         Ok(secret) => Zeroizing::new(secret),
         Err(keyring_core::Error::NoEntry) => return Ok(()),
@@ -698,7 +716,7 @@ thread_local! {
 /// in-memory fallback: a missing store is `KeychainUnavailable`.
 #[cfg(feature = "os-keychain")]
 fn keychain_entry(account: &str) -> Result<keyring_core::Entry, VaultError> {
-    let unavailable = |e: &dyn std::fmt::Display| VaultError::KeychainUnavailable(e.to_string());
+    let unavailable = |e: &dyn std::fmt::Display| keychain_error(e);
     // The platform store is installed on first use. A store installed
     // earlier (the in-memory mock in tests) is kept.
     if keyring_core::get_default_store().is_none() {
@@ -724,7 +742,7 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
     let profile_id = uuid::Uuid::now_v7().to_string();
     let account = format!("profile-{profile_id}");
     let entry = keychain_entry(&account)?;
-    entry.set_secret(&keychain_secret(&dek)).map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?;
+    entry.set_secret(&keychain_secret(&dek)).map_err(|e| keychain_error(&e))?;
     let mut header = ProfileHeader {
         format: "anvil-profile".into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
@@ -754,7 +772,7 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     check_unsealed_keychain_header(h)?;
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
-    let secret = Zeroizing::new(entry.get_secret().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))?);
+    let secret = Zeroizing::new(entry.get_secret().map_err(|e| keychain_error(&e))?);
     // The marker a conversion left in place of the key: this header is a
     // copy saved before the profile was converted.
     if secret.starts_with(KEYCHAIN_RETIRED_TAG) {
@@ -783,12 +801,35 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
 pub fn delete_keychain_entry(h: &ProfileHeader) -> Result<(), VaultError> {
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
-    entry.delete_credential().map_err(|e| VaultError::KeychainUnavailable(e.to_string()))
+    entry.delete_credential().map_err(|e| keychain_error(&e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "os-keychain")]
+    #[test]
+    fn keychain_access_denied_is_distinct_from_an_unavailable_store() {
+        let canceled = keyring_core::Error::PlatformFailure(Box::new(std::io::Error::other("User canceled the operation")));
+        assert!(matches!(keychain_error(&canceled), VaultError::KeychainAccessDenied));
+
+        let denied = keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("access denied")));
+        assert!(matches!(keychain_error(&denied), VaultError::KeychainAccessDenied));
+
+        let unavailable = keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked")));
+        assert!(matches!(keychain_error(&unavailable), VaultError::KeychainUnavailable(message) if message.contains("store locked")));
+    }
+
+    #[test]
+    fn keychain_access_denied_message_gives_recovery_steps() {
+        let message = VaultError::KeychainAccessDenied.to_string();
+        assert!(message.contains("refused access to the stored key"));
+        assert!(message.contains("after an app update"));
+        assert!(message.contains("Keychain Access"));
+        assert!(message.contains("retry the unlock"));
+        assert!(message.contains("re-enter your login password"));
+    }
 
     #[test]
     fn passphrase_and_recovery_both_unlock_and_wrong_fails() {

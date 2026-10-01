@@ -18,6 +18,12 @@
 
 ### Changed
 
+- Keychain unlock now explains when macOS refuses access to a stored profile key
+  after an app update, and how to allow Ferrum Anvil in Keychain Access and retry.
+- REL-003 records the verified signed in-app update from 0.1.0 to 0.1.1 on
+  macOS arm64, with the release runs and updater key evidence; Windows and Linux
+  remain untested.
+
 - New Ferrum gateway profiles default to `ferrum-edge-0.9.9` (desktop dialog
   and CLI), and the failure lab's default pin is Ferrum Edge v0.9.9
   (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
