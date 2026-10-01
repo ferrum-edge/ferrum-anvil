@@ -46,6 +46,7 @@ quinn-proto = { version = "0.11.18", default-features = false, features = ["rust
 h3.workspace = true
 h3-quinn.workspace = true
 jsonwebtoken.workspace = true
+rand.workspace = true
 
 [lints]
 workspace = true

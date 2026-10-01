@@ -7801,11 +7801,11 @@
    "id": "REL-003",
    "category": "Installer, updater and website release",
    "title": "Signed update integrity",
-   "status": "blocked",
+   "status": "verified_live",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "The updater is wired (opt-in update check; tauri-plugin-updater verifies each download's minisign signature against the public key compiled into the build), but no build carries the owner's updater key yet, so Upgrade opens the release page and Anvil never installs an update itself. Owner steps: docs/release.md#in-app-updates, ferrum-edge/ferrum-anvil#2."
+   "note": "Verified on macOS arm64: a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing."
   },
   {
    "id": "REL-004",
