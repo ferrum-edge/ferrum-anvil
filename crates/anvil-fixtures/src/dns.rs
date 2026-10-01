@@ -11,6 +11,10 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
 
 const PORT_ZERO_BIND_ATTEMPTS: usize = 64;
+const SEQUENTIAL_BIND_ATTEMPTS: usize = 4;
+const DYNAMIC_PORT_START: u16 = 49_152;
+const DYNAMIC_PORT_COUNT: u16 = u16::MAX - DYNAMIC_PORT_START + 1;
+const DYNAMIC_PORT_STRIDE: u16 = 9_973;
 
 /// `WSAEACCES`: Windows refuses a bind that lands inside a reserved/excluded
 /// port range (Hyper-V, WinNAT, WSL). Rust maps it to `PermissionDenied` on
@@ -51,8 +55,23 @@ where
     let mut rejected = Vec::new();
     let mut tried_ports = Vec::new();
     let mut last_error = None;
-    for _ in 0..PORT_ZERO_BIND_ATTEMPTS {
-        let udp = match bind_udp(bind).await {
+    let random_start = rand::random_range(0..DYNAMIC_PORT_COUNT);
+    for attempt in 0..PORT_ZERO_BIND_ATTEMPTS {
+        let candidate_bind = if requests_ephemeral_port(bind) && attempt >= SEQUENTIAL_BIND_ATTEMPTS {
+            let mut offset = attempt - SEQUENTIAL_BIND_ATTEMPTS;
+            let port = loop {
+                let port = dynamic_port_candidate(random_start, offset);
+                if !tried_ports.contains(&port) {
+                    break port;
+                }
+                offset += 1;
+            };
+            tried_ports.push(port);
+            bind_with_port(bind, port)
+        } else {
+            bind.to_owned()
+        };
+        let udp = match bind_udp(&candidate_bind).await {
             Ok(udp) => udp,
             Err(error) if retryable_bind_error(&error) => {
                 last_error = Some(error);
@@ -61,7 +80,9 @@ where
             Err(error) => return Err(error),
         };
         let addr = udp.local_addr()?;
-        tried_ports.push(addr.port());
+        if !tried_ports.contains(&addr.port()) {
+            tried_ports.push(addr.port());
+        }
         match bind_tcp(addr).await {
             Ok(tcp) => return Ok((udp, tcp)),
             Err(error) if retryable_bind_error(&error) => {
@@ -77,6 +98,17 @@ where
         error.kind(),
         format!("could not bind a DNS UDP/TCP pair after {PORT_ZERO_BIND_ATTEMPTS} attempts; tried UDP ports {tried_ports:?}: {error}"),
     ))
+}
+
+fn dynamic_port_candidate(random_start: u16, offset: usize) -> u16 {
+    let position =
+        (u32::from(random_start) + (offset as u32 * u32::from(DYNAMIC_PORT_STRIDE))) % u32::from(DYNAMIC_PORT_COUNT);
+    DYNAMIC_PORT_START + position as u16
+}
+
+fn bind_with_port(bind: &str, port: u16) -> String {
+    let (host, _) = bind.rsplit_once(':').expect("socket address includes a port");
+    format!("{host}:{port}")
 }
 
 fn requests_ephemeral_port(bind: &str) -> bool {
@@ -281,6 +313,59 @@ mod tests {
         assert_ne!(calls[0], calls[1], "the rejected UDP candidate was released and handed back");
         assert_eq!(*order.lock().unwrap(), ["udp", "tcp", "udp", "tcp"]);
         assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_pair_escapes_a_contiguous_tcp_exclusion() {
+        let exclusion_start = find_free_dynamic_udp_port().await;
+        let next_port = Arc::new(Mutex::new(exclusion_start));
+        let ports = Arc::new(Mutex::new(Vec::new()));
+        let bind_next = next_port.clone();
+        let tcp_ports = ports.clone();
+        let exclusion_end = exclusion_start + 500;
+
+        let (udp, tcp) = bind_ephemeral_pair_with(
+            "127.0.0.1:0",
+            move |bind| {
+                let addr = if bind.ends_with(":0") {
+                    let mut port = bind_next.lock().unwrap();
+                    let addr = SocketAddr::from(([127, 0, 0, 1], *port));
+                    *port += 1;
+                    addr
+                } else {
+                    bind.parse().unwrap()
+                };
+                Box::pin(async move { UdpSocket::bind(addr).await })
+            },
+            move |addr| {
+                tcp_ports.lock().unwrap().push(addr.port());
+                if (exclusion_start..exclusion_end).contains(&addr.port()) {
+                    let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                    Box::pin(async move { denied }) as TcpBindFuture
+                } else {
+                    Box::pin(TcpListener::bind(addr)) as TcpBindFuture
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let tried = ports.lock().unwrap();
+        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS]
+            .iter()
+            .all(|port| (exclusion_start..exclusion_end).contains(port)));
+        assert!(tried.last().is_some_and(|port| *port >= exclusion_end));
+        assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
+    }
+
+    async fn find_free_dynamic_udp_port() -> u16 {
+        for port in DYNAMIC_PORT_START..=65_000 {
+            if let Ok(socket) = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port))).await {
+                drop(socket);
+                return port;
+            }
+        }
+        panic!("no free UDP port in the dynamic range for the injected exclusion test");
     }
 
     #[tokio::test]
