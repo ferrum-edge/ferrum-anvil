@@ -38,6 +38,14 @@
   treats it as released but not yet read by Anvil (gateway findings stay
   capped at likely until the authenticated lookup is adopted).
 
+### Fixed
+
+- Desktop: the update dialog shows release notes as readable text instead of
+  raw Markdown. GitHub callouts read "Warning: …", emphasis, quote, heading
+  and code markers are dropped, bullets read "•" and links read
+  "text (url)". The notes are still text: nothing is rendered as markup and
+  links are not clickable.
+
 ## [0.1.1] - 2026-10-01
 
 ### Changed
