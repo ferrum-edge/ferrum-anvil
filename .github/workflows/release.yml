@@ -164,7 +164,7 @@ jobs:
           cache-on-failure: "false"
       - name: Bundling and inspection tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends libfuse2 rpm2cpio cpio
+        run: sudo apt-get install -y --no-install-recommends libfuse2 rpm2cpio cpio libarchive-tools
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-cyclonedx@0.5.9

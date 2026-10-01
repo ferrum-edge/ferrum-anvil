@@ -149,8 +149,18 @@ unpack() {
       if command -v dpkg-deb >/dev/null; then dpkg-deb -x "$a" "$out"
       else (cd "$out" && ar x "$a" && for d in data.tar.*; do tar -xf "$d"; done); fi ;;
     *.rpm)
-      command -v rpm2cpio >/dev/null || { echo "rpm2cpio required for $a" >&2; return 1; }
-      (cd "$out" && rpm2cpio "$a" | cpio -idm --quiet) ;;
+      # rpm2cpio | cpio first; bsdtar (libarchive) reads the RPM payload
+      # itself. A failure says why instead of only "could not unpack".
+      local err="$work/unpack.$RANDOM.err"
+      : >"$err"
+      if command -v rpm2cpio >/dev/null && (cd "$out" && rpm2cpio "$a" 2>>"$err" | cpio -idm --quiet 2>>"$err"); then
+        :
+      elif command -v bsdtar >/dev/null && bsdtar -xf "$a" -C "$out" 2>>"$err"; then
+        say "      unpack: rpm2cpio/cpio failed ($(tr '\n' ' ' <"$err" | cut -c1-300)); read with bsdtar"
+      else
+        say "      unpack: $(command -v rpm2cpio >/dev/null || printf 'no rpm2cpio; ')$(command -v bsdtar >/dev/null || printf 'no bsdtar; ')$(tr '\n' ' ' <"$err" | cut -c1-300)"
+        return 1
+      fi ;;
     *.AppImage)
       chmod +x "$a"
       (cd "$out" && "$a" --appimage-extract >/dev/null) ;;
@@ -193,8 +203,8 @@ free_port() {
   return 1
 }
 
-runtime_probe() { # $1 = executable; returns 0 pass, 1 fail, 2 inconclusive
-  local exe="$1" port data pid code i alive=1 served=""
+runtime_probe() { # $1 = executable, $2 = optional directory whose leftover processes are stopped; returns 0 pass, 1 fail, 2 inconclusive
+  local exe="$1" tree="${2:-}" port data pid code i alive=1 served=""
   port="$(free_port)" || { say "ERROR probe: no free port"; return 2; }
   data="$work/probe-data.$RANDOM"
   mkdir -p "$data"
@@ -210,6 +220,8 @@ runtime_probe() { # $1 = executable; returns 0 pass, 1 fail, 2 inconclusive
   done
   if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; sleep 1; kill -9 "$pid" 2>/dev/null || true; fi
   wait "$pid" 2>/dev/null || true
+  # A launcher that did not exec the app leaves it running from $tree (the probe's own unpack directory).
+  if [ -n "$tree" ] && command -v pkill >/dev/null; then pkill -KILL -f -- "$tree/" 2>/dev/null || true; fi
   local profiles=0
   if [ -d "$data/profiles" ]; then profiles="$(find "$data/profiles" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"; fi
   if [ -n "$served" ]; then
@@ -233,7 +245,9 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
   if [ ! -e "$a" ]; then bad_input "$a does not exist"; continue; fi
   dir="$work/a$idx"
   files=()
-  if [ -f "$a" ] && is_exe "$a" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe) false ;; *) true ;; esac; then
+  # Installers that are themselves executables (NSIS, and an AppImage, whose
+  # ELF runtime carries the app in a squashfs payload) are unpacked instead.
+  if [ -f "$a" ] && is_exe "$a" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe|*.AppImage) false ;; *) true ;; esac; then
     files=("$a")
   else
     if [ -d "$a" ]; then
@@ -284,7 +298,11 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
       say "      probe: no desktop executable in this artifact (skipped)"
     else
       [ -x "$target" ] || chmod +x "$target" 2>/dev/null || true
-      prc=0; runtime_probe "$target" || prc=$?
+      tree=""
+      # An AppImage's bundled WebKit finds its helper processes only when the
+      # app starts through the image's AppRun (environment, working directory).
+      case "$a" in *.AppImage) if [ -x "$dir/squashfs-root/AppRun" ]; then target="$dir/squashfs-root/AppRun"; tree="$dir/squashfs-root"; fi ;; esac
+      prc=0; runtime_probe "$target" "$tree" || prc=$?
       case "$prc" in
         0) probe_status="pass" ;;
         1) probe_status="fail"; failures=$((failures + 1)); status="fail" ;;
