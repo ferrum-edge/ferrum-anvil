@@ -428,9 +428,7 @@ async fn send_handshake_flight<C: DatagramChannel>(
     deadline: Option<Instant>,
     on_deadline: impl FnOnce() -> TransportFailure,
 ) -> Result<(), TransportFailure> {
-    send_bounded(chan, outs, notes, facts, cancel, deadline, on_deadline)
-        .await
-        .map_err(classify_handshake_send_failure)
+    send_bounded(chan, outs, notes, facts, cancel, deadline, on_deadline).await.map_err(classify_handshake_send_failure)
 }
 
 /// A tunnel a DTLS session runs through ([`crate::masque::MasqueChannel`] or
