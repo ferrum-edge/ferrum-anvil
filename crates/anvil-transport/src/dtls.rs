@@ -410,6 +410,29 @@ async fn send_bounded<C: DatagramChannel>(
     }
 }
 
+fn classify_handshake_send_failure(mut failure: TransportFailure) -> TransportFailure {
+    failure.phase = Phase::DtlsHandshake;
+    if failure.kind == FailureKind::RequestWriteFailed {
+        failure.kind = FailureKind::DtlsHandshakeFailed;
+    }
+    failure
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_handshake_flight<C: DatagramChannel>(
+    chan: &mut C,
+    outs: &[Out],
+    notes: &mut PathNotes,
+    facts: &mut SessionFacts,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+    on_deadline: impl FnOnce() -> TransportFailure,
+) -> Result<(), TransportFailure> {
+    send_bounded(chan, outs, notes, facts, cancel, deadline, on_deadline)
+        .await
+        .map_err(classify_handshake_send_failure)
+}
+
 /// A tunnel a DTLS session runs through ([`crate::masque::MasqueChannel`] or
 /// [`crate::hbone_udp::HboneChannel`]).
 trait Tunnel: DatagramChannel {
@@ -792,8 +815,7 @@ async fn exchange<C: DatagramChannel>(
             }
         }
         // The flight goes out within the handshake deadline too.
-        if let Err(mut f) = send_bounded(chan, &outs, &mut notes, facts, cancel, Some(hs_deadline), hs_timeout).await {
-            f.phase = Phase::DtlsHandshake;
+        if let Err(f) = send_handshake_flight(chan, &outs, &mut notes, facts, cancel, Some(hs_deadline), hs_timeout).await {
             break Err(f);
         }
         if outs.iter().any(|o| matches!(o, Out::Connected)) {
@@ -1094,10 +1116,14 @@ mod tests {
     struct Path {
         stalled: bool,
         taken: usize,
+        failure: Option<TransportFailure>,
     }
 
     impl DatagramChannel for Path {
         async fn send(&mut self, _datagram: &[u8]) -> Result<Sent, TransportFailure> {
+            if let Some(failure) = self.failure.take() {
+                return Err(failure);
+            }
             if self.stalled {
                 std::future::pending::<()>().await;
             }
@@ -1122,7 +1148,7 @@ mod tests {
     async fn send_flight(path: &mut Path, cancel: &CancellationToken, deadline: Option<Instant>) -> (Result<(), TransportFailure>, bool) {
         let (mut notes, mut facts) = (PathNotes::default(), SessionFacts::default());
         let outs = flight();
-        let sent = send_bounded(path, &outs, &mut notes, &mut facts, cancel, deadline, hs_timeout);
+        let sent = send_handshake_flight(path, &outs, &mut notes, &mut facts, cancel, deadline, hs_timeout);
         let r = tokio::time::timeout(Duration::from_secs(5), sent).await.expect("the flight must end without the path taking it");
         (r, notes.send_interrupted)
     }
@@ -1139,7 +1165,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_handshake_deadline_ends_a_flight_the_path_never_takes() {
-        let mut path = Path { stalled: true, taken: 0 };
+        let mut path = Path { stalled: true, taken: 0, failure: None };
         let deadline = Some(Instant::now() + Duration::from_millis(200));
         let (r, interrupted) = send_flight(&mut path, &CancellationToken::new(), deadline).await;
         assert_eq!(r.unwrap_err().kind, FailureKind::DtlsHandshakeTimeout);
@@ -1148,7 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_ends_a_flight_the_path_never_takes() {
-        let mut path = Path { stalled: true, taken: 0 };
+        let mut path = Path { stalled: true, taken: 0, failure: None };
         let (r, interrupted) = send_flight(&mut path, &cancel_after(100), None).await;
         assert_eq!(r.unwrap_err().kind, FailureKind::Canceled);
         assert!(interrupted);
@@ -1156,12 +1182,28 @@ mod tests {
 
     #[tokio::test]
     async fn a_path_that_takes_datagrams_gets_the_whole_flight() {
-        let mut path = Path { stalled: false, taken: 0 };
+        let mut path = Path { stalled: false, taken: 0, failure: None };
         let deadline = Some(Instant::now() + Duration::from_secs(5));
         let (r, interrupted) = send_flight(&mut path, &CancellationToken::new(), deadline).await;
         r.unwrap();
         assert_eq!(path.taken, 2, "every packet of the flight, nothing else");
         assert!(!interrupted);
+    }
+
+    #[tokio::test]
+    async fn a_handshake_write_failure_is_classified_as_a_handshake_failure() {
+        let failure = TransportFailure::new(
+            Phase::Session,
+            FailureKind::RequestWriteFailed,
+            "sending a DATAGRAM capsule on the CONNECT stream failed: Remote reset: 0x0",
+        );
+        let mut path = Path { stalled: false, taken: 0, failure: Some(failure) };
+        let (result, interrupted) = send_flight(&mut path, &CancellationToken::new(), None).await;
+        let failure = result.unwrap_err();
+
+        assert_eq!((failure.kind, failure.phase), (FailureKind::DtlsHandshakeFailed, Phase::DtlsHandshake));
+        assert_eq!(failure.message, "sending a DATAGRAM capsule on the CONNECT stream failed: Remote reset: 0x0");
+        assert!(interrupted);
     }
 
     /// The fake path as a tunnel: its evidence is whether it was reset.
@@ -1217,7 +1259,7 @@ mod tests {
     /// stops it: the tunnel is reset.
     #[tokio::test]
     async fn a_tunnel_is_reset_when_a_send_it_had_not_taken_is_interrupted() {
-        let (kind, reset) = through_tunnel(Path { stalled: true, taken: 0 }, &cancel_after(100)).await;
+        let (kind, reset) = through_tunnel(Path { stalled: true, taken: 0, failure: None }, &cancel_after(100)).await;
         assert_eq!(kind, Some(FailureKind::Canceled));
         assert!(reset, "the tunnel is reset (close(true)), not finished");
     }
@@ -1227,10 +1269,10 @@ mod tests {
     /// finished cleanly.
     #[tokio::test]
     async fn a_tunnel_is_finished_when_the_exchange_ends_while_nothing_is_sent() {
-        let (kind, reset) = through_tunnel(Path { stalled: false, taken: 0 }, &cancel_after(100)).await;
+        let (kind, reset) = through_tunnel(Path { stalled: false, taken: 0, failure: None }, &cancel_after(100)).await;
         assert_eq!(kind, Some(FailureKind::Canceled));
         assert!(!reset, "no send was interrupted: the tunnel is finished, not reset");
-        let (kind, reset) = through_tunnel(Path { stalled: false, taken: 0 }, &CancellationToken::new()).await;
+        let (kind, reset) = through_tunnel(Path { stalled: false, taken: 0, failure: None }, &CancellationToken::new()).await;
         assert_eq!(kind, Some(FailureKind::DtlsHandshakeTimeout));
         assert!(!reset, "a handshake that timed out waiting for the peer finishes the tunnel");
     }
