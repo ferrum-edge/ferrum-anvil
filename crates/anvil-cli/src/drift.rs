@@ -38,8 +38,8 @@ pub struct SpecDriftArgs {
     /// A HAR 1.2 capture of the traffic (browser dev tools, a proxy).
     #[arg(long, requires = "spec")]
     har: Option<PathBuf>,
-    /// Instead: an imported spec (its import id, see the desktop's Contract
-    /// view or `--json` of `import-spec`) and its collection's history.
+    /// Instead: an imported spec (its import id, printed by `import-spec` or
+    /// shown in the desktop's Contract view) and its collection's history.
     #[arg(long, conflicts_with = "har")]
     import: Option<String>,
     /// Newest history records read (with `--import`).

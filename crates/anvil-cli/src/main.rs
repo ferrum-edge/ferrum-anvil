@@ -164,7 +164,8 @@ enum Cmd {
         #[arg(long, default_value = "contracts/schemas")]
         out: PathBuf,
     },
-    /// Environment self-check (data dir, trust store, keychain).
+    /// Environment self-check (data dir, system trust store, profiles,
+    /// engine/catalog identity).
     Doctor,
 }
 

@@ -54,6 +54,15 @@
 
 - Documentation: link Anvil's contract pin to the immutable Ferrum contract
   release and describe the central store, consumed files and re-vendoring rule.
+- Documentation: reconcile the completion report's current-state statements
+  with `main`: 14 lab profiles including `mcp`, the four supported Edge
+  releases (0.9.5/0.9.7/0.9.8/0.9.9), eight `X-Gateway-Error` tokens from
+  0.9.8, and the published `anvil-v0.1.1` preview assets, checksums and
+  updater signatures against still-missing platform signing (#276).
+- CLI help: `spec-drift --import` now points to the import id printed by
+  `import-spec` (there is no `--json` flag), and `doctor` lists the checks it
+  performs (data dir, system trust store, profiles, engine/catalog) instead of
+  claiming a keychain self-check (#277).
 - Keychain unlock now explains when macOS refuses access to a stored profile key
   after an app update, and how to allow Ferrum Anvil in Keychain Access and retry.
 - REL-003 records the verified signed in-app update from 0.1.0 to 0.1.1 on
