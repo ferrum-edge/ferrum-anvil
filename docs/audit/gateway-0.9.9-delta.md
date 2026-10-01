@@ -107,7 +107,7 @@ what the provider receives, not a gateway-authored signal.
 
 | Outcome | Change | Evidence |
 |---|---|---|
-| `plugin.mesh_authz.denied` | On a route that allows `;` parameters, `paths` / `notPaths` and `request.headers[:path]` are judged on the raw and the parameter-stripped path: DENY, CUSTOM and AUDIT on either, ALLOW on both (#5948). `connection.sni` values and the received SNI are normalized, so a DENY on `admin.example.com` also fires for `admin.example.com.` (#5903). A `to.headers` pseudo-header rule is refused at config validation (#5951). Same 403 body. | `src/plugins/mesh/authz.rs:3087`; `src/modes/mesh/policy.rs:492` |
+| `plugin.mesh_authz.denied` | On a route that allows `;` parameters, `paths` / `notPaths` and `request.headers[:path]` are judged on the raw and the parameter-stripped path: DENY, CUSTOM and AUDIT on either, ALLOW on both (#5948). `connection.sni` values and the received SNI are normalized, so a DENY on `admin.example.com` also fires for `admin.example.com.` (#5903). A `to.headers` pseudo-header rule is refused at config validation (#5951, PR #5952). Same 403 body. | `src/plugins/mesh/authz.rs:3087`; `src/modes/mesh/policy.rs:492` |
 
 ### MCP (PRs #5905, #5919, #5930, #5943)
 

@@ -933,6 +933,7 @@ fn auth021(env: &Env) -> Fut<'_> {
             let before = env.fx.echo.log.count_requests();
             let refused = go(env, &ctx(env, "GET", &format!("{AUTH021_PARAM_PATH}?{query}"), hmac_cfg(env))).await;
             signal(&mut c, &refused, 400, "Request path contains a path parameter");
+            gateway_outcome(&mut c, env, &refused);
             backend_untouched(&mut c, env, before);
         }
         let before = env.fx.echo.log.count_requests();
