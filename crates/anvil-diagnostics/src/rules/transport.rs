@@ -97,11 +97,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             Some(base("exchange.total_timeout", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Caller, Severity::Error))
         }
         K::Canceled if status.is_none() => {
-            let scope = if a.dispatch == DispatchState::NotDispatched {
-                SourceScope::LocalClient
-            } else {
-                SourceScope::ClientToPeer
-            };
+            let scope = if a.dispatch == DispatchState::NotDispatched { SourceScope::LocalClient } else { SourceScope::ClientToPeer };
             Some(base("request.canceled", Confidence::Confirmed, scope, Owner::Caller, Severity::Warning))
         }
         K::QuicHandshakeTimeout => {
@@ -195,10 +191,7 @@ mod tests {
             connection: None,
             phases: vec![],
             dispatch,
-            bytes: ByteCounts {
-                connection_bytes_written: Some(bytes_written),
-                ..ByteCounts::default()
-            },
+            bytes: ByteCounts { connection_bytes_written: Some(bytes_written), ..ByteCounts::default() },
             response_status: None,
             failure: Some(TransportFailure::new(Phase::AwaitResponseHeaders, K::Canceled, "canceled")),
             duration_us: 1,
@@ -221,11 +214,7 @@ mod tests {
             gateway_detail: None,
             redact: None,
         };
-        crate::diagnose(&input)
-            .findings
-            .into_iter()
-            .find(|finding| finding.code == "request.canceled")
-            .expect("cancellation finding")
+        crate::diagnose(&input).findings.into_iter().find(|finding| finding.code == "request.canceled").expect("cancellation finding")
     }
 
     #[test]
