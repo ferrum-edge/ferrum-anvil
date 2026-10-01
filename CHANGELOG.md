@@ -96,6 +96,11 @@
   and code markers are dropped, bullets read "•" and links read
   "text (url)". The notes are still text: nothing is rendered as markup and
   links are not clickable.
+- The ignored Python `websockets` permessage-deflate interoperability test
+  now runs on `websockets` 14 and 15 as well as 13.x: its fixture
+  feature-detects the negotiated extensions (`.extensions` on 13.x, the new
+  asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
+  version range is documented where the run instructions live (#275).
 
 ## [0.1.1] - 2026-10-01
 
