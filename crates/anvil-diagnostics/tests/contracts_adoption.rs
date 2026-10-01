@@ -37,6 +37,74 @@ fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<S
     (missing, extra)
 }
 
+/// The Ferrum Edge releases the pinned tag covers. `contracts-edge-0.9.9` is
+/// cut from Edge v0.9.9, and v0.9.10 changed no contract source, so
+/// ferrum-contracts maps v0.9.10 to the same tag (its docs/versioning.md).
+/// Each release's catalog must agree with the pinned vocabularies.
+const PINNED_RELEASES: [&str; 2] = ["ferrum-edge-0.9.9", "ferrum-edge-0.9.10"];
+
+/// A catalog of a release the pin covers agrees with the pinned vocabularies:
+/// the same public tokens and error classes, each class with the contract's
+/// token, and header meanings that name every token.
+fn assert_catalog_matches_pin(root: &Path, compatibility_id: &str, errors: &Value) {
+    let local = read_json(&root.join(format!("catalog/ferrum/{compatibility_id}/outcomes.json")));
+    let contract_tokens: BTreeSet<String> =
+        errors["x_gateway_error_tokens"].as_array().unwrap().iter().map(|entry| entry["token"].as_str().unwrap().to_owned()).collect();
+    let local_tokens = strings(&local["public_tokens"]);
+    let (missing, extra) = differences(&contract_tokens, &local_tokens);
+    assert!(missing.is_empty() && extra.is_empty(), "{compatibility_id} public_tokens drift; missing: {missing:?}; extra: {extra:?}");
+
+    let contract_classes: BTreeSet<String> =
+        errors["error_classes"].as_array().unwrap().iter().map(|entry| entry["value"].as_str().unwrap().to_owned()).collect();
+    let local_classes: BTreeSet<String> =
+        local["error_class_semantics"].as_array().unwrap().iter().map(|entry| entry["class"].as_str().unwrap().to_owned()).collect();
+    let (missing, extra) = differences(&contract_classes, &local_classes);
+    assert!(missing.is_empty() && extra.is_empty(), "{compatibility_id} error_classes drift; missing: {missing:?}; extra: {extra:?}");
+    let local_class_meanings: BTreeMap<&str, &str> = local["error_class_semantics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["class"].as_str().unwrap(), entry["x_gateway_error_typical"].as_str().unwrap()))
+        .collect();
+    let mut class_meaning_drift = Vec::new();
+    for class in errors["error_classes"].as_array().unwrap() {
+        let name = class["value"].as_str().unwrap();
+        let token = class["x_gateway_error"].as_str().unwrap();
+        let local_meaning = local_class_meanings[name];
+        let documented_condition = match (name, token) {
+            ("client_disconnect", "backend_error") => local_meaning == "(only if public status >=500)",
+            ("request_body_too_large", "backend_error") => local_meaning == "(4xx: none)",
+            _ => false,
+        };
+        let mapped_token = local_meaning.split_once(" (").map_or(local_meaning, |(token, _)| token);
+        if mapped_token != token && !documented_condition {
+            class_meaning_drift.push(format!("{name}: contract token {token:?}, local meaning {local_meaning:?}"));
+        }
+    }
+    assert!(class_meaning_drift.is_empty(), "{compatibility_id} error_class token meaning drift: {class_meaning_drift:?}");
+
+    let local_header_meanings: BTreeMap<String, &str> = local["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["name"].as_str().unwrap().to_ascii_lowercase(), entry["semantics"].as_str().unwrap()))
+        .collect();
+    let gateway_error_meaning = local_header_meanings.get("x-gateway-error").expect("X-Gateway-Error meaning");
+    let missing_header_tokens: Vec<String> =
+        contract_tokens.iter().filter(|token| !gateway_error_meaning.contains(token.as_str())).cloned().collect();
+    assert!(missing_header_tokens.is_empty(), "{compatibility_id}: X-Gateway-Error meaning omits {missing_header_tokens:?}");
+    let upstream_status_meaning = local_header_meanings.get("x-gateway-upstream-status").expect("X-Gateway-Upstream-Status meaning");
+    assert!(
+        upstream_status_meaning.contains("degraded"),
+        "{compatibility_id}: X-Gateway-Upstream-Status meaning drifted: {upstream_status_meaning}"
+    );
+    let diagnostic_ref_meaning = local_header_meanings.get("x-ferrum-diagnostic-ref").expect("X-Ferrum-Diagnostic-Ref meaning");
+    assert!(
+        diagnostic_ref_meaning.contains("v0.9.9"),
+        "{compatibility_id}: X-Ferrum-Diagnostic-Ref meaning drifted: {diagnostic_ref_meaning}"
+    );
+}
+
 #[test]
 fn pinned_contract_hashes_and_anvil_copies_match() {
     let root = repo_root();
@@ -99,12 +167,16 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
-    let local = read_json(&root.join("catalog/ferrum/ferrum-edge-0.9.9/outcomes.json"));
+    for compatibility_id in PINNED_RELEASES {
+        assert_catalog_matches_pin(&root, compatibility_id, &errors);
+    }
+    // The lab's default pin is a release the contract pin covers.
+    let lock = std::fs::read_to_string(root.join("lab/gateway/RELEASE.lock")).expect("lab/gateway/RELEASE.lock");
+    let lab_release = lock.lines().find_map(|line| line.strip_prefix("release ")).expect("RELEASE.lock names a release");
+    let lab_id = format!("ferrum-edge-{}", lab_release.trim().trim_start_matches('v'));
+    assert!(PINNED_RELEASES.contains(&lab_id.as_str()), "the lab runs {lab_id}, which {tag:?} does not cover");
     let contract_tokens: BTreeSet<String> =
         errors["x_gateway_error_tokens"].as_array().unwrap().iter().map(|entry| entry["token"].as_str().unwrap().to_owned()).collect();
-    let local_tokens = strings(&local["public_tokens"]);
-    let (missing, extra) = differences(&contract_tokens, &local_tokens);
-    assert!(missing.is_empty() && extra.is_empty(), "0.9.9 public_tokens drift; missing: {missing:?}; extra: {extra:?}");
 
     let diagnostic_tokens: BTreeSet<String> = read_json(&root.join("catalog/diagnostics/findings.en.json"))["findings"]
         .as_object()
@@ -114,35 +186,6 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         .collect();
     let (missing, extra) = differences(&contract_tokens, &diagnostic_tokens);
     assert!(missing.is_empty() && extra.is_empty(), "ferrum.token.* wording drift; missing: {missing:?}; extra: {extra:?}");
-
-    let contract_classes: BTreeSet<String> =
-        errors["error_classes"].as_array().unwrap().iter().map(|entry| entry["value"].as_str().unwrap().to_owned()).collect();
-    let local_classes: BTreeSet<String> =
-        local["error_class_semantics"].as_array().unwrap().iter().map(|entry| entry["class"].as_str().unwrap().to_owned()).collect();
-    let (missing, extra) = differences(&contract_classes, &local_classes);
-    assert!(missing.is_empty() && extra.is_empty(), "0.9.9 error_classes drift; missing: {missing:?}; extra: {extra:?}");
-    let local_class_meanings: BTreeMap<&str, &str> = local["error_class_semantics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| (entry["class"].as_str().unwrap(), entry["x_gateway_error_typical"].as_str().unwrap()))
-        .collect();
-    let mut class_meaning_drift = Vec::new();
-    for class in errors["error_classes"].as_array().unwrap() {
-        let name = class["value"].as_str().unwrap();
-        let token = class["x_gateway_error"].as_str().unwrap();
-        let local_meaning = local_class_meanings[name];
-        let documented_condition = match (name, token) {
-            ("client_disconnect", "backend_error") => local_meaning == "(only if public status >=500)",
-            ("request_body_too_large", "backend_error") => local_meaning == "(4xx: none)",
-            _ => false,
-        };
-        let mapped_token = local_meaning.split_once(" (").map_or(local_meaning, |(token, _)| token);
-        if mapped_token != token && !documented_condition {
-            class_meaning_drift.push(format!("{name}: contract token {token:?}, local meaning {local_meaning:?}"));
-        }
-    }
-    assert!(class_meaning_drift.is_empty(), "error_class token meaning drift: {class_meaning_drift:?}");
 
     // Compare the headers Anvil's Ferrum rules actually read. A gateway
     // diagnostic header still unreleased on the pin needs an explicit decision
@@ -173,20 +216,6 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         ["x-gateway-error", "x-gateway-upstream-status", gateway_detail::REF_HEADER].into_iter().map(String::from).collect();
     let (missing, extra) = differences(&contract_headers, &local_header_names);
     assert!(missing.is_empty() && extra.is_empty(), "gateway diagnostic header drift; missing: {missing:?}; extra: {extra:?}");
-    let local_header_meanings: BTreeMap<String, &str> = local["headers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| (entry["name"].as_str().unwrap().to_ascii_lowercase(), entry["semantics"].as_str().unwrap()))
-        .collect();
-    let gateway_error_meaning = local_header_meanings.get("x-gateway-error").expect("X-Gateway-Error meaning");
-    let missing_header_tokens: Vec<String> =
-        contract_tokens.iter().filter(|token| !gateway_error_meaning.contains(token.as_str())).cloned().collect();
-    assert!(missing_header_tokens.is_empty(), "X-Gateway-Error meaning omits pinned tokens: {missing_header_tokens:?}");
-    let upstream_status_meaning = local_header_meanings.get("x-gateway-upstream-status").expect("X-Gateway-Upstream-Status meaning");
-    assert!(upstream_status_meaning.contains("degraded"), "X-Gateway-Upstream-Status meaning drifted: {upstream_status_meaning}");
-    let diagnostic_ref_meaning = local_header_meanings.get("x-ferrum-diagnostic-ref").expect("X-Ferrum-Diagnostic-Ref meaning");
-    assert!(diagnostic_ref_meaning.contains("v0.9.9"), "X-Ferrum-Diagnostic-Ref meaning drifted: {diagnostic_ref_meaning}");
 
     let shared_schema = read_json(&vendor.join("schemas/diagnostic-finding/v1.schema.json"));
     let local_schema = read_json(&root.join("contracts/schemas/DiagnosticFinding.schema.json"));

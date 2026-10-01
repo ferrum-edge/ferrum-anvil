@@ -5,9 +5,9 @@
 //! to the `:authority` (Ferrum Edge `src/proxy/hbone_proxy.rs`
 //! `handle_hbone_udp_request` / `relay_hbone_udp`,
 //! `src/proxy/mesh_udp_frame.rs`; the record framing is identical in v0.9.5,
-//! v0.9.7, v0.9.8 and v0.9.9). From v0.9.9 a relay that ends on a socket
+//! v0.9.7, v0.9.8, v0.9.9 and v0.9.10). From v0.9.9 a relay that ends on a socket
 //! error resets the CONNECT stream with `RST_STREAM(CONNECT_ERROR)` instead of
-//! a clean `END_STREAM` (#5781); MESH-026/027 check it on that release.
+//! a clean `END_STREAM` (#5781); MESH-026/027 check it from that release on.
 //!
 //! * The STRICT sidecar relays to the workload's declared `udp` ports on
 //!   loopback (mesh-sidecar.json 17802-17805): an echo (MESH-018), a silent

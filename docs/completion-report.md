@@ -11,8 +11,8 @@ pass.
 |---|---|
 | Source | `ferrum-edge/ferrum-anvil`, branch `claude/anvil-desktop-client-3f372d`, draft PR ferrum-edge/ferrum-anvil#1 |
 | Website (staged, pre-release) | `ferrum-edge/ferrumedge`, branch `claude/anvil-website`, draft PR ferrum-edge/ferrumedge#54. Do not merge before a release. |
-| Gateway compatibility targets | Ferrum Edge v0.9.9 release binary (source `234717c`, the default pin, `lab/gateway/RELEASE.lock`), v0.9.8 (source `e27f210`, `lab/gateway/releases/v0.9.8.lock`), v0.9.7 (source `8fed134`, `lab/gateway/releases/v0.9.7.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), each checksum-pinned; each has its own source-audited catalog |
-| Gateway changes | G01, the authorized diagnostic reference, ships in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and `ferrum-contracts` `contracts-edge-0.9.9` publishes its header and `ferrum.diagnostic_ref.v1` schema. Anvil looks references up for gateway profiles that configure the lookup; only a record bound to the response raises a finding above "likely". The contract is in `docs/g01-gateway-diagnostic-contract.md`; Anvil's use of it is in `docs/diagnostics.md`. |
+| Gateway compatibility targets | Ferrum Edge v0.9.10 release binary (source `ee040d5`, the default pin, `lab/gateway/RELEASE.lock`), v0.9.9 (source `234717c`, `lab/gateway/releases/v0.9.9.lock`), v0.9.8 (source `e27f210`, `lab/gateway/releases/v0.9.8.lock`), v0.9.7 (source `8fed134`, `lab/gateway/releases/v0.9.7.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), each checksum-pinned; each has its own source-audited catalog |
+| Gateway changes | G01, the authorized diagnostic reference, ships in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and `ferrum-contracts` `contracts-edge-0.9.9` publishes its header and `ferrum.diagnostic_ref.v1` schema (that tag also covers v0.9.10, which changed no contract source). Anvil looks references up for gateway profiles that configure the lookup; only a record bound to the response raises a finding above "likely". The contract is in `docs/g01-gateway-diagnostic-contract.md`; Anvil's use of it is in `docs/diagnostics.md`. |
 | Signed artifacts, checksums | None: signing is blocked on owner credentials. The release workflow only produces draft releases (see `docs/release.md`). |
 
 ## Implemented
@@ -40,7 +40,7 @@ pass.
 - **Evidence-based diagnostics.**
   - Deterministic rules run over typed evidence.
   - Each finding has a confidence (confirmed/likely/unknown/conflicting), a scope (the leg it concerns), an owner, what it does not prove, alternatives and next steps.
-  - Source-audited catalogs back the Ferrum-specific findings: 552 Ferrum Edge 0.9.9 outcomes, 540 Ferrum Edge 0.9.8 outcomes, 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
+  - Source-audited catalogs back the Ferrum-specific findings: 553 Ferrum Edge 0.9.10 outcomes, 552 Ferrum Edge 0.9.9 outcomes, 540 Ferrum Edge 0.9.8 outcomes, 538 Ferrum Edge 0.9.7 outcomes and 528 Ferrum Edge 0.9.5 outcomes. A declared gateway uses the catalog of its own release; a release without a catalog gets no outcome matching and an explicit finding saying so.
   - Markers count only for declared gateways and are capped at "likely". The seven coarse `X-Gateway-Error` values are never refined into precise causes.
   - No cloud service or LLM is involved.
   - See `docs/diagnostics.md` and `catalog/`.
@@ -59,7 +59,7 @@ pass.
   - Locking the app stops the run and keeps a partial report.
   - See `docs/load.md`.
 - **Real-gateway failure lab.**
-  - 13 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto, workload, early) drive a pinned gateway binary with controllable fixtures: v0.9.9 by default, v0.9.8, v0.9.7 or v0.9.5 with `--release`. The mesh profile runs the gateway in mesh mode (HBONE for TCP and UDP, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP (UDP and DTLS in the tunnel); proxyproto covers PROXY protocol listeners (TCP, UDP/DTLS, and HTTP listeners that do not expect a header); workload covers the SPIFFE Workload API (X.509-SVIDs and JWT-SVIDs); early covers TLS 1.3 / QUIC 0-RTT early data and `425 Too Early`.
+  - 13 profiles (core, policy, admission, drain, tls, auth, streams, cpdp, h3x, mesh, proxyproto, workload, early) drive a pinned gateway binary with controllable fixtures: v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`. The mesh profile runs the gateway in mesh mode (HBONE for TCP and UDP, SPIFFE); h3x covers SSE over HTTP/3 and CONNECT-UDP (UDP and DTLS in the tunnel); proxyproto covers PROXY protocol listeners (TCP, UDP/DTLS, and HTTP listeners that do not expect a header); workload covers the SPIFFE Workload API (X.509-SVIDs and JWT-SVIDs); early covers TLS 1.3 / QUIC 0-RTT early data and `425 Too Early`.
   - Ground truth is independent of the diagnosis.
   - Every scenario runs twice: trusted, and with the gateway untrusted.
   - See `docs/lab/`.
@@ -80,7 +80,7 @@ Exact commands are in `docs/release.md` → "Local verification record".
 | `cargo test --workspace --exclude anvil-desktop` | 93 test binaries, 716 passed, 0 failed, 2 ignored (the real OS keychain round trip, run by CI on each OS; the Python `websockets` interop check) |
 | Renderer (`tsc`, `vitest`) | clean; 78 passed |
 | Native desktop E2E (WebdriverIO, real app, real engine, core lab gateway on Ferrum Edge 0.9.7) | 9 spec files, 18 tests passed (earlier also on the release-profile e2e build) |
-| `anvil-lab [--release v0.9.5] run <profile> --untrusted-pass` (13 profiles) | v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons. This local record predates the v0.9.8 and v0.9.9 default pins; those releases are exercised by the nightly lab in CI, which runs every supported release. |
+| `anvil-lab [--release v0.9.5] run <profile> --untrusted-pass` (13 profiles) | v0.9.7 and v0.9.5 each: 530 passed, 0 failed, 19 skipped with stated reasons. This local record predates the v0.9.8, v0.9.9 and v0.9.10 default pins; those releases are exercised by the nightly lab in CI, which runs every supported release. |
 | Release check on the production `.app`, `.dmg`, raw binary and CLI, with runtime probe | pass. The e2e build fails as required. |
 | Plaintext-at-rest audit (profile files, WAL/SHM side files, temp files) | no leak |
 | `cargo deny`, license inventory, `gitleaks` over the branch | clean |
@@ -93,7 +93,7 @@ results and reasoned statuses.
 
 - **175 cases have executed evidence:**
   - 97 live against the real gateway;
-  - 77 automated tests (TRUST-009/010/011, the G01 lookup cases, also run live in the `core` lab profile on v0.9.9);
+  - 77 automated tests (TRUST-009/010/011, the G01 lookup cases, also run live in the `core` lab profile on v0.9.9 and later);
   - 1 executed release check.
 - **3 are blocked:**
   - REL-001/003/006 need signed installers, an updater and published assets.

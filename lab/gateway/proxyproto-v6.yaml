@@ -1,5 +1,5 @@
 # Ferrum Anvil failure lab - profile "proxyproto", untrusted-peer instance
-# (ferrum-edge v0.9.9, file mode). Gateway: HTTP 127.0.0.1:18984, admin 18992,
+# (ferrum-edge v0.9.10, file mode). Gateway: HTTP 127.0.0.1:18984, admin 18992,
 # streams [::1]:18921 (tcp) and [::1]:18923 (udp). Fixtures: 127.0.0.1:19921, 19923 — they must
 # never see traffic: the trust gate refuses the ::1 peer first.
 version: "1"

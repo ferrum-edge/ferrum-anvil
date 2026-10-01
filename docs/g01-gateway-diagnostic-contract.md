@@ -5,13 +5,13 @@
 | **Status** | Implemented in Ferrum Edge v0.9.9 (`FERRUM_DIAGNOSTIC_REFS`, default `off`; v0.9.8 and earlier lack it). Adopted by Anvil: a trusted gateway profile can configure the lookup (see [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)). |
 | **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
 | **Tracking** | ferrum-edge/ferrum-edge#5767, ferrum-edge/ferrum-edge#5845 (implementation), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
-| **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8; unchanged in v0.9.9), their statuses and bodies stay unchanged. |
+| **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8; unchanged in v0.9.9 and v0.9.10), their statuses and bodies stay unchanged. |
 
 ## Problem
 
 Without a diagnostic reference, a client sees a coarse token
 (`connection_failure`, `backend_timeout`, …) and a status. On v0.9.5, v0.9.7,
-v0.9.8, and on v0.9.9 without a lookup:
+v0.9.8, and on v0.9.9 and later without a lookup:
 
 - a token merges several causes. For example, `connection_failure` covers
   DNS, TCP, TLS, pool and egress policy;

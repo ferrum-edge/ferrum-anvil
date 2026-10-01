@@ -51,7 +51,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
         # "" = the default pin (RELEASE.lock). Nightly also re-runs every earlier supported release.
-        release: ${{ fromJSON(github.event_name == 'schedule' && '["", "v0.9.8", "v0.9.7", "v0.9.5"]' || format('["{0}"]', inputs.release || '')) }}
+        release: ${{ fromJSON(github.event_name == 'schedule' && '["", "v0.9.9", "v0.9.8", "v0.9.7", "v0.9.5"]' || format('["{0}"]', inputs.release || '')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
