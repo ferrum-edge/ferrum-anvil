@@ -48,6 +48,9 @@ pub struct Assembly<'a> {
     /// What the checks read in place of the response body, if not the body
     /// itself (see [`BodyView`]).
     pub body_view: Option<BodyView<'a>>,
+    /// What the trusted profile's diagnostic reference lookup learned about
+    /// the final response (G01), when one is configured.
+    pub gateway_detail: Option<anvil_diagnostics::gateway_detail::GatewayDetail>,
 }
 
 /// Picks what diagnosis, assertions and extractions read from a response:
@@ -256,6 +259,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         credentials_stripped_on_redirect: a.credentials_stripped,
         protocol_fallback_from: a.protocol_fallback_from.clone(),
         workload: a.workload_api.as_ref(),
+        gateway_detail: a.gateway_detail.as_ref(),
         redact: Some(&redact_excerpt),
     };
     let mut diagnosis = anvil_diagnostics::diagnose(&diag_input);
@@ -496,6 +500,7 @@ pub fn local_failure_with(
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: workload.as_ref(),
+        gateway_detail: None,
         redact: Some(&|s: &str| redactor.text(s)),
     });
     let settings = crate::settings::resolve(&ctx.settings_layers);
@@ -717,6 +722,7 @@ mod tests {
             protocol_status_override: None,
             workload_api: None,
             body_view: None,
+            gateway_detail: None,
         });
 
         let warning = output

@@ -37,6 +37,47 @@ against it).
   lookalikes. After redirects, attribution comes from the origin that
   produced the final response (its own profile and TLS requirement), never
   the original request's. See [diagnostics.md](diagnostics.md).
+- **Spoofed or replayed diagnostic references** (G01): `X-Ferrum-Diagnostic-Ref`
+  alone is never evidence. Anvil looks a reference up only for a declared
+  gateway with a configured lookup, never for a malformed one, and uses the
+  record only when it is complete (every key the schema requires) and binds
+  to the response: reference and replica, status, token, a known protocol,
+  namespace, and a creation time inside the recorded attempt's window (five
+  minutes of clock difference allowed; a later re-lookup does not widen it).
+  `confirmed` additionally needs both the request and the lookup over
+  verified TLS or a direct loopback connection, and an error class from the
+  pinned vocabulary.
+- **Loopback.** A connection is "direct loopback" when its connected peer is
+  in 127.0.0.0/8 or is ::1, and it ran through no proxy and no tunnel.
+  Anything listening on this computer counts as local, including a port
+  forward (`ssh -L`, `kubectl port-forward`): the forward's own transport
+  carries the rest of the path, and anyone able to listen on this computer's
+  loopback is outside this threat model.
+- **Where a lookup may go.** The lookup is refused before anything is sent
+  unless its admin URL is `https` (always verified: the request's TLS
+  profile contributes only trust roots, never a verification bypass, SNI
+  override, SPIFFE expectation or client identity), or plain `http` to a
+  loopback address literal (127.0.0.0/8 or ::1, not a host name), which never
+  goes through a proxy. Only an `https` lookup may cross the request's
+  forward proxy, its TLS verified end to end. Redirects from the admin
+  listener are never followed. Each lookup is bounded on its own (connect
+  2 s, total 5 s including one retry, or the request's shorter timeouts).
+- **Lookup credential exposure** (G01): the lookup token is a vault secret or
+  template, sent only to the configured admin listener, added to the
+  execution's redactor, never logged or recorded, and never given to load
+  workers. A bundle import drops every gateway profile's lookup (with a
+  warning), so a shared bundle cannot point this device's token, resolved
+  from its own variables, at a listener of the bundle's choosing. A full
+  backup restore keeps the stored lookup but, since a passphrase proves
+  nothing about who made the backup, every workspace it writes into is
+  sealed (the same device-local seal as this device's workload identity):
+  its requests get no lookup, and their records say "diagnostic lookup
+  paused", until the user allows the workspace on this device (Allow on this
+  device in its settings, or `anvil workspace allow-device-identity`). A
+  bundle import seals its workspaces the same way. An imported profile that covers the hosts
+  of an existing one is reported at import, and every record names the
+  profile used when several match. Users are told to mint a dedicated
+  `viewer`-role token with only `diagnostics:read` and an `ns` claim.
 
 ### gRPC responses
 

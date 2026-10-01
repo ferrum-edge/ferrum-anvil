@@ -1920,6 +1920,7 @@ async fn run_prepared(
         protocol_status_override: Some(out.status),
         workload_api: workload,
         body_view: None,
+        gateway_detail: None,
     };
     let mut output = record::assemble(assembly);
     output.session_facts = Some(out.facts);

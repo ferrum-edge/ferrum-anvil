@@ -7,9 +7,9 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 97 |
-| ✅ automated test | 74 |
+| ✅ automated test | 77 |
 | ✅ executed check script | 1 |
-| ⛔ blocked — see reason | 6 |
+| ⛔ blocked — see reason | 3 |
 | ➖ not applicable — see reason | 2 |
 | ◐ partial — see reason | 2 |
 | **Total** | **182** |
@@ -183,9 +183,9 @@ A skip or block is never counted as a pass.
 | TRUST-006 | 403 indistinguishable origins | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 | TRUST-007 | Post-header failure | ✅ live (real gateway) | lab `results/lab/20260926T055631Z-h3x`, `results/lab/20260926T055513Z-streams` — passed TRUST-007-sse, TRUST-007-sse-h3; `crates/anvil-engine/tests/engine_scenarios.rs`, `crates/anvil-engine/tests/h3_sse_masque.rs`, `crates/anvil-lab/src/h3x.rs` |
 | TRUST-008 | Multi-attempt provenance | ✅ automated test | `crates/anvil-engine/tests/matrix_local_tls.rs` |
-| TRUST-009 | Cross-tenant lookup | ⛔ blocked — see reason — Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md; proposed upstream as ferrum-edge/ferrum-edge#5767); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable. | — |
-| TRUST-010 | Diagnostic retention expired | ⛔ blocked — see reason — Depends on G01 detail retention; not available in any gateway release. | — |
-| TRUST-011 | Gateway detail spoofing | ⛔ blocked — see reason — Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass). | — |
+| TRUST-009 | Cross-tenant lookup | ✅ automated test | `crates/anvil-engine/tests/diagnostic_ref.rs`, `crates/anvil-lab/src/g01.rs` |
+| TRUST-010 | Diagnostic retention expired | ✅ automated test | `crates/anvil-engine/tests/diagnostic_ref.rs`, `crates/anvil-lab/src/g01.rs` |
+| TRUST-011 | Gateway detail spoofing | ✅ automated test | `crates/anvil-engine/tests/diagnostic_ref.rs`, `crates/anvil-lab/src/g01.rs` |
 | TRUST-012 | Uncertain log correlation | ➖ not applicable — see reason — Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth. | — |
 | TRUST-013 | Response prompt injection | ✅ automated test | `crates/anvil-engine/tests/engine_scenarios.rs` |
 

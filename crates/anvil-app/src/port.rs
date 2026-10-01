@@ -5,6 +5,7 @@ use crate::workspace::{attachment_index_id, put_attachment_in};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::execution::ExecutionRecord;
+use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::workspace::Workspace;
 use anvil_portability::bundle::{self, BundleKind, ExportMode, ExportOptions, ExportPreview};
 use anvil_portability::plan::{self, ConflictPolicy, Existing, ImportPlan};
@@ -491,6 +492,18 @@ impl App {
                     s.put(kind::PROXY_PROFILE, &p.id, Some(&p.workspace_id), None, 0.0, p)?;
                 }
             }
+            // An imported gateway profile for hosts a profile of the same
+            // workspace already covers would shadow it (or be shadowed by it):
+            // only the first match is used. Say so instead of either silently.
+            for p in g.integrations.iter().filter(|p| !skip(&p.id)) {
+                let local: Vec<IntegrationProfile> = s.list(kind::INTEGRATION, Some(&p.workspace_id))?;
+                for l in local.iter().filter(|l| l.id != p.id && gateway_hosts_overlap(l, p)) {
+                    notes.push(format!(
+                        "Imported gateway profile '{}' covers hosts of the gateway profile '{}' already in this workspace; requests to those hosts use only one of them (each record names which). Remove the one you do not want.",
+                        p.name, l.name
+                    ));
+                }
+            }
             for p in &g.integrations {
                 if !skip(&p.id) {
                     s.put(kind::INTEGRATION, &p.id, Some(&p.workspace_id), None, 0.0, p)?;
@@ -685,4 +698,13 @@ fn missing_secrets(g: &PortableGraph) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Whether two Ferrum gateway profiles name a common frontend host (with
+/// overlapping ports). Host patterns are compared literally: a wildcard
+/// (`*.example.com`) that covers the other profile's host is not detected
+/// here. Every record still names the profile used when several match.
+fn gateway_hosts_overlap(a: &IntegrationProfile, b: &IntegrationProfile) -> bool {
+    let (IntegrationKind::FerrumGateway { hosts: x, .. }, IntegrationKind::FerrumGateway { hosts: y, .. }) = (&a.kind, &b.kind);
+    x.iter().any(|h| y.iter().any(|k| h.host.eq_ignore_ascii_case(&k.host) && (h.port.is_none() || k.port.is_none() || h.port == k.port)))
 }

@@ -12,11 +12,12 @@ use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
 use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::ProxySelection;
-use anvil_domain::tls::{ClientIdentity, ProxyKind, ProxyProfile, TlsProfile};
+use anvil_domain::tls::{ClientIdentity, HostBinding, ProxyKind, ProxyProfile, TlsProfile};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
@@ -385,4 +386,59 @@ fn a_sealed_workspace_refuses_tls_profiles_that_present_this_devices_x509_svid()
     for (label, spec, _) in &cases {
         build(spec).unwrap_or_else(|e| panic!("{label}: {e}"));
     }
+}
+
+/// The lookups and record notes a draft request in `ws` gets.
+fn lookups(app: &App, ws: &Id) -> (Vec<Option<DiagnosticDetailAccess>>, Vec<String>) {
+    let ctx = app.build_context(None, ws, Some(RequestSpec::http("GET", URL)), &SendOptions::default()).unwrap();
+    let detail = |i: &IntegrationProfile| {
+        let IntegrationKind::FerrumGateway { detail, .. } = &i.kind;
+        detail.clone()
+    };
+    (ctx.integrations.iter().map(detail).collect(), ctx.notes.clone())
+}
+
+/// A restored backup's gateway lookup (G01) is restored but paused while the
+/// workspace is sealed, with a note on the record: a passphrase proves
+/// nothing about who made a backup. Allowing the workspace (one click in its
+/// settings) brings the lookup back.
+#[test]
+fn g01_a_restored_lookup_is_paused_until_the_workspace_is_allowed() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "old device");
+    let ws = a.create_workspace("Gateway").unwrap().meta.id;
+    let lookup = DiagnosticDetailAccess {
+        base_url: "https://admin.example.invalid".into(),
+        credential: SensitiveValue::Template { value: "{{diagnostics_token}}".into() },
+        namespace: None,
+    };
+    a.save_integration(IntegrationProfile {
+        id: Id::new(),
+        workspace_id: ws,
+        name: "gateway".into(),
+        kind: IntegrationKind::FerrumGateway {
+            hosts: vec![HostBinding { host: "api.example.invalid".into(), port: None }],
+            compatibility_id: "ferrum-edge-0.9.9".into(),
+            require_verified_tls: true,
+            detail: Some(lookup.clone()),
+            console_url: None,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(lookups(&a, &ws), (vec![Some(lookup.clone())], vec![]));
+    let (backup, _) = a.export_backup_with(BACKUP_PASS, KdfParams::testing()).unwrap();
+
+    let b = new_app(root.path(), "new device");
+    b.restore(&backup, Some(BACKUP_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(b.device_identity_sealed(&ws).unwrap());
+    let IntegrationKind::FerrumGateway { detail, .. } = &b.integrations(&ws).unwrap()[0].kind;
+    assert_eq!(detail.as_ref(), Some(&lookup), "the restore keeps the profile's lookup");
+    let (paused, notes) = lookups(&b, &ws);
+    assert_eq!(paused, vec![None], "but a sealed workspace's request does not get it");
+    assert!(notes.iter().any(|n| n.starts_with("diagnostic lookup paused")), "{notes:?}");
+
+    assert!(b.allow_device_identity(&ws).unwrap());
+    assert_eq!(lookups(&b, &ws), (vec![Some(lookup)], vec![]));
 }

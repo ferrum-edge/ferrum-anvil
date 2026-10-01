@@ -45,7 +45,7 @@ require a PROXY protocol header"; a 400, TLS alert or close right after
 Anvil sent one gains "the listener may not expect a PROXY protocol header"
 (see [protocols.md §3.10](protocols.md)).
 
-The catalog has 168 finding codes. The status bar shows the catalog version,
+The catalog has 182 finding codes. The status bar shows the catalog version,
 and every record names the findings catalog and Ferrum catalog it used.
 
 | Family | Codes | Examples |
@@ -59,8 +59,8 @@ and every record names the findings catalog and Ferrum catalog it used.
 | `request.*` | 5 | canceled; processing uncertain; an earlier attempt may have processed; `425 Too Early` with the retry outcome |
 | `early_data.*` | 4 | TLS 1.3 / QUIC 0-RTT: accepted (with the replay note), rejected and re-sent by the transport, no session ticket, tickets without early data |
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings) |
-| `ferrum.*` | 18 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog |
-| `app.*`, `auth.*` | 11 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
+| `ferrum.*` | 30 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
+| `app.*`, `auth.*` | 13 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
 | `grpc.*`, `grpc_web.*` | 2 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
 | `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 20 | close codes, idle/cancel, abnormal close, WebSocket permessage-deflate (offered but not negotiated, a refused extension answer, compressed frames never negotiated, undecodable data, the local limit reached after decompression), no UDP response observed, PROXY header possibly rejected |
@@ -284,13 +284,13 @@ failure (`app.mcp_tool_error`, scope upstream application).
   therefore capped at **likely**, even for trusted gateways over verified
   TLS. The same cap applies to a release without a catalog.
 - A trusted profile used over plain HTTP (lab use) is also capped at likely.
-- `confirmed` gateway attribution needs a gateway-owned, authenticated
-  diagnostic contract. G01 ships in Ferrum Edge v0.9.9
-  (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and
-  `ferrum-contracts` `contracts-edge-0.9.9` marks `X-Ferrum-Diagnostic-Ref`
-  released in v0.9.9, but Anvil does not use it yet (see
-  [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md)
-  and the adoption plan below).
+- The only path above *likely* is the gateway's own diagnostic record (G01,
+  Ferrum Edge v0.9.9 and later): a lookup the profile configures, whose
+  record binds to this exact response, with the request and the lookup both
+  over verified TLS or a direct loopback connection. Its `ferrum.detail.*`
+  finding can then be `confirmed`; the marker and catalog findings keep their
+  own ceiling beside it. See
+  [Gateway diagnostic references](#gateway-diagnostic-references-g01).
 
 ### The tokens are coarse, and stay coarse
 
@@ -310,66 +310,121 @@ A missing marker does not prove the response came from the backend
 WAF and bot-detection default bodies are byte-identical, and backend 403s
 look the same.
 
-## Adopting the gateway diagnostic reference (G01)
+<a id="adopting-the-gateway-diagnostic-reference-g01"></a>
 
-Ferrum Edge v0.9.9 is the first release with G01: `ferrum-edge/ferrum-edge#5767`
-is closed, #5845, #5857 and #5862 add the `X-Ferrum-Diagnostic-Ref` response
-header and `GET /diagnostics/v1/refs/{ref}`, and #5868 adds cross-replica
-lookup. The reference body is a published contract (`ferrum.diagnostic_ref.v1`,
-`schemas/diagnostic-ref/v1.schema.json` in `ferrum-contracts`), and
-`contracts-edge-0.9.9`, which Anvil pins, marks the header released in v0.9.9.
-The `ferrum-edge-0.9.9` catalog records the header (gateway-owned, off by
-default). Anvil does not read it or call the lookup yet, so gateway findings
-stay capped at *likely* until the plan below is implemented.
+## Gateway diagnostic references (G01)
 
-What Edge provides:
+Ferrum Edge v0.9.9 is the first release with G01 (`ferrum-edge/ferrum-edge#5767`;
+#5845, #5857/#5862 and #5868). With `FERRUM_DIAGNOSTIC_REFS=errors` or `all`
+(the default is `off`) the gateway stamps the error responses it authors with
+`X-Ferrum-Diagnostic-Ref` (`fd1_<32 hex>`, or `fd2_<8 hex replica>_<32 hex>`
+with replica tagging), and resolves a reference only through the
+authenticated admin lookup `GET /diagnostics/v1/refs/<ref>`, which answers a
+`ferrum.diagnostic_ref.v1` record: the public token and status, the client
+protocol, the granular `error_class`, the body-streaming class, the
+rejecting policy or route-timeout phase, how far the request reached a
+backend, the matched `proxy_id` and backend origin, each attempt's outcome
+and a coarse duration bucket. The record never holds bodies, headers, paths,
+credentials or client addresses. The contract, and how it differs from the
+original proposal, is in
+[g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md).
 
-- `X-Ferrum-Diagnostic-Ref: fd1_…` on gateway-authored error responses
-  (`FERRUM_DIAGNOSTIC_REFS=errors|all`), plus
-  `X-Ferrum-Diagnostic-Owner-Replica` when replica tagging is on
-  (`FERRUM_DIAGNOSTIC_REF_REPLICA_TAG=true`, refs `fd2_<replica>_<hex>`).
-- `GET /diagnostics/v1/refs/{ref}` on the admin listener, which needs both a
-  `diagnostics:read` scope and an `ns` claim covering the ref's namespace;
-  the admin `role` implies neither. A missing scope or `ns` claim is refused
-  with `403`, and an unknown, expired, evicted or out-of-namespace ref with
-  an indistinguishable `404`.
-- A body (`schema_version: ferrum.diagnostic_ref.v1`) naming the public token
-  and status, the protocol, the granular `error_class`, the body-streaming
-  class, the rejection or route-timeout phase, how far the request reached a
-  backend (`not_dispatched`, `pre_wire_failure`, `ambiguous_failure`,
-  `backend_response`), the matched `proxy_id` and origin, the per-attempt
-  outcomes and a coarse duration bucket — never bodies, headers, paths,
-  credentials or client addresses.
+### Configuring the lookup
 
-This differs from the G01 proposal in
-[g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md) in
-four ways Anvil must model: the schema name and fields
-(`ferrum.diagnostic_ref.v1`, `gateway_error`, `detail.*`, `backend_dispatch`)
-replace the proposed `version`/`outcome_id` envelope; authorization needs
-*both* the scope and the `ns` claim, and a credential failure is `403` rather
-than the proposed "everything is `404`"; the replica-owner header exists (the
-proposal had no replica concept); and `all` mode can reference plugin and
-routing rejections with a `null` `gateway_error`.
+A Ferrum gateway profile's **Diagnostic reference lookup** (`detail` in the
+profile: `base_url`, `credential`, optional `namespace`) names the gateway's
+admin listener and the token Anvil sends to it:
 
-Plan (Alloy's adopt-on-release rule is now met: v0.9.9 carries the
-reference). Still to do:
+- The token is a dedicated, short-lived admin JWT signed with the gateway's
+  primary admin key, with role `viewer`, a `scope` that includes
+  `diagnostics:read` and an `ns` claim naming the gateway's namespace. The
+  admin role implies neither the scope nor the claim, and a token signed with
+  the read-only viewer key never holds a scope. Never use a general admin
+  token.
+- The token is a sensitive value, stored like any profile credential: a
+  vault secret, or a template such as `{{FERRUM_DIAGNOSTICS_TOKEN}}` from an
+  environment. Anvil resolves it for the lookup only, sends it only to the
+  configured admin listener (never to the gateway's proxy listener), adds it
+  to the execution's redactor, and never logs it or writes it to a record. A
+  safe-share export replaces a literal with a placeholder; load workers never
+  receive the lookup at all.
+- With `namespace` set, a record of another namespace is not used.
+- The admin URL must be `https` (always verified: the request's TLS profile
+  contributes only its trust roots, never a verification bypass, SNI override,
+  SPIFFE expectation or client identity), or plain `http` to a loopback
+  address literal (`127.0.0.0/8` or `::1`, not `localhost`). Anything else is
+  refused before a byte is sent. Only an `https` lookup may cross the
+  request's forward proxy, and redirects from the admin listener are never
+  followed.
+- A bundle import drops every gateway profile's lookup and says so: configure
+  it again with your own admin URL and token. A full backup restore keeps
+  it, but paused (records say "diagnostic lookup paused") until you allow
+  the restored workspace on this device: Allow on this device in the
+  workspace settings' Auth tab, or `anvil workspace allow-device-identity`,
+  the same seal as this device's workload identity. When
+  several profiles match one destination, the first one is used and the
+  record names the others (an import that adds such a profile is reported
+  too).
 
-- [ ] Extend `IntegrationProfile`'s `DiagnosticDetailAccess`
-  (`crates/anvil-domain/src/integration.rs`) into the ref lookup: a
-  least-privilege `diagnostics:read` credential with an `ns` claim, plus the
-  admin endpoint. Treat a successful lookup as authenticated gateway
-  evidence, the only path that can raise a Ferrum finding above *likely*.
-- [ ] Unblock and implement TRUST-009 (cross-tenant lookup), TRUST-010
-  (expired/evicted detail) and TRUST-011 (spoofed detail), which are blocked
-  on G01 in `docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json`.
-- [ ] Add a lab profile or case against the first release that carries the
-  reference: the header is present on errors; the lookup succeeds; and it is
-  refused without `diagnostics:read` and for the wrong namespace.
-- [x] Add the catalog for that release and bump `lab/gateway/RELEASE.lock`
-  (`ferrum-edge-0.9.9`, v0.9.9 pin).
+### When Anvil looks a reference up, and what it believes
 
-Until then Anvil's answers remain honest about uncertainty, and this doc and
-the completion report say so.
+For the final response of a request to a destination matching the profile,
+Anvil looks up a well-formed reference as soon as the response arrives,
+through the engine transport and the request's DNS settings. A lookup is
+bounded on its own: connect within 2 s and everything within 5 s (or the
+request's shorter timeouts), including one retry 250 ms later when the
+record has no detail yet. The header alone is never evidence: a backend, a plugin or a server
+that is not Ferrum Edge can send it. A destination without a profile is never
+looked up, and a malformed reference (or several different ones) is reported
+without a lookup.
+
+A record is gateway evidence only when it is a valid
+`ferrum.diagnostic_ref.v1` body (every key the schema requires, closed
+vocabularies only, checked against the pinned schema) that **binds to this
+response**: the same reference (and replica), status, `X-Gateway-Error` value
+or none, a known client protocol and, when the profile names one, namespace,
+created while the recorded attempt was in flight (five minutes of clock
+difference allowed). A record whose error class is not in the pinned
+vocabulary is shown but capped at *likely*. Its finding cites the record as
+`gateway_detail` evidence and is `confirmed` only when both the request and
+the lookup used verified TLS or a direct loopback connection (nothing else
+could have answered on either path); otherwise it is `likely`. The marker and
+catalog findings stay beside it with their own ceiling, for comparison.
+
+| Code | When | Confidence |
+|---|---|---|
+| `ferrum.detail.failure` | The record classifies the failure: an `error_class` (scope from the class: gateway to upstream for connection, TLS, DNS and timeout classes), a body-streaming class or a route-timeout phase. Names the TLS failure when an attempt has one, the dispatch and every attempt. | confirmed (likely off verified TLS or loopback) |
+| `ferrum.detail.rejected` | A plugin (with its phase), a gateway policy, admission control or routing refused the request. | as above |
+| `ferrum.detail.backend_response` | A backend answered and the gateway relayed its outcome. | as above |
+| `ferrum.detail.authored` | The record names no failure, refusal or backend answer (for example, detail not recorded yet). | as above |
+| `ferrum.detail.mismatch` | A valid record that describes another response (field by field). Not used. | conflicting_evidence |
+| `ferrum.detail.refused` | `401`/`403`: the token is invalid, or lacks the scope or the `ns` claim. | confirmed that it was refused |
+| `ferrum.detail.unavailable` | `404`: expired, evicted, outside the token's namespaces, minted by another replica (the owner hint is listed), unknown or forged, or references off. Ferrum Edge answers all of these alike. | unknown |
+| `ferrum.detail.lookup_failed` | `429`, a transport failure, another status, or a body Anvil does not accept. | unknown |
+| `ferrum.detail.no_reference` | A gateway-marked error without a reference (references off, a release before v0.9.9, a replayed cached response). | unknown |
+| `ferrum.detail.invalid_reference` | The header is not a reference Ferrum Edge mints. | unknown |
+
+None of the outcomes after the first four adds `gateway_detail` evidence or
+raises any other finding. A record whose final attempt failed before dispatch
+but whose earlier attempt reached a backend says so (TRUST-008), and Anvil
+never uses `backend_dispatch` to relax the never-auto-replay rule.
+
+### How it is verified
+
+- Unit tests for reference parsing, the closed vocabularies, binding and the
+  confidence ceiling (`crates/anvil-diagnostics/src/gateway_detail.rs`,
+  `src/rules/ferrum_detail.rs`); the contract drift test checks Anvil's
+  vocabularies against the pinned schema and runs its fixtures through
+  Anvil's reader.
+- Engine tests with a fake admin listener
+  (`crates/anvil-engine/tests/diagnostic_ref.rs`): a bound record,
+  cross-tenant and under-scoped lookups (TRUST-009), expired references
+  (TRUST-010), spoofed and replayed references (TRUST-011), references off,
+  rate limits and owner-replica hints, and that the token never leaves the
+  lookup.
+- The lab's `core` profile on v0.9.9 and later turns references on and signs
+  lookup tokens itself (G01-001, G01-002, TRUST-009, TRUST-010, TRUST-011;
+  see [lab/README.md](lab/README.md#g01-diagnostic-references-core-profile)).
 
 ## Ordering
 

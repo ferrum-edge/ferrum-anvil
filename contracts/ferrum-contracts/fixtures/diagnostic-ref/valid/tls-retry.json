@@ -1,0 +1,37 @@
+{
+  "schema_version": "ferrum.diagnostic_ref.v1",
+  "ref": "fd1_8e2b4d6f0a1c3e5a7b9d1f3a5c7e9b0d",
+  "namespace": "ferrum",
+  "created_at": "2026-09-27T10:16:40.502Z",
+  "expires_at": "2026-09-27T10:31:40.502Z",
+  "protocol": "http1",
+  "status": 502,
+  "gateway_error": "connection_failure",
+  "detail_available": true,
+  "detail": {
+    "error_class": "tls_error",
+    "body_error_class": null,
+    "rejection_phase": null,
+    "route_timeout_phase": null,
+    "backend_dispatch": "pre_wire_failure",
+    "proxy_id": "payments-api",
+    "backend_target": "https://payments.internal:8443",
+    "duration_bucket": "lt_1s",
+    "attempts": [
+      {
+        "attempt": 1,
+        "backend_dispatch": "backend_response",
+        "status": 503
+      },
+      {
+        "attempt": 2,
+        "backend_dispatch": "pre_wire_failure",
+        "error_class": "tls_error",
+        "tls": {
+          "failure": "certificate_verification",
+          "reason": "expired"
+        }
+      }
+    ]
+  }
+}

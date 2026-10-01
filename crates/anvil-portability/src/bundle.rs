@@ -584,9 +584,11 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleErro
             graph.history.push(record);
         }
     }
-    let warnings = crate::validate::validate_and_normalize(&mut graph)?;
+    let mut warnings = crate::validate::validate_and_normalize(&mut graph)?;
     // Each imported OAuth 2 profile caches its token under the object that
     // defines it, never under a cache id the bundle names.
     crate::validate::clear_token_cache_ids(&mut graph);
+    // A gateway profile's diagnostic reference lookup never arrives in a bundle.
+    warnings.extend(crate::validate::clear_gateway_lookups(&mut graph));
     Ok(Opened { manifest, graph, warnings, secrets_restored })
 }

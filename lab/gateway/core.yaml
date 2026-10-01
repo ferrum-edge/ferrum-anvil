@@ -1,7 +1,9 @@
 # Ferrum Anvil failure lab - profile "core" (ferrum-edge v0.9.9, v0.9.8, v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: UP-001..003, UP-009..014, UP-020, GW-001, GW-006, GW-007, GW-008,
-#            GW-016, GW-017, GW-018 (+ positive control).
+#            GW-016, GW-017, GW-018 (+ positive control); on v0.9.9 and later also
+#            G01-001, G01-002 and TRUST-009..011 (diagnostic references, which
+#            reuse the up002-refused, ok and no-route paths; see core.conf).
 # Settings:  core.conf (proxy HTTP 127.0.0.1:18080, admin 127.0.0.1:18090).
 # Fixtures:  127.0.0.1:19000-19099 (DNS fixture 19053 udp+tcp) (see docs/audit/gateway-lab-config.md, port plan).
 #

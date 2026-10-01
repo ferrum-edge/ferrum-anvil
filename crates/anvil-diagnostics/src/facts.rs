@@ -56,6 +56,10 @@ pub struct DiagnosticInput<'a> {
     pub protocol_fallback_from: Option<String>,
     /// SPIFFE Workload API calls, SVIDs and JWT-SVID checks of this execution.
     pub workload: Option<&'a anvil_domain::workload::WorkloadApiEvidence>,
+    /// What the trusted Ferrum profile's diagnostic reference lookup learned
+    /// about this response ([`crate::gateway_detail`]); `None` when the
+    /// destination is not a trusted profile with a lookup configured.
+    pub gateway_detail: Option<&'a crate::gateway_detail::GatewayDetail>,
     /// Redacts every excerpt a finding quotes before it is cut ([`excerpt`]).
     /// The record redacts findings again afterwards, but by then a secret
     /// that crossed a cut has lost its tail and no longer matches.

@@ -882,8 +882,9 @@ export type IntegrationProfile1 = {
    */
   require_verified_tls?: boolean;
   /**
-   * Optional authorized diagnostic detail endpoint (proposed gateway
-   * contract; unavailable on current releases).
+   * Optional diagnostic reference lookup (G01, Ferrum Edge v0.9.9 and
+   * later). Only a lookup record that binds to the response can raise
+   * a Ferrum finding above `likely`.
    */
   detail?: DiagnosticDetailAccess | null;
   /**
@@ -3600,6 +3601,9 @@ export interface HostBinding {
  * via the `definition` "DiagnosticDetailAccess".
  */
 export interface DiagnosticDetailAccess {
+  /**
+   * Base URL of the gateway's admin listener, e.g. `https://gateway.example:9443`.
+   */
   base_url: string;
   /**
    * A field that may carry sensitive material (password, token, key).
@@ -3619,6 +3623,10 @@ export interface DiagnosticDetailAccess {
         secret: SecretRef;
         kind: "secret";
       };
+  /**
+   * The gateway's namespace (`FERRUM_NAMESPACE`). When set, a record of
+   * another namespace is not used.
+   */
   namespace?: string | null;
 }
 export interface IntegrationProfile2 {

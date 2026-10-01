@@ -28,6 +28,7 @@ mod fixtures_policy;
 mod fixtures_proxyproto;
 mod fixtures_streams;
 mod fixtures_tls;
+mod g01;
 mod gateway;
 mod h3x;
 mod harness;

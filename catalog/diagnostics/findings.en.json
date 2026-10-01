@@ -1,5 +1,5 @@
 {
-  "version": "2026.09.30-1",
+  "version": "2026.10.01-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2798,6 +2798,188 @@
       "confirm_with": [
         "The gateway's release version from its operator (for example `ferrum-edge --version`)."
       ]
+    },
+    "ferrum.detail.failure": {
+      "title": "The gateway's own record of this failure",
+      "explanation": "Ferrum Edge answered Anvil's authenticated lookup of diagnostic reference {ref} with its own record of this {status} response ({token}, namespace {namespace}). The gateway classified the failure as {cause}. {dispatch}",
+      "alternatives": [],
+      "does_not_prove": [
+        "What happened inside the backend: the record is the gateway's classification of what it observed.",
+        "That repeating the request is safe: check the dispatch and the attempts before repeating a request that is not idempotent."
+      ],
+      "remediation": [
+        {
+          "text": "Check the route and backend the record names (detail.proxy_id, detail.backend_target) for the recorded error class.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's log entry for this reference."
+      ]
+    },
+    "ferrum.detail.rejected": {
+      "title": "The gateway's own record: it refused the request",
+      "explanation": "Ferrum Edge answered Anvil's authenticated lookup of diagnostic reference {ref} with its own record of this {status} response (namespace {namespace}). The request was refused by {rejection}. {dispatch}",
+      "alternatives": [],
+      "does_not_prove": [
+        "Which rule of the policy matched, or why: the record names the refusing policy, not its rules or the data it matched."
+      ],
+      "remediation": [
+        {
+          "text": "Check the request against the policy the record names, and ask the gateway operator about the policy itself.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's log entry for this reference."
+      ]
+    },
+    "ferrum.detail.backend_response": {
+      "title": "The gateway's own record: a backend answered",
+      "explanation": "Ferrum Edge answered Anvil's authenticated lookup of diagnostic reference {ref} with its own record of this {status} response ({token}, namespace {namespace}). A backend answered the request and the gateway relayed the outcome. {dispatch}",
+      "alternatives": [],
+      "does_not_prove": [
+        "Why the backend answered this way."
+      ],
+      "remediation": [
+        {
+          "text": "Check the backend's own logs for this request.",
+          "owner": "api_owner"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's log entry for this reference."
+      ]
+    },
+    "ferrum.detail.authored": {
+      "title": "The gateway confirms it authored this response",
+      "explanation": "Ferrum Edge answered Anvil's authenticated lookup of diagnostic reference {ref}: it authored this {status} response (namespace {namespace}). Its record names no failure class, refusing policy or backend answer; the gateway may not have recorded the detail yet (a streamed response records it when its body ends). {dispatch}",
+      "alternatives": [],
+      "does_not_prove": [
+        "What went wrong."
+      ],
+      "remediation": [],
+      "confirm_with": [
+        "A new lookup of this reference after the response has finished.",
+        "The gateway's log entry for this reference."
+      ]
+    },
+    "ferrum.detail.mismatch": {
+      "title": "The gateway's record does not match this response",
+      "explanation": "Anvil looked up diagnostic reference {ref} at {endpoint}, but the record describes another response: its {field} is {record}, while this response shows {response}. Anvil does not use the record, and the gateway findings keep the confidence of the public evidence.",
+      "alternatives": [
+        "Something other than the gateway (a backend, a plugin or an intermediary) set the reference header.",
+        "The lookup reached a different gateway or namespace than the one that served this request.",
+        "This computer's clock and the gateway's differ by more than five minutes (created_at)."
+      ],
+      "does_not_prove": [
+        "What happened to this request."
+      ],
+      "remediation": [
+        {
+          "text": "Check that the profile's admin URL and namespace belong to the gateway that serves this host.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "The gateway's log entry for this request."
+      ]
+    },
+    "ferrum.detail.refused": {
+      "title": "The gateway refused the diagnostic lookup",
+      "explanation": "The admin listener at {endpoint} refused Anvil's lookup of diagnostic reference {ref} with HTTP {lookup_status}. Ferrum Edge requires an admin JWT whose scope includes diagnostics:read and whose ns claim names the gateway's namespace; the admin role implies neither. Gateway findings keep the confidence of the public evidence.",
+      "alternatives": [
+        "The token is expired, signed with another key, or carries an aud claim the gateway does not accept (401).",
+        "The token lacks the diagnostics:read scope or an ns claim (403), or was signed with the read-only viewer key, whose scope claims grant nothing."
+      ],
+      "does_not_prove": [
+        "Anything about this request's failure."
+      ],
+      "remediation": [
+        {
+          "text": "Give the profile's lookup a dedicated, short-lived admin JWT signed with the gateway's primary admin key, with role viewer, scope diagnostics:read and an ns claim for the gateway's namespace. Never use a general admin token.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "ferrum.detail.unavailable": {
+      "title": "The gateway has no record of this reference for Anvil",
+      "explanation": "The admin listener at {endpoint} answered Anvil's lookup of diagnostic reference {ref} with 404. Ferrum Edge gives the same answer for a reference that expired or was evicted, one outside the credential's namespaces, one another replica minted, an unknown or forged one, and while references are off, so Anvil cannot tell these apart. Gateway findings keep the confidence of the public evidence.",
+      "alternatives": [
+        "The reference expired or was evicted before the lookup (FERRUM_DIAGNOSTIC_REF_TTL_SECONDS, FERRUM_DIAGNOSTIC_REF_MAX_ENTRIES).",
+        "The credential's ns claim does not name the namespace of the gateway that served the request.",
+        "Another gateway replica served the request.",
+        "Something other than the gateway set the reference header."
+      ],
+      "does_not_prove": [
+        "That the reference is forged.",
+        "What happened to this request."
+      ],
+      "remediation": [
+        {
+          "text": "Reproduce the request: Anvil looks the reference up as soon as the response arrives.",
+          "owner": "caller"
+        },
+        {
+          "text": "Check the gateway's log for this request, or keep references longer if lookups routinely arrive late.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": []
+    },
+    "ferrum.detail.lookup_failed": {
+      "title": "The diagnostic lookup did not complete",
+      "explanation": "Anvil could not read the gateway's record of diagnostic reference {ref} from {endpoint}: {reason}. Gateway findings keep the confidence of the public evidence.",
+      "alternatives": [],
+      "does_not_prove": [
+        "Anything about this request's failure."
+      ],
+      "remediation": [
+        {
+          "text": "Check the profile's admin URL and that this computer can reach the gateway's admin listener.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "ferrum.detail.no_reference": {
+      "title": "No diagnostic reference to look up",
+      "explanation": "The trusted gateway marked this {status} response with X-Gateway-Error, but the response carries no X-Ferrum-Diagnostic-Ref, so Anvil could not ask the gateway for its own record. Ferrum Edge adds references only from v0.9.9, and only when FERRUM_DIAGNOSTIC_REFS is errors or all (the default is off).",
+      "alternatives": [
+        "The gateway runs a release before v0.9.9.",
+        "References are off (FERRUM_DIAGNOSTIC_REFS=off, the default).",
+        "A plugin replayed a stored response (a cache hit), which the gateway leaves without a reference.",
+        "Something between the gateway and Anvil removed the header."
+      ],
+      "does_not_prove": [
+        "That the gateway did not author the response."
+      ],
+      "remediation": [
+        {
+          "text": "Set FERRUM_DIAGNOSTIC_REFS=errors (or all) on Ferrum Edge v0.9.9 or later so that failures like this one can be looked up.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": []
+    },
+    "ferrum.detail.invalid_reference": {
+      "title": "The diagnostic reference is not one Ferrum Edge mints",
+      "explanation": "The response carries X-Ferrum-Diagnostic-Ref: {value}. Ferrum Edge mints only fd1_ and fd2_ references in lowercase hex, one per response, so Anvil did not look this value up and does not use it.",
+      "alternatives": [
+        "A backend or an intermediary set the header (Ferrum Edge v0.9.9 removes a backend's copy).",
+        "The destination is not Ferrum Edge v0.9.9 or later."
+      ],
+      "does_not_prove": [
+        "That the gateway did or did not author this response."
+      ],
+      "remediation": [
+        {
+          "text": "Look for a component on the response's path that adds the header.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": []
     },
     "ws.deflate_not_negotiated": {
       "title": "permessage-deflate was offered but not negotiated",

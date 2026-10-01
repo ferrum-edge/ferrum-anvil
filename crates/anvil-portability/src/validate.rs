@@ -20,7 +20,9 @@
 //!   turn on cross-origin credential forwarding or 0-RTT early data in
 //!   workspace, folder, request or app settings, and never open an imported
 //!   collection's root folder to its workspace. Linked local files are
-//!   listed: they need choosing on this device.
+//!   listed: they need choosing on this device. A bundle (not a full backup)
+//!   never brings a gateway profile's diagnostic reference lookup
+//!   ([`clear_gateway_lookups`]).
 
 use crate::bundle::BundleError;
 use crate::graph::PortableGraph;
@@ -365,6 +367,28 @@ pub fn validate_ruleset_limits(g: &PortableGraph, source: &str) -> Result<(), Bu
         )));
     }
     Ok(())
+}
+
+/// Drop the diagnostic reference lookup (`detail`) of every gateway profile in
+/// a bundle, returning a warning per profile. A lookup names an admin URL and
+/// a token that is often a `{{variable}}` template: imported as is, it would
+/// send this device's token (resolved from its own environment) to an admin
+/// URL the bundle chose, and a listener there could answer records that make
+/// findings "confirmed". The user configures a lookup deliberately instead.
+/// A full backup restores its own profile, lookup included; the restored
+/// workspace's seal pauses the lookup until the user allows it.
+pub fn clear_gateway_lookups(g: &mut PortableGraph) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for i in &mut g.integrations {
+        let anvil_domain::integration::IntegrationKind::FerrumGateway { detail, .. } = &mut i.kind;
+        if detail.take().is_some() {
+            warnings.push(format!(
+                "Gateway profile '{}' carried a diagnostic reference lookup (an admin URL and its token); the import removed it. Configure the lookup again deliberately, with your own admin URL and token.",
+                i.name
+            ));
+        }
+    }
+    warnings
 }
 
 /// Clear the token-cache id of every OAuth 2 profile in the graph's

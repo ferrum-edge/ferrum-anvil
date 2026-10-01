@@ -5,6 +5,7 @@ import { api, type ExportPreview, type FileGrant, type ImportReport, type Provid
 import type {
   AppSettings,
   ClientIdentity,
+  DiagnosticDetailAccess,
   Environment,
   HboneMarker,
   HboneOptions,
@@ -725,8 +726,43 @@ function FerrumForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: Inte
         Console link (optional, opened read-only)
         <input className="field mono" value={p.console_url ?? ""} onChange={(e) => onChange({ ...p, console_url: e.target.value || null })} />
       </label>
-      <p className="hint">An authorized diagnostic-detail endpoint is not available on current gateway releases; Anvil relies on the public markers and its own observations.</p>
+      <DiagnosticLookupForm p={p} onChange={onChange} />
     </div>
+  );
+}
+
+/** The profile's G01 diagnostic reference lookup (Ferrum Edge v0.9.9 and later). */
+function DiagnosticLookupForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: IntegrationProfile) => void }) {
+  const d = p.detail;
+  const set = (detail: DiagnosticDetailAccess | null) => onChange({ ...p, detail });
+  const blank: DiagnosticDetailAccess = { base_url: "", credential: { kind: "template", value: "" }, namespace: null };
+  return (
+    <fieldset>
+      <legend>Diagnostic reference lookup</legend>
+      <label className="check">
+        <input type="checkbox" checked={!!d} onChange={(e) => set(e.target.checked ? blank : null)} />
+        Ask the gateway for its own record of an error response (Ferrum Edge v0.9.9 and later)
+      </label>
+      {d && (
+        <>
+          <label className="lbl">
+            Admin listener URL
+            <input className="field mono" value={d.base_url} placeholder="https://gateway.example:9443" onChange={(e) => set({ ...d, base_url: e.target.value })} />
+          </label>
+          <SecretField label="Lookup token" value={d.credential} workspaceId={p.workspace_id} onChange={(credential) => set({ ...d, credential })} />
+          <label className="lbl">
+            Gateway namespace (optional)
+            <input className="field mono" value={d.namespace ?? ""} placeholder="ferrum" onChange={(e) => set({ ...d, namespace: e.target.value || null })} />
+          </label>
+        </>
+      )}
+      <p className="hint">
+        The gateway adds <code>X-Ferrum-Diagnostic-Ref</code> to its error responses when <code>FERRUM_DIAGNOSTIC_REFS</code> is <code>errors</code> or <code>all</code> (off by
+        default). Anvil looks the reference up with this token and uses the record only when it matches the response; only then can a gateway finding be “confirmed”. Use a dedicated,
+        short-lived admin JWT with role <code>viewer</code>, scope <code>diagnostics:read</code> and an <code>ns</code> claim for the gateway's namespace, never a general admin token.
+        The admin URL must be <code>https</code> (always verified), or <code>http</code> to a loopback address such as <code>127.0.0.1</code>. Imported profiles never bring a lookup.
+      </p>
+    </fieldset>
   );
 }
 

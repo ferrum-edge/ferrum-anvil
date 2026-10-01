@@ -1490,3 +1490,49 @@ fn an_imported_oauth_profile_never_keeps_a_token_cache_id() {
     assert_eq!(validate::clear_token_cache_ids(&mut g), 3);
     assert_eq!(validate::clear_token_cache_ids(&mut g), 0);
 }
+
+/// A gateway profile's diagnostic reference lookup (G01) never arrives in a
+/// bundle: its admin URL and `{{variable}}` token would otherwise send this
+/// device's token to a listener the bundle chose, whose records could make
+/// findings "confirmed". A full backup restores its own lookup.
+#[test]
+fn g01_bundles_never_import_a_gateway_lookup() {
+    let lookup = anvil_domain::integration::DiagnosticDetailAccess {
+        base_url: "https://admin.attacker.example".into(),
+        credential: SensitiveValue::Template { value: "{{FERRUM_DIAGNOSTICS_TOKEN}}".into() },
+        namespace: Some("ferrum".into()),
+    };
+    let mut g = sample();
+    g.integrations.push(anvil_domain::integration::IntegrationProfile {
+        id: Id::new(),
+        workspace_id: g.workspaces[0].meta.id,
+        name: "shared gateway".into(),
+        kind: anvil_domain::integration::IntegrationKind::FerrumGateway {
+            hosts: vec![anvil_domain::tls::HostBinding { host: "api.example.com".into(), port: None }],
+            compatibility_id: "ferrum-edge-0.9.9".into(),
+            require_verified_tls: true,
+            detail: Some(lookup.clone()),
+            console_url: None,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    });
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
+        let (bytes, _) = bundle::write(&g, &opts(mode, pass)).unwrap();
+        let opened = bundle::open(&bytes, pass).unwrap();
+        let anvil_domain::integration::IntegrationKind::FerrumGateway { detail, .. } = &opened.graph.integrations[0].kind;
+        assert!(detail.is_none(), "{mode:?}: the lookup was imported");
+        assert!(
+            opened.warnings.iter().any(|w| w.contains("'shared gateway'") && w.contains("diagnostic reference lookup")),
+            "{mode:?}: {:?}",
+            opened.warnings
+        );
+    }
+    // The normalisation a full backup restore runs keeps the profile's own lookup.
+    let mut restored = g.clone();
+    validate::validate_and_normalize(&mut restored).unwrap();
+    let anvil_domain::integration::IntegrationKind::FerrumGateway { detail, .. } = &restored.integrations[0].kind;
+    assert_eq!(detail.as_ref(), Some(&lookup));
+    // A graph without a lookup imports without a warning about one.
+    assert!(validate::clear_gateway_lookups(&mut sample()).is_empty());
+}
