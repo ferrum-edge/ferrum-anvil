@@ -237,10 +237,7 @@ fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
     let schema = read_json(&vendor.join("schemas/diagnostic-ref/v1.schema.json"));
     assert_eq!(schema["title"], gateway_detail::SCHEMA_VERSION);
     assert_eq!(enum_strings(&schema["properties"]["schema_version"]), local(&[gateway_detail::SCHEMA_VERSION]));
-    assert_eq!(
-        schema["properties"]["ref"]["pattern"],
-        "^(fd1_[0-9a-f]{32}|fd2_[0-9a-f]{8}_[0-9a-f]{32})$"
-    );
+    assert_eq!(schema["properties"]["ref"]["pattern"], "^(fd1_[0-9a-f]{32}|fd2_[0-9a-f]{8}_[0-9a-f]{32})$");
     for reference in ["fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f", "fd2_1a2b3c4d_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f"] {
         assert!(gateway_detail::parse_ref(reference).is_some(), "Anvil must accept a schema reference: {reference}");
     }
