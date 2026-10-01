@@ -52,6 +52,8 @@
 
 ### Changed
 
+- Documentation: link Anvil's contract pin to the immutable Ferrum contract
+  release and describe the central store, consumed files and re-vendoring rule.
 - Keychain unlock now explains when macOS refuses access to a stored profile key
   after an app update, and how to allow Ferrum Anvil in Keychain Access and retry.
 - REL-003 records the verified signed in-app update from 0.1.0 to 0.1.1 on

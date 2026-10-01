@@ -5,8 +5,8 @@ Anvil vendors the Ferrum Edge contracts it consumes under
 is recorded in `contracts/ferrum-contracts/PIN`: tag
 `contracts-edge-0.9.9`, commit `25c4e9e00033d7941a1dd0ab733fa74e735546ae` (Ferrum Edge
 v0.9.9). That tag marks `X-Ferrum-Diagnostic-Ref` released in v0.9.9 and
-publishes the `ferrum.diagnostic_ref.v1` lookup schema with its fixtures;
-Anvil reads the header and the lookup record (see
+publishes `schemas/diagnostic-ref/v1.schema.json` with its fixtures under
+`contracts/ferrum-contracts`. Anvil reads the header and lookup record (see
 [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)).
 The offline `anvil-diagnostics` test suite checks every vendored file against
 its pinned SHA-256, compares the local gateway vocabulary, header list and
