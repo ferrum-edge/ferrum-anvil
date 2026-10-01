@@ -442,6 +442,7 @@ dependencies = [
  "protox",
  "quinn",
  "quinn-proto",
+ "rand 0.10.3",
  "rcgen",
  "rustls",
  "rustls-pki-types",
