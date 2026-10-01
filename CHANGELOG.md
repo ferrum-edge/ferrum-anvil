@@ -32,6 +32,14 @@
   treats it as released but not yet read by Anvil (gateway findings stay
   capped at likely until the authenticated lookup is adopted).
 
+### Fixed
+
+- DTLS over MASQUE: when the tunnel ends while a handshake flight is being
+  written, the failure is now always `DtlsHandshakeFailed` in the
+  `DtlsHandshake` phase, with the write error as its message. It used to be
+  `RequestWriteFailed` or `DtlsHandshakeFailed` depending on which side
+  noticed first (#270).
+
 ## [0.1.1] - 2026-10-01
 
 ### Changed
