@@ -12,7 +12,7 @@ pass.
 | Source | `ferrum-edge/ferrum-anvil`, branch `claude/anvil-desktop-client-3f372d`, draft PR ferrum-edge/ferrum-anvil#1 |
 | Website (staged, pre-release) | `ferrum-edge/ferrumedge`, branch `claude/anvil-website`, draft PR ferrum-edge/ferrumedge#54. Do not merge before a release. |
 | Gateway compatibility targets | Ferrum Edge v0.9.9 release binary (source `234717c`, the default pin, `lab/gateway/RELEASE.lock`), v0.9.8 (source `e27f210`, `lab/gateway/releases/v0.9.8.lock`), v0.9.7 (source `8fed134`, `lab/gateway/releases/v0.9.7.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), each checksum-pinned; each has its own source-audited catalog |
-| Gateway changes | G01, the authorized diagnostic reference, ships in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and `ferrum-contracts` `contracts-edge-0.9.9` marks its header released; Anvil records it in the 0.9.9 catalog but has not adopted the lookup yet. The contract is in `docs/g01-gateway-diagnostic-contract.md`; the adoption plan is in `docs/diagnostics.md`. |
+| Gateway changes | G01, the authorized diagnostic reference, ships in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and `ferrum-contracts` `contracts-edge-0.9.9` publishes its header and `ferrum.diagnostic_ref.v1` schema. Anvil looks references up for gateway profiles that configure the lookup; only a record bound to the response raises a finding above "likely". The contract is in `docs/g01-gateway-diagnostic-contract.md`; Anvil's use of it is in `docs/diagnostics.md`. |
 | Signed artifacts, checksums | None: signing is blocked on owner credentials. The release workflow only produces draft releases (see `docs/release.md`). |
 
 ## Implemented
@@ -91,12 +91,11 @@ Exact commands are in `docs/release.md` → "Local verification record".
 `docs/verification/matrix-coverage.md` is generated from test names, lab
 results and reasoned statuses.
 
-- **172 cases have executed evidence:**
+- **175 cases have executed evidence:**
   - 97 live against the real gateway;
-  - 74 automated tests;
+  - 77 automated tests (TRUST-009/010/011, the G01 lookup cases, also run live in the `core` lab profile on v0.9.9);
   - 1 executed release check.
-- **6 are blocked:**
-  - TRUST-009/010/011 need the G01 gateway detail API, which no gateway release has.
+- **3 are blocked:**
   - REL-001/003/006 need signed installers, an updater and published assets.
 - **2 are not applicable:**
   - TRUST-012: Anvil does not correlate gateway logs.
@@ -126,7 +125,7 @@ results and reasoned statuses.
 
 - **No signed release.** There are no installers, notarization, updater or download assets. The website says "not yet released". Owner steps: ferrum-edge/ferrum-anvil#2.
 - **Platforms.** Only macOS arm64 was built and exercised locally. Linux and Windows are covered by CI only. No minimum OS versions have been established.
-- **G01 ships in Ferrum Edge v0.9.9 but Anvil has not adopted it yet** (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868): Anvil does not read the diagnostic reference or call its lookup, so gateway attribution never exceeds "likely" (see [diagnostics.md](diagnostics.md#adopting-the-gateway-diagnostic-reference-g01)).
+- **Confirmed gateway attribution needs the G01 lookup** (Ferrum Edge v0.9.9 and later, `ferrum-edge/ferrum-edge#5767`): it is off by default on the gateway (`FERRUM_DIAGNOSTIC_REFS`) and needs a dedicated `diagnostics:read` token with an `ns` claim in the gateway profile. Without both, or for a reference that expired, gateway attribution stays at "likely". Anvil looks a reference up only as the response arrives; there is no later re-lookup from the history view (see [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)).
 - **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md` and ferrum-edge/ferrum-anvil#3.
 - **Protocol and load gaps:**
   - WebSocket over HTTP/3 relies on a vendored `h3` 0.0.8 carrying one upstream commit (hyperium/h3#236) until an `h3` release includes it (`vendor/README.md`).

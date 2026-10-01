@@ -13,6 +13,7 @@
 
 pub mod facts;
 pub mod ferrum;
+pub mod gateway_detail;
 pub mod render;
 pub mod rules;
 

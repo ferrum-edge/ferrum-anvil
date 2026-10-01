@@ -173,9 +173,10 @@ what the provider receives, not a gateway-authored signal.
   (`vocabularies/gateway-errors.json` and `vocabularies/gateway-headers.json` change; the schema and
   fixtures are byte-identical). The drift test (`crates/anvil-diagnostics/tests/contracts_adoption.rs`)
   pins the new tag and commit, compares the 0.9.9 catalog with the vocabularies, requires
-  `X-Ferrum-Diagnostic-Ref` to be released in v0.9.9, and lists it as released but not read by
-  Anvil's rules. Anvil does not read the header or call the lookup yet (`docs/diagnostics.md`, G01),
-  so gateway findings stay capped at likely.
+  `X-Ferrum-Diagnostic-Ref` to be released in v0.9.9, and listed it as released but not read by
+  Anvil's rules when this catalog was added. G01 adoption (#224) since vendored the
+  `diagnostic-ref` schema and fixtures, counts the header among those Anvil reads, and checks Anvil's
+  lookup reader against the schema (`docs/diagnostics.md`, "Gateway diagnostic references").
 - **Lab.** The default pin is v0.9.9 (`lab/gateway/RELEASE.lock`, `lab/gateway/releases/v0.9.9.lock`);
   v0.9.8 joins the earlier supported releases and the nightly matrix. The lab profiles validate on
   v0.9.9 unchanged: `src/config/types.rs` only adds `Proxy` fields (`allow_path_parameters`,

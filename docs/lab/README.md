@@ -56,7 +56,7 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 
 | Profile | What it covers | Gateway listeners | Fixtures | Doc |
 |---|---|---|---|---|
-| `core` | Upstream failures, gateway admission, response ownership | HTTP 18080, admin 18090 | 19000–19099 | — |
+| `core` | Upstream failures, gateway admission, response ownership; G01 diagnostic references (v0.9.9 and later) | HTTP 18080, admin 18090 | 19000–19099 | [below](#g01-diagnostic-references-core-profile) |
 | `policy` | WAF/bot, OPA, IP, validators, rate/AI limits, concurrency, breaker, header ownership | HTTP 18280, admin 18290 | 19200–19299 | [policy-admission.md](policy-admission.md) |
 | `admission` | Overload, retained-buffer capacity, connection ceiling | HTTP 18580, admin 18590; mesh egress 18589 | 19500–19599 | [policy-admission.md](policy-admission.md) |
 | `drain` | Graceful shutdown: drain refusal and in-flight completion | HTTP 18680, admin 18690 | 19600–19699 | [policy-admission.md](policy-admission.md) |
@@ -74,3 +74,25 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 `cargo run -p anvil-lab -- list` prints the same list from the profile registry
 (`crates/anvil-lab/src/profiles.rs`). Gateway settings and routes are in `lab/gateway/<profile>*`;
 the port plan and config citations are in [../audit/gateway-lab-config.md](../audit/gateway-lab-config.md).
+
+## G01 diagnostic references (`core` profile)
+
+On Ferrum Edge v0.9.9 and later the `core` instance runs with `FERRUM_DIAGNOSTIC_REFS=all` and
+`FERRUM_DIAGNOSTIC_REF_TTL_SECONDS=5`, set as environment variables by the runner
+(`crates/anvil-lab/src/g01.rs`), because `ferrum.conf` rejects keys earlier releases do not know.
+The runner generates the instance's `FERRUM_ADMIN_JWT_SECRET` and signs lookup tokens with it: role
+`viewer`, `scope: diagnostics:read` and `ns: ferrum`, or a variant without the scope, without the
+`ns` claim, or for another namespace. The trusted profile's lookup (`http://127.0.0.1:18090`) holds
+the token as a vault secret. Both legs are direct loopback connections, so a bound record may be
+`confirmed`.
+
+| Scenario | Stimulus | Expected |
+|---|---|---|
+| G01-001 | Backend connect refused (`/up/refused/`) | The response carries a reference; `ferrum.detail.failure` is confirmed, scope gateway to upstream, with the operator log's `error_class`; the token finding stays likely; the token is in no record |
+| G01-002 | Route miss, and the application's own 404 | The route miss resolves to `ferrum.detail.rejected` (`routing route_not_found`), confirmed; the application's 404 carries no reference and gets no detail finding |
+| TRUST-009 | Lookups with a token for another namespace, without the scope, without `ns` | `ferrum.detail.unavailable` (the indistinguishable 404, no record field quoted) and `ferrum.detail.refused` twice; nothing above likely; the scoped token resolves |
+| TRUST-010 | The same lookup after the reference's retention | Resolved at first; afterwards the gateway answers 404, and re-diagnosing the recorded response reports `ferrum.detail.unavailable` with the public evidence kept |
+| TRUST-011 | The backend sets its own `X-Ferrum-Diagnostic-Ref` on a 500 | The client never sees the forged value and no finding cites it |
+
+In the untrusted pass no lookup happens and no `ferrum.detail.*` finding appears. Earlier releases
+skip all five with the reason.

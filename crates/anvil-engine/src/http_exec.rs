@@ -14,7 +14,7 @@ use anvil_auth::{ResolvedAuth, SignableRequest};
 use anvil_diagnostics::FerrumTrust;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::*;
-use anvil_domain::integration::IntegrationKind;
+use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
 use anvil_transport::connector::ProxyPlan;
 use anvil_transport::dns::DnsConfig;
@@ -407,6 +407,22 @@ pub(crate) fn trust_for(ctx: &ExecutionContext, target: &Target) -> (FerrumTrust
         }
     }
     (FerrumTrust::NotConfigured, false)
+}
+
+/// The first Ferrum gateway profile whose frontend hosts match `target`: the
+/// one [`trust_for`] takes its trust from.
+fn profile_for<'a>(ctx: &'a ExecutionContext, target: &Target) -> Option<&'a IntegrationProfile> {
+    ctx.integrations.iter().find(|i| {
+        let IntegrationKind::FerrumGateway { hosts, .. } = &i.kind;
+        hosts.iter().any(|h| host_matches(&h.host, &target.host) && h.port.map(|p| p == target.port).unwrap_or(true))
+    })
+}
+
+/// The diagnostic reference lookup of the profile that `target` matches, if
+/// that profile configures one.
+pub(crate) fn detail_access_for<'a>(ctx: &'a ExecutionContext, target: &Target) -> Option<&'a DiagnosticDetailAccess> {
+    let IntegrationKind::FerrumGateway { detail, .. } = &profile_for(ctx, target)?.kind;
+    detail.as_ref()
 }
 
 pub(crate) fn prepare_all(engine: &Engine, ctx: &ExecutionContext, r: &Resolver, allowed: &[&str]) -> Result<Prepared, TransportFailure> {
@@ -1199,6 +1215,16 @@ pub(crate) async fn execute_viewing(
             trust = FerrumTrust::NotConfigured;
         }
     }
+    // G01: the gateway's own record of the final response, when the profile
+    // its origin matches configures a lookup. Never for an untrusted
+    // destination, and never from the response header alone.
+    let gateway_detail = match (&trust, detail_access_for(ctx, &last_hop.target), last.response.as_ref()) {
+        (FerrumTrust::Trusted { .. }, Some(access), Some(response)) if !cancel.is_cancelled() => {
+            let lookup = crate::gateway_detail::Lookup { engine, epoch, ctx, settings: &prep.settings, resolver: &resolver };
+            Some(lookup.run(access, response, last.observation.started_at, &mut redactor, &cancel).await)
+        }
+        _ => None,
+    };
     let used_secrets = resolver.used_secrets.lock().clone();
     for s in &used_secrets {
         redactor.add_secret(s);
@@ -1239,6 +1265,7 @@ pub(crate) async fn execute_viewing(
         protocol_status_override: None,
         workload_api: workload,
         body_view: view,
+        gateway_detail,
     };
     let output = record::assemble(assembly);
     let _ = assertions::evaluate;

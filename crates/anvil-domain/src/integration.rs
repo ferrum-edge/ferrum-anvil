@@ -32,8 +32,9 @@ pub enum IntegrationKind {
         /// local/lab destinations and caps confidence at `likely`.
         #[serde(default = "default_true")]
         require_verified_tls: bool,
-        /// Optional authorized diagnostic detail endpoint (proposed gateway
-        /// contract; unavailable on current releases).
+        /// Optional diagnostic reference lookup (G01, Ferrum Edge v0.9.9 and
+        /// later). Only a lookup record that binds to the response can raise
+        /// a Ferrum finding above `likely`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<DiagnosticDetailAccess>,
         /// Link to Foundry/Nexus for read-only context (never auto-edited).
@@ -46,11 +47,21 @@ fn default_true() -> bool {
     true
 }
 
+// How Anvil looks up a Ferrum Edge diagnostic reference
+// (`GET /diagnostics/v1/refs/<ref>` on the admin listener). Anvil looks up the
+// reference of a trusted gateway's response only when its profile has one of
+// these, and treats the header alone as no evidence at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DiagnosticDetailAccess {
+    /// Base URL of the gateway's admin listener, e.g. `https://gateway.example:9443`.
     pub base_url: String,
-    /// Dedicated least-privilege diagnostic credential (never an admin JWT).
+    /// Bearer token for the lookup: a dedicated, short-lived admin JWT whose
+    /// `scope` includes `diagnostics:read` and whose `ns` claim names the
+    /// gateway's namespace (role `viewer` suffices), never a general admin
+    /// token. A vault secret, or a template such as an environment variable.
     pub credential: SensitiveValue,
+    /// The gateway's namespace (`FERRUM_NAMESPACE`). When set, a record of
+    /// another namespace is not used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 }

@@ -50,7 +50,7 @@
           "default": true
         },
         "detail": {
-          "description": "Optional authorized diagnostic detail endpoint (proposed gateway\ncontract; unavailable on current releases).",
+          "description": "Optional diagnostic reference lookup (G01, Ferrum Edge v0.9.9 and\nlater). Only a lookup record that binds to the response can raise\na Ferrum finding above `likely`.",
           "anyOf": [
             {
               "$ref": "#/$defs/DiagnosticDetailAccess"
@@ -110,13 +110,15 @@
       "type": "object",
       "properties": {
         "base_url": {
+          "description": "Base URL of the gateway's admin listener, e.g. `https://gateway.example:9443`.",
           "type": "string"
         },
         "credential": {
-          "description": "Dedicated least-privilege diagnostic credential (never an admin JWT).",
+          "description": "Bearer token for the lookup: a dedicated, short-lived admin JWT whose\n`scope` includes `diagnostics:read` and whose `ns` claim names the\ngateway's namespace (role `viewer` suffices), never a general admin\ntoken. A vault secret, or a template such as an environment variable.",
           "$ref": "#/$defs/SensitiveValue"
         },
         "namespace": {
+          "description": "The gateway's namespace (`FERRUM_NAMESPACE`). When set, a record of\nanother namespace is not used.",
           "type": [
             "string",
             "null"

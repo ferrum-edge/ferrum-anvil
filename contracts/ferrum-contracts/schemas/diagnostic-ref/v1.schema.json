@@ -1,0 +1,329 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json",
+  "title": "ferrum.diagnostic_ref.v1",
+  "description": "Body of GET /diagnostics/v1/refs/{ref} on the Ferrum Edge admin listener: the versioned detail behind one X-Ferrum-Diagnostic-Ref. Additive fields may appear within a schema version; a breaking change bumps schema_version. Transcribed from the DiagnosticRefLookup family of component schemas in Edge's openapi.yaml.",
+  "x-contract": {
+    "name": "diagnostic-ref",
+    "version": 1,
+    "status": "implemented",
+    "owner": "ferrum-edge/ferrum-edge",
+    "edge_availability": "Included in Ferrum Edge v0.9.9.",
+    "wire_version": "ferrum.diagnostic_ref.v1",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.9",
+        "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+        "path": "openapi.yaml",
+        "symbols": [
+          "components.schemas.DiagnosticRefLookup",
+          "components.schemas.DiagnosticRefDetail",
+          "components.schemas.DiagnosticRefRejection",
+          "components.schemas.DiagnosticRefAttempt",
+          "components.schemas.DiagnosticRefTlsDetail"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.9",
+        "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+        "path": "src/diagnostic_ref.rs",
+        "symbols": [
+          "DIAGNOSTIC_REF_SCHEMA_VERSION",
+          "DiagnosticRefView",
+          "DiagnosticDetail",
+          "DiagnosticRejection",
+          "DiagnosticAttempt",
+          "DiagnosticTlsDetail"
+        ]
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.9",
+        "commit": "ab16c714a4d3462cfa332375950c7bcf17ca64b0",
+        "path": "src/diagnostic_ref.rs",
+        "note": "Introduced by ferrum-edge#5845 for issue ferrum-edge#5767; extended by issue #5846 (all mode, attempts, rejection, replica tag)."
+      }
+    ]
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ref",
+    "namespace",
+    "created_at",
+    "expires_at",
+    "protocol",
+    "status",
+    "gateway_error",
+    "detail_available",
+    "detail"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "ferrum.diagnostic_ref.v1"
+      ]
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^(fd1_[0-9a-f]{32}|fd2_[0-9a-f]{8}_[0-9a-f]{32})$",
+      "description": "The resolved reference."
+    },
+    "replica_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Replica id of the process that minted a replica-tagged (fd2_) reference. Absent for fd1_ references."
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Data-plane namespace of the gateway that minted the reference."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the reference stops resolving (earlier if evicted)."
+    },
+    "protocol": {
+      "type": "string",
+      "enum": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "description": "Client-facing protocol of the response that carried the reference."
+    },
+    "status": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599,
+      "description": "Client-visible HTTP status of that response."
+    },
+    "gateway_error": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "connection_failure",
+        "backend_timeout",
+        "backend_error",
+        "circuit_breaker_open",
+        "overload",
+        "config_stale",
+        "concurrency_limit",
+        "request_timeout",
+        null
+      ],
+      "description": "The public X-Gateway-Error token of that response, or null for an all-mode reference on a gateway rejection that carries no token."
+    },
+    "detail_available": {
+      "type": "boolean",
+      "description": "false until the request's terminal transaction record exists, and in errors mode for the admission fences that answer before a request context exists."
+    },
+    "detail": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Detail"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "Detail": {
+      "type": "object",
+      "description": "Operator-only detail copied from the request's terminal transaction record. Every string is a closed vocabulary or operator configuration.",
+      "required": [
+        "error_class",
+        "body_error_class",
+        "rejection_phase",
+        "route_timeout_phase",
+        "backend_dispatch",
+        "proxy_id",
+        "backend_target",
+        "duration_bucket"
+      ],
+      "properties": {
+        "error_class": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Granular ErrorClass value as the access log names it (vocabularies/gateway-errors.json)."
+        },
+        "body_error_class": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Classification of a failure while streaming the response body."
+        },
+        "rejection_phase": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "circuit_breaker_open",
+            "concurrency_limit",
+            "overload",
+            "config_stale",
+            null
+          ]
+        },
+        "route_timeout_phase": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "before_dispatch",
+            "dispatch",
+            "retry_backoff",
+            null
+          ]
+        },
+        "backend_dispatch": {
+          "type": "string",
+          "enum": [
+            "not_dispatched",
+            "pre_wire_failure",
+            "ambiguous_failure",
+            "backend_response"
+          ]
+        },
+        "proxy_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend_target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Backend origin (scheme://host:port); userinfo, path, query and fragment removed."
+        },
+        "duration_bucket": {
+          "type": "string",
+          "enum": [
+            "lt_10ms",
+            "lt_100ms",
+            "lt_1s",
+            "lt_10s",
+            "ge_10s",
+            "unknown"
+          ]
+        },
+        "rejection": {
+          "$ref": "#/$defs/Rejection"
+        },
+        "attempts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/Attempt"
+          }
+        },
+        "attempts_omitted": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "Rejection": {
+      "type": "object",
+      "required": [
+        "source",
+        "phase"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "plugin",
+            "gateway",
+            "routing"
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "plugin": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "Attempt": {
+      "type": "object",
+      "required": [
+        "attempt",
+        "backend_dispatch"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "backend_dispatch": {
+          "type": "string",
+          "enum": [
+            "pre_wire_failure",
+            "ambiguous_failure",
+            "backend_response"
+          ]
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsDetail"
+        }
+      }
+    },
+    "TlsDetail": {
+      "type": "object",
+      "required": [
+        "failure"
+      ],
+      "properties": {
+        "failure": {
+          "type": "string",
+          "enum": [
+            "certificate_verification",
+            "alert_received",
+            "no_certificates_presented",
+            "peer_incompatible",
+            "peer_misbehaved",
+            "invalid_message",
+            "unexpected_message",
+            "decrypt_error",
+            "no_application_protocol",
+            "invalid_crl",
+            "other"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

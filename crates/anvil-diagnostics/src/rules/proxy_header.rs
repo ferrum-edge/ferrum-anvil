@@ -271,6 +271,7 @@ mod tests {
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
             workload: None,
+            gateway_detail: None,
             redact: None,
         };
         crate::diagnose(&input).findings

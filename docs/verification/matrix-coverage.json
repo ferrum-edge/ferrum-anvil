@@ -3,9 +3,9 @@
  "gateway_release": "v0.9.7",
  "total": 182,
  "totals": {
-  "verified_test": 74,
+  "verified_test": 77,
   "verified_live": 97,
-  "blocked": 6,
+  "blocked": 3,
   "not_applicable": 2,
   "verified_check": 1,
   "partial": 2
@@ -6822,31 +6822,103 @@
    "id": "TRUST-009",
    "category": "Diagnostic trust and uncertainty",
    "title": "Cross-tenant lookup",
-   "status": "blocked",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 201,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 205,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/g01.rs",
+     "line": 215,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/g01.rs",
+     "line": 346,
+     "kind": "lab"
+    }
+   ],
    "lab": null,
-   "note": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md; proposed upstream as ferrum-edge/ferrum-edge#5767); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
+   "note": null
   },
   {
    "id": "TRUST-010",
    "category": "Diagnostic trust and uncertainty",
    "title": "Diagnostic retention expired",
-   "status": "blocked",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 232,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 236,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/g01.rs",
+     "line": 276,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/g01.rs",
+     "line": 347,
+     "kind": "lab"
+    }
+   ],
    "lab": null,
-   "note": "Depends on G01 detail retention; not available in any gateway release."
+   "note": null
   },
   {
    "id": "TRUST-011",
    "category": "Diagnostic trust and uncertainty",
    "title": "Gateway detail spoofing",
-   "status": "blocked",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test",
+    "lab"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 260,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/diagnostic_ref.rs",
+     "line": 264,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-lab/src/g01.rs",
+     "line": 314,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/g01.rs",
+     "line": 348,
+     "kind": "lab"
+    }
+   ],
    "lab": null,
-   "note": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
+   "note": null
   },
   {
    "id": "TRUST-012",

@@ -37,6 +37,17 @@ against it).
   lookalikes. After redirects, attribution comes from the origin that
   produced the final response (its own profile and TLS requirement), never
   the original request's. See [diagnostics.md](diagnostics.md).
+- **Spoofed or replayed diagnostic references** (G01): `X-Ferrum-Diagnostic-Ref`
+  alone is never evidence. Anvil looks a reference up only for a declared
+  gateway with a configured lookup, never for a malformed one, and uses the
+  record only when it binds to the response (reference, status, token,
+  protocol, namespace, creation time). `confirmed` additionally needs both the
+  request and the lookup over verified TLS or a direct loopback connection.
+- **Lookup credential exposure** (G01): the lookup token is a vault secret or
+  template, sent only to the configured admin listener, added to the
+  execution's redactor, never logged or recorded, and never given to load
+  workers. Users are told to mint a dedicated `viewer`-role token with only
+  `diagnostics:read` and an `ns` claim.
 
 ### gRPC responses
 

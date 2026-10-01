@@ -133,6 +133,7 @@ fn run_redacted(s: &Shape, redact: Option<&dyn Fn(&str) -> String>) -> Diagnosis
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        gateway_detail: None,
         redact,
     })
 }
@@ -384,6 +385,7 @@ fn a_direct_tls13_handshake_failure_after_finished_with_a_presented_certificate_
             credentials_stripped_on_redirect: false,
             protocol_fallback_from: None,
             workload: None,
+            gateway_detail: None,
             redact: None,
         })
     };
@@ -447,6 +449,7 @@ fn udp(
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,
         workload: None,
+        gateway_detail: None,
         redact: None,
     })
 }

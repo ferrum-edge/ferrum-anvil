@@ -1,17 +1,5 @@
 {
  "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists. 'blocked', 'partial' and 'not_applicable' are never counted as passed; 'verified_check' records an executed check script (exact command, artifacts and result) that CI re-runs on every release artifact.",
- "TRUST-009": {
-  "status": "blocked",
-  "reason": "Needs the gateway-owned authorized diagnostic API (G01, docs/g01-gateway-diagnostic-contract.md; proposed upstream as ferrum-edge/ferrum-edge#5767); no Ferrum Edge release provides it. Anvil keeps detail access explicitly unavailable."
- },
- "TRUST-010": {
-  "status": "blocked",
-  "reason": "Depends on G01 detail retention; not available in any gateway release."
- },
- "TRUST-011": {
-  "status": "blocked",
-  "reason": "Depends on G01 reserved detail fields. For current public markers, backend-spoofable X-Gateway-Error is already capped at 'likely' and untrusted destinations never get gateway attribution (lab untrusted pass)."
- },
  "TRUST-012": {
   "status": "not_applicable",
   "reason": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."

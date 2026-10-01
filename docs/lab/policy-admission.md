@@ -222,9 +222,11 @@ suggests disabling the WAF, TLS or a policy.
 
 ## 5. Limitations
 
-- **Evidence mode.** Only plain-HTTP trusted profiles are exercised, so `confirmed` gateway
-  attribution is never expected. On 0.9.5 and 0.9.7 it would require the proposed gateway-owned
-  diagnostic contract ([g01-gateway-diagnostic-contract.md](../g01-gateway-diagnostic-contract.md)).
+- **Evidence mode.** Only plain-HTTP trusted profiles without a diagnostic reference lookup are
+  exercised, so `confirmed` gateway attribution is never expected. It requires the gateway's own
+  diagnostic record (G01, Ferrum Edge v0.9.9 and later,
+  [g01-gateway-diagnostic-contract.md](../g01-gateway-diagnostic-contract.md)), which the `core`
+  profile exercises ([README.md](README.md#g01-diagnostic-references-core-profile)).
 - **Mocks.** The OPA and AI mocks verify the gateway's adapter behaviour only, not any real policy
   engine or provider.
 - **Not covered here.** ACL denial (GW-011) belongs to the `auth` profile, and stale DP config

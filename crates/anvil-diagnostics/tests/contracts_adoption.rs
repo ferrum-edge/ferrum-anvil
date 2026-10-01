@@ -1,3 +1,4 @@
+use anvil_diagnostics::gateway_detail;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,6 +67,17 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         "fixtures/diagnostic-finding/invalid/alloy-only-evidence-source.json",
         "fixtures/diagnostic-finding/invalid/missing-does-not-prove.json",
         "fixtures/diagnostic-finding/invalid/probability-confidence.json",
+        "schemas/diagnostic-ref/v1.schema.json",
+        "fixtures/diagnostic-ref/valid/connection-failure.json",
+        "fixtures/diagnostic-ref/valid/plugin-rejection.json",
+        "fixtures/diagnostic-ref/valid/replica-tagged-reference.json",
+        "fixtures/diagnostic-ref/valid/tls-retry.json",
+        "fixtures/diagnostic-ref/invalid/created-at-not-rfc3339.json",
+        "fixtures/diagnostic-ref/invalid/detail-missing-backend-dispatch.json",
+        "fixtures/diagnostic-ref/invalid/granular-class-as-token.json",
+        "fixtures/diagnostic-ref/invalid/malformed-ref.json",
+        "fixtures/diagnostic-ref/invalid/unknown-schema-version.json",
+        "fixtures/diagnostic-ref/invalid/uppercase-replica-id.json",
     ]
     .into_iter()
     .map(String::from)
@@ -134,8 +146,7 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     // Compare the headers Anvil's Ferrum rules actually read. A gateway
     // diagnostic header still unreleased on the pin needs an explicit decision
-    // when the pin changes, and a released one Anvil does not read yet is
-    // listed here and asserted separately.
+    // when the pin changes.
     let unreleased: Vec<&str> = headers["headers"]
         .as_array()
         .unwrap()
@@ -144,23 +155,22 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         .map(|entry| entry["name"].as_str().unwrap())
         .collect();
     assert!(unreleased.is_empty(), "unreleased gateway diagnostic headers need an explicit decision: {unreleased:?}");
-    // X-Ferrum-Diagnostic-Ref is released in Ferrum Edge v0.9.9 (#5845). Anvil
-    // does not read it until the authenticated lookup is adopted
-    // (docs/diagnostics.md, G01), so its rules still read only the two markers.
+    // X-Ferrum-Diagnostic-Ref is released in Ferrum Edge v0.9.9 (#5845), and
+    // Anvil reads it: a trusted profile's lookup resolves it (G01).
     let entries = headers["headers"].as_array().unwrap();
     let diagnostic_ref = entries.iter().find(|entry| entry["name"] == "X-Ferrum-Diagnostic-Ref").expect("X-Ferrum-Diagnostic-Ref");
     assert_eq!(diagnostic_ref["availability"], "v0.9.9", "X-Ferrum-Diagnostic-Ref is released in Ferrum Edge v0.9.9");
     assert_eq!(diagnostic_ref["role"], "gateway_diagnostic");
-    let not_read_yet: BTreeSet<String> = ["x-ferrum-diagnostic-ref"].into_iter().map(String::from).collect();
+    assert_eq!(diagnostic_ref["name"].as_str().map(str::to_ascii_lowercase).as_deref(), Some(gateway_detail::REF_HEADER));
     let contract_headers: BTreeSet<String> = headers["headers"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|entry| entry["role"] == "gateway_diagnostic")
         .map(|entry| entry["name"].as_str().unwrap().to_ascii_lowercase())
-        .filter(|name| !not_read_yet.contains(name))
         .collect();
-    let local_header_names: BTreeSet<String> = ["x-gateway-error", "x-gateway-upstream-status"].into_iter().map(String::from).collect();
+    let local_header_names: BTreeSet<String> =
+        ["x-gateway-error", "x-gateway-upstream-status", gateway_detail::REF_HEADER].into_iter().map(String::from).collect();
     let (missing, extra) = differences(&contract_headers, &local_header_names);
     assert!(missing.is_empty() && extra.is_empty(), "gateway diagnostic header drift; missing: {missing:?}; extra: {extra:?}");
     let local_header_meanings: BTreeMap<String, &str> = local["headers"]
@@ -207,5 +217,58 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     ] {
         let instance = read_json(&vendor.join(fixture));
         assert!(!validator.is_valid(&instance), "pinned invalid fixture unexpectedly passed: {fixture}");
+    }
+}
+
+fn enum_strings(value: &Value) -> BTreeSet<String> {
+    value["enum"].as_array().expect("enum").iter().filter_map(|entry| entry.as_str().map(str::to_owned)).collect()
+}
+
+fn local(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| value.to_string()).collect()
+}
+
+/// The pinned `ferrum.diagnostic_ref.v1` schema (Ferrum Edge v0.9.9) and
+/// Anvil's lookup reader agree: the same closed vocabularies, and the pinned
+/// fixtures are accepted or refused by both.
+#[test]
+fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
+    let vendor = repo_root().join("contracts/ferrum-contracts");
+    let schema = read_json(&vendor.join("schemas/diagnostic-ref/v1.schema.json"));
+    assert_eq!(schema["title"], gateway_detail::SCHEMA_VERSION);
+    assert_eq!(enum_strings(&schema["properties"]["schema_version"]), local(&[gateway_detail::SCHEMA_VERSION]));
+    let defs = &schema["$defs"];
+    let vocabularies = [
+        ("protocol", &schema["properties"]["protocol"], &gateway_detail::PROTOCOLS[..]),
+        ("gateway_error", &schema["properties"]["gateway_error"], &gateway_detail::TOKENS[..]),
+        ("detail.backend_dispatch", &defs["Detail"]["properties"]["backend_dispatch"], &gateway_detail::DISPATCH[..]),
+        ("detail.duration_bucket", &defs["Detail"]["properties"]["duration_bucket"], &gateway_detail::DURATION_BUCKETS[..]),
+        ("detail.rejection_phase", &defs["Detail"]["properties"]["rejection_phase"], &gateway_detail::REJECTION_PHASES[..]),
+        ("detail.route_timeout_phase", &defs["Detail"]["properties"]["route_timeout_phase"], &gateway_detail::ROUTE_TIMEOUT_PHASES[..]),
+        ("rejection.source", &defs["Rejection"]["properties"]["source"], &gateway_detail::REJECTION_SOURCES[..]),
+        ("attempts.backend_dispatch", &defs["Attempt"]["properties"]["backend_dispatch"], &gateway_detail::ATTEMPT_DISPATCH[..]),
+        ("attempts.tls.failure", &defs["TlsDetail"]["properties"]["failure"], &gateway_detail::TLS_FAILURES[..]),
+    ];
+    for (field, contract, anvil) in vocabularies {
+        let (missing, extra) = differences(&enum_strings(contract), &local(anvil));
+        assert!(missing.is_empty() && extra.is_empty(), "{field} drift; missing: {missing:?}; extra: {extra:?}");
+    }
+    assert_eq!(defs["Detail"]["properties"]["attempts"]["maxItems"], gateway_detail::MAX_ATTEMPTS);
+
+    // `created_at` must be an RFC 3339 time: assert formats, as the contract's own checks do.
+    let validator = jsonschema::options().should_validate_formats(true).build(&schema).expect("pinned diagnostic-ref schema compiles");
+    let fixtures = files_under(&vendor.join("fixtures/diagnostic-ref"), &vendor);
+    assert_eq!(fixtures.len(), 10, "{fixtures:?}");
+    for fixture in fixtures {
+        let bytes = std::fs::read(vendor.join(&fixture)).unwrap();
+        let instance: Value = serde_json::from_slice(&bytes).unwrap();
+        let anvil = gateway_detail::parse_view(&bytes);
+        if fixture.contains("/valid/") {
+            assert!(validator.is_valid(&instance), "pinned valid fixture failed: {fixture}");
+            assert!(anvil.is_ok(), "Anvil refuses the valid fixture {fixture}: {anvil:?}");
+        } else {
+            assert!(!validator.is_valid(&instance), "pinned invalid fixture unexpectedly passed: {fixture}");
+            assert!(anvil.is_err(), "Anvil accepts the invalid fixture {fixture}");
+        }
     }
 }

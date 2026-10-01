@@ -5,6 +5,7 @@ mod application;
 mod auth_session;
 mod dispatch;
 mod early_data;
+mod ferrum_detail;
 mod ferrum_rules;
 mod http_status;
 mod mesh;
@@ -163,6 +164,12 @@ pub const RULES: &[RuleMeta] = &[
         ],
     },
     RuleMeta {
+        id: "ferrum.detail",
+        version: 1,
+        summary: "Gateway diagnostic references (G01, Ferrum Edge v0.9.9 and later): only an authenticated lookup record bound to the response is gateway evidence; refused, unknown, expired, rate-limited and mismatched lookups keep the public evidence's confidence",
+        fixtures: &["G01-001", "G01-002", "TRUST-009", "TRUST-010", "TRUST-011"],
+    },
+    RuleMeta {
         id: "local.workload_api",
         version: 1,
         summary: "SPIFFE Workload API unreachable, no identity issued, or another failure before anything was sent",
@@ -244,6 +251,7 @@ pub fn run_all(ctx: &Ctx<'_>, drafts: &mut Vec<Draft>, warnings: &mut Vec<Outcom
     dispatch::rules(ctx, drafts);
     http_status::rules(ctx, drafts);
     ferrum_rules::rules(ctx, drafts, warnings);
+    ferrum_detail::rules(ctx, drafts);
     application::rules(ctx, drafts, warnings);
     protocols::rules(ctx, drafts, warnings);
     early_data::rules(ctx, drafts);

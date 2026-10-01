@@ -4,13 +4,16 @@ Anvil vendors the Ferrum Edge contracts it consumes under
 [`contracts/ferrum-contracts`](../contracts/ferrum-contracts). The current pin
 is recorded in `contracts/ferrum-contracts/PIN`: tag
 `contracts-edge-0.9.9`, commit `25c4e9e00033d7941a1dd0ab733fa74e735546ae` (Ferrum Edge
-v0.9.9). That tag marks `X-Ferrum-Diagnostic-Ref` released in v0.9.9; Anvil
-records it in the 0.9.9 catalog but does not read it yet (see
-[diagnostics.md](diagnostics.md#adopting-the-gateway-diagnostic-reference-g01)),
-and the drift test lists it as released but not read.
+v0.9.9). That tag marks `X-Ferrum-Diagnostic-Ref` released in v0.9.9 and
+publishes the `ferrum.diagnostic_ref.v1` lookup schema with its fixtures;
+Anvil reads the header and the lookup record (see
+[diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)).
 The offline `anvil-diagnostics` test suite checks every vendored file against
-its pinned SHA-256, compares the local gateway vocabulary and DiagnosticFinding
-schema with the vendor copy, and validates the shared schema fixtures.
+its pinned SHA-256, compares the local gateway vocabulary, header list and
+DiagnosticFinding schema with the vendor copy, compares Anvil's diagnostic
+reference reader with the pinned `diagnostic-ref` schema's vocabularies, and
+validates the shared schema fixtures (the `diagnostic-ref` ones also through
+Anvil's reader).
 
 ## Bumping the pin
 

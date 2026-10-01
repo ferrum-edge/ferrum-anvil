@@ -15,6 +15,28 @@
   refusals, the WebSocket `permessage-deflate` negotiation `502` and `1007`
   close, and OpenAPI-bridge tool results whose text names a gateway error.
   Profiles declaring an older release do not match them.
+- Diagnostics: Ferrum Edge v0.9.9's gateway diagnostic references (G01,
+  #224). A Ferrum gateway profile can configure a diagnostic reference lookup
+  (the admin listener URL, a token held as a vault secret or template, and
+  optionally the gateway's namespace; desktop profile dialog). For a trusted
+  gateway's response that carries `X-Ferrum-Diagnostic-Ref`, Anvil calls
+  `GET /diagnostics/v1/refs/<ref>` as the response arrives and uses the
+  `ferrum.diagnostic_ref.v1` record only when it binds to that response
+  (reference, status, token, protocol, namespace, creation time). The new
+  `ferrum.detail.*` findings cite it as `gateway_detail` evidence and are the
+  only Ferrum findings that can be `confirmed`, and only when the request and
+  the lookup both used verified TLS or a direct loopback connection.
+  Refused (`401`/`403`), unknown or expired (`404`, with any owner-replica
+  hint), rate-limited, malformed and mismatched lookups are reported and keep
+  the public evidence's confidence. The header alone is never trusted, and
+  the token is sent only to the admin listener, redacted, and never logged
+  or recorded.
+- Failure matrix: TRUST-009 (cross-tenant lookup), TRUST-010 (expired
+  reference) and TRUST-011 (spoofed reference) are no longer blocked: engine
+  tests cover them, and on Ferrum Edge v0.9.9 and later the lab's `core`
+  profile turns references on (`FERRUM_DIAGNOSTIC_REFS=all`), signs
+  `diagnostics:read` tokens with an `ns` claim, and runs them with G01-001
+  and G01-002 against the real gateway (skipped on earlier releases).
 
 ### Changed
 
@@ -27,10 +49,11 @@
   MESH-026/027 check that the gateway resets a UDP tunnel that ended on a
   socket error with `RST_STREAM(CONNECT_ERROR)`.
 - The vendored Ferrum contracts move to `ferrum-contracts`
-  `contracts-edge-0.9.9`. `X-Ferrum-Diagnostic-Ref` is released in Ferrum
-  Edge v0.9.9: the 0.9.9 catalog records it, and the contract drift test
-  treats it as released but not yet read by Anvil (gateway findings stay
-  capped at likely until the authenticated lookup is adopted).
+  `contracts-edge-0.9.9`, including the `ferrum.diagnostic_ref.v1` schema and
+  fixtures. `X-Ferrum-Diagnostic-Ref` is released in Ferrum Edge v0.9.9: the
+  0.9.9 catalog records it, and the contract drift test counts it among the
+  headers Anvil reads and checks Anvil's lookup reader against the pinned
+  schema.
 
 ## [0.1.1] - 2026-10-01
 
