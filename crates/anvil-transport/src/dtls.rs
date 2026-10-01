@@ -1201,7 +1201,8 @@ mod tests {
 
         assert_eq!((failure.kind, failure.phase), (FailureKind::DtlsHandshakeFailed, Phase::DtlsHandshake));
         assert_eq!(failure.message, "sending a DATAGRAM capsule on the CONNECT stream failed: Remote reset: 0x0");
-        assert!(interrupted);
+        // A write the peer already reset is not a send this side abandoned.
+        assert!(!interrupted);
     }
 
     /// The fake path as a tunnel: its evidence is whether it was reset.
