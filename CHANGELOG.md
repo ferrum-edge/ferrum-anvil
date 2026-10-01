@@ -40,6 +40,11 @@
 
 ### Fixed
 
+- DTLS over MASQUE: when the tunnel ends while a handshake flight is being
+  written, the failure is now always `DtlsHandshakeFailed` in the
+  `DtlsHandshake` phase, with the write error as its message. It used to be
+  `RequestWriteFailed` or `DtlsHandshakeFailed` depending on which side
+  noticed first (#270).
 - Desktop: the update dialog shows release notes as readable text instead of
   raw Markdown. GitHub callouts read "Warning: …", emphasis, quote, heading
   and code markers are dropped, bullets read "•" and links read
