@@ -369,15 +369,14 @@ pub fn validate_ruleset_limits(g: &PortableGraph, source: &str) -> Result<(), Bu
     Ok(())
 }
 
-/// Clear the token-cache id of every OAuth 2 profile in the graph's
-/// workspaces, folders and requests, and return how many were cleared. An
 /// Drop the diagnostic reference lookup (`detail`) of every gateway profile in
 /// a bundle, returning a warning per profile. A lookup names an admin URL and
 /// a token that is often a `{{variable}}` template: imported as is, it would
 /// send this device's token (resolved from its own environment) to an admin
 /// URL the bundle chose, and a listener there could answer records that make
 /// findings "confirmed". The user configures a lookup deliberately instead.
-/// Full backups restore their own profile and keep it.
+/// A full backup restores its own profile, lookup included; the restored
+/// workspace's seal pauses the lookup until the user allows it.
 pub fn clear_gateway_lookups(g: &mut PortableGraph) -> Vec<String> {
     let mut warnings = Vec::new();
     for i in &mut g.integrations {
@@ -392,6 +391,8 @@ pub fn clear_gateway_lookups(g: &mut PortableGraph) -> Vec<String> {
     warnings
 }
 
+/// Clear the token-cache id of every OAuth 2 profile in the graph's
+/// workspaces, folders and requests, and return how many were cleared. An
 /// imported profile that kept one could share a cached token with a profile
 /// stored here that names the same id (and the same issuer, client and
 /// scope); without one, each caches under the id of the object that defines

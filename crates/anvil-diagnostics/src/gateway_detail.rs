@@ -73,8 +73,9 @@ pub const REJECTION_PHASES: [&str; 4] = ["circuit_breaker_open", "concurrency_li
 pub const ROUTE_TIMEOUT_PHASES: [&str; 3] = ["before_dispatch", "dispatch", "retry_backoff"];
 /// `detail.rejection.source`.
 pub const REJECTION_SOURCES: [&str; 3] = ["plugin", "gateway", "routing"];
-/// `error_class` and `attempts[].error_class`: the 19 classes of the pinned
-/// `vocabularies/gateway-errors.json`. A record naming another class is read,
+/// `error_class`, `body_error_class` and `attempts[].error_class`: the 19
+/// classes of the pinned `vocabularies/gateway-errors.json` (Ferrum Edge draws
+/// all three from its `ErrorClass`). A record naming another class is read,
 /// but never confirmed.
 pub const ERROR_CLASSES: [&str; 19] = [
     "connection_timeout",
@@ -98,18 +99,8 @@ pub const ERROR_CLASSES: [&str; 19] = [
     "request_error",
 ];
 /// Keys every record carries (some may be `null`).
-pub const REQUIRED_KEYS: [&str; 10] = [
-    "schema_version",
-    "ref",
-    "namespace",
-    "created_at",
-    "expires_at",
-    "protocol",
-    "status",
-    "gateway_error",
-    "detail_available",
-    "detail",
-];
+pub const REQUIRED_KEYS: [&str; 10] =
+    ["schema_version", "ref", "namespace", "created_at", "expires_at", "protocol", "status", "gateway_error", "detail_available", "detail"];
 /// Keys every non-null `detail` carries (some may be `null`).
 pub const DETAIL_REQUIRED_KEYS: [&str; 8] = [
     "error_class",
@@ -445,8 +436,9 @@ pub fn known_error_class(class: &str) -> bool {
 /// The error classes a record names that the pinned vocabulary does not know.
 pub fn unknown_error_classes(view: &RefView) -> Vec<String> {
     let Some(d) = &view.detail else { return vec![] };
-    let named = d.error_class.iter().chain(d.attempts.iter().filter_map(|a| a.error_class.as_ref()));
+    let named = d.error_class.iter().chain(&d.body_error_class).chain(d.attempts.iter().filter_map(|a| a.error_class.as_ref()));
     let mut unknown: Vec<String> = named.filter(|c| !known_error_class(c)).cloned().collect();
+    unknown.sort_unstable();
     unknown.dedup();
     unknown
 }
@@ -685,6 +677,9 @@ mod tests {
         let future = good.replace("connection_refused", "quantum_tunnel_collapse");
         let view = parse_view(future.as_bytes()).expect("a label outside the vocabulary is still a well-formed record");
         assert_eq!(unknown_error_classes(&view), ["quantum_tunnel_collapse"]);
+        let body = good.replace("\"body_error_class\":null", "\"body_error_class\":\"stream_gremlins\"");
+        assert_ne!(body, good);
+        assert_eq!(unknown_error_classes(&parse_view(body.as_bytes()).unwrap()), ["stream_gremlins"]);
     }
 
     #[test]

@@ -103,6 +103,9 @@ pub struct ExecutionContext {
     /// even one that starts later. `None` (a standalone context): the
     /// epoch is taken when the execution starts.
     pub epoch: Option<ContextEpoch>,
+    /// Notes the context's builder adds to every HTTP record's inferred list
+    /// (for example, that a gateway profile's diagnostic lookup is paused).
+    pub notes: Vec<String>,
 }
 
 impl ExecutionContext {
@@ -130,6 +133,7 @@ impl ExecutionContext {
             redaction_names: vec![],
             scope: None,
             epoch: None,
+            notes: vec![],
         }
     }
 

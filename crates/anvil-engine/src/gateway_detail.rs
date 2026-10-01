@@ -172,7 +172,10 @@ impl Lookup<'_> {
         if !pending || budget == 0 || cancel.is_cancelled() {
             return (endpoint, first.0, first.1);
         }
-        tokio::time::sleep(Duration::from_millis(DETAIL_RETRY_MS)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(DETAIL_RETRY_MS)) => {}
+            _ = cancel.cancelled() => return (endpoint, first.0, first.1),
+        }
         let again = self.once(&request, budget, redactor, cancel).await;
         // Only a bound record replaces the first one.
         let (channel_authenticated, outcome) = if matches!(again.1, LookupOutcome::Resolved(_)) { again } else { first };
@@ -275,7 +278,9 @@ impl Lookup<'_> {
             version: HttpVersionPolicy::Auto,
             timeouts: bounded(self.settings.timeouts, budget_ms),
             limits: Limits { max_response_bytes: bound, capture_bytes: bound, ..self.settings.limits },
-            keepalive: true,
+            // A fresh connection per lookup: a resend on a reused connection
+            // found closed would get a fresh deadline past the lookup's bound.
+            keepalive: false,
             dns: DnsConfig {
                 resolver: self.settings.resolver.clone(),
                 overrides: self.settings.dns_overrides.clone(),
@@ -322,13 +327,8 @@ mod tests {
 
     #[test]
     fn plain_http_is_allowed_only_to_a_loopback_literal() {
-        let allowed = [
-            "https://gateway.example:9443",
-            "https://192.0.2.10",
-            "http://127.0.0.1:18090",
-            "http://127.8.9.10",
-            "http://[::1]:9000",
-        ];
+        let allowed =
+            ["https://gateway.example:9443", "https://192.0.2.10", "http://127.0.0.1:18090", "http://127.8.9.10", "http://[::1]:9000"];
         for ok in allowed {
             assert!(admin_channel_allowed(&target(ok)).is_ok(), "{ok}");
         }
@@ -336,6 +336,59 @@ mod tests {
             let e = admin_channel_allowed(&target(refused)).unwrap_err();
             assert!(e.contains("refused before sending"), "{refused}: {e}");
         }
+    }
+
+    /// A plain-HTTP lookup goes straight to loopback even when the request
+    /// selects a forward proxy; only an https lookup, verified end to end,
+    /// may cross it. Each lookup uses a fresh connection.
+    #[tokio::test]
+    async fn a_plain_http_lookup_never_takes_the_requests_proxy() {
+        use anvil_domain::settings::{ProxySelection, SettingsOverrides};
+        use anvil_domain::tls::{ProxyKind, ProxyProfile};
+        let engine = Engine::new();
+        let proxy = ProxyProfile {
+            id: anvil_domain::Id::new(),
+            workspace_id: anvil_domain::Id::new(),
+            name: "corporate proxy".into(),
+            kind: ProxyKind::Http,
+            address: "192.0.2.1:3128".into(),
+            username: None,
+            password: None,
+            no_proxy: String::new(),
+            tls_profile_id: None,
+            hbone: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let selection = SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: proxy.id }), ..Default::default() };
+        let mut ctx = ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", "http://gateway.example/"));
+        ctx.proxy_profiles.push(proxy);
+        ctx.settings_layers.push(("run".into(), selection));
+        let settings = crate::settings::resolve(&ctx.settings_layers);
+        let resolver = Resolver::new(vec![], None);
+        let lookup = Lookup { engine: &engine, epoch: engine.sensitive_epoch(), ctx: &ctx, settings: &settings, resolver: &resolver };
+        let now = chrono::Utc::now();
+        let binding = Binding {
+            reference: gd::parse_ref("fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f").unwrap(),
+            status: 502,
+            gateway_error: None,
+            protocol: Some("http1"),
+            namespace: None,
+            not_before: now,
+            not_after: now,
+        };
+        let authorization = http::HeaderValue::from_static("Bearer lab");
+        let plan = |url: &str| {
+            let target = target(url);
+            let request = AdminRequest { target: &target, endpoint: "", authorization: &authorization, binding: &binding };
+            lookup.plan(&request, TOTAL_MS).unwrap()
+        };
+        let loopback = plan("http://127.0.0.1:18090/diagnostics/v1/refs/x");
+        assert!(loopback.proxy.is_none(), "a plain-HTTP lookup never takes the request's proxy");
+        assert!(!loopback.keepalive && loopback.tls.is_none());
+        let verified = plan("https://admin.example:9443/diagnostics/v1/refs/x");
+        assert!(verified.proxy.is_some(), "an https lookup may cross the proxy");
+        assert!(verified.tls.is_some() && !verified.keepalive);
     }
 
     #[test]

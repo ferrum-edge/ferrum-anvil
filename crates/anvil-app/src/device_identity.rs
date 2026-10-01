@@ -13,7 +13,10 @@
 //! the user lifts it on this device ([`App::allow_device_identity`]: the
 //! desktop's workspace settings, or `anvil workspace allow-device-identity`),
 //! so restoring your own backup on a new device means lifting the seals of
-//! the workspaces you trust. Seals are device-specific
+//! the workspaces you trust. The same seal pauses the workspace's gateway
+//! profiles' diagnostic reference lookups (G01): [`App::build_context`]
+//! leaves them out, with [`LOOKUP_PAUSED_NOTE`] on the record, until the
+//! workspace is allowed. Seals are device-specific
 //! ([`kind::DEVICE_IDENTITY_SEAL`]): they are not exported, not carried by a
 //! full backup, and only a bundle import or a restore creates one. Deleting a
 //! workspace deletes its seal.
@@ -28,6 +31,9 @@ use anvil_engine::context::ExecutionContext;
 use anvil_storage::{StoreTx, kind};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+/// The record note while a sealed workspace's diagnostic lookups are paused.
+pub const LOOKUP_PAUSED_NOTE: &str = "diagnostic lookup paused: this workspace came from an import or restore; allow it on this device";
 
 /// A workspace whose requests may not use this device's workload identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +88,7 @@ pub(crate) fn sealed_note(workspaces: &[Workspace]) -> Option<String> {
     }
     let names: Vec<String> = workspaces.iter().map(|w| format!("'{}'", w.name)).collect();
     Some(format!(
-        "Requests in {} do not use this device's workload identity (JWT-SVID or X.509-SVID) until you allow it with Allow on this device in the workspace settings' Auth tab or with `anvil workspace allow-device-identity`.",
+        "Requests in {} do not use this device's workload identity (JWT-SVID or X.509-SVID), and their gateway profiles' diagnostic reference lookups are paused, until you allow it with Allow on this device in the workspace settings' Auth tab or with `anvil workspace allow-device-identity`.",
         names.join(", ")
     ))
 }

@@ -67,8 +67,14 @@ against it).
   execution's redactor, never logged or recorded, and never given to load
   workers. A bundle import drops every gateway profile's lookup (with a
   warning), so a shared bundle cannot point this device's token, resolved
-  from its own variables, at a listener of the bundle's choosing; only a full
-  backup restores its own lookup. An imported profile that covers the hosts
+  from its own variables, at a listener of the bundle's choosing. A full
+  backup restore keeps the stored lookup but, since a passphrase proves
+  nothing about who made the backup, every workspace it writes into is
+  sealed (the same device-local seal as this device's workload identity):
+  its requests get no lookup, and their records say "diagnostic lookup
+  paused", until the user allows the workspace on this device (Allow on this
+  device in its settings, or `anvil workspace allow-device-identity`). A
+  bundle import seals its workspaces the same way. An imported profile that covers the hosts
   of an existing one is reported at import, and every record names the
   profile used when several match. Users are told to mint a dedicated
   `viewer`-role token with only `diagnostics:read` and an `ns` claim.

@@ -37,7 +37,10 @@
   detail yet, and never follows a redirect. A record must carry every key
   the schema requires, and one with an error class outside the pinned
   vocabulary is capped at likely. Bundle imports drop gateway profiles'
-  lookups with a warning (full backups keep them), an imported profile that
+  lookups with a warning, and a full backup restore keeps them paused
+  ("diagnostic lookup paused" on the record) until the restored workspace is
+  allowed on this device, the same seal as the device's workload identity;
+  an imported profile that
   covers an existing profile's hosts is reported, and a record names the
   profile used when several match its destination.
 - Failure matrix: TRUST-009 (cross-tenant lookup), TRUST-010 (expired

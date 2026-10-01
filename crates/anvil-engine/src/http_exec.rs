@@ -1243,6 +1243,7 @@ pub(crate) async fn execute_viewing(
     };
     let mut inferred = prep.inferred.clone();
     inferred.extend(shadowed_profiles(ctx, &last_hop.target));
+    inferred.extend(ctx.notes.iter().cloned());
     let used_secrets = resolver.used_secrets.lock().clone();
     for s in &used_secrets {
         redactor.add_secret(s);

@@ -357,7 +357,11 @@ admin listener and the token Anvil sends to it:
   request's forward proxy, and redirects from the admin listener are never
   followed.
 - A bundle import drops every gateway profile's lookup and says so: configure
-  it again with your own admin URL and token. A full backup keeps it. When
+  it again with your own admin URL and token. A full backup restore keeps
+  it, but paused (records say "diagnostic lookup paused") until you allow
+  the restored workspace on this device: Allow on this device in the
+  workspace settings' Auth tab, or `anvil workspace allow-device-identity`,
+  the same seal as this device's workload identity. When
   several profiles match one destination, the first one is used and the
   record names the others (an import that adds such a profile is reported
   too).

@@ -199,7 +199,8 @@ Implemented (see [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g
   `diagnostics:read` and an `ns` claim, never a general admin token. It is
   sent only to that admin listener, added to the execution's redactor, never
   logged or written to a record, and never handed to load workers. A bundle
-  import drops the lookup (a full backup keeps it).
+  import drops the lookup; a full backup restore keeps it but pauses it
+  until the user allows the restored workspace on this device.
 - For a response from a destination that matches such a profile, Anvil looks
   up a well-formed reference as soon as the response arrives. The admin URL
   must be `https` (always verified, whatever the request's TLS profile

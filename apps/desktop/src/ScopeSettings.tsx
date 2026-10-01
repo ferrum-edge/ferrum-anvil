@@ -26,7 +26,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
   }, []);
   const allowDeviceIdentity = async (w: Workspace) => {
     const ok = await ask(
-      `Let requests in “${w.name}” use this device's workload identity (JWT-SVID or X.509-SVID)? Only do this if you trust what was imported or restored into it.`,
+      `Let requests in “${w.name}” use this device's workload identity (JWT-SVID or X.509-SVID) and its gateway profiles' diagnostic reference lookups? Only do this if you trust what was imported or restored into it (your own backup, for example).`,
       { title: "Allow this device's workload identity", kind: "warning", okLabel: "Allow" },
     );
     if (!ok) return;
@@ -120,7 +120,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
           {sealed && ws && (
             <div className="warn-box row" role="note">
               <span className="grow">
-                A bundle import or backup restore wrote into this workspace, so its requests do not use this device's workload identity (JWT-SVID or X.509-SVID).
+                A bundle import or backup restore wrote into this workspace, so its requests do not use this device's workload identity (JWT-SVID or X.509-SVID), and its gateway profiles' diagnostic reference lookups are paused.
               </span>
               <button className="btn small" onClick={() => void allowDeviceIdentity(ws)}>
                 Allow on this device

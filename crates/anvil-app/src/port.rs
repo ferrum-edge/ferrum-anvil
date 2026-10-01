@@ -701,7 +701,9 @@ fn missing_secrets(g: &PortableGraph) -> Vec<String> {
 }
 
 /// Whether two Ferrum gateway profiles name a common frontend host (with
-/// overlapping ports).
+/// overlapping ports). Host patterns are compared literally: a wildcard
+/// (`*.example.com`) that covers the other profile's host is not detected
+/// here. Every record still names the profile used when several match.
 fn gateway_hosts_overlap(a: &IntegrationProfile, b: &IntegrationProfile) -> bool {
     let (IntegrationKind::FerrumGateway { hosts: x, .. }, IntegrationKind::FerrumGateway { hosts: y, .. }) = (&a.kind, &b.kind);
     x.iter().any(|h| y.iter().any(|k| h.host.eq_ignore_ascii_case(&k.host) && (h.port.is_none() || k.port.is_none() || h.port == k.port)))

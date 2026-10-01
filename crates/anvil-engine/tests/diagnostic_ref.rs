@@ -10,7 +10,8 @@ use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, EvidenceSource};
 use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::tls::HostBinding;
+use anvil_domain::settings::SettingsOverrides;
+use anvil_domain::tls::{HostBinding, TlsProfile};
 use anvil_engine::context::MemorySecrets;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::http as fx;
@@ -344,6 +345,52 @@ async fn trust_011_lookups_stay_on_the_configured_path() {
     let refused = finding(&o, "ferrum.detail.lookup_failed");
     assert!(refused.explanation.contains("refused before sending"), "{}", refused.explanation);
     assert!(admin.heads().is_empty(), "nothing was sent");
+    stays_public(&o);
+    token_stays_in_the_lookup(&o, &f);
+}
+
+/// An https lookup is always verified: the request's TLS profile bypasses
+/// verification and trusts nothing extra, and the admin listener's
+/// certificate chains to a root nobody trusts. The handshake fails, nothing of
+/// the lookup reaches the listener, and the public evidence stays capped.
+#[tokio::test]
+async fn g01_an_https_lookup_never_inherits_a_verification_bypass() {
+    init();
+    let pki = anvil_fixtures::pki::LabPki::generate();
+    let tls = anvil_fixtures::tlsserver::TlsServerOptions::new(pki.server.chain_with(&pki.ca), pki.server.key.clone());
+    let admin = fx::serve("127.0.0.1:0", Some(tls)).await.unwrap();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = vault_ref();
+    let lookup = DiagnosticDetailAccess {
+        base_url: admin.url(""),
+        credential: SensitiveValue::Secret { secret: secret.clone() },
+        namespace: None,
+    };
+    assert!(lookup.base_url.starts_with("https://127.0.0.1:"), "{}", lookup.base_url);
+    let mut c = ctx(&gateway_url(&f, REF), Some(lookup), &secret);
+    let bypass = TlsProfile {
+        id: anvil_domain::Id::new(),
+        workspace_id: anvil_domain::Id::new(),
+        name: "bypass".into(),
+        verify: false,
+        use_system_roots: true,
+        extra_roots_pem: vec![],
+        client_identity: None,
+        bindings: vec![],
+        min_version: Default::default(),
+        server_name_override: None,
+        server_spiffe: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let id = bypass.id;
+    c.tls_profiles.push(bypass);
+    c.settings_layers.push(("run".into(), SettingsOverrides { tls_profile_id: Some(id), ..Default::default() }));
+    let o = run(&e, &c).await;
+    let failed = finding(&o, "ferrum.detail.lookup_failed");
+    assert!(failed.explanation.to_ascii_lowercase().contains("tls"), "{}", failed.explanation);
+    assert_eq!(admin.log.count_requests(), 0, "no request headers reached the admin listener");
     stays_public(&o);
     token_stays_in_the_lookup(&o, &f);
 }

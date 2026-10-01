@@ -7,6 +7,7 @@ use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::integration::IntegrationKind;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
@@ -325,7 +326,23 @@ impl App {
             redaction_names: settings_app.redaction_names.clone(),
             scope: sealed.map(|i| chain[i].meta.id),
             epoch: Some(epoch),
+            notes: vec![],
         };
+        // A gateway profile's diagnostic reference lookup in a workspace a
+        // bundle import or backup restore wrote into would send this device's
+        // token where the import or restore said: a passphrase proves nothing
+        // about who made a backup. It is paused under the same seal as this
+        // device's workload identity, until the user allows the workspace.
+        if self.device_identity_sealed(ws_id)? {
+            let mut paused = false;
+            for i in &mut ctx.integrations {
+                let IntegrationKind::FerrumGateway { detail, .. } = &mut i.kind;
+                paused |= detail.take().is_some();
+            }
+            if paused {
+                ctx.notes.push(crate::device_identity::LOOKUP_PAUSED_NOTE.to_string());
+            }
+        }
         if sealed.is_some() {
             refuse_device_identity(&ctx.effective_auth().1)?;
             refuse_unbound_client_identity(&ctx)?;
