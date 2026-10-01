@@ -367,17 +367,31 @@ mod tests {
 
     #[tokio::test]
     async fn ephemeral_pair_final_error_lists_tried_ports() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Every attempt binds UDP first. TCP is reached only when the real UDP bind succeeds, which a
+        // Windows runner's excluded port ranges can refuse, so attempts are counted on the UDP side.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let udp_attempts = attempts.clone();
         let ports = Arc::new(Mutex::new(Vec::new()));
         let bind_ports = ports.clone();
-        let result = bind_ephemeral_pair_with("127.0.0.1:0", bind_udp_future, move |addr| {
-            bind_ports.lock().unwrap().push(addr.port());
-            let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
-            Box::pin(async move { denied }) as TcpBindFuture
-        })
+        let result = bind_ephemeral_pair_with(
+            "127.0.0.1:0",
+            move |bind: &str| {
+                udp_attempts.fetch_add(1, Ordering::SeqCst);
+                bind_udp_future(bind)
+            },
+            move |addr| {
+                bind_ports.lock().unwrap().push(addr.port());
+                let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                Box::pin(async move { denied }) as TcpBindFuture
+            },
+        )
         .await;
 
         let tried = ports.lock().unwrap();
-        assert_eq!(tried.len(), PORT_ZERO_BIND_ATTEMPTS);
+        assert_eq!(attempts.load(Ordering::SeqCst), PORT_ZERO_BIND_ATTEMPTS);
+        assert!(!tried.is_empty() && tried.len() <= PORT_ZERO_BIND_ATTEMPTS);
         assert_eq!(tried.iter().copied().collect::<std::collections::HashSet<_>>().len(), tried.len());
         let error = result.unwrap_err().to_string();
         assert!(error.contains("tried UDP ports ["));
