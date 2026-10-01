@@ -362,11 +362,8 @@ async fn g01_an_https_lookup_never_inherits_a_verification_bypass() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let e = Engine::new();
     let secret = vault_ref();
-    let lookup = DiagnosticDetailAccess {
-        base_url: admin.url(""),
-        credential: SensitiveValue::Secret { secret: secret.clone() },
-        namespace: None,
-    };
+    let lookup =
+        DiagnosticDetailAccess { base_url: admin.url(""), credential: SensitiveValue::Secret { secret: secret.clone() }, namespace: None };
     assert!(lookup.base_url.starts_with("https://127.0.0.1:"), "{}", lookup.base_url);
     let mut c = ctx(&gateway_url(&f, REF), Some(lookup), &secret);
     let bypass = TlsProfile {
