@@ -1,7 +1,7 @@
 # Failure lab: `h3x` profile (SSE over HTTP/3, CONNECT-UDP, DTLS in the tunnel)
 
 This profile runs Anvil's shared engine against the **real, pinned Ferrum Edge release
-binary** (v0.9.8 by default, v0.9.7 or v0.9.5 with `--release`). It exercises HTTP/3 extensions
+binary** (v0.9.9 by default, v0.9.8, v0.9.7 or v0.9.5 with `--release`). It exercises HTTP/3 extensions
 through the gateway's QUIC listener:
 
 - **Server-sent events over HTTP/3.** The event stream is parsed from the HTTP/3 request

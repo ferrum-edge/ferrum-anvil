@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- Diagnostics: a `ferrum-edge-0.9.9` compatibility catalog for Ferrum Edge
+  v0.9.9 (552 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
+  It knows the release's new public signals: the `400` refusals of an empty
+  path segment and of a `;` path parameter on a route without
+  `allow_path_parameters` (GHSA-fcqw-793q-wg5x), the `421 Misdirected
+  Request` of a retired Gateway listener, the MCP JSON-RPC refusals
+  `-32014` (request changed after admission) and `-32015`/`-32016`/`-32017`
+  (`rate_limiting` tool-call limits), the `ai_prompt_shield` MCP argument
+  refusals, the WebSocket `permessage-deflate` negotiation `502` and `1007`
+  close, and OpenAPI-bridge tool results whose text names a gateway error.
+  Profiles declaring an older release do not match them.
+
+### Changed
+
+- New Ferrum gateway profiles default to `ferrum-edge-0.9.9` (desktop dialog
+  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.9
+  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
+  asset). v0.9.8, v0.9.7 and v0.9.5 stay supported with `--release`; the
+  nightly lab runs all four. On v0.9.9 the lab's AUTH-021 signs a path
+  without `;` and checks that the `;` path is refused with `400`, and
+  MESH-026/027 check that the gateway resets a UDP tunnel that ended on a
+  socket error with `RST_STREAM(CONNECT_ERROR)`.
+- The vendored Ferrum contracts move to `ferrum-contracts`
+  `contracts-edge-0.9.9`. `X-Ferrum-Diagnostic-Ref` is released in Ferrum
+  Edge v0.9.9: the 0.9.9 catalog records it, and the contract drift test
+  treats it as released but not yet read by Anvil (gateway findings stay
+  capped at likely until the authenticated lookup is adopted).
+
 ## [0.1.0] - 2026-10-01
 
 ### Changed

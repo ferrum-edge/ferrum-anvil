@@ -20,13 +20,14 @@ use std::sync::OnceLock;
 
 /// The compatibility id new integration profiles default to: the newest
 /// audited release.
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.8";
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.9";
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.5", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.5/outcomes.json")),
     ("ferrum-edge-0.9.7", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.7/outcomes.json")),
     ("ferrum-edge-0.9.8", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.8/outcomes.json")),
+    ("ferrum-edge-0.9.9", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.9/outcomes.json")),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -177,7 +178,7 @@ fn parse_jsonrpc(id: &str, body_shape: &serde_json::Value) -> Option<JsonRpcShap
 #[derive(Debug)]
 pub struct FerrumCatalog {
     pub compatibility_id: String,
-    /// Gateway release tag the catalog was audited at (e.g. `v0.9.8`).
+    /// Gateway release tag the catalog was audited at (e.g. `v0.9.9`).
     pub release_tag: String,
     pub source_sha: String,
     pub tokens: Vec<String>,
@@ -392,7 +393,7 @@ pub enum MatchStrength {
 }
 
 impl FerrumCatalog {
-    /// Human-readable release name, e.g. `Ferrum Edge 0.9.8`.
+    /// Human-readable release name, e.g. `Ferrum Edge 0.9.9`.
     pub fn release_label(&self) -> String {
         let v = self.release_tag.trim_start_matches('v');
         if v.is_empty() { self.compatibility_id.clone() } else { format!("Ferrum Edge {v}") }
@@ -495,14 +496,15 @@ mod tests {
     #[test]
     fn every_embedded_catalog_loads_under_its_own_id_with_all_public_tokens() {
         let ids: Vec<&str> = compatibility_ids().collect();
-        assert_eq!(ids, ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8"]);
+        assert_eq!(ids, ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8", "ferrum-edge-0.9.9"]);
         for id in ids {
             let c = catalog_for(id).expect("embedded");
             assert_eq!(c.compatibility_id, id);
             assert_eq!(format!("ferrum-edge-{}", c.release_tag.trim_start_matches('v')), id, "release tag matches the id");
             assert_eq!(c.source_sha.len(), 40, "{id}: full source sha");
+            let knows_request_timeout = matches!(id, "ferrum-edge-0.9.8" | "ferrum-edge-0.9.9");
             let expected_tokens: Vec<&str> =
-                TOKENS.iter().copied().filter(|token| id == "ferrum-edge-0.9.8" || *token != "request_timeout").collect();
+                TOKENS.iter().copied().filter(|token| knows_request_timeout || *token != "request_timeout").collect();
             for t in expected_tokens {
                 assert!(c.is_known_token(t), "{id}: missing token {t}");
             }
@@ -511,18 +513,38 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.8");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.9");
     }
 
-    /// `request_timeout` joined the closed vocabulary in 0.9.8; the older
-    /// catalogs do not know it, so it is not part of the shared vocabulary.
+    /// `request_timeout` joined the closed vocabulary in 0.9.8 (0.9.9 keeps
+    /// it); the older catalogs do not know it, so it is not part of the
+    /// shared vocabulary.
     #[test]
-    fn request_timeout_is_a_token_of_the_0_9_8_catalog_only() {
-        assert!(catalog_for("ferrum-edge-0.9.8").expect("embedded").is_known_token("request_timeout"));
+    fn request_timeout_is_a_token_of_the_0_9_8_and_later_catalogs_only() {
+        for id in ["ferrum-edge-0.9.8", "ferrum-edge-0.9.9"] {
+            assert!(catalog_for(id).expect("embedded").is_known_token("request_timeout"), "{id}");
+        }
         for id in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7"] {
             assert!(!catalog_for(id).expect("embedded").is_known_token("request_timeout"), "{id}");
         }
         assert!(!shared_tokens().iter().any(|t| t == "request_timeout"));
+    }
+
+    /// Outcomes new in 0.9.9 (the `;` path-parameter refusal, the MCP
+    /// tool-call rate limit) match from their public signal in the 0.9.9
+    /// catalog only; 0.9.8 never answered them.
+    #[test]
+    fn outcomes_new_in_0_9_9_match_only_their_own_catalog() {
+        let body = br#"{"error":"Request path contains a path parameter"}"#;
+        let bf = body_facts(Some("application/json"), body);
+        let signal = Signal { status: 400, token: None, body_text: std::str::from_utf8(body).unwrap(), body: &bf, grpc_status: None };
+        let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()), ["gateway.routing.path_parameter_refused"]);
+        assert!(ids(catalog_for("ferrum-edge-0.9.8").unwrap()).is_empty());
+        let rate = JsonRpcSignal { status: 200, token: None, code: -32015, message: "MCP tool-call rate limit exceeded", gateway: None };
+        let m = catalog_for("ferrum-edge-0.9.9").unwrap().match_jsonrpc_error(&rate);
+        assert_eq!(m.exact.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["plugin.rate_limiting.mcp_tool_calls_exceeded"]);
+        assert!(catalog_for("ferrum-edge-0.9.8").unwrap().match_jsonrpc_error(&rate).exact.is_empty());
     }
 
     #[test]

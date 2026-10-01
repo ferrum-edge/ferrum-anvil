@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "h3x" (ferrum-edge v0.9.8, file mode)
+# Ferrum Anvil failure lab - profile "h3x" (ferrum-edge v0.9.9, file mode)
 #
 # Scenarios (crates/anvil-lab/src/h3x.rs, docs/lab/h3x.md):
 #   SSE over HTTP/3 through the QUIC listener (events, idle, cancel, mid-stream abort,

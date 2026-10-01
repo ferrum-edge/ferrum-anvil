@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
   "vocabulary": "gateway-errors",
   "version": 1,
-  "edge_release": "v0.9.8",
+  "edge_release": "v0.9.9",
   "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the eight coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.8",
-      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "ref": "v0.9.9",
+      "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
       "path": "src/retry.rs",
       "symbols": [
         "ErrorClass",
@@ -26,8 +26,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.8",
-      "commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+      "ref": "v0.9.9",
+      "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
       "path": "docs/error_classification.md",
       "sections": [
         "Canonical taxonomy (ErrorClass)",
@@ -305,11 +305,5 @@
       "rejection_phases": [],
       "meaning": "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before any backend held the request: during the client upload, a gateway-local phase, admission, or retry backoff. New in v0.9.8 (#5762)."
     }
-  ],
-  "main_branch_delta": {
-    "repo": "ferrum-edge/ferrum-edge",
-    "ref": "main",
-    "commit": "f638465034734e335bde7e76c56e8c8244afba8a",
-    "summary": "No change to the 19 ErrorClass values, the eight X-Gateway-Error tokens, or the class-to-token mapping (src/retry.rs differs only in the visibility of a private helper). docs/error_classification.md adds gateway diagnostic references: X-Ferrum-Diagnostic-Ref joins the gateway-owned diagnostic response headers, and the lookup body is schemas/diagnostic-ref/v1 (issue #5767, not in any release yet)."
-  }
+  ]
 }

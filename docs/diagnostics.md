@@ -126,7 +126,7 @@ describes it as failed**: there is no `http.*`, `client.connect.*`,
 Several admission reasons share one public response: Ferrum Edge uses one
 body for an unauthenticated peer, a withdrawn trust and a revoked SVID.
 0.9.5 and 0.9.7 answer a destination the endpoint does not terminate with the
-same `404 {"error":"Not Found"}` as a route miss; 0.9.8 answers it with the
+same `404 {"error":"Not Found"}` as a route miss; 0.9.8 and later answer it with the
 documented `403 {"error":"HBONE relay destination not allowed"}`, and a
 terminator without its mesh configuration with
 `503 {"error":"HBONE relay not ready"}`. The refusal is attributed to the
@@ -222,13 +222,14 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.8` (default for new profiles) | v0.9.8, `e27f210` | **540** | [audit/gateway-0.9.8-delta.md](audit/gateway-0.9.8-delta.md) (delta on top of the 0.9.7 audit) |
+| `ferrum-edge-0.9.9` (default for new profiles) | v0.9.9, `234717c` | **552** | [audit/gateway-0.9.9-delta.md](audit/gateway-0.9.9-delta.md) (delta on top of the 0.9.8 audit) |
+| `ferrum-edge-0.9.8` | v0.9.8, `e27f210` | **540** | [audit/gateway-0.9.8-delta.md](audit/gateway-0.9.8-delta.md) (delta on top of the 0.9.7 audit) |
 | `ferrum-edge-0.9.7` | v0.9.7, `8fed134` | **538** | [audit/gateway-0.9.7-delta.md](audit/gateway-0.9.7-delta.md) (delta on top of the 0.9.5 audit) |
 | `ferrum-edge-0.9.5` | v0.9.5, `20e7603` | **528** | [audit/gateway-source-audit.md](audit/gateway-source-audit.md) |
 
 Each catalog inventories the release's client-observable outcomes, the public
 `X-Gateway-Error` tokens (**7** in 0.9.5 and 0.9.7; 0.9.8 adds
-`request_timeout`, so **8**), the **19**
+`request_timeout`, so **8**, unchanged in 0.9.9), the **19**
 internal error classes, the gateway-written headers, and each outcome's
 `shared_signal_with` siblings. Its `drift` section records the reconciliation
 with the previous release, and `marker_semantics` holds the release-specific
@@ -277,18 +278,17 @@ failure (`app.mcp_tool_error`, scope upstream application).
 
 - On v0.9.5 and v0.9.7 a backend can inject `X-Gateway-Error` and
   `X-Gateway-Upstream-Status` on some paths (native gRPC responses, plugin
-  reject maps). v0.9.8 strips a backend's copies at every backend response
+  reject maps). v0.9.8 and later strip a backend's copies at every backend response
   boundary, but a plugin rejection can still carry any value and any
   non-Ferrum endpoint can send the headers. Marker-derived claims are
   therefore capped at **likely**, even for trusted gateways over verified
   TLS. The same cap applies to a release without a catalog.
 - A trusted profile used over plain HTTP (lab use) is also capped at likely.
 - `confirmed` gateway attribution needs a gateway-owned, authenticated
-  diagnostic contract. G01 is implemented on Ferrum Edge main
-  (`ferrum-edge/ferrum-edge#5767` closed; #5845, #5857/#5862 and #5868) and
-  its `ferrum.diagnostic_ref.v1` schema ships in `ferrum-contracts`
-  `contracts-edge-0.9.8`, but no released gateway binary contains it yet, so
-  Anvil does not use it (see
+  diagnostic contract. G01 ships in Ferrum Edge v0.9.9
+  (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and
+  `ferrum-contracts` `contracts-edge-0.9.9` marks `X-Ferrum-Diagnostic-Ref`
+  released in v0.9.9, but Anvil does not use it yet (see
   [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md)
   and the adoption plan below).
 
@@ -297,8 +297,8 @@ failure (`app.mcp_tool_error`, scope upstream application).
 | Token | What Anvil says | What Anvil never claims from the token alone |
 |---|---|---|
 | `connection_failure` | The gateway could not set up a connection to the configured backend (DNS, TCP, TLS, pool, …). | That TLS failed; that DNS failed; that your client certificate is wrong (the gateway uses its own identity). |
-| `backend_timeout` | The gateway's backend deadline elapsed (any 504 gets this token, except a 0.9.8 route timeout that no backend held). | That the backend received the request (on v0.9.5 a pooled-connection bug can strand it; on v0.9.7 a Gateway API route's request timeout can fire before dispatch); that the backend is slow rather than unreachable. |
-| `request_timeout` (0.9.8) | The route's total request timeout expired before any backend held the attempt (upload, gateway processing or admission, retry backoff). | That the backend is slow; which phase used the time; that no earlier attempt reached a backend. |
+| `backend_timeout` | The gateway's backend deadline elapsed (any 504 gets this token, except a 0.9.8 or later route timeout that no backend held). | That the backend received the request (on v0.9.5 a pooled-connection bug can strand it; on v0.9.7 a Gateway API route's request timeout can fire before dispatch); that the backend is slow rather than unreachable. |
+| `request_timeout` (0.9.8 and later) | The route's total request timeout expired before any backend held the attempt (upload, gateway processing or admission, retry backoff). | That the backend is slow; which phase used the time; that no earlier attempt reached a backend. |
 | `backend_error` | The backend path failed or the gateway refused locally (buffer capacity, in-flight limit, egress policy, …). | That the backend returned this error. |
 | `circuit_breaker_open` | The gateway's breaker for this backend is open. | That the backend is down right now. |
 | `overload` | The gateway shed load, was draining, or hit the response-transform ceiling (502). | CPU pressure. |
@@ -312,14 +312,15 @@ look the same.
 
 ## Adopting the gateway diagnostic reference (G01)
 
-Ferrum Edge main implements G01: `ferrum-edge/ferrum-edge#5767` is closed,
-#5845, #5857 and #5862 add the `X-Ferrum-Diagnostic-Ref` response header and
-`GET /diagnostics/v1/refs/{ref}`, and #5868 adds cross-replica lookup. The
-reference body is a published contract (`ferrum.diagnostic_ref.v1`,
-`schemas/diagnostic-ref/v1.schema.json` in `ferrum-contracts`
-`contracts-edge-0.9.8`) whose `x-contract.edge_availability` reads "Edge main
-only; not in v0.9.8 or any earlier release". Anvil therefore keeps gateway
-findings capped at *likely* until a released gateway binary carries it.
+Ferrum Edge v0.9.9 is the first release with G01: `ferrum-edge/ferrum-edge#5767`
+is closed, #5845, #5857 and #5862 add the `X-Ferrum-Diagnostic-Ref` response
+header and `GET /diagnostics/v1/refs/{ref}`, and #5868 adds cross-replica
+lookup. The reference body is a published contract (`ferrum.diagnostic_ref.v1`,
+`schemas/diagnostic-ref/v1.schema.json` in `ferrum-contracts`), and
+`contracts-edge-0.9.9`, which Anvil pins, marks the header released in v0.9.9.
+The `ferrum-edge-0.9.9` catalog records the header (gateway-owned, off by
+default). Anvil does not read it or call the lookup yet, so gateway findings
+stay capped at *likely* until the plan below is implemented.
 
 What Edge provides:
 
@@ -350,8 +351,8 @@ than the proposed "everything is `404`"; the replica-owner header exists (the
 proposal had no replica concept); and `all` mode can reference plugin and
 routing rejections with a `null` `gateway_error`.
 
-Plan (merge only when a released Edge binary carries the reference, matching
-Alloy's adopt-on-release rule). All of it is blocked on an Edge release:
+Plan (Alloy's adopt-on-release rule is now met: v0.9.9 carries the
+reference). Still to do:
 
 - [ ] Extend `IntegrationProfile`'s `DiagnosticDetailAccess`
   (`crates/anvil-domain/src/integration.rs`) into the ref lookup: a
@@ -364,7 +365,8 @@ Alloy's adopt-on-release rule). All of it is blocked on an Edge release:
 - [ ] Add a lab profile or case against the first release that carries the
   reference: the header is present on errors; the lookup succeeds; and it is
   refused without `diagnostics:read` and for the wrong namespace.
-- [ ] Add the catalog for that release and bump `lab/gateway/RELEASE.lock`.
+- [x] Add the catalog for that release and bump `lab/gateway/RELEASE.lock`
+  (`ferrum-edge-0.9.9`, v0.9.9 pin).
 
 Until then Anvil's answers remain honest about uncertainty, and this doc and
 the completion report say so.
@@ -394,13 +396,14 @@ only presentation; every card shows its own confidence.
   wording, every catalog on disk is embedded and internally consistent, and
   the desktop profile dialog offers exactly the embedded releases.
 - Per-release selection tests: a 0.9.7-only signal is not matched against
-  the 0.9.5 catalog, 0.9.8's `request_timeout` is unknown to the older
-  catalogs, release notes follow the profile's release, and an unknown
+  the 0.9.5 catalog, `request_timeout` (0.9.8 and 0.9.9) is unknown to the older
+  catalogs, 0.9.9-only outcomes (the `;` path-parameter refusal, MCP tool-call
+  rate limits) match only the 0.9.9 catalog, release notes follow the profile's release, and an unknown
   release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
   (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,
-  v0.9.8). Every lab profile's trusted profile declares the running release's
+  v0.9.9). Every lab profile's trusted profile declares the running release's
   compatibility id, and the lab refuses to run a release without its own
   catalog. Every scenario runs trusted and untrusted: no `ferrum.*`
   gateway attribution may appear when the destination is untrusted, and

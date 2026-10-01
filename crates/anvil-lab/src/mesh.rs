@@ -673,7 +673,7 @@ fn mesh008(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-009: sidecar relay destination guard: a port no local workload
-/// declares is refused at relay synthesis (0.9.5 / 0.9.7: `404`, 0.9.8: `403`;
+/// declares is refused at relay synthesis (0.9.5 / 0.9.7: `404`, from 0.9.8: `403`;
 /// reason `port_not_declared`).
 fn mesh009(env: &Env) -> Fut<'_> {
     Box::pin(async move {
