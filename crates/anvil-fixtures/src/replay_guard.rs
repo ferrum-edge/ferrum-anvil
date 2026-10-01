@@ -103,8 +103,7 @@ where
 }
 
 fn dynamic_port_candidate(random_start: u16, offset: usize) -> u16 {
-    let position =
-        (u32::from(random_start) + (offset as u32 * u32::from(DYNAMIC_PORT_STRIDE))) % u32::from(DYNAMIC_PORT_COUNT);
+    let position = (u32::from(random_start) + (offset as u32 * u32::from(DYNAMIC_PORT_STRIDE))) % u32::from(DYNAMIC_PORT_COUNT);
     DYNAMIC_PORT_START + position as u16
 }
 
@@ -241,10 +240,7 @@ async fn bind(tls: &TlsServerOptions, quic: bool) -> anyhow::Result<(Option<quin
         |port| {
             let server_cfg = server_cfg.clone();
             Box::pin(async move {
-                let endpoint = quinn::Endpoint::server(
-                    server_cfg,
-                    SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0))),
-                )?;
+                let endpoint = quinn::Endpoint::server(server_cfg, SocketAddr::from(([127, 0, 0, 1], port.unwrap_or(0))))?;
                 let addr = endpoint.local_addr()?;
                 Ok((endpoint, addr))
             })
@@ -452,9 +448,7 @@ mod tests {
         .unwrap();
 
         let tried = ports.lock().unwrap();
-        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS]
-            .iter()
-            .all(|port| (exclusion_start..exclusion_end).contains(port)));
+        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS].iter().all(|port| (exclusion_start..exclusion_end).contains(port)));
         assert!(tried.last().is_some_and(|port| !(exclusion_start..exclusion_end).contains(port)));
         assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
     }
