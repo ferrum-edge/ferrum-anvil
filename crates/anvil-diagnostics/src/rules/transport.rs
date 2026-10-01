@@ -170,7 +170,6 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     }
 }
 
-
 pub fn h2_name(code: u32) -> String {
     let n = match code {
         0 => "NO_ERROR",
