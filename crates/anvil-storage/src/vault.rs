@@ -57,7 +57,7 @@ pub enum VaultError {
     #[error("the passphrase or recovery key is not correct")]
     WrongSecret,
     #[error(
-        "macOS refused access to the stored key. This can happen after an app update, especially when the build is unsigned. Open Keychain Access, find this profile's Anvil key, and allow Ferrum Anvil under Access Control. Then retry the unlock, or re-enter your Mac login password if prompted."
+        "the operating system refused access to the stored key. This can happen after an app update, especially when the build is unsigned. On macOS, open Keychain Access, find this profile's Anvil key, and allow Ferrum Anvil under Access Control. Then retry the unlock, or re-enter your login password if prompted."
     )]
     KeychainAccessDenied,
     #[error("the OS credential store is unavailable ({0}); use a passphrase-protected profile instead")]
@@ -575,14 +575,9 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
     forget_keychain_account(dir, h, &account)
 }
 
-/// Delete `account`'s entry if it holds this profile's key, or the marker
-/// that replaced it. Succeeds when the entry is gone or is not this
-/// profile's.
-///
-/// If the store refuses to delete an entry holding the key, the entry is
-/// overwritten with the marker (see [`KEYCHAIN_RETIRED_TAG`]) so that a copy
-/// of the header saved before the conversion cannot unlock from it; the
-/// removal is still reported as failed and retried.
+/// Maps a keyring error to a vault error. The user refusing access (the OS
+/// prompt was denied or cancelled, common after an unsigned app update)
+/// is distinct from a store that is genuinely unavailable.
 #[cfg(feature = "os-keychain")]
 fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
     let message = error.to_string();
@@ -597,6 +592,14 @@ fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
     }
 }
 
+/// Delete `account`'s entry if it holds this profile's key, or the marker
+/// that replaced it. Succeeds when the entry is gone or is not this
+/// profile's.
+///
+/// If the store refuses to delete an entry holding the key, the entry is
+/// overwritten with the marker (see [`KEYCHAIN_RETIRED_TAG`]) so that a copy
+/// of the header saved before the conversion cannot unlock from it; the
+/// removal is still reported as failed and retried.
 #[cfg(feature = "os-keychain")]
 fn delete_retired_entry(h: &ProfileHeader, account: &str) -> Result<(), VaultError> {
     let entry = keychain_entry(account)?;
@@ -824,11 +827,11 @@ mod tests {
     #[test]
     fn keychain_access_denied_message_gives_recovery_steps() {
         let message = VaultError::KeychainAccessDenied.to_string();
-        assert!(message.contains("macOS refused access to the stored key"));
+        assert!(message.contains("refused access to the stored key"));
         assert!(message.contains("after an app update"));
         assert!(message.contains("Keychain Access"));
         assert!(message.contains("retry the unlock"));
-        assert!(message.contains("re-enter your Mac login password"));
+        assert!(message.contains("re-enter your login password"));
     }
 
     #[test]
