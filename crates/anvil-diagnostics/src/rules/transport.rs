@@ -1,7 +1,7 @@
 use super::Ctx;
 use crate::{Draft, warn};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
-use anvil_domain::execution::{BodyCompleteness, FailureKind as K, Phase};
+use anvil_domain::execution::{BodyCompleteness, DispatchState, FailureKind as K, Phase};
 use anvil_domain::outcome::{ClosedBy, OutcomeWarning, WarningCode};
 
 pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarning>) {
@@ -44,7 +44,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     }
     let status = a.response_status;
     let base = |code: &str, conf: Confidence, scope: SourceScope, owner: Owner, sev: Severity| {
-        let mut d = Draft::new(code, "transport.exchange", conf, scope, owner, sev)
+        let mut d = Draft::new(code, "transport.exchange", conf, scope, owner, sev);
+        d.rule_version = 2;
+        d = d
             .ev_at(E::NativeTransport, "failure.kind", format!("{:?}", f.kind), a.index)
             .ev_at(E::NativeTransport, "failure.phase", format!("{:?}", f.phase), a.index)
             .ev_at(E::NativeTransport, "dispatch", format!("{:?}", a.dispatch), a.index)
@@ -95,7 +97,12 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             Some(base("exchange.total_timeout", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Caller, Severity::Error))
         }
         K::Canceled if status.is_none() => {
-            Some(base("request.canceled", Confidence::Confirmed, SourceScope::LocalClient, Owner::Caller, Severity::Warning))
+            let scope = if a.dispatch == DispatchState::NotDispatched {
+                SourceScope::LocalClient
+            } else {
+                SourceScope::ClientToPeer
+            };
+            Some(base("request.canceled", Confidence::Confirmed, scope, Owner::Caller, Severity::Warning))
         }
         K::QuicHandshakeTimeout => {
             Some(base("client.quic.handshake_timeout", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Error))
@@ -164,6 +171,77 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             (BodyCompleteness::Canceled, _) => out.push(mk("request.canceled_during_body", Confidence::Confirmed, Owner::Caller)),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::{DiagnosticInput, FerrumTrust};
+    use anvil_domain::diagnostics::DiagnosticFinding;
+    use anvil_domain::execution::{AttemptObservation, AttemptReason, ByteCounts, TransportFailure};
+    use anvil_domain::outcome::ProtocolStatus;
+    use anvil_domain::request::Protocol;
+
+    fn canceled(dispatch: DispatchState, bytes_written: u64) -> DiagnosticFinding {
+        let trust = FerrumTrust::NotConfigured;
+        let protocol_status = ProtocolStatus::None;
+        let attempts = [AttemptObservation {
+            index: 0,
+            reason: AttemptReason::Initial,
+            method: "GET".into(),
+            url: "http://127.0.0.1:18193/delay".into(),
+            started_at: chrono::Utc::now(),
+            connection: None,
+            phases: vec![],
+            dispatch,
+            bytes: ByteCounts {
+                connection_bytes_written: Some(bytes_written),
+                ..ByteCounts::default()
+            },
+            response_status: None,
+            failure: Some(TransportFailure::new(Phase::AwaitResponseHeaders, K::Canceled, "canceled")),
+            duration_us: 1,
+            early_data: None,
+        }];
+        let input = DiagnosticInput {
+            protocol: Protocol::Http,
+            method: "GET",
+            preparation_failure: None,
+            attempts: &attempts,
+            response: None,
+            body: &[],
+            stream: None,
+            protocol_status: &protocol_status,
+            trust: &trust,
+            tls_verification_enabled: true,
+            credentials_stripped_on_redirect: false,
+            protocol_fallback_from: None,
+            workload: None,
+            gateway_detail: None,
+            redact: None,
+        };
+        crate::diagnose(&input)
+            .findings
+            .into_iter()
+            .find(|finding| finding.code == "request.canceled")
+            .expect("cancellation finding")
+    }
+
+    #[test]
+    fn cancellation_before_dispatch_is_scoped_to_the_local_client() {
+        let finding = canceled(DispatchState::NotDispatched, 0);
+
+        assert_eq!(finding.scope, SourceScope::LocalClient);
+        assert_eq!(finding.rule_version, 2);
+    }
+
+    #[test]
+    fn cancellation_after_request_bytes_are_written_is_scoped_to_the_peer_leg() {
+        let finding = canceled(DispatchState::MayHaveBeenSent, 128);
+
+        assert_eq!(finding.scope, SourceScope::ClientToPeer);
+        assert_eq!(finding.rule_version, 2);
     }
 }
 

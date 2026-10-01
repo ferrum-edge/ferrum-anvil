@@ -111,7 +111,7 @@ pub const RULES: &[RuleMeta] = &[
     },
     RuleMeta {
         id: "transport.exchange",
-        version: 1,
+        version: 2,
         summary: "Request write / response header wait outcomes",
         fixtures: &["LOCAL-011", "PROTO-003", "PROTO-004", "PROTO-005"],
     },
