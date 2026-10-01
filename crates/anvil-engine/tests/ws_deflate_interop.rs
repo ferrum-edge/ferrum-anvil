@@ -9,8 +9,8 @@
 //!
 //! The fixture supports `websockets` 13.x through 15.x; it feature-detects the
 //! negotiated extensions as `.extensions` (the 13.x legacy server protocol) or
-//! `.protocol.extensions` (the 14/15 asyncio `ServerConnection`). It is checked
-//! against `websockets==13.1` and `websockets==15.0.1`. Without a suitable
+//! `.protocol.extensions` (the 14/15 asyncio `ServerConnection`). It has run
+//! against `websockets==13.1`; the 14/15 path follows those releases' API. Without a suitable
 //! Python the test fails (it never passes silently).
 
 use anvil_domain::execution::Direction;
