@@ -43,6 +43,7 @@
     "webdriverio": "9.32.0"
   },
   "overrides": {
+    "@puppeteer/browsers": "3.2.3",
     "serialize-javascript": "7.0.5"
   }
 }

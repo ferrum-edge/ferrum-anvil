@@ -127,6 +127,15 @@
   asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
   version range is documented where the run instructions live (#275).
 
+### Security
+
+- Desktop development dependencies: an npm override moves WebdriverIO's
+  `@puppeteer/browsers` from 2.13.2 to 3.2.3, which drops `extract-zip`
+  2.0.1 (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv; no patched release) and
+  its `yauzl` and `proxy-agent` chains from the lockfile (#232). It is used
+  only by the E2E tooling and is not shipped. `@puppeteer/browsers` 3.x
+  requires Node.js 22.12 or newer.
+
 ## [0.1.1] - 2026-10-01
 
 ### Changed
