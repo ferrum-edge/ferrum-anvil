@@ -250,12 +250,12 @@ release page once.
     switching `jsonwebtoken` to a constant-time backend.
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
-    gtk-rs ≥ 0.20.
+    gtk 0.19+ (glib ≥ 0.20).
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E
   tooling (WebdriverIO 9.30.1, pinned exactly by `@wdio/tauri-service` 1.4.0)
-  carries high-severity advisories in `deepmerge-ts` and
-  `serialize-javascript`; it runs only on developer machines and CI against
+  carries a high-severity advisory in `deepmerge-ts` 7.1.6 (`serialize-javascript`
+  is overridden to the fixed 7.0.5); it runs only on developer machines and CI against
   local fixtures and is never shipped. Revisit when the Tauri service moves to
   a fixed WebdriverIO. An npm `overrides` entry moves WebdriverIO's
   `@puppeteer/browsers` to 3.x, which no longer depends on `extract-zip`

@@ -4,7 +4,7 @@
   "version": "0.1.1",
   "type": "module",
   "license": "SEE LICENSE IN ../../LICENSE",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.12" },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit -p . && vite build",
