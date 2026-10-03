@@ -52,7 +52,28 @@ fn retryable_bind_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(WINDOWS_WSAEACCES) || matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse)
 }
 
-async fn bind_udp_tcp_pair_with<E, Tcp, U, T>(mut bind_udp: U, mut bind_tcp: T) -> anyhow::Result<(E, Tcp)>
+async fn bind_udp_tcp_pair_with<E, Tcp, U, T>(
+    bind_udp: U,
+    bind_tcp: T,
+) -> anyhow::Result<(E, Tcp)>
+where
+    E: Send,
+    U: FnMut(Option<u16>) -> UdpBindFuture<E>,
+    T: FnMut(SocketAddr) -> TcpBindFuture<Tcp>,
+{
+    bind_udp_tcp_pair_with_start(
+        rand::random_range(0..DYNAMIC_PORT_COUNT),
+        bind_udp,
+        bind_tcp,
+    )
+    .await
+}
+
+async fn bind_udp_tcp_pair_with_start<E, Tcp, U, T>(
+    random_start: u16,
+    mut bind_udp: U,
+    mut bind_tcp: T,
+) -> anyhow::Result<(E, Tcp)>
 where
     E: Send,
     U: FnMut(Option<u16>) -> UdpBindFuture<E>,
@@ -61,7 +82,6 @@ where
     let mut rejected = Vec::new();
     let mut tried_ports = Vec::new();
     let mut last_error = None;
-    let random_start = rand::random_range(0..DYNAMIC_PORT_COUNT);
     for attempt in 0..PORT_ZERO_BIND_ATTEMPTS {
         let candidate_port = (attempt >= SEQUENTIAL_BIND_ATTEMPTS).then(|| {
             let mut offset = attempt - SEQUENTIAL_BIND_ATTEMPTS;
@@ -415,10 +435,12 @@ mod tests {
                     calls.len()
                 };
                 if attempt == 1 {
-                    let denied: io::Result<MockTcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                    let denied: io::Result<MockTcpListener> =
+                        Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
                     Box::pin(async move { denied }) as TcpBindFuture<MockTcpListener>
                 } else {
-                    Box::pin(async move { Ok(MockTcpListener(addr)) }) as TcpBindFuture<MockTcpListener>
+                    Box::pin(async move { Ok(MockTcpListener(addr)) })
+                        as TcpBindFuture<MockTcpListener>
                 }
             },
         )
@@ -435,14 +457,16 @@ mod tests {
 
     #[tokio::test]
     async fn pair_escapes_a_contiguous_tcp_exclusion() {
-        let exclusion_start = find_free_dynamic_udp_port().await;
+        let exclusion_start = 55_000;
+        let exclusion_end = exclusion_start + 500;
+        let random_start = 60_000 - DYNAMIC_PORT_START;
         let next_port = Arc::new(StdMutex::new(exclusion_start));
         let ports = Arc::new(StdMutex::new(Vec::new()));
         let bind_next = next_port.clone();
         let tcp_ports = ports.clone();
-        let exclusion_end = exclusion_start + 500;
 
-        let (udp, tcp) = bind_udp_tcp_pair_with(
+        let (udp, tcp) = bind_udp_tcp_pair_with_start(
+            random_start,
             move |candidate_port| {
                 let port = candidate_port.unwrap_or_else(|| {
                     let mut port = bind_next.lock().unwrap();
@@ -450,20 +474,18 @@ mod tests {
                     *port += 1;
                     next
                 });
-                Box::pin(async move {
-                    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-                    let udp = UdpSocket::bind(addr).await?;
-                    let addr = udp.local_addr()?;
-                    Ok((udp, addr))
-                })
+                let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                Box::pin(async move { Ok((MockUdpSocket(addr), addr)) })
             },
             move |addr| {
                 tcp_ports.lock().unwrap().push(addr.port());
                 if (exclusion_start..exclusion_end).contains(&addr.port()) {
-                    let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
-                    Box::pin(async move { denied }) as TcpBindFuture<TcpListener>
+                    let denied: io::Result<MockTcpListener> =
+                        Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                    Box::pin(async move { denied }) as TcpBindFuture<MockTcpListener>
                 } else {
-                    Box::pin(TcpListener::bind(addr)) as TcpBindFuture<TcpListener>
+                    Box::pin(async move { Ok(MockTcpListener(addr)) })
+                        as TcpBindFuture<MockTcpListener>
                 }
             },
         )
@@ -471,42 +493,42 @@ mod tests {
         .unwrap();
 
         let tried = ports.lock().unwrap();
-        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS].iter().all(|port| (exclusion_start..exclusion_end).contains(port)));
-        assert!(tried.last().is_some_and(|port| !(exclusion_start..exclusion_end).contains(port)));
+        assert_eq!(tried.len(), SEQUENTIAL_BIND_ATTEMPTS + 1);
+        assert_eq!(tried[..SEQUENTIAL_BIND_ATTEMPTS], [55_000, 55_001, 55_002, 55_003]);
+        assert_eq!(tried[SEQUENTIAL_BIND_ATTEMPTS], 60_000);
+        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS]
+            .iter()
+            .all(|port| (exclusion_start..exclusion_end).contains(port)));
+        assert!(!(exclusion_start..exclusion_end).contains(&tried[SEQUENTIAL_BIND_ATTEMPTS]));
+        assert_eq!(udp.local_addr().unwrap().port(), tried[SEQUENTIAL_BIND_ATTEMPTS]);
         assert_eq!(udp.local_addr().unwrap().port(), tcp.local_addr().unwrap().port());
-    }
-
-    async fn find_free_dynamic_udp_port() -> u16 {
-        for port in DYNAMIC_PORT_START..=65_000 {
-            if let Ok(socket) = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port))).await {
-                drop(socket);
-                return port;
-            }
-        }
-        panic!("no free UDP port in the dynamic range for the injected exclusion test");
     }
 
     #[tokio::test]
     async fn pair_error_lists_every_tried_udp_port() {
         let ports = Arc::new(StdMutex::new(Vec::new()));
         let bind_ports = ports.clone();
+        let udp_attempts = Arc::new(StdMutex::new(0usize));
+        let bind_udp_attempts = udp_attempts.clone();
         let result = bind_udp_tcp_pair_with(
-            |_| {
-                Box::pin(async {
-                    let udp = UdpSocket::bind("127.0.0.1:0").await?;
-                    let addr = udp.local_addr()?;
-                    Ok((udp, addr))
-                })
+            |candidate_port| {
+                let mut attempts = bind_udp_attempts.lock().unwrap();
+                let port = candidate_port.unwrap_or(55_000 + *attempts as u16);
+                *attempts += 1;
+                let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                Box::pin(async move { Ok((MockUdpSocket(addr), addr)) })
             },
             move |addr| {
                 bind_ports.lock().unwrap().push(addr.port());
-                let denied: io::Result<TcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
-                Box::pin(async move { denied }) as TcpBindFuture<TcpListener>
+                let denied: io::Result<MockTcpListener> =
+                    Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                Box::pin(async move { denied }) as TcpBindFuture<MockTcpListener>
             },
         )
         .await;
 
         let tried = ports.lock().unwrap();
+        assert_eq!(*udp_attempts.lock().unwrap(), PORT_ZERO_BIND_ATTEMPTS);
         assert_eq!(tried.len(), PORT_ZERO_BIND_ATTEMPTS);
         assert_eq!(tried.iter().copied().collect::<HashSet<_>>().len(), tried.len());
         let error = result.unwrap_err().to_string();
