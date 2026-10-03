@@ -273,13 +273,11 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                         .sum::<u64>(),
                 )
             });
-            if *half_closed {
-                if let Some(bytes) = bytes_received_after_half_close.filter(|bytes| *bytes > 0) {
-                    out.push(
-                        Draft::new("tcp.reply_after_half_close", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Info)
-                            .var("bytes", bytes.to_string()),
-                    );
-                }
+            if *half_closed && let Some(bytes) = bytes_received_after_half_close.filter(|bytes| *bytes > 0) {
+                out.push(
+                    Draft::new("tcp.reply_after_half_close", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Info)
+                        .var("bytes", bytes.to_string()),
+                );
             }
             let ended_by_peer = matches!(closed_by, ClosedBy::Peer | ClosedBy::Abnormal);
             if ended_by_peer && *bytes_received == 0 {
