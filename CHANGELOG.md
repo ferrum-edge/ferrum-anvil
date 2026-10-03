@@ -118,6 +118,7 @@
   proxy URL), a per-run value that reaches the URL's scheme or host is
   refused, naming its source but never its value. A per-run port is allowed
   only after a fixed loopback host.
+- Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
 - Diagnostics: cancellation findings now use the local-client scope only when
   dispatch recorded no request bytes; canceled requests that may have reached
   the peer use the client-to-peer scope.
@@ -136,6 +137,13 @@
   feature-detects the negotiated extensions (`.extensions` on 13.x, the new
   asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
   version range is documented where the run instructions live (#275).
+- Desktop: switching a request to MCP now saves the default `tools/list`
+  operation, so the editor shows exactly what will be sent and Send no longer
+  refuses a new MCP request for missing settings (#286).
+- Desktop: choosing `.proto files…` as the gRPC schema source now records it as
+  `proto_files`, not a descriptor set, even though the controlled select
+  re-renders while the native dialog is open; the choice is merged into the
+  latest draft rather than one captured before the dialog opened (#287).
 
 ### Security
 
