@@ -261,11 +261,25 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             }
         }
         ProtocolStatus::Tcp { bytes_sent, bytes_received, half_closed, closed_by } => {
-            if *half_closed && *bytes_received > 0 {
-                out.push(
-                    Draft::new("tcp.reply_after_half_close", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Info)
-                        .var("bytes", bytes_received.to_string()),
-                );
+            let bytes_received_after_half_close = ctx.input.stream.and_then(|stream| {
+                let half_close = stream.messages.iter().position(|message| {
+                    message.direction == Direction::Sent && message.kind == "half_close"
+                })?;
+                Some(
+                    stream.messages[half_close + 1..]
+                        .iter()
+                        .filter(|message| message.direction == Direction::Received)
+                        .map(|message| message.size)
+                        .sum::<u64>(),
+                )
+            });
+            if *half_closed {
+                if let Some(bytes) = bytes_received_after_half_close.filter(|bytes| *bytes > 0) {
+                    out.push(
+                        Draft::new("tcp.reply_after_half_close", "protocol.streams", Confidence::Confirmed, SourceScope::ClientToPeer, Owner::Unknown, Severity::Info)
+                            .var("bytes", bytes.to_string()),
+                    );
+                }
             }
             let ended_by_peer = matches!(closed_by, ClosedBy::Peer | ClosedBy::Abnormal);
             if ended_by_peer && *bytes_received == 0 {
@@ -364,10 +378,19 @@ fn masque_rules(ctx: &Ctx<'_>, m: &MasqueTunnel, out: &mut Vec<Draft>) {
 mod tests {
     use crate::facts::{DiagnosticInput, FerrumTrust};
     use anvil_domain::diagnostics::{DiagnosticFinding, Owner, Severity, SourceScope};
+    use anvil_domain::execution::{Direction, StreamMessage, StreamTranscript};
     use anvil_domain::outcome::{ClosedBy, ProtocolStatus, WsCompressionViolation, WsExtensions, WsNegotiation, WsViolationKind};
     use anvil_domain::request::Protocol;
 
     fn diagnose(protocol: Protocol, status: ProtocolStatus) -> Vec<DiagnosticFinding> {
+        diagnose_with_stream(protocol, status, None)
+    }
+
+    fn diagnose_with_stream(
+        protocol: Protocol,
+        status: ProtocolStatus,
+        stream: Option<&StreamTranscript>,
+    ) -> Vec<DiagnosticFinding> {
         let trust = FerrumTrust::NotConfigured;
         let input = DiagnosticInput {
             protocol,
@@ -376,7 +399,7 @@ mod tests {
             attempts: &[],
             response: None,
             body: &[],
-            stream: None,
+            stream,
             protocol_status: &status,
             trust: &trust,
             tls_verification_enabled: true,
@@ -513,6 +536,64 @@ mod tests {
 
     fn tcp(sent: u64, received: u64, by: ClosedBy) -> ProtocolStatus {
         ProtocolStatus::Tcp { bytes_sent: sent, bytes_received: received, half_closed: false, closed_by: by }
+    }
+
+    fn tcp_message(direction: Direction, kind: &str, size: u64) -> StreamMessage {
+        StreamMessage {
+            direction,
+            offset_us: 0,
+            kind: kind.into(),
+            size,
+            preview: String::new(),
+            preview_is_hex: false,
+            preview_truncated: false,
+            event_id: None,
+            event_type: None,
+        }
+    }
+
+    fn half_closed_tcp(sent: u64, received: u64) -> ProtocolStatus {
+        ProtocolStatus::Tcp { bytes_sent: sent, bytes_received: received, half_closed: true, closed_by: ClosedBy::Peer }
+    }
+
+    #[test]
+    fn a_tcp_reply_is_after_half_close_only_when_the_transcript_orders_it_after_fin() {
+        let before = StreamTranscript {
+            messages: vec![tcp_message(Direction::Received, "bytes", 12), tcp_message(Direction::Sent, "half_close", 0)],
+            ..Default::default()
+        };
+        let findings = diagnose_with_stream(Protocol::Tcp, half_closed_tcp(6, 12), Some(&before));
+        assert!(!findings.iter().any(|finding| finding.code == "tcp.reply_after_half_close"));
+
+        let after = StreamTranscript {
+            messages: vec![
+                tcp_message(Direction::Received, "bytes", 4),
+                tcp_message(Direction::Sent, "half_close", 0),
+                tcp_message(Direction::Received, "bytes", 5),
+                tcp_message(Direction::Sent, "half_close", 0),
+                tcp_message(Direction::Received, "bytes", 3),
+            ],
+            ..Default::default()
+        };
+        let findings = diagnose_with_stream(Protocol::Tcp, half_closed_tcp(6, 12), Some(&after));
+        assert_eq!(
+            find(&findings, "tcp.reply_after_half_close").explanation,
+            "Anvil half-closed its side after sending; the peer still returned 8 bytes. The reply was preserved."
+        );
+    }
+
+    #[test]
+    fn a_tcp_half_close_finding_fails_closed_without_a_retained_control_entry() {
+        let dropped = StreamTranscript {
+            messages: vec![tcp_message(Direction::Received, "bytes", 12)],
+            dropped_messages: 1,
+            ..Default::default()
+        };
+        let findings = diagnose_with_stream(Protocol::Tcp, half_closed_tcp(6, 12), Some(&dropped));
+        assert!(!findings.iter().any(|finding| finding.code == "tcp.reply_after_half_close"));
+
+        let findings = diagnose(Protocol::Tcp, half_closed_tcp(6, 12));
+        assert!(!findings.iter().any(|finding| finding.code == "tcp.reply_after_half_close"));
     }
 
     #[test]
