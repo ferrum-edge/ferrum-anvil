@@ -108,6 +108,7 @@
 
 ### Fixed
 
+- Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
 - Diagnostics: cancellation findings now use the local-client scope only when
   dispatch recorded no request bytes; canceled requests that may have reached
   the peer use the client-to-peer scope.
