@@ -374,9 +374,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::Mutex as StdMutex;
-    use tokio::net::UdpSocket;
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     struct MockUdpSocket(SocketAddr);
 
     impl MockUdpSocket {

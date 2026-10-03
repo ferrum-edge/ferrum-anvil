@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     struct MockUdpSocket(SocketAddr);
 
     impl BoundUdpSocket for MockUdpSocket {
@@ -278,6 +278,7 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
     struct MockTcpListener(SocketAddr);
 
     #[tokio::test]
