@@ -296,15 +296,11 @@ impl App {
                         }
                     }
                     add_preflight_variables(&mut preflight_ctx, &id, p, &job);
-                    let preview = self
-                        .engine
-                        .preview(&preflight_ctx)
-                        .map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
+                    let preview =
+                        self.engine.preview(&preflight_ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
                     let origin = url_origin(&preview.url);
                     if origin.contains(PREFLIGHT_SENTINEL) {
-                        return Err(AppError::Invalid(
-                            "load preflight cannot prove that a variable URL origin stays on loopback".into(),
-                        ));
+                        return Err(AppError::Invalid("load preflight cannot prove that a variable URL origin stays on loopback".into()));
                     }
                     let mut d = format!("{} {}", preview.method, origin);
                     let mut local = url_is_loopback(&preview.url);

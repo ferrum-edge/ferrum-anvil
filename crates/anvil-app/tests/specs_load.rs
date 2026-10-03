@@ -153,9 +153,7 @@ async fn load_preflight_resolves_iteration_values_but_refuses_dynamic_origins() 
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let ws = app.create_workspace("Load").unwrap();
-    let dataset = app
-        .create_dataset(&ws.meta.id, "rows", DatasetFormat::Csv, b"qaRow\nfirst\nsecond\n", vec![])
-        .unwrap();
+    let dataset = app.create_dataset(&ws.meta.id, "rows", DatasetFormat::Csv, b"qaRow\nfirst\nsecond\n", vec![]).unwrap();
 
     let mut producer_spec = RequestSpec::http("GET", &fx.url("/echo"));
     producer_spec.extractions.push(Extraction {
@@ -164,10 +162,8 @@ async fn load_preflight_resolves_iteration_values_but_refuses_dynamic_origins() 
         sensitive: false,
     });
     let producer = app.create_request(&ws.meta.id, None, "producer", producer_spec).unwrap();
-    let mut consumer_spec = RequestSpec::http(
-        "GET",
-        &fx.url("/echo?method={{qaMethod}}&row={{qaRow}}&iteration={{anvil.iteration}}&vu={{anvil.vu}}"),
-    );
+    let mut consumer_spec =
+        RequestSpec::http("GET", &fx.url("/echo?method={{qaMethod}}&row={{qaRow}}&iteration={{anvil.iteration}}&vu={{anvil.vu}}"));
     consumer_spec.body = Body::Raw { text: "row={{qaRow}}".into(), content_type: None };
     let consumer = app.create_request(&ws.meta.id, None, "consumer", consumer_spec).unwrap();
     let p = app
@@ -183,33 +179,18 @@ async fn load_preflight_resolves_iteration_values_but_refuses_dynamic_origins() 
     assert!(preflight.destinations.iter().any(|d| d == &format!("GET http://{}", fx.addr)));
     assert!(!preflight.warnings.iter().any(|w| w.contains("Traffic leaves this machine")), "{:?}", preflight.warnings);
 
-    let dynamic = app
-        .create_request(&ws.meta.id, None, "dynamic target", RequestSpec::http("GET", "http://{{qaRow}}/echo"))
-        .unwrap();
+    let dynamic = app.create_request(&ws.meta.id, None, "dynamic target", RequestSpec::http("GET", "http://{{qaRow}}/echo")).unwrap();
     let p = app
-        .save_load_plan(LoadPlan {
-            chain: vec![dynamic.meta.id],
-            dataset_id: Some(dataset.meta.id),
-            ..plan(ws.meta.id, dynamic.meta.id)
-        })
+        .save_load_plan(LoadPlan { chain: vec![dynamic.meta.id], dataset_id: Some(dataset.meta.id), ..plan(ws.meta.id, dynamic.meta.id) })
         .unwrap();
     let error = app.load_preflight(&p).unwrap_err().to_string();
     assert!(error.contains("cannot prove that a variable URL origin stays on loopback"), "{error}");
     assert!(!error.contains("first") && !error.contains("second"), "dataset values leaked into preflight: {error}");
 
-    let dynamic_extracted = app
-        .create_request(
-            &ws.meta.id,
-            None,
-            "extracted target",
-            RequestSpec::http("GET", "http://{{qaMethod}}/echo"),
-        )
-        .unwrap();
+    let dynamic_extracted =
+        app.create_request(&ws.meta.id, None, "extracted target", RequestSpec::http("GET", "http://{{qaMethod}}/echo")).unwrap();
     let p = app
-        .save_load_plan(LoadPlan {
-            chain: vec![producer.meta.id, dynamic_extracted.meta.id],
-            ..plan(ws.meta.id, producer.meta.id)
-        })
+        .save_load_plan(LoadPlan { chain: vec![producer.meta.id, dynamic_extracted.meta.id], ..plan(ws.meta.id, producer.meta.id) })
         .unwrap();
     let error = app.load_preflight(&p).unwrap_err().to_string();
     assert!(error.contains("cannot prove that a variable URL origin stays on loopback"), "{error}");
