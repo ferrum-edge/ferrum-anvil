@@ -4,8 +4,10 @@ use anvil_app::App;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::specs::SpecTarget;
 use anvil_domain::Id;
+use anvil_domain::assertions::{Extraction, ExtractionSource};
 use anvil_domain::load::{LoadPlan, Workload};
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{Body, RequestSpec};
+use anvil_domain::workspace::DatasetFormat;
 use anvil_import::{ImportOptions, ReimportApproval};
 use anvil_storage::KdfParams;
 use tokio_util::sync::CancellationToken;
@@ -139,6 +141,90 @@ fn plan(ws: Id, req: Id) -> LoadPlan {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
+}
+
+/// Preflight supplies synthetic iteration values to the preview, so values in
+/// a fixed loopback URL's path/query do not prevent confirmation. It refuses
+/// an origin selected by those same values.
+#[tokio::test]
+async fn load_preflight_resolves_iteration_values_but_refuses_dynamic_origins() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let dataset = app
+        .create_dataset(&ws.meta.id, "rows", DatasetFormat::Csv, b"qaRow\nfirst\nsecond\n", vec![])
+        .unwrap();
+
+    let mut producer_spec = RequestSpec::http("GET", &fx.url("/echo"));
+    producer_spec.extractions.push(Extraction {
+        variable: "qaMethod".into(),
+        source: ExtractionSource::JsonPath { path: "$.method".into() },
+        sensitive: false,
+    });
+    let producer = app.create_request(&ws.meta.id, None, "producer", producer_spec).unwrap();
+    let mut consumer_spec = RequestSpec::http(
+        "GET",
+        &fx.url("/echo?method={{qaMethod}}&row={{qaRow}}&iteration={{anvil.iteration}}&vu={{anvil.vu}}"),
+    );
+    consumer_spec.body = Body::Raw { text: "row={{qaRow}}".into(), content_type: None };
+    let consumer = app.create_request(&ws.meta.id, None, "consumer", consumer_spec).unwrap();
+    let p = app
+        .save_load_plan(LoadPlan {
+            chain: vec![producer.meta.id, consumer.meta.id],
+            dataset_id: Some(dataset.meta.id),
+            ..plan(ws.meta.id, producer.meta.id)
+        })
+        .unwrap();
+
+    let preflight = app.load_preflight(&p).unwrap();
+    assert_eq!(preflight.dataset_rows, Some(2));
+    assert!(preflight.destinations.iter().any(|d| d == &format!("GET http://{}", fx.addr)));
+    assert!(!preflight.warnings.iter().any(|w| w.contains("Traffic leaves this machine")), "{:?}", preflight.warnings);
+
+    let dynamic = app
+        .create_request(&ws.meta.id, None, "dynamic target", RequestSpec::http("GET", "http://{{qaRow}}/echo"))
+        .unwrap();
+    let p = app
+        .save_load_plan(LoadPlan {
+            chain: vec![dynamic.meta.id],
+            dataset_id: Some(dataset.meta.id),
+            ..plan(ws.meta.id, dynamic.meta.id)
+        })
+        .unwrap();
+    let error = app.load_preflight(&p).unwrap_err().to_string();
+    assert!(error.contains("cannot prove that a variable URL origin stays on loopback"), "{error}");
+    assert!(!error.contains("first") && !error.contains("second"), "dataset values leaked into preflight: {error}");
+
+    let dynamic_extracted = app
+        .create_request(
+            &ws.meta.id,
+            None,
+            "extracted target",
+            RequestSpec::http("GET", "http://{{qaMethod}}/echo"),
+        )
+        .unwrap();
+    let p = app
+        .save_load_plan(LoadPlan {
+            chain: vec![producer.meta.id, dynamic_extracted.meta.id],
+            ..plan(ws.meta.id, producer.meta.id)
+        })
+        .unwrap();
+    let error = app.load_preflight(&p).unwrap_err().to_string();
+    assert!(error.contains("cannot prove that a variable URL origin stays on loopback"), "{error}");
+
+    let dynamic_helper = app
+        .create_request(
+            &ws.meta.id,
+            None,
+            "dynamic helper target",
+            RequestSpec::http("GET", "http://{{$randomFrom 127.0.0.1|example.org}}/echo"),
+        )
+        .unwrap();
+    let p = app.save_load_plan(plan(ws.meta.id, dynamic_helper.meta.id)).unwrap();
+    let error = app.load_preflight(&p).unwrap_err().to_string();
+    assert!(error.contains("cannot prove that a variable URL origin stays on loopback"), "{error}");
 }
 
 #[test]

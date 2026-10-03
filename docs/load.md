@@ -229,7 +229,13 @@ proxy.example.test:3128`. The profile is picked exactly as the engine picks
 it: a target its `NO_PROXY` list bypasses is sent directly, so it is shown
 without the proxy. It warns that traffic leaves this machine when a target
 or the proxy it actually uses is not a loopback address or `localhost`
-(each host is judged on its own).
+(each host is judged on its own). The preview resolves iteration variables,
+dataset columns and values extracted by earlier chain steps without using
+their per-run values, so they can appear in a path, query or body of a fixed
+loopback request. If one of those values can change the URL origin, the
+preflight refuses to start because it cannot prove that every iteration
+stays on loopback. Dataset cells and extracted values are never shown in the
+preflight destination or refusal message.
 
 ## Accounting
 

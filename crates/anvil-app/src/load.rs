@@ -12,6 +12,7 @@ use anvil_domain::request::{AttachmentRef, Protocol};
 use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_domain::workspace::DatasetFormat as DomainDatasetFormat;
 use anvil_domain::workspace::Workspace;
+use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_load::{Dataset, DatasetFormat, LoadJob, Refusal, RunOptions, WorkerJob};
 use anvil_storage::StoreError;
 use anvil_storage::store::kind;
@@ -287,10 +288,27 @@ impl App {
             let ctx = &job.requests[&id];
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
-                    let preview = self.engine.preview(ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-                    let mut d = format!("{} {}", preview.method, url_origin(&preview.url));
+                    let mut preflight_ctx = ctx.clone();
+                    preflight_ctx.spec.url = mask_dynamic_expressions(&preflight_ctx.spec.url);
+                    for layer in &mut preflight_ctx.var_layers {
+                        for variable in &mut layer.vars {
+                            variable.value = mask_dynamic_expressions(&variable.value);
+                        }
+                    }
+                    add_preflight_variables(&mut preflight_ctx, &id, p, &job);
+                    let preview = self
+                        .engine
+                        .preview(&preflight_ctx)
+                        .map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
+                    let origin = url_origin(&preview.url);
+                    if origin.contains(PREFLIGHT_SENTINEL) {
+                        return Err(AppError::Invalid(
+                            "load preflight cannot prove that a variable URL origin stays on loopback".into(),
+                        ));
+                    }
+                    let mut d = format!("{} {}", preview.method, origin);
                     let mut local = url_is_loopback(&preview.url);
-                    if let Some(proxy) = anvil_load::protocol::route(ctx, &preview.url, Protocol::Http).and_then(|(_, p)| p) {
+                    if let Some(proxy) = anvil_load::protocol::route(&preflight_ctx, &preview.url, Protocol::Http).and_then(|(_, p)| p) {
                         d.push_str(&proxy_label(proxy));
                         local &= address_is_loopback(&proxy.address);
                     }
@@ -393,6 +411,75 @@ fn validate_plan(p: &LoadPlan) -> Result<()> {
         return Err(AppError::Invalid("add at least one saved request to the plan".into()));
     }
     anvil_load::validate_plan(p).map_err(|e| AppError::Invalid(e.to_string()))
+}
+
+const PREFLIGHT_SENTINEL: &str = "anvil-preflight-dynamic-288";
+
+/// Dynamic helpers may produce a loopback-looking value in one preview and
+/// a remote value on a send. Mask them so they cannot authorize an origin.
+fn mask_dynamic_expressions(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(open) = rest.find("{{") {
+        output.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            output.push_str(&rest[open..]);
+            return output;
+        };
+        let expression = &after[..close];
+        if expression.trim().starts_with('$') {
+            output.push_str(PREFLIGHT_SENTINEL);
+        } else {
+            output.push_str("{{");
+            output.push_str(expression);
+            output.push_str("}}");
+        }
+        rest = &after[close + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Add synthetic iteration values so the preview can resolve fields that the
+/// worker resolves per send. These values contain no dataset or response data.
+fn add_preflight_variables(ctx: &mut anvil_engine::ExecutionContext, id: &Id, p: &LoadPlan, job: &LoadJob) {
+    ctx.var_layers.push(VarLayer {
+        label: "preflight load".into(),
+        vars: vec![
+            VarEntry { name: "anvil.iteration".into(), value: PREFLIGHT_SENTINEL.into(), secret: false },
+            VarEntry { name: "anvil.vu".into(), value: PREFLIGHT_SENTINEL.into(), secret: false },
+        ],
+    });
+    if ctx.scope.is_none()
+        && let Some(dataset) = &job.dataset
+    {
+        ctx.var_layers.push(VarLayer {
+            label: "preflight dataset".into(),
+            vars: dataset
+                .columns
+                .iter()
+                .map(|name| VarEntry { name: name.clone(), value: PREFLIGHT_SENTINEL.into(), secret: false })
+                .collect(),
+        });
+    }
+
+    let mut extracted = Vec::new();
+    for previous_id in p.chain.iter().take_while(|previous_id| *previous_id != id) {
+        let Some(previous) = job.requests.get(previous_id) else {
+            continue;
+        };
+        if previous.scope == ctx.scope {
+            for extraction in &previous.spec.extractions {
+                if !extracted.iter().any(|entry: &VarEntry| entry.name == extraction.variable) {
+                    extracted.push(VarEntry { name: extraction.variable.clone(), value: PREFLIGHT_SENTINEL.into(), secret: false });
+                }
+            }
+        }
+    }
+    if !extracted.is_empty() {
+        ctx.var_layers.push(VarLayer { label: "preflight extracted".into(), vars: extracted });
+    }
 }
 
 /// `WS ws://host:port`-style destination of a session request, from its URL

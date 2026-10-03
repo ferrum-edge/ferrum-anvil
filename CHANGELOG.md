@@ -108,6 +108,9 @@
 
 ### Fixed
 
+- Desktop Load: preflight now resolves iteration variables, dataset columns
+  and earlier chain extractions for requests with fixed origins. A variable
+  URL origin is refused because it cannot be proven to stay on loopback.
 - Diagnostics: cancellation findings now use the local-client scope only when
   dispatch recorded no request bytes; canceled requests that may have reached
   the peer use the client-to-peer scope.
