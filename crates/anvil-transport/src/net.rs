@@ -361,6 +361,17 @@ pub async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
 /// `NO_PROXY` matching: `*`, exact hosts, `.suffix` / `suffix` domain matches,
 /// IP literals and CIDR blocks. Ports in entries (`host:port`) must match.
 pub fn no_proxy_matches(no_proxy: &str, host: &str, port: u16) -> bool {
+    no_proxy_match(no_proxy, host, Some(port))
+}
+
+/// Whether `NO_PROXY` bypasses `host` on every port: only an entry without a
+/// port (`*`, a host, a domain suffix, an IP literal or a CIDR block) does.
+pub fn no_proxy_matches_every_port(no_proxy: &str, host: &str) -> bool {
+    no_proxy_match(no_proxy, host, None)
+}
+
+/// [`no_proxy_matches`] for `port`, or for every port when it is `None`.
+fn no_proxy_match(no_proxy: &str, host: &str, port: Option<u16>) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
     for raw in no_proxy.split(',') {
         let entry = raw.trim().to_ascii_lowercase();
@@ -378,7 +389,7 @@ pub fn no_proxy_matches(no_proxy: &str, host: &str, port: u16) -> bool {
             _ => (entry.trim_start_matches('[').trim_end_matches(']').to_string(), None),
         };
         if let Some(p) = eport
-            && p != port
+            && Some(p) != port
         {
             continue;
         }
@@ -435,6 +446,18 @@ mod tests {
         assert!(no_proxy_matches("localhost:8080", "localhost", 8080));
         assert!(!no_proxy_matches("localhost:8080", "localhost", 9090));
         assert!(no_proxy_matches("::1", "[::1]", 80));
+    }
+
+    /// A per-run port is bypassed only by an entry without a port.
+    #[test]
+    fn no_proxy_for_every_port_ignores_entries_with_a_port() {
+        assert!(no_proxy_matches_every_port("localhost,127.0.0.1", "127.0.0.1"));
+        assert!(no_proxy_matches_every_port("127.0.0.0/8", "127.0.0.1"));
+        assert!(no_proxy_matches_every_port("*", "localhost"));
+        assert!(no_proxy_matches_every_port("::1", "[::1]"));
+        assert!(!no_proxy_matches_every_port("127.0.0.1:8080", "127.0.0.1"));
+        assert!(!no_proxy_matches_every_port("localhost:8080,[::1]:80", "localhost"));
+        assert!(!no_proxy_matches_every_port("example.com", "127.0.0.1"));
     }
 }
 

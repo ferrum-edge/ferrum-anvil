@@ -108,6 +108,16 @@
 
 ### Fixed
 
+- Load preflight: iteration variables, dataset columns, values extracted by
+  earlier chain steps and dynamic helpers in the path, query, method, headers
+  or body of a fixed origin no longer stop a plan (#288). The preflight judges
+  each origin from the URL alone, with every per-run value layered above
+  workspace, environment and folder variables as the worker layers it, and a
+  repeated chain step sees what its earlier positions extracted. For HTTP and
+  every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
+  proxy URL), a per-run value that reaches the URL's scheme or host is
+  refused, naming its source but never its value. A per-run port is allowed
+  only after a fixed loopback host.
 - Desktop imports: refresh the selected workspace's environments, profiles,
   history and request tree after a spec import or bundle import. Open tabs for
   replaced requests now reload when clean; unsaved drafts and running sends or
