@@ -108,9 +108,16 @@
 
 ### Fixed
 
-- Desktop Load: preflight now resolves iteration variables, dataset columns
-  and earlier chain extractions for requests with fixed origins. A variable
-  URL origin is refused because it cannot be proven to stay on loopback.
+- Load preflight: iteration variables, dataset columns, values extracted by
+  earlier chain steps and dynamic helpers in the path, query, method, headers
+  or body of a fixed origin no longer stop a plan (#288). The preflight judges
+  each origin from the URL alone, with every per-run value layered above
+  workspace, environment and folder variables as the worker layers it, and a
+  repeated chain step sees what its earlier positions extracted. For HTTP and
+  every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
+  proxy URL), a per-run value that reaches the URL's scheme or host is
+  refused, naming its source but never its value. A per-run port is allowed
+  only after a fixed loopback host.
 - Diagnostics: cancellation findings now use the local-client scope only when
   dispatch recorded no request bytes; canceled requests that may have reached
   the peer use the client-to-peer scope.

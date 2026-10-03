@@ -12,7 +12,7 @@ use anvil_domain::request::{AttachmentRef, Protocol};
 use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_domain::workspace::DatasetFormat as DomainDatasetFormat;
 use anvil_domain::workspace::Workspace;
-use anvil_engine::vars::{VarEntry, VarLayer};
+use anvil_engine::vars::{Resolver, VarEntry, VarLayer};
 use anvil_load::{Dataset, DatasetFormat, LoadJob, Refusal, RunOptions, WorkerJob};
 use anvil_storage::StoreError;
 use anvil_storage::store::kind;
@@ -286,31 +286,40 @@ impl App {
         let mut leaves = false;
         for id in ids {
             let ctx = &job.requests[&id];
+            // Dataset cells, extracted values, iteration variables and dynamic
+            // helpers stand in as markers, so each origin is judged from the
+            // URL alone, without any per-run value.
+            let resolver = preflight_resolver(ctx, &id, p, &job);
+            let refuse = |what: &str, origin: PerRunOrigin| {
+                let request = self.request(&id).map(|r| r.name).unwrap_or_default();
+                per_run_origin_refusal(&request, what, &origin)
+            };
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
-                    let mut preflight_ctx = ctx.clone();
-                    preflight_ctx.spec.url = mask_dynamic_expressions(&preflight_ctx.spec.url);
-                    for layer in &mut preflight_ctx.var_layers {
-                        for variable in &mut layer.vars {
-                            variable.value = mask_dynamic_expressions(&variable.value);
-                        }
-                    }
-                    add_preflight_variables(&mut preflight_ctx, &id, p, &job);
-                    let preview =
-                        self.engine.preview(&preflight_ctx).map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-                    let origin = url_origin(&preview.url);
-                    if origin.contains(PREFLIGHT_SENTINEL) {
-                        return Err(AppError::Invalid("load preflight cannot prove that a variable URL origin stays on loopback".into()));
-                    }
-                    let mut d = format!("{} {}", preview.method, origin);
-                    let mut local = url_is_loopback(&preview.url);
-                    if let Some(proxy) = anvil_load::protocol::route(&preflight_ctx, &preview.url, Protocol::Http).and_then(|(_, p)| p) {
+                    // The method, headers and body never change the origin;
+                    // they are prepared and checked when each iteration sends.
+                    let proven = match prove_url(&resolver, &ctx.spec.url, "url") {
+                        Ok(proven) => proven,
+                        Err(UrlProblem::Unresolved(message)) => return Err(AppError::Invalid(message)),
+                        Err(UrlProblem::PerRun(origin)) => return Err(refuse("URL", origin)),
+                    };
+                    let schemes = anvil_load::protocol::send_schemes(Protocol::Http);
+                    let target = anvil_engine::prepare::parse_target(&proven.probe, schemes, &mut Vec::new())
+                        .map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
+                    let method = match resolver.resolve(ctx.spec.method.trim(), "method") {
+                        Ok(method) if per_run_sources(&method).is_empty() => method.to_ascii_uppercase(),
+                        // A per-run method is shown as written.
+                        _ => ctx.spec.method.trim().to_string(),
+                    };
+                    let mut d = format!("{method} {}", origin_label(&target.url(), proven.port_varies));
+                    let mut local = url_is_loopback(&target.url());
+                    if let Some(proxy) = proven.proxy(ctx, Protocol::Http) {
                         d.push_str(&proxy_label(proxy));
                         local &= address_is_loopback(&proxy.address);
                     }
                     (d, local)
                 }
-                other => session_destination(ctx, other),
+                other => session_destination(ctx, other, &resolver).map_err(|(what, origin)| refuse(what, origin))?,
             };
             leaves |= !local;
             destinations.push(destination);
@@ -409,10 +418,34 @@ fn validate_plan(p: &LoadPlan) -> Result<()> {
     anvil_load::validate_plan(p).map_err(|e| AppError::Invalid(e.to_string()))
 }
 
-const PREFLIGHT_SENTINEL: &str = "anvil-preflight-dynamic-288";
+// Stand-ins for the values a load worker supplies on each iteration
+// (`run_iteration`), one per source so a refusal can say where a value comes
+// from without showing it. They hold no URL delimiter (`:`, `/`, `?`, `#`,
+// `@`, `[`, `]`), so each stays inside the URL part it reaches.
+const DATASET_VALUE: &str = "anvil-preflight-dataset-column";
+const EXTRACTED_VALUE: &str = "anvil-preflight-extracted-value";
+const ITERATION_VALUE: &str = "anvil-preflight-iteration-variable";
+const HELPER_VALUE: &str = "anvil-preflight-dynamic-helper";
+const PER_RUN_VALUES: [(&str, &str); 4] = [
+    (DATASET_VALUE, "a dataset column"),
+    (EXTRACTED_VALUE, "a value extracted by a chain step"),
+    (ITERATION_VALUE, "an iteration variable (anvil.iteration or anvil.vu)"),
+    (HELPER_VALUE, "a dynamic helper ({{$...}})"),
+];
+
+/// Where the per-run stand-ins in `text` come from.
+fn per_run_sources(text: &str) -> Vec<&'static str> {
+    PER_RUN_VALUES.iter().filter(|(stand_in, _)| text.contains(stand_in)).map(|(_, source)| *source).collect()
+}
+
+fn replace_stand_ins(text: &str, with: &str) -> String {
+    PER_RUN_VALUES.iter().fold(text.to_string(), |text, (stand_in, _)| text.replace(stand_in, with))
+}
 
 /// Dynamic helpers may produce a loopback-looking value in one preview and
 /// a remote value on a send. Mask them so they cannot authorize an origin.
+/// Tokenized exactly as the resolver tokenizes (`{{`, the first `}}`, the
+/// trimmed expression starting with `$`).
 fn mask_dynamic_expressions(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
@@ -425,7 +458,7 @@ fn mask_dynamic_expressions(input: &str) -> String {
         };
         let expression = &after[..close];
         if expression.trim().starts_with('$') {
-            output.push_str(PREFLIGHT_SENTINEL);
+            output.push_str(HELPER_VALUE);
         } else {
             output.push_str("{{");
             output.push_str(expression);
@@ -437,56 +470,158 @@ fn mask_dynamic_expressions(input: &str) -> String {
     output
 }
 
-/// Add synthetic iteration values so the preview can resolve fields that the
-/// worker resolves per send. These values contain no dataset or response data.
-fn add_preflight_variables(ctx: &mut anvil_engine::ExecutionContext, id: &Id, p: &LoadPlan, job: &LoadJob) {
-    ctx.var_layers.push(VarLayer {
-        label: "preflight load".into(),
-        vars: vec![
-            VarEntry { name: "anvil.iteration".into(), value: PREFLIGHT_SENTINEL.into(), secret: false },
-            VarEntry { name: "anvil.vu".into(), value: PREFLIGHT_SENTINEL.into(), secret: false },
-        ],
-    });
+/// A resolver for what a load step sends on every iteration: the step's own
+/// variable layers with every dynamic helper masked (also one reached through
+/// a variable's value), then a stand-in for each value the worker adds per
+/// iteration, layered as `run_iteration` layers the real values. A stand-in
+/// therefore wins over a workspace, environment or folder variable of the
+/// same name exactly as the real value does.
+fn preflight_resolver(ctx: &anvil_engine::ExecutionContext, id: &Id, p: &LoadPlan, job: &LoadJob) -> Resolver {
+    let mut layers = ctx.var_layers.clone();
+    for variable in layers.iter_mut().flat_map(|layer| layer.vars.iter_mut()) {
+        variable.value = mask_dynamic_expressions(&variable.value);
+    }
+    let stand_in = |name: &str, value: &str| VarEntry { name: name.into(), value: value.into(), secret: false };
+    let iteration = vec![stand_in("anvil.iteration", ITERATION_VALUE), stand_in("anvil.vu", ITERATION_VALUE)];
+    layers.push(VarLayer { label: "load".into(), vars: iteration });
+    // Only a step outside a sealed import root sees the dataset row.
     if ctx.scope.is_none()
         && let Some(dataset) = &job.dataset
     {
-        ctx.var_layers.push(VarLayer {
-            label: "preflight dataset".into(),
-            vars: dataset
-                .columns
-                .iter()
-                .map(|name| VarEntry { name: name.clone(), value: PREFLIGHT_SENTINEL.into(), secret: false })
-                .collect(),
-        });
+        let vars: Vec<VarEntry> = dataset.columns.iter().map(|column| stand_in(column.as_str(), DATASET_VALUE)).collect();
+        layers.push(VarLayer { label: "dataset".into(), vars });
     }
-
-    let mut extracted = Vec::new();
-    for previous_id in p.chain.iter().take_while(|previous_id| *previous_id != id) {
-        let Some(previous) = job.requests.get(previous_id) else {
-            continue;
-        };
-        if previous.scope == ctx.scope {
-            for extraction in &previous.spec.extractions {
-                if !extracted.iter().any(|entry: &VarEntry| entry.name == extraction.variable) {
-                    extracted.push(VarEntry { name: extraction.variable.clone(), value: PREFLIGHT_SENTINEL.into(), secret: false });
-                }
+    // A chain step sees what every earlier position of the iteration
+    // extracted under its own scope, including an earlier position of the
+    // same request: judge each request at its last position.
+    let earlier = p.chain.iter().rposition(|step| step == id).map_or(&[][..], |last| &p.chain[..last]);
+    let mut extracted: Vec<VarEntry> = Vec::new();
+    for step in earlier.iter().filter_map(|step| job.requests.get(step)).filter(|step| step.scope == ctx.scope) {
+        for extraction in &step.spec.extractions {
+            if !extracted.iter().any(|entry| entry.name == extraction.variable) {
+                extracted.push(stand_in(extraction.variable.as_str(), EXTRACTED_VALUE));
             }
         }
     }
     if !extracted.is_empty() {
-        ctx.var_layers.push(VarLayer { label: "preflight extracted".into(), vars: extracted });
+        layers.push(VarLayer { label: "iteration (extracted)".into(), vars: extracted });
+    }
+    Resolver::new(layers, None)
+}
+
+/// The part of a URL's origin a per-run value reaches, and where those values
+/// come from.
+struct PerRunOrigin {
+    part: &'static str,
+    sources: Vec<&'static str>,
+}
+
+enum UrlProblem {
+    /// The URL does not resolve (an undefined variable, a cycle): every send
+    /// fails on it.
+    Unresolved(String),
+    /// A per-run value can change the URL's origin.
+    PerRun(PerRunOrigin),
+}
+
+/// A URL whose origin the preflight proved: per-run values reach at most its
+/// path, query and fragment, or its port after a fixed loopback host.
+struct ProvenUrl {
+    /// The resolved URL with each per-run value replaced by `1`, to parse and
+    /// route. It is never sent.
+    probe: String,
+    /// The port comes from a per-run value.
+    port_varies: bool,
+}
+
+impl ProvenUrl {
+    fn label(&self) -> String {
+        origin_label(&self.probe, self.port_varies)
+    }
+
+    /// The proxy profile the engine routes this URL through. With a per-run
+    /// port, `NO_PROXY` may bypass some ports and not others, so the selected
+    /// profile is assumed to carry the traffic.
+    fn proxy<'a>(&self, ctx: &'a anvil_engine::ExecutionContext, protocol: Protocol) -> Option<&'a ProxyProfile> {
+        if !self.port_varies {
+            return anvil_load::protocol::route(ctx, &self.probe, protocol).and_then(|(_, proxy)| proxy);
+        }
+        let selected = anvil_engine::settings::resolve(&ctx.settings_layers).proxy_profile_id;
+        selected.and_then(|id| ctx.proxy_profiles.iter().find(|proxy| proxy.id == id))
     }
 }
 
+/// Resolve a URL template as every iteration sends it and prove its origin.
+fn prove_url(resolver: &Resolver, template: &str, field: &str) -> std::result::Result<ProvenUrl, UrlProblem> {
+    let resolved = match resolver.resolve(&mask_dynamic_expressions(template), field) {
+        Ok(resolved) => resolved,
+        Err(f) => return Err(UrlProblem::Unresolved(replace_stand_ins(&format!("{:?}: {}", f.kind, f.message), "<per-iteration value>"))),
+    };
+    let port_varies = per_run_origin(&resolved).map_err(UrlProblem::PerRun)?;
+    Ok(ProvenUrl { probe: replace_stand_ins(&resolved, "1"), port_varies })
+}
+
+/// Whether a per-run value reaches the port of `resolved` (a URL resolved
+/// with the per-run stand-ins), or which part of its origin it reaches when
+/// that cannot be proven local. The URL is split as `parse_target` splits it:
+/// the scheme ends at the first `://` (with none, a fixed one is inferred),
+/// the authority at the first `/`, `?` or `#`, and the host at the `:` before
+/// the port (after the `]` of an IPv6 literal). A per-run port is accepted
+/// only after a fixed loopback host: the value then starts after that `:`, so
+/// it can change the port (or make the URL invalid) but never the host.
+fn per_run_origin(resolved: &str) -> std::result::Result<bool, PerRunOrigin> {
+    let raw = resolved.trim();
+    let (scheme, rest) = raw.split_once("://").unwrap_or(("", raw));
+    let sources = per_run_sources(scheme);
+    if !sources.is_empty() {
+        return Err(PerRunOrigin { part: "scheme", sources });
+    }
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let sources = per_run_sources(authority);
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
+    let (host, port) = authority.split_at(host_end.unwrap_or(authority.len()));
+    if !port.starts_with(':') || !per_run_sources(host).is_empty() {
+        return Err(PerRunOrigin { part: "host", sources });
+    }
+    if !host_is_loopback(host) {
+        return Err(PerRunOrigin { part: "port", sources });
+    }
+    Ok(true)
+}
+
+/// The refusal of a load step whose `what` (its URL or MASQUE proxy URL) has
+/// an origin a per-run value can change. It names where the value comes from,
+/// never the value.
+fn per_run_origin_refusal(request: &str, what: &str, origin: &PerRunOrigin) -> AppError {
+    let (part, sources) = (origin.part, origin.sources.join(" and "));
+    let mut message = format!("load preflight cannot prove that a variable URL origin stays on loopback: the {part} of the {what}");
+    message.push_str(&format!(" of request '{request}' comes from {sources}, which can change on every iteration"));
+    if part == "port" {
+        message.push_str("; a per-iteration port is allowed only after a fixed loopback host");
+    }
+    AppError::Invalid(message)
+}
+
 /// `WS ws://host:port`-style destination of a session request, from its URL
-/// with the context's variables resolved (nothing is sent), and whether all
-/// of its traffic stays on this machine: the target and the proxy it reaches
-/// first (a MASQUE proxy, or the proxy profile the engine routes it through)
-/// are judged separately, so either one off this machine counts.
-fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol) -> (String, bool) {
-    let r = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None);
-    let resolve = |raw: &str, field: &str| r.resolve(raw, field).unwrap_or_else(|_| raw.to_string());
-    let url = resolve(&ctx.spec.url, "url");
+/// resolved as every iteration resolves it (nothing is sent), and whether
+/// all of its traffic stays on this machine: the target and the proxy it
+/// reaches first (a MASQUE proxy, or the proxy profile the engine routes it
+/// through) are judged separately, so either one off this machine counts.
+/// `Err` names the URL whose origin a per-run value can change.
+fn session_destination(
+    ctx: &anvil_engine::ExecutionContext,
+    protocol: Protocol,
+    resolver: &Resolver,
+) -> std::result::Result<(String, bool), (&'static str, PerRunOrigin)> {
+    // A URL that does not resolve is never judged local; every send fails on it.
+    let target = match prove_url(resolver, &ctx.spec.url, "url") {
+        Ok(target) => Some(target),
+        Err(UrlProblem::Unresolved(_)) => None,
+        Err(UrlProblem::PerRun(origin)) => return Err(("URL", origin)),
+    };
     let label = match protocol {
         Protocol::WebSocket => "WebSocket",
         Protocol::Grpc => "gRPC",
@@ -496,19 +631,23 @@ fn session_destination(ctx: &anvil_engine::ExecutionContext, protocol: Protocol)
         Protocol::Http => "HTTP",
         Protocol::Mcp => "MCP",
     };
-    let mut d = format!("{label} {}", url_origin(&url));
-    let mut local = url_is_loopback(&url);
+    let mut d = format!("{label} {}", target.as_ref().map_or_else(|| url_origin(&ctx.spec.url), ProvenUrl::label));
+    let mut local = target.as_ref().is_some_and(|target| url_is_loopback(&target.probe));
     // A datagram tunnel sends every exchange's traffic to the proxy first.
     // (The plan check refuses a MASQUE request a proxy profile also routes.)
     if let Some(m) = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| protocol == Protocol::Udp) {
-        let proxy_url = resolve(&m.proxy_url, "udp.masque.proxy_url");
-        d.push_str(&format!(" via MASQUE proxy {}", url_origin(&proxy_url)));
-        local &= url_is_loopback(&proxy_url);
-    } else if let Some(proxy) = anvil_load::protocol::route(ctx, &url, protocol).and_then(|(_, p)| p) {
+        let proxy = match prove_url(resolver, &m.proxy_url, "udp.masque.proxy_url") {
+            Ok(proxy) => Some(proxy),
+            Err(UrlProblem::Unresolved(_)) => None,
+            Err(UrlProblem::PerRun(origin)) => return Err(("MASQUE proxy URL", origin)),
+        };
+        d.push_str(&format!(" via MASQUE proxy {}", proxy.as_ref().map_or_else(|| url_origin(&m.proxy_url), ProvenUrl::label)));
+        local &= proxy.as_ref().is_some_and(|proxy| url_is_loopback(&proxy.probe));
+    } else if let Some(proxy) = target.as_ref().and_then(|target| target.proxy(ctx, protocol)) {
         d.push_str(&proxy_label(proxy));
         local &= address_is_loopback(&proxy.address);
     }
-    (d, local)
+    Ok((d, local))
 }
 
 /// ` via HTTP proxy host:port`-style suffix of a destination.
