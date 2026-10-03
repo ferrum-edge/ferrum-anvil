@@ -126,6 +126,13 @@
   feature-detects the negotiated extensions (`.extensions` on 13.x, the new
   asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
   version range is documented where the run instructions live (#275).
+- Desktop: switching a request to MCP now saves the default `tools/list`
+  operation, so the editor shows exactly what will be sent and Send no longer
+  refuses a new MCP request for missing settings (#286).
+- Desktop: choosing `.proto files…` as the gRPC schema source now records it as
+  `proto_files`, not a descriptor set, even though the controlled select
+  re-renders while the native dialog is open; the choice is merged into the
+  latest draft rather than one captured before the dialog opened (#287).
 
 ### Security
 
