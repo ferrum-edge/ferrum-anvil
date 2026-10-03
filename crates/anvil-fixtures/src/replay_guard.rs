@@ -384,6 +384,7 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
     struct MockTcpListener(SocketAddr);
 
     impl MockTcpListener {
