@@ -316,6 +316,81 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     setTabs((ts) => ts.map((x) => (x.req.id !== id ? x : { ...x, req, saved: snap(req) })));
   };
 
+  // Imports can replace saved requests while their tabs remain open. Refresh
+  // clean tabs, keep dirty drafts against the new saved baseline, and leave
+  // running requests and sessions alone.
+  const refreshImportedTabs = async (workspaceIds: string[]) => {
+    const imported = new Set(workspaceIds);
+    const affected = tabsRef.current.filter((t) => imported.has(t.wsId));
+    const refreshable = affected.filter((t) => !liveWork(t));
+    const latest = await Promise.all(
+      refreshable.map(async (t) => {
+        try {
+          return { id: t.req.id, req: await api.getRequest(t.req.id) };
+        } catch (e) {
+          // A replaced bundle may no longer contain a request that had an open
+          // tab. Keep the draft visible and mark it unsaved below.
+          if (!/not.?found/i.test(String((e as Error).message ?? e))) throw e;
+          return { id: t.req.id, req: null };
+        }
+      }),
+    );
+    const byId = new Map(latest.map((r) => [r.id, r.req]));
+    const changedDrafts = affected.filter((t) => {
+      const req = byId.get(t.req.id);
+      return !liveWork(t) && isDirty(t) && req != null && snap(t.req) !== snap(req);
+    }).length;
+    const missing = affected.filter((t) => !liveWork(t) && byId.get(t.req.id) === null).length;
+    setTabs((ts) =>
+      ts.flatMap((t) => {
+        if (!imported.has(t.wsId) || liveWork(t)) return [t];
+        const req = byId.get(t.req.id);
+        if (req === undefined) return [t];
+        if (!req) {
+          if (isDirty(t)) return [{ ...t, saved: "" }];
+          return [];
+        }
+        if (isDirty(t)) {
+          return [{ ...t, saved: snap(t.req) === snap(req) ? t.saved : snap(req) }];
+        }
+        return [{ ...t, req, saved: snap(req) }];
+      }),
+    );
+    const running = affected.length - refreshable.length;
+    return { changedDrafts, missing, running };
+  };
+
+  // Selecting an imported workspace triggers the workspace effect when its id
+  // changes. When it is already selected, explicitly reload every workspace
+  // list because that effect does not run again.
+  const refreshAfterImport = async (workspaceIds: string[]) => {
+    const target = workspaceIds[0];
+    const selected = wsRef.current?.id;
+    await loadWorkspaces(target);
+    const lists =
+      selected === target
+        ? Promise.all([loadTree(), loadEnvs(), loadProfiles(), loadHistory()])
+        : Promise.resolve();
+    const [tabRefresh] = await Promise.all([refreshImportedTabs(workspaceIds), lists]);
+    return tabRefresh;
+  };
+
+  const importNotice = (
+    message: string,
+    result: Awaited<ReturnType<typeof refreshAfterImport>>,
+  ) => {
+    const notices = [
+      result.changedDrafts
+        ? `${result.changedDrafts} unsaved tab(s) kept; stored requests changed.`
+        : "",
+      result.missing
+        ? `${result.missing} missing request tab(s) marked unsaved or closed.`
+        : "",
+      result.running ? `${result.running} running tab(s) were left untouched.` : "",
+    ].filter(Boolean);
+    notify(`${message}${notices.length ? ` ${notices.join(" ")}` : ""}`);
+  };
+
   // Asked before a linked file is relocated: the reload that follows replaces
   // the tab's draft, so unsaved edits are discarded only once confirmed.
   const confirmReload = async (id: string) => {
@@ -971,15 +1046,17 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             onSpecImported={async (r) => {
               setDialog(null);
               const missing = r.report.required_variables.length;
-              notify(`Imported ${r.requests} request(s). Nothing was sent.${missing ? ` Fill in ${missing} variable(s) before sending.` : ""}`);
-              await loadWorkspaces(r.workspace_id);
-              await loadTree();
+              const refreshed = await refreshAfterImport([r.workspace_id]);
+              const variables = missing ? ` Fill in ${missing} variable(s) before sending.` : "";
+              importNotice(
+                `Imported ${r.requests} request(s). Nothing was sent.${variables}`,
+                refreshed,
+              );
             }}
             onClose={() => setDialog(null)}
             onImported={async (ids) => {
-              notify(`Imported ${ids.length} workspace(s). Nothing was run.`);
-              await loadWorkspaces(ids[0]);
-              await loadTree();
+              const refreshed = await refreshAfterImport(ids);
+              importNotice(`Imported ${ids.length} workspace(s). Nothing was run.`, refreshed);
             }}
           />
         )}

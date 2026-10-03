@@ -118,6 +118,10 @@
   proxy URL), a per-run value that reaches the URL's scheme or host is
   refused, naming its source but never its value. A per-run port is allowed
   only after a fixed loopback host.
+- Desktop imports: refresh the selected workspace's environments, profiles,
+  history and request tree after a spec import or bundle import. Open tabs for
+  replaced requests now reload when clean; unsaved drafts and running sends or
+  sessions are preserved safely.
 - Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
 - Diagnostics: cancellation findings now use the local-client scope only when
   dispatch recorded no request bytes; canceled requests that may have reached
