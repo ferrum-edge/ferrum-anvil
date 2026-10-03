@@ -57,23 +57,13 @@ fn retryable_bind_error(error: &io::Error) -> bool {
 /// socket is kept until the function returns so another attempt cannot
 /// receive the same port. Port 0 binds take this path; an explicitly
 /// requested port is bound once and reported as-is.
-async fn bind_ephemeral_pair_with<Tcp, Udp, T, U>(
-    bind: &str,
-    bind_udp: U,
-    bind_tcp: T,
-) -> io::Result<(Udp, Tcp)>
+async fn bind_ephemeral_pair_with<Tcp, Udp, T, U>(bind: &str, bind_udp: U, bind_tcp: T) -> io::Result<(Udp, Tcp)>
 where
     Udp: BoundUdpSocket,
     T: FnMut(SocketAddr) -> TcpBindFuture<Tcp>,
     U: FnMut(&str) -> UdpBindFuture<Udp>,
 {
-    bind_ephemeral_pair_with_start(
-        bind,
-        rand::random_range(0..DYNAMIC_PORT_COUNT),
-        bind_udp,
-        bind_tcp,
-    )
-    .await
+    bind_ephemeral_pair_with_start(bind, rand::random_range(0..DYNAMIC_PORT_COUNT), bind_udp, bind_tcp).await
 }
 
 async fn bind_ephemeral_pair_with_start<Tcp, Udp, T, U>(
@@ -397,12 +387,10 @@ mod tests {
             move |addr| {
                 tcp_ports.lock().unwrap().push(addr.port());
                 if (exclusion_start..exclusion_end).contains(&addr.port()) {
-                    let denied: io::Result<MockTcpListener> =
-                        Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                    let denied: io::Result<MockTcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
                     Box::pin(async move { denied }) as TcpBindFuture<MockTcpListener>
                 } else {
-                    Box::pin(async move { Ok(MockTcpListener(addr)) })
-                        as TcpBindFuture<MockTcpListener>
+                    Box::pin(async move { Ok(MockTcpListener(addr)) }) as TcpBindFuture<MockTcpListener>
                 }
             },
         )
@@ -413,9 +401,7 @@ mod tests {
         assert_eq!(tried.len(), SEQUENTIAL_BIND_ATTEMPTS + 1);
         assert_eq!(tried[..SEQUENTIAL_BIND_ATTEMPTS], [55_000, 55_001, 55_002, 55_003]);
         assert_eq!(tried[SEQUENTIAL_BIND_ATTEMPTS], 60_000);
-        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS]
-            .iter()
-            .all(|port| (exclusion_start..exclusion_end).contains(port)));
+        assert!(tried[..SEQUENTIAL_BIND_ATTEMPTS].iter().all(|port| (exclusion_start..exclusion_end).contains(port)));
         assert!(!(exclusion_start..exclusion_end).contains(&tried[SEQUENTIAL_BIND_ATTEMPTS]));
         assert_eq!(udp.local_addr().unwrap().port(), tried[SEQUENTIAL_BIND_ATTEMPTS]);
         assert_eq!(udp.local_addr().unwrap().port(), tcp.0.port());
@@ -433,18 +419,13 @@ mod tests {
             "127.0.0.1:0",
             move |bind: &str| {
                 let attempt = udp_attempts.fetch_add(1, Ordering::SeqCst);
-                let port = if bind.ends_with(":0") {
-                    55_000 + attempt as u16
-                } else {
-                    bind.rsplit_once(':').unwrap().1.parse().unwrap()
-                };
+                let port = if bind.ends_with(":0") { 55_000 + attempt as u16 } else { bind.rsplit_once(':').unwrap().1.parse().unwrap() };
                 let socket = MockUdpSocket(SocketAddr::from(([127, 0, 0, 1], port)));
                 Box::pin(async move { Ok(socket) }) as UdpBindFuture<MockUdpSocket>
             },
             move |addr| {
                 bind_ports.lock().unwrap().push(addr.port());
-                let denied: io::Result<MockTcpListener> =
-                    Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
+                let denied: io::Result<MockTcpListener> = Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES));
                 Box::pin(async move { denied }) as TcpBindFuture<MockTcpListener>
             },
         )
@@ -453,14 +434,7 @@ mod tests {
         let tried = ports.lock().unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), PORT_ZERO_BIND_ATTEMPTS);
         assert_eq!(tried.len(), PORT_ZERO_BIND_ATTEMPTS);
-        assert_eq!(
-            tried
-                .iter()
-                .copied()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            tried.len()
-        );
+        assert_eq!(tried.iter().copied().collect::<std::collections::HashSet<_>>().len(), tried.len());
         let error = result.unwrap_err().to_string();
         assert!(error.contains("tried UDP ports ["));
         for port in tried.iter() {
