@@ -1,6 +1,6 @@
 // Request editor. Edits a draft RequestDefinition; nothing here performs I/O
 // except explicit lint/preview calls to the Rust backend.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type EffectiveRequest, type LinkedFileReferrer, type LintResult } from "./api";
 import type {
   Assertion,
@@ -51,6 +51,8 @@ const PROTOCOLS: { id: NonNullable<RequestSpec["protocol"]>; label: string }[] =
   { id: "udp", label: "UDP" },
   { id: "mcp", label: "MCP" },
 ];
+/** The operation a request starts with when MCP is chosen but none was saved yet. */
+const DEFAULT_MCP: McpSpec = { operation: { kind: "tools_list" } };
 
 export function RequestEditor(props: {
   req: RequestDefinition;
@@ -103,7 +105,18 @@ export function RequestEditor(props: {
         }}
       >
         <div className="url-group">
-          <select className="field protocol-select" aria-label="Protocol" value={protocol} onChange={(e) => set({ protocol: e.target.value as RequestSpec["protocol"] })}>
+          <select
+            className="field protocol-select"
+            aria-label="Protocol"
+            value={protocol}
+            onChange={(e) => {
+              const next = e.target.value as RequestSpec["protocol"];
+              // Switching to MCP must save the tools/list default: otherwise the editor shows it
+              // but Send refuses the request for missing MCP settings.
+              const mcp = next === "mcp" && !spec.mcp ? { mcp: DEFAULT_MCP } : {};
+              set({ protocol: next, ...mcp });
+            }}
+          >
             {PROTOCOLS.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.label}
@@ -640,6 +653,11 @@ function mcpOperationDefault(kind: McpOperation["kind"]): McpOperation {
   }
 }
 
+/** A gRPC request with reflection and an empty message, for records that have no gRPC spec yet. */
+function defaultGrpc(): GrpcSpec {
+  return { service: "", method: "", schema: { kind: "reflection" }, messages: ["{}"] };
+}
+
 /** MCP (Streamable HTTP): the operation, the session options, and "discover tools". */
 function McpEditor(props: {
   spec: RequestSpec;
@@ -651,7 +669,7 @@ function McpEditor(props: {
   onTreeChanged?: () => void;
 }) {
   const { spec, set } = props;
-  const m: McpSpec = spec.mcp ?? { operation: { kind: "tools_list" } };
+  const m: McpSpec = spec.mcp ?? DEFAULT_MCP;
   const op = m.operation;
   const setM = (patch: Partial<McpSpec>) => set({ mcp: { ...m, ...patch } });
   const setOp = (operation: McpOperation) => setM({ operation });
@@ -824,6 +842,11 @@ export function ProtocolEditor({
   onTreeChanged?: () => void;
 }) {
   const p = spec.protocol ?? "http";
+  // The latest spec, so a handler that awaits a native dialog still merges into what is on screen.
+  const latest = useRef(spec);
+  useEffect(() => {
+    latest.current = spec;
+  });
   if (p === "mcp") {
     return (
       <McpEditor
@@ -896,7 +919,7 @@ export function ProtocolEditor({
     );
   }
   if (p === "grpc") {
-    const g = spec.grpc ?? { service: "", method: "", schema: { kind: "reflection" as const }, messages: ["{}"] };
+    const g = spec.grpc ?? defaultGrpc();
     const wire = g.wire ?? "grpc";
     const web = wire !== "grpc";
     const streamingRequest = g.mode === "client_streaming" || g.mode === "bidirectional";
@@ -942,13 +965,20 @@ export function ProtocolEditor({
             className="field"
             value={g.schema.kind}
             onChange={async (e) => {
-              if (e.target.value === "reflection") set({ grpc: { ...g, schema: { kind: "reflection" } } });
-              else {
-                const files = await api.chooseFiles("attachment", { multiple: e.target.value === "proto_files" });
-                if (files.length === 0) return;
-                const refs = await Promise.all(files.map((f) => api.attachmentAdd(f.token, null)));
-                set({ grpc: { ...g, schema: e.target.value === "proto_files" ? { kind: "proto_files", files: refs } : { kind: "descriptor_set", attachment: refs[0] } } });
+              // Read the choice before awaiting the native dialog: React resets this controlled
+              // select to the saved schema kind while the dialog is open, so reading it afterwards
+              // recorded a ".proto files" choice as a descriptor set.
+              const kind = e.target.value as GrpcSpec["schema"]["kind"];
+              if (kind === "reflection") {
+                set({ grpc: { ...(latest.current.grpc ?? defaultGrpc()), schema: { kind: "reflection" } } });
+                return;
               }
+              const files = await api.chooseFiles("attachment", { multiple: kind === "proto_files" });
+              if (files.length === 0) return;
+              const refs = await Promise.all(files.map((f) => api.attachmentAdd(f.token, null)));
+              // Merge into the latest spec so edits made while the dialog was open are kept.
+              const current = latest.current.grpc ?? defaultGrpc();
+              set({ grpc: { ...current, schema: kind === "proto_files" ? { kind: "proto_files", files: refs } : { kind: "descriptor_set", attachment: refs[0] } } });
             }}
           >
             <option value="reflection" disabled={web}>
