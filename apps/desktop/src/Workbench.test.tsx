@@ -597,6 +597,175 @@ describe("workspace lists follow the selected workspace", () => {
   });
 });
 
+describe("imports refresh the selected workspace and its open tabs", () => {
+  const emptySpecReport = {
+    warnings: [],
+    unsupported: [],
+    external_refs: [],
+    scripts: [],
+    inactive_settings: [],
+    redactions: [],
+    required_variables: [],
+    counts: {
+      operations_found: 0,
+      requests: 0,
+      folders: 0,
+      environments: 0,
+      skipped_operations: 0,
+      warnings: 0,
+    },
+  };
+
+  it(
+    "reloads environments and replaces a clean tab after importing a spec into the current workspace",
+    async () => {
+      let imported = false;
+      backend({
+        environments_list: (a) => [
+          environment(
+            imported ? "new-env" : "old-env",
+            a.workspaceId as string,
+            imported ? "Imported env" : "Old env",
+          ),
+        ],
+        spec_preview: () => ({
+          detected: { kind: "openapi", dialect: "openapi", syntax: "json" },
+          report: emptySpecReport,
+          folders: 1,
+          requests: 1,
+          environments: 1,
+          sample: [],
+        }),
+        spec_import: () => {
+          imported = true;
+          requests.r1 = request("r1", "A", "Alpha", { url: "https://imported.test/" });
+          return {
+            workspace_id: "A",
+            import_id: "import-1",
+            requests: 1,
+            report: emptySpecReport,
+          };
+        },
+      });
+      await boot();
+      await openTab("Alpha");
+      expect(screen.getByRole("option", { name: "Old env" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Import" }));
+      fireEvent.change(screen.getByPlaceholderText(/curl -X POST/), {
+        target: { value: "openapi: 3.0.0" },
+      });
+      fireEvent.click(screen.getByLabelText(/Into “One”/));
+      fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+      await screen.findByText("Requests / folders / environments");
+      fireEvent.click(screen.getByRole("button", { name: "Import", exact: true }));
+
+      await waitFor(() => expect(urlField().value).toBe("https://imported.test/"));
+      expect(await screen.findByRole("option", { name: "Imported env" })).toBeTruthy();
+      expect(screen.queryByRole("option", { name: "Old env" })).toBeNull();
+      expect(
+        calls("tls_profiles_list").filter((c) => c.workspaceId === "A").length,
+      ).toBeGreaterThan(1);
+      expect(calls("history_list").filter((c) => c.workspaceId === "A").length).toBeGreaterThan(1);
+    },
+  );
+
+  it(
+    "keeps a dirty draft when a spec reimport changes its saved request",
+    async () => {
+      backend({
+        spec_preview: () => ({
+          detected: { kind: "openapi", dialect: "openapi", syntax: "json" },
+          report: emptySpecReport,
+          folders: 1,
+          requests: 1,
+          environments: 0,
+          sample: [],
+        }),
+        spec_import: () => {
+          requests.r1 = request("r1", "A", "Alpha", { url: "https://imported.test/" });
+          return { workspace_id: "A", import_id: "import-2", requests: 1, report: emptySpecReport };
+        },
+      });
+      await boot();
+      await openTab("Alpha");
+      fireEvent.change(urlField(), { target: { value: "https://my-draft.test/" } });
+      fireEvent.click(screen.getByRole("button", { name: "Import" }));
+      fireEvent.change(screen.getByPlaceholderText(/curl -X POST/), {
+        target: { value: "openapi: 3.0.0" },
+      });
+      fireEvent.click(screen.getByLabelText(/Into “One”/));
+      fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+      await screen.findByText("Requests / folders / environments");
+      fireEvent.click(screen.getByRole("button", { name: "Import", exact: true }));
+
+      await waitFor(() => expect(urlField().value).toBe("https://my-draft.test/"));
+      expect(screen.getByLabelText("unsaved")).toBeTruthy();
+      expect(
+        await screen.findByText(/unsaved tab\(s\) kept; stored requests changed/),
+      ).toBeTruthy();
+    },
+  );
+
+  it(
+    "refreshes clean tabs and workspace lists after bundle Replace existing",
+    async () => {
+      let imported = false;
+      backend({
+        file_choose: () => [{ token: "bundle-token", file_name: "workspace.anvil" }],
+        import_preview: () => ({
+          plan: {
+            policy: "replace",
+            to_create: 0,
+            to_replace: 1,
+            skipped_existing: 0,
+            conflicts: [],
+            foreign_secrets: [],
+            foreign_objects: [],
+            existing_workspaces: [{ id: "A", name: "One" }],
+          },
+          warnings: [],
+          secrets_restored: false,
+          missing_secrets: [],
+          linked_files: [],
+          workspaces: ["One"],
+          workspace_ids: ["A"],
+          full_backup: false,
+          api_standards_count: 0,
+          bundle_sha256: "hash",
+        }),
+        import_apply: () => {
+          imported = true;
+          requests.r1 = request("r1", "A", "Alpha", { url: "https://bundle.test/" });
+          return { workspace_ids: ["A"] };
+        },
+        environments_list: (a) => [
+          environment(
+            imported ? "bundle-env" : "old-env",
+            a.workspaceId as string,
+            imported ? "Bundle env" : "Old env",
+          ),
+        ],
+      });
+      await boot();
+      await openTab("Alpha");
+      fireEvent.click(screen.getByRole("button", { name: "Import" }));
+      fireEvent.click(screen.getByRole("tab", { name: "Anvil bundle / backup" }));
+      fireEvent.click(screen.getByRole("button", { name: "Choose bundle…" }));
+      fireEvent.change(screen.getByLabelText("If objects already exist"), {
+        target: { value: "replace" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+      await screen.findByText("To replace");
+      fireEvent.click(screen.getByLabelText(/I trust this bundle/));
+      fireEvent.click(screen.getByRole("button", { name: "Import", exact: true }));
+
+      await waitFor(() => expect(urlField().value).toBe("https://bundle.test/"));
+      expect(await screen.findByRole("option", { name: "Bundle env" })).toBeTruthy();
+      expect(screen.queryByRole("option", { name: "Old env" })).toBeNull();
+    },
+  );
+});
+
 describe("saving a request", () => {
   it("marks the request saved (control)", async () => {
     backend({ request_save: (a) => a.request });

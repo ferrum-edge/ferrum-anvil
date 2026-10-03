@@ -108,6 +108,10 @@
 
 ### Fixed
 
+- Desktop imports: refresh the selected workspace's environments, profiles,
+  history and request tree after a spec import or bundle import. Open tabs for
+  replaced requests now reload when clean; unsaved drafts and running sends or
+  sessions are preserved safely.
 - Diagnostics: cancellation findings now use the local-client scope only when
   dispatch recorded no request bytes; canceled requests that may have reached
   the peer use the client-to-peer scope.
