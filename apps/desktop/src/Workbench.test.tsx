@@ -651,13 +651,14 @@ describe("imports refresh the selected workspace and its open tabs", () => {
       await openTab("Alpha");
       expect(screen.getByRole("option", { name: "Old env" })).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Import" }));
+      const importDialog = screen.getByRole("dialog", { name: "Import" });
       fireEvent.change(screen.getByPlaceholderText(/curl -X POST/), {
         target: { value: "openapi: 3.0.0" },
       });
       fireEvent.click(screen.getByLabelText(/Into “One”/));
       fireEvent.click(screen.getByRole("button", { name: "Preview" }));
       await screen.findByText("Requests / folders / environments");
-      fireEvent.click(screen.getByRole("button", { name: /^Import$/ }));
+      fireEvent.click(within(importDialog).getByRole("button", { name: /^Import$/ }));
 
       await waitFor(() => expect(urlField().value).toBe("https://imported.test/"));
       expect(await screen.findByRole("option", { name: "Imported env" })).toBeTruthy();
@@ -690,13 +691,14 @@ describe("imports refresh the selected workspace and its open tabs", () => {
       await openTab("Alpha");
       fireEvent.change(urlField(), { target: { value: "https://my-draft.test/" } });
       fireEvent.click(screen.getByRole("button", { name: "Import" }));
+      const importDialog = screen.getByRole("dialog", { name: "Import" });
       fireEvent.change(screen.getByPlaceholderText(/curl -X POST/), {
         target: { value: "openapi: 3.0.0" },
       });
       fireEvent.click(screen.getByLabelText(/Into “One”/));
       fireEvent.click(screen.getByRole("button", { name: "Preview" }));
       await screen.findByText("Requests / folders / environments");
-      fireEvent.click(screen.getByRole("button", { name: /^Import$/ }));
+      fireEvent.click(within(importDialog).getByRole("button", { name: /^Import$/ }));
 
       await waitFor(() => expect(urlField().value).toBe("https://my-draft.test/"));
       expect(screen.getByLabelText("unsaved")).toBeTruthy();
@@ -749,15 +751,17 @@ describe("imports refresh the selected workspace and its open tabs", () => {
       await boot();
       await openTab("Alpha");
       fireEvent.click(screen.getByRole("button", { name: "Import" }));
+      const importDialog = screen.getByRole("dialog", { name: "Import" });
       fireEvent.click(screen.getByRole("tab", { name: "Anvil bundle / backup" }));
-      fireEvent.click(screen.getByRole("button", { name: "Choose bundle…" }));
-      fireEvent.change(screen.getByLabelText("If objects already exist"), {
+      fireEvent.click(within(importDialog).getByRole("button", { name: "Choose bundle…" }));
+      await within(importDialog).findByText("workspace.anvil");
+      fireEvent.change(within(importDialog).getByLabelText("If objects already exist"), {
         target: { value: "replace" },
       });
-      fireEvent.click(screen.getByRole("button", { name: "Preview" }));
-      await screen.findByText("To replace");
-      fireEvent.click(screen.getByLabelText(/I trust this bundle/));
-      fireEvent.click(screen.getByRole("button", { name: /^Import$/ }));
+      fireEvent.click(within(importDialog).getByRole("button", { name: "Preview" }));
+      await within(importDialog).findByText("To replace");
+      fireEvent.click(within(importDialog).getByLabelText(/I trust this bundle/));
+      fireEvent.click(within(importDialog).getByRole("button", { name: /^Import$/ }));
 
       await waitFor(() => expect(urlField().value).toBe("https://bundle.test/"));
       expect(await screen.findByRole("option", { name: "Bundle env" })).toBeTruthy();

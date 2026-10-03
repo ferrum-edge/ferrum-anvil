@@ -64,6 +64,8 @@
 
 ### Changed
 
+- Workbench import tests now scope submit-button queries to the import dialog and
+  wait for the bundle chooser result before previewing it.
 - Documentation: link Anvil's contract pin to the immutable Ferrum contract
   release and describe the central store, consumed files and re-vendoring rule.
 - Documentation: reconcile the completion report's current-state statements
