@@ -384,11 +384,7 @@ mod tests {
         diagnose_with_stream(protocol, status, None)
     }
 
-    fn diagnose_with_stream(
-        protocol: Protocol,
-        status: ProtocolStatus,
-        stream: Option<&StreamTranscript>,
-    ) -> Vec<DiagnosticFinding> {
+    fn diagnose_with_stream(protocol: Protocol, status: ProtocolStatus, stream: Option<&StreamTranscript>) -> Vec<DiagnosticFinding> {
         let trust = FerrumTrust::NotConfigured;
         let input = DiagnosticInput {
             protocol,
@@ -582,11 +578,8 @@ mod tests {
 
     #[test]
     fn a_tcp_half_close_finding_fails_closed_without_a_retained_control_entry() {
-        let dropped = StreamTranscript {
-            messages: vec![tcp_message(Direction::Received, "bytes", 12)],
-            dropped_messages: 1,
-            ..Default::default()
-        };
+        let dropped =
+            StreamTranscript { messages: vec![tcp_message(Direction::Received, "bytes", 12)], dropped_messages: 1, ..Default::default() };
         let findings = diagnose_with_stream(Protocol::Tcp, half_closed_tcp(6, 12), Some(&dropped));
         assert!(!findings.iter().any(|finding| finding.code == "tcp.reply_after_half_close"));
 
