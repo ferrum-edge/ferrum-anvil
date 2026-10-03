@@ -117,7 +117,11 @@
   every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
   proxy URL), a per-run value that reaches the URL's scheme or host is
   refused, naming its source but never its value. A per-run port is allowed
-  only after a fixed loopback host.
+  only after a fixed loopback host. Loopback judgments now use the transport's
+  DNS policy, including overrides and custom resolvers, and require every
+  resolved address to be loopback; failed lookups count as remote. The
+  preflight also checks per-run OAuth token URLs and interactive authorization
+  URLs against the same origin and proxy rules (#295, #296).
 - Desktop imports: refresh the selected workspace's environments, profiles,
   history and request tree after a spec import or bundle import. Open tabs for
   replaced requests now reload when clean; unsaved drafts and running sends or
