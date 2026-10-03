@@ -733,9 +733,7 @@ fn url_resolves_loopback(ctx: &anvil_engine::ExecutionContext, url: &str) -> boo
             runtime
                 .ok()
                 .and_then(|runtime| runtime.block_on(anvil_transport::dns::resolve(&host, port, &dns, timeout)).ok())
-                .is_some_and(|resolution| {
-                    !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip()))
-                })
+                .is_some_and(|resolution| !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())))
         })
         .and_then(|thread| thread.join().map_err(|_| std::io::Error::other("preflight DNS thread panicked")))
         .unwrap_or(false)
