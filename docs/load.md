@@ -227,9 +227,11 @@ first: a MASQUE proxy, or the selected proxy profile of any kind (HTTP,
 HTTPS, SOCKS5 or HBONE), e.g. `GET http://127.0.0.1:8080 via HTTP proxy
 proxy.example.test:3128`. The profile is picked exactly as the engine picks
 it: a target its `NO_PROXY` list bypasses is sent directly, so it is shown
-without the proxy. It warns that traffic leaves this machine when a target
-or the proxy it actually uses is not a loopback address or `localhost`
-(each host is judged on its own).
+without the proxy. It warns that traffic leaves this machine when any address
+the transport's DNS policy resolves for a target or the proxy it actually uses
+is not loopback (each host is judged on its own). This includes configured DNS
+overrides and custom resolvers; failed or empty resolutions are treated as
+remote.
 
 The preflight judges each origin from the URL alone (a request's URL and a
 MASQUE proxy URL, for every protocol), resolved as every iteration resolves
@@ -250,6 +252,11 @@ A per-run value in a URL's scheme or host makes the preflight refuse the plan,
 because it cannot prove that every iteration stays on loopback. The refusal
 names the URL part and where the value comes from (a dataset column, an
 extracted value, an iteration variable or a dynamic helper), never the value.
+A request's effective OAuth profile is checked too: its token URL on every
+grant, and its authorization URL for authorization-code/PKCE and refresh-token
+grants, use the same per-run stand-ins and DNS/proxy checks. These auth-flow
+destinations appear alongside the request in the preflight, so a dataset-driven
+issuer cannot send credentials off-machine without being surfaced.
 A per-run port is allowed only after a fixed loopback host, for example
 `http://127.0.0.1:{{port}}/`, with nothing but fixed digits beside the value
 (`:80{{n}}` is allowed, `:{{port}}@example.net` is refused). The URL is split
@@ -633,7 +640,7 @@ Observations that shaped the implementation:
 | LOAD-010 | `load_010_bounded_samples_under_sustained_failures_and_large_bodies`, `metrics::tests::load_010_…` |
 | LOAD-011 | `load_011_report_roundtrip_and_html_escape_response_content`, `report::tests::load_011_…`, `html::tests::load_011_…` |
 | LOAD-012 | not implemented |
-| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` (the local-traffic warning judges target and proxy hosts separately, for every proxy kind, after `NO_PROXY`); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
+| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…`, `specs_load.rs::load_preflight_uses_transport_dns_overrides_for_loopback_judgments`, `specs_load.rs::load_preflight_checks_oauth_urls_with_per_run_values` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` (local-traffic warnings judge resolved target and proxy addresses, including OAuth flow URLs); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
 | LOAD-014 | `compare::tests::load_014_incompatible_runs_withhold_latency_deltas` |
 
 ### Live lab check (real gateway)

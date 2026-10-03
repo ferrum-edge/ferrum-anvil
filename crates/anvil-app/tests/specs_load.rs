@@ -5,8 +5,11 @@ use anvil_app::profiles::ProfileManager;
 use anvil_app::specs::SpecTarget;
 use anvil_domain::Id;
 use anvil_domain::assertions::{Extraction, ExtractionSource};
+use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{Body, RequestSpec};
+use anvil_domain::secret::SensitiveValue;
+use anvil_domain::settings::DnsOverride;
 use anvil_domain::workspace::DatasetFormat;
 use anvil_import::{ImportOptions, ReimportApproval};
 use anvil_storage::KdfParams;
@@ -227,6 +230,75 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
     let helper_method = app.create_request(&ws, None, "helper method", spec).unwrap();
     let p = app.save_load_plan(chain_plan(ws, env, vec![helper_method.meta.id], None)).unwrap();
     assert_eq!(app.load_preflight(&p).unwrap().destinations, vec!["{{$randomFrom GET|POST}} http://127.0.0.1:8080".to_string()]);
+}
+
+#[test]
+fn load_preflight_uses_transport_dns_overrides_for_loopback_judgments() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("DNS preflight").unwrap();
+    let mut workspace = app.workspace(&ws.meta.id).unwrap();
+    workspace.settings.dns_overrides.push(DnsOverride { host: "localhost".into(), addresses: vec!["198.51.100.7".into()] });
+    app.save_workspace(workspace).unwrap();
+    let req = app.create_request(&ws.meta.id, None, "local name", RequestSpec::http("GET", "http://localhost:8080/")).unwrap();
+    let p = app.save_load_plan(plan(ws.meta.id, req.meta.id)).unwrap();
+    let pre = app.load_preflight(&p).unwrap();
+    assert!(leaves_machine(&pre.warnings), "{:?}", pre.warnings);
+
+    let mut workspace = app.workspace(&ws.meta.id).unwrap();
+    workspace.settings.dns_overrides[0].addresses = vec!["127.0.0.1".into(), "::1".into()];
+    app.save_workspace(workspace).unwrap();
+    let pre = app.load_preflight(&p).unwrap();
+    assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
+}
+
+#[test]
+fn load_preflight_checks_oauth_urls_with_per_run_values() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let (ws, env, dataset) = preflight_workspace(&app);
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/resource");
+    spec.auth = AuthConfig::OAuth2 {
+        config: OAuth2Config {
+            grant: OAuthGrant::ClientCredentials,
+            token_url: "https://{{host}}/token".into(),
+            authorization_url: String::new(),
+            client_id: "client".into(),
+            client_secret: SensitiveValue::default(),
+            scope: String::new(),
+            audience: String::new(),
+            client_auth: OAuthClientAuth::RequestBody,
+            token_cache_id: None,
+            refresh_skew_secs: 30,
+        },
+    };
+    let req = app.create_request(&ws, None, "OAuth", spec.clone()).unwrap();
+    let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
+    let error = app.load_preflight(&p).unwrap_err().to_string();
+    assert!(error.contains("OAuth token URL"), "{error}");
+    assert!(error.contains("dataset column"), "{error}");
+    assert!(!error.contains("anvil-preflight"), "{error}");
+
+    spec.auth = AuthConfig::OAuth2 {
+        config: OAuth2Config {
+            grant: OAuthGrant::AuthorizationCodePkce,
+            token_url: "http://127.0.0.1:8080/token/{{rowId}}".into(),
+            authorization_url: "http://127.0.0.1:8080/authorize/{{rowId}}".into(),
+            client_id: "client".into(),
+            client_secret: SensitiveValue::default(),
+            scope: String::new(),
+            audience: String::new(),
+            client_auth: OAuthClientAuth::RequestBody,
+            token_cache_id: None,
+            refresh_skew_secs: 30,
+        },
+    };
+    let req = app.create_request(&ws, None, "Local OAuth", spec).unwrap();
+    let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
+    let pre = app.load_preflight(&p).unwrap();
+    assert!(pre.destinations.iter().any(|d| d.starts_with("OAuth token URL http://127.0.0.1:8080")), "{:?}", pre.destinations);
+    assert!(pre.destinations.iter().any(|d| d.starts_with("OAuth authorization URL http://127.0.0.1:8080")), "{:?}", pre.destinations);
+    assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
 }
 
 /// A per-run value is layered above workspace, environment and folder
