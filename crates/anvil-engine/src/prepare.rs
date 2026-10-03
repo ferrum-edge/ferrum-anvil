@@ -566,6 +566,59 @@ mod tests {
         }
     }
 
+    /// The load preflight accepts a per-run port after a fixed loopback host
+    /// (`anvil-app` `per_run_origin`) only because a value there can change
+    /// the port or make the URL invalid, never the host: an `@` anywhere in
+    /// the authority is refused, the host ends at the first `:`, and the port
+    /// must be ASCII digits in range. Pinned for every scheme a load request
+    /// is sent with, and for a URL whose scheme is inferred.
+    #[test]
+    fn a_value_after_a_fixed_hosts_port_colon_never_changes_the_host() {
+        let schemes = ["http", "https", "ws", "wss", "grpc", "grpcs", "tcp", "tls", "udp", "dtls"];
+        let values = [
+            "80@evil.example",
+            "80\\@evil.example",
+            "80#@evil.example",
+            "80/../@evil.example",
+            "80%40evil.example",
+            "\u{ff18}\u{ff10}",
+            "80:81",
+            "80\tevil",
+            "//evil.example",
+            "80.evil.example",
+            "80\\evil.example",
+            "",
+        ];
+        for scheme in schemes {
+            for (host, parsed) in [("127.0.0.1", "127.0.0.1"), ("[::1]", "::1"), ("localhost", "localhost")] {
+                for value in values {
+                    let url = format!("{scheme}://{host}:{value}/x");
+                    if let Ok(t) = parse_target(&url, &[scheme], &mut vec![]) {
+                        assert_eq!(t.host, parsed, "{url}");
+                    }
+                }
+            }
+        }
+        for value in values {
+            let url = format!("localhost:{value}/x");
+            if let Ok(t) = parse_target(&url, &["https", "http"], &mut vec![]) {
+                assert_eq!(t.host, "localhost", "{url}");
+            }
+        }
+
+        // The two rejections the preflight relies on, explicitly.
+        for scheme in schemes {
+            for value in ["80@evil.example", "80\\@evil.example", "@evil.example"] {
+                let url = format!("{scheme}://127.0.0.1:{value}/x");
+                assert!(parse_target(&url, &[scheme], &mut vec![]).is_err(), "{url}");
+            }
+            for port in ["65536", "99999", "-1", "80x", "\u{ff18}\u{ff10}", "80:81", "80.evil.example", "80%40evil.example"] {
+                let url = format!("{scheme}://127.0.0.1:{port}/x");
+                assert!(parse_target(&url, &[scheme], &mut vec![]).is_err(), "{url}");
+            }
+        }
+    }
+
     fn prepared(spec: &RequestSpec) -> PreparedHttp {
         let vars = vec![
             crate::vars::VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },

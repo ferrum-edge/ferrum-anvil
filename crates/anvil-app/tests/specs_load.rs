@@ -211,6 +211,9 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
         ("http://[::1]:{{port}}/", "GET http://[::1]:<per-iteration port>"),
         ("localhost:{{port}}/x", "GET https://localhost:<per-iteration port>"),
         ("http://127.0.0.1:{{$randomInt 8000 9000}}/", "GET http://127.0.0.1:<per-iteration port>"),
+        // Fixed digits beside the value are part of the per-run port; the
+        // preflight never shows or parses a port it made up (`99991`).
+        ("http://127.0.0.1:9999{{port}}/", "GET http://127.0.0.1:<per-iteration port>"),
     ] {
         let req = app.create_request(&ws, None, "per-run port", RequestSpec::http("GET", url)).unwrap();
         let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
@@ -218,6 +221,12 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
         assert_eq!(pre.destinations, vec![destination.to_string()], "{url}");
         assert!(!leaves_machine(&pre.warnings), "{url}: {:?}", pre.warnings);
     }
+
+    // A dynamic helper in the method is shown as written, not as one draw.
+    let spec = RequestSpec::http("{{$randomFrom GET|POST}}", "http://127.0.0.1:8080/x");
+    let helper_method = app.create_request(&ws, None, "helper method", spec).unwrap();
+    let p = app.save_load_plan(chain_plan(ws, env, vec![helper_method.meta.id], None)).unwrap();
+    assert_eq!(app.load_preflight(&p).unwrap().destinations, vec!["{{$randomFrom GET|POST}} http://127.0.0.1:8080".to_string()]);
 }
 
 /// A per-run value is layered above workspace, environment and folder
@@ -265,9 +274,13 @@ fn load_preflight_refuses_a_per_run_value_that_shadows_a_loopback_origin() {
     let remote = save(vec![remote_port], Some(dataset));
     assert_refused(&app, &remote, "port", "a dataset column");
     assert!(app.load_preflight(&remote).unwrap_err().to_string().contains("only after a fixed loopback host"));
-    // A per-run port before a fixed userinfo marker never reaches a send.
+    // Only fixed digits may share the port with a per-run value: anything
+    // else (here a userinfo marker the engine would refuse anyway) is refused
+    // by the preflight itself.
     let port_userinfo = create("port userinfo", RequestSpec::http("GET", "http://127.0.0.1:{{port}}@example.net/x"));
-    assert!(app.load_preflight(&save(vec![port_userinfo], Some(dataset))).is_err());
+    let shared = save(vec![port_userinfo], Some(dataset));
+    assert_refused(&app, &shared, "port", "a dataset column");
+    assert!(app.load_preflight(&shared).unwrap_err().to_string().contains("only fixed digits may share the port"));
 }
 
 /// Dynamic helpers draw a new value on every send, so one preview's loopback
@@ -278,43 +291,16 @@ fn load_preflight_refuses_a_dynamic_helper_in_the_origin() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let (ws, env, _) = preflight_workspace(&app);
-    for url in [
-        "http://{{$randomFrom 127.0.0.1|example.org}}/echo",
-        "http://{{ $randomFrom 127.0.0.1|127.0.0.2 }}:8080/echo",
-        "{{base}}/echo",
-    ] {
+    for url in
+        ["http://{{$randomFrom 127.0.0.1|example.org}}/echo", "http://{{ $randomFrom 127.0.0.1|127.0.0.2 }}:8080/echo", "{{base}}/echo"]
+    {
         let req = app.create_request(&ws, None, "helper", RequestSpec::http("GET", url)).unwrap();
         assert_refused(&app, &app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], None)).unwrap(), "host", "a dynamic helper");
     }
 }
 
-/// Session protocols get the same per-run layering: a dataset column that
-/// shadows a loopback WebSocket host, or a helper choosing a MASQUE proxy, is
-/// refused; per-run values in a fixed loopback session URL's path are not.
-#[test]
-fn load_preflight_judges_per_run_values_in_session_urls() {
+fn udp_via_masque(proxy_url: &str) -> RequestSpec {
     use anvil_domain::request::{MASQUE_DEFAULT_TEMPLATE, MasqueSpec, PayloadEncoding, Protocol, StreamPayload, UdpSpec};
-    let root = tempfile::tempdir().unwrap();
-    let app = new_app(root.path());
-    let (ws, env, dataset) = preflight_workspace(&app);
-    let socket = |url: &str| {
-        let mut s = RequestSpec::http("GET", url);
-        s.protocol = Protocol::WebSocket;
-        app.create_request(&ws, None, "socket", s).unwrap().meta.id
-    };
-    let save = |chain: Vec<Id>, dataset: Option<Id>| app.save_load_plan(chain_plan(ws, env, chain, dataset)).unwrap();
-
-    let by_host = socket("ws://{{host}}:9000/socket");
-    let pre = app.load_preflight(&save(vec![by_host], None)).unwrap();
-    assert_eq!(pre.destinations, vec!["WebSocket ws://127.0.0.1:9000".to_string()]);
-    assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
-    assert_refused(&app, &save(vec![by_host], Some(dataset)), "host", "a dataset column");
-
-    let by_path = socket("ws://127.0.0.1:9000/rows/{{qaRow}}?i={{anvil.iteration}}");
-    let pre = app.load_preflight(&save(vec![by_path], Some(dataset))).unwrap();
-    assert_eq!(pre.destinations, vec!["WebSocket ws://127.0.0.1:9000".to_string()]);
-    assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
-
     let mut udp = RequestSpec::http("GET", "udp://127.0.0.1:9");
     udp.protocol = Protocol::Udp;
     udp.udp = Some(UdpSpec {
@@ -323,16 +309,146 @@ fn load_preflight_judges_per_run_values_in_session_urls() {
         response_window_ms: 100,
         max_datagrams: 1,
         masque: Some(MasqueSpec {
-            proxy_url: "https://{{ $randomFrom 127.0.0.1|example.org }}:4433".into(),
+            proxy_url: proxy_url.into(),
             uri_template: MASQUE_DEFAULT_TEMPLATE.into(),
             datagrams: Default::default(),
         }),
         proxy_protocol: None,
     });
-    let tunneled = app.create_request(&ws, None, "via masque", udp).unwrap();
+    udp
+}
+
+/// Session protocols get the same per-run layering: a dataset column that
+/// shadows a loopback WebSocket host, a per-run scheme or a helper choosing a
+/// MASQUE proxy is refused; per-run values in a fixed loopback session URL's
+/// path, or its port, are not.
+#[test]
+fn load_preflight_judges_per_run_values_in_session_urls() {
+    use anvil_domain::request::Protocol;
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let (ws, env, dataset) = preflight_workspace(&app);
+    let session = |protocol: Protocol, url: &str| {
+        let mut s = RequestSpec::http("GET", url);
+        s.protocol = protocol;
+        app.create_request(&ws, None, "session", s).unwrap().meta.id
+    };
+    let save = |chain: Vec<Id>, dataset: Option<Id>| app.save_load_plan(chain_plan(ws, env, chain, dataset)).unwrap();
+    let local = |chain: Vec<Id>, dataset: Option<Id>, destination: &str| {
+        let pre = app.load_preflight(&save(chain, dataset)).unwrap();
+        assert_eq!(pre.destinations, vec![destination.to_string()]);
+        assert!(!leaves_machine(&pre.warnings), "{destination}: {:?}", pre.warnings);
+    };
+
+    let by_host = session(Protocol::WebSocket, "ws://{{host}}:9000/socket");
+    local(vec![by_host], None, "WebSocket ws://127.0.0.1:9000");
+    assert_refused(&app, &save(vec![by_host], Some(dataset)), "host", "a dataset column");
+    let by_path = session(Protocol::WebSocket, "ws://127.0.0.1:9000/rows/{{qaRow}}?i={{anvil.iteration}}");
+    local(vec![by_path], Some(dataset), "WebSocket ws://127.0.0.1:9000");
+
+    // A per-run port after a fixed loopback host, for a special and a
+    // non-special scheme, and for a MASQUE proxy URL.
+    let ws_port = session(Protocol::WebSocket, "ws://127.0.0.1:{{port}}/socket");
+    local(vec![ws_port], Some(dataset), "WebSocket ws://127.0.0.1:<per-iteration port>");
+    let tcp_port = session(Protocol::Tcp, "tcp://[::1]:{{port}}");
+    local(vec![tcp_port], Some(dataset), "TCP tcp://[::1]:<per-iteration port>");
+    let masque_port = app.create_request(&ws, None, "masque port", udp_via_masque("https://127.0.0.1:{{port}}")).unwrap();
+    local(vec![masque_port.meta.id], Some(dataset), "UDP udp://127.0.0.1:9 via MASQUE proxy https://127.0.0.1:<per-iteration port>");
+
+    // The scheme, a port after a remote host, and anything but fixed digits
+    // beside a per-run port are refused for sessions too.
+    let scheme = session(Protocol::Tcp, "{{verb}}://127.0.0.1:9000");
+    assert_refused(&app, &save(vec![scheme], Some(dataset)), "scheme", "a dataset column");
+    let remote_port = session(Protocol::WebSocket, "ws://192.0.2.1:{{port}}/socket");
+    assert_refused(&app, &save(vec![remote_port], Some(dataset)), "port", "a dataset column");
+    let port_userinfo = session(Protocol::WebSocket, "ws://127.0.0.1:{{port}}@example.net/socket");
+    let shared = save(vec![port_userinfo], Some(dataset));
+    assert_refused(&app, &shared, "port", "a dataset column");
+    assert!(app.load_preflight(&shared).unwrap_err().to_string().contains("only fixed digits may share the port"));
+
+    let helper_proxy = udp_via_masque("https://{{ $randomFrom 127.0.0.1|example.org }}:4433");
+    let tunneled = app.create_request(&ws, None, "via masque", helper_proxy).unwrap();
     let p = save(vec![tunneled.meta.id], None);
     assert_refused(&app, &p, "host", "a dynamic helper");
     assert!(app.load_preflight(&p).unwrap_err().to_string().contains("MASQUE proxy URL"));
+}
+
+/// A per-run port honours `NO_PROXY` as far as it can: an entry without a
+/// port bypasses the proxy on every port, so a loopback host it lists is
+/// sent directly. An entry naming one port cannot cover a per-run port, so
+/// the proxy is assumed to carry it.
+#[test]
+fn load_preflight_applies_port_free_no_proxy_entries_to_a_per_run_port() {
+    use anvil_domain::settings::ProxySelection;
+    use anvil_domain::tls::{ProxyKind, ProxyProfile};
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Load").unwrap();
+    let preflight = |no_proxy: &str| {
+        let proxy = app
+            .save_proxy_profile(ProxyProfile {
+                id: Id::new(),
+                workspace_id: ws.meta.id,
+                name: "proxy".into(),
+                kind: ProxyKind::Http,
+                address: "proxy.example.test:3128".into(),
+                username: None,
+                password: None,
+                no_proxy: no_proxy.into(),
+                tls_profile_id: None,
+                hbone: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let mut spec = RequestSpec::http("GET", "http://127.0.0.1:{{$randomInt 8000 9000}}/x");
+        spec.settings.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
+        let req = app.create_request(&ws.meta.id, None, "req", spec).unwrap();
+        app.load_preflight(&app.save_load_plan(plan(ws.meta.id, req.meta.id)).unwrap()).unwrap()
+    };
+
+    for no_proxy in ["localhost,127.0.0.1", "127.0.0.0/8", "*"] {
+        let pre = preflight(no_proxy);
+        assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:<per-iteration port>".to_string()], "{no_proxy}");
+        assert!(!leaves_machine(&pre.warnings), "{no_proxy}: {:?}", pre.warnings);
+    }
+    for no_proxy in ["", "127.0.0.1:8080", "localhost"] {
+        let pre = preflight(no_proxy);
+        let destination = "GET http://127.0.0.1:<per-iteration port> via HTTP proxy proxy.example.test:3128";
+        assert_eq!(pre.destinations, vec![destination.to_string()], "{no_proxy}");
+        assert!(leaves_machine(&pre.warnings), "{no_proxy}: {:?}", pre.warnings);
+    }
+}
+
+/// A step under a sealed import root sees no dataset row and no value
+/// extracted outside the root, so neither can shadow the root's own
+/// variables there, while the same URL outside the root is refused.
+#[test]
+fn load_preflight_keeps_per_run_values_out_of_a_sealed_import_root() {
+    use anvil_domain::workspace::Variable;
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let (ws, env, dataset) = preflight_workspace(&app);
+    let target = SpecTarget::Workspace { workspace_id: ws };
+    let done = app.spec_import(SPEC_V1.as_bytes(), "orders.yaml", &ImportOptions::default(), target).unwrap();
+    let mut sealed = app.folder(&done.root_folder_id.unwrap()).unwrap();
+    assert!(sealed.import_root && !sealed.use_workspace_scope);
+    sealed.variables.push(Variable::plain("host", "127.0.0.1"));
+    let sealed = app.save_folder(sealed).unwrap();
+    let by_host = || RequestSpec::http("GET", "http://{{host}}:8080/x");
+    let inside = app.create_request(&ws, Some(sealed.meta.id), "inside", by_host()).unwrap().meta.id;
+    let outside = app.create_request(&ws, None, "outside", by_host()).unwrap().meta.id;
+    let producer_spec = extracting(RequestSpec::http("GET", "http://127.0.0.1:8080/next"), "host");
+    let producer = app.create_request(&ws, None, "producer", producer_spec).unwrap().meta.id;
+
+    let p = app.save_load_plan(chain_plan(ws, env, vec![producer, inside], Some(dataset))).unwrap();
+    let pre = app.load_preflight(&p).unwrap();
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080".to_string()]);
+    assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
+    let p = app.save_load_plan(chain_plan(ws, env, vec![outside], Some(dataset))).unwrap();
+    assert_refused(&app, &p, "host", "a dataset column");
+    let p = app.save_load_plan(chain_plan(ws, env, vec![producer, outside], None)).unwrap();
+    assert_refused(&app, &p, "host", "a value extracted by a chain step");
 }
 
 #[test]

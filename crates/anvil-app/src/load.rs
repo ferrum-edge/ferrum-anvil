@@ -306,9 +306,9 @@ impl App {
                     let schemes = anvil_load::protocol::send_schemes(Protocol::Http);
                     let target = anvil_engine::prepare::parse_target(&proven.probe, schemes, &mut Vec::new())
                         .map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-                    let method = match resolver.resolve(ctx.spec.method.trim(), "method") {
+                    let method = match resolver.resolve(&mask_dynamic_expressions(ctx.spec.method.trim()), "method") {
                         Ok(method) if per_run_sources(&method).is_empty() => method.to_ascii_uppercase(),
-                        // A per-run method is shown as written.
+                        // A per-run method (or a dynamic helper) is shown as written.
                         _ => ctx.spec.method.trim().to_string(),
                     };
                     let mut d = format!("{method} {}", origin_label(&target.url(), proven.port_varies));
@@ -514,6 +514,8 @@ fn preflight_resolver(ctx: &anvil_engine::ExecutionContext, id: &Id, p: &LoadPla
 struct PerRunOrigin {
     part: &'static str,
     sources: Vec<&'static str>,
+    /// The rule a per-run port broke, when `part` is the port.
+    rule: Option<&'static str>,
 }
 
 enum UrlProblem {
@@ -527,8 +529,9 @@ enum UrlProblem {
 /// A URL whose origin the preflight proved: per-run values reach at most its
 /// path, query and fragment, or its port after a fixed loopback host.
 struct ProvenUrl {
-    /// The resolved URL with each per-run value replaced by `1`, to parse and
-    /// route. It is never sent.
+    /// The resolved URL with a per-run port (with any fixed digits beside the
+    /// value) replaced by `1`, and every other per-run value by `1`, to parse
+    /// and route. It is never sent.
     probe: String,
     /// The port comes from a per-run value.
     port_varies: bool,
@@ -540,56 +543,71 @@ impl ProvenUrl {
     }
 
     /// The proxy profile the engine routes this URL through. With a per-run
-    /// port, `NO_PROXY` may bypass some ports and not others, so the selected
-    /// profile is assumed to carry the traffic.
+    /// port, only a `NO_PROXY` entry without a port bypasses every port, so
+    /// the selected profile is assumed to carry the traffic unless one of
+    /// those matches the host.
     fn proxy<'a>(&self, ctx: &'a anvil_engine::ExecutionContext, protocol: Protocol) -> Option<&'a ProxyProfile> {
+        let (target, proxy) = anvil_load::protocol::route(ctx, &self.probe, protocol)?;
         if !self.port_varies {
-            return anvil_load::protocol::route(ctx, &self.probe, protocol).and_then(|(_, proxy)| proxy);
+            return proxy;
         }
         let selected = anvil_engine::settings::resolve(&ctx.settings_layers).proxy_profile_id;
-        selected.and_then(|id| ctx.proxy_profiles.iter().find(|proxy| proxy.id == id))
+        let selected = selected.and_then(|id| ctx.proxy_profiles.iter().find(|proxy| proxy.id == id));
+        selected.filter(|proxy| !anvil_transport::net::no_proxy_matches_every_port(&proxy.no_proxy, &target.host))
     }
 }
 
 /// Resolve a URL template as every iteration sends it and prove its origin.
 fn prove_url(resolver: &Resolver, template: &str, field: &str) -> std::result::Result<ProvenUrl, UrlProblem> {
-    let resolved = match resolver.resolve(&mask_dynamic_expressions(template), field) {
-        Ok(resolved) => resolved,
+    let mut resolved = match resolver.resolve(&mask_dynamic_expressions(template), field) {
+        Ok(resolved) => resolved.trim().to_string(),
         Err(f) => return Err(UrlProblem::Unresolved(replace_stand_ins(&format!("{:?}: {}", f.kind, f.message), "<per-iteration value>"))),
     };
-    let port_varies = per_run_origin(&resolved).map_err(UrlProblem::PerRun)?;
+    let port = per_run_origin(&resolved).map_err(UrlProblem::PerRun)?;
+    let port_varies = port.is_some();
+    // The whole per-run port becomes one valid port, never fixed digits
+    // followed by a placeholder (`9999{{p}}` must not become `99991`).
+    if let Some(port) = port {
+        resolved.replace_range(port, "1");
+    }
     Ok(ProvenUrl { probe: replace_stand_ins(&resolved, "1"), port_varies })
 }
 
-/// Whether a per-run value reaches the port of `resolved` (a URL resolved
-/// with the per-run stand-ins), or which part of its origin it reaches when
-/// that cannot be proven local. The URL is split as `parse_target` splits it:
-/// the scheme ends at the first `://` (with none, a fixed one is inferred),
-/// the authority at the first `/`, `?` or `#`, and the host at the `:` before
-/// the port (after the `]` of an IPv6 literal). A per-run port is accepted
-/// only after a fixed loopback host: the value then starts after that `:`, so
-/// it can change the port (or make the URL invalid) but never the host.
-fn per_run_origin(resolved: &str) -> std::result::Result<bool, PerRunOrigin> {
-    let raw = resolved.trim();
-    let (scheme, rest) = raw.split_once("://").unwrap_or(("", raw));
+/// The byte range of the port of `resolved` (a trimmed URL resolved with the
+/// per-run stand-ins) when a per-run value reaches it, or which part of its
+/// origin a per-run value reaches when that cannot be proven local. The URL
+/// is split as `parse_target` splits it: the scheme ends at the first `://`
+/// (with none, a fixed one is inferred), the authority at the first `/`, `?`
+/// or `#`, and the host at the `:` before the port (after the `]` of an IPv6
+/// literal). A per-run port is accepted only after a fixed loopback host,
+/// and with nothing but fixed digits beside it: the value then starts after
+/// that `:`, so it can change the port (or make the URL invalid: the engine
+/// refuses an `@` in the authority and a port that is not 0-65535 in ASCII
+/// digits) but never the host.
+fn per_run_origin(resolved: &str) -> std::result::Result<Option<std::ops::Range<usize>>, PerRunOrigin> {
+    let (scheme, rest) = resolved.split_once("://").unwrap_or(("", resolved));
     let sources = per_run_sources(scheme);
     if !sources.is_empty() {
-        return Err(PerRunOrigin { part: "scheme", sources });
+        return Err(PerRunOrigin { part: "scheme", sources, rule: None });
     }
     let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
     let sources = per_run_sources(authority);
     if sources.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
     let (host, port) = authority.split_at(host_end.unwrap_or(authority.len()));
-    if !port.starts_with(':') || !per_run_sources(host).is_empty() {
-        return Err(PerRunOrigin { part: "host", sources });
-    }
+    let Some(port) = port.strip_prefix(':').filter(|_| per_run_sources(host).is_empty()) else {
+        return Err(PerRunOrigin { part: "host", sources, rule: None });
+    };
     if !host_is_loopback(host) {
-        return Err(PerRunOrigin { part: "port", sources });
+        return Err(PerRunOrigin { part: "port", sources, rule: Some("a per-iteration port is allowed only after a fixed loopback host") });
     }
-    Ok(true)
+    if !replace_stand_ins(port, "").bytes().all(|b| b.is_ascii_digit()) {
+        return Err(PerRunOrigin { part: "port", sources, rule: Some("only fixed digits may share the port with a per-iteration value") });
+    }
+    let start = resolved.len() - rest.len() + host.len() + 1;
+    Ok(Some(start..resolved.len() - rest.len() + authority.len()))
 }
 
 /// The refusal of a load step whose `what` (its URL or MASQUE proxy URL) has
@@ -599,8 +617,8 @@ fn per_run_origin_refusal(request: &str, what: &str, origin: &PerRunOrigin) -> A
     let (part, sources) = (origin.part, origin.sources.join(" and "));
     let mut message = format!("load preflight cannot prove that a variable URL origin stays on loopback: the {part} of the {what}");
     message.push_str(&format!(" of request '{request}' comes from {sources}, which can change on every iteration"));
-    if part == "port" {
-        message.push_str("; a per-iteration port is allowed only after a fixed loopback host");
+    if let Some(rule) = origin.rule {
+        message.push_str(&format!("; {rule}"));
     }
     AppError::Invalid(message)
 }
@@ -681,6 +699,15 @@ fn host_is_loopback(host: &str) -> bool {
         Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
         Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
         Err(_) => h.strip_suffix('.').unwrap_or(h).eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// [`url_origin`], with a per-run port shown as `<per-iteration port>`
+/// instead of the probe's placeholder.
+fn origin_label(url: &str, port_varies: bool) -> String {
+    match url::Url::parse(url) {
+        Ok(u) if port_varies => format!("{}://{}:<per-iteration port>", u.scheme(), u.host_str().unwrap_or("?")),
+        _ => url_origin(url),
     }
 }
 

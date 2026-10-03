@@ -251,12 +251,16 @@ because it cannot prove that every iteration stays on loopback. The refusal
 names the URL part and where the value comes from (a dataset column, an
 extracted value, an iteration variable or a dynamic helper), never the value.
 A per-run port is allowed only after a fixed loopback host, for example
-`http://127.0.0.1:{{port}}/`: the URL is split as the engine splits it, and
-the value starts after the host's `:`, so it can change the port or make the
-URL invalid but never the host. Such a destination is shown as
-`http://127.0.0.1:<per-iteration port>`, and a selected proxy profile is
-assumed to carry it whatever its `NO_PROXY` list says, since that list may
-bypass some ports and not others. A per-run port after any other host is
+`http://127.0.0.1:{{port}}/`, with nothing but fixed digits beside the value
+(`:80{{n}}` is allowed, `:{{port}}@example.net` is refused). The URL is split
+as the engine splits it, and the value starts after the host's `:`; the engine
+refuses any `@` in the authority and any port that is not 0-65535 in ASCII
+digits, so the value can change the port or make the URL invalid but never
+the host. Such a destination is shown as
+`http://127.0.0.1:<per-iteration port>`. A selected proxy profile is assumed
+to carry it unless a `NO_PROXY` entry without a port (such as `127.0.0.1`,
+`localhost`, `127.0.0.0/8` or `*`) matches the host: an entry naming one port
+cannot cover a port that changes. A per-run port after any other host is
 refused. Dataset cells and extracted values are never shown in the preflight
 destination or refusal message.
 
