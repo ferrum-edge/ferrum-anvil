@@ -23,8 +23,12 @@ fn fixture_dir() -> PathBuf {
 fn assert_snapshot() -> String {
     let variant = std::env::var("ANVIL_RESOURCE_VARIANT").expect("hosted variant");
     let snapshot = std::env::var("ANVIL_RESOURCE_EXPECTED_SNAPSHOT").expect("hosted snapshot");
-    let built_variant = option_env!("ANVIL_RESOURCE_BUILD_VARIANT").expect("embedded variant");
-    let built_snapshot = option_env!("ANVIL_RESOURCE_BUILD_SNAPSHOT").expect("embedded snapshot");
+    let Some(built_variant) = option_env!("ANVIL_RESOURCE_BUILD_VARIANT") else {
+        panic!("qualification binary is missing its embedded variant");
+    };
+    let Some(built_snapshot) = option_env!("ANVIL_RESOURCE_BUILD_SNAPSHOT") else {
+        panic!("qualification binary is missing its embedded snapshot");
+    };
     assert_eq!(variant, built_variant, "measured binary must match the named variant");
     assert_eq!(snapshot, built_snapshot, "measured binary must match the exact snapshot");
     let (total, entry) = match variant.as_str() {
