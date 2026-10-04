@@ -1398,7 +1398,9 @@ pub(crate) mod tests {
                 assert_rejected_session_command(
                     &st,
                     cancel,
-                    |st, fence, args: &CancelSessionArgs| crate::cmd_sessions::admit_cancel(st, fence, &args.execution_id, &args.attempt_id),
+                    |st, fence, args: &CancelSessionArgs| {
+                        crate::cmd_sessions::admit_cancel(st, fence, &args.execution_id, &args.attempt_id)
+                    },
                     expected,
                 );
             }
