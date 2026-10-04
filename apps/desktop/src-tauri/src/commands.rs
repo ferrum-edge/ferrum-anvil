@@ -1386,37 +1386,19 @@ pub(crate) mod tests {
                         payload["attemptId"] = serde_json::json!("");
                     }
                 }
-                let expected = if empty {
-                    "attemptId must be nonempty"
-                } else {
-                    "missing field `attemptId`"
-                };
+                let expected = if empty { "attemptId must be nonempty" } else { "missing field `attemptId`" };
                 let admit_open = |_: &DesktopState, fence, _: &OpenSessionArgs| Ok(fence);
                 assert_rejected_session_command(&st, open, admit_open, expected);
                 assert_rejected_session_command(
                     &st,
                     send,
-                    |st, fence, args: &SessionArgs| {
-                        crate::cmd_sessions::admit_control(
-                            st,
-                            fence,
-                            &args.execution_id,
-                            &args.attempt_id,
-                        )
-                    },
+                    |st, fence, args: &SessionArgs| crate::cmd_sessions::admit_control(st, fence, &args.execution_id, &args.attempt_id),
                     expected,
                 );
                 assert_rejected_session_command(
                     &st,
                     cancel,
-                    |st, fence, args: &CancelSessionArgs| {
-                        crate::cmd_sessions::admit_cancel(
-                            st,
-                            fence,
-                            &args.execution_id,
-                            &args.attempt_id,
-                        )
-                    },
+                    |st, fence, args: &CancelSessionArgs| crate::cmd_sessions::admit_cancel(st, fence, &args.execution_id, &args.attempt_id),
                     expected,
                 );
             }
