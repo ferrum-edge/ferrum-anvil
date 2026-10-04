@@ -13,6 +13,14 @@
 
 ### Added
 
+- Opt-in draft identity expectations authenticate the required binding and its
+  publication journal, reject missing or replaced bindings before installation,
+  and fence cooperating profile writers through the checked installation callback.
+  Recovery-key unlock remains available; new draft keychain enrollment is refused
+  before creating profile or OS-store state. Normal creation remains legacy.
+  Legacy link/unlink requires explicit enrollment. Format and caller adoption,
+  physical platform acceptance and whole-profile freshness remain pending owner
+  decisions; see `docs/security/identity-binding-expectation.md`.
 - Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
   v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
   It knows the release's new `ai_prompt_shield` MCP refusals: `400`
