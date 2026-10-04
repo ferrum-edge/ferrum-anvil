@@ -274,10 +274,7 @@ impl App {
         let ctx = self.build_context(request_id, ws, draft, opts)?;
         let target = anvil_engine::oauth_http::interactive_oauth(&ctx)
             .map_err(|failure| anvil_identity::FlowError::Configuration(failure.message))?;
-        Ok(anvil_engine::oauth_http::token_status(
-            &self.engine,
-            &target,
-        ))
+        Ok(anvil_engine::oauth_http::token_status(&self.engine, &target))
     }
 
     /// Forget the cached token for the OAuth profile in effect.

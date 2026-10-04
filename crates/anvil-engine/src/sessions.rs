@@ -1624,22 +1624,8 @@ async fn prepare_masque(
         host_from_authority: false,
         path_only: false,
     };
-    let Authorized {
-        mut headers,
-        query,
-        facts,
-        ..
-    } = apply_auth(
-        engine,
-        ctx,
-        &mut b.prep,
-        &mut b.redactor,
-        &connect,
-        cancel,
-    )
-    .await?;
-    b.inferred
-        .extend(http_exec::cookie_header_budget(&mut headers).0);
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    b.inferred.extend(http_exec::cookie_header_budget(&mut headers).0);
     let t = Target { query, ..connect.target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);

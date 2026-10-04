@@ -13,6 +13,17 @@
 
 ### Added
 
+- Candidate proposal (PR #308; owner approval, independent security review and
+  exact-head hosted qualification remain pending; no released version is
+  claimed patched): bounds retained HTTP cookies and aggregate request Cookie
+  headers, including after signing and for MASQUE CONNECT; requires HTTPS or a
+  literal loopback token issuer (including mapped IPv6) before credential
+  expansion, with matching App preflight and browser sign-in/status failures;
+  and pins validated DNS answers to the actual dial while restricting direct
+  redirects by address class. Opaque proxy resolution remains unverifiable:
+  original proxied requests remain supported, but redirects through proxy
+  routes are refused. Cookie eviction/omission, issuer restrictions and proxy
+  redirect behavior remain owner-unapproved compatibility changes.
 - Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
   v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
   It knows the release's new `ai_prompt_shield` MCP refusals: `400`

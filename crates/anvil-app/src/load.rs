@@ -343,10 +343,7 @@ impl App {
                     if label == "OAuth token URL" {
                         // Eligibility is the acquisition sink's literal policy,
                         // independent of proxy routing or client DNS overrides.
-                        anvil_engine::oauth_http::require_secure_token_endpoint(
-                            &proven.probe,
-                        )
-                        .map_err(AppError::Invalid)?;
+                        anvil_engine::oauth_http::require_secure_token_endpoint(&proven.probe).map_err(AppError::Invalid)?;
                     }
                     let target = anvil_engine::prepare::parse_target(
                         &proven.probe,

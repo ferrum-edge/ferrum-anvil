@@ -295,27 +295,15 @@ async fn proxy_resolved_names_ignore_client_pins_including_oauth_and_no_proxy() 
         let before = recorder.requests().len();
         let api_before = api.requests().len();
         if scheme == "http" {
-            assert!(app
-                .load_preflight(&p)
-                .unwrap_err()
-                .to_string()
-                .contains("HTTPS or literal-loopback HTTP"));
+            assert!(app.load_preflight(&p).unwrap_err().to_string().contains("HTTPS or literal-loopback HTTP"));
             let o = send(&context(&app, &p)).await;
             assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
-            assert_eq!(
-                recorder.requests().len(),
-                before,
-                "ineligible token URL never reaches the proxy"
-            );
+            assert_eq!(recorder.requests().len(), before, "ineligible token URL never reaches the proxy");
             assert_eq!(api.requests().len(), api_before);
         } else {
             assert!(warns(&app, &p));
             let _ = send(&context(&app, &p)).await;
-            assert!(recorder
-                .requests()
-                .last()
-                .unwrap()
-                .contains("issuer.example.test"));
+            assert!(recorder.requests().last().unwrap().contains("issuer.example.test"));
         }
 
         // Port-free NO_PROXY makes the same fixed pin authoritative on the client.
@@ -344,21 +332,12 @@ async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch(
     let ws = app.create_workspace("Issuer eligibility").unwrap().meta.id;
     let api = Recorder::start(false).await;
     let recorder = Recorder::start(false).await;
-    let profile = proxy(
-        &app,
-        ws,
-        ProxyKind::Http,
-        &recorder.address.to_string(),
-        "",
-    );
+    let profile = proxy(&app, ws, ProxyKind::Http, &recorder.address.to_string(), "");
     for host in ["localhost", "issuer.example.test", "[::ffff:192.168.1.1]"] {
         pin(&app, ws, host, &["127.0.0.1"]);
         for proxied in [false, true] {
             let mut spec = RequestSpec::http("GET", &api.url("/api"));
-            spec.auth = oauth(&format!(
-                "http://{host}:{}/token?hidden=endpoint-material",
-                api.address.port()
-            ));
+            spec.auth = oauth(&format!("http://{host}:{}/token?hidden=endpoint-material", api.address.port()));
             if let AuthConfig::OAuth2 { config } = &mut spec.auth {
                 config.client_id = "{{missing_client_id}}".into();
                 config.client_secret = SensitiveValue::template("{{missing_client_secret}}");
@@ -373,17 +352,7 @@ async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch(
             assert!(!error.contains("missing_client"));
             let o = send(&context(&app, &p)).await;
             assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
-            assert_eq!(
-                o.record
-                    .attempts
-                    .last()
-                    .unwrap()
-                    .failure
-                    .as_ref()
-                    .unwrap()
-                    .kind,
-                FailureKind::AuthPreparationFailed
-            );
+            assert_eq!(o.record.attempts.last().unwrap().failure.as_ref().unwrap().kind, FailureKind::AuthPreparationFailed);
             assert!(api.requests().is_empty());
             assert!(recorder.requests().is_empty());
         }

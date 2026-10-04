@@ -255,30 +255,16 @@ fn jwt_cookie(size: usize) -> AuthConfig {
 const BUDGET_NOTE: &str = "a Cookie header exceeds the 8 KiB request cookie budget";
 
 fn assert_cookie_budget(o: &ExecutionOutput, headers: &[(String, String)], oversized: bool) {
-    let values: Vec<&str> = headers
-        .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
-        .map(|(_, value)| value.as_str())
-        .collect();
-    let bytes =
-        values.iter().map(|value| value.len()).sum::<usize>() + values.len().saturating_sub(1) * 2;
+    let values: Vec<&str> =
+        headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("cookie")).map(|(_, value)| value.as_str()).collect();
+    let bytes = values.iter().map(|value| value.len()).sum::<usize>() + values.len().saturating_sub(1) * 2;
     assert!(bytes <= 8192, "aggregate Cookie output exceeded its ceiling");
-    assert_eq!(
-        values.is_empty(),
-        oversized,
-        "Cookie omission differs from the budget"
-    );
-    assert_eq!(
-        o.record.prepared.inferred.iter().any(|note| note == BUDGET_NOTE),
-        oversized
-    );
+    assert_eq!(values.is_empty(), oversized, "Cookie omission differs from the budget");
+    assert_eq!(o.record.prepared.inferred.iter().any(|note| note == BUDGET_NOTE), oversized);
     let record = serde_json::to_string(&o.record).unwrap();
     assert!(!record.contains("audit-only-cookie-signing-key"));
     for value in values {
-        assert!(
-            !record.contains(value),
-            "wire credential appeared in the record"
-        );
+        assert!(!record.contains(value), "wire credential appeared in the record");
     }
 }
 
@@ -292,11 +278,7 @@ async fn jwt_cookie_output_is_bounded_on_http_and_sse_reconnection_with_jars_on_
             let oversized = size > 1024;
             let configure = |mut c: ExecutionContext| {
                 c.auth_layers = vec![("request".into(), jwt_cookie(size))];
-                if cookies {
-                    c
-                } else {
-                    cookies_off(c)
-                }
+                if cookies { c } else { cookies_off(c) }
             };
             let o = ok(&e, &configure(get(&f.url("/echo")))).await;
             let headers = f.log.last_request_headers().unwrap();
@@ -310,20 +292,13 @@ async fn jwt_cookie_output_is_bounded_on_http_and_sse_reconnection_with_jars_on_
             c.spec.sse.as_mut().unwrap().max_events = 2;
             let o = ok(&e, &configure(c)).await;
             assert_eq!(o.record.attempts.len(), 2);
-            assert!(matches!(
-                o.record.attempts[1].reason,
-                anvil_domain::execution::AttemptReason::Retry { .. }
-            ));
+            assert!(matches!(o.record.attempts[1].reason, anvil_domain::execution::AttemptReason::Retry { .. }));
             let requests: Vec<Vec<(String, String)>> = f
                 .log
                 .entries()
                 .into_iter()
                 .filter_map(|entry| match entry.event {
-                    GroundTruth::RequestReceived { path, headers, .. }
-                        if path.starts_with("/sse") =>
-                    {
-                        Some(headers)
-                    }
+                    GroundTruth::RequestReceived { path, headers, .. } if path.starts_with("/sse") => Some(headers),
                     _ => None,
                 })
                 .collect();
@@ -331,22 +306,11 @@ async fn jwt_cookie_output_is_bounded_on_http_and_sse_reconnection_with_jars_on_
             for headers in &requests {
                 assert_cookie_budget(&o, headers, oversized);
             }
-            assert!(requests[1]
-                .iter()
-                .any(|(name, value)| name.eq_ignore_ascii_case("last-event-id") && value == "0"));
+            assert!(requests[1].iter().any(|(name, value)| name.eq_ignore_ascii_case("last-event-id") && value == "0"));
             if !oversized {
-                let cookie = |headers: &[(String, String)]| {
-                    headers
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case("cookie"))
-                        .unwrap()
-                        .1
-                        .clone()
-                };
-                assert!(
-                    cookie(&requests[0]) != cookie(&requests[1]),
-                    "time claims changed"
-                );
+                let cookie =
+                    |headers: &[(String, String)]| headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("cookie")).unwrap().1.clone();
+                assert!(cookie(&requests[0]) != cookie(&requests[1]), "time claims changed");
             }
         }
     }
@@ -362,9 +326,7 @@ async fn reflected_grpc_resigning_cannot_restore_an_initially_withheld_cookie() 
         c.spec.grpc.as_mut().unwrap().schema = GrpcSchemaSource::Reflection;
         c.auth_layers = vec![("request".into(), jwt_cookie(size))];
         let task = tokio::spawn(async move { run(&Engine::new(), &c).await });
-        tokio::time::timeout(Duration::from_secs(10), g.held())
-            .await
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), g.held()).await.unwrap();
         // The reflection request was signed before connecting. The actual
         // call is signed after this gate, with changed JWT time claims.
         tokio::time::sleep(Duration::from_millis(1100)).await;

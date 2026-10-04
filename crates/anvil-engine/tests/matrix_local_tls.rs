@@ -159,10 +159,7 @@ async fn local_010_connect_deadline_does_not_claim_firewall_or_backend() {
     // loopback listener instead, so this still exercises the connect deadline.
     let stalled = anvil_fixtures::dns::stalled_listener("127.0.0.1:0").unwrap();
     let c = with_settings(
-        ctx(RequestSpec::http(
-            "GET",
-            &format!("http://{}/", stalled.addr),
-        )),
+        ctx(RequestSpec::http("GET", &format!("http://{}/", stalled.addr))),
         SettingsOverrides { timeouts: Some(TimeoutOverrides { connect_ms: Some(Some(400)), ..Default::default() }), ..Default::default() },
     );
     let o = run(&c).await;
@@ -178,13 +175,7 @@ async fn local_010_connect_deadline_does_not_claim_firewall_or_backend() {
     let peer = fx::serve("127.0.0.1:0", None).await.unwrap();
     let positive = with_settings(
         ctx(RequestSpec::http("GET", &peer.url("/echo"))),
-        SettingsOverrides {
-            timeouts: Some(TimeoutOverrides {
-                connect_ms: Some(Some(400)),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
+        SettingsOverrides { timeouts: Some(TimeoutOverrides { connect_ms: Some(Some(400)), ..Default::default() }), ..Default::default() },
     );
     assert_eq!(run(&positive).await.record.response.unwrap().status, 200);
     assert_eq!(peer.log.count_requests(), 1);
