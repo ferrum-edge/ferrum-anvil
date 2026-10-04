@@ -1,5 +1,5 @@
 use anvil_diagnostics::import::{ImportError, MAX_ARRAY_ITEMS, MAX_BYTES, MAX_DEPTH, MAX_OBJECT_MEMBERS, MAX_STRING_BYTES, preview};
-use anvil_domain::diagnostic_import::{ImportedDiagnosticKind, ImportedDiagnosticTrust};
+use anvil_domain::diagnostic_import::{ImportedDiagnosticKind, ImportedDiagnosticPreview, ImportedDiagnosticTrust};
 use anvil_domain::diagnostics::Confidence;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,10 @@ fn report() -> Value {
 fn finding() -> Value {
     let bytes = std::fs::read(vendor().join("fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json")).unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn reported(preview: &ImportedDiagnosticPreview) -> Value {
+    serde_json::from_str(&preview.reported_json).unwrap()
 }
 
 fn accepts(value: &Value) -> bool {
@@ -102,7 +106,7 @@ fn known_fields_reject_null_without_losing_schema_permitted_null_or_unknown_memb
     value["collection"]["verification"] = json!("future_verification");
     value["x-future"] = json!({"authenticated": true, "nested": [null, "claim"]});
     let result = preview(value.to_string().as_bytes(), &|_| Ok(())).unwrap();
-    assert_eq!(result.reported, value);
+    assert_eq!(reported(&result), value);
     assert_eq!(result.trust, ImportedDiagnosticTrust::Unverified);
     assert_eq!(result.confidence, Confidence::Unknown);
 
@@ -224,7 +228,7 @@ fn forged_authenticated_flags_and_trusted_sources_remain_unknown_offline_claims(
     let result = preview(value.to_string().as_bytes(), &|_| Ok(())).unwrap();
     assert_eq!(result.confidence, Confidence::Unknown);
     assert_eq!(result.trust, ImportedDiagnosticTrust::Unverified);
-    assert_eq!(result.reported, value);
+    assert_eq!(reported(&result), value);
     assert_eq!(result.finding_count, 1);
     assert_eq!(result.observation_count, 0);
 }
@@ -256,7 +260,7 @@ fn alloy_cli_envelope_is_distinct_from_the_report_contract() {
     let value = json!({"report": report(), "warnings": [], "claimed_verification": null});
     let result = preview(value.to_string().as_bytes(), &|_| Ok(())).unwrap();
     assert_eq!(result.kind, ImportedDiagnosticKind::AlloyCli);
-    assert_eq!(result.reported, value);
+    assert_eq!(reported(&result), value);
     for patch in [
         json!({"path": "/tmp/file"}),
         json!({"warnings": null}),
@@ -301,7 +305,7 @@ fn immutable_real_alloy_exporter_golden_preserves_every_reported_fact() {
     let bytes = std::fs::read(root.join("diagnosis-edge-0.9.10.json")).unwrap();
     let golden: Value = serde_json::from_slice(&bytes).unwrap();
     let result = preview(&bytes, &|_| Ok(())).unwrap();
-    assert_eq!(result.reported, golden);
+    assert_eq!(reported(&result), golden);
     assert_eq!(result.confidence, Confidence::Unknown);
     assert_eq!(result.finding_count, 2);
     assert!(result.observation_count > 0);
@@ -314,5 +318,5 @@ fn immutable_real_alloy_exporter_golden_preserves_every_reported_fact() {
     let cli = json!({"claimed_verification": "unverified", "warnings": [], "report": golden});
     let result = preview(cli.to_string().as_bytes(), &|_| Ok(())).unwrap();
     assert_eq!(result.kind, ImportedDiagnosticKind::AlloyCli);
-    assert_eq!(result.reported, cli);
+    assert_eq!(reported(&result), cli);
 }

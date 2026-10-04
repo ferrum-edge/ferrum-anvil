@@ -17,7 +17,7 @@ export function DiagnosticImport() {
     },
     [],
   );
-  const reported = preview ? JSON.stringify(preview.reported, null, 2) : "";
+  const reported = preview?.reported_json ?? "";
   const displayLimit = 64 * 1024;
   const escaped = reported.replace(/[\u202a-\u202e\u2066-\u2069]/g, (c) =>
     `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,

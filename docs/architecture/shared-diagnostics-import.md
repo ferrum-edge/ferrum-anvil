@@ -58,8 +58,13 @@ tokens before allocating a JSON tree. A serde visitor rejects duplicate keys
 (including escaped aliases), strings and keys over 2,048 decoded UTF-8 bytes,
 arrays over 5,000 elements, objects over 128 members and trees over 200,000
 values. The schema additionally caps findings at 1,000, attributes at 32 and
-reference attempts at eight. Redaction discovery is bounded to 128 credential
-strings and 64 KiB of credential bytes; exceeding it rejects the preview.
+reference attempts at eight. Schema and semantic validation complete before
+redaction, so masking a credential cannot repair invalid JSON or invalid schema
+values. Redaction discovery is bounded to 128 nonempty registrations and 64 KiB
+of credential bytes; exceeding either rejects the preview. Repeated values and
+decoded layers count toward both budgets even though the scrubber deduplicates
+them. Each component has at most three strict, shrinking UTF-8 percent-decoding
+rounds. Invalid percent escapes or UTF-8 stop decoding without a lossy substitute.
 These limits apply to unknown fields and extensions as well.
 
 The consumer uses a fail-closed interpreter of the assertions in the three
@@ -80,7 +85,7 @@ required presence and nullable fields. None of these checks authenticates a clai
 
 ## Trust and presentation
 
-The private, ephemeral `ImportedDiagnosticPreview` DTO cannot substitute for an
+The ephemeral `ImportedDiagnosticPreview` DTO cannot substitute for an
 execution record, `DiagnosticFinding`, `GatewayDetail` or confirmed client
 diagnosis. Its assessment is always **unverified**, confidence **unknown**.
 Original reported verification, observation trust, confidence and authenticated
@@ -91,10 +96,27 @@ The command uses Anvil's existing credential-name classification and `Redactor`
 for exact values, encoded echoes and URL credentials. Credential-named subtrees
 and evidence/header `key`/`name`/`header` plus `value` pairs are masked. Recognized
 Bearer/Basic tokens and private-key text are scrubbed across the whole preview.
+Before global scrubbing, discovery extracts individual Cookie values, the first
+Set-Cookie pair (including quoted values, excluding attributes), and username and
+password components from structurally parsed URLs. Cookie header arrays and
+evidence/header pairs retain their context. URL fields and whitespace-delimited
+URLs in text contribute credentials, as do recognized credential query/fragment
+values. Raw and bounded valid percent-decoded components are registered, so
+matching echoes elsewhere are scrubbed. Overlapping values are scrubbed longest
+first. Values shorter than four UTF-8 bytes are masked in their credential
+structure but are deliberately not scrubbed from arbitrary text, which would
+otherwise shred ordinary words. URLs embedded without recognizable delimiters,
+other encodings and unrecognized free-form secrets can remain.
 The command does not resolve vault secrets. Unrecognized secrets in arbitrary
 free text can remain, so the preview retains a review-before-sharing notice.
 Errors contain fixed text, never attacker keys or JSON excerpts.
 
+Rust serializes the redacted tree to `reported_json` text before native IPC. The
+DTO transports bounded observation/finding counts plus kind, trust, confidence,
+fixed warnings and this string; it carries no JSON numeric tree to JavaScript.
+The domain DTO participates in JSON schema and TypeScript binding generation.
+The UI uses this text directly, without `JSON.parse` or `JSON.stringify`, retaining
+exact integer values such as the exporter's `1791123618658684620` nanoseconds.
 The UI renders up to 64 KiB of the redacted report as React text inside a `pre`,
 escaping bidirectional control characters and showing a truncation notice when
 needed, with fixed trust wording outside it. No Markdown, HTML, executable instructions or external links
@@ -106,9 +128,22 @@ All canonical positive and negative fixtures exercise both the production parser
 and dedicated IPC DTO/command. Independent schema tests check each canonical
 negative's expected location and keyword, as well as exact fixture presence.
 The real hosted golden preserves all reported facts and both telemetry source
-families without granting trust. Local validation is static only; formatting,
-compile, lint and execution gates belong to GitHub-hosted CI.
+families without granting trust. The existing native WDIO runner launches the
+actual Tauri E2E app for the diagnostic spec: all 27 shared fixtures, the actual
+Alloy report and source-derived CLI envelope cross native IPC. The golden's
+timestamp lexemes are compared as strings through IPC and the real dialog. The
+spec also covers forged provenance/authentication, credential echoes, truncated
+input, discovery count/byte caps, duplicate keys, invalid credential attributes,
+extra capabilities, presentation truncation, bidi escaping and clearing. It
+compares profile/workspace/history/settings state and hashes the throw-away
+profile's persisted bytes (including vault/database/WAL), without decrypting
+secrets. A loopback fixture observes no fetches to the supplied credential and
+markup URLs; this is a targeted network control, not a capture of all OS traffic.
+These added native tests require hosted results before qualification is claimed.
+Local validation is static only; formatting, compile, lint and execution gates
+belong to GitHub-hosted CI.
 
 This implements Anvil's consumer portion of
 [ferrum-alloy#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 That issue remains open for Nexus consumption and cross-repository qualification.
+The shared-contract qualification remains **PROPOSED** pending that evidence.

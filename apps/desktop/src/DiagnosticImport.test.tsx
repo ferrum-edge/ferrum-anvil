@@ -30,12 +30,16 @@ const result: ImportedDiagnosticPreview = {
   confidence: "unknown",
   observation_count: 0,
   finding_count: 1,
-  reported: {
-    ...JSON.parse(report),
-    findings: [{ confidence: "confirmed", title: '<img src="https://example.test/x">' }],
-    note: "[run me](javascript:alert(1)) file:///etc/passwd https://example.test/claims",
-    authorization: "‹redacted›",
-  },
+  reported_json: JSON.stringify(
+    {
+      ...JSON.parse(report),
+      findings: [{ confidence: "confirmed", title: '<img src="https://example.test/x">' }],
+      note: "[run me](javascript:alert(1)) file:///etc/passwd https://example.test/claims",
+      authorization: "‹redacted›",
+    },
+    null,
+    2,
+  ),
   warnings: ["Supplied findings are unverified claims."],
 };
 
@@ -57,6 +61,17 @@ function backend() {
 afterEach(() => {
   cleanup();
   invoke.mockReset();
+});
+
+it("renders Rust JSON text without rounding producer nanosecond integers", async () => {
+  const reported_json =
+    '{"start_unix_nano":1791123618658684620,"end_unix_nano":18446744073709551615}';
+  invoke.mockResolvedValue({ ...result, reported_json });
+  render(<DiagnosticImport />);
+  fireEvent.change(screen.getByLabelText("Paste diagnostic JSON"), { target: { value: report } });
+  fireEvent.click(screen.getByRole("button", { name: "Preview diagnostic" }));
+  const view = await screen.findByTestId("diagnostic-reported");
+  expect(view.textContent).toBe(reported_json);
 });
 
 it("opens from Import and renders escaped claims with no effects", async () => {
@@ -171,7 +186,7 @@ it("shows a bounded generic error without reflecting untrusted backend text", as
 it("bounds rendered UTF-8 text and escapes bidirectional controls", async () => {
   invoke.mockResolvedValue({
     ...result,
-    reported: { control: "\u202e", note: "é".repeat(64 * 1024) },
+    reported_json: JSON.stringify({ control: "\u202e", note: "é".repeat(64 * 1024) }),
   });
   render(<DiagnosticImport />);
   fireEvent.change(screen.getByLabelText("Paste diagnostic JSON"), { target: { value: report } });

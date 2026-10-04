@@ -62,11 +62,12 @@ pub fn preview(input: &[u8], redact: &dyn Fn(&mut Value) -> Result<(), ImportErr
         confidence: Confidence::Unknown,
         observation_count,
         finding_count,
-        reported: value,
+        reported_json: serde_json::to_string_pretty(&value).map_err(|_| ImportError::Json)?,
         warnings: vec![
             "Read-only offline preview: reported facts and authentication claims are unverified.".into(),
             "Supplied findings are conclusions, never evidence for an Anvil diagnosis.".into(),
             "Unknown members are uninterpreted claims. Review free text before sharing.".into(),
+            "Short or unrecognized free-text secrets can remain after credential redaction.".into(),
         ],
     })
 }
