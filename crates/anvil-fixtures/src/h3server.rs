@@ -709,11 +709,7 @@ async fn connect_udp(
 
 const CONNECT_UDP_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn drain_connect_udp_request(
-    recv: &mut h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
-    log: &GroundTruthLog,
-    end: &str,
-) {
+async fn drain_connect_udp_request(recv: &mut h3::server::RequestStream<h3_quinn::RecvStream, Bytes>, log: &GroundTruthLog, end: &str) {
     let mut bytes = 0u64;
     let drain = async {
         while let Some(mut chunk) = recv.recv_data().await? {
@@ -825,14 +821,7 @@ mod connect_udp_tests {
                     .unwrap();
                 let resolver = h3.accept().await.unwrap().unwrap();
                 let (req, stream) = resolver.resolve_request().await.unwrap();
-                let handler = tokio::spawn(connect_udp(
-                    req,
-                    stream,
-                    server_log,
-                    H3Options::default(),
-                    peer,
-                    DatagramRouter::default(),
-                ));
+                let handler = tokio::spawn(connect_udp(req, stream, server_log, H3Options::default(), peer, DatagramRouter::default()));
                 handler_tx.send(handler).unwrap();
                 let _ = h3.accept().await;
             });
@@ -844,12 +833,8 @@ mod connect_udp_tests {
             let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let port = target.local_addr().unwrap().port();
             let uri = format!("https://{addr}/.well-known/masque/udp/127.0.0.1/{port}/?{query}");
-            let mut req = http::Request::builder()
-                .method(http::Method::CONNECT)
-                .uri(uri)
-                .header("capsule-protocol", "?1")
-                .body(())
-                .unwrap();
+            let mut req =
+                http::Request::builder().method(http::Method::CONNECT).uri(uri).header("capsule-protocol", "?1").body(()).unwrap();
             req.extensions_mut().insert(h3::ext::Protocol::CONNECT_UDP);
             let mut stream = requests.send_request(req).await.unwrap();
             assert_eq!(stream.recv_response().await.unwrap().status(), 200);
@@ -930,10 +915,7 @@ mod connect_udp_tests {
                 assert!(!has_fault(&t.log, "masque_fin_drain_timeout"));
                 let entries = t.log.entries();
                 assert!(entries.iter().any(|e| e.event == GroundTruth::MessageReceived { bytes }));
-                let relayed = entries
-                    .iter()
-                    .filter(|e| matches!(e.event, GroundTruth::DatagramRelayed { .. }))
-                    .count();
+                let relayed = entries.iter().filter(|e| matches!(e.event, GroundTruth::DatagramRelayed { .. })).count();
                 assert_eq!(relayed, 1, "post-FIN capsules are drained, never forwarded");
             }
         }
@@ -972,21 +954,15 @@ mod connect_udp_tests {
         let mut t = tunnel("fin_after_ms=0").await;
         observe_fin(&mut t, false).await;
         let bound = CONNECT_UDP_DRAIN + Duration::from_secs(2);
-        tokio::time::timeout(bound, &mut t.handler)
-            .await
-            .expect("an open request must not retain the handler indefinitely")
-            .unwrap();
+        tokio::time::timeout(bound, &mut t.handler).await.expect("an open request must not retain the handler indefinitely").unwrap();
         assert!(has_fault(&t.log, "masque_fin_drain_timeout"));
         assert!(!has_fault(&t.log, "masque_fin_request_finished"));
         // The timeout sends an explicit cancellation, not quinn's implicit 0.
         let flight = Bytes::from([0, 2, 0, b'y'].repeat(32 * 1024));
-        let error = tokio::time::timeout(
-            Duration::from_secs(2),
-            t.stream.send_data(flight),
-        )
-        .await
-        .expect("the writer must observe the cleanup cancellation")
-        .unwrap_err();
+        let error = tokio::time::timeout(Duration::from_secs(2), t.stream.send_data(flight))
+            .await
+            .expect("the writer must observe the cleanup cancellation")
+            .unwrap_err();
         assert!(matches!(
             error,
             h3::error::StreamError::RemoteTerminate { code, .. }
@@ -999,13 +975,10 @@ mod connect_udp_tests {
         let mut t = tunnel("fin_after_ms=0").await;
         observe_fin(&mut t, false).await;
         t.quic.close(0u32.into(), b"peer done");
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            &mut t.handler,
-        )
-        .await
-        .expect("connection closure must release the request half promptly")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut t.handler)
+            .await
+            .expect("connection closure must release the request half promptly")
+            .unwrap();
         assert!(has_fault(&t.log, "masque_fin_request_closed"));
         assert!(!has_fault(&t.log, "masque_fin_drain_timeout"));
     }

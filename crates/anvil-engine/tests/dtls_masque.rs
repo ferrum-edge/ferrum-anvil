@@ -419,11 +419,7 @@ async fn a_tunnel_ending_during_the_handshake_fails_the_handshake_typed() {
         assert_eq!(phase(last(&o), Phase::DtlsHandshake), Some(PhaseStatus::Failed));
         assert!(f.message.contains("closed during the DTLS handshake"), "{}", f.message);
         assert_eq!(tunnel(&o).2.closed_by, ClosedBy::Peer);
-        assert!(
-            !codes(&o).iter().any(|c| c.starts_with("masque.")),
-            "a proxy close is not an abnormal end: {:?}",
-            codes(&o)
-        );
+        assert!(!codes(&o).iter().any(|c| c.starts_with("masque.")), "a proxy close is not an abnormal end: {:?}", codes(&o));
         assert!(o.record.stream.is_none());
         assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
         assert_eq!(tunnel(&o).2.received_capsules, 0, "no handshake replies after FIN");
