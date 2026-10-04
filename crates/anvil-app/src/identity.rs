@@ -32,7 +32,7 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::workspace::LinkedIdentity;
 use anvil_engine::oauth_http::TokenSummary;
 use anvil_identity::{ApiAuthorization, BrowserOpener, FlowObserver, FlowOptions, ProviderInfo, VerifiedIdentity};
-use anvil_storage::vault::ProfileHeader;
+use anvil_storage::vault::{self, IdentityBindingPublication, IdentityHeaderGuard, ProfileHeader};
 use anvil_storage::{Key, crypto};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,14 @@ pub enum IdentityPolicyError {
     NotLinked,
     #[error("the identity binding of this profile was changed outside Anvil; unlock with the recovery key and link the account again")]
     BindingTampered,
+    #[error(
+        "an identity change was interrupted; explicitly recover its authenticated publication before ordinary unlock"
+    )]
+    PublicationPending,
+    #[error(
+        "this legacy profile has no authenticated identity expectation; linking requires an explicitly created draft-format profile"
+    )]
+    LegacyEnrollmentRequired,
 }
 
 /// What the lock screen can know before unlocking (no e-mail, no secrets).
@@ -85,6 +93,7 @@ pub struct UnlockRequirements {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BindingFile {
     format: String,
     version: u32,
@@ -127,25 +136,43 @@ fn aad(h: &ProfileHeader) -> Vec<u8> {
     format!("anvil-identity-binding-v1/{}", h.profile_id).into_bytes()
 }
 
-/// The plaintext binding, if any. A present but unreadable file is treated
-/// as tampering, never as "not linked".
-pub(crate) fn read_binding(dir: &Path) -> Result<Option<BindingFile>> {
-    let p = path(dir);
-    let bytes = match std::fs::read(&p) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+/// Read the exact binding committed by the header. Lock-screen callers have
+/// only an untrusted hint; ordinary unlock authenticates the header with its
+/// DEK before returning a key to the profile installer.
+pub(crate) fn read_binding(dir: &Path, h: &ProfileHeader) -> Result<Option<BindingFile>> {
+    if h.identity_binding.as_ref().is_some_and(|e| e.pending.is_some()) {
+        return Err(IdentityPolicyError::PublicationPending.into());
+    }
+    let bytes = match std::fs::read(path(dir)) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    let f: BindingFile = serde_json::from_slice(&bytes).map_err(|_| IdentityPolicyError::BindingTampered)?;
+    if let Some(expectation) = &h.identity_binding {
+        match (&expectation.binding, &bytes) {
+            (None, None) => return Ok(None),
+            (Some(expected), Some(bytes))
+                if expected.version == VERSION
+                    && *expected == vault::identity_binding_digest(bytes, VERSION) => {}
+            _ => return Err(IdentityPolicyError::BindingTampered.into()),
+        }
+    }
+    bytes.map(|b| parse_binding(&b)).transpose()
+}
+
+fn parse_binding(bytes: &[u8]) -> Result<BindingFile> {
+    let f: BindingFile =
+        serde_json::from_slice(bytes).map_err(|_| IdentityPolicyError::BindingTampered)?;
     if f.format != FORMAT || f.version != VERSION {
         return Err(IdentityPolicyError::BindingTampered.into());
     }
-    Ok(Some(f))
+    Ok(f)
 }
 
 /// Open the sealed copy with the data key and require the plaintext hint to
 /// match it field for field.
 pub(crate) fn verify_binding(f: &BindingFile, h: &ProfileHeader, dek: &Key) -> Result<LinkedIdentity> {
+    vault::authenticate_header(h, dek)?;
     let env = hex::decode(&f.sealed).map_err(|_| IdentityPolicyError::BindingTampered)?;
     let pt = crypto::open(dek, &aad(h), &env).map_err(|_| IdentityPolicyError::BindingTampered)?;
     let linked: LinkedIdentity = serde_json::from_slice(&pt).map_err(|_| IdentityPolicyError::BindingTampered)?;
@@ -159,7 +186,7 @@ pub(crate) fn verify_binding(f: &BindingFile, h: &ProfileHeader, dek: &Key) -> R
     Ok(linked)
 }
 
-fn write_binding(dir: &Path, h: &ProfileHeader, dek: &Key, linked: &LinkedIdentity) -> Result<()> {
+fn binding_contents(h: &ProfileHeader, dek: &Key, linked: &LinkedIdentity) -> Result<String> {
     let sealed = hex::encode(crypto::seal(dek, &aad(h), &serde_json::to_vec(linked)?));
     let f = BindingFile {
         format: FORMAT.into(),
@@ -170,18 +197,46 @@ fn write_binding(dir: &Path, h: &ProfileHeader, dek: &Key, linked: &LinkedIdenti
         linked_at: linked.linked_at,
         sealed,
     };
-    let tmp = dir.join(format!("{IDENTITY_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&f)?)?;
-    std::fs::rename(tmp, path(dir))?;
+    Ok(serde_json::to_string_pretty(&f)?)
+}
+
+pub(crate) fn require_enrolled(h: &ProfileHeader) -> Result<()> {
+    if h.format != vault::IDENTITY_PROFILE_FORMAT {
+        return Err(IdentityPolicyError::LegacyEnrollmentRequired.into());
+    }
     Ok(())
 }
 
-pub(crate) fn remove_binding(dir: &Path) -> Result<()> {
-    match std::fs::remove_file(path(dir)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+pub(crate) fn unlink(guard: &IdentityHeaderGuard<'_>, h: &ProfileHeader, dek: &Key) -> Result<()> {
+    require_enrolled(h)?;
+    guard.begin_identity_publication(
+        h,
+        dek,
+        IdentityBindingPublication { binding: None, contents: None },
+    )?;
+    guard.finish_identity_publication(dek)?;
+    Ok(())
+}
+
+/// Validate journal data under the proven DEK before resuming publication.
+pub(crate) fn recover_publication(
+    guard: &IdentityHeaderGuard<'_>,
+    h: &ProfileHeader,
+    dek: &Key,
+) -> Result<()> {
+    require_enrolled(h)?;
+    vault::authenticate_header(h, dek)?;
+    let pending = h
+        .identity_binding
+        .as_ref()
+        .and_then(|e| e.pending.as_ref())
+        .ok_or_else(|| AppError::Invalid("no pending identity publication".into()))?;
+    if let Some(contents) = &pending.contents {
+        let binding = parse_binding(contents.as_bytes())?;
+        verify_binding(&binding, h, dek)?;
     }
+    guard.finish_identity_publication(dek)?;
+    Ok(())
 }
 
 /// A proof counts only for the linked provider and subject, and only while fresh.
@@ -200,18 +255,19 @@ pub(crate) fn check_fresh(proof: &VerifiedIdentity, now: DateTime<Utc>) -> Resul
     Ok(())
 }
 
-pub(crate) fn hint(dir: &Path) -> Result<Option<IdentityHint>> {
-    Ok(read_binding(dir)?.map(|f| f.hint()))
+pub(crate) fn hint(dir: &Path, h: &ProfileHeader) -> Result<Option<IdentityHint>> {
+    Ok(read_binding(dir, h)?.map(|f| f.hint()))
 }
 
 pub(crate) fn link(
-    dir: &Path,
+    guard: &IdentityHeaderGuard<'_>,
     h: &ProfileHeader,
     dek: &Key,
     proof: &VerifiedIdentity,
     require_fresh_login: bool,
     now: DateTime<Utc>,
 ) -> Result<LinkedIdentity> {
+    require_enrolled(h)?;
     let linked = LinkedIdentity {
         provider: proof.provider().to_string(),
         subject: proof.subject().to_string(),
@@ -219,7 +275,14 @@ pub(crate) fn link(
         linked_at: now,
         require_fresh_login,
     };
-    write_binding(dir, h, dek, &linked)?;
+    let contents = binding_contents(h, dek, &linked)?;
+    let binding = Some(vault::identity_binding_digest(contents.as_bytes(), VERSION));
+    guard.begin_identity_publication(
+        h,
+        dek,
+        IdentityBindingPublication { binding, contents: Some(contents) },
+    )?;
+    guard.finish_identity_publication(dek)?;
     Ok(linked)
 }
 

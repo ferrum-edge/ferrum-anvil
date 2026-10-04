@@ -49,7 +49,9 @@ async fn sign_in(p: &MockProvider) -> VerifiedIdentity {
 
 /// Passphrase profile; returns (dir, recovery key).
 fn profile(root: &Path, name: &str) -> (PathBuf, String) {
-    let (s, _dek, rk) = ProfileManager::new(root).create_passphrase(name, PASS, KdfParams::testing()).unwrap();
+    let (s, _dek, rk) = ProfileManager::new(root)
+        .create_passphrase_with_identity_expectation(name, PASS, KdfParams::testing())
+        .unwrap();
     (s.dir, rk.to_string())
 }
 
@@ -76,7 +78,14 @@ async fn link_with_mock_provider_keeps_the_key_wraps_untouched() {
     assert!(!linked.require_fresh_login);
 
     // Identity is not a key: the wrapped data key and its check value are unchanged.
-    assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), header_before);
+    let before: serde_json::Value = serde_json::from_slice(&header_before).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("profile.json")).unwrap()).unwrap();
+    for field in ["passphrase_wrap", "recovery_wrap", "key_check"] {
+        assert_eq!(before[field], after[field]);
+    }
+    assert_ne!(before["protection_mac"], after["protection_mac"]);
+    assert!(after["identity_binding"]["binding"].is_object());
     // The plaintext hint carries no e-mail and no key material.
     let raw = std::fs::read_to_string(dir.join(IDENTITY_FILE)).unwrap();
     assert!(!raw.contains("idp.anvil.test"), "{raw}");
@@ -214,6 +223,387 @@ async fn relinking_and_unlinking_follow_the_policy() {
     ProfileManager::unlink_identity(&dir, Unlock::Passphrase(PASS), Some(sign_in(&p).await)).unwrap();
     assert!(ProfileManager::unlock_requirements(&dir).unwrap().linked.is_none());
     assert_eq!(policy_err(ProfileManager::unlink_identity(&dir, Unlock::Passphrase(PASS), None)), IdentityPolicyError::NotLinked);
+}
+
+/// Exercise the production unlock-to-install sequence and prove the installer
+/// never runs on refusal. The existing database/workspace bytes stay untouched.
+fn rejected_install(dir: &Path) -> AppError {
+    let before = std::fs::read(dir.join(anvil_storage::store::DB_FILE)).ok();
+    let mut installed = false;
+    let result = ProfileManager::unlock(dir, Unlock::Passphrase(PASS)).and_then(|(h, key)| {
+        installed = true;
+        let app = App::open(dir.to_path_buf(), h, key)?;
+        app.create_workspace("must never be created")?;
+        Ok(app)
+    });
+    assert!(!installed, "ordinary unlock returned a key to the installer");
+    assert_eq!(std::fs::read(dir.join(anvil_storage::store::DB_FILE)).ok(), before);
+    result.err().expect("unlock must refuse")
+}
+
+#[tokio::test]
+async fn deleted_truncated_replaced_and_replayed_required_bindings_refuse_install() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, rk) = profile(root.path(), "alice");
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir.clone(), h, key).unwrap();
+    app.create_workspace("existing workspace").unwrap();
+    drop(app);
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false)
+        .unwrap();
+    let path = dir.join(IDENTITY_FILE);
+    let older = std::fs::read(&path).unwrap();
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true)
+        .unwrap();
+    let current = std::fs::read(&path).unwrap();
+    let header = std::fs::read(dir.join("profile.json")).unwrap();
+    let (other, _) = profile(root.path(), "bob");
+    ProfileManager::link_identity(&other, Unlock::Passphrase(PASS), sign_in(&p).await, false)
+        .unwrap();
+    let other_binding = std::fs::read(other.join(IDENTITY_FILE)).unwrap();
+
+    for replacement in [
+        None,
+        Some(b"".to_vec()),
+        Some(b"{".to_vec()),
+        Some(older),
+        Some(other_binding),
+    ] {
+        match replacement {
+            Some(bytes) => std::fs::write(&path, bytes).unwrap(),
+            None => std::fs::remove_file(&path).unwrap(),
+        }
+        assert!(matches!(
+            rejected_install(&dir),
+            AppError::Identity(IdentityPolicyError::BindingTampered),
+        ));
+        assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), header);
+        assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_ok());
+        // Even a valid proof does not repair a missing/replaced required file.
+        assert_eq!(
+            policy_err(ProfileManager::unlock_with_fresh_login(
+                &dir,
+                Unlock::Passphrase(PASS),
+                sign_in(&p).await,
+            )),
+            IdentityPolicyError::BindingTampered,
+        );
+        std::fs::write(&path, &current).unwrap();
+    }
+    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rk), None).unwrap();
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, h, key).unwrap();
+    assert!(app.find_workspace("existing workspace").is_ok());
+    assert!(app.find_workspace("must never be created").is_err());
+}
+
+#[tokio::test]
+async fn required_digest_version_and_header_fields_cannot_be_weakened() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, rk) = profile(root.path(), "alice");
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false)
+        .unwrap();
+    let original = anvil_storage::vault::read_header(&dir).unwrap();
+    let binding_path = dir.join(IDENTITY_FILE);
+    let binding = std::fs::read(&binding_path).unwrap();
+    let mut bad_binding: serde_json::Value = serde_json::from_slice(&binding).unwrap();
+    bad_binding["version"] = 2.into();
+    std::fs::write(&binding_path, serde_json::to_vec(&bad_binding).unwrap()).unwrap();
+    assert!(matches!(
+        rejected_install(&dir),
+        AppError::Identity(IdentityPolicyError::BindingTampered),
+    ));
+    std::fs::write(&binding_path, &binding).unwrap();
+
+    for mutation in 0..6 {
+        let mut h = original.clone();
+        let e = h.identity_binding.as_mut().unwrap();
+        match mutation {
+            0 => e.binding = None,
+            1 => e.binding.as_mut().unwrap().version = 2,
+            2 => e.binding.as_mut().unwrap().sha256 = "00".repeat(32),
+            3 => e.version = 2,
+            4 => h.identity_binding = None,
+            5 => h.protection_mac = None,
+            _ => unreachable!(),
+        }
+        anvil_storage::vault::write_header(&dir, &h).unwrap();
+        rejected_install(&dir);
+        // Recovery bypasses provider policy, never a bad protection MAC/format.
+        assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_err());
+    }
+    let mut h = original.clone();
+    h.identity_binding.as_mut().unwrap().binding = None;
+    anvil_storage::vault::write_header(&dir, &h).unwrap();
+    std::fs::remove_file(&binding_path).unwrap();
+    assert!(matches!(rejected_install(&dir), AppError::Vault(VaultError::HeaderTampered)));
+    assert!(ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rk), None).is_err());
+    anvil_storage::vault::write_header(&dir, &original).unwrap();
+    // A valid required header + missing binding is recoverable only explicitly.
+    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rk), None).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
+}
+
+#[tokio::test]
+async fn a_matching_file_digest_does_not_replace_profile_specific_binding_authentication() {
+    use anvil_storage::{crypto, vault};
+    use vault::IdentityBindingPublication;
+
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, rk) = profile(root.path(), "draft");
+    let linked = ProfileManager::link_identity(
+        &dir,
+        Unlock::Passphrase(PASS),
+        sign_in(&p).await,
+        false,
+    )
+    .unwrap();
+    let h = vault::read_header(&dir).unwrap();
+    let key = vault::unlock_with_recovery(&h, &rk).unwrap();
+    let bytes = std::fs::read(dir.join(IDENTITY_FILE)).unwrap();
+    let mut file: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    file["sealed"] = hex::encode(crypto::seal(
+        &key,
+        b"anvil-identity-binding-v1/a-different-profile",
+        &serde_json::to_vec(&linked).unwrap(),
+    ))
+    .into();
+    let contents = serde_json::to_string_pretty(&file).unwrap();
+    let publication = IdentityBindingPublication {
+        binding: Some(vault::identity_binding_digest(contents.as_bytes(), 1)),
+        contents: Some(contents),
+    };
+    // Test-only authenticated malformed state: even with a matching digest,
+    // the production verifier must reject the wrong-profile AEAD envelope.
+    let guard = vault::lock_identity_header(&dir).unwrap();
+    guard.begin_identity_publication(&h, &key, publication).unwrap();
+    guard.finish_identity_publication(&key).unwrap();
+    drop(guard);
+    assert!(matches!(
+        rejected_install(&dir),
+        AppError::Identity(IdentityPolicyError::BindingTampered),
+    ));
+    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rk), None).unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_link_and_unlink_require_explicit_authenticated_journal_recovery() {
+    use anvil_storage::vault::{self, IdentityBindingPublication};
+
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, rk) = profile(root.path(), "alice");
+    let unlinked = vault::read_header(&dir).unwrap();
+    let key = vault::unlock_with_recovery(&unlinked, &rk).unwrap();
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true)
+        .unwrap();
+    let linked = vault::read_header(&dir).unwrap();
+    let contents = std::fs::read_to_string(dir.join(IDENTITY_FILE)).unwrap();
+    let publication = IdentityBindingPublication {
+        binding: linked.identity_binding.as_ref().unwrap().binding.clone(),
+        contents: Some(contents.clone()),
+    };
+
+    // Replay a test snapshot to exercise each actual publication boundary:
+    // after pending header, after next file, and after final header. Only the
+    // header journal supplies recovery bytes; the disk binding may be garbage.
+    for file_published in [false, true] {
+        vault::write_header(&dir, &unlinked).unwrap();
+        std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
+        let guard = vault::lock_identity_header(&dir).unwrap();
+        guard.begin_identity_publication(&unlinked, &key, publication.clone()).unwrap();
+        drop(guard);
+        if file_published {
+            std::fs::write(dir.join(IDENTITY_FILE), &contents).unwrap();
+        }
+        assert!(matches!(
+            rejected_install(&dir),
+            AppError::Identity(IdentityPolicyError::PublicationPending),
+        ));
+        // Wrong credentials cannot finalize a journal or write the binding.
+        let before = std::fs::read(dir.join("profile.json")).unwrap();
+        assert!(
+            ProfileManager::recover_identity_publication(&dir, Unlock::Passphrase("wrong")).is_err()
+        );
+        assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), before);
+        assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_ok());
+        assert_eq!(
+            std::fs::read(dir.join("profile.json")).unwrap(),
+            before,
+            "unlock did not repair",
+        );
+        std::fs::write(dir.join(IDENTITY_FILE), b"attacker hint").unwrap();
+        ProfileManager::recover_identity_publication(&dir, Unlock::RecoveryKey(&rk)).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(IDENTITY_FILE)).unwrap(), contents);
+        assert!(matches!(
+            rejected_install(&dir),
+            AppError::Identity(IdentityPolicyError::FreshLoginRequired { .. }),
+        ));
+        assert!(ProfileManager::unlock_with_fresh_login(
+            &dir,
+            Unlock::Passphrase(PASS),
+            sign_in(&p).await,
+        )
+        .is_ok());
+        assert!(
+            ProfileManager::recover_identity_publication(&dir, Unlock::RecoveryKey(&rk)).is_err()
+        );
+    }
+
+    for file_removed in [false, true] {
+        vault::write_header(&dir, &linked).unwrap();
+        std::fs::write(dir.join(IDENTITY_FILE), &contents).unwrap();
+        let guard = vault::lock_identity_header(&dir).unwrap();
+        guard
+            .begin_identity_publication(
+                &linked,
+                &key,
+                IdentityBindingPublication { binding: None, contents: None },
+            )
+            .unwrap();
+        drop(guard);
+        if file_removed {
+            std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
+        }
+        assert!(matches!(
+            rejected_install(&dir),
+            AppError::Identity(IdentityPolicyError::PublicationPending),
+        ));
+        ProfileManager::recover_identity_publication(&dir, Unlock::Passphrase(PASS)).unwrap();
+        assert!(!dir.join(IDENTITY_FILE).exists());
+        assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
+        assert!(ProfileManager::linked_identity(&dir, &key).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn tampered_journal_cannot_resume_or_weaken_a_pending_change() {
+    use anvil_storage::vault::{self, IdentityBindingPublication};
+
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, rk) = profile(root.path(), "alice");
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true)
+        .unwrap();
+    let h = vault::read_header(&dir).unwrap();
+    let key = vault::unlock_with_recovery(&h, &rk).unwrap();
+    let guard = vault::lock_identity_header(&dir).unwrap();
+    let pending = guard
+        .begin_identity_publication(
+            &h,
+            &key,
+            IdentityBindingPublication { binding: None, contents: None },
+        )
+        .unwrap();
+    drop(guard);
+    let binding = std::fs::read(dir.join(IDENTITY_FILE)).unwrap();
+    for remove_pending in [false, true] {
+        let mut edited = pending.clone();
+        let e = edited.identity_binding.as_mut().unwrap();
+        if remove_pending {
+            e.pending = None;
+            e.binding = None;
+            std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
+        } else {
+            e.pending.as_mut().unwrap().contents = Some("{}".into());
+        }
+        vault::write_header(&dir, &edited).unwrap();
+        assert!(
+            ProfileManager::recover_identity_publication(&dir, Unlock::RecoveryKey(&rk)).is_err()
+        );
+        rejected_install(&dir);
+        std::fs::write(dir.join(IDENTITY_FILE), &binding).unwrap();
+    }
+    vault::write_header(&dir, &pending).unwrap();
+    ProfileManager::recover_identity_publication(&dir, Unlock::RecoveryKey(&rk)).unwrap();
+}
+
+#[tokio::test]
+async fn never_linked_profiles_work_and_legacy_enrollment_is_not_silent() {
+    let root = tempfile::tempdir().unwrap();
+    let (dir, rk) = profile(root.path(), "new draft profile");
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_ok());
+    assert!(ProfileManager::unlock_requirements(&dir).unwrap().linked.is_none());
+    assert!(ProfileManager::recover_identity_publication(&dir, Unlock::RecoveryKey(&rk)).is_err());
+    let (legacy, _, _) = ProfileManager::new(root.path())
+        .create_passphrase("legacy", PASS, KdfParams::testing())
+        .unwrap();
+    let before = std::fs::read(legacy.dir.join("profile.json")).unwrap();
+    assert!(ProfileManager::unlock(&legacy.dir, Unlock::Passphrase(PASS)).is_ok());
+    assert_eq!(std::fs::read(legacy.dir.join("profile.json")).unwrap(), before);
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let e = policy_err(ProfileManager::link_identity(
+        &legacy.dir,
+        Unlock::Passphrase(PASS),
+        sign_in(&provider(&idp)).await,
+        true,
+    ));
+    assert_eq!(e, IdentityPolicyError::LegacyEnrollmentRequired);
+    assert_eq!(std::fs::read(legacy.dir.join("profile.json")).unwrap(), before);
+    assert!(!legacy.dir.join(IDENTITY_FILE).exists());
+}
+
+#[test]
+fn an_open_draft_profile_cannot_reseal_a_field_stripped_legacy_header() {
+    use anvil_storage::vault;
+
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "draft");
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir.clone(), h.clone(), key).unwrap();
+    let mut edited = h;
+    edited.format = "anvil-profile".into();
+    edited.identity_binding = None;
+    edited.protection_mac = None;
+    vault::write_header(&dir, &edited).unwrap();
+    let before = std::fs::read(dir.join("profile.json")).unwrap();
+    assert!(matches!(
+        app.change_passphrase("replacement passphrase", KdfParams::testing()),
+        Err(AppError::Vault(VaultError::HeaderTampered)),
+    ));
+    assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_consistent_old_profile_snapshot_remains_replayable_in_this_partial_candidate() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "draft");
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir.clone(), h, key).unwrap();
+    app.create_workspace("retained snapshot").unwrap();
+    drop(app);
+    let header = std::fs::read(dir.join("profile.json")).unwrap();
+    let database = std::fs::read(dir.join(anvil_storage::store::DB_FILE)).unwrap();
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true)
+        .unwrap();
+    std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err());
+    // Restoring the matching old header/database and old absence of a binding
+    // restores an authentic unlinked state. This is an unresolved advisory
+    // limit, explicitly a positive control against a false antirollback claim.
+    std::fs::write(dir.join("profile.json"), header).unwrap();
+    std::fs::write(dir.join(anvil_storage::store::DB_FILE), database).unwrap();
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, h, key).unwrap();
+    assert!(app.find_workspace("retained snapshot").is_ok());
 }
 
 #[tokio::test]
