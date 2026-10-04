@@ -38,6 +38,73 @@ impl Target {
     }
 }
 
+/// The first explicit Host wins over the URL authority. Auth-written
+/// headers replace all configured headers of the same name before this.
+pub fn request_authority(headers: &[(String, String)], target: &Target) -> String {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| target.authority.clone())
+}
+
+/// Resolve only the inputs that can change a forward proxy's authority.
+/// The caller supplies its per-run-aware template resolver: `None` means
+/// an input varies or cannot be resolved. Generated credentials used as
+/// Host also remain unproven. No signing or token acquisition occurs here.
+pub fn preflight_authority(
+    ctx: &crate::ExecutionContext,
+    target: &Target,
+    resolve: impl Fn(&str, &str) -> Option<String>,
+) -> Option<String> {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+
+    fn auth_host(
+        auth: &AuthConfig,
+        ctx: &crate::ExecutionContext,
+        resolve: &impl Fn(&str, &str) -> Option<String>,
+        headers: &mut Vec<(String, String)>,
+    ) -> Option<()> {
+        match auth {
+            AuthConfig::ApiKey { name, value, location: KeyLocation::Header } => {
+                let name = resolve(name, "auth.name")?;
+                if name.eq_ignore_ascii_case("host") {
+                    let (raw, _) = crate::context::resolve_sensitive(value, ctx.secrets.as_ref()).ok()?;
+                    let value = resolve(&raw, "auth.value")?;
+                    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
+                    headers.push((name, value));
+                }
+            }
+            AuthConfig::Jwt { header_name, .. } if header_name.eq_ignore_ascii_case("host") => {
+                return None;
+            }
+            AuthConfig::JwtSvid { config } if config.header_name.trim().eq_ignore_ascii_case("host") => {
+                return None;
+            }
+            AuthConfig::Multi { profiles } => {
+                for profile in profiles {
+                    auth_host(profile, ctx, resolve, headers)?;
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    let mut headers = Vec::new();
+    let metadata = ctx.spec.grpc.as_ref().filter(|_| ctx.spec.protocol == anvil_domain::request::Protocol::Grpc);
+    let inputs = ctx.spec.headers.iter().chain(metadata.into_iter().flat_map(|g| &g.metadata));
+    for header in inputs.filter(|header| header.enabled) {
+        let name = resolve(header.name.trim(), "headers.name")?;
+        if name.eq_ignore_ascii_case("host") {
+            headers.push((name, resolve(&header.value, "headers.value")?));
+        }
+    }
+    let (_, auth) = ctx.effective_auth();
+    auth_host(&auth, ctx, &resolve, &mut headers)?;
+    Some(request_authority(&headers, target))
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparedHttp {
     pub method: String,
@@ -167,7 +234,8 @@ pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<Stri
 /// §7.2, RFC 3986 §3.2.2): a host name or IPv4 address, or an IPv6 address
 /// in brackets, each with an optional port. `None` when it is one. The
 /// value is the authority the request names, and its signature covers; it
-/// never changes where the connection goes.
+/// changes a cleartext HTTP forward proxy's absolute-form destination;
+/// otherwise it never changes where the connection goes.
 pub(crate) fn host_problem(v: &str) -> Option<String> {
     if v.is_empty() {
         return Some("it is empty".into());

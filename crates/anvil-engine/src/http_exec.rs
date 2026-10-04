@@ -63,7 +63,7 @@ pub(crate) fn binding_matches(b: &[anvil_domain::tls::HostBinding], t: &Target) 
 }
 
 /// Resolve auth configuration secrets into a [`ResolvedAuth`].
-pub(crate) fn resolve_auth(
+fn resolve_auth(
     engine: &Engine,
     auth: &AuthConfig,
     ctx: &ExecutionContext,
@@ -339,13 +339,7 @@ pub(crate) fn proxy_for(
         inferred.push(format!("proxy '{}' bypassed for {} (NO_PROXY)", p.name, target.host));
         return Ok(None);
     }
-    let (host, port) = match p.address.rsplit_once(':') {
-        Some((h, pt)) => match pt.parse::<u16>() {
-            Ok(n) => (h.trim_start_matches('[').trim_end_matches(']').to_string(), n),
-            Err(_) => return Err(proxy_invalid(format!("proxy address '{}' has an invalid port", p.address), "proxy.address")),
-        },
-        None => return Err(proxy_invalid(format!("proxy address '{}' must be host:port", p.address), "proxy.address")),
-    };
+    let (host, port) = anvil_transport::net::parse_proxy_address(&p.address)?;
     let credentials = match (&p.username, &p.password) {
         (Some(u), Some(pw)) => {
             let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref()).map_err(|e| proxy_invalid(e, "proxy.password"))?;
@@ -465,6 +459,9 @@ pub(crate) fn prepare_all_at(
     )?;
     let mut inferred = http.inferred.clone();
     let (auth_scope, auth_cfg) = ctx.effective_auth();
+    auth_cfg
+        .oauth_profile()
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     let mut oauth_key = None;
     let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key)?;
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };
@@ -555,9 +552,7 @@ pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<Strin
 /// SSE and gRPC, over every HTTP version) build the request. Request
 /// signatures cover this value, so the send path, sessions and the preview
 /// all use it.
-pub(crate) fn request_authority(headers: &[(String, String)], target: &Target) -> String {
-    headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.clone()).unwrap_or_else(|| target.authority.clone())
-}
+pub(crate) use crate::prepare::request_authority;
 
 /// What an auth profile signs for one send of `method` to `target` with
 /// `headers` and `body`.
