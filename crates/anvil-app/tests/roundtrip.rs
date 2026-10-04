@@ -5,12 +5,12 @@ use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
-use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::{RequestDefinition, RequestRevision, Variable};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
-use anvil_storage::{KdfParams, kind};
+use anvil_storage::{KdfParams, StoreError, kind};
 use anvil_transport::recorder::EventCtx;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -185,24 +185,64 @@ fn a_save_changes_a_request_but_never_its_placement() {
     let a = new_app(root.path(), "t");
     let ws = a.create_workspace("W").unwrap();
     let f = a.create_folder(&ws.meta.id, None, "F").unwrap();
-    let r = a.create_request(&ws.meta.id, Some(f.meta.id), "R", RequestSpec::http("GET", "http://a/")).unwrap();
+    let attachment = a.put_attachment("request.bin", b"request attachment", None).unwrap();
+    let attachment_sha = match &attachment {
+        AttachmentRef::Stored { sha256, .. } => sha256.clone(),
+        _ => unreachable!(),
+    };
+    let mut spec = RequestSpec::http("GET", "http://a/");
+    spec.body = Body::Binary { attachment: attachment.clone(), content_type: None };
+    let r = a.create_request(&ws.meta.id, Some(f.meta.id), "R", spec).unwrap();
     assert_eq!((r.workspace_id, r.folder_id, r.sort_key), (ws.meta.id, Some(f.meta.id), 1.0));
 
-    let saved = a.save_request(RequestDefinition { name: "S".into(), spec: RequestSpec::http("POST", "http://b/"), ..r.clone() }).unwrap();
+    let mut changed_spec = r.spec.clone();
+    changed_spec.method = "POST".into();
+    changed_spec.url = "http://b/".into();
+    let saved = a.save_request(RequestDefinition { name: "S".into(), spec: changed_spec, ..r.clone() }).unwrap();
     assert_eq!((saved.name.as_str(), saved.spec.url.as_str()), ("S", "http://b/"));
     assert_ne!(saved.revision_id, r.revision_id, "the changed spec files a revision");
     assert_eq!(a.revision(&saved.revision_id.unwrap()).unwrap().spec, saved.spec);
     assert_eq!(a.request(&r.meta.id).unwrap(), saved);
 
-    // The placement a save names is not written: only a move places a
-    // request, and never into another workspace.
-    let other = a.create_workspace("X").unwrap();
-    let theirs = a.create_folder(&other.meta.id, None, "theirs").unwrap();
-    let placed = RequestDefinition { workspace_id: other.meta.id, folder_id: Some(theirs.meta.id), sort_key: 9.0, ..saved.clone() };
-    let kept = a.save_request(placed).unwrap();
+    // A same-workspace save cannot forge folder placement or sort order.
+    let same_workspace_forgery = RequestDefinition { folder_id: None, sort_key: 9.0, ..saved.clone() };
+    let kept = a.save_request(same_workspace_forgery).unwrap();
     assert_eq!((kept.workspace_id, kept.folder_id, kept.sort_key), (ws.meta.id, Some(f.meta.id), 1.0));
     assert_eq!(kept.revision_id, saved.revision_id, "an unchanged spec files no revision");
     assert_eq!(a.request(&r.meta.id).unwrap(), kept);
+
+    // A save cannot substitute another workspace owner. The failed attempt
+    // must leave its request, revision history, attachment index and blob intact.
+    let other = a.create_workspace("X").unwrap();
+    let theirs = a.create_folder(&other.meta.id, None, "theirs").unwrap();
+    let mut substituted_spec = kept.spec.clone();
+    substituted_spec.url = "http://foreign-workspace/".into();
+    let forged = RequestDefinition {
+        workspace_id: other.meta.id,
+        folder_id: Some(theirs.meta.id),
+        sort_key: 9.0,
+        spec: substituted_spec,
+        ..kept.clone()
+    };
+    let mut revision_ids: Vec<_> = a.store.object_meta(kind::REVISION).unwrap().into_iter().map(|row| row.id).collect();
+    revision_ids.sort();
+    let attachment_indexes: Vec<serde_json::Value> = a.store.list(kind::IMPORT_SOURCE, None).unwrap();
+    let db = rusqlite::Connection::open(a.dir.join(anvil_storage::store::DB_FILE)).unwrap();
+    let blob_count: i64 = db.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0)).unwrap();
+    drop(db);
+
+    assert!(matches!(a.save_request(forged), Err(AppError::Store(StoreError::Ownership))));
+    assert_eq!(a.request(&r.meta.id).unwrap(), kept);
+    let mut revisions_after: Vec<_> = a.store.object_meta(kind::REVISION).unwrap().into_iter().map(|row| row.id).collect();
+    revisions_after.sort();
+    assert_eq!(revisions_after, revision_ids);
+    let indexes_after: Vec<serde_json::Value> = a.store.list(kind::IMPORT_SOURCE, None).unwrap();
+    assert_eq!(indexes_after, attachment_indexes);
+    assert_eq!(a.revision(&kept.revision_id.unwrap()).unwrap().spec, kept.spec);
+    assert_eq!(a.get_attachment(&attachment_sha).unwrap().unwrap(), b"request attachment");
+    let db = rusqlite::Connection::open(a.dir.join(anvil_storage::store::DB_FILE)).unwrap();
+    let blobs_after: i64 = db.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0)).unwrap();
+    assert_eq!(blobs_after, blob_count);
     assert!(a.requests(&other.meta.id).unwrap().is_empty());
 }
 
