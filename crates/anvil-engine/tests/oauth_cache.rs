@@ -810,8 +810,9 @@ mod preparation_order {
 
     #[cfg(any(unix, windows))]
     async fn workload_fixture() -> anvil_fixtures::workload_api::Fixture {
-        // Keep the fixture filename short for the macOS Unix socket path limit.
-        let name = format!("av-scope-{}", &Id::new().to_string()[..8]);
+        // UUIDv7 starts with a timestamp, so use its random suffix for concurrent fixture names.
+        let id = Id::new().to_string().replace('-', "");
+        let name = format!("av-scope-{}", &id[12..]);
         #[cfg(unix)]
         let fixture = {
             let path = std::env::temp_dir().join(format!("{name}.sock"));
