@@ -114,8 +114,8 @@ failed on Linux, macOS and Windows because Clippy's `option_env_unwrap` lint
 rejected `.expect()` on the harness's compile-time `option_env!` values. Commit
 `722bb8bc844feabe63e9ec6ae436d041be1e0878` changes only that compiled-metadata
 extraction to `let Some(...) else`; it does not change limits, runtime behavior,
-or harness identity. The correction received a fresh independent harness review
-with five APPROVED findings. The rerun of the resource qualification on that exact head
+or harness identity. The correction received a fresh independent harness review, which
+approved the delta with no findings. The rerun of the resource qualification on that exact head
 [passed on Linux and macOS](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37196753225).
 Its ordinary [canonical CI run](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37196753237)
 was still in progress at this check: Linux and Windows Rust jobs had passed, while
