@@ -162,9 +162,8 @@ async fn choose_native(
     }
     // The app may have locked while the dialog was open: grant nothing then.
     let app = st.app()?;
-    // Another profile may have opened while the dialog was open. Its swap
-    // precedes the grant revocation, so the generation alone may not show it
-    // yet: grant and bind nothing unless the profile is still the one shown for.
+    // Grant and bind only for the profile the dialog was shown for, in
+    // addition to checking the revocation generation when recording it.
     if !Weak::ptr_eq(&shown_for, &Arc::downgrade(&app)) {
         return Err(GrantError::Revoked.to_string());
     }
@@ -173,6 +172,10 @@ async fn choose_native(
         let path = file.into_path().map_err(|x| x.to_string())?;
         let grant = match (&bind, purpose.access()) {
             (Some(bind), _) => bind_picked(&st, &app, generation, bind, &path)?,
+            (None, _) if purpose == FilePurpose::PemPrivateKey => st
+                .file_grants
+                .grant_private_key_at(&app, &path, generation)
+                .map_err(|x| x.to_string())?,
             (None, Access::Write) => st.file_grants.grant_write_at(purpose, &path, generation).map_err(|x| x.to_string())?,
             (None, _) => st.file_grants.grant_read_at(purpose, &path, generation).map_err(|x| x.to_string())?,
         };

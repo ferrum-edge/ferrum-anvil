@@ -1030,6 +1030,8 @@ pub async fn read_certificate_file(handle: AppHandle, grant: String) -> R<String
 
 /// Consume a private-key grant into the vault. Neither purpose nor
 /// disposition is a renderer argument; only a secret reference returns.
+/// The session and grant are fenced before the write. A committed reference
+/// remains a success even if a lock follows the commit.
 #[tauri::command]
 pub async fn import_private_key_file(
     handle: AppHandle,
@@ -1037,13 +1039,29 @@ pub async fn import_private_key_file(
     workspace_id: String,
     label: String,
 ) -> R<SecretRef> {
-    blocking(&handle, move |st| {
-        let app = st.app()?;
-        st.file_grants
-            .import_private_key(&app, &grant, &id(&workspace_id)?, &label)
-            .map_err(e)
+    let seen = handle.state::<DesktopState>().epoch();
+    blocking_unchecked(&handle, move |st| {
+        ingest_private_key(st, seen, &grant, &workspace_id, &label, || {})
     })
     .await
+}
+
+fn ingest_private_key(
+    st: &DesktopState,
+    seen: u64,
+    grant: &str,
+    workspace_id: &str,
+    label: &str,
+    before_write: impl FnOnce(),
+) -> R<SecretRef> {
+    let app = st.app()?;
+    let workspace = id(workspace_id)?;
+    let claim = st.file_grants.claim_private_key(&app, grant).map_err(e)?;
+    before_write();
+    // The epoch check runs inside the vault transaction, with the grant's
+    // revocation fence held through commit. Never take the app lock there:
+    // profile publication takes it before the revocation mutex.
+    claim.store(&workspace, label, || st.epoch() == seen).map_err(e)
 }
 
 /// PKCS#12 remains vault-only and is stored as base64. This command has
@@ -1079,6 +1097,128 @@ mod tests {
     use tokio::sync::oneshot;
 
     #[test]
+    fn private_key_ingestion_paused_before_write_is_abandoned_after_lock_and_reunlock() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, dir) = create(&st, "PEM");
+        let workspace = app.create_workspace("keys").unwrap().meta.id;
+        st.set_app_since(app, st.epoch()).unwrap();
+        let app = st.app().unwrap();
+        let path = root.0.join("key.pem");
+        std::fs::write(&path, "vault-only canary").unwrap();
+        let grant = st.file_grants.grant_private_key(&app, &path).unwrap();
+        let seen = st.epoch();
+        let (claimed_tx, claimed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_st = &st;
+            let token = &grant.token;
+            let worker = scope.spawn(move || {
+                ingest_private_key(
+                    worker_st,
+                    seen,
+                    token,
+                    &workspace.to_string(),
+                    "abandoned",
+                    || {
+                        claimed_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    },
+                )
+            });
+            claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            assert!(
+                st.file_grants.is_empty(),
+                "the actual grant was already spent and read",
+            );
+            st.lock();
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(
+                &dir,
+                Unlock::Passphrase(PASSPHRASE),
+            )
+            .unwrap();
+            st.unlock_since(&app, key, st.epoch()).unwrap();
+            assert!(st.app().is_ok(), "the same profile is unlocked again");
+            release_tx.send(()).unwrap();
+            assert_eq!(worker.join().unwrap(), Err("LOCKED".into()));
+        });
+        assert!(app.store.list_secret_ids(None).unwrap().is_empty());
+        assert!(ingest_private_key(
+            &st,
+            st.epoch(),
+            &grant.token,
+            &workspace.to_string(),
+            "replay",
+            || {},
+        )
+        .is_err());
+        let fresh = st.file_grants.grant_private_key(&app, &path).unwrap();
+        let secret = ingest_private_key(
+            &st,
+            st.epoch(),
+            &fresh.token,
+            &workspace.to_string(),
+            "fresh",
+            || {},
+        )
+        .unwrap();
+        assert_eq!(
+            app.store.list_secret_ids(None).unwrap(),
+            vec![secret.id.to_string()],
+        );
+    }
+
+    #[test]
+    fn private_key_ingestion_paused_before_write_cannot_record_in_either_switched_profile() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, a_dir) = create(&st, "A");
+        let (b, _) = create(&st, "B");
+        let workspace = a.create_workspace("keys").unwrap().meta.id;
+        // Even a matching workspace id in B cannot authorize A's selection.
+        b.save_workspace(a.workspace(&workspace).unwrap()).unwrap();
+        st.set_app_since(a, st.epoch()).unwrap();
+        let a = st.app().unwrap();
+        let path = root.0.join("key.pem");
+        std::fs::write(&path, "vault-only canary").unwrap();
+        let grant = st.file_grants.grant_private_key(&a, &path).unwrap();
+        let seen = st.epoch();
+        let (claimed_tx, claimed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_st = &st;
+            let token = &grant.token;
+            let worker = scope.spawn(move || {
+                ingest_private_key(
+                    worker_st,
+                    seen,
+                    token,
+                    &workspace.to_string(),
+                    "abandoned",
+                    || {
+                        claimed_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    },
+                )
+            });
+            claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            st.set_app_since(b, st.epoch()).unwrap();
+            // Reopen A's store too: being locked must not mask a stray write.
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(
+                &a_dir,
+                Unlock::Passphrase(PASSPHRASE),
+            )
+            .unwrap();
+            a.unlock(key).unwrap();
+            release_tx.send(()).unwrap();
+            assert_eq!(worker.join().unwrap(), Err("LOCKED".into()));
+        });
+        assert!(a.store.list_secret_ids(None).unwrap().is_empty());
+        assert!(st.app().unwrap().store.list_secret_ids(None).unwrap().is_empty());
+        assert!(st.file_grants.is_empty());
+    }
+
+    #[test]
     fn pkcs12_ingestion_returns_only_a_vault_reference_and_refuses_pem_grants() {
         let root = TempRoot::new();
         let st = DesktopState::new(root.0.clone());
@@ -1098,7 +1238,11 @@ mod tests {
         assert_eq!(&*stored, "AAEC/w==");
         assert!(st.file_grants.read(&grant.token, FilePurpose::PemCertificate).is_err());
         for purpose in [FilePurpose::PemCertificate, FilePurpose::PemPrivateKey] {
-            let grant = st.file_grants.grant_read(purpose, &path).unwrap();
+            let grant = if purpose == FilePurpose::PemPrivateKey {
+                st.file_grants.grant_private_key(&app, &path).unwrap()
+            } else {
+                st.file_grants.grant_read(purpose, &path).unwrap()
+            };
             assert!(ingest_pkcs12(&st, &grant.token, &workspace.to_string(), "confused").is_err());
         }
         assert_eq!(app.store.list_secret_ids(Some(&workspace)).unwrap().len(), 1);

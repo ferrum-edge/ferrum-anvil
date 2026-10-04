@@ -596,6 +596,33 @@ impl App {
         Ok(SecretRef { id, label: label.into() })
     }
 
+    /// Validate ownership and write in one transaction. Acquire the caller's
+    /// lifecycle guard only once the store transaction has begun, and retain
+    /// it through commit/rollback so revocation cannot cross the write.
+    pub(crate) fn set_secret_guarded<G>(
+        &self,
+        ws: &Id,
+        label: &str,
+        value: &str,
+        gate: impl FnOnce() -> Option<G>,
+    ) -> Result<SecretRef> {
+        let id = Id::new();
+        let mut guard = None;
+        let result = self.store.atomically(|tx| {
+            guard = gate();
+            if guard.is_none() {
+                return Err(StoreError::Locked);
+            }
+            let _: Workspace = tx
+                .get(kind::WORKSPACE, ws)?
+                .ok_or_else(|| StoreError::NotFound(ws.to_string()))?;
+            tx.put_secret(&id, Some(ws), label, value)?;
+            Ok(SecretRef { id, label: label.into() })
+        });
+        drop(guard);
+        Ok(result?)
+    }
+
     // ------------------------------------------------------------ profiles
 
     pub fn tls_profiles(&self, ws: &Id) -> Result<Vec<TlsProfile>> {

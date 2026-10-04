@@ -60,11 +60,11 @@ fn private_key_grants_never_return_bytes_and_cannot_change_purpose() {
         FilePurpose::Dataset,
         FilePurpose::Ruleset,
     ] {
-        let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+        let grant = grants.grant_private_key(&app, &path).unwrap();
         assert_eq!(grants.read(&grant.token, purpose).unwrap_err(), GrantError::WrongPurpose);
         assert!(grants.import_private_key(&app, &grant.token, &workspace, "key").is_err());
     }
-    let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
     assert_eq!(
         grants.read(&grant.token, FilePurpose::PemPrivateKey).unwrap_err(),
         GrantError::WrongPurpose,
@@ -79,7 +79,7 @@ fn a_private_key_is_ingested_once_as_a_reference_and_still_prepares_tls() {
     let pki = anvil_fixtures::LabPki::generate();
     let path = file(root.path(), "key.pem", pki.client_a.key.as_bytes());
     let grants = FileGrants::default();
-    let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
     let secret = grants.import_private_key(&app, &grant.token, &workspace, "key").unwrap();
     let returned = serde_json::to_value(&secret).unwrap();
     assert_eq!(returned, serde_json::json!({ "id": secret.id, "label": "key" }));
@@ -112,7 +112,7 @@ fn concurrent_private_key_ingestion_spends_the_grant_atomically() {
     let app = Arc::new(app);
     let path = file(root.path(), "key.pem", b"vault-only canary");
     let grants = Arc::new(FileGrants::default());
-    let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
     let barrier = Arc::new(Barrier::new(2));
     let workers: Vec<_> = (0..2)
         .map(|_| {
@@ -141,16 +141,16 @@ fn failed_private_key_ingestion_cannot_be_replayed() {
     let grants = FileGrants::default();
     for contents in [vec![0xff], vec![b'x'; 1024 * 1024 + 1]] {
         let path = file(root.path(), "key.pem", &contents);
-        let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+        let grant = grants.grant_private_key(&app, &path).unwrap();
         assert!(grants.import_private_key(&app, &grant.token, &workspace, "key").is_err());
         assert!(grants.is_empty());
         assert!(grants.import_private_key(&app, &grant.token, &workspace, "again").is_err());
     }
     let path = file(root.path(), "key.pem", b"vault-only canary");
-    let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
     assert!(grants.import_private_key(&app, &grant.token, &Id::new(), "missing").is_err());
     assert!(grants.is_empty());
-    let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
     let swap = file(root.path(), "swap", b"different file");
     std::fs::rename(swap, &path).unwrap();
     assert!(grants.import_private_key(&app, &grant.token, &workspace, "changed").is_err());
@@ -164,19 +164,69 @@ fn private_key_grants_keep_expiry_lock_and_dialog_generation_controls() {
     let (app, workspace) = vault(root.path());
     let path = file(root.path(), "key.pem", b"vault-only canary");
     let expired = FileGrants::new(Duration::ZERO);
-    let grant = expired.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = expired.grant_private_key(&app, &path).unwrap();
     assert!(expired.import_private_key(&app, &grant.token, &workspace, "expired").is_err());
     let grants = FileGrants::default();
     let generation = grants.generation();
-    let grant = grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
     grants.revoke_all();
     assert!(grants.import_private_key(&app, &grant.token, &workspace, "revoked").is_err());
     assert_eq!(
-        grants.grant_read_at(FilePurpose::PemPrivateKey, &path, generation).unwrap_err(),
+        grants.grant_private_key_at(&app, &path, generation).unwrap_err(),
         GrantError::Revoked,
     );
     assert!(grants.is_empty());
     assert!(app.store.list_secret_ids(Some(&workspace)).unwrap().is_empty());
+}
+
+#[test]
+fn private_key_grants_require_the_issuing_vault_even_before_revocation() {
+    let root = tempfile::tempdir().unwrap();
+    let (a, a_workspace) = vault(root.path());
+    let (b, b_workspace) = vault(root.path());
+    let path = file(root.path(), "key.pem", b"vault-only canary");
+    let grants = FileGrants::default();
+    assert_eq!(
+        grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap_err(),
+        GrantError::WrongPurpose,
+    );
+    assert_eq!(
+        grants
+            .grant_read_at(FilePurpose::PemPrivateKey, &path, grants.generation())
+            .unwrap_err(),
+        GrantError::WrongPurpose,
+    );
+    let grant = grants.grant_private_key(&a, &path).unwrap();
+    assert!(grants.import_private_key(&b, &grant.token, &b_workspace, "wrong").is_err());
+    assert!(grants.is_empty(), "a wrong-vault claim is also spent");
+    assert!(grants.import_private_key(&a, &grant.token, &a_workspace, "replay").is_err());
+    assert!(a.store.list_secret_ids(None).unwrap().is_empty());
+    assert!(b.store.list_secret_ids(None).unwrap().is_empty());
+}
+
+#[test]
+fn a_claim_read_before_revocation_cannot_write_after_the_vault_reopens() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, workspace) = vault(root.path());
+    let path = file(root.path(), "key.pem", b"vault-only canary");
+    let grants = FileGrants::default();
+    let grant = grants.grant_private_key(&app, &path).unwrap();
+    let claim = grants.claim_private_key(&app, &grant.token).unwrap();
+    assert!(grants.is_empty());
+    grants.revoke_all();
+    app.lock();
+    let (_, key) = ProfileManager::unlock(
+        &app.dir,
+        anvil_app::profiles::Unlock::Passphrase("test passphrase"),
+    )
+    .unwrap();
+    app.unlock(key).unwrap();
+    assert!(matches!(
+        claim.store(&workspace, "abandoned", || true),
+        Err(anvil_app::AppError::Locked),
+    ));
+    assert!(app.store.list_secret_ids(None).unwrap().is_empty());
+    assert!(grants.import_private_key(&app, &grant.token, &workspace, "replay").is_err());
 }
 
 #[test]
