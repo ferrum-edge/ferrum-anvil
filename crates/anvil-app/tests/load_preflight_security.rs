@@ -404,9 +404,8 @@ async fn cleartext_forward_proxy_receives_the_authority_preflight_checks() {
     // This HTTP/1.1 and h2c peer records requests and never forwards them.
     let recorder = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
     let profile = proxy(&app, ws, ProxyKind::Http, &recorder.addr.to_string(), "");
-    let environment = app
-        .create_environment(&ws, "fixed", vec![anvil_domain::workspace::Variable::plain("fixed_host", "remote.example.test")])
-        .unwrap();
+    let environment =
+        app.create_environment(&ws, "fixed", vec![anvil_domain::workspace::Variable::plain("fixed_host", "remote.example.test")]).unwrap();
     let dataset = app.create_dataset(&ws, "hosts", DatasetFormat::Csv, b"host,header\nremote.example.test,Host\n", vec![]).unwrap();
     // The proxy receives names unchanged, despite client overrides.
     pin(&app, ws, "remote.example.test", &["127.0.0.1"]);
@@ -450,9 +449,13 @@ async fn cleartext_forward_proxy_receives_the_authority_preflight_checks() {
                 _ => None,
             });
             assert_eq!(authority.as_deref(), Some(expected), "{version:?}: proxy-received authority");
-            assert!(!recorder.log.entries().iter().any(|entry| {
-                matches!(&entry.event, GroundTruth::RequestReceived { method, .. } if method == "CONNECT")
-            }));
+            assert!(
+                !recorder
+                    .log
+                    .entries()
+                    .iter()
+                    .any(|entry| { matches!(&entry.event, GroundTruth::RequestReceived { method, .. } if method == "CONNECT") })
+            );
         }
     }
 
@@ -469,9 +472,11 @@ async fn cleartext_forward_proxy_receives_the_authority_preflight_checks() {
     row(&mut ctx, "host", "remote.example.test");
     assert_eq!(send(&ctx).await.record.response.unwrap().status, 200);
     assert_eq!(recorder.log.entries().len(), before);
-    assert!(direct.log.entries().iter().any(|entry| {
-        matches!(&entry.event, GroundTruth::AuthorityReceived { authority, .. } if authority == "remote.example.test")
-    }));
+    assert!(
+        direct.log.entries().iter().any(|entry| {
+            matches!(&entry.event, GroundTruth::AuthorityReceived { authority, .. } if authority == "remote.example.test")
+        })
+    );
 }
 
 #[tokio::test]
@@ -563,9 +568,8 @@ async fn masque_locality_checks_the_template_and_records_the_actual_connect_udp_
     let environment = app
         .create_environment(&ws, "canonical", vec![anvil_domain::workspace::Variable::plain("canonical", MASQUE_DEFAULT_TEMPLATE)])
         .unwrap();
-    let dataset = app
-        .create_dataset(&ws, "route", DatasetFormat::Csv, b"relay_host,template\nremote.example.test,unused\n", vec![])
-        .unwrap();
+    let dataset =
+        app.create_dataset(&ws, "route", DatasetFormat::Csv, b"relay_host,template\nremote.example.test,unused\n", vec![]).unwrap();
     let custom = "/.well-known/masque/udp/remote.example.test/{target_port}/?original={target_host}";
     let varying = "/.well-known/masque/udp/{{relay_host}}/{target_port}/?original={target_host}";
     let canonical_path = "/.well-known/masque/udp/127.0.0.1/9/";
