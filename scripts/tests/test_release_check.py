@@ -412,7 +412,9 @@ class ReleaseCheckAppImage(unittest.TestCase):
                 self.assert_no_payload_execution()
 
     def test_supported_extractor_version_banners_allow_real_extraction(self):
-        for version, status in (("4.5.1", 1), ("4.5.1", 0), ("4.6", 1), ("4.6.1", 0)):
+        for version, status in (
+            ("4.5.1", 1), ("4.5.1", 0), ("4.6", 1), ("4.6.1", 0), ("4.7.5", 1),
+        ):
             with self.subTest(version=version, status=status):
                 env = self.extractor_path(f"unsquashfs version {version} (2022/03/17)", status)
                 sentinel = Path(env["RELEASE_CHECK_EXTRACTOR_SENTINEL"])
@@ -477,6 +479,7 @@ class ReleaseCheckAppImage(unittest.TestCase):
         _, output = self.check(image, 2)
         self.assertIn("could not unpack", output)
         self.assertNotIn("AppImage metadata:", output)
+        self.assertNotIn("trusted unsquashfs >= 4.5.1 required", output)
         self.assert_no_payload_execution()
 
     def test_explicit_probe_launches_extracted_apprun_only(self):
