@@ -75,21 +75,10 @@ fn approval_scope(
         SpecInput::File { grant } => ("file", grant.as_str()),
         SpecInput::Text { name, .. } => ("text", name.as_str()),
     };
-    binding.scoped_digest(&(
-        st.review_session,
-        st.epoch(),
-        &fence.app.header.profile_id,
-        source,
-        destination,
-    )).map_err(e)
+    binding.scoped_digest(&(st.review_session, st.epoch(), &fence.app.header.profile_id, source, destination)).map_err(e)
 }
 
-fn preview(
-    st: &DesktopState,
-    input: &SpecInput,
-    options: &ImportOptions,
-    target: &SpecTarget,
-) -> R<ReviewedPreview> {
+fn preview(st: &DesktopState, input: &SpecInput, options: &ImportOptions, target: &SpecTarget) -> R<ReviewedPreview> {
     let fence = st.admit_payload()?;
     let (bytes, _) = input.load(&st.file_grants)?;
     let preview = fence.app.spec_preview(&bytes, options).map_err(e)?;
@@ -101,13 +90,7 @@ fn preview(
     })?
 }
 
-fn import(
-    st: &DesktopState,
-    input: &SpecInput,
-    options: &ImportOptions,
-    target: SpecTarget,
-    approval: &SpecApproval,
-) -> R<SpecImported> {
+fn import(st: &DesktopState, input: &SpecInput, options: &ImportOptions, target: SpecTarget, approval: &SpecApproval) -> R<SpecImported> {
     import_with(st, input, options, target, approval, || {})
 }
 
@@ -121,13 +104,7 @@ fn import_with(
 ) -> R<SpecImported> {
     let fence = st.admit_payload()?;
     let (bytes, name) = input.load(&st.file_grants)?;
-    let prepared = fence.app.prepare_spec_import_reviewed(
-        bytes,
-        name,
-        options,
-        target.clone(),
-        &approval.binding,
-    ).map_err(e)?;
+    let prepared = fence.app.prepare_spec_import_reviewed(bytes, name, options, target.clone(), &approval.binding).map_err(e)?;
     before_commit();
     // Parsing and I/O are already finished. Lock either wins this commit
     // boundary (no writes), or follows the completed transaction.
@@ -171,12 +148,7 @@ fn reimport_apply_with(
 ) -> R<usize> {
     let fence = st.admit_payload()?;
     let (bytes, name) = input.load(&st.file_grants)?;
-    let prepared = fence.app.prepare_spec_reimport_reviewed(
-        &id(import_id)?,
-        bytes,
-        name,
-        &approval.binding,
-    ).map_err(e)?;
+    let prepared = fence.app.prepare_spec_reimport_reviewed(&id(import_id)?, bytes, name, &approval.binding).map_err(e)?;
     before_commit();
     st.deliver_payload(&fence, || {
         let scope = approval_scope(st, &fence, input, &("reimport", import_id), &approval.binding)?;
@@ -188,12 +160,7 @@ fn reimport_apply_with(
 }
 
 #[tauri::command]
-pub async fn spec_preview(
-    handle: AppHandle,
-    input: SpecInput,
-    options: ImportOptions,
-    target: SpecTarget,
-) -> R<ReviewedPreview> {
+pub async fn spec_preview(handle: AppHandle, input: SpecInput, options: ImportOptions, target: SpecTarget) -> R<ReviewedPreview> {
     blocking(&handle, move |st| preview(st, &input, &options, &target)).await
 }
 
@@ -216,11 +183,7 @@ pub fn spec_sources(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec<
 }
 
 #[tauri::command]
-pub async fn spec_reimport_plan(
-    handle: AppHandle,
-    import_id: String,
-    input: SpecInput,
-) -> R<ReviewedReimport> {
+pub async fn spec_reimport_plan(handle: AppHandle, import_id: String, input: SpecInput) -> R<ReviewedReimport> {
     blocking(&handle, move |st| reimport_plan(st, &import_id, &input)).await
 }
 
@@ -234,9 +197,7 @@ pub async fn spec_reimport_apply(
     decisions: ReimportApproval,
     approval: SpecApproval,
 ) -> R<usize> {
-    blocking_unchecked(&handle, move |st| {
-        reimport_apply(st, &import_id, &input, &decisions, &approval)
-    }).await
+    blocking_unchecked(&handle, move |st| reimport_apply(st, &import_id, &input, &decisions, &approval)).await
 }
 
 #[cfg(test)]
@@ -283,7 +244,8 @@ mod tests {
         let review = preview(&st, &input, &opts, &SpecTarget::NewWorkspace).unwrap();
         let done = import_with(&st, &input, &opts, SpecTarget::NewWorkspace, &review.approval, || {
             replace_in_place(&path, &V1.replace("/safe", "/changed-after-verify"));
-        }).unwrap();
+        })
+        .unwrap();
         let app = st.app().unwrap();
         assert_eq!(app.spec_original(&done.import_id).unwrap(), V1.as_bytes());
         let reviewed = V1.replace("/safe", "/reviewed");
@@ -292,7 +254,8 @@ mod tests {
         let plan = reimport_plan(&st, &key, &input).unwrap();
         reimport_apply_with(&st, &key, &input, &ReimportApproval::default(), &plan.approval, || {
             replace_in_place(&path, &V1.replace("/safe", "/changed-after-verify"));
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(app.spec_original(&done.import_id).unwrap(), reviewed.as_bytes());
     }
 
@@ -312,14 +275,7 @@ mod tests {
             let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
             st.unlock_since(&app, key, st.epoch()).unwrap();
         };
-        assert!(import_with(
-            &st,
-            &input,
-            &opts,
-            SpecTarget::NewWorkspace,
-            &review.approval,
-            invalidate,
-        ).is_err());
+        assert!(import_with(&st, &input, &opts, SpecTarget::NewWorkspace, &review.approval, invalidate,).is_err());
         assert_eq!(app.backup_contents().unwrap(), before);
         let grant = st.file_grants.grant_read(FilePurpose::SpecSource, &path).unwrap();
         let input = SpecInput::File { grant: grant.token };
@@ -329,14 +285,7 @@ mod tests {
         let key = done.import_id.to_string();
         let plan = reimport_plan(&st, &key, &input).unwrap();
         let before = app.backup_contents().unwrap();
-        assert!(reimport_apply_with(
-            &st,
-            &key,
-            &input,
-            &ReimportApproval::default(),
-            &plan.approval,
-            invalidate,
-        ).is_err());
+        assert!(reimport_apply_with(&st, &key, &input, &ReimportApproval::default(), &plan.approval, invalidate,).is_err());
         assert_eq!(app.backup_contents().unwrap(), before);
     }
 
@@ -354,23 +303,11 @@ mod tests {
         replace_in_place(&path, &V1.replace("/safe", "/unexpected"));
         // The ordinary reusable grant still accepts the changed inode.
         assert!(input.load(&st.file_grants).is_ok());
-        let err = import(
-            &st,
-            &input,
-            &options,
-            SpecTarget::NewWorkspace,
-            &review.approval,
-        ).unwrap_err();
+        let err = import(&st, &input, &options, SpecTarget::NewWorkspace, &review.approval).unwrap_err();
         assert!(err.contains("source or plan changed"), "{err}");
         assert_eq!(app.backup_contents().unwrap(), before);
         replace_in_place(&path, V1);
-        let done = import(
-            &st,
-            &input,
-            &options,
-            SpecTarget::NewWorkspace,
-            &review.approval,
-        ).unwrap();
+        let done = import(&st, &input, &options, SpecTarget::NewWorkspace, &review.approval).unwrap();
         assert_eq!(app.spec_original(&done.import_id).unwrap(), V1.as_bytes());
         assert_eq!(app.requests(&done.workspace_id).unwrap().len(), 1);
     }
@@ -385,13 +322,7 @@ mod tests {
         let (input, path) = selected(&st, &root, V1);
         let options = ImportOptions::default();
         let first = preview(&st, &input, &options, &SpecTarget::NewWorkspace).unwrap();
-        let done = import(
-            &st,
-            &input,
-            &options,
-            SpecTarget::NewWorkspace,
-            &first.approval,
-        ).unwrap();
+        let done = import(&st, &input, &options, SpecTarget::NewWorkspace, &first.approval).unwrap();
         let request = app.requests(&done.workspace_id).unwrap().pop().unwrap();
         let reviewed = V1.replace("/safe", "/reviewed");
         replace_in_place(&path, &reviewed);
@@ -456,40 +387,22 @@ mod tests {
         let plan = reimport_plan(&st, &key, &input).unwrap();
         let decisions = ReimportApproval::default();
         let refused = || {
-            assert!(import(
-                &st,
-                &input,
-                &opts,
-                SpecTarget::NewWorkspace,
-                &review.approval,
-            ).is_err());
+            assert!(import(&st, &input, &opts, SpecTarget::NewWorkspace, &review.approval,).is_err());
             assert!(reimport_apply(&st, &key, &input, &decisions, &plan.approval).is_err());
         };
         st.lock();
         refused();
         let app = st.app.read().clone().unwrap();
-        let (_, key_material) = ProfileManager::unlock(
-            &dir,
-            Unlock::Passphrase(PASSPHRASE),
-        ).unwrap();
+        let (_, key_material) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
         st.unlock_since(&app, key_material, st.epoch()).unwrap();
         refused();
         st.set_app_since(other, st.epoch()).unwrap();
         refused();
-        let (header, key_material) = ProfileManager::unlock(
-            &dir,
-            Unlock::Passphrase(PASSPHRASE),
-        ).unwrap();
+        let (header, key_material) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
         let reopened = anvil_app::App::open(dir, header, key_material).unwrap();
         let restarted = DesktopState::new(root.0.clone());
         restarted.set_app_since(reopened, restarted.epoch()).unwrap();
-        assert!(import(
-            &restarted,
-            &input,
-            &opts,
-            SpecTarget::NewWorkspace,
-            &review.approval,
-        ).is_err());
+        assert!(import(&restarted, &input, &opts, SpecTarget::NewWorkspace, &review.approval,).is_err());
         assert!(reimport_apply(&restarted, &key, &input, &decisions, &plan.approval).is_err());
     }
 
@@ -506,33 +419,15 @@ mod tests {
         let before = st.app().unwrap().backup_contents().unwrap();
         let changed = ImportOptions { include_credentials: true, ..opts.clone() };
         assert!(import(&st, &input, &changed, SpecTarget::NewWorkspace, &review.approval).is_err());
-        assert!(import(
-            &st,
-            &input,
-            &opts,
-            SpecTarget::Workspace { workspace_id: workspace },
-            &review.approval,
-        ).is_err());
+        assert!(import(&st, &input, &opts, SpecTarget::Workspace { workspace_id: workspace }, &review.approval,).is_err());
         let replacement = st.file_grants.grant_read(FilePurpose::SpecSource, &path).unwrap();
         let replacement = SpecInput::File { grant: replacement.token };
-        assert!(import(
-            &st,
-            &replacement,
-            &opts,
-            SpecTarget::NewWorkspace,
-            &review.approval,
-        ).is_err());
+        assert!(import(&st, &replacement, &opts, SpecTarget::NewWorkspace, &review.approval,).is_err());
         let mut forged = review.approval;
         forged.binding.source_sha256 = Id::new().to_string();
         // Even with a correctly recomputed context digest, native bytes win.
         let fence = st.admit_payload().unwrap();
-        forged.scope = approval_scope(
-            &st,
-            &fence,
-            &input,
-            &("import", SpecTarget::NewWorkspace),
-            &forged.binding,
-        ).unwrap();
+        forged.scope = approval_scope(&st, &fence, &input, &("import", SpecTarget::NewWorkspace), &forged.binding).unwrap();
         assert!(import(&st, &input, &opts, SpecTarget::NewWorkspace, &forged).is_err());
         assert_eq!(st.app().unwrap().backup_contents().unwrap(), before);
     }

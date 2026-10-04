@@ -86,10 +86,8 @@ pub(crate) async fn session_open(
     });
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let publish = |session| {
-        let slot = Arc::new(OpenSession {
-            session: tokio::sync::Mutex::new(Some(session)),
-            cancel: tokio_util::sync::CancellationToken::new(),
-        });
+        let slot =
+            Arc::new(OpenSession { session: tokio::sync::Mutex::new(Some(session)), cancel: tokio_util::sync::CancellationToken::new() });
         st.sessions.lock().insert(execution_id.clone(), (fence.clone(), slot.clone()));
         slot
     };
@@ -145,19 +143,10 @@ pub(crate) async fn session_open(
 }
 
 /// A refused final payload still retires the UI's session with scalar status.
-fn emit_ended(
-    st: &DesktopState,
-    fence: &crate::state::PayloadFence,
-    ev: SessionEnded,
-    emit: impl Fn(SessionEnded),
-) {
+fn emit_ended(st: &DesktopState, fence: &crate::state::PayloadFence, ev: SessionEnded, emit: impl Fn(SessionEnded)) {
     let execution_id = ev.execution_id.clone();
     if st.deliver_payload(fence, || emit(ev)).is_err() {
-        emit(SessionEnded {
-            execution_id,
-            view: None,
-            error: Some("LOCKED".into()),
-        });
+        emit(SessionEnded { execution_id, view: None, error: Some("LOCKED".into()) });
     }
 }
 
@@ -177,10 +166,7 @@ where
     }
 }
 
-async fn until_canceled<T>(
-    cancel: &tokio_util::sync::CancellationToken,
-    work: impl Future<Output = T>,
-) -> R<T> {
+async fn until_canceled<T>(cancel: &tokio_util::sync::CancellationToken, work: impl Future<Output = T>) -> R<T> {
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(crate::commands::CANCELED.into()),
@@ -188,15 +174,8 @@ async fn until_canceled<T>(
     }
 }
 
-pub(crate) async fn session_send(
-    st: &DesktopState,
-    execution_id: String,
-    command: SessionCommand,
-) -> R<()> {
-    with_session(st, &execution_id, |s| {
-        Box::pin(async move { s.send(command).await.map_err(|x| x.to_string()) })
-    })
-    .await
+pub(crate) async fn session_send(st: &DesktopState, execution_id: String, command: SessionCommand) -> R<()> {
+    with_session(st, &execution_id, |s| Box::pin(async move { s.send(command).await.map_err(|x| x.to_string()) })).await
 }
 
 /// Abort without a graceful close handshake. An open still connecting is
@@ -223,10 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_interrupts_a_queue_wait_and_releases_the_session_mutex() {
-        let slot = Arc::new(OpenSession {
-            session: tokio::sync::Mutex::new(None),
-            cancel: tokio_util::sync::CancellationToken::new(),
-        });
+        let slot = Arc::new(OpenSession { session: tokio::sync::Mutex::new(None), cancel: tokio_util::sync::CancellationToken::new() });
         let (waiting_tx, waiting_rx) = oneshot::channel();
         let sender = async {
             let _guard = slot.session.lock().await;
@@ -244,7 +220,9 @@ mod tests {
         };
         tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(sender, canceler);
-        }).await.expect("cancellation must release the slot");
+        })
+        .await
+        .expect("cancellation must release the slot");
     }
 
     #[tokio::test]
@@ -277,10 +255,7 @@ mod tests {
                 }
                 let ended = SessionEnded {
                     execution_id: output.record.id.to_string(),
-                    view: Some(ExecutionView {
-                        record: output.record,
-                        body: body_view(&output.body, None, None),
-                    }),
+                    view: Some(ExecutionView { record: output.record, body: body_view(&output.body, None, None) }),
                     error: Some("payload-canary recording error".into()),
                 };
                 let received = parking_lot::Mutex::new(Vec::new());
@@ -288,10 +263,7 @@ mod tests {
                 let received = received.into_inner();
                 assert_eq!(received.len(), 1);
                 if transition == "unchanged" {
-                    assert_eq!(
-                        received[0].view.as_ref().unwrap().body.text.as_deref(),
-                        Some("payload-canary"),
-                    );
+                    assert_eq!(received[0].view.as_ref().unwrap().body.text.as_deref(), Some("payload-canary"),);
                 } else {
                     assert!(received[0].view.is_none(), "{transition}");
                     assert_eq!(received[0].error.as_deref(), Some("LOCKED"));
@@ -303,10 +275,7 @@ mod tests {
                     "lock" => st.lock(),
                     "lock-unlock" => {
                         st.lock();
-                        let (_, key) = ProfileManager::unlock(
-                            &dir,
-                            Unlock::Passphrase(PASSPHRASE),
-                        ).unwrap();
+                        let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
                         st.unlock_since(&fence.app, key, st.epoch()).unwrap();
                     }
                     "profile" => st.set_app_since(other, st.epoch()).unwrap(),
@@ -317,7 +286,9 @@ mod tests {
             };
             tokio::time::timeout(Duration::from_secs(10), async {
                 tokio::join!(finalizing, locking);
-            }).await.expect("session finalization must settle");
+            })
+            .await
+            .expect("session finalization must settle");
         }
     }
 }

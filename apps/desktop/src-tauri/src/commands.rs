@@ -581,12 +581,7 @@ pub(crate) fn with_execution_commands(
     move |invoke| {
         if matches!(
             invoke.message.command(),
-            "send_request"
-                | "effective_request"
-                | "mcp_discover_tools"
-                | "session_open"
-                | "session_send"
-                | "session_cancel"
+            "send_request" | "effective_request" | "mcp_discover_tools" | "session_open" | "session_send" | "session_cancel"
         ) {
             execution_command(invoke);
             true
@@ -601,9 +596,9 @@ pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
         "send_request" => payload_reply(invoke, |handle, fence, args: SendArgs| async move {
             send_request(handle, fence, args.input, args.execution_id).await
         }),
-        "effective_request" => payload_reply(invoke, |_, fence, args: PreviewArgs| async move {
-            effective_request(fence, args.input).await
-        }),
+        "effective_request" => {
+            payload_reply(invoke, |_, fence, args: PreviewArgs| async move { effective_request(fence, args.input).await })
+        }
         "mcp_discover_tools" => payload_reply(invoke, |handle, fence, args: McpArgs| async move {
             mcp_discover_tools(handle, fence, args.input, args.execution_id).await
         }),
@@ -611,17 +606,10 @@ pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
             crate::cmd_sessions::session_open(handle, fence, args.input, args.execution_id).await
         }),
         "session_send" => payload_reply(invoke, |handle, _, args: SessionArgs| async move {
-            crate::cmd_sessions::session_send(
-                &handle.state::<DesktopState>(),
-                args.execution_id,
-                args.command,
-            ).await
+            crate::cmd_sessions::session_send(&handle.state::<DesktopState>(), args.execution_id, args.command).await
         }),
         "session_cancel" => payload_reply(invoke, |handle, _, args: CancelSessionArgs| async move {
-            crate::cmd_sessions::session_cancel(
-                &handle.state::<DesktopState>(),
-                args.execution_id,
-            ).await
+            crate::cmd_sessions::session_cancel(&handle.state::<DesktopState>(), args.execution_id).await
         }),
         _ => invoke.resolver.reject("unknown execution command"),
     }
@@ -674,25 +662,20 @@ where
 
 /// `reply` serializes and enqueues synchronously. A stale result's detailed
 /// error is payload too, so only the scalar LOCKED code may be returned.
-fn reply_payload<T>(
-    st: &DesktopState,
-    fence: &PayloadFence,
-    out: R<T>,
-    reply: impl FnOnce(R<T>),
-) {
+fn reply_payload<T>(st: &DesktopState, fence: &PayloadFence, out: R<T>, reply: impl FnOnce(R<T>)) {
     let mut reply = Some(reply);
     let mut out = Some(out);
-    if st.deliver_payload(fence, || {
-        reply.take().expect("one reply")(out.take().expect("one result"));
-    }).is_err() {
+    if st
+        .deliver_payload(fence, || {
+            reply.take().expect("one reply")(out.take().expect("one result"));
+        })
+        .is_err()
+    {
         reply.expect("undelivered reply")(Err("LOCKED".into()));
     }
 }
 
-async fn effective_request(
-    fence: PayloadFence,
-    input: SendInput,
-) -> R<anvil_engine::preview::EffectiveRequest> {
+async fn effective_request(fence: PayloadFence, input: SendInput) -> R<anvil_engine::preview::EffectiveRequest> {
     let app = fence.app;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
@@ -704,12 +687,7 @@ async fn effective_request(
     Ok(preview)
 }
 
-async fn send_request(
-    handle: AppHandle,
-    fence: PayloadFence,
-    input: SendInput,
-    execution_id: String,
-) -> R<ExecutionView> {
+async fn send_request(handle: AppHandle, fence: PayloadFence, input: SendInput, execution_id: String) -> R<ExecutionView> {
     let st = handle.state::<DesktopState>();
     let exec_id = id(&execution_id)?;
     // Register, then validate the admission again: a lock before registration
@@ -1245,7 +1223,8 @@ pub(crate) mod tests {
                 "protocol_status": { "protocol": "none" }, "dispatch": "sent",
                 "warnings": [], "summary": "payload-canary"
             }
-        })).unwrap();
+        }))
+        .unwrap();
         ExecutionView { record, body: body_view(b"payload-canary", None, None) }
     }
 

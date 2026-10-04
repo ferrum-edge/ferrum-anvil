@@ -251,10 +251,7 @@ impl DesktopState {
     /// emission boundary: payload sinks must still enqueue under the gate.
     pub fn check_payload(&self, fence: &PayloadFence) -> Result<(), String> {
         let current = self.app.read();
-        if self.epoch() != fence.epoch
-            || !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app))
-            || fence.app.is_locked()
-        {
+        if self.epoch() != fence.epoch || !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app)) || fence.app.is_locked() {
             return Err("LOCKED".into());
         }
         Ok(())
@@ -264,17 +261,10 @@ impl DesktopState {
     /// while lock/profile publication is excluded. `deliver` must not await,
     /// reenter this gate, or wait for cancellation/finalization. Spec writes
     /// also use this gate on a blocking worker, with no renderer callbacks.
-    pub fn deliver_payload<T>(
-        &self,
-        fence: &PayloadFence,
-        deliver: impl FnOnce() -> T,
-    ) -> Result<T, String> {
+    pub fn deliver_payload<T>(&self, fence: &PayloadFence, deliver: impl FnOnce() -> T) -> Result<T, String> {
         let _delivery = self.payload_gate.lock();
         let current = self.app.read();
-        if self.epoch() != fence.epoch
-            || !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app))
-            || fence.app.is_locked()
-        {
+        if self.epoch() != fence.epoch || !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app)) || fence.app.is_locked() {
             return Err("LOCKED".into());
         }
         Ok(deliver())
@@ -283,17 +273,10 @@ impl DesktopState {
     /// Transport callbacks must not block, including while lock clears an
     /// engine cache whose owner might be emitting. Drop on gate contention;
     /// the owned final reply uses deliver_payload after finalization instead.
-    pub fn try_deliver_payload<T>(
-        &self,
-        fence: &PayloadFence,
-        deliver: impl FnOnce() -> T,
-    ) -> Option<T> {
+    pub fn try_deliver_payload<T>(&self, fence: &PayloadFence, deliver: impl FnOnce() -> T) -> Option<T> {
         let _delivery = self.payload_gate.try_lock()?;
         let current = self.app.try_read()?;
-        if self.epoch() != fence.epoch
-            || !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app))
-            || fence.app.is_locked()
-        {
+        if self.epoch() != fence.epoch || !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app)) || fence.app.is_locked() {
             return None;
         }
         Some(deliver())
@@ -687,11 +670,13 @@ pub(crate) mod tests {
             let emit_fence = &fence;
             let emit_log = &log;
             let delivery = scope.spawn(move || {
-                emit_st.deliver_payload(emit_fence, || {
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-                    emit_log.lock().push("payload");
-                }).unwrap();
+                emit_st
+                    .deliver_payload(emit_fence, || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                        emit_log.lock().push("payload");
+                    })
+                    .unwrap();
             });
             entered_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             // A real transport callback must drop on contention, never wait
@@ -752,10 +737,7 @@ pub(crate) mod tests {
                     "lock" => st.lock(),
                     "lock-unlock" => {
                         st.lock();
-                        let (_, key) = ProfileManager::unlock(
-                            &dir,
-                            anvil_app::profiles::Unlock::Passphrase(PASSPHRASE),
-                        ).unwrap();
+                        let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
                         st.unlock_since(&old_app, key, st.epoch()).unwrap();
                         assert!(st.is_current(&old_app));
                         assert!(!old_app.is_locked());

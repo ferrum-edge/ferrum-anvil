@@ -108,13 +108,13 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
         };
         tauri::async_runtime::spawn_blocking(move || {
             let st = handle.state::<DesktopState>();
-            if st.deliver_payload(&fence, || {
-                let _ = handle.emit("run-finished", ev);
-            }).is_err() {
-                let _ = handle.emit("run-finished", RunFinished {
-                    run_id: run_id.to_string(),
-                    error: Some("LOCKED".into()),
-                });
+            if st
+                .deliver_payload(&fence, || {
+                    let _ = handle.emit("run-finished", ev);
+                })
+                .is_err()
+            {
+                let _ = handle.emit("run-finished", RunFinished { run_id: run_id.to_string(), error: Some("LOCKED".into()) });
             }
         });
     });

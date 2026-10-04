@@ -101,17 +101,10 @@ fn import_review(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult> {
 }
 
 fn import_binding(result: &ImportResult) -> Result<SpecBinding> {
-    Ok(SpecBinding {
-        source_sha256: result.source.sha256.clone(),
-        plan_sha256: review_digest(&canonical_result(result.clone()))?,
-    })
+    Ok(SpecBinding { source_sha256: result.source.sha256.clone(), plan_sha256: review_digest(&canonical_result(result.clone()))? })
 }
 
-fn reviewed_import_result(
-    bytes: &[u8],
-    opts: &ImportOptions,
-    binding: &SpecBinding,
-) -> Result<ImportResult> {
+fn reviewed_import_result(bytes: &[u8], opts: &ImportOptions, binding: &SpecBinding) -> Result<ImportResult> {
     if &import_binding(&import_review(bytes, opts)?)? != binding {
         return Err(AppError::Invalid(REVIEW_CHANGED.into()));
     }
@@ -124,22 +117,11 @@ impl Reimport {
     fn binding(&self) -> Result<SpecBinding> {
         let result = canonical_result(self.result.clone());
         let fresh = generated_scope(&result, self.rec.root_folder_id.is_some());
-        let scope = ScopeDiff {
-            current: &self.current,
-            generated: self.generated.as_ref(),
-            fresh: &fresh,
-        };
+        let scope = ScopeDiff { current: &self.current, generated: self.generated.as_ref(), fresh: &fresh };
         let plan = anvil_import::reimport_diff(&self.previous, &result, scope);
         Ok(SpecBinding {
             source_sha256: result.source.sha256.clone(),
-            plan_sha256: review_digest(&(
-                &self.rec,
-                &self.previous,
-                &self.current,
-                &self.generated,
-                &result,
-                &plan,
-            ))?,
+            plan_sha256: review_digest(&(&self.rec, &self.previous, &self.current, &self.generated, &result, &plan))?,
         })
     }
 }
@@ -303,13 +285,7 @@ impl App {
         self.persist_import(bytes, file_name, target, r)
     }
 
-    fn persist_import(
-        &self,
-        bytes: &[u8],
-        file_name: &str,
-        target: SpecTarget,
-        mut r: ImportResult,
-    ) -> Result<SpecImported> {
+    fn persist_import(&self, bytes: &[u8], file_name: &str, target: SpecTarget, mut r: ImportResult) -> Result<SpecImported> {
         let root = match &target {
             SpecTarget::NewWorkspace => None,
             SpecTarget::Workspace { workspace_id } => {
@@ -505,11 +481,7 @@ impl App {
         Ok(PreparedSpecReimport { bytes, file_name, reimport })
     }
 
-    pub fn apply_prepared_spec_reimport(
-        &self,
-        prepared: PreparedSpecReimport,
-        approval: &ReimportApproval,
-    ) -> Result<usize> {
+    pub fn apply_prepared_spec_reimport(&self, prepared: PreparedSpecReimport, approval: &ReimportApproval) -> Result<usize> {
         let PreparedSpecReimport { bytes, file_name, reimport } = prepared;
         self.apply_reimport(reimport, &bytes, &file_name, approval)
     }
