@@ -1101,9 +1101,10 @@ fn full_backups_are_never_written_or_opened_as_bundles() {
     assert!(matches!(bundle::write(&sample(), &backup_kind), Err(BundleError::FullBackupNotABundle)));
     assert!(matches!(bundle::preview(&sample(), &backup_kind), Err(BundleError::FullBackupNotABundle)));
 
-    // A bundle that describes a full backup, as early builds wrote them, is
-    // refused with or without its passphrase, before its objects or vault
-    // are read.
+    // Manifest and directory metadata that describes a full backup is
+    // refused with or without its passphrase, before objects or the vault
+    // are read. The objects-only marker below is discovered only after the
+    // passphrase check and objects read.
     let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
     let legacy = [
         edit_json(&bytes, "manifest.json", |m| m["mode"] = "full_backup".into()),
@@ -1113,7 +1114,6 @@ fn full_backups_are_never_written_or_opened_as_bundles() {
             m["mode"] = "full_backup".into();
         }),
         with_entry(&bytes, "settings/portable.json", b"{}"),
-        edit_json(&bytes, "workspace/objects.json", |o| o["app_settings"] = serde_json::Value::Object(Default::default())),
     ];
     for b in &legacy {
         for p in [None, Some(pass)] {
@@ -1122,6 +1122,13 @@ fn full_backups_are_never_written_or_opened_as_bundles() {
             assert!(e.to_string().contains("restore from an ANVILBAK backup"), "{e}");
         }
     }
+    let objects_only = edit_json(&bytes, "workspace/objects.json", |o| {
+        o["app_settings"] = serde_json::Value::Object(Default::default())
+    });
+    assert!(matches!(bundle::open(&objects_only, None), Err(BundleError::PassphraseRequired)));
+    let e = bundle::open(&objects_only, Some(pass)).unwrap_err();
+    assert!(matches!(e, BundleError::LegacyFullBackup), "{e}");
+    assert!(e.to_string().contains("restore from an ANVILBAK backup"), "{e}");
     bundle::open(&bytes, Some(pass)).expect("the untouched bundle opens");
 }
 
