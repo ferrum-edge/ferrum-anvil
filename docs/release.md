@@ -28,6 +28,9 @@ website are manual owner steps, taken only after the
 **Preflight** (Ubuntu): the tag must equal `anvil-v<version>` and the three
 version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --check`;
 `scripts/release-check.sh` (dependency graph); the diagnostic catalog drift test.
+The hosted AppImage checker regression suite also runs with distribution-provided
+`gcc`, `python3` and `mksquashfs`, and the checksum-pinned upstream `unsquashfs`
+described below, before any release build.
 
 **Build** (one job per target):
 
@@ -126,14 +129,74 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
    `ANVIL_E2E_PROFILE`, `e2e: create profile failed`, `e2e: unlock failed`,
    `e2e_unlock`). Each artifact must also contain an Anvil marker string, so a
    compressed or foreign file can never pass by accident.
+   For `.AppImage` inputs, only the [Type 2 ELF + SquashFS format](https://github.com/AppImage/AppImageSpec/blob/master/draft.md#type-2-image-format)
+   is supported. Trusted `python3` and `unsquashfs` (`squashfs-tools` 4.5.1 or
+   later) must be installed on a trusted `PATH`; hosted provisioning is described
+   below. Isolated Python reads the 32/64-bit ELF metadata in either byte order
+   and derives the filesystem boundary using the
+   [official runtime's layout](https://github.com/AppImage/type2-runtime/blob/main/src/runtime/runtime.c).
+   `unsquashfs` reads the filesystem as data into `squashfs-root`, with extraction
+   errors treated as fatal. The input is never made executable or invoked to
+   extract contents or discover its offset. Missing tools, unsupported types,
+   malformed metadata, corrupt filesystems and missing `AppRun` fail closed.
+   Every extracted regular file must be readable through EOF. Classification
+   and scanning use the same descriptor, with no symlink traversal; read errors
+   and changes to the extraction tree are fatal even if another file contains
+   a valid Anvil marker. Other artifact scans also reject classification,
+   enumeration and `grep` read errors; a normal no-match result remains valid.
 3. **Runtime probe** (`--runtime-probe`) — the desktop executable is launched
    with `TAURI_WEBDRIVER_PORT=<free port>`, `ANVIL_E2E_PROFILE` and
    `ANVIL_E2E_PASSPHRASE` set and a throw-away `ANVIL_DATA_DIR`. Nothing may
    answer `GET /status` on that port and no profile may appear in the data
-   directory. Only the process the probe started is stopped.
+   directory. AppImages launch the extracted `squashfs-root/AppRun` so bundled
+   WebKit helpers retain their environment; the input image's runtime is never
+   invoked. This option deliberately executes artifact contents: use it only
+   after establishing the artifact's provenance and any required signatures.
+   The probe stops the process it launched and leftover helpers in its own
+   temporary AppImage extraction directory.
 
 Exit status: `0` pass, `1` test hooks found, `2` usage error or an artifact
 that could not be inspected (never reported as a pass).
+
+The Ubuntu 22.04 release build keeps its older glibc baseline. Its distribution
+[`squashfs-tools` package](https://packages.ubuntu.com/jammy/squashfs-tools)
+is `1:4.5-3build1`, whose upstream 4.5 banner is below the checker's 4.5.1
+security floor. The CI fixture jobs on both Ubuntu versions, release preflight,
+and the Linux release build therefore compile only `unsquashfs` from the
+[upstream 4.7.5 release archive](https://github.com/plougher/squashfs-tools/releases/tag/4.7.5).
+The repository recipes in `.github/workflows/ci.yml` and `.github/workflows/release.yml`
+require a GitHub-hosted runner, fetch the exact release asset over HTTPS, and
+verify SHA-256 before unpacking or building:
+
+```text
+squashfs-tools-4.7.5.tar.gz
+547b7b7f4d2e44bf91b6fc554664850c69563701deab9fd9cd7e21f694c88ea6
+```
+
+This digest matches the upstream release asset's GitHub API `digest` field and
+the downloaded archive. The pinned archive's
+[change log](https://github.com/plougher/squashfs-tools/blob/4.7.5/CHANGES.md#451-17-mar-2022-new-manpages-fix-cve-2021-41072-and-miscellaneous-improvements-and-bug-fixes)
+records the 4.5.1 fix for CVE-2021-41072 (writes outside the extraction destination).
+Build dependencies come from the runner's authenticated Ubuntu repositories;
+the extractor enables gzip, xz, lzo, lz4, zstd and legacy lzma support. Only the
+resulting `unsquashfs` is installed into a private runner temporary directory,
+its exact version banner is checked, and its directory is prepended to `PATH`
+for later steps. Fixture `mksquashfs` and bundling tools remain distribution-provided.
+Update all three provisioning recipes together when changing this pin. The
+checker still rejects tools below 4.5.1 and unknown banners; provisioning does
+not add an exception for the Ubuntu 4.5 package.
+
+The CI release-checker jobs (Ubuntu 22.04 and 24.04) and release preflight run
+`scripts/tests/test_release_check.py` against the actual checker. Hosted fixtures
+include a native malicious runtime whose sentinel must never appear, real
+compressed SquashFS payloads, both ELF boundary layouts across architectures,
+forbidden markers in a library, malformed images and missing extraction tools.
+Contained `AppRun` symlinks also pass with a trusted symlinked `TMPDIR`; escaping
+links still fail under both ordinary and aliased temporary directories.
+Separate explicit-probe tests prove that extracted `AppRun` launches only when
+requested, that environment-created profiles fail the probe, and that early
+exit is inconclusive; a listener answering the WebDriver status request also
+fails. These fixture builds and script tests run on hosted CI.
 
 ## Signing and what "unsigned" means
 
