@@ -10,6 +10,8 @@ mod cmd_specs;
 mod cmd_standards;
 mod cmd_update;
 mod commands;
+#[cfg(test)]
+mod payload_tests;
 mod state;
 
 pub use cmd_load::LOAD_WORKER_FLAG;

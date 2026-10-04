@@ -2,7 +2,7 @@
 //! refuses while locked; secrets never cross into the webview except where
 //! the user explicitly typed them (they are stored and only references return).
 
-use crate::state::{DesktopState, ImportGate, PayloadFence, PendingEntry, cancel_pending};
+use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, PendingEntry, cancel_pending};
 use anvil_app::cleanup::StorageCleanupRecord;
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
@@ -605,12 +605,18 @@ pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
         "session_open" => payload_reply(invoke, |handle, fence, args: SendArgs| async move {
             crate::cmd_sessions::session_open(handle, fence, args.input, args.execution_id).await
         }),
-        "session_send" => payload_reply(invoke, |handle, _, args: SessionArgs| async move {
-            crate::cmd_sessions::session_send(&handle.state::<DesktopState>(), args.execution_id, args.command).await
-        }),
-        "session_cancel" => payload_reply(invoke, |handle, _, args: CancelSessionArgs| async move {
-            crate::cmd_sessions::session_cancel(&handle.state::<DesktopState>(), args.execution_id).await
-        }),
+        "session_send" => payload_reply_admitted(
+            invoke,
+            |st, fence, args: &SessionArgs| crate::cmd_sessions::admit_control(st, fence, &args.execution_id),
+            |handle, control, args| async move {
+                crate::cmd_sessions::session_send(&handle.state::<DesktopState>(), control, args.command).await
+            },
+        ),
+        "session_cancel" => payload_reply_admitted(
+            invoke,
+            |st, fence, args: &CancelSessionArgs| crate::cmd_sessions::admit_control(st, fence, &args.execution_id),
+            |handle, control, _| async move { crate::cmd_sessions::session_cancel(&handle.state::<DesktopState>(), control).await },
+        ),
         _ => invoke.resolver.reject("unknown execution command"),
     }
 }
@@ -620,6 +626,20 @@ where
     A: serde::de::DeserializeOwned + Send + 'static,
     T: Serialize + Send + 'static,
     F: FnOnce(AppHandle, PayloadFence, A) -> Fut + Send + 'static,
+    Fut: Future<Output = R<T>> + Send + 'static,
+{
+    payload_reply_admitted(invoke, |_, fence, _: &A| Ok(fence), work);
+}
+
+fn payload_reply_admitted<A, C, T, F, Fut>(
+    invoke: tauri::ipc::Invoke,
+    admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>,
+    work: F,
+) where
+    A: serde::de::DeserializeOwned + Send + 'static,
+    C: Send + 'static,
+    T: Serialize + Send + 'static,
+    F: FnOnce(AppHandle, C, A) -> Fut + Send + 'static,
     Fut: Future<Output = R<T>> + Send + 'static,
 {
     let args = match invoke.message.payload() {
@@ -644,35 +664,79 @@ where
             return;
         }
     };
+    // Controls bind the exact pending/open slot synchronously at IPC
+    // admission, before the command future can be delayed by scheduling.
+    let admitted = match admit(&handle.state::<DesktopState>(), fence.clone(), &args) {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            invoke.resolver.reject(err);
+            return;
+        }
+    };
     let resolver = invoke.resolver;
+    let future = work(handle.clone(), admitted, args);
+    dispatch_payload_reply(handle, fence, future, move |response| match response {
+        tauri::ipc::InvokeResponse::Ok(body) => resolver.respond(Ok(body)),
+        tauri::ipc::InvokeResponse::Err(err) => resolver.respond(Result::<(), _>::Err(err)),
+    });
+}
+
+/// The production async work/IPC serialization/enqueue path. Only the final
+/// blocking delivery holds shared synchronous access; async work holds none.
+pub(crate) fn dispatch_payload_reply<S, T>(
+    source: S,
+    fence: PayloadFence,
+    work: impl Future<Output = R<T>> + Send + 'static,
+    reply: impl FnOnce(tauri::ipc::InvokeResponse) + Send + 'static,
+) where
+    S: PayloadState,
+    T: Serialize + Send + 'static,
+{
     tauri::async_runtime::spawn(async move {
-        let out = work(handle.clone(), fence.clone(), args).await;
-        // Serialization AND the real IPC responder run under the boundary.
-        // No payload or detailed error escapes in a future's return value.
-        // A spec commit can hold the synchronous gate while writing to the
-        // store. Wait for final delivery on a blocking worker, never on an
-        // async runtime thread that a session finalizer might need.
+        let out = work.await;
         tauri::async_runtime::spawn_blocking(move || {
-            reply_payload(&handle.state::<DesktopState>(), &fence, out, |out| {
-                resolver.respond(out.map_err(Into::into));
-            });
+            source.with_state(|st| reply_payload(st, &fence, out, reply));
         });
     });
 }
 
-/// `reply` serializes and enqueues synchronously. A stale result's detailed
-/// error is payload too, so only the scalar LOCKED code may be returned.
-fn reply_payload<T>(st: &DesktopState, fence: &PayloadFence, out: R<T>, reply: impl FnOnce(R<T>)) {
+/// Serialize into Tauri's actual response body and enqueue under the fence.
+/// A stale detailed error is payload too: return only the scalar LOCKED code.
+fn reply_payload<T: Serialize>(st: &DesktopState, fence: &PayloadFence, out: R<T>, reply: impl FnOnce(tauri::ipc::InvokeResponse)) {
     let mut reply = Some(reply);
     let mut out = Some(out);
     if st
         .deliver_payload(fence, || {
-            reply.take().expect("one reply")(out.take().expect("one result"));
+            reply.take().expect("one reply")(out.take().expect("one result").into());
         })
         .is_err()
     {
-        reply.expect("undelivered reply")(Err("LOCKED".into()));
+        reply.expect("undelivered reply")(R::<T>::Err("LOCKED".into()).into());
     }
+}
+
+/// The shared production sink for manual sends and interactive sessions.
+/// Preserve the manual send's existing progress throttle; session messages
+/// and critical events are never dropped merely because another reply runs.
+pub(crate) fn execution_sink<S: PayloadState>(
+    source: S,
+    fence: PayloadFence,
+    throttle_progress: bool,
+    emit: impl Fn(&ExecutionEvent) + Send + Sync + 'static,
+) -> anvil_transport::EventFn {
+    let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
+    Arc::new(move |ev| {
+        if throttle_progress && matches!(ev, ExecutionEvent::BodyProgress { .. }) {
+            let mut last = last_progress.lock();
+            if last.elapsed() < std::time::Duration::from_millis(100) {
+                return;
+            }
+            *last = std::time::Instant::now();
+        }
+        source.with_state(|st| {
+            let _ = st.deliver_payload(&fence, || emit(&ev));
+        });
+    })
 }
 
 async fn effective_request(fence: PayloadFence, input: SendInput) -> R<anvil_engine::preview::EffectiveRequest> {
@@ -700,19 +764,8 @@ async fn send_request(handle: AppHandle, fence: PayloadFence, input: SendInput, 
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
     let h2 = handle.clone();
-    let owner = fence.clone();
-    let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
-    let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
-        if matches!(ev, ExecutionEvent::BodyProgress { .. }) {
-            let mut l = last_progress.lock();
-            if l.elapsed() < std::time::Duration::from_millis(100) {
-                return;
-            }
-            *l = std::time::Instant::now();
-        }
-        let _ = h2.state::<DesktopState>().try_deliver_payload(&owner, || {
-            let _ = h2.emit("execution-event", &ev);
-        });
+    let sink = execution_sink(handle.clone(), fence.clone(), true, move |ev| {
+        let _ = h2.emit("execution-event", ev);
     });
     let events = EventCtx { execution_id: exec_id, sink: Some(sink) };
     let opts = SendOptions {
@@ -1226,51 +1279,6 @@ pub(crate) mod tests {
         }))
         .unwrap();
         ExecutionView { record, body: body_view(b"payload-canary", None, None) }
-    }
-
-    #[test]
-    fn paused_execution_reply_drops_view_and_detailed_error_after_lock() {
-        let root = TempRoot::new();
-        let st = DesktopState::new(root.0.clone());
-        let (app, _) = create(&st, "reply");
-        st.set_app_since(app, st.epoch()).unwrap();
-        let fence = st.admit_payload().unwrap();
-        for out in [Ok(payload_view()), Err("payload-canary error".into())] {
-            let (ready_tx, ready_rx) = mpsc::channel();
-            let (release_tx, release_rx) = mpsc::channel();
-            std::thread::scope(|scope| {
-                let worker_st = &st;
-                let worker_fence = &fence;
-                let worker = scope.spawn(move || {
-                    ready_tx.send(()).unwrap();
-                    release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-                    let result = parking_lot::Mutex::new(None);
-                    reply_payload(worker_st, worker_fence, out, |out| {
-                        *result.lock() = Some(serde_json::to_value(out).unwrap());
-                    });
-                    result.into_inner().unwrap()
-                });
-                ready_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-                st.lock();
-                release_tx.send(()).unwrap();
-                let reply = worker.join().unwrap();
-                assert_eq!(reply, serde_json::json!({ "Err": "LOCKED" }));
-            });
-        }
-    }
-
-    #[test]
-    fn unchanged_unlocked_execution_reply_delivers_the_full_view() {
-        let root = TempRoot::new();
-        let st = DesktopState::new(root.0.clone());
-        let (app, _) = create(&st, "reply");
-        st.set_app_since(app, st.epoch()).unwrap();
-        let fence = st.admit_payload().unwrap();
-        let received = parking_lot::Mutex::new(None);
-        reply_payload(&st, &fence, Ok(payload_view()), |out| {
-            *received.lock() = Some(out.unwrap().body.text);
-        });
-        assert_eq!(received.into_inner(), Some(Some("payload-canary".into())));
     }
 
     #[test]

@@ -65,21 +65,36 @@ CLI (`anvil`) = same anvil-app services without a webview.
 - **Payload enqueue shares the lock boundary.** Sends, interactive sessions,
   collection-run events, effective-request previews and MCP discovery capture
   `state::PayloadFence`: the admitted unlocked `Arc<App>` and lock epoch.
-  `payload_gate` excludes payload serialization/enqueue while lock bumps the
-  epoch, revokes grants and drops the key, or while a profile is published.
-  An old fence remains invalid after unlock, even for the same profile.
-  Transport callbacks use `try_deliver_payload` and drop on contention rather
-  than blocking engine cache cleanup. Final views and detailed errors use
-  `deliver_payload` only after work/history finalization; no async wait holds
-  the gate. The native execution/session commands use an explicit Tauri IPC
+  `payload_gate` gives serialization/enqueue and spec commits shared access;
+  lock/unlock/profile publication use exclusive access. Unlocked callbacks
+  therefore retain session messages and the runner's start/end/failure events
+  while another reply or spec commit is running. Lock closes admission and
+  advances the epoch under exclusive access, then releases the gate before
+  dropping the key and clearing engine caches. A callback during cleanup
+  refuses before app/key access. A separate transition mutex prevents unlock
+  or publication from overtaking cleanup. An old fence remains invalid after
+  unlock, even for the same profile. Final views and detailed errors use
+  `deliver_payload` after work/history finalization; no async wait holds the
+  gate. The native execution/session commands use an explicit Tauri IPC
   responder under this gate, preserving their existing UI argument/result
   types. A check followed by a generated async command return would leave
   reply enqueue outside the boundary.
-- **Session cancellation cannot wait behind its own send.** Each open slot
-  has an independent cancellation token. Lock signals it before acquiring
-  the slot, interrupting both a slot wait and a bounded command-queue send.
-  The engine abort then acquires the released slot. The existing cancellation
-  grace, watcher polling, bounded transcripts and history policy remain in
+- **Session controls own an admitted slot.** A pending open publishes its
+  slot and cancellation token under its admission, then fills the same slot
+  with the engine handle. Send/cancel IPC captures that exact slot and the
+  invocation profile/epoch before scheduling. The control checks both under
+  shared delivery access at each synchronous effect. A stale control cannot
+  drive a new pending or live slot with a reused renderer execution id, even
+  within the same epoch. A finalizer removes only its own slot.
+- **Session cancellation cannot wait behind its own send.** Each pending/open
+  slot has an independent cancellation token. Cancellation signals it under
+  the gate before awaiting the slot, interrupting both a slot wait and a
+  bounded command-queue send. Lock retires and signals the old slots during
+  cleanup. The engine abort then acquires the released slot. Each poll of the
+  real engine queue send checks the admission/slot and enqueues under shared
+  access; a pending poll releases the synchronous gate before waiting. The
+  existing cancellation grace, watcher polling, bounded transcripts and
+  history policy remain in
   force. A suppressed session finalization still sends its execution id,
   `view: null` and scalar `LOCKED` status; run completion may send its id and
   scalar status too. Load progress metrics/report holding keep their existing
@@ -89,8 +104,9 @@ The boundary is native enqueue, before the actual lock operation can finish.
 It cannot retract a payload already queued to the webview before that boundary.
 No renderer predicate supplies the security fence. Gate acquisition precedes
 profile/key/grant access; finalizers complete engine/history work before taking
-it. Engine callbacks only try the gate, so a cache owner cannot block waiting
-for a lock operation that is clearing that cache. The existing PEM grant claim
+it. Cache cleanup runs with admission closed and without the delivery gate;
+callbacks reject before acquiring the app guard, so a cache owner cannot wait
+for the lock operation that is clearing that cache. The existing PEM grant claim
 and revocation mutex/transaction ordering is unchanged.
 
 ### Store work

@@ -1,7 +1,7 @@
 //! Collection-runner commands: scenarios, folder runs, reports.
 
 use crate::commands::{R, e, id};
-use crate::state::{DesktopState, PendingEntry, cancel_pending};
+use crate::state::{DesktopState, PayloadFence, PayloadState, PendingEntry, cancel_pending};
 use anvil_app::file_grants::FilePurpose;
 use anvil_app::runner::RunSettings;
 use anvil_domain::Id;
@@ -70,11 +70,8 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
     let fence = st.admit_payload()?;
     let app = fence.app.clone();
     let h2 = handle.clone();
-    let owner = fence.clone();
-    let sink: anvil_runner::RunEventSink = Arc::new(move |ev: RunEvent| {
-        let _ = h2.state::<DesktopState>().try_deliver_payload(&owner, || {
-            let _ = h2.emit("run-event", &ev);
-        });
+    let sink = run_event_sink(handle.clone(), fence.clone(), move |ev| {
+        let _ = h2.emit("run-event", ev);
     });
     let settings = RunSettings {
         environment: input.environment_id.as_deref().map(id).transpose()?,
@@ -108,17 +105,31 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
         };
         tauri::async_runtime::spawn_blocking(move || {
             let st = handle.state::<DesktopState>();
-            if st
-                .deliver_payload(&fence, || {
-                    let _ = handle.emit("run-finished", ev);
-                })
-                .is_err()
-            {
-                let _ = handle.emit("run-finished", RunFinished { run_id: run_id.to_string(), error: Some("LOCKED".into()) });
-            }
+            emit_finished(st.inner(), &fence, ev, |ev| {
+                let _ = handle.emit("run-finished", ev);
+            });
         });
     });
     Ok(key)
+}
+
+pub(crate) fn run_event_sink<S: PayloadState>(
+    source: S,
+    fence: PayloadFence,
+    emit: impl Fn(&RunEvent) + Send + Sync + 'static,
+) -> anvil_runner::RunEventSink {
+    Arc::new(move |ev| {
+        source.with_state(|st| {
+            let _ = st.deliver_payload(&fence, || emit(&ev));
+        });
+    })
+}
+
+pub(crate) fn emit_finished(st: &DesktopState, fence: &PayloadFence, ev: RunFinished, emit: impl Fn(RunFinished)) {
+    let run_id = ev.run_id.clone();
+    if st.deliver_payload(fence, || emit(ev)).is_err() {
+        emit(RunFinished { run_id, error: Some("LOCKED".into()) });
+    }
 }
 
 #[tauri::command]
