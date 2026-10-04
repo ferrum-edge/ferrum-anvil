@@ -363,10 +363,10 @@ describe("session controls", () => {
       const send = () => {
         if (action === "text") {
           fireEvent.change(screen.getByLabelText("Message"), { target: { value: "console payload" } });
-          fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+          fireEvent.click(screen.getByRole("button", { name: "Send" }));
         } else {
           const name = action === "close" ? "Close" : "Half-close";
-          fireEvent.click(screen.getByRole("button", { name, exact: true }));
+          fireEvent.click(screen.getByRole("button", { name }));
         }
       };
       send();
