@@ -43,17 +43,14 @@ fn a_stored_object_that_does_not_decode_is_named_in_the_log_file() {
 
     let done = app.clean_up_storage().unwrap();
     assert_eq!(done.undecodable.len(), 2, "the damaged request and its revision are blocked");
-    assert!(done.undecodable.contains(&anvil_app::cleanup::UndecodableObject {
-        kind: kind::REQUEST.into(),
-        id: id.clone(),
-    }));
-    assert!(done.undecodable.contains(&anvil_app::cleanup::UndecodableObject {
-        kind: kind::REVISION.into(),
-        id: revision.to_string(),
-    }));
+    assert!(done.undecodable.contains(&anvil_app::cleanup::UndecodableObject { kind: kind::REQUEST.into(), id: id.clone() }));
+    assert!(done.undecodable.contains(&anvil_app::cleanup::UndecodableObject { kind: kind::REVISION.into(), id: revision.to_string() }));
     assert!(app.store.object_meta(kind::REQUEST).unwrap().iter().any(|row| row.id == id));
     assert!(app.store.object_meta(kind::REVISION).unwrap().iter().any(|row| row.id == revision.to_string()));
-    assert_eq!(app.get_attachment(&sha256).unwrap().unwrap(), b"LOG-SECRET-4821");
+    assert!(
+        app.get_attachment(&sha256).unwrap().unwrap().as_slice() == b"LOG-SECRET-4821",
+        "attachment data was not retained"
+    );
     let attachment_index: serde_json::Value = app.store.list(kind::IMPORT_SOURCE, None).unwrap().remove(0);
     let blob = attachment_index["blob"].as_str().unwrap();
     let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
@@ -66,18 +63,16 @@ fn a_stored_object_that_does_not_decode_is_named_in_the_log_file() {
         .unwrap();
     assert!(pinned, "cleanup released or unpinned the blocked request attachment");
     let log = std::fs::read_to_string(logs.join(LOG_FILE)).unwrap();
-    let request_warning = log
-        .lines()
-        .find(|line| line.contains("a stored object does not decode") && line.contains(&format!("id={id}")))
-        .unwrap_or_else(|| panic!("no warning for the damaged request in the log: {log}"));
-    assert!(request_warning.contains(" WARN anvil_app::"), "{request_warning}");
-    assert!(request_warning.contains(&format!("kind=\"{}\"", kind::REQUEST)), "{request_warning}");
-    let revision_warning = log
-        .lines()
-        .find(|line| line.contains("a stored revision does not decode") && line.contains(&format!("id={revision}")))
-        .unwrap_or_else(|| panic!("no warning for the blocked revision in the log: {log}"));
-    assert!(revision_warning.contains(" WARN anvil_app::"), "{revision_warning}");
-    assert!(revision_warning.contains(&format!("kind=\"{}\"", kind::REVISION)), "{revision_warning}");
+    let has_warning = |kind: &str, id: &str| {
+        log.lines().any(|line| {
+            line.contains(" WARN anvil_app::")
+                && line.contains("a stored object does not decode")
+                && line.contains(&format!("kind=\"{kind}\""))
+                && line.ends_with(&format!("id={id}"))
+        })
+    };
+    assert!(has_warning(kind::REQUEST, &id), "request warning was not logged");
+    assert!(has_warning(kind::REVISION, &revision.to_string()), "revision warning was not logged");
     assert!(!log.contains("LOG-SECRET-4821") && !log.contains("private-payload.bin"), "log contains attachment data");
 }
 
