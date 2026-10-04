@@ -216,10 +216,8 @@ describe("read-only diagnostic import through native IPC", () => {
     expect(fixture.requests.length).toBe(0);
   });
 
-  it("refuses truncated, over-budget and capability-bearing input with fixed errors", async () => {
+  it("keeps accepted extension limits below their caps", async () => {
     const report = JSON.parse(forged);
-    const invalidAttribute = JSON.parse(forged);
-    invalidAttribute.observations[0].attributes.authorization = 42;
     for (const extensions of [
       { passwords: Array(128).fill("credential-canary") },
       { passwords: Array(32).fill("x".repeat(2048)) },
@@ -230,28 +228,100 @@ describe("read-only diagnostic import through native IPC", () => {
       expect(result.ok !== undefined).toBe(true);
       expect(result.ok!.trust).toBe("unverified");
     }
-    const cases = [
-      golden.slice(0, -20),
-      JSON.stringify({ ...report, extensions: { password: "x".repeat(2049) } }),
-      JSON.stringify({
-        ...report,
-        extensions: { passwords: Array(129).fill("credential-canary") },
-      }),
-      JSON.stringify({ ...report, extensions: { passwords: Array(33).fill("x".repeat(2048)) } }),
-      JSON.stringify({ ...report, extensions: { cookie: "a=x; b=y; ".repeat(65) } }),
-      JSON.stringify({ ...report, extensions: { note: "é".repeat(1025) } }),
-      JSON.stringify({ ...report, extensions: { notes: Array(5001).fill("ordinary") } }),
+  });
+
+  it("rejects malformed JSON through the native IPC boundary", async () => {
+    const result = await preview(golden.slice(0, -20));
+    expect(result.ok).toBeUndefined();
+    expect(result.err).toBe("Diagnostic input must be valid UTF-8 JSON with unique object keys.");
+    expect(fixture.requests.length).toBe(0);
+  });
+
+  it("rejects invalid report schemas with the fixed contract error", async () => {
+    const report = JSON.parse(forged);
+    const invalidAttribute = JSON.parse(forged);
+    invalidAttribute.observations[0].attributes.authorization = 42;
+    for (const text of [
       JSON.stringify(invalidAttribute),
       JSON.stringify({ ...report, schema_version: "2.0" }),
-      '{"schema":null,"schema":"ferrum.diagnostic_report"}',
       `{"report":${golden},"warnings":null,"claimed_verification":"verified"}`,
-    ];
-    for (const text of cases) {
+    ]) {
       const result = await preview(text);
-      expect(result.ok === undefined).toBe(true);
-      expect(result.err?.startsWith("Diagnostic ")).toBe(true);
-      expect(result.err?.includes("credential-canary")).toBe(false);
+      expect(result.ok).toBeUndefined();
+      expect(result.err).toBe("Diagnostic input does not match a supported v1 contract.");
     }
+    expect(fixture.requests.length).toBe(0);
+  });
+
+  it("rejects duplicate schema keys in an otherwise valid canonical report", async () => {
+    const schemaMember = '"schema": "ferrum.diagnostic_report",';
+    const exactDuplicate = forged.replace(
+      schemaMember,
+      `${schemaMember}\n  "schema": "ferrum.diagnostic_report",`,
+    );
+    const escapedAlias = forged.replace(
+      schemaMember,
+      `${schemaMember}\n  "\\u0073chema": "ferrum.diagnostic_report",`,
+    );
+    const state = await visibleState(workspaceId);
+    const profile = persistedBytes(process.env.ANVIL_DATA_DIR!);
+    for (const text of [exactDuplicate, escapedAlias]) {
+      const result = await preview(text);
+      expect(result.ok).toBeUndefined();
+      expect(result.err).toBe("Diagnostic input must be valid UTF-8 JSON with unique object keys.");
+    }
+    expect(fixture.requests.length).toBe(0);
+    expect(await visibleState(workspaceId)).toEqual(state);
+    expect(persistedBytes(process.env.ANVIL_DATA_DIR!)).toEqual(profile);
+  });
+
+  it("rejects overlong strings with the fixed native limit error", async () => {
+    const report = JSON.parse(forged);
+    const result = await preview(
+      JSON.stringify({ ...report, extensions: { password: "x".repeat(2049) } }),
+    );
+    expect(result.ok).toBeUndefined();
+    expect(result.err).toBe("Diagnostic JSON exceeds a byte, depth, string or collection limit.");
+    expect(fixture.requests.length).toBe(0);
+  });
+
+  it("rejects oversized credential collections with the fixed native limit error", async () => {
+    const report = JSON.parse(forged);
+    for (const extensions of [
+      { passwords: Array(129).fill("credential-canary") },
+      { passwords: Array(33).fill("x".repeat(2048)) },
+    ]) {
+      const result = await preview(JSON.stringify({ ...report, extensions }));
+      expect(result.ok).toBeUndefined();
+      expect(result.err).toBe("Diagnostic JSON exceeds a byte, depth, string or collection limit.");
+    }
+    expect(fixture.requests.length).toBe(0);
+  });
+
+  it("rejects excessive cookie credentials with the fixed native limit error", async () => {
+    const report = JSON.parse(forged);
+    const result = await preview(
+      JSON.stringify({ ...report, extensions: { cookie: "a=x; b=y; ".repeat(65) } }),
+    );
+    expect(result.ok).toBeUndefined();
+    expect(result.err).toBe("Diagnostic JSON exceeds a byte, depth, string or collection limit.");
+    expect(fixture.requests.length).toBe(0);
+  });
+
+  it("rejects excessive Unicode strings and arrays with the fixed native limit error", async () => {
+    const report = JSON.parse(forged);
+    for (const extensions of [
+      { note: "é".repeat(1025) },
+      { notes: Array(5001).fill("ordinary") },
+    ]) {
+      const result = await preview(JSON.stringify({ ...report, extensions }));
+      expect(result.ok).toBeUndefined();
+      expect(result.err).toBe("Diagnostic JSON exceeds a byte, depth, string or collection limit.");
+    }
+    expect(fixture.requests.length).toBe(0);
+  });
+
+  it("rejects inputs beyond the byte cap through real native IPC", async () => {
     const oversized = await browser.execute(
       async (length: number) => {
         const internals = (window as unknown as {
@@ -281,14 +351,18 @@ describe("read-only diagnostic import through native IPC", () => {
     );
     expect(oversized.err?.includes("credential-canary")).toBe(false);
     expect(fixture.requests.length).toBe(0);
-    for (const input of [
+  });
+
+  it("rejects unsupported IPC capabilities", async () => {
+    const inputs = [
       { text: forged, path: "/diagnostic.json" },
       { text: forged, url: fixture.url },
       { text: forged, grant: "forged" },
       { text: null },
-    ]) {
+    ];
+    for (const input of inputs) {
       const result = await invoke("diagnostic_import_preview", { input });
-      expect(result.ok === undefined).toBe(true);
+      expect(result.ok).toBeUndefined();
     }
     expect(fixture.requests.length).toBe(0);
   });
