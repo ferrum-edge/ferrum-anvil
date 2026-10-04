@@ -108,6 +108,10 @@
 
 ### Fixed
 
+- Desktop security: PEM selection uses purpose-bound native choosers.
+  Certificate reads return validated certificate PEM and refuse key material;
+  private-key grants are consumed once into the workspace vault, returning
+  only a secret reference to the renderer.
 - Load preflight: iteration variables, dataset columns, values extracted by
   earlier chain steps and dynamic helpers in the path, query, method, headers
   or body of a fixed origin no longer stop a plan (#288). The preflight judges
