@@ -132,9 +132,7 @@ impl FilePurpose {
         match self {
             FilePurpose::BundleImport => 2 * 1024 * MIB,
             FilePurpose::Attachment => 256 * MIB,
-            FilePurpose::PemCertificate
-            | FilePurpose::PemPrivateKey
-            | FilePurpose::Pkcs12File => MIB,
+            FilePurpose::PemCertificate | FilePurpose::PemPrivateKey | FilePurpose::Pkcs12File => MIB,
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
             FilePurpose::Ruleset => MIB,
@@ -234,11 +232,7 @@ struct Vault {
 
 impl Vault {
     fn of(app: &crate::App) -> Self {
-        Self {
-            dir: app.dir.clone(),
-            profile_id: app.header.profile_id.clone(),
-            key_check: app.header.key_check.clone(),
-        }
+        Self { dir: app.dir.clone(), profile_id: app.header.profile_id.clone(), key_check: app.header.key_check.clone() }
     }
 }
 
@@ -282,26 +276,15 @@ impl PrivateKeyImport<'_> {
     /// Write only if the claim has not been revoked and the caller's session
     /// gate still allows it. The revocation mutex stays held through the
     /// vault transaction's commit, not just through the generation check.
-    pub fn store(
-        self,
-        workspace: &Id,
-        label: &str,
-        gate: impl FnOnce() -> bool,
-    ) -> crate::Result<SecretRef> {
-        let text = std::str::from_utf8(&self.bytes)
-            .map_err(|_| crate::AppError::Invalid("the file is not UTF-8 text".into()))?;
-        self.app.set_secret_guarded(
-            workspace,
-            label,
-            text,
-            || {
-                let state = self.grants.state.lock();
-                if state.generation != self.generation || !gate() {
-                    return None;
-                }
-                Some(state)
-            },
-        )
+    pub fn store(self, workspace: &Id, label: &str, gate: impl FnOnce() -> bool) -> crate::Result<SecretRef> {
+        let text = std::str::from_utf8(&self.bytes).map_err(|_| crate::AppError::Invalid("the file is not UTF-8 text".into()))?;
+        self.app.set_secret_guarded(workspace, label, text, || {
+            let state = self.grants.state.lock();
+            if state.generation != self.generation || !gate() {
+                return None;
+            }
+            Some(state)
+        })
     }
 }
 
@@ -338,39 +321,19 @@ impl FileGrants {
 
     /// Record a private-key choice for its issuing vault. The generic read
     /// issuer cannot create unbound private-key grants.
-    pub fn grant_private_key(
-        &self,
-        app: &crate::App,
-        picked: &Path,
-    ) -> Result<FileGrant, GrantError> {
+    pub fn grant_private_key(&self, app: &crate::App, picked: &Path) -> Result<FileGrant, GrantError> {
         self.grant_private_key_at(app, picked, self.generation())
     }
 
     /// A private-key choice whose dialog started in `generation` for `app`.
-    pub fn grant_private_key_at(
-        &self,
-        app: &crate::App,
-        picked: &Path,
-        generation: u64,
-    ) -> Result<FileGrant, GrantError> {
+    pub fn grant_private_key_at(&self, app: &crate::App, picked: &Path, generation: u64) -> Result<FileGrant, GrantError> {
         if app.is_locked() {
             return Err(GrantError::Revoked);
         }
-        self.grant_read_for(
-            FilePurpose::PemPrivateKey,
-            picked,
-            generation,
-            Some(Vault::of(app)),
-        )
+        self.grant_read_for(FilePurpose::PemPrivateKey, picked, generation, Some(Vault::of(app)))
     }
 
-    fn grant_read_for(
-        &self,
-        purpose: FilePurpose,
-        picked: &Path,
-        generation: u64,
-        vault: Option<Vault>,
-    ) -> Result<FileGrant, GrantError> {
+    fn grant_read_for(&self, purpose: FilePurpose, picked: &Path, generation: u64, vault: Option<Vault>) -> Result<FileGrant, GrantError> {
         if purpose.access() != Access::Read {
             return Err(GrantError::WrongPurpose);
         }
@@ -383,13 +346,7 @@ impl FileGrants {
         };
         let id = file_id(&file, &meta).map_err(io)?;
         let file_name = display_name(path.file_name());
-        self.insert(
-            purpose,
-            Target::Read { id, path },
-            file_name,
-            generation,
-            vault,
-        )
+        self.insert(purpose, Target::Read { id, path }, file_name, generation, vault)
     }
 
     /// Record a destination the user picked in the native save dialog for
@@ -415,13 +372,7 @@ impl FileGrants {
         }
         refuse_directory(&dir.join(name))?;
         let file_name = display_name(Some(name));
-        self.insert(
-            purpose,
-            Target::Write { dir, name: name.to_owned() },
-            file_name,
-            generation,
-            None,
-        )
+        self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation, None)
     }
 
     /// Read the file behind a readable grant issued for `purpose`. The grant
@@ -437,43 +388,22 @@ impl FileGrants {
     /// Consume a private-key selection and store it in the workspace vault.
     /// The purpose and disposition are fixed here, not supplied by a renderer.
     /// A failed ingestion also spends the grant; a retry needs a fresh choice.
-    pub fn import_private_key(
-        &self,
-        app: &crate::App,
-        token: &str,
-        workspace: &Id,
-        label: &str,
-    ) -> crate::Result<SecretRef> {
+    pub fn import_private_key(&self, app: &crate::App, token: &str, workspace: &Id, label: &str) -> crate::Result<SecretRef> {
         self.claim_private_key(app, token)?.store(workspace, label, || true)
     }
 
     /// Spend the grant before reading, retaining its issuing vault and claim
     /// generation through the later atomic write. There is no bytes/text
     /// accessor on the returned claim.
-    pub fn claim_private_key<'a>(
-        &'a self,
-        app: &'a crate::App,
-        token: &str,
-    ) -> crate::Result<PrivateKeyImport<'a>> {
+    pub fn claim_private_key<'a>(&'a self, app: &'a crate::App, token: &str) -> crate::Result<PrivateKeyImport<'a>> {
         // Taking the grant under its mutex prevents concurrent ingestion or
         // reuse, including after a read or vault write fails.
-        let (entry, generation) = self
-            .take(token, FilePurpose::PemPrivateKey)
-            .map_err(|err| crate::AppError::Invalid(err.to_string()))?;
+        let (entry, generation) = self.take(token, FilePurpose::PemPrivateKey).map_err(|err| crate::AppError::Invalid(err.to_string()))?;
         if entry.vault.as_ref() != Some(&Vault::of(app)) {
-            return Err(crate::AppError::Invalid(
-                "the file selection belongs to a different vault; choose the file again".into(),
-            ));
+            return Err(crate::AppError::Invalid("the file selection belongs to a different vault; choose the file again".into()));
         }
-        let file = self
-            .read_file(entry, FilePurpose::PemPrivateKey)
-            .map_err(|err| crate::AppError::Invalid(err.to_string()))?;
-        Ok(PrivateKeyImport {
-            grants: self,
-            app,
-            generation,
-            bytes: Zeroizing::new(file.bytes),
-        })
+        let file = self.read_file(entry, FilePurpose::PemPrivateKey).map_err(|err| crate::AppError::Invalid(err.to_string()))?;
+        Ok(PrivateKeyImport { grants: self, app, generation, bytes: Zeroizing::new(file.bytes) })
     }
 
     fn read_file(&self, entry: Entry, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
@@ -558,14 +488,7 @@ impl FileGrants {
         if g.generation != generation {
             return Err(GrantError::Revoked);
         }
-        let entry = Entry {
-            purpose,
-            vault,
-            target,
-            file_name: file_name.clone(),
-            issued: Instant::now(),
-            seq,
-        };
+        let entry = Entry { purpose, vault, target, file_name: file_name.clone(), issued: Instant::now(), seq };
         self.admit(&mut g, token.clone(), entry);
         Ok(FileGrant { token, file_name, path: None })
     }
@@ -612,11 +535,7 @@ impl FileGrants {
 /// material. Validate the DER as certificates too: changing a private key's
 /// PEM label to CERTIFICATE must not make it readable by the renderer.
 fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
-    let invalid = || {
-        GrantError::Invalid(
-            "choose a certificate-only PEM file; private keys stay in the vault".into(),
-        )
-    };
+    let invalid = || GrantError::Invalid("choose a certificate-only PEM file; private keys stay in the vault".into());
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
     let mut pem = String::new();
     let mut in_certificate = false;
@@ -647,10 +566,7 @@ fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
     // Reuse the transport's certificate DER validation without system roots,
     // a client identity, or any network access. Do not expose parser errors
     // that could quote untrusted file contents.
-    let settings = anvil_transport::tls::TlsSettings {
-        extra_roots_pem: vec![pem.clone()],
-        ..Default::default()
-    };
+    let settings = anvil_transport::tls::TlsSettings { extra_roots_pem: vec![pem.clone()], ..Default::default() };
     anvil_transport::tls::prepare(&settings).map_err(|_| invalid())?;
     Ok(pem)
 }

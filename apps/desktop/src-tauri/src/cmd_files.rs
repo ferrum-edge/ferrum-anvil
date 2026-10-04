@@ -68,37 +68,15 @@ pub async fn file_choose(
 /// The native title and grant purpose are fixed by this command. The
 /// renderer cannot select a role or override the security-related title.
 #[tauri::command]
-pub async fn certificate_file_choose(
-    window: Window,
-    st: State<'_, DesktopState>,
-) -> R<Vec<FileGrant>> {
-    choose_native(
-        window,
-        st,
-        FilePurpose::PemCertificate,
-        None,
-        None,
-        None,
-    )
-    .await
+pub async fn certificate_file_choose(window: Window, st: State<'_, DesktopState>) -> R<Vec<FileGrant>> {
+    choose_native(window, st, FilePurpose::PemCertificate, None, None, None).await
 }
 
 /// Choose a private key for one-shot vault ingestion, with native wording
 /// that makes the disposition visible at the existing file selection.
 #[tauri::command]
-pub async fn private_key_file_choose(
-    window: Window,
-    st: State<'_, DesktopState>,
-) -> R<Vec<FileGrant>> {
-    choose_native(
-        window,
-        st,
-        FilePurpose::PemPrivateKey,
-        None,
-        None,
-        None,
-    )
-    .await
+pub async fn private_key_file_choose(window: Window, st: State<'_, DesktopState>) -> R<Vec<FileGrant>> {
+    choose_native(window, st, FilePurpose::PemPrivateKey, None, None, None).await
 }
 
 fn general_purpose(purpose: FilePurpose) -> R<()> {
@@ -172,10 +150,9 @@ async fn choose_native(
         let path = file.into_path().map_err(|x| x.to_string())?;
         let grant = match (&bind, purpose.access()) {
             (Some(bind), _) => bind_picked(&st, &app, generation, bind, &path)?,
-            (None, _) if purpose == FilePurpose::PemPrivateKey => st
-                .file_grants
-                .grant_private_key_at(&app, &path, generation)
-                .map_err(|x| x.to_string())?,
+            (None, _) if purpose == FilePurpose::PemPrivateKey => {
+                st.file_grants.grant_private_key_at(&app, &path, generation).map_err(|x| x.to_string())?
+            }
             (None, Access::Write) => st.file_grants.grant_write_at(purpose, &path, generation).map_err(|x| x.to_string())?,
             (None, _) => st.file_grants.grant_read_at(purpose, &path, generation).map_err(|x| x.to_string())?,
         };

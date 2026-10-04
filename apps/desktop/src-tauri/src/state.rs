@@ -148,12 +148,7 @@ impl DesktopState {
         self.set_app_since_with(app, seen, |_| {})
     }
 
-    fn set_app_since_with(
-        &self,
-        app: App,
-        seen: u64,
-        published: impl FnOnce(&Arc<App>),
-    ) -> Result<(), String> {
+    fn set_app_since_with(&self, app: App, seen: u64, published: impl FnOnce(&Arc<App>)) -> Result<(), String> {
         app.confine_token_files();
         let swapped = {
             let mut g = self.app.write();
@@ -657,30 +652,19 @@ pub(crate) mod tests {
                     release_rx.recv().unwrap();
                 })
             });
-            let published = published_rx
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
+            let published = published_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             // Publication is paused under its write guard. Try the real A
             // grant directly against B in the former publish/revoke interval.
             assert!(st.file_grants.is_empty());
-            assert!(st.file_grants
-                .import_private_key(&published, &grant.token, &workspace, "wrong")
-                .is_err());
+            assert!(st.file_grants.import_private_key(&published, &grant.token, &workspace, "wrong").is_err());
             // A chooser still open from A cannot issue a replacement either.
-            assert_eq!(
-                st.file_grants.grant_private_key_at(&a, &path, generation),
-                Err(GrantError::Revoked),
-            );
+            assert_eq!(st.file_grants.grant_private_key_at(&a, &path, generation), Err(GrantError::Revoked),);
             assert!(a.store.list_secret_ids(None).unwrap().is_empty());
             assert!(published.store.list_secret_ids(None).unwrap().is_empty());
             release_tx.send(()).unwrap();
             switch.join().unwrap().unwrap();
         });
-        let (_, key) = ProfileManager::unlock(
-            &a_dir,
-            anvil_app::profiles::Unlock::Passphrase(PASSPHRASE),
-        )
-        .unwrap();
+        let (_, key) = ProfileManager::unlock(&a_dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
         a.unlock(key).unwrap();
         assert!(a.store.list_secret_ids(None).unwrap().is_empty());
         assert!(st.app().unwrap().store.list_secret_ids(None).unwrap().is_empty());

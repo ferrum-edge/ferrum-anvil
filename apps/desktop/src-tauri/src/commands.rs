@@ -1019,10 +1019,7 @@ pub async fn attachment_add(handle: AppHandle, grant: String, media_type: Option
 pub async fn read_certificate_file(handle: AppHandle, grant: String) -> R<String> {
     blocking(&handle, move |st| {
         st.app()?;
-        let file = st
-            .file_grants
-            .read(&grant, FilePurpose::PemCertificate)
-            .map_err(|err| err.to_string())?;
+        let file = st.file_grants.read(&grant, FilePurpose::PemCertificate).map_err(|err| err.to_string())?;
         String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())
     })
     .await
@@ -1033,17 +1030,9 @@ pub async fn read_certificate_file(handle: AppHandle, grant: String) -> R<String
 /// The session and grant are fenced before the write. A committed reference
 /// remains a success even if a lock follows the commit.
 #[tauri::command]
-pub async fn import_private_key_file(
-    handle: AppHandle,
-    grant: String,
-    workspace_id: String,
-    label: String,
-) -> R<SecretRef> {
+pub async fn import_private_key_file(handle: AppHandle, grant: String, workspace_id: String, label: String) -> R<SecretRef> {
     let seen = handle.state::<DesktopState>().epoch();
-    blocking_unchecked(&handle, move |st| {
-        ingest_private_key(st, seen, &grant, &workspace_id, &label, || {})
-    })
-    .await
+    blocking_unchecked(&handle, move |st| ingest_private_key(st, seen, &grant, &workspace_id, &label, || {})).await
 }
 
 fn ingest_private_key(
@@ -1067,22 +1056,14 @@ fn ingest_private_key(
 /// PKCS#12 remains vault-only and is stored as base64. This command has
 /// no plaintext-return mode and accepts only a PKCS#12 chooser grant.
 #[tauri::command]
-pub async fn import_pkcs12_file(
-    handle: AppHandle,
-    grant: String,
-    workspace_id: String,
-    label: String,
-) -> R<SecretRef> {
+pub async fn import_pkcs12_file(handle: AppHandle, grant: String, workspace_id: String, label: String) -> R<SecretRef> {
     blocking(&handle, move |st| ingest_pkcs12(st, &grant, &workspace_id, &label)).await
 }
 
 fn ingest_pkcs12(st: &DesktopState, grant: &str, workspace_id: &str, label: &str) -> R<SecretRef> {
     use base64::Engine as _;
     let app = st.app()?;
-    let file = st
-        .file_grants
-        .read(grant, FilePurpose::Pkcs12File)
-        .map_err(|err| err.to_string())?;
+    let file = st.file_grants.read(grant, FilePurpose::Pkcs12File).map_err(|err| err.to_string())?;
     let bytes = zeroize::Zeroizing::new(file.bytes);
     let text = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(&*bytes));
     app.set_secret(&id(workspace_id)?, label, &text).map_err(e)
@@ -1114,58 +1095,25 @@ mod tests {
             let worker_st = &st;
             let token = &grant.token;
             let worker = scope.spawn(move || {
-                ingest_private_key(
-                    worker_st,
-                    seen,
-                    token,
-                    &workspace.to_string(),
-                    "abandoned",
-                    || {
-                        claimed_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                    },
-                )
+                ingest_private_key(worker_st, seen, token, &workspace.to_string(), "abandoned", || {
+                    claimed_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
             });
             claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-            assert!(
-                st.file_grants.is_empty(),
-                "the actual grant was already spent and read",
-            );
+            assert!(st.file_grants.is_empty(), "the actual grant was already spent and read",);
             st.lock();
-            let (_, key) = anvil_app::profiles::ProfileManager::unlock(
-                &dir,
-                Unlock::Passphrase(PASSPHRASE),
-            )
-            .unwrap();
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
             st.unlock_since(&app, key, st.epoch()).unwrap();
             assert!(st.app().is_ok(), "the same profile is unlocked again");
             release_tx.send(()).unwrap();
             assert_eq!(worker.join().unwrap(), Err("LOCKED".into()));
         });
         assert!(app.store.list_secret_ids(None).unwrap().is_empty());
-        assert!(ingest_private_key(
-            &st,
-            st.epoch(),
-            &grant.token,
-            &workspace.to_string(),
-            "replay",
-            || {},
-        )
-        .is_err());
+        assert!(ingest_private_key(&st, st.epoch(), &grant.token, &workspace.to_string(), "replay", || {},).is_err());
         let fresh = st.file_grants.grant_private_key(&app, &path).unwrap();
-        let secret = ingest_private_key(
-            &st,
-            st.epoch(),
-            &fresh.token,
-            &workspace.to_string(),
-            "fresh",
-            || {},
-        )
-        .unwrap();
-        assert_eq!(
-            app.store.list_secret_ids(None).unwrap(),
-            vec![secret.id.to_string()],
-        );
+        let secret = ingest_private_key(&st, st.epoch(), &fresh.token, &workspace.to_string(), "fresh", || {}).unwrap();
+        assert_eq!(app.store.list_secret_ids(None).unwrap(), vec![secret.id.to_string()],);
     }
 
     #[test]
@@ -1189,26 +1137,15 @@ mod tests {
             let worker_st = &st;
             let token = &grant.token;
             let worker = scope.spawn(move || {
-                ingest_private_key(
-                    worker_st,
-                    seen,
-                    token,
-                    &workspace.to_string(),
-                    "abandoned",
-                    || {
-                        claimed_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                    },
-                )
+                ingest_private_key(worker_st, seen, token, &workspace.to_string(), "abandoned", || {
+                    claimed_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
             });
             claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             st.set_app_since(b, st.epoch()).unwrap();
             // Reopen A's store too: being locked must not mask a stray write.
-            let (_, key) = anvil_app::profiles::ProfileManager::unlock(
-                &a_dir,
-                Unlock::Passphrase(PASSPHRASE),
-            )
-            .unwrap();
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(&a_dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
             a.unlock(key).unwrap();
             release_tx.send(()).unwrap();
             assert_eq!(worker.join().unwrap(), Err("LOCKED".into()));
@@ -1230,10 +1167,7 @@ mod tests {
         std::fs::write(&path, [0, 1, 2, 255]).unwrap();
         let grant = st.file_grants.grant_read(FilePurpose::Pkcs12File, &path).unwrap();
         let secret = ingest_pkcs12(&st, &grant.token, &workspace.to_string(), "bundle").unwrap();
-        assert_eq!(
-            serde_json::to_value(&secret).unwrap(),
-            serde_json::json!({ "id": secret.id, "label": "bundle" }),
-        );
+        assert_eq!(serde_json::to_value(&secret).unwrap(), serde_json::json!({ "id": secret.id, "label": "bundle" }),);
         let (_, stored) = app.store.get_workspace_secret(&secret.id, &workspace).unwrap().unwrap();
         assert_eq!(&*stored, "AAEC/w==");
         assert!(st.file_grants.read(&grant.token, FilePurpose::PemCertificate).is_err());
@@ -1247,10 +1181,7 @@ mod tests {
         }
         assert_eq!(app.store.list_secret_ids(Some(&workspace)).unwrap().len(), 1);
         st.lock();
-        assert_eq!(
-            ingest_pkcs12(&st, "unknown", &workspace.to_string(), "locked"),
-            Err("LOCKED".into()),
-        );
+        assert_eq!(ingest_pkcs12(&st, "unknown", &workspace.to_string(), "locked"), Err("LOCKED".into()),);
     }
 
     /// A registered attempt, and the gate of its writes.

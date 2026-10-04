@@ -31,13 +31,7 @@ fn partial_files(dir: &Path) -> Vec<String> {
 
 fn vault(root: &Path) -> (App, Id) {
     let profiles = ProfileManager::new(root);
-    let (profile, key, _) = profiles
-        .create_passphrase(
-            "PEM",
-            "test passphrase",
-            anvil_storage::KdfParams::testing(),
-        )
-        .unwrap();
+    let (profile, key, _) = profiles.create_passphrase("PEM", "test passphrase", anvil_storage::KdfParams::testing()).unwrap();
     let header = anvil_storage::vault::read_header(&profile.dir).unwrap();
     let app = App::open(profile.dir, header, key).unwrap();
     let workspace = app.create_workspace("keys").unwrap().meta.id;
@@ -65,10 +59,7 @@ fn private_key_grants_never_return_bytes_and_cannot_change_purpose() {
         assert!(grants.import_private_key(&app, &grant.token, &workspace, "key").is_err());
     }
     let grant = grants.grant_private_key(&app, &path).unwrap();
-    assert_eq!(
-        grants.read(&grant.token, FilePurpose::PemPrivateKey).unwrap_err(),
-        GrantError::WrongPurpose,
-    );
+    assert_eq!(grants.read(&grant.token, FilePurpose::PemPrivateKey).unwrap_err(), GrantError::WrongPurpose,);
     assert!(app.store.list_secret_ids(Some(&workspace)).unwrap().is_empty());
 }
 
@@ -86,10 +77,7 @@ fn a_private_key_is_ingested_once_as_a_reference_and_still_prepares_tls() {
     assert!(!returned.to_string().contains("PRIVATE KEY"));
     assert!(grants.is_empty());
     assert!(grants.import_private_key(&app, &grant.token, &workspace, "again").is_err());
-    assert_eq!(
-        grants.read(&grant.token, FilePurpose::PemCertificate).unwrap_err(),
-        GrantError::Unknown,
-    );
+    assert_eq!(grants.read(&grant.token, FilePurpose::PemCertificate).unwrap_err(), GrantError::Unknown,);
     let (_, stored) = app.store.get_workspace_secret(&secret.id, &workspace).unwrap().unwrap();
     assert_eq!(&*stored, &pki.client_a.key);
     let settings = anvil_transport::tls::TlsSettings {
@@ -124,11 +112,7 @@ fn concurrent_private_key_ingestion_spends_the_grant_atomically() {
             })
         })
         .collect();
-    let successes = workers
-        .into_iter()
-        .map(|worker| worker.join().unwrap())
-        .filter(Result::is_ok)
-        .count();
+    let successes = workers.into_iter().map(|worker| worker.join().unwrap()).filter(Result::is_ok).count();
     assert_eq!(successes, 1);
     assert_eq!(app.store.list_secret_ids(Some(&workspace)).unwrap().len(), 1);
     assert!(grants.is_empty());
@@ -171,10 +155,7 @@ fn private_key_grants_keep_expiry_lock_and_dialog_generation_controls() {
     let grant = grants.grant_private_key(&app, &path).unwrap();
     grants.revoke_all();
     assert!(grants.import_private_key(&app, &grant.token, &workspace, "revoked").is_err());
-    assert_eq!(
-        grants.grant_private_key_at(&app, &path, generation).unwrap_err(),
-        GrantError::Revoked,
-    );
+    assert_eq!(grants.grant_private_key_at(&app, &path, generation).unwrap_err(), GrantError::Revoked,);
     assert!(grants.is_empty());
     assert!(app.store.list_secret_ids(Some(&workspace)).unwrap().is_empty());
 }
@@ -186,16 +167,8 @@ fn private_key_grants_require_the_issuing_vault_even_before_revocation() {
     let (b, b_workspace) = vault(root.path());
     let path = file(root.path(), "key.pem", b"vault-only canary");
     let grants = FileGrants::default();
-    assert_eq!(
-        grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap_err(),
-        GrantError::WrongPurpose,
-    );
-    assert_eq!(
-        grants
-            .grant_read_at(FilePurpose::PemPrivateKey, &path, grants.generation())
-            .unwrap_err(),
-        GrantError::WrongPurpose,
-    );
+    assert_eq!(grants.grant_read(FilePurpose::PemPrivateKey, &path).unwrap_err(), GrantError::WrongPurpose,);
+    assert_eq!(grants.grant_read_at(FilePurpose::PemPrivateKey, &path, grants.generation()).unwrap_err(), GrantError::WrongPurpose,);
     let grant = grants.grant_private_key(&a, &path).unwrap();
     assert!(grants.import_private_key(&b, &grant.token, &b_workspace, "wrong").is_err());
     assert!(grants.is_empty(), "a wrong-vault claim is also spent");
@@ -215,16 +188,9 @@ fn a_claim_read_before_revocation_cannot_write_after_the_vault_reopens() {
     assert!(grants.is_empty());
     grants.revoke_all();
     app.lock();
-    let (_, key) = ProfileManager::unlock(
-        &app.dir,
-        anvil_app::profiles::Unlock::Passphrase("test passphrase"),
-    )
-    .unwrap();
+    let (_, key) = ProfileManager::unlock(&app.dir, anvil_app::profiles::Unlock::Passphrase("test passphrase")).unwrap();
     app.unlock(key).unwrap();
-    assert!(matches!(
-        claim.store(&workspace, "abandoned", || true),
-        Err(anvil_app::AppError::Locked),
-    ));
+    assert!(matches!(claim.store(&workspace, "abandoned", || true), Err(anvil_app::AppError::Locked),));
     assert!(app.store.list_secret_ids(None).unwrap().is_empty());
     assert!(grants.import_private_key(&app, &grant.token, &workspace, "replay").is_err());
 }
@@ -243,16 +209,8 @@ fn certificate_reads_refuse_private_keys_mixed_pem_and_relabelled_keys() {
         "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n".into(),
         format!("{}-----BEGIN CERTIFICATE-----\n", pki.ca.cert),
     ];
-    for label in [
-        "RSA PRIVATE KEY",
-        "EC PRIVATE KEY",
-        "ENCRYPTED PRIVATE KEY",
-        "OPENSSH PRIVATE KEY",
-    ] {
-        refused.push(format!(
-            "{}-----BEGIN {label}-----\ncanary\n-----END {label}-----\n",
-            pki.ca.cert,
-        ));
+    for label in ["RSA PRIVATE KEY", "EC PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "OPENSSH PRIVATE KEY"] {
+        refused.push(format!("{}-----BEGIN {label}-----\ncanary\n-----END {label}-----\n", pki.ca.cert,));
     }
     for contents in refused {
         let path = file(root.path(), "cert.pem", contents.as_bytes());
@@ -320,12 +278,7 @@ fn a_path_or_a_made_up_token_is_never_read() {
         format!("fg-{}", "0".repeat(32)),
         String::new(),
     ] {
-        for purpose in [
-            FilePurpose::PemCertificate,
-            FilePurpose::Pkcs12File,
-            FilePurpose::Attachment,
-            FilePurpose::BundleImport,
-        ] {
+        for purpose in [FilePurpose::PemCertificate, FilePurpose::Pkcs12File, FilePurpose::Attachment, FilePurpose::BundleImport] {
             assert_eq!(grants.read(&token, purpose).unwrap_err(), GrantError::Unknown, "{token}");
         }
     }
@@ -356,10 +309,7 @@ fn a_grant_serves_only_the_purpose_it_was_chosen_for() {
     let path = file(dir.path(), "key.pem", b"private");
     let grants = FileGrants::default();
     let g = grants.grant_read(FilePurpose::Pkcs12File, &path).unwrap();
-    assert_eq!(
-        grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(),
-        GrantError::WrongPurpose,
-    );
+    assert_eq!(grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(), GrantError::WrongPurpose,);
     // Misuse revokes the grant.
     assert_eq!(grants.read(&g.token, FilePurpose::Pkcs12File).unwrap_err(), GrantError::Unknown);
 
@@ -400,10 +350,7 @@ fn reads_are_bounded_per_purpose() {
     let path = file(dir.path(), "big.pem", &vec![b'a'; 1024 * 1024 + 1]);
     let grants = FileGrants::default();
     let g = grants.grant_read(FilePurpose::PemCertificate, &path).unwrap();
-    assert_eq!(
-        grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(),
-        GrantError::TooLarge("1 MiB".into()),
-    );
+    assert_eq!(grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(), GrantError::TooLarge("1 MiB".into()),);
     let g = grants.grant_read(FilePurpose::Attachment, &path).unwrap();
     assert_eq!(grants.read(&g.token, FilePurpose::Attachment).unwrap().bytes.len(), 1024 * 1024 + 1);
 }
@@ -489,10 +436,7 @@ fn a_file_replaced_after_it_was_chosen_is_refused() {
     // (Unix) or file index (Windows).
     let swap = file(dir.path(), "swap", b"substituted");
     std::fs::rename(swap, &path).unwrap();
-    assert_eq!(
-        grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(),
-        GrantError::Changed,
-    );
+    assert_eq!(grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(), GrantError::Changed,);
 }
 
 #[test]
@@ -505,10 +449,7 @@ fn a_lock_while_the_dialog_is_open_grants_nothing() {
     let before = grants.generation();
     grants.revoke_all();
     assert_ne!(grants.generation(), before);
-    assert_eq!(
-        grants.grant_read_at(FilePurpose::PemCertificate, &src, before).unwrap_err(),
-        GrantError::Revoked,
-    );
+    assert_eq!(grants.grant_read_at(FilePurpose::PemCertificate, &src, before).unwrap_err(), GrantError::Revoked,);
     assert_eq!(grants.grant_write_at(FilePurpose::BundleExport, &dest, before).unwrap_err(), GrantError::Revoked);
     assert!(grants.is_empty());
     // A choice started after the lock is granted.
@@ -574,10 +515,7 @@ mod unix {
         let g = grants.grant_read(FilePurpose::PemCertificate, &path).unwrap();
         std::fs::remove_file(&path).unwrap();
         symlink(secret, &path).unwrap();
-        assert_eq!(
-            grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(),
-            GrantError::Changed,
-        );
+        assert_eq!(grants.read(&g.token, FilePurpose::PemCertificate).unwrap_err(), GrantError::Changed,);
     }
 
     #[test]
