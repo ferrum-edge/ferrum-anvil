@@ -13,9 +13,10 @@
 
 ### Added
 
-- Candidate proposal (PR #308; owner approval, independent security review and
-  exact-head hosted qualification remain pending; no released version is
-  claimed patched): bounds retained HTTP cookies and aggregate request Cookie
+- Candidate proposal (PR #308; code root/independent review and all 14 hosted
+  checks are qualified at `3c1baed`; owner approval and fresh final-documentation
+  head checks remain pending; no released version is claimed patched): bounds
+  retained HTTP cookies and aggregate request Cookie
   headers, including after signing and for MASQUE CONNECT; requires HTTPS or a
   literal loopback token issuer (including mapped IPv6) before credential
   expansion, with matching App preflight and browser sign-in/status failures;

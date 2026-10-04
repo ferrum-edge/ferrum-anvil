@@ -3,8 +3,9 @@
 Status: candidate only, owner unapproved. This branch changes the supported HTTP
 profile and security tradeoffs. It must not be merged, activated, represented as an
 approved release profile, or used to close the advisories until root completes its
-review, fresh independent security/concurrency review, hosted qualification and
-the root-owned CHANGELOG follow-up, and then obtains the owner's explicit decision.
+review and fresh exact-head hosted qualification of the final documentation
+commit, and then obtains the owner's explicit decision. Root and independent
+security/concurrency reviews of the code candidate are complete.
 Candidate preparation was authorized; adopting these defaults was not.
 
 The candidate now implements the core, App preflight, target-API sign-in/status
@@ -255,8 +256,10 @@ proof. Address tables need review as allocation standards evolve.
 
 Local validation was static only: source/dependency/API review and `git diff
 --check`. No repository executable, formatter, build, test, server, container,
-hook or project script was run. No CI workflow was dispatched. Passing runtime,
-formatting, concurrency or release qualification is not claimed.
+hook or project script was run. No workflow was manually dispatched by the
+implementer. The root qualification
+record below gives the subsequent hosted results; release qualification and
+owner approval remain unclaimed.
 
 Added tests exercise per-site/isolation count and byte ceilings, metadata charges,
 expiry/removal, same-tuple replacement, deterministic LRU ties, PSL/private and
@@ -277,7 +280,7 @@ automatic jars both on and off. Real MASQUE CONNECT-UDP tests cover configured
 and auth-added over-budget fields, good under-budget fields, and several fields
 whose individual sizes fit but aggregate does not. Tests check wire ground truth,
 generic omission reasons and record redaction without printing credentials.
-Their runtime results remain pending hosted qualification.
+These tests are included in the successful code-head hosted qualification below.
 
 Destination tests cover literal classes, mapped/transition classes, mixed-record
 and override rejection before pool checkout, all proxy modes, QUIC refusal and
@@ -290,11 +293,11 @@ claim of an executed end-to-end public-server exploit. Real loopback engine 307/
 redirects test different-zone refusal and same-zone override positives. Cached
 private sockets and safe same-zone reuse have explicit negative/positive controls.
 
-Root must obtain hosted formatting, compilation, clippy and relevant full-suite
-results on all supported platforms, inspect failures, and commission fresh
-independent security/concurrency review before presenting the owner decision.
-In particular, review the flat-cookie accounting/eviction semantics, DNS/CNAME
-pinning, every TCP/QUIC reuse/resend/fallback path and proxy compatibility. The
+Root obtained the code-head hosted formatting, compilation, clippy and suite
+results below, investigated the failures and commissioned fresh independent
+security/concurrency reviews of the flat-cookie accounting/eviction semantics,
+DNS/CNAME pinning, TCP/QUIC reuse/resend/fallback paths and proxy compatibility.
+Fresh final-documentation-head checks remain required before the owner decision. The
 repository currently configures rustfmt at 140 columns with Max heuristics; this
 assignment requested hand formatting at 100/60. Root must apply the actual hosted
 formatter diff as directed during qualification; no local formatter was used.
@@ -325,13 +328,46 @@ The latter used TEST-NET, now rejected before dialing. Its candidate replacement
 uses the existing saturated-loopback listener with the same 400 ms connect
 deadline, requires an actual ConnectTimeout, retains no-dispatch/diagnostic
 assertions and adds an accepting-loopback control. No timeout increase, skip or
-policy bypass was added. These repairs have not yet been hosted-qualified.
+policy bypass was added. The subsequent code-head hosted qualification below
+includes these repairs.
 
-`CHANGELOG.md` remains a root-owned sequential follow-up after the FS writer
-exits. This worker intentionally does not edit it. Root owns exact-head hosted
-qualification, fresh independent review and the explicit owner decision.
+`CHANGELOG.md` now records this candidate under Unreleased. The owner decision
+and a fresh hosted pass on the final documentation commit remain required.
 
-No advisory state, PR metadata, release range or approval status was changed by
-this implementer. Root owns opening the draft and all further review/qualification;
-this delivery completes the scoped implementation contract, not qualification,
-advisory closure or approval of the supported behavior changes.
+The draft remains owner-unapproved. Root owns further qualification and the
+explicit adoption decision; the implementation and code-head evidence establish
+neither advisory closure nor approval of the supported behavior changes.
+
+### Root code-head qualification
+
+Root read the entire code change and all repair deltas. Fresh independent
+security/concurrency reviews, including the recorded-lookup/native-ordering
+review and the final unique-workload-fixture review, found no remaining findings
+in their assigned scopes. On code head
+`3c1baed5eb83c867bc7a747216b0226535a6d6c2`, all 14 check-runs from GitHub
+Actions app 15368 and all three pull-request workflows succeeded:
+
+- [CI 37210938477](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210938477):
+  formatting, compilation, clippy, source/contract policy and Rust suites on
+  Ubuntu 24.04, macOS 15 and Windows 2025.
+- [Desktop E2E 37210938502](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210938502):
+  ten native Tauri spec files passed on each of the three operating systems.
+- [Lab 37210938583](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210938583):
+  Ubuntu and macOS lab qualification passed.
+
+Root inspected actual logs for the bounded cookie accounting/output, resolved
+OAuth endpoint and credential preflight, destination classes, cached-connection
+controls, real DNS answer pinning and native E2E results. The UUIDv7 fixture repair
+uses the random/counter suffix rather than the shared millisecond prefix; it fixes
+the demonstrated parallel socket/pipe collision without rerunning an identical
+failed tree. The standard Windows Rust job does not execute desktop library unit
+tests; native Windows E2E does execute the app. These results establish the
+recorded candidate's hosted coverage, not physical OS-provider acceptance,
+renderer-independent native network consent, a memory/RSS benchmark, an
+authenticated diagnostic producer, or a patched released binary.
+
+This qualification-only documentation update creates a new head. Root must wait
+for all hosted checks on that exact head before presenting the adoption decision.
+Owner approval of cookie eviction/omission, issuer restrictions, address classes
+and proxy redirect compatibility remains required. None of the three advisories
+is closed by this qualification record.
