@@ -943,11 +943,8 @@ mod preparation_order {
         for protocol in [Protocol::Sse, Protocol::WebSocket] {
             let mut session = c.clone();
             session.spec.protocol = protocol;
-            session.spec.url = if protocol == Protocol::Sse {
-                api.url("/sse?count=1")
-            } else {
-                format!("wss://{}/ws?close_after=1", api.addr)
-            };
+            session.spec.url =
+                if protocol == Protocol::Sse { api.url("/sse?count=1") } else { format!("wss://{}/ws?close_after=1", api.addr) };
             session.spec.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 3_000, last_event_id: None, reconnect: false });
             session.spec.websocket = Some(WsSpec {
                 bootstrap: WsBootstrap::Http1Upgrade,
