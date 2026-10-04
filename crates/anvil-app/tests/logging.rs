@@ -47,10 +47,7 @@ fn a_stored_object_that_does_not_decode_is_named_in_the_log_file() {
     assert!(done.undecodable.contains(&anvil_app::cleanup::UndecodableObject { kind: kind::REVISION.into(), id: revision.to_string() }));
     assert!(app.store.object_meta(kind::REQUEST).unwrap().iter().any(|row| row.id == id));
     assert!(app.store.object_meta(kind::REVISION).unwrap().iter().any(|row| row.id == revision.to_string()));
-    assert!(
-        app.get_attachment(&sha256).unwrap().unwrap().as_slice() == b"LOG-SECRET-4821",
-        "attachment data was not retained"
-    );
+    assert!(app.get_attachment(&sha256).unwrap().unwrap().as_slice() == b"LOG-SECRET-4821", "attachment data was not retained");
     let attachment_index: serde_json::Value = app.store.list(kind::IMPORT_SOURCE, None).unwrap().remove(0);
     let blob = attachment_index["blob"].as_str().unwrap();
     let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
