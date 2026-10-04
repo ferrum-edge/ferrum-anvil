@@ -852,7 +852,7 @@
           ]
         },
         {
-          "description": "Several explicit presentations in one request (e.g. mTLS + API key).\nOrder is preserved; conflicting headers fail validation.",
+          "description": "Several explicit presentations in one request (e.g. mTLS + API key).\nOrder is preserved; conflicting headers fail validation. At most one\nOAuth profile, including nested sets, may acquire a token.",
           "type": "object",
           "properties": {
             "profiles": {

@@ -92,11 +92,7 @@ pub fn preflight_authority(
     }
 
     let mut headers = Vec::new();
-    let metadata = ctx
-        .spec
-        .grpc
-        .as_ref()
-        .filter(|_| ctx.spec.protocol == anvil_domain::request::Protocol::Grpc);
+    let metadata = ctx.spec.grpc.as_ref().filter(|_| ctx.spec.protocol == anvil_domain::request::Protocol::Grpc);
     let inputs = ctx.spec.headers.iter().chain(metadata.into_iter().flat_map(|g| &g.metadata));
     for header in inputs.filter(|header| header.enabled) {
         let name = resolve(header.name.trim(), "headers.name")?;

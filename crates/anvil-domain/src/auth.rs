@@ -264,9 +264,7 @@ impl AuthConfig {
                 for profile in profiles {
                     if let Some(config) = profile.oauth_profile()? {
                         if found.is_some() {
-                            return Err(
-                                "a multi-auth set can hold one OAuth 2 profile; several profiles would each set Authorization",
-                            );
+                            return Err("a multi-auth set can hold one OAuth 2 profile; several profiles would each set Authorization");
                         }
                         found = Some(config);
                     }

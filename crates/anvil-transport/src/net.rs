@@ -21,16 +21,9 @@ pub struct ConnectResult<S = TcpStream> {
 /// The proxy host passed to DNS and the connector, without URL host
 /// normalization. In particular, `127.1` is a name here, not `127.0.0.1`.
 pub fn parse_proxy_address(address: &str) -> Result<(String, u16), TransportFailure> {
-    let invalid = |message| {
-        TransportFailure::new(Phase::Prepare, FailureKind::ProxyConfigInvalid, message)
-            .with_field("proxy.address")
-    };
-    let (host, port) = address
-        .rsplit_once(':')
-        .ok_or_else(|| invalid(format!("proxy address '{address}' must be host:port")))?;
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| invalid(format!("proxy address '{address}' has an invalid port")))?;
+    let invalid = |message| TransportFailure::new(Phase::Prepare, FailureKind::ProxyConfigInvalid, message).with_field("proxy.address");
+    let (host, port) = address.rsplit_once(':').ok_or_else(|| invalid(format!("proxy address '{address}' must be host:port")))?;
+    let port = port.parse::<u16>().map_err(|_| invalid(format!("proxy address '{address}' has an invalid port")))?;
     Ok((host.trim_start_matches('[').trim_end_matches(']').to_string(), port))
 }
 

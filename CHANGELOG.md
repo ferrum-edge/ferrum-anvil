@@ -123,8 +123,11 @@
   lookup, preventing DNS rebinding and blocking resolver shutdown waits.
   Proxy-resolved target names remain unproven despite client overrides, and
   proxy addresses use the connector's host spelling. HTTP forward-proxy
-  authority checks include fixed, templated and auth-written Host headers;
-  per-run Host values/names require the warning. OAuth token endpoints use
+  authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
+  Host headers; per-run Host values/names require the warning. Session protocols
+  use their actual CONNECT target. MASQUE requires the canonical routing
+  template for local classification; custom or per-run templates require the
+  warning even with loopback target and proxy origins. OAuth token endpoints use
   the same origin, fixed-address and NO_PROXY checks; external-browser
   authorization names remain unproven. Nested conflicting OAuth profiles
   are refused consistently before acquiring any token, while valid

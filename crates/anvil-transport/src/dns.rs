@@ -51,16 +51,9 @@ pub fn apply_preference(mut addrs: Vec<SocketAddr>, pref: IpPreference) -> Vec<S
 /// Fixed addresses used by the connector without contacting a resolver.
 /// `None` means send-time DNS can change the addresses; a preflight must not
 /// treat a one-time lookup as proof of locality.
-pub fn fixed_resolution(
-    host: &str,
-    port: u16,
-    cfg: &DnsConfig,
-) -> Option<Result<Resolution, TransportFailure>> {
+pub fn fixed_resolution(host: &str, port: u16, cfg: &DnsConfig) -> Option<Result<Resolution, TransportFailure>> {
     if let Some(ip) = parse_literal(host) {
-        return Some(Ok(Resolution {
-            addrs: vec![SocketAddr::new(ip, port)],
-            source: "literal",
-        }));
+        return Some(Ok(Resolution { addrs: vec![SocketAddr::new(ip, port)], source: "literal" }));
     }
     if let Some(ov) = cfg.overrides.iter().find(|o| o.host.eq_ignore_ascii_case(host)) {
         let mut addrs = Vec::new();
@@ -68,22 +61,17 @@ pub fn fixed_resolution(
             match parse_literal(a) {
                 Some(ip) => addrs.push(SocketAddr::new(ip, port)),
                 None => {
-                    return Some(Err(
-                        TransportFailure::new(
-                            Phase::Prepare,
-                            FailureKind::InvalidUrl,
-                            format!("DNS override for {host} contains a non-IP address: {a}"),
-                        )
-                        .with_field("settings.dns_overrides"),
-                    ));
+                    return Some(Err(TransportFailure::new(
+                        Phase::Prepare,
+                        FailureKind::InvalidUrl,
+                        format!("DNS override for {host} contains a non-IP address: {a}"),
+                    )
+                    .with_field("settings.dns_overrides")));
                 }
             }
         }
         let addrs = apply_preference(addrs, cfg.ip_preference);
-        return Some(Ok(Resolution {
-            addrs,
-            source: "override",
-        }));
+        return Some(Ok(Resolution { addrs, source: "override" }));
     }
     None
 }

@@ -269,10 +269,8 @@ impl TokenSummary {
 pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, TransportFailure> {
     let fail = |m: &str| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let (scope_label, auth) = ctx.effective_auth();
-    let config = auth
-        .oauth_profile()
-        .map_err(fail)?
-        .ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
+    let config =
+        auth.oauth_profile().map_err(fail)?.ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
     if config.grant == OAuthGrant::ClientCredentials {
         return Err(fail("this OAuth profile uses the client-credentials grant, which needs no browser sign-in"));
     }

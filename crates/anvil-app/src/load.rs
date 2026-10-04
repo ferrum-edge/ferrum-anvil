@@ -576,11 +576,7 @@ struct ProvenUrl {
 
 impl ProvenUrl {
     fn label(&self, protocol: Protocol) -> String {
-        match anvil_engine::prepare::parse_target(
-            &self.probe,
-            anvil_load::protocol::send_schemes(protocol),
-            &mut Vec::new(),
-        ) {
+        match anvil_engine::prepare::parse_target(&self.probe, anvil_load::protocol::send_schemes(protocol), &mut Vec::new()) {
             Ok(target) => origin_label(&target.url(), self.port_varies),
             Err(_) => url_origin(&self.probe),
         }
@@ -693,23 +689,11 @@ fn session_destination(
         Protocol::Http => "HTTP",
         Protocol::Mcp => "MCP",
     };
-    let parsed = target.as_ref().and_then(|target| {
-        anvil_load::protocol::route(ctx, &target.probe, protocol).map(|(target, _)| target)
-    });
+    let parsed = target.as_ref().and_then(|target| anvil_load::protocol::route(ctx, &target.probe, protocol).map(|(target, _)| target));
     let proxy = target.as_ref().and_then(|target| target.proxy(ctx, protocol));
-    let masque = ctx
-        .spec
-        .udp
-        .as_ref()
-        .and_then(|u| u.masque.as_ref())
-        .filter(|_| protocol == Protocol::Udp);
-    let mut d = format!(
-        "{label} {}",
-        target.as_ref().map_or_else(|| url_origin(&ctx.spec.url), |target| target.label(protocol)),
-    );
-    let mut local = parsed
-        .as_ref()
-        .is_some_and(|target| target_is_loopback(ctx, target, proxy.is_some() || masque.is_some()));
+    let masque = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| protocol == Protocol::Udp);
+    let mut d = format!("{label} {}", target.as_ref().map_or_else(|| url_origin(&ctx.spec.url), |target| target.label(protocol)),);
+    let mut local = parsed.as_ref().is_some_and(|target| target_is_loopback(ctx, target, proxy.is_some() || masque.is_some()));
     // A datagram tunnel sends every exchange's traffic to the proxy first.
     // (The plan check refuses a MASQUE request a proxy profile also routes.)
     if let Some(m) = masque {
@@ -726,6 +710,18 @@ fn session_destination(
             anvil_load::protocol::route(ctx, &proxy.probe, Protocol::Http)
                 .is_some_and(|(target, _)| target_is_loopback(ctx, &target, false))
         });
+        // The proxy routes by the expanded CONNECT-UDP path, not the UDP
+        // URL. Only the canonical template proves that its routing host is
+        // the already checked target. A custom template may put that host
+        // in a query while routing to an unrelated host in the path.
+        let canonical = resolver
+            .resolve(&mask_dynamic_expressions(&m.uri_template), "udp.masque.uri_template")
+            .is_ok_and(|template| template == anvil_domain::request::MASQUE_DEFAULT_TEMPLATE);
+        if !canonical {
+            local = false;
+            // Templates can contain secrets; describe the uncertainty only.
+            d.push_str(" (MASQUE routing template is unproven)");
+        }
     } else if let Some(proxy) = proxy {
         d.push_str(&proxy_label(proxy));
         local &= address_is_loopback(ctx, &proxy.address);
@@ -759,20 +755,14 @@ fn fixed_host_is_loopback(ctx: &anvil_engine::ExecutionContext, host: &str, port
     };
     anvil_transport::dns::fixed_resolution(host, port, &dns)
         .and_then(std::result::Result::ok)
-        .is_some_and(|resolution| {
-            !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip()))
-        })
+        .is_some_and(|resolution| !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())))
 }
 
 fn literal_is_loopback(host: &str) -> bool {
     anvil_transport::dns::parse_literal(host).is_some_and(ip_is_loopback)
 }
 
-fn target_is_loopback(
-    ctx: &anvil_engine::ExecutionContext,
-    target: &anvil_engine::prepare::Target,
-    proxy_resolved: bool,
-) -> bool {
+fn target_is_loopback(ctx: &anvil_engine::ExecutionContext, target: &anvil_engine::prepare::Target, proxy_resolved: bool) -> bool {
     if proxy_resolved {
         // The proxy receives this name unchanged and ignores client overrides.
         literal_is_loopback(&target.host)
@@ -789,13 +779,13 @@ fn ip_is_loopback(ip: std::net::IpAddr) -> bool {
 }
 
 fn address_is_loopback(ctx: &anvil_engine::ExecutionContext, address: &str) -> bool {
-    anvil_transport::net::parse_proxy_address(address)
-        .is_ok_and(|(host, port)| fixed_host_is_loopback(ctx, &host, port))
+    anvil_transport::net::parse_proxy_address(address).is_ok_and(|(host, port)| fixed_host_is_loopback(ctx, &host, port))
 }
 
-/// A forward proxy routes the absolute URI using the effective Host. Check
-/// the same first-header/auth-replacement semantics as execution, without
-/// preparing the method or body or acquiring credentials. Dynamic header
+/// A forward proxy routes the absolute URI or h2c `:authority` using the
+/// effective Host. Check the same first-header/auth-replacement semantics
+/// as execution, without preparing the method or body or acquiring
+/// credentials. Dynamic header
 /// names and Host values are unproven, so they always require remote consent.
 fn forward_authority_is_loopback(
     ctx: &anvil_engine::ExecutionContext,
@@ -804,33 +794,18 @@ fn forward_authority_is_loopback(
     resolver: &Resolver,
     destination: &mut String,
 ) -> bool {
-    use anvil_domain::request::GrpcWire;
-    use anvil_domain::settings::HttpVersionPolicy;
-    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-    let http_family = matches!(ctx.spec.protocol, Protocol::Http | Protocol::Sse)
-        || (ctx.spec.protocol == Protocol::Grpc
-            && ctx.spec.grpc.as_ref().is_some_and(|g| g.wire != GrpcWire::Grpc));
-    let secure = matches!(target.scheme.as_str(), "https" | "wss" | "grpcs");
-    let h2_only = matches!(
-        settings.http_version,
-        HttpVersionPolicy::Http2Only | HttpVersionPolicy::H2c | HttpVersionPolicy::Http3Only
-    );
-    let absolute_form = anvil_transport::http::forward_proxy_absolute_form(
-        secure,
-        h2_only,
-        Some(proxy.kind),
-    );
-    if !http_family || !absolute_form {
+    // Session transports (SSE, WebSocket, native gRPC and gRPC-Web) always
+    // CONNECT to the URL target, even for cleartext HTTP/1.1 or h2c. Only
+    // HttpTransport skips CONNECT, independently of its version policy.
+    let forward = anvil_transport::http::forward_proxy_routes_authority(target.scheme == "https", Some(proxy.kind));
+    if ctx.spec.protocol != Protocol::Http || !forward {
         return true;
     }
     let authority = anvil_engine::prepare::preflight_authority(ctx, target, |template, field| {
         let resolved = resolver.resolve(&mask_dynamic_expressions(template), field).ok()?;
         per_run_sources(&resolved).is_empty().then_some(resolved)
     });
-    let local = authority
-        .as_deref()
-        .and_then(anvil_transport::http::authority_host)
-        .is_some_and(|host| literal_is_loopback(&host));
+    let local = authority.as_deref().and_then(anvil_transport::http::authority_host).is_some_and(|host| literal_is_loopback(&host));
     if !local {
         // Host can be an auth credential or secret variable: never display it.
         destination.push_str(" (forward-proxy Host authority is remote or unproven)");

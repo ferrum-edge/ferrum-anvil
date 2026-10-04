@@ -222,12 +222,7 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
         let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
         let pre = app.load_preflight(&p).unwrap();
         assert_eq!(pre.destinations, vec![destination.to_string()], "{url}");
-        assert_eq!(
-            leaves_machine(&pre.warnings),
-            url.starts_with("localhost:"),
-            "{url}: {:?}",
-            pre.warnings,
-        );
+        assert_eq!(leaves_machine(&pre.warnings), url.starts_with("localhost:"), "{url}: {:?}", pre.warnings,);
     }
 
     // A dynamic helper in the method is shown as written, not as one draw.

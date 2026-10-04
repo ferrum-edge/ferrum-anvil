@@ -459,10 +459,9 @@ pub(crate) fn prepare_all_at(
     )?;
     let mut inferred = http.inferred.clone();
     let (auth_scope, auth_cfg) = ctx.effective_auth();
-    auth_cfg.oauth_profile().map_err(|message| {
-        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message)
-            .with_field("auth")
-    })?;
+    auth_cfg
+        .oauth_profile()
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     let mut oauth_key = None;
     let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key)?;
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };

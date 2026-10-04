@@ -260,16 +260,31 @@ are prepared and checked when each iteration is sent, so a body such as
 `{"id": {{rowId}}}` does not stop the plan, and a per-run method is shown as
 written (`{{verb}} http://127.0.0.1:8080`).
 
-A cleartext HTTP forward proxy can also route by the effective `Host` authority.
+A cleartext HTTP request through an HTTP forward proxy can also route by the
+effective `Host` authority, using an absolute URI over HTTP/1.1 or `:authority`
+over h2c. Both paths skip CONNECT.
 Preflight checks the first configured Host after header-template resolution,
 then any auth-written Host that replaces it, using the execution path's authority
-semantics (also for SSE and gRPC-Web over HTTP/1.1). A fixed loopback literal
-Host remains local. A hostname Host, a per-run Host value or header name, or a
-Host generated from auth credentials requires the remote-traffic warning;
+semantics. A fixed loopback literal Host remains local. A hostname Host,
+a per-run Host value or header name, or a Host generated from auth credentials
+requires the remote-traffic warning;
 client DNS overrides cannot constrain what the proxy resolves. The destination
 notes that the forward-proxy Host authority is remote or unproven and never
 shows Host values that may hold credentials. `NO_PROXY` continues to match the
 URL target, so bypassing the proxy restores direct URL-based routing.
+
+SSE, WebSocket, native gRPC and gRPC-Web use CONNECT tunnels to the URL target,
+including their cleartext paths; their Host headers do not select the proxy's
+tunnel destination.
+
+MASQUE routes UDP and DTLS by the expanded CONNECT-UDP request path. Locality
+requires the URI template to resolve to the canonical
+`/.well-known/masque/udp/{target_host}/{target_port}/`, as well as a proven local
+target and proxy. A custom template or a template containing per-run values
+requires the remote-traffic warning, even when the UDP URL and proxy are
+loopback: its routing host cannot be proven from those origins. The destination
+notes that the MASQUE routing template is unproven without displaying template
+values. Custom templates remain usable after the usual load confirmation.
 
 A per-run value in a URL's scheme or host makes the preflight refuse the plan,
 because it cannot prove that every iteration stays on loopback. The refusal
@@ -671,7 +686,7 @@ Observations that shaped the implementation:
 | LOAD-010 | `load_010_bounded_samples_under_sustained_failures_and_large_bodies`, `metrics::tests::load_010_…` |
 | LOAD-011 | `load_011_report_roundtrip_and_html_escape_response_content`, `report::tests::load_011_…`, `html::tests::load_011_…` |
 | LOAD-012 | not implemented |
-| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…`, `specs_load.rs::load_preflight_uses_transport_dns_overrides_for_loopback_judgments`, `specs_load.rs::load_preflight_checks_oauth_urls_with_per_run_values` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` and `load_preflight_security.rs` (fixed-address locality, changing and silent DNS, escaped raw hosts, connector proxy spelling, recording HTTP/SOCKS5/HBONE target and OAuth routes, NO_PROXY, effective Host authority, and zero token requests for nested OAuth conflicts); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
+| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…`, `specs_load.rs::load_preflight_uses_transport_dns_overrides_for_loopback_judgments`, `specs_load.rs::load_preflight_checks_oauth_urls_with_per_run_values` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` and `load_preflight_security.rs` (fixed-address locality, changing and silent DNS, escaped raw hosts, connector proxy spelling, recording HTTP/SOCKS5/HBONE target and OAuth routes, NO_PROXY, proxy-received HTTP/1.1/h2c authority, cleartext session CONNECT targets, canonical/custom/dataset MASQUE routing with recorded UDP/DTLS CONNECT-UDP paths, and zero token requests for nested OAuth conflicts); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
 | LOAD-014 | `compare::tests::load_014_incompatible_runs_withhold_latency_deltas` |
 
 ### Live lab check (real gateway)
