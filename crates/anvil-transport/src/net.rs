@@ -50,10 +50,7 @@ pub async fn connect_tcp(
     let dial_addrs: Vec<_> = addrs
         .iter()
         .map(|addr| match addr {
-            SocketAddr::V6(v6) if v6.scope_id() == 0 => v6
-                .ip()
-                .to_ipv4_mapped()
-                .map_or(*addr, |ip| SocketAddr::new(ip.into(), v6.port())),
+            SocketAddr::V6(v6) if v6.scope_id() == 0 => v6.ip().to_ipv4_mapped().map_or(*addr, |ip| SocketAddr::new(ip.into(), v6.port())),
             _ => *addr,
         })
         .collect();

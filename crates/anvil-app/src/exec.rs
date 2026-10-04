@@ -119,10 +119,7 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
 fn defer_unvalidated_oauth_secrets(auth: &mut AuthConfig, conflicting: bool) {
     match auth {
         AuthConfig::OAuth2 { config } => {
-            if conflicting
-                || config.token_url.contains("{{")
-                || require_secure_token_endpoint(&config.token_url).is_err()
-            {
+            if conflicting || config.token_url.contains("{{") || require_secure_token_endpoint(&config.token_url).is_err() {
                 config.client_secret = SensitiveValue::default();
             }
         }

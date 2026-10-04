@@ -128,38 +128,24 @@ impl TokenHttp for EngineTokenHttp<'_> {
 }
 
 /// Resolve an OAuth 2 profile's templates and secret references.
-pub(crate) fn resolve_oauth(
-    config: &OAuth2Config,
-    ctx: &ExecutionContext,
-    r: &Resolver,
-) -> Result<OAuthResolved, TransportFailure> {
-    let fail = |m: String| {
-        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m)
-            .with_field("auth")
-    };
+pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &Resolver) -> Result<OAuthResolved, TransportFailure> {
+    let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     // Expansion errors may quote variable names obtained from vault values.
     // Sanitize at their source, before history, flow observers or IPC see them.
     let resolve = |value: &str, field: &str| {
         r.resolve(value, field).map_err(|mut failure| {
-            failure.message =
-                format!("could not resolve {field}; check the vault and active variables");
+            failure.message = format!("could not resolve {field}; check the vault and active variables");
             failure
         })
     };
     let token_url = resolve(&config.token_url, "auth.token_url")?;
     require_secure_token_endpoint(&token_url).map_err(fail)?;
     let (raw_secret, _) = resolve_sensitive(&config.client_secret, ctx.secrets.as_ref())
-        .map_err(|_| {
-            fail(
-                "could not resolve auth.client_secret; check the vault and active variables".into(),
-            )
-        })?;
+        .map_err(|_| fail("could not resolve auth.client_secret; check the vault and active variables".into()))?;
     // Only interactive grants visit the authorization endpoint.
     let authorization_url = match config.grant {
         OAuthGrant::ClientCredentials => String::new(),
-        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken => {
-            resolve(&config.authorization_url, "auth.authorization_url")?
-        }
+        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken => resolve(&config.authorization_url, "auth.authorization_url")?,
     };
     Ok(OAuthResolved {
         grant: config.grant,

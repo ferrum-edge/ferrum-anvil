@@ -152,10 +152,7 @@ async fn mapped_override_keeps_the_tls_name_while_dialing_ipv4() {
     init();
     let fx = tls_fixture(&pki().server, ClientAuth::None).await;
     let mut p = plan(&fx.url_host("localhost", "/echo"), None);
-    p.dns.overrides.push(anvil_domain::settings::DnsOverride {
-        host: "localhost".into(),
-        addresses: vec!["::ffff:127.0.0.1".into()],
-    });
+    p.dns.overrides.push(anvil_domain::settings::DnsOverride { host: "localhost".into(), addresses: vec!["::ffff:127.0.0.1".into()] });
     let a = run(&HttpTransport::new(), &p).await;
     assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
     assert_eq!(a.response.unwrap().status, 200);

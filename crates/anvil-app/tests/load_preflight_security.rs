@@ -367,16 +367,9 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Credential ordering").unwrap();
-    ws.variables.push(anvil_domain::workspace::Variable::plain(
-        "issuer",
-        "http://127.0.0.1:8080/token",
-    ));
+    ws.variables.push(anvil_domain::workspace::Variable::plain("issuer", "http://127.0.0.1:8080/token"));
     app.save_workspace(ws.clone()).unwrap();
-    for grant in [
-        OAuthGrant::ClientCredentials,
-        OAuthGrant::RefreshToken,
-        OAuthGrant::AuthorizationCodePkce,
-    ] {
+    for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
         for (endpoint, prefetched) in [
             ("http://127.0.0.1:8080/token", true),
             ("https://issuer.example.test/token", true),
@@ -385,9 +378,7 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
             ("{{issuer}}", false),
         ] {
             for inherited in [false, true] {
-                let secret = app
-                    .set_secret(&ws.meta.id, "OAuth credential", "original-vault-value")
-                    .unwrap();
+                let secret = app.set_secret(&ws.meta.id, "OAuth credential", "original-vault-value").unwrap();
                 let mut auth = oauth(endpoint);
                 if let AuthConfig::OAuth2 { config } = &mut auth {
                     config.grant = grant;
@@ -396,9 +387,7 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
                 }
                 // Exercise both the spec's duplicate reference and inherited,
                 // nested effective auth. Neither may bypass the prefetch gate.
-                let nested = AuthConfig::Multi {
-                    profiles: vec![AuthConfig::Multi { profiles: vec![auth] }],
-                };
+                let nested = AuthConfig::Multi { profiles: vec![AuthConfig::Multi { profiles: vec![auth] }] };
                 let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
                 spec.auth = if inherited {
                     ws.auth = nested;
@@ -416,10 +405,7 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
                 if prefetched {
                     assert_eq!(resolved.unwrap().as_str(), "original-vault-value");
                 } else {
-                    assert!(
-                        resolved.is_err(),
-                        "unvalidated credential was prefetched: {endpoint}"
-                    );
+                    assert!(resolved.is_err(), "unvalidated credential was prefetched: {endpoint}");
                 }
             }
         }
@@ -434,14 +420,9 @@ async fn templated_eligible_oauth_endpoint_still_acquires_a_vault_backed_credent
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Deferred eligible issuer").unwrap();
     let api = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
-    ws.variables.push(anvil_domain::workspace::Variable::plain(
-        "issuer",
-        &api.url("/oauth/token"),
-    ));
+    ws.variables.push(anvil_domain::workspace::Variable::plain("issuer", &api.url("/oauth/token")));
     app.save_workspace(ws.clone()).unwrap();
-    let secret = app
-        .set_secret(&ws.meta.id, "OAuth credential", "anvil-secret")
-        .unwrap();
+    let secret = app.set_secret(&ws.meta.id, "OAuth credential", "anvil-secret").unwrap();
     let mut spec = RequestSpec::http("GET", &api.url("/echo"));
     spec.auth = oauth("{{issuer}}");
     if let AuthConfig::OAuth2 { config } = &mut spec.auth {
@@ -454,10 +435,7 @@ async fn templated_eligible_oauth_endpoint_still_acquires_a_vault_backed_credent
     let output = send(&context(&app, &p)).await;
     assert_eq!(output.record.response.unwrap().status, 200);
     assert_eq!(*api.state.oauth_token_requests.lock(), 1);
-    assert_eq!(
-        api.log.requests(),
-        [("POST".into(), "/oauth/token".into()), ("GET".into(), "/echo".into())]
-    );
+    assert_eq!(api.log.requests(), [("POST".into(), "/oauth/token".into()), ("GET".into(), "/echo".into())]);
 }
 
 #[test]
@@ -465,9 +443,7 @@ fn oauth_endpoint_expansion_errors_do_not_expose_vault_derived_variable_names() 
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Endpoint errors").unwrap();
-    let secret = app
-        .set_secret(&ws.meta.id, "Issuer URL", "{{vault-canary}}")
-        .unwrap();
+    let secret = app.set_secret(&ws.meta.id, "Issuer URL", "{{vault-canary}}").unwrap();
     ws.variables.push(anvil_domain::workspace::Variable {
         name: "issuer".into(),
         value: SensitiveValue::Secret { secret },
@@ -480,10 +456,7 @@ fn oauth_endpoint_expansion_errors_do_not_expose_vault_derived_variable_names() 
     spec.auth = oauth("{{issuer}}");
     let p = plan(&app, ws.meta.id, spec);
     let error = app.load_preflight(&p).unwrap_err().to_string();
-    assert_eq!(
-        error,
-        "could not resolve OAuth token URL; check the vault and active variables"
-    );
+    assert_eq!(error, "could not resolve OAuth token URL; check the vault and active variables");
     assert!(!error.contains("vault-canary"));
 }
 
