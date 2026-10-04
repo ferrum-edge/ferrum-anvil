@@ -9,6 +9,9 @@
 //! - A read grant pins the canonical path (and the file's identity)
 //!   at selection time; if the file or a folder on its path is replaced
 //!   afterwards, the read is refused.
+//! - Certificate reads return only validated certificate blocks. A private
+//!   key selection is consumed atomically by vault ingestion and returns
+//!   only a secret reference, never bytes to the renderer.
 //! - A write grant pins the canonical folder and the chosen file name. Data
 //!   goes to a newly created temporary file in that folder (never through an
 //!   existing file or link) that is then renamed over the chosen name. A
@@ -24,6 +27,8 @@
 //! `linked_file_relocate` to repoint it to a new location,
 //! `anvil_app::linked_files`).
 
+use anvil_domain::Id;
+use anvil_domain::secret::SecretRef;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,6 +38,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 /// How long a selection stays usable.
 pub const GRANT_TTL: Duration = Duration::from_secs(30 * 60);
@@ -48,8 +54,10 @@ pub enum FilePurpose {
     BundleImport,
     /// Read a file into a request as a stored attachment.
     Attachment,
-    /// Read a PEM certificate or key.
-    PemFile,
+    /// Read PEM certificates into the renderer, refusing private keys.
+    PemCertificate,
+    /// Ingest a PEM private key into the vault once; never return its text.
+    PemPrivateKey,
     /// Read a PKCS#12 keystore (carried as base64).
     Pkcs12File,
     /// Read an API spec or collection to import.
@@ -101,7 +109,8 @@ impl FilePurpose {
             | FilePurpose::SpecRevisionExport => Access::Write,
             FilePurpose::BundleImport
             | FilePurpose::Attachment
-            | FilePurpose::PemFile
+            | FilePurpose::PemCertificate
+            | FilePurpose::PemPrivateKey
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset
@@ -122,7 +131,9 @@ impl FilePurpose {
         match self {
             FilePurpose::BundleImport => 2 * 1024 * MIB,
             FilePurpose::Attachment => 256 * MIB,
-            FilePurpose::PemFile | FilePurpose::Pkcs12File => MIB,
+            FilePurpose::PemCertificate
+            | FilePurpose::PemPrivateKey
+            | FilePurpose::Pkcs12File => MIB,
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
             FilePurpose::Ruleset => MIB,
@@ -300,14 +311,43 @@ impl FileGrants {
         self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation)
     }
 
-    /// Read the file behind a read grant issued for `purpose`. The grant stays
-    /// usable (preview then apply read the same file) until it expires or the
-    /// app locks.
+    /// Read the file behind a readable grant issued for `purpose`. The grant
+    /// stays usable until it expires or the app locks. Private-key grants are
+    /// refused here and served only by `import_private_key`.
     pub fn read(&self, token: &str, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
-        if purpose.access() != Access::Read {
+        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
             return Err(GrantError::WrongPurpose);
         }
-        let entry = self.lookup(token, purpose)?;
+        self.read_file(token, purpose)
+    }
+
+    /// Consume a private-key selection and store it in the workspace vault.
+    /// The purpose and disposition are fixed here, not supplied by a renderer.
+    /// A failed ingestion also spends the grant; a retry needs a fresh choice.
+    pub fn import_private_key(
+        &self,
+        app: &crate::App,
+        token: &str,
+        workspace: &Id,
+        label: &str,
+    ) -> crate::Result<SecretRef> {
+        let file = self
+            .read_file(token, FilePurpose::PemPrivateKey)
+            .map_err(|err| crate::AppError::Invalid(err.to_string()))?;
+        let bytes = Zeroizing::new(file.bytes);
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| crate::AppError::Invalid("the file is not UTF-8 text".into()))?;
+        app.set_secret(workspace, label, text)
+    }
+
+    fn read_file(&self, token: &str, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
+        // Taking the grant under its mutex prevents concurrent ingestion or
+        // reuse, including after a read or vault write fails.
+        let entry = if purpose == FilePurpose::PemPrivateKey {
+            self.take(token, purpose)?.0
+        } else {
+            self.lookup(token, purpose)?
+        };
         let Target::Read { path, id } = entry.target else {
             return Err(GrantError::WrongPurpose);
         };
@@ -331,6 +371,10 @@ impl FileGrants {
         file.take(max + 1).read_to_end(&mut bytes).map_err(io)?;
         if bytes.len() as u64 > max {
             return Err(GrantError::TooLarge(size_label(max)));
+        }
+        if purpose == FilePurpose::PemCertificate {
+            let selected = Zeroizing::new(bytes);
+            bytes = certificate_pem(&selected)?.into_bytes();
         }
         Ok(ReadFile { bytes, file_name: entry.file_name })
     }
@@ -419,6 +463,53 @@ impl FileGrants {
         }
         Ok((entry, g.generation))
     }
+}
+
+/// Return only complete certificate blocks, never comments or other PEM
+/// material. Validate the DER as certificates too: changing a private key's
+/// PEM label to CERTIFICATE must not make it readable by the renderer.
+fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
+    let invalid = || {
+        GrantError::Invalid(
+            "choose a certificate-only PEM file; private keys stay in the vault".into(),
+        )
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    let mut pem = String::new();
+    let mut in_certificate = false;
+    let mut certificates = 0;
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        match line {
+            "-----BEGIN CERTIFICATE-----" if !in_certificate => {
+                in_certificate = true;
+            }
+            "-----END CERTIFICATE-----" if in_certificate => {
+                in_certificate = false;
+                certificates += 1;
+                pem.push_str(line);
+                pem.push('\n');
+                continue;
+            }
+            _ if line.contains("-----BEGIN") || line.contains("-----END") => return Err(invalid()),
+            _ if !in_certificate => continue,
+            _ => {}
+        }
+        pem.push_str(line);
+        pem.push('\n');
+    }
+    if in_certificate || certificates == 0 {
+        return Err(invalid());
+    }
+    // Reuse the transport's certificate DER validation without system roots,
+    // a client identity, or any network access. Do not expose parser errors
+    // that could quote untrusted file contents.
+    let settings = anvil_transport::tls::TlsSettings {
+        extra_roots_pem: vec![pem.clone()],
+        ..Default::default()
+    };
+    anvil_transport::tls::prepare(&settings).map_err(|_| invalid())?;
+    Ok(pem)
 }
 
 /// Open `path` for reading if it is a regular file; `None` when it is not, a

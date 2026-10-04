@@ -60,6 +60,62 @@ pub async fn file_choose(
     referrer: Option<LinkedFileReferrer>,
     old_path: Option<String>,
 ) -> R<Vec<FileGrant>> {
+    st.app()?;
+    general_purpose(purpose)?;
+    choose_native(window, st, purpose, options, referrer, old_path).await
+}
+
+/// The native title and grant purpose are fixed by this command. The
+/// renderer cannot select a role or override the security-related title.
+#[tauri::command]
+pub async fn certificate_file_choose(
+    window: Window,
+    st: State<'_, DesktopState>,
+) -> R<Vec<FileGrant>> {
+    choose_native(
+        window,
+        st,
+        FilePurpose::PemCertificate,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Choose a private key for one-shot vault ingestion, with native wording
+/// that makes the disposition visible at the existing file selection.
+#[tauri::command]
+pub async fn private_key_file_choose(
+    window: Window,
+    st: State<'_, DesktopState>,
+) -> R<Vec<FileGrant>> {
+    choose_native(
+        window,
+        st,
+        FilePurpose::PemPrivateKey,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+fn general_purpose(purpose: FilePurpose) -> R<()> {
+    if matches!(purpose, FilePurpose::PemCertificate | FilePurpose::PemPrivateKey) {
+        return Err("PEM files require their dedicated native chooser".into());
+    }
+    Ok(())
+}
+
+async fn choose_native(
+    window: Window,
+    st: State<'_, DesktopState>,
+    purpose: FilePurpose,
+    options: Option<DialogOptions>,
+    referrer: Option<LinkedFileReferrer>,
+    old_path: Option<String>,
+) -> R<Vec<FileGrant>> {
     // Read before the lock check, so a lock after it always moves the
     // generation past this value.
     let generation = st.file_grants.generation();
@@ -218,7 +274,8 @@ fn title(purpose: FilePurpose) -> &'static str {
     match purpose {
         FilePurpose::BundleImport => "Import an Anvil bundle or backup",
         FilePurpose::Attachment => "Attach a file",
-        FilePurpose::PemFile => "Choose a PEM certificate or key",
+        FilePurpose::PemCertificate => "Choose PEM certificates to display in Anvil",
+        FilePurpose::PemPrivateKey => "Choose a PEM private key for the vault",
         FilePurpose::Pkcs12File => "Choose a PKCS#12 keystore for the vault",
         FilePurpose::SpecSource => "Import an API spec or collection",
         FilePurpose::Dataset => "Choose a CSV or JSON dataset",
@@ -240,6 +297,17 @@ mod tests {
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use anvil_app::profiles::{ProfileManager, Unlock};
     use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
+
+    #[test]
+    fn pem_roles_are_fixed_by_dedicated_native_choosers() {
+        for purpose in [FilePurpose::PemCertificate, FilePurpose::PemPrivateKey] {
+            assert!(general_purpose(purpose).is_err());
+        }
+        assert!(general_purpose(FilePurpose::Pkcs12File).is_ok());
+        assert!(general_purpose(FilePurpose::Attachment).is_ok());
+        assert!(title(FilePurpose::PemCertificate).contains("display"));
+        assert!(title(FilePurpose::PemPrivateKey).contains("vault"));
+    }
 
     #[test]
     fn a_relocation_names_its_request_or_dataset_and_its_reference() {

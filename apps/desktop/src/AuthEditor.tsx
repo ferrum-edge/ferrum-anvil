@@ -485,10 +485,14 @@ export function PemFromFile(props: { label: string; workspaceId: string | null; 
           if (!workspaceId) return;
           setErr(null);
           try {
-            const file = await api.chooseFile("pem_file");
+            const file = await api.choosePrivateKeyFile();
             if (!file) return;
-            const r = await api.readTextFile(file.token, workspaceId, file.file_name || "key");
-            if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
+            const secret = await api.importPrivateKeyFile(
+              file.token,
+              workspaceId,
+              file.file_name || "key",
+            );
+            props.onSecret({ kind: "secret", secret });
           } catch (e) {
             setErr(String((e as Error).message));
           }
