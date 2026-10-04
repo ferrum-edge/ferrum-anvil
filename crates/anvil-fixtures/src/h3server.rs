@@ -30,6 +30,12 @@
 //!   datagrams a handshake inside the tunnel took). The client only sends
 //!   once it has the 2xx, so the end never overtakes the response headers,
 //!   and with `N = 0` it lands during a handshake the client already began.
+//!   A clean FIN closes only the response: UDP forwarding stops and the
+//!   request half is drained for at most five seconds, without forwarding
+//!   more datagrams, until the client finishes or closes the connection.
+//!   A client that keeps the request open is then explicitly canceled.
+//!   Response resets retain/drain the request half under the same bound,
+//!   so the intended reset code is not raced by an implicit STOP_SENDING(0).
 //!   CONNECT-UDP while
 //!   [`H3Options::connect_udp`] is off gets `501`, a path that is not a
 //!   template expansion `400`.
@@ -583,6 +589,7 @@ async fn connect_udp(
     let mut buf = vec![0u8; 65_536];
     let mut replies = 0u64;
     let mut ended = false;
+    let mut clean_fin = false;
     // Client → target: one Context ID 0 payload.
     let relay = |ctx_and_payload: &[u8], via: &str| -> Option<Vec<u8>> {
         let mut pos = 0;
@@ -604,7 +611,7 @@ async fn connect_udp(
                     send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
                 } else {
                     log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
-                    let _ = send.finish().await;
+                    clean_fin = true;
                 }
                 ended = true;
                 break;
@@ -668,7 +675,7 @@ async fn connect_udp(
                 }
                 if fin_after == Some(replies) {
                     log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
-                    let _ = send.finish().await;
+                    clean_fin = true;
                     ended = true;
                     break;
                 }
@@ -676,7 +683,330 @@ async fn connect_udp(
         }
     }
     router.0.lock().remove(&quarter);
-    if !ended {
+    drop(rx_dgram);
+    if ended {
+        // Ending the response does not end the request half. Dropping an
+        // unread quinn receive stream sends STOP_SENDING(0), which can fail
+        // a pending DTLS flight before the
+        // client reads our FIN or RESET. Stop forwarding and drain that half.
+        drop(sock);
+        drop(pending);
+        if clean_fin {
+            let write_bound = std::time::Duration::from_millis(200);
+            let finished = tokio::time::timeout(write_bound, send.finish()).await;
+            if !matches!(finished, Ok(Ok(()))) {
+                recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                log.push(GroundTruth::FaultApplied { fault: "masque_fin_write_failed".into() });
+                return;
+            }
+        }
+        let end = if clean_fin { "masque_fin" } else { "masque_reset" };
+        drain_connect_udp_request(&mut recv, &log, end).await;
+    } else {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), send.finish()).await;
+    }
+}
+
+const CONNECT_UDP_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn drain_connect_udp_request(
+    recv: &mut h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
+    log: &GroundTruthLog,
+    end: &str,
+) {
+    let mut bytes = 0u64;
+    let drain = async {
+        while let Some(mut chunk) = recv.recv_data().await? {
+            let n = chunk.remaining();
+            bytes += n as u64;
+            chunk.advance(n);
+        }
+        // DATA can end at trailers before QUIC EOF. Retain the receive half
+        // through that EOF too, so trailers cannot cause another early drop.
+        recv.recv_trailers().await?;
+        Ok::<(), h3::error::StreamError>(())
+    };
+    // One total deadline, not an idle timer a still-writing peer can extend.
+    let fault = match tokio::time::timeout(CONNECT_UDP_DRAIN, drain).await {
+        Ok(Ok(())) => "request_finished",
+        Ok(Err(_)) => {
+            recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+            "request_closed"
+        }
+        Err(_) => {
+            recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+            "drain_timeout"
+        }
+    };
+    log.push(GroundTruth::MessageReceived { bytes });
+    log.push(GroundTruth::FaultApplied { fault: format!("{end}_{fault}") });
+}
+
+#[cfg(test)]
+mod connect_udp_tests {
+    use super::*;
+    use crate::LabPki;
+    use std::time::Duration;
+    use tokio::net::UdpSocket;
+    use tokio::task::JoinHandle;
+
+    type ClientStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+    struct Tunnel {
+        _client: quinn::Endpoint,
+        _server: quinn::Endpoint,
+        _requests: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+        stream: ClientStream,
+        quic: quinn::Connection,
+        target: UdpSocket,
+        log: GroundTruthLog,
+        handler: JoinHandle<()>,
+        client_driver: JoinHandle<()>,
+        server_driver: JoinHandle<()>,
+    }
+
+    impl Drop for Tunnel {
+        fn drop(&mut self) {
+            self.quic.close(0u32.into(), b"test shutdown");
+            self.handler.abort();
+            self.client_driver.abort();
+            self.server_driver.abort();
+        }
+    }
+
+    // Real HTTP/3 endpoints, driving the same handler as serve_with. Retain
+    // its task so cleanup is awaited directly, without polling logs or sleeps.
+    async fn tunnel(query: &str) -> Tunnel {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            crate::init();
+            let pki = LabPki::generate();
+            let chain = pki.server.chain_with(&pki.ca);
+            let mut opts = TlsServerOptions::new(chain, pki.server.key);
+            opts.alpn = vec!["h3".into()];
+            opts.tls13_only = true;
+            let tls = server_config(&opts).unwrap();
+            let tls = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+            let mut config = quinn::ServerConfig::with_crypto(Arc::new(tls));
+            // A post-FIN flight must consume renewed receive credit, rather
+            // than fitting in the initial stream window despite a dropped recv.
+            let mut transport = quinn::TransportConfig::default();
+            transport.stream_receive_window(4096u32.into());
+            transport.receive_window(8192u32.into());
+            config.transport_config(Arc::new(transport));
+            let bind = "127.0.0.1:0".parse().unwrap();
+            let server = quinn::Endpoint::server(config, bind).unwrap();
+            let addr = server.local_addr().unwrap();
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in crate::tlsserver::certs(&pki.ca.cert) {
+                roots.add(cert).unwrap();
+            }
+            let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+            let mut tls = builder.with_no_client_auth();
+            tls.alpn_protocols = vec![b"h3".to_vec()];
+            let tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+            let mut config = quinn::ClientConfig::new(Arc::new(tls));
+            let mut transport = quinn::TransportConfig::default();
+            transport.send_window(4096);
+            config.transport_config(Arc::new(transport));
+            let mut client = quinn::Endpoint::client(bind).unwrap();
+            client.set_default_client_config(config);
+            let connect = client.connect(addr, "localhost").unwrap();
+            let accept = async { server.accept().await.unwrap().await.unwrap() };
+            let (quic, peer) = tokio::join!(connect, accept);
+            let quic = quic.unwrap();
+            let log = GroundTruthLog::default();
+            let server_log = log.clone();
+            let (handler_tx, handler_rx) = tokio::sync::oneshot::channel();
+            let server_driver = tokio::spawn(async move {
+                let mut h3 = h3::server::builder()
+                    .enable_extended_connect(true)
+                    .build::<_, Bytes>(h3_quinn::Connection::new(peer.clone()))
+                    .await
+                    .unwrap();
+                let resolver = h3.accept().await.unwrap().unwrap();
+                let (req, stream) = resolver.resolve_request().await.unwrap();
+                let handler = tokio::spawn(connect_udp(
+                    req,
+                    stream,
+                    server_log,
+                    H3Options::default(),
+                    peer,
+                    DatagramRouter::default(),
+                ));
+                handler_tx.send(handler).unwrap();
+                let _ = h3.accept().await;
+            });
+            let conn = h3_quinn::Connection::new(quic.clone());
+            let (mut driver, mut requests) = h3::client::new(conn).await.unwrap();
+            let client_driver = tokio::spawn(async move {
+                let _ = futures::future::poll_fn(|cx| driver.poll_close(cx)).await;
+            });
+            let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let port = target.local_addr().unwrap().port();
+            let uri = format!("https://{addr}/.well-known/masque/udp/127.0.0.1/{port}/?{query}");
+            let mut req = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri(uri)
+                .header("capsule-protocol", "?1")
+                .body(())
+                .unwrap();
+            req.extensions_mut().insert(h3::ext::Protocol::CONNECT_UDP);
+            let mut stream = requests.send_request(req).await.unwrap();
+            assert_eq!(stream.recv_response().await.unwrap().status(), 200);
+            let handler = handler_rx.await.unwrap();
+            Tunnel {
+                _client: client,
+                _server: server,
+                _requests: requests,
+                stream,
+                quic,
+                target,
+                log,
+                handler,
+                client_driver,
+                server_driver,
+            }
+        })
+        .await
+        .expect("CONNECT-UDP setup must be bounded")
+    }
+
+    async fn observe_fin(t: &mut Tunnel, reply: bool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let first = Bytes::from_static(&[0, 2, 0, b'x']);
+            t.stream.send_data(first).await.unwrap();
+            let mut buf = [0u8; 32];
+            let (n, peer) = t.target.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"x");
+            if reply {
+                t.target.send_to(b"reply", peer).await.unwrap();
+            }
+            let mut body = Vec::new();
+            while let Some(mut chunk) = t.stream.recv_data().await.unwrap() {
+                let n = chunk.remaining();
+                body.extend_from_slice(&chunk.copy_to_bytes(n));
+            }
+            if reply {
+                assert_eq!(body, [0, 6, 0, b'r', b'e', b'p', b'l', b'y']);
+            } else {
+                assert!(body.is_empty(), "no UDP response is forwarded before a timed FIN");
+            }
+        })
+        .await
+        .expect("the response FIN must arrive before the request is finished");
+    }
+
+    fn has_fault(log: &GroundTruthLog, fault: &str) -> bool {
+        let entries = log.entries();
+        entries.iter().any(|e| match &e.event {
+            GroundTruth::FaultApplied { fault: f } => f == fault,
+            _ => false,
+        })
+    }
+
+    #[tokio::test]
+    async fn response_fin_drains_an_outstanding_capsule_flight_without_forwarding_it() {
+        for reply in [false, true] {
+            for iteration in 0..8 {
+                let query = if reply { "fin_after=1" } else { "fin_after_ms=0" };
+                let mut t = tunnel(query).await;
+                observe_fin(&mut t, reply).await;
+                // Valid DATAGRAM capsules still pending in the request half.
+                // This exceeds both flow-control windows by a wide margin.
+                let flight = Bytes::from([0, 2, 0, b'y'].repeat(32 * 1024));
+                let bytes = flight.len() as u64;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    let sent = t.stream.send_data(flight).await;
+                    sent.expect("FIN must not stop the request writer");
+                    if iteration % 2 == 0 {
+                        t.stream.send_trailers(http::HeaderMap::new()).await.unwrap();
+                    }
+                    t.stream.finish().await.unwrap();
+                    (&mut t.handler).await.unwrap();
+                })
+                .await
+                .expect("draining the outstanding flight and request FIN must finish promptly");
+                assert!(has_fault(&t.log, "masque_fin_request_finished"));
+                assert!(!has_fault(&t.log, "masque_fin_drain_timeout"));
+                let entries = t.log.entries();
+                assert!(entries.iter().any(|e| e.event == GroundTruth::MessageReceived { bytes }));
+                let relayed = entries
+                    .iter()
+                    .filter(|e| matches!(e.event, GroundTruth::DatagramRelayed { .. }))
+                    .count();
+                assert_eq!(relayed, 1, "post-FIN capsules are drained, never forwarded");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_reset_keeps_its_code_while_the_request_flight_drains() {
+        for _ in 0..8 {
+            let mut t = tunnel("reset_after_ms=0").await;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let first = Bytes::from_static(&[0, 2, 0, b'x']);
+                t.stream.send_data(first).await.unwrap();
+                let mut buf = [0u8; 32];
+                let (n, _) = t.target.recv_from(&mut buf).await.unwrap();
+                assert_eq!(&buf[..n], b"x");
+                let error = t.stream.recv_data().await.err().expect("response must be reset");
+                assert!(matches!(
+                    error,
+                    h3::error::StreamError::RemoteTerminate { code, .. }
+                        if code == h3::error::Code::H3_INTERNAL_ERROR
+                ));
+                let flight = Bytes::from([0, 2, 0, b'y'].repeat(32 * 1024));
+                t.stream.send_data(flight).await.unwrap();
+                t.stream.finish().await.unwrap();
+                (&mut t.handler).await.unwrap();
+            })
+            .await
+            .expect("a response RESET must not abandon the pending request half");
+            assert!(has_fault(&t.log, "masque_reset_request_finished"));
+            assert!(!has_fault(&t.log, "masque_reset_drain_timeout"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_leaving_the_request_open_is_canceled_at_the_total_drain_deadline() {
+        let mut t = tunnel("fin_after_ms=0").await;
+        observe_fin(&mut t, false).await;
+        let bound = CONNECT_UDP_DRAIN + Duration::from_secs(2);
+        tokio::time::timeout(bound, &mut t.handler)
+            .await
+            .expect("an open request must not retain the handler indefinitely")
+            .unwrap();
+        assert!(has_fault(&t.log, "masque_fin_drain_timeout"));
+        assert!(!has_fault(&t.log, "masque_fin_request_finished"));
+        // The timeout sends an explicit cancellation, not quinn's implicit 0.
+        let flight = Bytes::from([0, 2, 0, b'y'].repeat(32 * 1024));
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            t.stream.send_data(flight),
+        )
+        .await
+        .expect("the writer must observe the cleanup cancellation")
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            h3::error::StreamError::RemoteTerminate { code, .. }
+                if code == h3::error::Code::H3_REQUEST_CANCELLED
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_peer_closing_the_connection_releases_the_drain_before_its_deadline() {
+        let mut t = tunnel("fin_after_ms=0").await;
+        observe_fin(&mut t, false).await;
+        t.quic.close(0u32.into(), b"peer done");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            &mut t.handler,
+        )
+        .await
+        .expect("connection closure must release the request half promptly")
+        .unwrap();
+        assert!(has_fault(&t.log, "masque_fin_request_closed"));
+        assert!(!has_fault(&t.log, "masque_fin_drain_timeout"));
     }
 }

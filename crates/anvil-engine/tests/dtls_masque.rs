@@ -392,23 +392,43 @@ async fn a_tunnel_ending_during_the_handshake_fails_the_handshake_typed() {
     let p = proxy(H3Options::default()).await;
     let echo = dtls_echo(&pki().server, false).await;
     let e = Engine::new();
-    // The proxy resets the stream as soon as the ClientHello is through the tunnel.
-    let reset = "/.well-known/masque/udp/{target_host}/{target_port}/?reset_after_ms=0";
-    let o = run(&e, &ctx(&echo.url(), &p, reset, MasqueDatagramMode::Auto, None)).await;
-    let f = last(&o).failure.as_ref().unwrap();
-    assert_eq!((f.kind, f.phase), (FailureKind::BodyReset, Phase::DtlsHandshake), "{f:?}");
-    assert_eq!(tunnel(&o).2.closed_by, ClosedBy::Abnormal);
-    finding(&o, "masque.tunnel_ended_abnormally");
-    assert!(o.record.stream.is_none());
-    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
-    // A clean FIN right after the ClientHello: the handshake cannot finish.
-    let fin = "/.well-known/masque/udp/{target_host}/{target_port}/?fin_after_ms=0";
-    let o = run(&e, &ctx(&echo.url(), &p, fin, MasqueDatagramMode::Auto, None)).await;
-    let f = last(&o).failure.as_ref().unwrap();
-    assert_eq!((f.kind, f.phase), (FailureKind::DtlsHandshakeFailed, Phase::DtlsHandshake), "{f:?}");
-    assert!(f.message.contains("closed during the DTLS handshake"), "{}", f.message);
-    assert_eq!(tunnel(&o).2.closed_by, ClosedBy::Peer);
-    assert!(!codes(&o).iter().any(|c| c.starts_with("masque.")), "a proxy close is not an abnormal end: {:?}", codes(&o));
+    // Every iteration is a new real-socket tunnel. Both controls must pass
+    // each time; neither arm retries or accepts the other's classification.
+    for _ in 0..16 {
+        // The proxy resets the stream as soon as the ClientHello is relayed.
+        let reset = "/.well-known/masque/udp/{target_host}/{target_port}/?reset_after_ms=0";
+        let c = ctx(&echo.url(), &p, reset, MasqueDatagramMode::Auto, None);
+        let o = run(&e, &c).await;
+        let f = last(&o).failure.as_ref().unwrap();
+        let expected = (FailureKind::BodyReset, Phase::DtlsHandshake);
+        assert_eq!((f.kind, f.phase), expected, "{f:?}");
+        assert_eq!(f.quic_error_code, Some(0x102), "the intended H3_INTERNAL_ERROR reset");
+        assert_eq!(phase(last(&o), Phase::DtlsHandshake), Some(PhaseStatus::Failed));
+        assert_eq!(tunnel(&o).2.closed_by, ClosedBy::Abnormal);
+        finding(&o, "masque.tunnel_ended_abnormally");
+        assert!(o.record.stream.is_none());
+        assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+        // A clean response FIN after ClientHello cannot complete DTLS. The
+        // fixture retains the request half while any remaining flight drains.
+        let fin = "/.well-known/masque/udp/{target_host}/{target_port}/?fin_after_ms=0";
+        let c = ctx(&echo.url(), &p, fin, MasqueDatagramMode::Auto, None);
+        let o = run(&e, &c).await;
+        let f = last(&o).failure.as_ref().unwrap();
+        let expected = (FailureKind::DtlsHandshakeFailed, Phase::DtlsHandshake);
+        assert_eq!((f.kind, f.phase), expected, "{f:?}");
+        assert_eq!(phase(last(&o), Phase::DtlsHandshake), Some(PhaseStatus::Failed));
+        assert!(f.message.contains("closed during the DTLS handshake"), "{}", f.message);
+        assert_eq!(tunnel(&o).2.closed_by, ClosedBy::Peer);
+        assert!(
+            !codes(&o).iter().any(|c| c.starts_with("masque.")),
+            "a proxy close is not an abnormal end: {:?}",
+            codes(&o)
+        );
+        assert!(o.record.stream.is_none());
+        assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+        assert_eq!(tunnel(&o).2.received_capsules, 0, "no handshake replies after FIN");
+        assert_eq!(app_datagrams(&echo.log), 0);
+    }
 }
 
 #[tokio::test]
