@@ -966,7 +966,15 @@ pub(crate) fn reference_scan_in(
                 continue;
             }
             let decoded = match m.id.parse::<Id>() {
-                Ok(id) => match s.get::<serde_json::Value>(k, &id) {
+                Ok(id) => match (|| {
+                    if k == kind::REVISION
+                        && let Some(refs) = s.orphan_revision_attachment_refs_for_retention(&id)?
+                    {
+                        candidates.retain(|sha| !refs.contains(sha));
+                        return Ok(None);
+                    }
+                    s.get::<serde_json::Value>(k, &id)
+                })() {
                     Ok(Some(o)) => Some(o.to_string()),
                     Ok(None) => continue,
                     Err(StoreError::Integrity | StoreError::Serde(_)) => None,
@@ -1065,7 +1073,10 @@ fn unstored(sha256: &str) -> AppError {
 /// ones a user added, unless a user attached it within [`ATTACHMENT_GRACE`]
 /// ([`held_release_waits_in`]), as [`release_held_attachment_in`] does, in
 /// one pass over the referrers.
-fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_storage::store::Result<()> {
+pub(crate) fn delete_requests_in(
+    s: &StoreTx<'_>,
+    requests: &[RequestDefinition],
+) -> anvil_storage::store::Result<()> {
     let mut specs = Vec::new();
     for r in requests {
         specs.push(serde_json::to_value(&r.spec)?);
@@ -1078,11 +1089,11 @@ fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_
             continue;
         }
         let Ok(id) = m.id.parse::<Id>() else { continue };
-        // One that does not decode goes with its request; the files it named
-        // are kept.
+        // Preserve an undecodable revision as an orphan: dropping its row
+        // would lose the only record of the files it may still name.
         match s.get::<RequestRevision>(kind::REVISION, &id) {
             Ok(Some(rev)) => specs.push(serde_json::to_value(&rev.spec)?),
-            Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => {}
+            Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => continue,
             Err(e) => return Err(e),
         }
         s.delete(kind::REVISION, &id)?;

@@ -62,7 +62,56 @@ explicit move. Explicit folder/request moves keep their owner and existing
 transactional relationship checks. A new request is written before its
 first revision in the same transaction; deletion reads revisions before
 removing their parent, so owner validation and attachment release continue
-to work through the production methods.
+to work through the production methods, including approved spec reimport
+deletions. Reimport writes a revision only for a changed request present in
+the transaction's checked previous set. New imports and newly added reimport
+requests have no revision until saved; that save creates the parent before
+its first revision. The suspected missing-parent revision write on these
+import paths is therefore unreachable and their ordering is unchanged.
+
+### Existing orphans and reference retention
+
+Released profiles can already contain revisions whose request was deleted.
+Ordinary typed/untyped revision gets and scoped/unscoped lists still refuse
+them. Full profile backups exclude each authentic orphan revision with an
+explicit manifest entry and count only included revisions. They carry its
+available attachment bytes through the profile-wide attachment index. The
+original encrypted revision row remains in the profile and any existing
+checkpoints; the portable backup does **not** carry that ciphertext or its
+spec. Keep a profile checkpoint if recovering the excluded history is
+required: a portable backup alone cannot recover it. Attachment bytes without
+an ordinary saved referrer remain retained after portable restore; that is
+not a trust decision to adopt the excluded history or delete its files.
+No backup read creates quarantine rows, adopts owners or reseals data.
+A malformed or undecryptable revision still fails the backup, rather than
+being silently omitted.
+
+The internal `StoreRead::orphan_revision_attachment_refs_for_retention`
+inspection authenticates the released kind/ID envelope, checks the decoded
+revision ID, and checks absence of the **sealed** request ID in the same read
+transaction. An existing request, including a corrupt one, is never treated
+as missing. Plaintext workspace/parent indexes cannot classify or route an
+orphan. The inspection returns only canonical attachment hashes, never a
+spec, URL, file name, workspace owner or executable request context. Its only
+callers are profile backup exclusion and profile-wide reference retention;
+ordinary revision access, workspace exports and routing keep their guards.
+This is reference accounting, not authenticated historical ownership.
+
+Cleanup gathers those hashes before deleting an orphan and releases its
+files only after the ordinary cross-profile reference scan finds no other
+holder and the attachment grace period permits release. This includes
+imported attachment indexes with `user: false`. If any revision's references
+cannot be inspected, its row and pins remain and the pass removes/releases
+nothing, even with no aged-user candidates. Other undecodable referrers also
+block an orphan's removal. Request deletion similarly keeps undecodable
+revision rows for a later safe cleanup instead of losing their references.
+Workspace deletion reads live revisions before their parents disappear and
+keeps orphan/undecodable revisions for profile-wide cleanup; an orphan's
+plaintext workspace index cannot authorize its removal with that workspace.
+Cleanup now authenticates revision identities across the profile rather
+than relying on their plaintext parent indexes; large revision histories
+may increase its read cost. This does not introduce a format migration or a
+trusted historical-owner mapping.
 
 ## Unresolved revision ownership: owner decision required
 
@@ -126,7 +175,12 @@ The following requires owner approval before implementation:
 
 No migration, lifecycle ceremony, new AAD or schema bump is included here.
 This plan needs coordination with the owners of profile/vault lifecycle and
-backup/import code, which are outside this assignment's edit scope.
+backup/import code. Ownerless legacy **and newly written** revisions remain
+subject to parent-ID reuse and authentic old-ciphertext replay. History and
+load-report plaintext ownership indexes also remain outside this object
+guard. Root must decide the legacy trust source, quarantine/recovery policy,
+new revision format, downgrade/replay handling, and migration/restore rollback
+semantics before claiming a full advisory fix.
 
 ## Validation evidence and limits
 
@@ -145,6 +199,16 @@ Added tests exercise production Store SQL and App methods:
   missing and cyclic targets leave no row mutation; a stale request save
   keeps its authorized move. A failing final request write rolls back the
   new revision, and another request's revision is rejected.
+- Production App import/create/add/save/reimport-delete and full backup;
+  failure after reimport cascades rolls back requests, revisions, blobs and
+  pins. Newly added requests save successfully through parent validation.
+- Authentic old orphans with foreign/null owner and parent index edits never
+  expose ordinary revision data or workspace export attachments; full backup
+  exclusion counts are explicit and inspection leaves ciphertext unchanged.
+- A sole imported attachment (`user: false`) remains readable and pinned
+  across backup, blocked cleanup, history retention and checkpoint restore,
+  then releases only with a safe orphan cleanup. Corrupt revisions retain
+  their rows and references; corrupt parents block both request and revision.
 
 Existing storage concurrency/security fixtures now provide actual domain
 identities rather than partial workspace JSON. No tests, project tooling,

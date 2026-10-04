@@ -247,8 +247,16 @@ fn an_object_that_does_not_decode_keeps_every_file_and_is_named() {
     db.execute("UPDATE objects SET payload=x'00' WHERE kind=?1 AND id=?2", rusqlite::params![kind::REQUEST, id]).unwrap();
 
     let done = app.clean_up_storage().unwrap();
-    let named = vec![UndecodableObject { kind: kind::REQUEST.into(), id }];
+    let named = vec![
+        UndecodableObject { kind: kind::REQUEST.into(), id },
+        UndecodableObject {
+            kind: kind::REVISION.into(),
+            id: damaged.revision_id.unwrap().to_string(),
+        },
+    ];
     assert_eq!(done.undecodable, named);
+    assert_eq!(done.orphaned_revisions, 0);
+    assert_eq!(revisions_of(&app, &damaged.meta.id), 1, "the revision is retained");
     assert_eq!(done.released_attachments, 0);
     assert!(stored(&app, &abandoned), "the damaged request could name it: kept");
     // The pass is kept, so the damaged row can be found.
@@ -356,7 +364,9 @@ fn a_mark_stamped_by_a_pass_an_undecodable_object_blocked_does_not_make_the_next
     drop(db);
 
     let done = app.clean_up_storage().unwrap();
-    assert_eq!(done.undecodable.len(), 1);
+    assert_eq!(done.undecodable.len(), 2, "the damaged parent also blocks its revision");
+    assert_eq!(done.orphaned_revisions, 0);
+    assert_eq!(revisions_of(&app, &damaged.meta.id), 1, "no revision is deleted");
     assert_eq!(done.released_attachments, 0);
     let (_, entry) = index_entry(&app, &legacy);
     assert!(entry["attached_at"].as_i64().is_some(), "stamped though the pass released nothing: {entry}");

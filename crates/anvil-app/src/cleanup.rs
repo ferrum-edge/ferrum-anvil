@@ -8,7 +8,6 @@ use crate::workspace::{
 };
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::workspace::RequestRevision;
 use anvil_storage::{StoreError, StoreRead, StoreTx, kind};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -105,8 +104,9 @@ impl App {
     /// takes the write lock; the removals then run in a short write
     /// transaction only if nothing was written in between (see
     /// [`ChangeMarker`](anvil_storage::store::ChangeMarker)), and otherwise
-    /// the pass reads again. A pass with nothing to release decodes only the
-    /// attachment index and any orphaned revisions. The pass is kept
+    /// the pass reads again. Each pass authenticates revisions to classify
+    /// orphans without trusting their indexes; other referrers are decoded
+    /// when there are attachment candidates to release. The pass is kept
     /// ([`App::last_storage_cleanup`]).
     pub fn clean_up_storage(&self) -> Result<StorageCleanup> {
         self.clean_up_storage_between_phases(|| {})
@@ -190,35 +190,45 @@ fn plan_in(s: &StoreRead<'_>, cutoff: i64) -> anvil_storage::store::Result<Plan>
     let (unstamped, entries): (Vec<AttachmentIndex>, Vec<AttachmentIndex>) =
         entries.into_iter().partition(|e| e.user && e.attached_at.is_none());
     let mut candidates = HashSet::new();
-    let requests: HashSet<String> = s.object_meta(kind::REQUEST)?.into_iter().map(|m| m.id).collect();
     // By id, and their row ids for the reference scan to skip.
     let (mut orphans, mut orphan_rows) = (Vec::new(), HashSet::new());
+    let mut undecodable = Vec::new();
     for m in s.object_meta(kind::REVISION)? {
-        // Every writer files a revision under its request; one filed under
-        // none is kept.
-        if m.parent_id.as_ref().is_none_or(|p| requests.contains(p)) {
-            continue;
-        }
-        let Ok(id) = m.id.parse::<Id>() else { continue };
-        // One that does not decode goes too; the files it named are kept.
-        match s.get::<RequestRevision>(kind::REVISION, &id) {
-            Ok(Some(rev)) => {
-                let spec = serde_json::to_value(&rev.spec)?;
-                crate::exec::collect_attachments(&spec, &mut |sha| {
-                    if !recent.contains(sha) {
-                        candidates.insert(sha.to_string());
-                    }
+        // Only the sealed request ID decides orphanhood. Plaintext indexes
+        // cannot supply historical ownership, even if they name a live row.
+        let refs = match m.id.parse::<Id>() {
+            Ok(id) => s.orphan_revision_attachment_refs_for_retention(&id),
+            Err(_) => Err(StoreError::Integrity),
+        };
+        match refs {
+            Ok(Some(refs)) => {
+                candidates.extend(refs.into_iter().filter(|sha| !recent.contains(sha)));
+                orphans.push(m.id.parse::<Id>().map_err(|_| StoreError::Integrity)?);
+                orphan_rows.insert(m.id);
+            }
+            Ok(None) => {}
+            Err(StoreError::Integrity | StoreError::Serde(_)) => {
+                tracing::warn!(
+                    kind = kind::REVISION,
+                    id = %m.id,
+                    "a stored revision does not decode; its row and stored files are kept"
+                );
+                undecodable.push(UndecodableObject {
+                    kind: kind::REVISION.into(),
+                    id: m.id,
                 });
             }
-            Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => {}
             Err(e) => return Err(e),
         }
-        orphans.push(id);
-        orphan_rows.insert(m.id);
     }
     let aged: Vec<AttachmentIndex> = entries.into_iter().filter(|e| e.user && !attached_recently(e, cutoff)).collect();
     candidates.extend(aged.iter().map(|e| e.attachment.clone()));
-    let (unreferenced, undecodable) = reference_scan_in(s, candidates, &orphan_rows)?;
+    let (unreferenced, blocked) = reference_scan_in(s, candidates, &orphan_rows)?;
+    for object in blocked {
+        if !undecodable.contains(&object) {
+            undecodable.push(object);
+        }
+    }
     let held = aged.into_iter().filter(|e| !unreferenced.contains(&e.attachment)).collect();
     Ok(Plan { orphans, unreferenced, held, unstamped, undecodable, rows })
 }

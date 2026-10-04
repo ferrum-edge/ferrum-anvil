@@ -31,6 +31,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
@@ -1069,7 +1070,28 @@ impl StoreTx<'_> {
     pub fn delete_workspace(&self, ws: &Id) -> Result<()> {
         let _ = self.store.key()?;
         let ws = ws.to_string();
-        self.tx.execute("DELETE FROM objects WHERE workspace_id=?1", params![ws])?;
+        // Authenticate live revision owners before removing any parent.
+        // An orphan's index supplies no historical owner; preserve it (and
+        // any undecodable revision) for profile-wide reference accounting.
+        let mut revisions = Vec::new();
+        for row in self.object_meta(kind::REVISION)? {
+            if row.workspace_id.as_deref() != Some(ws.as_str()) {
+                continue;
+            }
+            let Ok(id) = row.id.parse::<Id>() else { continue };
+            match self.get::<anvil_domain::workspace::RequestRevision>(kind::REVISION, &id) {
+                Ok(Some(_)) => revisions.push(id),
+                Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        for id in revisions {
+            self.delete(kind::REVISION, &id)?;
+        }
+        self.tx.execute(
+            "DELETE FROM objects WHERE workspace_id=?1 AND kind<>?2",
+            params![ws, kind::REVISION],
+        )?;
         self.tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws])?;
         self.tx.execute("DELETE FROM secrets WHERE workspace_id=?1", params![ws])?;
         self.tx.execute("DELETE FROM history WHERE workspace_id=?1", params![ws])?;
@@ -1153,6 +1175,25 @@ impl StoreRead<'_> {
 
     pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         self.records()?.get(kind, id)
+    }
+
+    /// Internal profile-wide retention inspection, never revision access or
+    /// workspace authorization. `Some` contains only stored attachment hashes
+    /// from an authentic revision whose sealed request ID has no parent row.
+    /// No spec, route, owner, file name or other revision data is returned.
+    /// `None` requires callers to use ordinary validated reads instead.
+    ///
+    /// Legacy revisions have no authenticated historical workspace owner.
+    /// Neither plaintext owner/parent indexes nor a recreated request supply
+    /// that proof. This read ignores those indexes only to preserve references
+    /// or exclude an orphan from a portable backup; it never adopts or reseals
+    /// the row. Keep undecodable rows and their pins until safely resolved.
+    #[doc(hidden)]
+    pub fn orphan_revision_attachment_refs_for_retention(
+        &self,
+        id: &Id,
+    ) -> Result<Option<HashSet<String>>> {
+        self.records()?.orphan_revision_attachment_refs_for_retention(id)
     }
 
     pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
@@ -1246,6 +1287,36 @@ impl ObjectRow {
     }
 }
 
+// Only canonical content hashes may leave the restricted orphan inspection.
+// Walk the typed spec's serialization so all stored attachment variants count.
+fn collect_retention_attachment_refs(
+    value: &serde_json::Value,
+    refs: &mut HashSet<String>,
+) -> Result<()> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("kind").and_then(|v| v.as_str()) == Some("stored") {
+                let sha = fields.get("sha256").and_then(|v| v.as_str()).ok_or(StoreError::Integrity)?;
+                let canonical = sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if sha.len() != 64 || !canonical {
+                    return Err(StoreError::Integrity);
+                }
+                refs.insert(sha.to_string());
+            }
+            for v in fields.values() {
+                collect_retention_attachment_refs(v, refs)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for v in values {
+                collect_retention_attachment_refs(v, refs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 impl Records<'_> {
     fn put<T: Serialize>(
         &self,
@@ -1328,6 +1399,41 @@ impl Records<'_> {
             return Err(StoreError::Integrity);
         }
         Ok(())
+    }
+
+    fn orphan_revision_attachment_refs_for_retention(
+        &self,
+        id: &Id,
+    ) -> Result<Option<HashSet<String>>> {
+        let id_s = id.to_string();
+        let Some(row) = self.object_row(kind::REVISION, &id_s)? else {
+            return Ok(None);
+        };
+        let pt = crypto::open(
+            &self.key,
+            &aad("objects", kind::REVISION, &id_s),
+            &row.payload,
+        )
+        .map_err(|_| StoreError::Integrity)?;
+        let revision: anvil_domain::workspace::RequestRevision = serde_json::from_slice(&pt)?;
+        if revision.id != *id {
+            return Err(StoreError::Integrity);
+        }
+        // Presence, not the parent index or a failed ordinary parent read:
+        // a corrupt or metadata-tampered existing request is not an orphan.
+        if self
+            .object_row(
+                kind::REQUEST,
+                &revision.request_id.to_string(),
+            )?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let spec = serde_json::to_value(&revision.spec)?;
+        let mut refs = HashSet::new();
+        collect_retention_attachment_refs(&spec, &mut refs)?;
+        Ok(Some(refs))
     }
 
     fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {

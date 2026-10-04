@@ -346,3 +346,96 @@ fn new_objects_require_consistent_identity_and_an_existing_workspace() {
         }
     }
 }
+
+#[test]
+fn orphan_inspection_returns_only_hashes_and_never_bypasses_a_present_parent() {
+    let (dir, store, _key, a, b, request) = open();
+    let db = Connection::open(dir.path().join(DB_FILE)).unwrap();
+    let mut revision = fixture(kind::REVISION, a, request);
+    let hash = "a".repeat(64);
+    revision.value["spec"]["body"] = json!({
+        "type": "binary",
+        "attachment": {
+            "kind": "stored", "sha256": hash, "size": 3,
+            "file_name": "private-route-name", "media_type": "private-media-type"
+        }
+    });
+    revision.put(&store).unwrap();
+    db.execute(
+        "UPDATE objects SET workspace_id=?1,parent_id=NULL WHERE kind='revision' AND id=?2",
+        params![b.to_string(), revision.id.to_string()],
+    )
+    .unwrap();
+    let forged = row(&db, &revision);
+    // Even a corrupt parent remains present, so this cannot become an
+    // alternative reader for live revision data or reference authorization.
+    db.execute(
+        "UPDATE objects SET payload=x'00' WHERE kind='request' AND id=?1",
+        params![request.to_string()],
+    )
+    .unwrap();
+    let refs = store
+        .read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id))
+        .unwrap();
+    assert_eq!(refs, None);
+    assert!(matches!(
+        store.get::<Value>(kind::REVISION, &revision.id),
+        Err(StoreError::Integrity)
+    ));
+    store.delete(kind::REQUEST, &request).unwrap();
+    let refs = store
+        .read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id))
+        .unwrap();
+    assert_eq!(refs, Some(std::collections::HashSet::from([hash])));
+    assert!(matches!(
+        store.get::<Value>(kind::REVISION, &revision.id),
+        Err(StoreError::Integrity)
+    ));
+    assert!(store.list::<Value>(kind::REVISION, Some(&b)).is_err());
+    assert!(revision.put(&store).is_err(), "reference inspection cannot reseal or adopt it");
+    assert_eq!(row(&db, &revision), forged);
+    store.lock();
+    assert!(matches!(
+        store.read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id)),
+        Err(StoreError::Locked)
+    ));
+}
+
+#[test]
+fn orphan_inspection_refuses_ciphertext_wrong_ids_and_non_hash_attachment_data() {
+    let (dir, store, key, a, _b, request) = open();
+    let db = Connection::open(dir.path().join(DB_FILE)).unwrap();
+    let revision = fixture(kind::REVISION, a, request);
+    revision.put(&store).unwrap();
+    store.delete(kind::REQUEST, &request).unwrap();
+    let mut wrong_id = revision.value.clone();
+    wrong_id["id"] = json!(Id::new());
+    let mut invalid_hash = revision.value.clone();
+    invalid_hash["spec"]["body"] = json!({
+        "type": "binary",
+        "attachment": {
+            "kind": "stored", "sha256": "https://private-route.invalid/",
+            "size": 0, "file_name": "private"
+        }
+    });
+    let aad = format!("anvil/v1/objects/revision/{}", revision.id);
+    for payload in [
+        vec![0],
+        crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&wrong_id).unwrap()),
+        crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&invalid_hash).unwrap()),
+    ] {
+        db.execute(
+            "UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2",
+            params![payload, revision.id.to_string()],
+        )
+        .unwrap();
+        let before = row(&db, &revision);
+        assert!(matches!(
+            store.read_consistently(|r| {
+                r.orphan_revision_attachment_refs_for_retention(&revision.id)
+            }),
+            Err(StoreError::Integrity)
+        ));
+        assert_eq!(row(&db, &revision), before);
+    }
+}
