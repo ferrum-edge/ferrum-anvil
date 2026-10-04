@@ -6,6 +6,14 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::{MountProfile, set_test_mount_profile, with_test_mount_profile};
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn test_mount_profile(dir: &SelectedDirectory) -> io::Result<MountProfile> {
+    macos::mount_profile(dir)
+}
+
 pub(crate) struct OwnedPublication {
     pub(crate) file: File,
     _lease: DescriptorLease,
@@ -20,6 +28,12 @@ impl OwnedPublication {
             return Err(io::Error::other("export staging is not a regular file"));
         }
         Ok(Self { file, _lease: lease })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn check_before_write(&self, dir: &SelectedDirectory) -> io::Result<()> {
+        macos::check_mount_policy(dir)?;
+        macos::check_owner_only(&self.file)
     }
 
     pub(crate) fn publish(&self, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()> {
@@ -89,6 +103,7 @@ fn create(dir: &SelectedDirectory, _owner_only: bool) -> io::Result<File> {
 #[cfg(target_os = "macos")]
 fn publish(file: &File, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()> {
     use rustix::fs::{CloneFlags, fclonefileat};
+    macos::check_mount_policy(dir)?;
     macos::check_owner_only(file)?;
     // Apple specifies atomic all-or-nothing creation and EEXIST. Source is
     // the open vnode; renaming/replacing its temporary name cannot redirect
@@ -122,6 +137,109 @@ mod macos {
     const ACL_FLAG_NO_INHERIT: c_int = 1 << 17;
     const FILESEC_MODE: c_int = 4;
     const FILESEC_ACL: c_int = 5;
+
+    // Darwin statfs.f_flags is uint32_t, while libc's MNT_* constants are
+    // c_int. Preserve their bits explicitly, without an inferred `as _`.
+    // Only these understood flags are allowed. In particular, read-only,
+    // union, exported, ignore-ownership, automount and snapshot are refused.
+    // These three public SDK sys/mount.h flags are not named by libc 0.2.189.
+    const MNT_REMOVABLE: u32 = 0x0000_0200;
+    const MNT_NOFOLLOW: u32 = 0x0800_0000;
+    const MNT_STRICTATIME: u32 = 0x8000_0000;
+    const ALLOWED_MOUNT_FLAGS: u32 = u32::from_ne_bytes(
+        (libc::MNT_SYNCHRONOUS
+            | libc::MNT_NOEXEC
+            | libc::MNT_NOSUID
+            | libc::MNT_NODEV
+            | libc::MNT_ASYNC
+            | libc::MNT_CPROTECT
+            | libc::MNT_QUARANTINE
+            | libc::MNT_LOCAL
+            | libc::MNT_QUOTA
+            | libc::MNT_ROOTFS
+            | libc::MNT_DONTBROWSE
+            | libc::MNT_JOURNALED
+            | libc::MNT_NOUSERXATTR
+            | libc::MNT_DEFWRITE
+            | libc::MNT_MULTILABEL
+            | libc::MNT_NOATIME)
+            .to_ne_bytes(),
+    ) | MNT_REMOVABLE
+        | MNT_NOFOLLOW
+        | MNT_STRICTATIME;
+    // Only MNT_EXT_ROOT_DATA_VOL is understood; FSKit and unknown extended
+    // flags are refused. Both fields exist in the locked libc 0.2.189 ABI.
+    const ALLOWED_EXT_FLAGS: u32 = 0x0000_0001;
+
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct MountProfile {
+        pub(crate) name: [u8; 16],
+        pub(crate) flags: u32,
+        pub(crate) extended_flags: u32,
+    }
+
+    pub(super) fn mount_profile(dir: &SelectedDirectory) -> io::Result<MountProfile> {
+        // rustix's Darwin StatFs is the native libc::statfs. XNU gets this
+        // mount from the held descriptor's vnode, never a fresh path walk.
+        // f_type is a runtime VFS registration number, not a stable APFS ID;
+        // f_fstypename is the kernel's filesystem type name.
+        let stat = rustix::fs::fstatfs(dir.dir())?;
+        Ok(MountProfile {
+            name: stat.f_fstypename.map(|byte| byte.to_ne_bytes()[0]),
+            flags: stat.f_flags,
+            extended_flags: stat.f_flags_ext,
+        })
+    }
+
+    pub(super) fn check_mount_policy(dir: &SelectedDirectory) -> io::Result<()> {
+        let profile = mount_profile(dir)?;
+        #[cfg(test)]
+        let profile = TEST_MOUNT_PROFILE.with(|slot| slot.get().unwrap_or(profile));
+        let end = profile.name.iter().position(|byte| *byte == 0);
+        let local = u32::from_ne_bytes(libc::MNT_LOCAL.to_ne_bytes());
+        let owners_ignored = u32::from_ne_bytes(libc::MNT_IGNORE_OWNERSHIP.to_ne_bytes());
+        if end.is_none_or(|end| &profile.name[..end] != b"apfs")
+            || profile.flags & local == 0
+            || profile.flags & owners_ignored != 0
+            || profile.flags & !ALLOWED_MOUNT_FLAGS != 0
+            || profile.extended_flags & !ALLOWED_EXT_FLAGS != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "macOS exports require local APFS with ownership enabled and audited mount flags",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static TEST_MOUNT_PROFILE: std::cell::Cell<Option<MountProfile>> = const {
+            std::cell::Cell::new(None)
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_mount_profile(profile: Option<MountProfile>) {
+        TEST_MOUNT_PROFILE.with(|slot| slot.set(profile));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_mount_profile<T>(
+        profile: Option<MountProfile>,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(Option<MountProfile>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                set_test_mount_profile(self.0);
+            }
+        }
+        let restore = Restore(TEST_MOUNT_PROFILE.with(|slot| slot.replace(profile)));
+        let result = operation();
+        drop(restore);
+        result
+    }
 
     unsafe extern "C" {
         fn acl_init(count: c_int) -> *mut c_void;
@@ -175,6 +293,11 @@ mod macos {
     }
 
     pub(super) fn create(dir: &SelectedDirectory) -> io::Result<File> {
+        // Fail before dispatching ANY native staging creation. Descriptor
+        // metadata after open cannot revoke a foreign pre-opened handle.
+        check_mount_policy(dir)?;
+        #[cfg(test)]
+        crate::file_handles::test_checkpoint("macos_staging_dispatch");
         // openx_np has no *at variant. A dedicated, joined thread uses the
         // retained directory as its thread-only cwd and resolves ONE leaf.
         // Neither the caller's thread cwd nor the process cwd is changed;
@@ -208,9 +331,14 @@ mod macos {
             checked(pthread_fchdir_np(dir.dir().as_raw_fd()))?;
         }
         let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // Requery the held DIRECTORY on the creating thread immediately
+        // before openx_np. Mount-administration races remain outside the
+        // contract; retaining a descriptor does not freeze mount options.
+        check_mount_policy(dir)?;
         // SAFETY: a live filesec and NUL-terminated single component are
-        // borrowed through atomic exclusive creation relative to the vnode
-        // retained by this thread's cwd. No inherited allow ACE can appear.
+        // borrowed through exclusive creation on the audited local APFS
+        // mount, relative to this thread's retained directory vnode. XNU's
+        // initial NO_INHERIT ACL suppresses directory ACE inheritance here.
         let fd = unsafe { openx_np(name.as_ptr(), flags, security.0) };
         checked(fd)?;
         // SAFETY: successful openx_np transfers this new descriptor to us.

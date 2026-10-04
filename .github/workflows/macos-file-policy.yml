@@ -1,0 +1,146 @@
+# Draft qualification only. Mounts an image created by this hosted job;
+# never changes ownership settings on a runner's existing volume.
+name: macOS export mount policy (draft)
+
+on:
+  push:
+    branches: [fix/retained-file-and-export-handles]
+    paths:
+      - crates/anvil-app/src/file_publish.rs
+      - crates/anvil-app/src/file_grants.rs
+      - crates/anvil-app/src/file_grant_native_tests.rs
+      - .github/workflows/macos-file-policy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-policy:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ github.sha }}
+      RUSTUP_TOOLCHAIN: 1.90.0
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_TARGET_DIR: ${{ runner.temp }}/anvil-macos-policy-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require immutable source on a GitHub-hosted runner
+        shell: bash
+        run: |
+          test "${GITHUB_ACTIONS:-}" = "true"
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Install the declared MSRV without caches
+        shell: bash
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          rustc --version
+          cargo --version
+      - name: Qualify native ACLs and reject a private Ignore Ownership image
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d "$RUNNER_TEMP/anvil-macos-policy.XXXXXX")"
+          image="$fixture/image.dmg"
+          mount_path="$fixture/mount"
+          mkdir "$mount_path"
+          # The trap is installed before ANY image creation or attachment.
+          # Exact image-path matching also catches partial attach failures
+          # that leave a device without a mounted filesystem.
+          cleanup() {
+            original_status=$?
+            trap - EXIT INT TERM
+            set +e
+            cleanup_status=0
+            if /usr/bin/hdiutil info -plist > "$fixture/info.plist"; then
+              if python3 - "$fixture/info.plist" "$image" > "$fixture/devices" <<'PY'
+          import os
+          import plistlib
+          import re
+          import sys
+
+          with open(sys.argv[1], 'rb') as stream:
+              images = plistlib.load(stream).get('images', [])
+          for entry in images:
+              if os.path.realpath(entry.get('image-path', '')) == os.path.realpath(sys.argv[2]):
+                  devices = [entity['dev-entry'] for entity in entry.get('system-entities', [])
+                             if re.fullmatch(r'/dev/disk[0-9]+', entity.get('dev-entry', ''))]
+                  if not devices:
+                      raise RuntimeError('Owned image is attached without an identifiable device')
+                  print(devices[0])
+          PY
+              then
+                while IFS= read -r device; do
+                  /usr/bin/hdiutil detach "$device" -force || cleanup_status=1
+                done < "$fixture/devices"
+              else
+                cleanup_status=1
+              fi
+            else
+              cleanup_status=1
+            fi
+            # Verify that no attachment of this exact image remains before
+            # removing its backing file or reporting successful cleanup.
+            if [ "$cleanup_status" -eq 0 ]; then
+              if /usr/bin/hdiutil info -plist > "$fixture/after.plist"; then
+                if ! python3 - "$fixture/after.plist" "$image" <<'PY'
+          import os
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], 'rb') as stream:
+              images = plistlib.load(stream).get('images', [])
+          if any(os.path.realpath(entry.get('image-path', '')) == os.path.realpath(sys.argv[2])
+                 for entry in images):
+              raise RuntimeError('Owned image remains attached after cleanup')
+          PY
+                then
+                  cleanup_status=1
+                fi
+              else
+                cleanup_status=1
+              fi
+            fi
+            if [ "$cleanup_status" -eq 0 ]; then
+              /bin/rm -rf "$fixture" || cleanup_status=1
+            fi
+            printf 'source_sha=%s\nprivate_mount=%s\ncleanup_status=%s\n' \
+              "$SOURCE_SHA" "$mount_path" "$cleanup_status"
+            {
+              printf 'Source: `%s`\n\nPrivate mount: `%s`\n\n' "$SOURCE_SHA" "$mount_path"
+              printf 'Cleanup status: `%s` (0 = owned image detached and fixture removed).\n' "$cleanup_status"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$cleanup_status" -ne 0 ]; then
+              echo "::error::Private image cleanup failed; inspect this hosted runner"
+              exit 1
+            fi
+            exit "$original_status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf 'source_sha=%s\nprivate_mount=%s\n' "$SOURCE_SHA" "$mount_path"
+          /usr/bin/hdiutil create -size 128m -fs APFS -volname AnvilPolicy \
+            -format UDRW "$image"
+          /usr/bin/hdiutil attach -nobrowse -owners off -mountpoint "$mount_path" "$image"
+          export ANVIL_TEST_IGNORE_OWNERSHIP_MOUNT="$mount_path"
+          ulimit -n 4096
+          cargo test --locked -p anvil-app --lib file_grants::native_tests::macos_acl \
+            -- --include-ignored --nocapture --test-threads=1
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Record interrupted qualification
+        if: ${{ cancelled() }}
+        shell: bash
+        run: |
+          echo "::error::Qualification interrupted; cleanup completion must be verified in the preceding log"
+          printf 'Qualification cancelled. Require a completed cleanup record before accepting evidence.\n' \
+            >> "$GITHUB_STEP_SUMMARY"

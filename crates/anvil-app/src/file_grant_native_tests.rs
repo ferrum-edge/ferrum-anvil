@@ -239,6 +239,9 @@ fn revocation_between_pre_acquisition_pruning_and_insert_rejects_both_issuers() 
 #[cfg(target_os = "macos")]
 mod macos_acl {
     use super::*;
+    use crate::file_handles::publication::{
+        MountProfile, set_test_mount_profile, test_mount_profile, with_test_mount_profile,
+    };
     use std::cell::Cell;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::process::{Command, Output};
@@ -275,6 +278,218 @@ mod macos_acl {
         assert!(String::from_utf8_lossy(&read.stderr).contains("Permission denied"), "{read:?}",);
     }
 
+    fn profile(name: &[u8], flags: u32, extended_flags: u32) -> MountProfile {
+        let mut bytes = [0; 16];
+        bytes[..name.len()].copy_from_slice(name);
+        MountProfile { name: bytes, flags, extended_flags }
+    }
+
+    fn assert_rejected_before_staging(directory: &Path, injected: Option<MountProfile>) {
+        let grants = FileGrants::default();
+        let destination = directory.join("rejected.anvil");
+        let mut before: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        before.sort();
+        let grant = grants.grant_write(FilePurpose::BundleExport, &destination).unwrap();
+        let charged = grants.budget.used();
+        let result = with_test_mount_profile(injected, || {
+            with_test_hook(
+                |point| {
+                    assert_ne!(
+                        point,
+                        "macos_staging_dispatch",
+                        "rejected before native creation",
+                    );
+                    assert_ne!(point, "write_staged", "rejected before plaintext I/O");
+                },
+                || {
+                    grants.write(
+                        &grant.token,
+                        FilePurpose::BundleExport,
+                        b"must never be staged",
+                    )
+                },
+            )
+        });
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("local APFS with ownership enabled"), "{error}");
+        let mut after: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        after.sort();
+        assert_eq!(after, before, "rejection must create no staging or final entry");
+        assert_eq!(
+            grants.budget.used(),
+            charged,
+            "no staging descriptor charge survives",
+        );
+        // Failure preserves the original retry grant and generation.
+        assert_eq!(grants.len(), 1);
+        grants.revoke_all();
+        assert_eq!(grants.budget.used(), 0);
+    }
+
+    #[test]
+    fn synthetic_unsupported_profiles_are_rejected_before_native_creation() {
+        // These exercise the production policy seam, not SMB/NFS servers.
+        // Even a spoofed LOCAL flag cannot qualify an unsupported type name.
+        let root = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(root.path()).unwrap();
+        for name in [
+            b"smbfs".as_slice(),
+            b"nfs",
+            b"webdav",
+            b"fusefs",
+            b"msdos",
+            b"exfat",
+            b"ntfs",
+            b"hfs",
+            b"unknown",
+            b"APFS",
+            b"apfs-extra",
+            b"",
+            b"abcdefghijklmnop",
+        ] {
+            assert_rejected_before_staging(
+                &directory,
+                Some(profile(name, 0x1000, 0)),
+            );
+        }
+        assert_rejected_before_staging(
+            &directory,
+            Some(profile(b"apfs", 0, 0)),
+        );
+        // Every unsupported bit in the SDK's 32-bit visible mount field:
+        // read-only, union, exported, unused, deprecated volfs, command bits,
+        // ignore ownership, automount, unknown and snapshot respectively.
+        for bit in [0, 5, 8, 11, 15, 16, 17, 18, 19, 21, 22, 29, 30] {
+            let flags = 0x1000 | (1u32 << bit);
+            assert_rejected_before_staging(
+                &directory,
+                Some(profile(b"apfs", flags, 0)),
+            );
+        }
+        // FSKit (bit 1) and ALL unknown extended bits fail closed.
+        for bit in 1..32 {
+            let extended = 1u32 << bit;
+            assert_rejected_before_staging(
+                &directory,
+                Some(profile(b"apfs", 0x1000, extended)),
+            );
+        }
+    }
+
+    #[test]
+    fn mount_policy_is_rechecked_before_plaintext_and_at_publication() {
+        for point in ["write_staged", "write_synced", "write_verified"] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = std::fs::canonicalize(root.path()).unwrap();
+            let destination = directory.join("bundle.anvil");
+            let grants = FileGrants::default();
+            let grant = grants.grant_write(FilePurpose::BundleExport, &destination).unwrap();
+            let reached = Rc::new(Cell::new(false));
+            let hook_reached = reached.clone();
+            let result = with_test_mount_profile(None, || {
+                with_test_hook(
+                    move |observed| {
+                        if observed == point {
+                            assert!(!hook_reached.replace(true));
+                            set_test_mount_profile(Some(profile(b"apfs", 0x0020_1000, 0)));
+                        }
+                    },
+                    || {
+                        grants.write(
+                            &grant.token,
+                            FilePurpose::BundleExport,
+                            b"private canary",
+                        )
+                    },
+                )
+            });
+            assert!(reached.get(), "production export must reach the policy barrier");
+            assert!(result.unwrap_err().to_string().contains("local APFS with ownership enabled"));
+            assert!(!destination.exists(), "policy rejection must precede cloning");
+            let staging = std::fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "partial"))
+                .unwrap();
+            let expected: &[u8] = if point == "write_staged" { b"" } else { b"private canary" };
+            assert_eq!(std::fs::read(staging).unwrap(), expected);
+            grants.revoke_all();
+            assert_eq!(grants.budget.used(), 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the dedicated GitHub-hosted private APFS image workflow"]
+    fn real_ignore_ownership_image_is_rejected_before_staging() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted"),
+        );
+        let directory = PathBuf::from(
+            std::env::var_os("ANVIL_TEST_IGNORE_OWNERSHIP_MOUNT").unwrap(),
+        );
+        let directory = std::fs::canonicalize(directory).unwrap();
+        let grants = FileGrants::default();
+        let grant = grants
+            .grant_write(
+                FilePurpose::BundleExport,
+                &directory.join("probe.anvil"),
+            )
+            .unwrap();
+        let entry = grants.lookup(&grant.token, FilePurpose::BundleExport).unwrap();
+        let Target::Write { dir, .. } = &entry.target else { unreachable!() };
+        let native = test_mount_profile(dir).unwrap();
+        assert_eq!(&native.name[..5], b"apfs\0", "must use a real APFS image");
+        assert_ne!(native.flags & 0x1000, 0, "image must be local");
+        assert_ne!(
+            native.flags & 0x0020_0000,
+            0,
+            "native Ignore Ownership flag is required",
+        );
+        eprintln!("real image descriptor profile: {native:?}; private mount: {directory:?}");
+        drop(entry);
+        grants.revoke_all();
+        assert_rejected_before_staging(&directory, None);
+
+        // A safe replacement at the former selected pathname must not
+        // override the unsafe mount of the retained directory descriptor.
+        let selected = directory.join("selected");
+        let retained = directory.join("retained");
+        std::fs::create_dir(&selected).unwrap();
+        let replacement = tempfile::tempdir().unwrap();
+        let grants = FileGrants::default();
+        let grant = grants
+            .grant_write(
+                FilePurpose::BundleExport,
+                &selected.join("redirect.anvil"),
+            )
+            .unwrap();
+        std::fs::rename(&selected, &retained).unwrap();
+        std::os::unix::fs::symlink(replacement.path(), &selected).unwrap();
+        let result = with_test_hook(
+            |point| assert_ne!(point, "macos_staging_dispatch"),
+            || {
+                grants.write(
+                    &grant.token,
+                    FilePurpose::BundleExport,
+                    b"must stay private",
+                )
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("local APFS with ownership enabled"));
+        assert_eq!(std::fs::read_dir(&retained).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(replacement.path()).unwrap().count(), 0);
+        grants.revoke_all();
+        assert_eq!(grants.budget.used(), 0);
+    }
+
     #[test]
     fn inherited_acl_never_exposes_staging_or_final_exports_even_when_changed_before_publish() {
         // /Users/Shared is searchable by the separate native account. A
@@ -289,6 +504,18 @@ mod macos_acl {
             let destination = directory.join("bundle.anvil");
             let grants = FileGrants::default();
             let grant = grants.grant_write(FilePurpose::BundleExport, &destination).unwrap();
+            let entry = grants.lookup(&grant.token, FilePurpose::BundleExport).unwrap();
+            let Target::Write { dir, .. } = &entry.target else { unreachable!() };
+            let native = test_mount_profile(dir).unwrap();
+            assert_eq!(&native.name[..5], b"apfs\0");
+            assert_ne!(native.flags & 0x1000, 0);
+            assert_eq!(
+                native.flags & 0x0020_0000,
+                0,
+                "positive control enforces ownership",
+            );
+            eprintln!("inherited-ACL descriptor profile: {native:?}");
+            drop(entry);
             let hook_directory = directory.clone();
             let reached = Rc::new(Cell::new(false));
             let hook_reached = reached.clone();

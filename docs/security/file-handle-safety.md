@@ -6,7 +6,9 @@ patched release from this work. The accepted publication, revocation, dialog
 and retirement defects have concrete source changes below; **all-platform
 hosted qualification is still required**. macOS uses descriptor cloning rather
 than rename and retains uncertain staging names; its support/retention contract
-needs owner attention before integration.
+needs owner attention before integration. This round additionally restricts
+macOS export destinations to audited local APFS mounts with ownership enabled.
+That is a proposed filesystem compatibility change, **not owner approved**.
 
 The assigned source base is `4254ea84c101bdc9231a4c6f455421e22468d0ec`.
 [GHSA-6hc8-xjvq-478g](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-6hc8-xjvq-478g)
@@ -152,9 +154,112 @@ Publication never resolves a checked temporary name again:
   refusal of existing destinations, and a separate copy-on-write inode.
   XNU gets the source vnode from the descriptor (`fp_getfvp`), not its staging
   pathname. A foreign replacement/hard-link/symlink at that pathname is
-  never published or treated as ours. The filesystem must support cloning
-  (normally APFS), and source/destination must share a volume. There is no
-  name-based copy/rename fallback on unsupported volumes.
+  never published or treated as ours. The candidate requires the local APFS
+  mount profile described below, and source/destination must share a volume.
+  There is no name-based copy/rename fallback on unsupported volumes.
+
+### macOS filesystem and mount policy — DRAFT, approval required
+
+Before dispatching native staging creation, `file_publish` obtains `fstatfs`
+from the **held destination directory descriptor**. The creating thread
+rechecks that descriptor immediately before `openx_np`. `FileGrants::write`
+rechecks before its first plaintext write; publication rechecks before
+`fclonefileat`. Each query describes the retained directory's mount, including
+after an ancestor rename. No pathname precheck, mode or owner metadata can
+substitute for this policy. Failed policy checks create no staging entry;
+checks after staging refuse further writes/cloning and retain the uncertain
+source under the existing retention policy. There is no pathname cleanup in
+this candidate. Any future cleanup needs a fresh held-directory policy check
+and an independently safe object-removal primitive.
+
+The allowlist requires the kernel filesystem name `apfs`, `MNT_LOCAL`, and
+ownership enforcement. It rejects SMB, NFS, WebDAV, FUSE, HFS, exFAT, NTFS,
+unknown or malformed type names, nonlocal mounts, `MNT_IGNORE_OWNERSHIP`,
+read-only, union, exported, automounted, snapshot and deprecated volfs profiles.
+HFS is deliberately excluded: the owned clone-publication contract has not
+been qualified there. Only recognized flags for synchronization, execution,
+setuid/device restrictions, content protection, removable storage, quarantine,
+quota, root/data volume, browsing, journaling, xattrs, deferred writes, MAC
+labels, no-follow and access-time policy are allowed. All other visible bits
+fail closed. The extended field permits only `MNT_EXT_ROOT_DATA_VOL`; FSKit
+and unknown extended bits fail closed. Root must qualify legitimate destination
+profiles and approve this narrower support contract before integration.
+
+Static ABI verification used the installed Apple MacOSX26.5 SDK's
+`usr/include/sys/mount.h`, the
+[XNU mount definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/mount.h),
+[XNU descriptor statfs implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
+[locked libc 0.2.189 definitions](https://github.com/rust-lang/libc/blob/0.2.189/src/unix/bsd/apple/mod.rs),
+and [rustix 1.1.5 native StatFs alias](https://github.com/bytecodealliance/rustix/blob/v1.1.5/src/backend/libc/fs/types.rs).
+Darwin's `f_flags` and `f_flags_ext` are `uint32_t`; libc's `MNT_*` values are
+`c_int`, converted by their explicit 32-bit representation. `f_type` is a
+runtime VFS registration number, not a portable APFS magic number, so the
+policy uses the kernel's NUL-terminated `f_fstypename`. The preserved Linux
+procfs check uses the explicit fallible `libc::c_long` conversion from head
+`375128d4d51d4467af6e83559078d7d608c41c3c`.
+
+On ownership-enforcing local APFS, the candidate combines initial mode `0600`
+with an explicit empty `ACL_FLAG_NO_INHERIT` ACL through `openx_np`. XNU
+[prepares initial security attributes before native creation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_subr.c)
+and [suppresses inheritance for that ACL](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_authorization.c).
+The source descriptor must retain an empty non-inheriting ACL before writing
+and cloning; `CLONE_ACL` carries that policy into destination creation. These
+contracts require real hosted APFS qualification. A later ACL postcheck does
+**not** revoke a foreign handle already opened during unsafe creation. Mode
+`0600`, reported UID and empty ACL do **not** establish effective ownership on
+[Ignore Ownership volumes](https://support.apple.com/en-om/guide/mac-help/mchlp1204/mac).
+In particular, [Apple SMB creation](https://github.com/apple-oss-distributions/SMBClient/blob/main/kernel/smbfs/smbfs_vnops.c)
+applies some security attributes after creation; this candidate rejects SMB
+before creation and does not claim to qualify its handle access semantics.
+
+Retaining a directory descriptor does not freeze mount policy. All checks
+assume ownership enforcement and the audited native filesystem implementation
+remain stable throughout creation, writing, cloning and retained staging-data
+lifetime. An actor able to remount, toggle ownership, replace a filesystem
+implementation or administer an image can change policy between checks or
+after success. Such administrative authority is outside this contract;
+rechecks only detect changes already visible when queried. No atomic mount
+policy lease or retroactive access revocation is claimed. Existing named
+staging data remains subject to this limitation even after export completion.
+
+This is a local destination-filesystem policy in `FileGrants`; it does not
+change HTTP/HTTPS request access, remote API authorization, TLS, linked-file
+read authorization or the application identity policy.
+
+The existing real macOS inherited-ACL regression uses a separately authorized
+native `nobody` account, a readable inherited-ACL control, and denied reads of
+both staging and final exports before and after directory ACL changes. New
+synthetic profiles exercise the production `fstatfs` policy seam before native
+creation, before plaintext and before cloning. Unsupported names and every
+unsupported visible/extended flag bit are covered. These are rejection tests,
+**not real SMB/NFS qualification**.
+
+The optional [hosted macOS qualification workflow](../../.github/workflows/macos-file-policy.yml)
+checks out the exact source SHA with a fully pinned action, read-only permission,
+no persisted credentials, no shared caches and no repository write-back. It
+creates its own APFS image under a private runner-temp path and attaches that
+image with `-owners off`. The ignored native test requires the GitHub-hosted
+environment and observes real APFS, LOCAL and IGNORE_OWNERSHIP descriptor fields
+before requiring rejection without staging. The workflow also runs the real
+inherited-ACL test and synthetic controls. An EXIT/signal cleanup trap is
+installed before image creation, identifies only this exact image path,
+detaches its owned device, removes the fixture only after successful detach,
+and reports the private mount path, source SHA and cleanup status. Existing
+runner/user volumes are never reconfigured. Forced runner destruction can
+interrupt cleanup; cancelled runs require explicit cleanup evidence and are
+not accepted as qualification.
+
+**Current evidence:** source/SDK inspection only; no new regression or image
+workflow has run in this implementation session. Root must inspect the new
+hosted run's test results and cleanup record, plus all-platform CI and a fresh
+independent security/workflow review. If APFS image attachment or the native
+Ignore Ownership assertion fails, the actionable human step is to run this
+workflow on an authorized GitHub-hosted macOS runner at the pushed source SHA,
+record `hdiutil` output, native descriptor flags and the private path, and require
+`cleanup_status=0`. Do not change a user's existing drive to obtain evidence or
+substitute a synthetic profile for the native flag assertion. Owner approval
+comes only after this candidate is fully qualified and reviewable; this document
+does not declare the advisory resolved or integration externally blocked.
 
 **macOS staging-retention constraint:** the public API audited here has no
 unlink-by-descriptor operation. A pathname identity check followed by unlink
@@ -229,9 +334,9 @@ All three `.cargo_vcs_info.json` files name upstream commit
 and [pathname-based Windows rename](https://github.com/bytecodealliance/cap-std/blob/b7acf8e8807fe3fab991884d2208b7e03d35a409/cap-primitives/src/windows/fs/rename_unchecked.rs).
 The archives use edition 2021 and do not declare a package MSRV. Compatibility
 of their full resolved graph with Anvil's Rust 1.90 is not proved by inspection.
-Only the isolated Windows publication FFI introduces unsafe code, with its
-specific layout/lifetime justification; other native filesystem calls use
-safe published APIs.
+The isolated Windows publication and Darwin ACL/filesec boundaries use unsafe
+code with their specific ABI/lifetime justifications. Descriptor filesystem
+queries and the remaining native filesystem calls use safe published APIs.
 The direct safe `rustix` dependency is pinned to the already locked 1.1.5;
 its downloaded archive hash matches the existing Cargo.lock checksum
 `891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d`.

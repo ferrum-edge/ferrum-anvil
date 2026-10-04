@@ -603,6 +603,8 @@ fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), G
     let mut publication = OwnedPublication::create(dir, owner_only).map_err(io)?;
     #[cfg(test)]
     crate::file_handles::test_checkpoint("write_staged");
+    #[cfg(target_os = "macos")]
+    publication.check_before_write(dir).map_err(io)?;
     publication.file.write_all(bytes).map_err(io)?;
     publication.file.sync_all().map_err(io)?;
     #[cfg(test)]
