@@ -1,0 +1,34 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.0",
+  "collection": {
+    "collector": { "kind": "collector", "name": "fixture" },
+    "method": "fixture",
+    "verification": "unverified"
+  },
+  "subject": { "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7" },
+  "observations": [
+    {
+      "id": "edge-ttfb",
+      "producer": { "kind": "edge", "name": "ferrum-edge", "version": "0.9.7" },
+      "kind": "measurement",
+      "name": "edge.backend.time_to_headers",
+      "availability": "measured",
+      "value": 1800.0,
+      "unit": "ms",
+      "scope": { "leg": "gateway_to_service" },
+      "span": { "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7", "span_id": "1111222233334444" },
+      "attributes": { "edge.response.streamed": "true" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-not-sampled",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry" },
+      "kind": "measurement",
+      "name": "alloy.server.time_to_headers",
+      "availability": "not_sampled",
+      "scope": { "leg": "service", "service": "orders-api" },
+      "trust": "unverified"
+    }
+  ]
+}
