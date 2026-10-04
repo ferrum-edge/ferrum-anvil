@@ -1,68 +1,89 @@
-# Portable bundle resource policy: owner decision required
+# Portable bundle resource policy: unmerged owner-approval candidate
 
-Status: proposal only. No budget, bundle format, backup compatibility or
-public API change is implemented by this document.
+Status: implemented on a proposal branch only; no human approval, default-main
+activation, release, patched-version claim or advisory closure is authorized.
+GHSA-jqq4-v58m-6fcw remains partially addressed by PR #303, landed as
+`76ed2bc3569bae64e691ecbf1a16e17bf7743107`, which preserved 1 GiB/512 MiB.
+Anvil `anvil-v0.1.1` and `anvil-v0.1.0` were published on October 1, 2026.
+Reducing accepted archives and export behavior therefore needs a product decision;
+the advisory's scanned-snapshot scope does not establish affected binary ranges.
 
-The validation-order and allocation-accounting changes associated with
-GHSA-jqq4-v58m-6fcw reject invalid directory declarations and mandatory
-metadata before payload expansion. They preserve 1 GiB aggregate inflated
-bytes, 512 MiB per entry, the integer-quotient compression-ratio limit of
-200 and 20,000 entries. Metadata has the same per-entry limit. Attachments
-are hashed during reading and their buffers move into `Opened.graph`.
+## Concrete 64 MiB/32 MiB policy
 
-This does not fully remediate the advisory's memory concern. A valid
-untrusted bundle, with syntactically valid metadata and matching hashes,
-can still retain close to 1 GiB of attachments. Checksums do not authenticate
-a share-safe bundle's author. Mandatory metadata itself can be large, and
-ZIP directory parsing happens before the application checks its count.
-The input archive, parsed objects/history/metadata, vault plaintext and KDF
-allocations add overhead beyond the inflated-byte budget. Peak resident
-memory has not been measured. Incremental hashing alone cannot eliminate
-retention while the public `Opened` contract owns attachment byte vectors.
+`bundle::MAX_TOTAL_BYTES` is 67,108,864 and `MAX_ENTRY_BYTES` is 33,554,432.
+Both boundaries are inclusive; manifest, checksums, objects, history, attachments
+and vault ciphertext use one policy. Metadata has no additional smaller cap.
+The 20,000-entry and integer-quotient ratio limit of 200 remain unchanged.
+Directory declarations must fit before any entry expansion. A reservation check
+precedes allocation; every actual successful read consumes the same remaining
+total, including metadata whose byte buffers are later dropped. There are no
+refunds. Declared/actual mismatches stop opening, with at most one non-retained
+sentinel byte beyond the entry/remaining bound. Hashing is incremental, and
+attachments move directly into `Opened.graph` without a retained clone.
 
-## Candidate policy for human approval
+Preview and write count actual serialized JSON/JSONL lengths through a bounded
+writer, including the manifest, checksum list and the sealed vault's 41-byte
+envelope overhead. Attachment sizes/counts are checked before object preparation;
+complete preflight precedes payload buffers, ZIP output and key derivation.
+Write borrows attachment bytes. It checks the finished ZIP against import
+preflight; entries exceeding the compression-ratio rule are rewritten as Stored,
+so highly compressible valid exports remain importable, with larger file sizes.
+Vault AAD and checksums still bind the same inflated bytes. Limit errors name
+entries/budgets, never secret payloads. Write returns bytes only after validation;
+existing callers write destination files after success, so limit refusal cannot
+partially write a destination. Export preparation still allocates parsed objects.
 
-For normal bundle preview/import, reduce the aggregate inflated-byte budget
-to **64 MiB** and the per-entry budget to **32 MiB**, including metadata.
-Keep the ratio and entry-count limits unchanged. Count all expanded bytes,
-even when their buffers are subsequently released, against the same
-cumulative work budget. Retain preflight and the bounded actual-read checks.
-These proposed numbers need hosted memory measurements and a corpus of
-legitimate exports before approval; they are not a process-memory guarantee.
+Compatibility: format 1 share-safe and format 2 share-safe/encrypted transfers
+within policy remain supported; unbound format 1 vaults remain refused. Older
+archives over either limit are refused by normal preview/import. Exact 64 MiB
+includes metadata, so two complete 32 MiB attachments cannot fit together.
+Oversized exports are refused in preview/write; no splitting or exception path
+is introduced. Full ANVILBAK backups and their reader are outside this candidate.
 
-Compatibility effects:
+## Hosted qualification and remaining uncertainty
 
-- Existing format 1 share-safe and format 2 encrypted-transfer bundles above
-  either proposed limit would be refused by ordinary preview/import.
-  Otherwise their format and vault AAD remain unchanged.
-- The exporter can currently produce larger archives. A follow-up must
-  decide whether to refuse such exports with a clear preview error, offer
-  splitting, or supply an explicitly approved large-import path. Do not
-  silently create exports ordinary import cannot open.
-- Full backups use the separate ANVILBAK format. This proposal does not
-  change that reader or its limits. Any backup-policy change requires its
-  own assessment and owner approval.
+`bundle-resources.yml` is a read-only PR/manual workflow on Ubuntu 24.04/macOS 15.
+It compares this candidate, landed preflight and pinned released 0.1.1 source
+`d69aa97fbe0cb670a1a6a0462c8826a820144bf6`, using the same ignored test harness.
+Generation/builds run outside measurement; each opening gets a fresh process.
+Synthetic streamed fixtures cover exact 1 GiB/512 MiB and 64 MiB/32 MiB, one-byte
+entry/total excess, invalid manifest/checksums and an exact 32 MiB valid manifest.
+Fixture archives are capped at 64 MiB compressed, generation at 1 GiB inflated;
+Linux opening is capped at 4 GiB virtual memory, and hosted steps have timeouts.
+GNU time reports RSS in KiB; macOS time reports bytes. Scalar logs/TSV only are
+uploaded. Fixture regression ceilings (512 MiB candidate, 3 GiB baselines,
+256 MiB early refusals) allow allocator/runner variance; they are not app limits.
+Candidate boundary RSS must also be below half each 1 GiB baseline's measured RSS.
+Ordinary hosted CI retains format/vault positives and read-counter barriers on
+Linux/macOS/Windows. No existing job guard or trusted-policy exception changes.
+Measured results: **pending hosted execution**; no local project code was run.
+Root must link exact-head runs/artifacts and independently review results before
+asking for approval. Synthetic data is not a legitimate export corpus, desktop
+concurrency, a binary measurement, Windows RSS qualification or a worst-case proof.
 
-The repository/product owner, with the security owner, must explicitly
-approve the 64 MiB/32 MiB values, the refusal of previously accepted large
-bundles, exporter behavior, and whether an exception path is permitted.
-Root must prepare that concrete compatibility decision for human approval
-before implementing smaller accepted budgets. No such approval is assumed
-by this patch.
+These byte limits do not eliminate all DoS: ZIP central-directory parsing happens
+before the count cap, input/archive buffers and parsed JSON/history can amplify
+memory, and vault plaintext adds overhead. Existing unauthenticated KDF bounds
+still permit 256 MiB memory and substantial CPU work. Share-safe hashes do not
+authenticate authors. Peak RSS and OS OOM behavior remain unverified until hosted
+runs; bounded synthetic results cannot establish a universal resident-memory cap.
 
-## Alternative if large-bundle compatibility must be preserved
+## Alternative preserving large-archive compatibility
 
-Introduce a separate streaming/staged import result with attachment handles,
-then migrate preview and apply callers away from `Opened`'s owned byte map.
-Keep the current accepted byte limits, but add an approved resource policy
-for staging, parser allocations, cumulative work, cancellation and cleanup.
-That requires portability/API ownership plus desktop/import/storage owner
-coordination; leaving the current `open` API in active use retains its risk.
-The human owner must decide whether that API and product-flow change is
-preferred to refusing large bundles, and approve staging/storage costs.
+Keep 1 GiB/512 MiB acceptance, but introduce a file-backed `StagedOpened` alongside
+`Opened`: seek the input file instead of retaining archive bytes; stream/hash
+attachments into private temporary files and expose hash/length/read handles.
+Preview and apply must consume those handles instead of `BTreeMap<String, Vec<u8>>`;
+leaving the large owned-byte path active retains the advisory's memory risk.
+Stage objects/history too and decode incrementally during preview/apply, with
+explicit parser/live-object, disk-quota, cumulative-work and cancellation policy.
+Verify all digests/vault binding before store mutation; preserve checkpoint and
+transaction semantics. Reserve disk before writes, use private permissions, avoid
+logging plaintext, and clean staging on failure/cancellation/drop plus crash recovery.
+Preserving large metadata acceptance needs a lazy representation and caller changes,
+not merely file-backed attachments. Portability/app/storage owners must coordinate
+that API migration and approve staging costs; it is not implemented here.
 
-Root owns the PR, independent security review and hosted CI. Before claiming
-full remediation, obtain the owner decision, measure hosted peak memory on
-valid and invalid representative archives, and verify the chosen policy's
-compatibility and recovery behavior. This proposal contains no exploit
-archive or private proof-of-concept data.
+Root owns the draft PR, independent review and hosted qualification. Only after
+those are concrete should product/security owners choose 64 MiB/32 MiB plus export
+refusal, or staged compatibility preservation. No owner decision is assumed.

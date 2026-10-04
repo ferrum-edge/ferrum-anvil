@@ -1,0 +1,161 @@
+# Candidate qualification only. No approval, merge, release or advisory action.
+name: Bundle resource qualification
+
+on:
+  pull_request:
+    paths:
+      - "crates/anvil-portability/**"
+      - ".github/workflows/bundle-resources.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-resources-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  qualify:
+    name: Bundle resources · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Released anvil-v0.1.1 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: d69aa97fbe0cb670a1a6a0462c8826a820144bf6
+          path: released
+          persist-credentials: false
+      - name: Landed preflight with preserved 1 GiB limits
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 76ed2bc3569bae64e691ecbf1a16e17bf7743107
+          path: preflight
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: bundle-resources
+      - name: Build qualification harnesses (excluded from RSS measurements)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target"
+          for variant in candidate preflight released; do
+            if [ "$variant" != candidate ]; then
+              cp crates/anvil-portability/tests/bundle_resources.rs \
+                "$variant/crates/anvil-portability/tests/bundle_resources.rs"
+            fi
+            manifest="$variant/Cargo.toml"
+            if [ "$variant" = candidate ]; then manifest=Cargo.toml; fi
+            cargo test --manifest-path "$manifest" --locked \
+              -p anvil-portability --test bundle_resources --no-run
+          done
+      - name: Generate bounded synthetic fixtures in a separate process
+        timeout-minutes: 5
+        shell: bash
+        env:
+          ANVIL_RESOURCE_FIXTURES: ${{ runner.temp }}/bundle-resource-fixtures
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target"
+          cargo test --manifest-path Cargo.toml --locked \
+            -p anvil-portability --test bundle_resources -- \
+            --ignored --exact generate_resource_fixtures --nocapture
+      - name: Measure fresh opening processes (Linux KiB, macOS bytes)
+        timeout-minutes: 15
+        shell: bash
+        env:
+          ANVIL_RESOURCE_FIXTURES: ${{ runner.temp }}/bundle-resource-fixtures
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target"
+          mkdir -p "$RUNNER_TEMP/bundle-resource-results"
+          for variant in candidate preflight released; do
+            # Switching snapshots can rebuild the crate. Do that before timing.
+            manifest="$variant/Cargo.toml"
+            if [ "$variant" = candidate ]; then manifest=Cargo.toml; fi
+            cargo test --manifest-path "$manifest" --locked \
+              -p anvil-portability --test bundle_resources --no-run
+            for case in proposal_exact released_exact entry_over total_over \
+              invalid_manifest invalid_checksums metadata_exact; do
+              export ANVIL_RESOURCE_CASE="$case"
+              metric="$RUNNER_TEMP/bundle-resource-results/$variant-$case.txt"
+              if [ "$RUNNER_OS" = Linux ]; then
+                # Only the measured process gets a 4 GiB virtual-memory ceiling;
+                # fixture buffers are bounded independently by the Rust harness.
+                (ulimit -v 4194304; /usr/bin/time -v \
+                  cargo test --manifest-path "$manifest" --locked \
+                    -p anvil-portability --test bundle_resources -- \
+                    --ignored --exact measure_resource_open --nocapture) >"$metric" 2>&1
+              else
+                /usr/bin/time -l \
+                  cargo test --manifest-path "$manifest" --locked \
+                    -p anvil-portability --test bundle_resources -- \
+                    --ignored --exact measure_resource_open --nocapture >"$metric" 2>&1
+              fi
+              cat "$metric"
+            done
+          done
+      - name: Compare peak RSS and enforce fixture-specific regression ceilings
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "bundle-resource-results"
+          linux = os.environ["RUNNER_OS"] == "Linux"
+          metrics = {}
+          for path in sorted(root.glob("*.txt")):
+              text = path.read_text()
+              pattern = (r"Maximum resident set size \(kbytes\):\s*(\d+)" if linux
+                         else r"(\d+)\s+maximum resident set size")
+              match = re.search(pattern, text)
+              assert match, f"missing RSS metric: {path.name}"
+              rss = int(match[1]) * (1024 if linux else 1)
+              metrics[path.stem] = rss
+          assert len(metrics) == 21, "every snapshot/case must produce a metric"
+          lines = ["snapshot_case\tpeak_rss_bytes"]
+          for case, rss in sorted(metrics.items()):
+              lines.append(f"{case}\t{rss}")
+              # These generous ceilings apply to these fixtures, not arbitrary
+              # JSON, concurrent desktop work, vaults or other architectures.
+              ceiling = (512 if case.startswith("candidate-") else 3072) * 1024**2
+              assert rss <= ceiling, f"fixture RSS regression: {case}: {rss}"
+          for baseline in ("released", "preflight"):
+              large = metrics[f"{baseline}-released_exact"]
+              assert large >= 512 * 1024**2, "large baseline must actually be retained"
+              assert metrics["candidate-proposal_exact"] < large / 2
+          for case in ("invalid_manifest", "invalid_checksums", "released_exact"):
+              assert metrics[f"candidate-{case}"] <= 256 * 1024**2
+          summary = "\n".join(lines) + "\n"
+          (root / "peak-rss.tsv").write_text(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("```tsv\n" + summary + "```\n")
+          PY
+      - name: Upload scalar qualification evidence (no ZIP fixtures)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundle-resource-results-${{ matrix.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/bundle-resource-results
+          if-no-files-found: warn
+          retention-days: 30
