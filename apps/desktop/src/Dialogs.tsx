@@ -404,10 +404,10 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
       <button
         className="btn small start"
         onClick={async () => {
-          const file = await api.chooseFile("pem_file");
+          const file = await api.chooseCertificateFile();
           if (!file) return;
-          const r = await api.readTextFile(file.token, p.workspace_id, null);
-          if (r.text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), r.text] });
+          const text = await api.readCertificateFile(file.token);
+          if (text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), text] });
         }}
       >
         <Icon name="file" size={14} />
@@ -512,10 +512,10 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
             <button
               className="btn small start"
               onClick={async () => {
-                const file = await api.chooseFile("pem_file");
+                const file = await api.chooseCertificateFile();
                 if (!file) return;
-                const r = await api.readTextFile(file.token, p.workspace_id, null);
-                if (r.text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: r.text } });
+                const text = await api.readCertificateFile(file.token);
+                if (text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: text } });
               }}
             >
               <Icon name="file" size={14} />
@@ -567,8 +567,12 @@ function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "s
             const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
             if (!file) return;
             // The bundle goes straight into the vault as base64; only a reference returns.
-            const r = await api.readTextFile(file.token, workspaceId, file.file_name || "client.p12", true);
-            if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
+            const secret = await api.importPkcs12File(
+              file.token,
+              workspaceId,
+              file.file_name || "client.p12",
+            );
+            props.onSecret({ kind: "secret", secret });
           } catch (e) {
             setErr(String((e as Error).message));
           }

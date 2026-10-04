@@ -1012,49 +1012,61 @@ pub async fn attachment_add(handle: AppHandle, grant: String, media_type: Option
     .await
 }
 
-/// Read a small file the user picked in the native open dialog: a PEM
-/// certificate/key (purpose `pem_file`) or, with `base64`, a PKCS#12
-/// keystore (purpose `pkcs12_file`, which must be stored). The content goes
-/// straight into the vault when `store_as_secret` is set, so a private key
-/// never round-trips through the webview. Read and stored on a blocking
-/// thread (see [`blocking`]).
+/// Return only validated PEM certificates from the certificate chooser.
+/// Private-key grants and mixed certificate/key files are refused by the
+/// backend before any file contents can be returned.
 #[tauri::command]
-pub async fn read_text_file(
-    handle: AppHandle,
-    grant: String,
-    workspace_id: Option<String>,
-    store_as_secret: Option<String>,
-    base64: Option<bool>,
-) -> R<TextFile> {
-    use base64::Engine as _;
+pub async fn read_certificate_file(handle: AppHandle, grant: String) -> R<String> {
     blocking(&handle, move |st| {
-        let app = st.app()?;
-        let binary = base64.unwrap_or(false);
-        if binary && store_as_secret.is_none() {
-            return Err("a PKCS#12 keystore is only read into the vault; give it a label".into());
-        }
-        let purpose = if binary { FilePurpose::Pkcs12File } else { FilePurpose::PemFile };
-        let file = st.file_grants.read(&grant, purpose).map_err(|x| x.to_string())?;
-        // Binary keystores (PKCS#12) are carried as base64 text in the vault.
-        let text = if binary {
-            base64::engine::general_purpose::STANDARD.encode(&file.bytes)
-        } else {
-            String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())?
-        };
-        if let Some(label) = store_as_secret {
-            let ws = workspace_id.ok_or_else(|| "a secret must belong to a workspace; open one first".to_string())?;
-            let r = app.set_secret(&id(&ws)?, &label, &text).map_err(e)?;
-            return Ok(TextFile { text: None, secret: Some(r) });
-        }
-        Ok(TextFile { text: Some(text), secret: None })
+        st.app()?;
+        let file = st.file_grants.read(&grant, FilePurpose::PemCertificate).map_err(|err| err.to_string())?;
+        String::from_utf8(file.bytes).map_err(|_| "the file is not UTF-8 text".to_string())
     })
     .await
 }
 
-#[derive(Serialize)]
-pub struct TextFile {
-    pub text: Option<String>,
-    pub secret: Option<SecretRef>,
+/// Consume a private-key grant into the vault. Neither purpose nor
+/// disposition is a renderer argument; only a secret reference returns.
+/// The session and grant are fenced before the write. A committed reference
+/// remains a success even if a lock follows the commit.
+#[tauri::command]
+pub async fn import_private_key_file(handle: AppHandle, grant: String, workspace_id: String, label: String) -> R<SecretRef> {
+    let seen = handle.state::<DesktopState>().epoch();
+    blocking_unchecked(&handle, move |st| ingest_private_key(st, seen, &grant, &workspace_id, &label, || {})).await
+}
+
+fn ingest_private_key(
+    st: &DesktopState,
+    seen: u64,
+    grant: &str,
+    workspace_id: &str,
+    label: &str,
+    before_write: impl FnOnce(),
+) -> R<SecretRef> {
+    let app = st.app()?;
+    let workspace = id(workspace_id)?;
+    let claim = st.file_grants.claim_private_key(&app, grant).map_err(e)?;
+    before_write();
+    // The epoch check runs inside the vault transaction, with the grant's
+    // revocation fence held through commit. Never take the app lock there:
+    // profile publication takes it before the revocation mutex.
+    claim.store(&workspace, label, || st.epoch() == seen).map_err(e)
+}
+
+/// PKCS#12 remains vault-only and is stored as base64. This command has
+/// no plaintext-return mode and accepts only a PKCS#12 chooser grant.
+#[tauri::command]
+pub async fn import_pkcs12_file(handle: AppHandle, grant: String, workspace_id: String, label: String) -> R<SecretRef> {
+    blocking(&handle, move |st| ingest_pkcs12(st, &grant, &workspace_id, &label)).await
+}
+
+fn ingest_pkcs12(st: &DesktopState, grant: &str, workspace_id: &str, label: &str) -> R<SecretRef> {
+    use base64::Engine as _;
+    let app = st.app()?;
+    let file = st.file_grants.read(grant, FilePurpose::Pkcs12File).map_err(|err| err.to_string())?;
+    let bytes = zeroize::Zeroizing::new(file.bytes);
+    let text = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(&*bytes));
+    app.set_secret(&id(workspace_id)?, label, &text).map_err(e)
 }
 
 #[cfg(test)]
@@ -1064,6 +1076,113 @@ mod tests {
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn private_key_ingestion_paused_before_write_is_abandoned_after_lock_and_reunlock() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, dir) = create(&st, "PEM");
+        let workspace = app.create_workspace("keys").unwrap().meta.id;
+        st.set_app_since(app, st.epoch()).unwrap();
+        let app = st.app().unwrap();
+        let path = root.0.join("key.pem");
+        std::fs::write(&path, "vault-only canary").unwrap();
+        let grant = st.file_grants.grant_private_key(&app, &path).unwrap();
+        let seen = st.epoch();
+        let (claimed_tx, claimed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_st = &st;
+            let token = &grant.token;
+            let worker = scope.spawn(move || {
+                ingest_private_key(worker_st, seen, token, &workspace.to_string(), "abandoned", || {
+                    claimed_tx.send(()).unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+                })
+            });
+            claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            assert!(st.file_grants.is_empty(), "the actual grant was already spent and read",);
+            st.lock();
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+            st.unlock_since(&app, key, st.epoch()).unwrap();
+            assert!(st.app().is_ok(), "the same profile is unlocked again");
+            release_tx.send(()).unwrap();
+            assert_eq!(worker.join().unwrap(), Err("LOCKED".into()));
+        });
+        assert!(app.store.list_secret_ids(None).unwrap().is_empty());
+        assert!(ingest_private_key(&st, st.epoch(), &grant.token, &workspace.to_string(), "replay", || {},).is_err());
+        let fresh = st.file_grants.grant_private_key(&app, &path).unwrap();
+        let secret = ingest_private_key(&st, st.epoch(), &fresh.token, &workspace.to_string(), "fresh", || {}).unwrap();
+        assert_eq!(app.store.list_secret_ids(None).unwrap(), vec![secret.id.to_string()],);
+    }
+
+    #[test]
+    fn private_key_ingestion_paused_before_write_cannot_record_in_either_switched_profile() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, a_dir) = create(&st, "A");
+        let (b, _) = create(&st, "B");
+        let workspace = a.create_workspace("keys").unwrap().meta.id;
+        // Even a matching workspace id in B cannot authorize A's selection.
+        b.save_workspace(a.workspace(&workspace).unwrap()).unwrap();
+        st.set_app_since(a, st.epoch()).unwrap();
+        let a = st.app().unwrap();
+        let path = root.0.join("key.pem");
+        std::fs::write(&path, "vault-only canary").unwrap();
+        let grant = st.file_grants.grant_private_key(&a, &path).unwrap();
+        let seen = st.epoch();
+        let (claimed_tx, claimed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_st = &st;
+            let token = &grant.token;
+            let worker = scope.spawn(move || {
+                ingest_private_key(worker_st, seen, token, &workspace.to_string(), "abandoned", || {
+                    claimed_tx.send(()).unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+                })
+            });
+            claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            st.set_app_since(b, st.epoch()).unwrap();
+            // Reopen A's store too: being locked must not mask a stray write.
+            let (_, key) = anvil_app::profiles::ProfileManager::unlock(&a_dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+            a.unlock(key).unwrap();
+            release_tx.send(()).unwrap();
+            assert_eq!(worker.join().unwrap(), Err("LOCKED".into()));
+        });
+        assert!(a.store.list_secret_ids(None).unwrap().is_empty());
+        assert!(st.app().unwrap().store.list_secret_ids(None).unwrap().is_empty());
+        assert!(st.file_grants.is_empty());
+    }
+
+    #[test]
+    fn pkcs12_ingestion_returns_only_a_vault_reference_and_refuses_pem_grants() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, _) = create(&st, "PKCS12");
+        let workspace = app.create_workspace("keys").unwrap().meta.id;
+        st.set_app_since(app, st.epoch()).unwrap();
+        let app = st.app().unwrap();
+        let path = root.0.join("client.p12");
+        std::fs::write(&path, [0, 1, 2, 255]).unwrap();
+        let grant = st.file_grants.grant_read(FilePurpose::Pkcs12File, &path).unwrap();
+        let secret = ingest_pkcs12(&st, &grant.token, &workspace.to_string(), "bundle").unwrap();
+        assert_eq!(serde_json::to_value(&secret).unwrap(), serde_json::json!({ "id": secret.id, "label": "bundle" }),);
+        let (_, stored) = app.store.get_workspace_secret(&secret.id, &workspace).unwrap().unwrap();
+        assert_eq!(&*stored, "AAEC/w==");
+        assert!(st.file_grants.read(&grant.token, FilePurpose::PemCertificate).is_err());
+        for purpose in [FilePurpose::PemCertificate, FilePurpose::PemPrivateKey] {
+            let grant = if purpose == FilePurpose::PemPrivateKey {
+                st.file_grants.grant_private_key(&app, &path).unwrap()
+            } else {
+                st.file_grants.grant_read(purpose, &path).unwrap()
+            };
+            assert!(ingest_pkcs12(&st, &grant.token, &workspace.to_string(), "confused").is_err());
+        }
+        assert_eq!(app.store.list_secret_ids(Some(&workspace)).unwrap().len(), 1);
+        st.lock();
+        assert_eq!(ingest_pkcs12(&st, "unknown", &workspace.to_string(), "locked"), Err("LOCKED".into()),);
+    }
 
     /// A registered attempt, and the gate of its writes.
     fn registered() -> (Arc<Running>, Id, PendingEntry, Arc<ImportGate>) {

@@ -145,13 +145,26 @@ impl DesktopState {
     /// lock does. The previous profile is locked and its work stopped, so
     /// nothing it started records into this one or keeps its key in memory.
     pub fn set_app_since(&self, app: App, seen: u64) -> Result<(), String> {
+        self.set_app_since_with(app, seen, |_| {})
+    }
+
+    fn set_app_since_with(&self, app: App, seen: u64, published: impl FnOnce(&Arc<App>)) -> Result<(), String> {
         app.confine_token_files();
         let swapped = {
             let mut g = self.app.write();
             // A lock bumps the epoch before it reads the app, so one that
             // bumps after this exchange waits for the guard and locks `app`.
             match self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => Ok(g.replace(Arc::new(app))),
+                Ok(_) => {
+                    // Revoke while publication is still excluded by `app`'s
+                    // write guard. No caller can obtain the new profile with
+                    // grants (or claims) from the one it replaces.
+                    self.file_grants.revoke_all();
+                    let app = Arc::new(app);
+                    let previous = g.replace(app.clone());
+                    published(&app);
+                    Ok(previous)
+                }
                 Err(_) => Err(app),
             }
         };
@@ -164,9 +177,6 @@ impl DesktopState {
                 return Err("LOCKED".into());
             }
         };
-        // After the swap: a choice that starts from now on sees only the new
-        // profile, and one still open from before grants nothing.
-        self.file_grants.revoke_all();
         // An execution registers before it asks for the app, so one that got
         // the previous profile registered before the swap and is stopped
         // below; one registered after the stop gets this profile.
@@ -238,13 +248,18 @@ impl DesktopState {
     pub fn lock(&self) {
         // First, so an unlock or a read still running off the lock sees it.
         self.lock_epoch.fetch_add(1, Ordering::SeqCst);
-        self.file_grants.revoke_all();
+        {
+            // Exclude new chooser/app readers until both revocation and the
+            // key drop finish; none can issue a grant in between them.
+            let app = self.app.write();
+            self.file_grants.revoke_all();
+            if let Some(a) = app.as_ref() {
+                a.lock();
+            }
+        }
         // The app locks before the drain below. An execution registers before
         // it asks for the app, so one registered after the drain is refused by
         // `app()`, and one registered before it is canceled here.
-        if let Some(a) = self.app.read().as_ref() {
-            a.lock();
-        }
         self.stop_work();
     }
 
@@ -608,6 +623,51 @@ pub(crate) mod tests {
         // Work started from now on is not stopped by the earlier switch.
         let later = PendingEntry::register(&st.running, Id::new()).unwrap();
         assert!(!later.token().is_cancelled());
+    }
+
+    #[test]
+    fn paused_profile_publication_has_already_revoked_the_previous_vaults_private_key_grants() {
+        use anvil_app::file_grants::GrantError;
+        use std::sync::mpsc;
+
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, a_dir) = create(&st, "A");
+        let (b, _) = create(&st, "B");
+        let workspace = a.create_workspace("keys").unwrap().meta.id;
+        b.save_workspace(a.workspace(&workspace).unwrap()).unwrap();
+        st.set_app_since(a, st.epoch()).unwrap();
+        let a = st.app().unwrap();
+        let path = root.0.join("key.pem");
+        std::fs::write(&path, "vault-only canary").unwrap();
+        let generation = st.file_grants.generation();
+        let grant = st.file_grants.grant_private_key(&a, &path).unwrap();
+        let (published_tx, published_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let switch_st = &st;
+            let switch = scope.spawn(move || {
+                switch_st.set_app_since_with(b, switch_st.epoch(), |published| {
+                    assert!(published_tx.send(published.clone()).is_ok());
+                    release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+                })
+            });
+            let published = published_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            // Publication is paused under its write guard. Try the real A
+            // grant directly against B in the former publish/revoke interval.
+            assert!(st.file_grants.is_empty());
+            assert!(st.file_grants.import_private_key(&published, &grant.token, &workspace, "wrong").is_err());
+            // A chooser still open from A cannot issue a replacement either.
+            assert_eq!(st.file_grants.grant_private_key_at(&a, &path, generation), Err(GrantError::Revoked),);
+            assert!(a.store.list_secret_ids(None).unwrap().is_empty());
+            assert!(published.store.list_secret_ids(None).unwrap().is_empty());
+            release_tx.send(()).unwrap();
+            switch.join().unwrap().unwrap();
+        });
+        let (_, key) = ProfileManager::unlock(&a_dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
+        a.unlock(key).unwrap();
+        assert!(a.store.list_secret_ids(None).unwrap().is_empty());
+        assert!(st.app().unwrap().store.list_secret_ids(None).unwrap().is_empty());
     }
 
     #[tokio::test]

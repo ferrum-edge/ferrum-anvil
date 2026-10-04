@@ -56,8 +56,9 @@ describe("file grants", () => {
   it("never reads a path or a made-up grant", async () => {
     for (const grant of [source, `fg-${"0".repeat(32)}`, "source.json"]) {
       const calls: [string, Record<string, unknown>][] = [
-        ["read_text_file", { grant, workspaceId: null, storeAsSecret: null, base64: false }],
-        ["read_text_file", { grant, workspaceId: null, storeAsSecret: "p12", base64: true }],
+        ["read_certificate_file", { grant }],
+        ["import_private_key_file", { grant, workspaceId, label: "key" }],
+        ["import_pkcs12_file", { grant, workspaceId, label: "p12" }],
         ["attachment_add", { grant, mediaType: null }],
         ["import_preview", { grant, passphrase: null, conflictPolicy: "duplicate" }],
         ["import_apply", { grant, passphrase: null, conflictPolicy: "duplicate" }],
@@ -70,7 +71,9 @@ describe("file grants", () => {
 
   it("has no command argument that takes a path", async () => {
     const calls: [string, Record<string, unknown>][] = [
-      ["read_text_file", { path: source, workspaceId: null, storeAsSecret: null, base64: false }],
+      ["read_certificate_file", { path: source }],
+      ["import_private_key_file", { path: source, workspaceId, label: "key" }],
+      ["import_pkcs12_file", { path: source, workspaceId, label: "p12" }],
       ["attachment_add", { path: source, mediaType: null }],
       ["import_preview", { path: source, passphrase: null, conflictPolicy: "duplicate" }],
       ["dataset_add", { workspaceId, path: source, name: "d", sensitiveColumns: [] }],
@@ -97,6 +100,19 @@ describe("file grants", () => {
     expectRefused("file_choose", r, "a save dialog chooses one file");
     const t = await invoke("file_choose", { purpose: "jwt_svid_file", options: { multiple: true } });
     expectRefused("file_choose jwt_svid_file", t, "choose one file");
+  });
+
+  it("refuses renderer-selected PEM roles on the generic native chooser", async () => {
+    for (const purpose of ["pem_certificate", "pem_private_key"]) {
+      const r = await invoke("file_choose", { purpose, options: null });
+      expectRefused(purpose, r, "PEM files require their dedicated native chooser");
+    }
+    expectRefused("legacy PEM chooser", await invoke("file_choose", { purpose: "pem_file" }));
+    expectRefused("legacy disposition command", await invoke("read_text_file", {
+      grant: `fg-${"0".repeat(32)}`,
+      storeAsSecret: null,
+      base64: false,
+    }));
   });
 
   it("refuses a linked-file dialog that is not for a request or dataset before showing anything", async () => {
