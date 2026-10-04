@@ -631,11 +631,8 @@ where
     payload_reply_admitted(invoke, |_, fence, _: &A| Ok(fence), work);
 }
 
-fn payload_reply_admitted<A, C, T, F, Fut>(
-    invoke: tauri::ipc::Invoke,
-    admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>,
-    work: F,
-) where
+fn payload_reply_admitted<A, C, T, F, Fut>(invoke: tauri::ipc::Invoke, admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>, work: F)
+where
     A: serde::de::DeserializeOwned + Send + 'static,
     C: Send + 'static,
     T: Serialize + Send + 'static,

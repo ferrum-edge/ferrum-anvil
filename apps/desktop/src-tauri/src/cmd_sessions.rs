@@ -301,10 +301,8 @@ mod tests {
         });
         let (pending, mut registration) = register_session(st, fence, execution_id).unwrap();
         let slot = registration.slot.clone();
-        let open = fence.app.engine.open_session(
-            ExecutionContext::standalone(spec),
-            EventCtx { execution_id: id(execution_id).unwrap(), sink },
-        );
+        let open =
+            fence.app.engine.open_session(ExecutionContext::standalone(spec), EventCtx { execution_id: id(execution_id).unwrap(), sink });
         let (session, canceled) = pending.open(open, |session| session).await.unwrap();
         publish_handle(st, fence, &slot, session, canceled).await;
         registration.published = true;
@@ -355,7 +353,9 @@ mod tests {
                 let mut waiting_tx = Some(waiting_tx);
                 let result = std::future::poll_fn(|cx| {
                     let polled = send.as_mut().poll(cx);
-                    if polled.is_pending() && let Some(waiting_tx) = waiting_tx.take() {
+                    if polled.is_pending()
+                        && let Some(waiting_tx) = waiting_tx.take()
+                    {
                         waiting_tx.send(()).unwrap();
                     }
                     polled
@@ -446,9 +446,8 @@ mod tests {
                     // checking the new token or sending its positive control.
                     (fresh, slot, peer, pending)
                 };
-                let (_, (fresh, slot, _peer, pending)) = tokio::time::timeout(BOUND, async { tokio::join!(controls, replacing) })
-                    .await
-                    .expect("paused controls must settle");
+                let (_, (fresh, slot, _peer, pending)) =
+                    tokio::time::timeout(BOUND, async { tokio::join!(controls, replacing) }).await.expect("paused controls must settle");
                 assert!(!slot.cancel.is_cancelled(), "stale cancel reached replacement: {how}, live={live}");
                 if let Some(pending) = pending.as_ref() {
                     assert!(!pending.token().is_cancelled());
