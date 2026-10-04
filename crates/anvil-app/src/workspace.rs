@@ -122,21 +122,13 @@ impl App {
     }
 
     pub fn create_folder(&self, ws: &Id, parent: Option<Id>, name: &str) -> Result<Folder> {
-        self.workspace(ws)?;
-        if let Some(p) = parent {
-            let pf = self.folder(&p)?;
-            if pf.workspace_id != *ws {
-                return Err(AppError::Invalid("parent folder belongs to another workspace".into()));
-            }
-        }
-        let siblings = self.folders(ws)?.into_iter().filter(|f| f.parent_id == parent).count();
-        let f = Folder {
+        let mut f = Folder {
             meta: Meta::new(),
             workspace_id: *ws,
             parent_id: parent,
             name: name.trim().into(),
             description: String::new(),
-            sort_key: siblings as f64 + 1.0,
+            sort_key: 0.0,
             settings: Default::default(),
             variables: vec![],
             auth: AuthConfig::Inherit,
@@ -145,7 +137,19 @@ impl App {
             import_environment_ids: vec![],
             use_workspace_scope: false,
         };
-        self.store.put(kind::FOLDER, &f.meta.id, Some(ws), parent.as_ref(), f.sort_key, &f)?;
+        self.store.atomically(|s| {
+            validate_folder_parent_in(s, ws, parent)?;
+            let siblings: Vec<Folder> = s.list(kind::FOLDER, Some(ws))?;
+            f.sort_key = siblings.iter().filter(|f| f.parent_id == parent).count() as f64 + 1.0;
+            s.put(
+                kind::FOLDER,
+                &f.meta.id,
+                Some(ws),
+                parent.as_ref(),
+                f.sort_key,
+                &f,
+            )
+        })?;
         Ok(f)
     }
 
@@ -154,12 +158,25 @@ impl App {
     /// an import root, and only [`App::set_import_root_workspace_scope`]
     /// opens one.
     pub fn save_folder(&self, mut f: Folder) -> Result<Folder> {
-        let stored: Option<Folder> = self.store.get(kind::FOLDER, &f.meta.id)?;
-        f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
-        f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
-        f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
-        f.meta.updated_at = chrono::Utc::now();
-        self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
+        self.store.atomically(|s| {
+            let stored: Option<Folder> = s.get(kind::FOLDER, &f.meta.id)?;
+            validate_folder_parent_in(s, &f.workspace_id, f.parent_id)?;
+            f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
+            f.import_environment_ids = stored
+                .as_ref()
+                .map(|s| s.import_environment_ids.clone())
+                .unwrap_or_default();
+            f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
+            f.meta.updated_at = chrono::Utc::now();
+            s.put(
+                kind::FOLDER,
+                &f.meta.id,
+                Some(&f.workspace_id),
+                f.parent_id.as_ref(),
+                f.sort_key,
+                &f,
+            )
+        })?;
         Ok(f)
     }
 
@@ -168,14 +185,27 @@ impl App {
     /// environment and auth, and this device's workload identity and token
     /// files (`Folder::use_workspace_scope`). An import never sets this.
     pub fn set_import_root_workspace_scope(&self, id: &Id, allow: bool) -> Result<Folder> {
-        let mut f = self.folder(id)?;
-        if !f.import_root {
-            return Err(AppError::Invalid("only the root folder of an imported collection has a scope of its own".into()));
-        }
-        f.use_workspace_scope = allow;
-        f.meta.updated_at = chrono::Utc::now();
-        self.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
-        Ok(f)
+        self.store.atomically(|s| {
+            let Some(mut f) = s.get::<Folder>(kind::FOLDER, id)? else {
+                return Ok(Err(AppError::NotFound("folder".into())));
+            };
+            if !f.import_root {
+                return Ok(Err(AppError::Invalid(
+                    "only the root folder of an imported collection has a scope of its own".into(),
+                )));
+            }
+            f.use_workspace_scope = allow;
+            f.meta.updated_at = chrono::Utc::now();
+            s.put(
+                kind::FOLDER,
+                &f.meta.id,
+                Some(&f.workspace_id),
+                f.parent_id.as_ref(),
+                f.sort_key,
+                &f,
+            )?;
+            Ok(Ok(f))
+        })?
     }
 
     /// Move a folder under a new parent (None = root) at `sort_key`,
@@ -198,7 +228,7 @@ impl App {
                         return Ok(Err(AppError::Invalid("the target folder's ancestry is cyclic".into())));
                     }
                     let Some(a) = s.get::<Folder>(kind::FOLDER, &c)? else { return Ok(Err(AppError::NotFound("folder".into()))) };
-                    if c == p && a.workspace_id != f.workspace_id {
+                    if a.workspace_id != f.workspace_id {
                         return Ok(Err(AppError::Invalid("cannot move a folder to another workspace".into())));
                     }
                     cur = a.parent_id;
@@ -338,8 +368,8 @@ impl App {
     /// gone. The check and the save run in one write transaction.
     ///
     /// A save never places a request that is already stored: it keeps the
-    /// workspace, folder and position the store holds, read in the same
-    /// transaction, whatever `r` names. The editor's copy may predate a move
+    /// folder and position the store holds, read in the same transaction.
+    /// A changed workspace is refused. The editor's copy may predate a move
     /// ([`App::move_request`]), which writing back its placement would undo.
     /// A new request is placed where `r` puts it.
     ///
@@ -365,7 +395,12 @@ impl App {
         self.store.atomically(|s| {
             let held: Option<RequestDefinition> = s.get(kind::REQUEST, &r.meta.id)?;
             match &held {
-                Some(h) => (r.workspace_id, r.folder_id, r.sort_key) = (h.workspace_id, h.folder_id, h.sort_key),
+                Some(h) => {
+                    if r.workspace_id != h.workspace_id {
+                        return Err(StoreError::Ownership);
+                    }
+                    (r.folder_id, r.sort_key) = (h.folder_id, h.sort_key);
+                }
                 None if !new => return Ok(Err(AppError::NotFound("request (it was deleted)".into()))),
                 None => {
                     if s.get::<Workspace>(kind::WORKSPACE, &r.workspace_id)?.is_none() {
@@ -390,7 +425,23 @@ impl App {
                 Some(rid) => s.get(kind::REVISION, &rid)?,
                 None => None,
             };
+            if prev.as_ref().is_some_and(|p| p.request_id != r.meta.id) {
+                return Err(StoreError::Ownership);
+            }
             if prev.as_ref().map(|p| p.spec_sha256 != hash).unwrap_or(true) {
+                // Revisions authenticate ownership through the sealed parent
+                // request. Create that parent first, in this same transaction.
+                // Any later failure rolls both rows back.
+                if new {
+                    s.put(
+                        kind::REQUEST,
+                        &r.meta.id,
+                        Some(&r.workspace_id),
+                        r.folder_id.as_ref(),
+                        r.sort_key,
+                        &r,
+                    )?;
+                }
                 let rev = RequestRevision {
                     id: Id::new(),
                     request_id: r.meta.id,
@@ -737,6 +788,28 @@ impl App {
     }
 }
 
+/// Validate placement under the same write lock as a folder create/save.
+/// A concurrent delete cannot leave the new row under a deleted owner or
+/// parent; a foreign parent cannot supply another workspace's inherited scope.
+fn validate_folder_parent_in(
+    s: &StoreTx<'_>,
+    ws: &Id,
+    parent: Option<Id>,
+) -> anvil_storage::store::Result<()> {
+    if s.get::<Workspace>(kind::WORKSPACE, ws)?.is_none() {
+        return Err(StoreError::NotFound("workspace".into()));
+    }
+    if let Some(id) = parent {
+        let folder: Folder = s
+            .get(kind::FOLDER, &id)?
+            .ok_or_else(|| StoreError::NotFound("folder".into()))?;
+        if folder.workspace_id != *ws {
+            return Err(StoreError::Ownership);
+        }
+    }
+    Ok(())
+}
+
 /// Store an attachment inside the caller's transaction, so it is rolled
 /// back with everything else the caller writes. Unlike [`App::put_attachment`]
 /// it does not mark the attachment as added by a user (an entry already
@@ -1034,7 +1107,6 @@ fn unstored(sha256: &str) -> AppError {
 fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_storage::store::Result<()> {
     let mut specs = Vec::new();
     for r in requests {
-        s.delete(kind::REQUEST, &r.meta.id)?;
         specs.push(serde_json::to_value(&r.spec)?);
     }
     // Every writer files a revision under its request (`parent_id`), so only
@@ -1053,6 +1125,11 @@ fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_
             Err(e) => return Err(e),
         }
         s.delete(kind::REVISION, &id)?;
+    }
+    // Keep the parents until their revisions have authenticated their owners.
+    // Both kinds disappear in this same transaction before attachment release.
+    for r in requests {
+        s.delete(kind::REQUEST, &r.meta.id)?;
     }
     let mut held = HashSet::new();
     for spec in &specs {

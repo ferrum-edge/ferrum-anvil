@@ -42,12 +42,22 @@ fn assert_no_open_transaction(dir: &Path) {
     other.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").expect("the store's connection was left inside a transaction");
 }
 
+fn workspace(id: &Id, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "schema_version": anvil_domain::SCHEMA_VERSION,
+        "created_at": chrono::Utc::now(),
+        "updated_at": chrono::Utc::now(),
+        "name": name,
+    })
+}
+
 #[test]
 fn failed_transaction_never_rolls_back_a_concurrent_save() {
     let (dir, store, dek) = open();
     let store = &store;
     let (ws, doomed) = (Id::new(), Id::new());
-    store.put(kind::WORKSPACE, &ws, None, None, 0.0, &json!({"name": "old"})).unwrap();
+    store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "old")).unwrap();
 
     let (began, began_rx) = mpsc::channel();
     let (saved, saved_rx) = mpsc::channel();
@@ -56,7 +66,7 @@ fn failed_transaction_never_rolls_back_a_concurrent_save() {
         let a = sc.spawn(move || {
             let mut saved_inside = false;
             let r: Result<(), StoreError> = store.atomically(|tx| {
-                tx.put(kind::WORKSPACE, &doomed, None, None, 0.0, &json!({"name": "doomed"}))?;
+                tx.put(kind::WORKSPACE, &doomed, None, None, 0.0, &workspace(&doomed, "doomed"))?;
                 began.send(()).unwrap();
                 saved_inside = saved_rx.recv_timeout(WINDOW).is_ok();
                 Err(injected())
@@ -66,7 +76,7 @@ fn failed_transaction_never_rolls_back_a_concurrent_save() {
         });
         // Caller B: an unrelated save while A's transaction is open.
         began_rx.recv().unwrap();
-        store.put(kind::WORKSPACE, &ws, None, None, 0.0, &json!({"name": "renamed"})).unwrap();
+        store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "renamed")).unwrap();
         let _ = saved.send(());
         a.join().unwrap()
     });
@@ -85,7 +95,7 @@ fn readers_never_see_another_callers_uncommitted_writes() {
     let (_dir, store, _dek) = open();
     let store = &store;
     let ws = Id::new();
-    store.put(kind::WORKSPACE, &ws, None, None, 0.0, &json!({"name": "committed"})).unwrap();
+    store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "committed")).unwrap();
 
     let (began, began_rx) = mpsc::channel();
     let (read, read_rx) = mpsc::channel();
@@ -93,7 +103,7 @@ fn readers_never_see_another_callers_uncommitted_writes() {
         let a = sc.spawn(move || {
             let mut read_inside = None;
             let r: Result<(), StoreError> = store.atomically(|tx| {
-                tx.put(kind::WORKSPACE, &ws, None, None, 0.0, &json!({"name": "uncommitted"}))?;
+                tx.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "uncommitted"))?;
                 // The transaction sees its own write.
                 assert_eq!(tx.get::<Value>(kind::WORKSPACE, &ws)?.unwrap()["name"], "uncommitted");
                 began.send(()).unwrap();
@@ -127,7 +137,7 @@ fn concurrent_transactions_commit_or_roll_back_independently() {
         let a = sc.spawn(move || {
             let mut b_inside = false;
             let r: Result<(), StoreError> = store.atomically(|tx| {
-                tx.put(kind::WORKSPACE, &a_id, None, None, 0.0, &json!({"name": "a"}))?;
+                tx.put(kind::WORKSPACE, &a_id, None, None, 0.0, &workspace(&a_id, "a"))?;
                 began.send(()).unwrap();
                 b_inside = b_done_rx.recv_timeout(WINDOW).is_ok();
                 Err(injected())
@@ -138,7 +148,7 @@ fn concurrent_transactions_commit_or_roll_back_independently() {
         // Transaction B, started while A is open, commits.
         began_rx.recv().unwrap();
         let r: Result<(), StoreError> = store.atomically(|tx| {
-            tx.put(kind::WORKSPACE, &b_id, None, None, 0.0, &json!({"name": "b"}))?;
+            tx.put(kind::WORKSPACE, &b_id, None, None, 0.0, &workspace(&b_id, "b"))?;
             assert!(tx.get::<Value>(kind::WORKSPACE, &a_id)?.is_none(), "B saw A's uncommitted write");
             Ok(())
         });
@@ -160,8 +170,15 @@ fn store_calls_inside_its_own_transaction_are_rejected_not_deadlocked() {
     let (_dir, store, _dek) = open();
     let (kept, stray) = (Id::new(), Id::new());
     let r: Result<(), StoreError> = store.atomically(|tx| {
-        tx.put(kind::WORKSPACE, &kept, None, None, 0.0, &json!({"name": "kept"}))?;
-        let direct = store.put(kind::WORKSPACE, &stray, None, None, 0.0, &json!({"name": "stray"}));
+        tx.put(kind::WORKSPACE, &kept, None, None, 0.0, &workspace(&kept, "kept"))?;
+        let direct = store.put(
+            kind::WORKSPACE,
+            &stray,
+            None,
+            None,
+            0.0,
+            &workspace(&stray, "stray"),
+        );
         assert!(matches!(direct, Err(StoreError::TransactionActive)));
         assert!(matches!(store.get::<Value>(kind::WORKSPACE, &kept), Err(StoreError::TransactionActive)));
         assert!(matches!(store.atomically(|_| Ok(())), Err(StoreError::TransactionActive)), "nested transactions are rejected");
@@ -174,13 +191,13 @@ fn store_calls_inside_its_own_transaction_are_rejected_not_deadlocked() {
     // A panic inside the closure rolls back and releases the store.
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.atomically(|tx| -> Result<(), StoreError> {
-            tx.put(kind::WORKSPACE, &stray, None, None, 0.0, &json!({"name": "stray"}))?;
+            tx.put(kind::WORKSPACE, &stray, None, None, 0.0, &workspace(&stray, "stray"))?;
             panic!("injected panic");
         })
     }));
     assert!(panicked.is_err());
     assert_eq!(name(&store, &stray), None);
-    store.put(kind::WORKSPACE, &stray, None, None, 0.0, &json!({"name": "after"})).unwrap();
+    store.put(kind::WORKSPACE, &stray, None, None, 0.0, &workspace(&stray, "after")).unwrap();
     assert_eq!(name(&store, &stray).as_deref(), Some("after"));
 }
 
@@ -189,9 +206,10 @@ fn locking_mid_transaction_fails_its_remaining_writes() {
     let (_dir, store, dek) = open();
     let id = Id::new();
     let r: Result<(), StoreError> = store.atomically(|tx| {
-        tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "w"}))?;
+        tx.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "w"))?;
         store.lock();
-        tx.put(kind::WORKSPACE, &Id::new(), None, None, 0.0, &json!({"name": "x"}))
+        let other_id = Id::new();
+        tx.put(kind::WORKSPACE, &other_id, None, None, 0.0, &workspace(&other_id, "x"))
     });
     assert!(matches!(r, Err(StoreError::Locked)));
     store.unlock(dek).unwrap();
@@ -204,7 +222,7 @@ fn every_transaction_ends_before_the_connection_is_released() {
     let id = Id::new();
 
     let r: Result<(), StoreError> = store.atomically(|tx| {
-        tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "failed"}))?;
+        tx.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "failed"))?;
         Err(injected())
     });
     assert!(matches!(r, Err(StoreError::NotFound(_))), "the closure's own error is returned");
@@ -212,7 +230,7 @@ fn every_transaction_ends_before_the_connection_is_released() {
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.atomically(|tx| -> Result<(), StoreError> {
-            tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "panicked"}))?;
+            tx.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "panicked"))?;
             panic!("injected panic");
         })
     }));
@@ -220,7 +238,18 @@ fn every_transaction_ends_before_the_connection_is_released() {
     assert_no_open_transaction(dir.path());
     assert_eq!(name(&store, &id), None);
 
-    store.atomically(|tx| tx.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "committed"}))).unwrap();
+    store
+        .atomically(|tx| {
+            tx.put(
+                kind::WORKSPACE,
+                &id,
+                None,
+                None,
+                0.0,
+                &workspace(&id, "committed"),
+            )
+        })
+        .unwrap();
     assert_no_open_transaction(dir.path());
     assert_eq!(name(&store, &id).as_deref(), Some("committed"));
 }
@@ -229,7 +258,7 @@ fn every_transaction_ends_before_the_connection_is_released() {
 fn consistent_reads_take_no_write_lock_and_see_one_state() {
     let (dir, store, dek) = open();
     let id = Id::new();
-    store.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "kept"})).unwrap();
+    store.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "kept")).unwrap();
     // A second connection to the same database, as another process would have.
     let other = Store::open(dir.path(), dek).unwrap();
 
@@ -239,7 +268,7 @@ fn consistent_reads_take_no_write_lock_and_see_one_state() {
         raw.busy_timeout(Duration::ZERO).unwrap();
         raw.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").expect("a consistent read took the write lock");
         // A write committed elsewhere mid-read is not seen by this read.
-        other.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "changed"})).unwrap();
+        other.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "changed")).unwrap();
         let second = tx.get(kind::WORKSPACE, &id)?;
         Ok((first, second))
     });
@@ -260,12 +289,12 @@ fn a_change_marker_moves_with_every_committed_write() {
     // Taken in a write transaction, it is the same while nothing changed.
     assert_eq!(store.atomically(|tx| tx.as_read().change_marker()).unwrap(), start);
 
-    store.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "one"})).unwrap();
+    store.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "one")).unwrap();
     let own = marker(&store);
     assert_ne!(own, start, "a write through this store");
     // Another connection to the same database, as another process would have.
     let other = Store::open(dir.path(), dek).unwrap();
-    other.put(kind::WORKSPACE, &id, None, None, 0.0, &json!({"name": "two"})).unwrap();
+    other.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "two")).unwrap();
     let elsewhere = marker(&store);
     assert_ne!(elsewhere, own, "a write through another connection");
     let checkpoint = store.checkpoint("marker").unwrap();

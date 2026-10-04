@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Storage: validate sealed object IDs, workspace owners and parents against
+  row metadata, and reject existing-owner changes in transactional saves.
+  Folder/request moves retain their relationship checks. This is a partial
+  GHSA-fmx8-p5wc-hm8p remediation candidate: legacy request revisions lack a
+  sealed historical workspace owner and need an explicit format/migration
+  decision; see `docs/security/workspace-owner-binding.md`.
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
   the filesystem. Missing tools, unsupported formats, malformed metadata,

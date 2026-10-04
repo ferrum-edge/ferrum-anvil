@@ -33,14 +33,45 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     v
 }
 
+fn workspace(id: &Id, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "schema_version": anvil_domain::SCHEMA_VERSION,
+        "created_at": chrono::Utc::now(),
+        "updated_at": chrono::Utc::now(),
+        "name": name,
+    })
+}
+
 #[test]
 fn plaintext_leak_audit_db_wal_checkpoints() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "auditor", "pw", KdfParams::testing()).unwrap();
     let store = Store::open(dir.path(), created.dek.clone()).unwrap();
     let ws = Id::new();
-    let req = serde_json::json!({"url": PLANTED[1], "headers": [["Authorization", format!("Bearer {}", PLANTED[0])]], "body": PLANTED[3]});
-    store.put(kind::REQUEST, &Id::new(), Some(&ws), None, 1.0, &req).unwrap();
+    store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "audit")).unwrap();
+    let id = Id::new();
+    let mut spec = anvil_domain::request::RequestSpec::http("GET", PLANTED[1]);
+    spec.headers.push(anvil_domain::request::KeyValue::new(
+        "Authorization",
+        format!("Bearer {}", PLANTED[0]),
+    ));
+    spec.body = anvil_domain::request::Body::Raw {
+        text: PLANTED[3].into(),
+        content_type: None,
+    };
+    let req = serde_json::json!({
+        "id": id,
+        "schema_version": anvil_domain::SCHEMA_VERSION,
+        "created_at": chrono::Utc::now(),
+        "updated_at": chrono::Utc::now(),
+        "workspace_id": ws,
+        "name": PLANTED[3],
+        "description": PLANTED[0],
+        "sort_key": 1.0,
+        "spec": spec,
+    });
+    store.put(kind::REQUEST, &id, Some(&ws), None, 1.0, &req).unwrap();
     store.put_secret(&Id::new(), Some(&ws), "db password", PLANTED[2]).unwrap();
     store.add_history(&Id::new(), Some(&ws), None, 1, &req, Some(format!("response containing {}", PLANTED[3]).as_bytes())).unwrap();
     store.put_blob(PLANTED[0].as_bytes()).unwrap();
@@ -63,7 +94,7 @@ fn data_015_backend_rejects_every_operation_while_locked() {
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let store = Store::open(dir.path(), created.dek.clone()).unwrap();
     let id = Id::new();
-    store.put(kind::WORKSPACE, &id, None, None, 0.0, &serde_json::json!({"name": "w"})).unwrap();
+    store.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "w")).unwrap();
     store.lock();
     assert!(matches!(store.get::<serde_json::Value>(kind::WORKSPACE, &id), Err(StoreError::Locked)));
     assert!(matches!(store.list::<serde_json::Value>(kind::WORKSPACE, None), Err(StoreError::Locked)));
@@ -95,7 +126,7 @@ fn an_unlock_whose_gate_refuses_never_sets_the_key() {
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let s = Store::open(dir.path(), created.dek.clone()).unwrap();
     let id = Id::new();
-    s.put(kind::WORKSPACE, &id, None, None, 0.0, &serde_json::json!({"name": "w"})).unwrap();
+    s.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "w")).unwrap();
     s.lock();
     // A gate that refuses, as for a lock that landed during the unlock.
     assert!(matches!(s.unlock_if(created.dek.clone(), || false), Err(StoreError::Locked)));
@@ -111,7 +142,7 @@ fn an_unlock_whose_gate_refuses_never_clears_a_newer_key() {
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let s = Store::open(dir.path(), created.dek.clone()).unwrap();
     let id = Id::new();
-    s.put(kind::WORKSPACE, &id, None, None, 0.0, &serde_json::json!({"name": "w"})).unwrap();
+    s.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "w")).unwrap();
     // The key is set, as by a newer unlock that its own gate allowed after the
     // lock that makes this older one refuse.
     assert!(matches!(s.unlock_if(created.dek.clone(), || false), Err(StoreError::Locked)));
@@ -142,7 +173,8 @@ fn atomic_sections_roll_back_on_error() {
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let store = Store::open(dir.path(), created.dek.clone()).unwrap();
     let r: Result<(), StoreError> = store.atomically(|s| {
-        s.put(kind::WORKSPACE, &Id::new(), None, None, 0.0, &serde_json::json!({"n": 1}))?;
+        let id = Id::new();
+        s.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "rolled back"))?;
         Err(StoreError::NotFound("simulated failure mid-import".into()))
     });
     assert!(r.is_err());
