@@ -13,6 +13,15 @@
 
 ### Added
 
+- Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
+  byte-exact, with the accepted unchanged EXISTING shared v1 freeze and strict original
+  diagnostic negative expectations, reader vocabularies and producer description parity.
+  Read-only preview stays unverified/unknown; the real historical Alloy golden is unchanged.
+- Add the separately source-audited Edge v0.9.11 catalog and actual release-asset locks
+  at `c764084b3b51c3f7ffde268c039688d35e49c553`, selected as the candidate lab/new-profile
+  default pending hosted Anvil gates. Preserve 0.9.5/7/8/9/10 catalogs, locks and nightly
+  coverage. Record lifetime/cancellation, timeout, H1 headers/pooling and plugin deltas
+  in `docs/audit/gateway-0.9.11-delta.md`; no new lab/native acceptance or release claim.
 - Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
   finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
   input and a stateless IPC parser preserve redacted producer facts as unverified

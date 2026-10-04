@@ -1,7 +1,11 @@
 # Failure lab: policy, admission and drain profiles
 
+The v0.9.11 default is a reviewed source candidate pending hosted Anvil gates.
+Results and observations below remain historical; see
+[the 0.9.11 source delta](../audit/gateway-0.9.11-delta.md).
+
 Three real-gateway profiles for the WAF/policy and gateway-admission families of the failure matrix.
-Every stimulus drives a pinned Ferrum Edge release binary (v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
+Every stimulus drives a pinned Ferrum Edge release binary (v0.9.11 candidate default, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
 `--release`) with controllable local fixtures. No response is faked, and no failure is
 injected as an enum. Behaviour recorded below as "0.9.5" was re-observed on 0.9.7: every scenario
 passes on both releases with the same expectations, except `GW-010-BOT.allow-edge`, whose verdict is
