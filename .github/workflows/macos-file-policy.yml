@@ -24,7 +24,6 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.90.0
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      CARGO_TARGET_DIR: ${{ runner.temp }}/anvil-macos-policy-target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,6 +45,8 @@ jobs:
           cargo --version
       - name: Qualify native ACLs and reject a private Ignore Ownership image
         shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/anvil-macos-policy-target
         run: |
           set -euo pipefail
           fixture="$(mktemp -d "$RUNNER_TEMP/anvil-macos-policy.XXXXXX")"
