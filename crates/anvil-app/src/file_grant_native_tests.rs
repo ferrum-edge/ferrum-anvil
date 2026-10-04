@@ -249,13 +249,7 @@ mod windows_publish {
     #[link(name = "advapi32")]
     unsafe extern "system" {
         #[link_name = "GetKernelObjectSecurity"]
-        fn get_kernel_object_security(
-            handle: *mut c_void,
-            requested: u32,
-            descriptor: *mut c_void,
-            length: u32,
-            needed: *mut u32,
-        ) -> i32;
+        fn get_kernel_object_security(handle: *mut c_void, requested: u32, descriptor: *mut c_void, length: u32, needed: *mut u32) -> i32;
     }
 
     fn security(file: &File) -> (u32, Vec<u32>) {
@@ -265,15 +259,7 @@ mod windows_publish {
         let mut needed = 0;
         // SAFETY: borrowed handle and initialized length output; a null
         // zero-length buffer asks the API for its required allocation size.
-        let ok = unsafe {
-            get_kernel_object_security(
-                file.as_raw_handle(),
-                7,
-                std::ptr::null_mut(),
-                0,
-                &mut needed,
-            )
-        };
+        let ok = unsafe { get_kernel_object_security(file.as_raw_handle(), 7, std::ptr::null_mut(), 0, &mut needed) };
         assert_eq!(ok, 0);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(122));
         assert!(needed >= 20);
@@ -281,21 +267,8 @@ mod windows_publish {
         let mut storage = vec![0u32; usize::try_from(length).unwrap().div_ceil(4)];
         // SAFETY: a fully initialized, DWORD-aligned buffer with at least
         // length bytes and a live handle are borrowed synchronously.
-        let ok = unsafe {
-            get_kernel_object_security(
-                file.as_raw_handle(),
-                7,
-                storage.as_mut_ptr().cast(),
-                length,
-                &mut needed,
-            )
-        };
-        assert_ne!(
-            ok,
-            0,
-            "descriptor security query: {}",
-            io::Error::last_os_error()
-        );
+        let ok = unsafe { get_kernel_object_security(file.as_raw_handle(), 7, storage.as_mut_ptr().cast(), length, &mut needed) };
+        assert_ne!(ok, 0, "descriptor security query: {}", io::Error::last_os_error());
         assert_eq!(needed, length);
         (length, storage)
     }
@@ -315,17 +288,11 @@ mod windows_publish {
         let grants = FileGrants::default();
         let grant = grants.grant_write(FilePurpose::BundleExport, &destination).unwrap();
         let entry = grants.lookup(&grant.token, FilePurpose::BundleExport).unwrap();
-        let Target::Write { dir, name } = &entry.target else {
-            unreachable!()
-        };
+        let Target::Write { dir, name } = &entry.target else { unreachable!() };
         let mut publication = OwnedPublication::create(dir, true).unwrap();
         publication.file.write_all(b"owned native bytes").unwrap();
         publication.file.sync_all().unwrap();
-        let source_id = file_id(
-            &publication.file,
-            &publication.file.metadata().unwrap(),
-        )
-        .unwrap();
+        let source_id = file_id(&publication.file, &publication.file.metadata().unwrap()).unwrap();
         let source_security = security(&publication.file);
         let parent = dir.dir().try_clone().unwrap().into_std_file();
         let parent_id = file_id(&parent, &parent.metadata().unwrap()).unwrap();
@@ -339,16 +306,10 @@ mod windows_publish {
         // name go through NtSetInformationFile, with no precheck substitute.
         publication.publish(dir, name).expect("native rooted rename must succeed");
         let final_file = File::open(&destination).unwrap();
-        assert_eq!(
-            file_id(&final_file, &final_file.metadata().unwrap()).unwrap(),
-            source_id
-        );
+        assert_eq!(file_id(&final_file, &final_file.metadata().unwrap()).unwrap(), source_id);
         assert_eq!(security(&final_file), source_security);
         assert_eq!(security(&publication.file), source_security);
-        assert_eq!(
-            file_id(&parent, &parent.metadata().unwrap()).unwrap(),
-            parent_id
-        );
+        assert_eq!(file_id(&parent, &parent.metadata().unwrap()).unwrap(), parent_id);
         assert_eq!(std::fs::read(&destination).unwrap(), b"owned native bytes");
         assert!(!staging.exists(), "rename consumes the owned source name");
         assert_eq!(std::fs::read(&foreign).unwrap(), b"outside native canary");
@@ -378,17 +339,11 @@ mod windows_publish {
             let grants = FileGrants::default();
             let grant = grants.grant_write(FilePurpose::BundleExport, &destination).unwrap();
             let entry = grants.lookup(&grant.token, FilePurpose::BundleExport).unwrap();
-            let Target::Write { dir, name } = &entry.target else {
-                unreachable!()
-            };
+            let Target::Write { dir, name } = &entry.target else { unreachable!() };
             let mut publication = OwnedPublication::create(dir, true).unwrap();
             publication.file.write_all(b"owned native bytes").unwrap();
             publication.file.sync_all().unwrap();
-            let source_id = file_id(
-                &publication.file,
-                &publication.file.metadata().unwrap(),
-            )
-            .unwrap();
+            let source_id = file_id(&publication.file, &publication.file.metadata().unwrap()).unwrap();
             let source_security = security(&publication.file);
             let staging = std::fs::read_dir(&selected).unwrap().next().unwrap().unwrap().path();
             if hardlink {
@@ -404,26 +359,12 @@ mod windows_publish {
             assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
             assert!(matches!(error.raw_os_error(), Some(80 | 183)), "{error}");
             let occupied = File::open(&destination).unwrap();
-            assert_eq!(
-                file_id(&occupied, &occupied.metadata().unwrap()).unwrap(),
-                occupied_id
-            );
+            assert_eq!(file_id(&occupied, &occupied.metadata().unwrap()).unwrap(), occupied_id);
             assert_eq!(security(&occupied), occupied_security);
-            assert_eq!(
-                file_id(
-                    &publication.file,
-                    &publication.file.metadata().unwrap(),
-                )
-                .unwrap(),
-                source_id
-            );
+            assert_eq!(file_id(&publication.file, &publication.file.metadata().unwrap(),).unwrap(), source_id);
             assert_eq!(security(&publication.file), source_security);
             assert_eq!(std::fs::read(&staging).unwrap(), b"owned native bytes");
-            let expected: &[u8] = if hardlink {
-                b"outside native canary"
-            } else {
-                b"foreign occupied leaf"
-            };
+            let expected: &[u8] = if hardlink { b"outside native canary" } else { b"foreign occupied leaf" };
             assert_eq!(std::fs::read(&destination).unwrap(), expected);
             assert_eq!(std::fs::read(&canary).unwrap(), b"outside native canary");
             assert_eq!(std::fs::read_dir(&selected).unwrap().count(), 2);
@@ -432,10 +373,7 @@ mod windows_publish {
             // The same owned handle can still publish to an unused leaf.
             // A blanket API failure (including error 87) cannot pass here.
             publication.publish(dir, std::ffi::OsStr::new("retry.anvil")).unwrap();
-            assert_eq!(
-                std::fs::read(selected.join("retry.anvil")).unwrap(),
-                b"owned native bytes"
-            );
+            assert_eq!(std::fs::read(selected.join("retry.anvil")).unwrap(), b"owned native bytes");
             assert!(!staging.exists());
             assert_eq!(std::fs::read_dir(&selected).unwrap().count(), 2);
             drop(occupied);
@@ -638,10 +576,7 @@ mod macos_acl {
                     || grants.write(&grant.token, FilePurpose::BundleExport, b"private canary"),
                 )
             });
-            assert!(
-                reached.get(),
-                "production export must reach the policy barrier: {result:?}"
-            );
+            assert!(reached.get(), "production export must reach the policy barrier: {result:?}");
             assert!(result.unwrap_err().to_string().contains("local APFS with ownership enabled"));
             assert!(!destination.exists(), "policy rejection must precede cloning");
             let staging = std::fs::read_dir(&directory)
@@ -743,10 +678,7 @@ mod macos_acl {
                 },
                 || grants.write(&grant.token, FilePurpose::BundleExport, b"owner-only bundle canary"),
             );
-            assert!(
-                reached.get(),
-                "production export must reach the ACL mutation barrier: {written:?}"
-            );
+            assert!(reached.get(), "production export must reach the ACL mutation barrier: {written:?}");
             assert_eq!(written.unwrap(), 24);
             assert_eq!(std::fs::read(&destination).unwrap(), b"owner-only bundle canary");
             assert_denied(&destination);
@@ -786,19 +718,11 @@ mod macos_acl {
                             .unwrap();
                         match change {
                             "remove-acl" => {
-                                let output = Command::new("/bin/chmod")
-                                    .arg("-N")
-                                    .arg(&staging)
-                                    .output()
-                                    .unwrap();
+                                let output = Command::new("/bin/chmod").arg("-N").arg(&staging).output().unwrap();
                                 assert!(output.status.success(), "{output:?}");
                             }
                             "add-entry" => inheritable_acl(&staging, "everyone allow read"),
-                            "mode" => std::fs::set_permissions(
-                                &staging,
-                                std::fs::Permissions::from_mode(0o640),
-                            )
-                            .unwrap(),
+                            "mode" => std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o640)).unwrap(),
                             _ => unreachable!(),
                         }
                     }
@@ -806,10 +730,7 @@ mod macos_acl {
                 },
                 || grants.write(&grant.token, FilePurpose::BundleExport, b"private canary"),
             );
-            assert!(
-                reached.get(),
-                "native staging must succeed before mutation: {result:?}"
-            );
+            assert!(reached.get(), "native staging must succeed before mutation: {result:?}");
             let error = result.unwrap_err().to_string();
             assert!(error.contains("export requires"), "{error}");
             assert!(!error.contains("private canary"));

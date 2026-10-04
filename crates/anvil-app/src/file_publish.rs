@@ -396,10 +396,7 @@ mod macos {
         };
         let mut result = SecurityAttributes {
             length: 0,
-            reference: libc::attrreference_t {
-                attr_dataoffset: 0,
-                attr_length: 0,
-            },
+            reference: libc::attrreference_t { attr_dataoffset: 0, attr_length: 0 },
             security: EmptyFilesec::default(),
         };
         const _: () = assert!(size_of::<EmptyFilesec>() == 44);
@@ -471,13 +468,7 @@ mod windows {
     #[link(name = "ntdll")]
     unsafe extern "system" {
         #[link_name = "NtSetInformationFile"]
-        fn nt_set_information_file(
-            file: *mut c_void,
-            status: *mut IoStatusBlock,
-            information: *mut c_void,
-            size: u32,
-            class: i32,
-        ) -> i32;
+        fn nt_set_information_file(file: *mut c_void, status: *mut IoStatusBlock, information: *mut c_void, size: u32, class: i32) -> i32;
         #[link_name = "RtlNtStatusToDosError"]
         fn rtl_nt_status_to_dos_error(status: i32) -> u32;
     }
@@ -498,12 +489,7 @@ mod windows {
         assert!(align_of::<usize>() >= align_of::<RenameInfo>());
         let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
         let pointer = storage.as_mut_ptr().cast::<RenameInfo>();
-        let mut completion = IoStatusBlock {
-            status: IoStatus {
-                pointer: std::ptr::null_mut(),
-            },
-            information: 0,
-        };
+        let mut completion = IoStatusBlock { status: IoStatus { pointer: std::ptr::null_mut() }, information: 0 };
         // SAFETY: storage is aligned, initialized and large enough for the
         // complete header plus all UTF-16 units. Both handles are borrowed
         // from live owners. create() uses cap-std's synchronous NtCreateFile
@@ -521,20 +507,13 @@ mod windows {
             (*pointer).file_name_length = bytes32;
             let destination = storage.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>();
             std::ptr::copy_nonoverlapping(name.as_ptr(), destination, name.len());
-            nt_set_information_file(
-                file.as_raw_handle(),
-                &mut completion,
-                pointer.cast(),
-                size32,
-                10,
-            )
+            nt_set_information_file(file.as_raw_handle(), &mut completion, pointer.cast(), size32, 10)
         };
         if status < 0 {
             // Nt APIs return NTSTATUS, not a Win32 last-error value.
             // SAFETY: this conversion accepts any NTSTATUS and borrows nothing.
             let code = unsafe { rtl_nt_status_to_dos_error(status) };
-            let code = i32::try_from(code)
-                .map_err(|_| io::Error::other(format!("rename failed: NTSTATUS {status:#x}")))?;
+            let code = i32::try_from(code).map_err(|_| io::Error::other(format!("rename failed: NTSTATUS {status:#x}")))?;
             Err(io::Error::from_raw_os_error(code))
         } else {
             Ok(())

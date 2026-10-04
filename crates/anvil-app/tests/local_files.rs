@@ -411,30 +411,13 @@ async fn a_saved_linked_file_is_inert_until_it_is_chosen_for_that_request_on_thi
     let before_bindings = serde_json::to_value(app.linked_file_bindings().unwrap()).unwrap();
     let before_request = serde_json::to_value(app.request(&later.meta.id).unwrap()).unwrap();
     let err = refused(app.bind_linked_file(request(&later), &other), "a file the request does not name");
-    assert_eq!(
-        err,
-        format!(
-            "the request does not name the linked file '{}', so it cannot be relocated",
-            other.display()
-        )
-    );
+    assert_eq!(err, format!("the request does not name the linked file '{}', so it cannot be relocated", other.display()));
     assert!(!err.contains(CANARY), "{err}");
     assert_eq!(app.linked_file_bindings().unwrap().len(), saved.len());
-    assert_eq!(
-        serde_json::to_value(app.linked_file_bindings().unwrap()).unwrap(),
-        before_bindings
-    );
-    assert_eq!(
-        serde_json::to_value(app.request(&later.meta.id).unwrap()).unwrap(),
-        before_request
-    );
+    assert_eq!(serde_json::to_value(app.linked_file_bindings().unwrap()).unwrap(), before_bindings);
+    assert_eq!(serde_json::to_value(app.request(&later.meta.id).unwrap()).unwrap(), before_request);
     let err = refused(
-        app.build_context(
-            Some(later.meta.id),
-            &ws.meta.id,
-            None,
-            &SendOptions::default(),
-        ),
+        app.build_context(Some(later.meta.id), &ws.meta.id, None, &SendOptions::default()),
         "rejected binding leaves the request unbound",
     );
     assert!(err.contains("not chosen on this device") && !err.contains(CANARY), "{err}");
@@ -623,23 +606,11 @@ fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() 
     let before_bindings = serde_json::to_value(app.linked_file_bindings().unwrap()).unwrap();
     let before_request = serde_json::to_value(app.request(&r.meta.id).unwrap()).unwrap();
     let err = refused(app.bind_linked_file(request(&r), &moved), "moved");
-    assert_eq!(
-        err,
-        format!(
-            "the request does not name the linked file '{}', so it cannot be relocated",
-            canonical(&moved).display()
-        )
-    );
+    assert_eq!(err, format!("the request does not name the linked file '{}', so it cannot be relocated", canonical(&moved).display()));
     assert!(!err.contains(CANARY), "{err}");
     assert_eq!(app.linked_file_bindings().unwrap().len(), bindings);
-    assert_eq!(
-        serde_json::to_value(app.linked_file_bindings().unwrap()).unwrap(),
-        before_bindings
-    );
-    assert_eq!(
-        serde_json::to_value(app.request(&r.meta.id).unwrap()).unwrap(),
-        before_request
-    );
+    assert_eq!(serde_json::to_value(app.linked_file_bindings().unwrap()).unwrap(), before_bindings);
+    assert_eq!(serde_json::to_value(app.request(&r.meta.id).unwrap()).unwrap(), before_request);
     assert_eq!(states(&app, request(&r)), vec![LinkedFileState::Invalid]);
     assert!(ctx.attachments.load(&linked(&path)).is_err());
     assert!(ctx.attachments.load(&linked(&moved)).is_err());
