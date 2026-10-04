@@ -569,16 +569,17 @@ async fn connect_udp(
     let reset_after = query_u64(&qs, "reset_after");
     let fin_after = query_u64(&qs, "fin_after");
     let timed_end = match (query_u64(&qs, "reset_after_ms"), query_u64(&qs, "fin_after_ms")) {
-        (Some(ms), _) => Some((std::time::Duration::from_millis(ms), true)),
-        (None, Some(ms)) => Some((std::time::Duration::from_millis(ms), false)),
+        (Some(ms), _) => Some((std::time::Duration::from_millis(ms), ConnectUdpEnd::Reset)),
+        (None, Some(ms)) => Some((std::time::Duration::from_millis(ms), ConnectUdpEnd::Fin)),
         (None, None) => None,
     };
     // Armed by the first client datagram: a reset abandons unsent stream data,
     // so one timed from the 2xx could reach the client before the headers did.
-    let mut end_at: Option<tokio::time::Instant> = None;
-    let arm = |end_at: &mut Option<tokio::time::Instant>| {
+    // Arm before sending to the target, so socket backpressure cannot defer it.
+    let mut end_at: Option<(tokio::time::Instant, ConnectUdpEnd)> = None;
+    let arm = |end_at: &mut Option<(tokio::time::Instant, ConnectUdpEnd)>| {
         if end_at.is_none() {
-            *end_at = timed_end.map(|(after, _)| tokio::time::Instant::now() + after);
+            *end_at = timed_end.map(|(after, end)| (tokio::time::Instant::now() + after, end));
         }
     };
     let quarter = stream.id().into_inner() / 4;
@@ -588,8 +589,6 @@ async fn connect_udp(
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 65_536];
     let mut replies = 0u64;
-    let mut ended = false;
-    let mut clean_fin = false;
     // Client → target: one Context ID 0 payload.
     let relay = |ctx_and_payload: &[u8], via: &str| -> Option<Vec<u8>> {
         let mut pos = 0;
@@ -600,21 +599,16 @@ async fn connect_udp(
         log.push(GroundTruth::DatagramRelayed { bytes: (ctx_and_payload.len() - pos) as u64, via: via.into() });
         Some(ctx_and_payload[pos..].to_vec())
     };
-    loop {
+    let end = 'relay: loop {
+        if let Some(end) = due_connect_udp_end(end_at) {
+            break Some(end);
+        }
         tokio::select! {
-            // A due end goes first, so a zero delay ends the tunnel before any
-            // reply to the first datagram can come back through it.
+            // Prefer timer wakes, but enforce the absolute deadline again at
+            // the reply boundary: Sleep can be Pending until its wheel wakes.
             biased;
-            _ = tokio::time::sleep_until(end_at.unwrap_or_else(tokio::time::Instant::now)), if end_at.is_some() => {
-                if timed_end.map(|t| t.1).unwrap_or(false) {
-                    log.push(GroundTruth::FaultApplied { fault: "masque_reset".into() });
-                    send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
-                } else {
-                    log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
-                    clean_fin = true;
-                }
-                ended = true;
-                break;
+            _ = tokio::time::sleep_until(end_at.map(|t| t.0).unwrap_or_else(tokio::time::Instant::now)), if end_at.is_some() => {
+                break end_at.map(|t| t.1);
             }
             c = recv.recv_data() => match c {
                 Ok(Some(mut chunk)) => {
@@ -629,24 +623,37 @@ async fn connect_udp(
                         }
                         let value: Vec<u8> = pending[pos..pos + len].to_vec();
                         pending.drain(..pos + len);
+                        if let Some(end) = due_connect_udp_end(end_at) {
+                            break 'relay Some(end);
+                        }
                         if ty == 0
                             && let Some(p) = relay(&value, "capsule")
                         {
-                            let _ = sock.send(&p).await;
                             arm(&mut end_at);
+                            let _ = sock.send(&p).await;
+                            if let Some(end) = due_connect_udp_end(end_at) {
+                                break 'relay Some(end);
+                            }
                         }
                     }
                 }
-                _ => break,
+                _ => break None,
             },
             Some(d) = rx_dgram.recv() => {
+                if let Some(end) = due_connect_udp_end(end_at) {
+                    break Some(end);
+                }
                 if let Some(p) = relay(&d, "quic_datagram") {
-                    let _ = sock.send(&p).await;
                     arm(&mut end_at);
+                    let _ = sock.send(&p).await;
                 }
             }
-            r = sock.recv(&mut buf) => {
-                let Ok(n) = r else { break };
+            r = recv_connect_udp_reply(&sock, &mut buf, end_at) => {
+                let n = match r {
+                    Ok(ConnectUdpReply::Data(n)) => n,
+                    Ok(ConnectUdpReply::End(end)) => break Some(end),
+                    Err(_) => break None,
+                };
                 let sent = if quic_replies {
                     let mut out = Vec::with_capacity(n + 9);
                     put_varint(&mut out, quarter);
@@ -662,36 +669,37 @@ async fn connect_udp(
                     send.send_data(Bytes::from(out)).await.is_ok()
                 };
                 if !sent {
-                    break;
+                    break None;
                 }
                 replies += 1;
                 if reset_after == Some(replies) {
                     // Let the reply leave before the reset abandons unsent stream data.
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    log.push(GroundTruth::FaultApplied { fault: "masque_reset".into() });
-                    send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
-                    ended = true;
-                    break;
+                    break Some(ConnectUdpEnd::Reset);
                 }
                 if fin_after == Some(replies) {
-                    log.push(GroundTruth::FaultApplied { fault: "masque_fin".into() });
-                    clean_fin = true;
-                    ended = true;
-                    break;
+                    break Some(ConnectUdpEnd::Fin);
                 }
             }
         }
-    }
+    };
     router.0.lock().remove(&quarter);
     drop(rx_dgram);
-    if ended {
+    if let Some(end) = end {
         // Ending the response does not end the request half. Dropping an
         // unread quinn receive stream sends STOP_SENDING(0), which can fail
-        // a pending DTLS flight before the
-        // client reads our FIN or RESET. Stop forwarding and drain that half.
+        // a pending DTLS flight before the client reads our FIN or RESET.
+        // Stop forwarding and drain that half.
         drop(sock);
         drop(pending);
-        if clean_fin {
+        let fault = match end {
+            ConnectUdpEnd::Fin => "masque_fin",
+            ConnectUdpEnd::Reset => "masque_reset",
+        };
+        log.push(GroundTruth::FaultApplied { fault: fault.into() });
+        if end == ConnectUdpEnd::Reset {
+            send.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+        } else {
             let write_bound = std::time::Duration::from_millis(200);
             let finished = tokio::time::timeout(write_bound, send.finish()).await;
             if !matches!(finished, Ok(Ok(()))) {
@@ -700,11 +708,40 @@ async fn connect_udp(
                 return;
             }
         }
-        let end = if clean_fin { "masque_fin" } else { "masque_reset" };
-        drain_connect_udp_request(&mut recv, &log, end).await;
+        drain_connect_udp_request(&mut recv, &log, fault).await;
     } else {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), send.finish()).await;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectUdpEnd {
+    Fin,
+    Reset,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectUdpReply {
+    Data(usize),
+    End(ConnectUdpEnd),
+}
+
+fn due_connect_udp_end(end_at: Option<(tokio::time::Instant, ConnectUdpEnd)>) -> Option<ConnectUdpEnd> {
+    end_at.filter(|(at, _)| tokio::time::Instant::now() >= *at).map(|(_, end)| end)
+}
+
+async fn recv_connect_udp_reply(
+    sock: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+    end_at: Option<(tokio::time::Instant, ConnectUdpEnd)>,
+) -> std::io::Result<ConnectUdpReply> {
+    let n = sock.recv(buf).await?;
+    // This runs in the same poll that receives the UDP reply, before either
+    // capsule or QUIC DATAGRAM forwarding. It needs no timer-wheel repoll.
+    Ok(match due_connect_udp_end(end_at) {
+        Some(end) => ConnectUdpReply::End(end),
+        None => ConnectUdpReply::Data(n),
+    })
 }
 
 const CONNECT_UDP_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
@@ -863,9 +900,9 @@ mod connect_udp_tests {
             let mut buf = [0u8; 32];
             let (n, peer) = t.target.recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], b"x");
-            if reply {
-                t.target.send_to(b"reply", peer).await.unwrap();
-            }
+            // The timed FIN must suppress a real reply too, not just finish
+            // while the target remains silent. fin_after=1 must deliver it.
+            t.target.send_to(b"reply", peer).await.unwrap();
             let mut body = Vec::new();
             while let Some(mut chunk) = t.stream.recv_data().await.unwrap() {
                 let n = chunk.remaining();
@@ -887,6 +924,44 @@ mod connect_udp_tests {
             GroundTruth::FaultApplied { fault: f } => f == fault,
             _ => false,
         })
+    }
+
+    #[tokio::test]
+    async fn a_ready_udp_reply_cannot_overtake_an_expired_end_without_a_timer_poll() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for end in [ConnectUdpEnd::Fin, ConnectUdpEnd::Reset] {
+                for overdue in [Duration::ZERO, Duration::from_millis(1)] {
+                    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    sock.connect(target.local_addr().unwrap()).await.unwrap();
+                    sock.send(b"hello").await.unwrap();
+                    let mut buf = [0u8; 32];
+                    let (n, peer) = target.recv_from(&mut buf).await.unwrap();
+                    assert_eq!(&buf[..n], b"hello");
+                    target.send_to(b"reply", peer).await.unwrap();
+                    sock.readable().await.unwrap();
+
+                    // Queue the real reply before expiring the absolute end.
+                    // No await or timer poll may give the wheel a turn between
+                    // that deadline and polling the actual relay boundary.
+                    let at = tokio::time::Instant::now() - overdue;
+                    let _unpolled_timer = tokio::time::sleep_until(at);
+                    let result = {
+                        let reply = recv_connect_udp_reply(&sock, &mut buf, Some((at, end)));
+                        tokio::pin!(reply);
+                        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+                        std::future::Future::poll(reply.as_mut(), &mut cx)
+                    };
+                    let std::task::Poll::Ready(Ok(reply)) = result else {
+                        panic!("the queued UDP reply must be ready in the first poll: {result:?}");
+                    };
+                    assert_eq!(&buf[..5], b"reply", "the boundary consumed the real UDP packet");
+                    assert_eq!(reply, ConnectUdpReply::End(end), "an expired reply must never be forwarded");
+                }
+            }
+        })
+        .await
+        .expect("real UDP readiness must be bounded");
     }
 
     #[tokio::test]
@@ -929,8 +1004,9 @@ mod connect_udp_tests {
                 let first = Bytes::from_static(&[0, 2, 0, b'x']);
                 t.stream.send_data(first).await.unwrap();
                 let mut buf = [0u8; 32];
-                let (n, _) = t.target.recv_from(&mut buf).await.unwrap();
+                let (n, peer) = t.target.recv_from(&mut buf).await.unwrap();
                 assert_eq!(&buf[..n], b"x");
+                t.target.send_to(b"reply", peer).await.unwrap();
                 let error = t.stream.recv_data().await.err().expect("response must be reset");
                 assert!(matches!(
                     error,

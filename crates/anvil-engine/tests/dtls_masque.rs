@@ -408,6 +408,8 @@ async fn a_tunnel_ending_during_the_handshake_fails_the_handshake_typed() {
         finding(&o, "masque.tunnel_ended_abnormally");
         assert!(o.record.stream.is_none());
         assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+        assert_eq!(tunnel(&o).2.received_capsules, 0, "no handshake replies after RESET");
+        assert_eq!(app_datagrams(&echo.log), 0);
         // A clean response FIN after ClientHello cannot complete DTLS. The
         // fixture retains the request half while any remaining flight drains.
         let fin = "/.well-known/masque/udp/{target_host}/{target_port}/?fin_after_ms=0";
