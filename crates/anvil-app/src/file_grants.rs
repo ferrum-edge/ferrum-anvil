@@ -328,6 +328,7 @@ impl FileGrants {
         if !picked.is_absolute() {
             return Err(GrantError::Invalid("the chosen file has no absolute path".into()));
         }
+        self.prepare_acquisition(generation)?;
         let selected = SelectedFile::choose(picked, &self.budget)
             .map_err(|err| if err.kind() == std::io::ErrorKind::InvalidInput { GrantError::Invalid(err.to_string()) } else { io(err) })?;
         let file_name = display_name(selected.path.file_name());
@@ -351,6 +352,7 @@ impl FileGrants {
         let (Some(parent), Some(_)) = (picked.parent(), picked.file_name()) else {
             return Err(GrantError::Invalid("choose a file name, not a folder".into()));
         };
+        self.prepare_acquisition(generation)?;
         let canonical = std::fs::canonicalize(parent).map_err(io)?;
         #[cfg(test)]
         crate::file_handles::test_checkpoint("write_choose_canonical");
@@ -456,6 +458,24 @@ impl FileGrants {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Retire expired registry owners before reserving any new descriptors.
+    /// Operations retaining an Arc keep their native handles and lifetime
+    /// charges. Acquisition stays outside the mutex; insert checks the same
+    /// dialog generation again, so revocation during acquisition grants nothing.
+    fn prepare_acquisition(&self, generation: u64) -> Result<(), GrantError> {
+        let mut g = self.state.lock();
+        let retired = self.prune(&mut g.entries);
+        let current = g.generation == generation;
+        drop(g);
+        drop(retired);
+        if !current {
+            return Err(GrantError::Revoked);
+        }
+        #[cfg(test)]
+        crate::file_handles::test_checkpoint("grant_acquisition_prepared");
+        Ok(())
     }
 
     fn insert(
@@ -581,6 +601,8 @@ fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), G
     crate::file_handles::test_checkpoint("write_selected");
     refuse_occupied(dir, name)?;
     let mut publication = OwnedPublication::create(dir, owner_only).map_err(io)?;
+    #[cfg(test)]
+    crate::file_handles::test_checkpoint("write_staged");
     publication.file.write_all(bytes).map_err(io)?;
     publication.file.sync_all().map_err(io)?;
     #[cfg(test)]
@@ -619,3 +641,7 @@ fn size_label(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     if bytes.is_multiple_of(GIB) { format!("{} GiB", bytes / GIB) } else { format!("{} MiB", bytes >> 20) }
 }
+
+#[cfg(test)]
+#[path = "file_grant_native_tests.rs"]
+mod native_tests;
