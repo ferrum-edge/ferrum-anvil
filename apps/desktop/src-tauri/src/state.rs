@@ -464,8 +464,8 @@ pub(crate) mod tests {
         use std::time::Duration;
 
         for existing in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let st = Arc::new(DesktopState::new(root.path().to_path_buf()));
+            let root = TempRoot::new();
+            let st = Arc::new(DesktopState::new(root.0.clone()));
             let (summary, key, _) = st
                 .profiles
                 .create_passphrase_with_identity_expectation("draft fence", PASSPHRASE, anvil_storage::KdfParams::testing())

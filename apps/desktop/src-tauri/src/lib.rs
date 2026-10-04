@@ -261,6 +261,8 @@ pub fn run() {
 /// `scripts/release-check.sh`).
 #[cfg(feature = "e2e")]
 fn e2e_unlock(st: &DesktopState) {
+    use anvil_app::profiles::{ProfileManager, Unlock};
+
     let (Some(name), Some(pass)) = (std::env::var("ANVIL_E2E_PROFILE").ok(), std::env::var("ANVIL_E2E_PASSPHRASE").ok()) else {
         return;
     };
@@ -272,15 +274,12 @@ fn e2e_unlock(st: &DesktopState) {
         },
     };
     let seen = st.epoch();
-    match anvil_app::profiles::ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(&pass)) {
-        Ok((header, key)) => match anvil_app::App::open(dir, header, key) {
-            Ok(app) => {
-                if let Err(e) = st.set_app_since(app, seen) {
-                    eprintln!("e2e: open failed: {e}");
-                }
+    match ProfileManager::authorize_unlock(&dir, Unlock::Passphrase(&pass), None) {
+        Ok(authorization) => {
+            if let Err(e) = st.install_authorized(authorization, seen) {
+                eprintln!("e2e: open failed: {e}");
             }
-            Err(e) => eprintln!("e2e: open failed: {e}"),
-        },
+        }
         Err(e) => eprintln!("e2e: unlock failed: {e}"),
     }
 }

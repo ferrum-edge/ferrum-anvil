@@ -276,8 +276,7 @@ pub(crate) fn read_binding(dir: &Path, h: &ProfileHeader) -> Result<Option<ReadB
     if let Some(expectation) = &h.identity_binding {
         match (&expectation.binding, &file) {
             (None, None) => return Ok(None),
-            (Some(expected), Some(_)) if expected.version == VERSION && *expected == vault::identity_binding_digest(&bytes, VERSION) => {
-            }
+            (Some(expected), Some(_)) if expected.version == VERSION && *expected == vault::identity_binding_digest(&bytes, VERSION) => {}
             _ => return Err(IdentityPolicyError::BindingTampered.into()),
         }
     }

@@ -1134,13 +1134,9 @@ mod tests {
         for phase in ["pending", "binding", "final"] {
             for point in points {
                 let dir = tempfile::tempdir().unwrap();
-                let created = create_passphrase_profile_with_identity_expectation(
-                    dir.path(),
-                    "cutpoint",
-                    "passphrase",
-                    KdfParams::testing(),
-                )
-                .unwrap();
+                let created =
+                    create_passphrase_profile_with_identity_expectation(dir.path(), "cutpoint", "passphrase", KdfParams::testing())
+                        .unwrap();
                 let guard = lock_identity_header(dir.path()).unwrap();
                 let contents = "sealed fixture bytes".to_string();
                 let digest = identity_binding_digest(contents.as_bytes(), 1);
@@ -1213,8 +1209,8 @@ mod tests {
     #[test]
     fn an_actual_removal_failure_never_finalizes_the_pending_header() {
         let dir = tempfile::tempdir().unwrap();
-        let created = create_passphrase_profile_with_identity_expectation(dir.path(), "remove failure", "passphrase", KdfParams::testing())
-            .unwrap();
+        let created =
+            create_passphrase_profile_with_identity_expectation(dir.path(), "remove failure", "passphrase", KdfParams::testing()).unwrap();
         let guard = lock_identity_header(dir.path()).unwrap();
         guard
             .begin_identity_publication(&created.header, &created.dek, IdentityBindingPublication { binding: None, contents: None })
