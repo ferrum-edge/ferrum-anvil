@@ -77,7 +77,7 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
 
 /// The strongest trust Anvil can have in an audited gateway release: a trusted
 /// profile over verified TLS. Markers stay spoofable on every audited release
-/// (0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10 and 0.9.11), so nothing may exceed `likely`.
+/// (0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10 and 0.9.11), so attribution never exceeds `likely`.
 fn trusted_verified(compat: &str) -> FerrumTrust {
     FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: true }
 }
@@ -94,6 +94,19 @@ fn coarse_connection_failure(trust: FerrumTrust) -> Diagnosis {
 
 fn codes(d: &Diagnosis) -> Vec<&str> {
     d.findings.iter().map(|f| f.code.as_str()).collect()
+}
+
+/// Confirming an unverified header's observation does not attribute it to a
+/// gateway. Every other public Ferrum finding remains at most likely.
+fn assert_public_ferrum_confidence(d: &Diagnosis) {
+    for f in d.findings.iter().filter(|f| f.code.starts_with("ferrum.")) {
+        if f.code == "ferrum.marker.unverified" {
+            assert_eq!(f.confidence, Confidence::Confirmed);
+            assert_eq!(f.scope, SourceScope::Unknown);
+        } else {
+            assert!(f.confidence <= Confidence::Likely, "{} confidence is {:?}", f.code, f.confidence);
+        }
+    }
 }
 
 /// Every user-visible statement of a finding that asserts something (title and
@@ -280,28 +293,16 @@ fn up_018_reqwest_lane_for(compat: &str) {
 fn up_018_direct_h1_ceiling_uses_the_0_9_11_ambiguous_setup_signal() {
     let compat = "ferrum-edge-0.9.11";
     let direct_h1 = |trust| {
-        let mut r = response(
-            502,
-            &[("x-gateway-error", "connection_failure"), ("via", "1.1 ferrum-edge")],
-            BACKEND_UNAVAILABLE,
-        );
+        let mut r = response(502, &[("x-gateway-error", "connection_failure"), ("via", "1.1 ferrum-edge")], BACKEND_UNAVAILABLE);
         // The dispatch failure builder has an empty header map; the finalizer
         // adds the marker and Via, but no Content-Type.
         r.body.content_type = None;
         diagnose_http(&r, BACKEND_UNAVAILABLE, trust)
     };
     for channel_authenticated in [true, false] {
-        let trust = FerrumTrust::Trusted {
-            profile_name: "lab".into(),
-            compatibility_id: compat.into(),
-            channel_authenticated,
-        };
+        let trust = FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated };
         let d = direct_h1(trust);
-        let tok = d
-            .findings
-            .iter()
-            .find(|f| f.code == "ferrum.token.connection_failure")
-            .expect("direct-H1 coarse token");
+        let tok = d.findings.iter().find(|f| f.code == "ferrum.token.connection_failure").expect("direct-H1 coarse token");
         assert_eq!(tok.confidence, Confidence::Likely);
         assert_eq!(tok.scope, SourceScope::GatewayToUpstream);
         let (amb, ids) = ambiguous_candidates(&d);
@@ -313,63 +314,33 @@ fn up_018_direct_h1_ceiling_uses_the_0_9_11_ambiguous_setup_signal() {
         assert!(!codes(&d).contains(&"ferrum.outcome"));
         assert!(!codes(&d).contains(&"ferrum.token.backend_error"));
         assert!(!codes(&d).contains(&"ferrum.backend_passthrough"));
-        assert!(d.findings.iter().all(|f| {
-            !f.code.starts_with("ferrum.") || f.confidence <= Confidence::Likely
-        }));
+        assert!(d.findings.iter().all(|f| { !f.code.starts_with("ferrum.") || f.confidence <= Confidence::Likely }));
         assert!(!d.findings.iter().any(|f| {
-            matches!(f.scope, SourceScope::UpstreamApplication | SourceScope::ClientToPeer)
-                && f.confidence >= Confidence::Likely
+            matches!(f.scope, SourceScope::UpstreamApplication | SourceScope::ClientToPeer) && f.confidence >= Confidence::Likely
         }));
-        assert_no_claim_at_likely(
-            &d,
-            &[
-                "connection ceiling",
-                "maxconnections",
-                "crash",
-                "unhealthy",
-                "backend is down",
-                "overload",
-            ],
-        );
+        assert_no_claim_at_likely(&d, &["connection ceiling", "maxconnections", "crash", "unhealthy", "backend is down", "overload"]);
         assert_no_specific_cause_at_likely(&d, &["dns", "tls", "refused", "connection_limit"]);
     }
 
     let d = direct_h1(FerrumTrust::NotConfigured);
     assert!(codes(&d).contains(&"ferrum.marker.unverified"));
-    assert!(!codes(&d)
-        .iter()
-        .any(|c| c.starts_with("ferrum.token") || c.starts_with("ferrum.outcome")));
+    assert_public_ferrum_confidence(&d);
+    assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.token") || c.starts_with("ferrum.outcome")));
 
     // A backend's own 502, even with the exact ceiling body, gets backend_error
     // from the finalizer and must not match the connection_failure family.
     let app = br#"{"error":"service unavailable","source":"application"}"#;
     for body in [app.as_slice(), BACKEND_UNAVAILABLE] {
-        let r = response(
-            502,
-            &[
-                ("content-type", "application/json"),
-                ("x-gateway-error", "backend_error"),
-                ("via", "1.1 ferrum-edge"),
-            ],
-            body,
-        );
-        for (trust, trusted) in [
-            (trusted_verified(compat), true),
-            (FerrumTrust::NotConfigured, false),
-        ] {
+        let r =
+            response(502, &[("content-type", "application/json"), ("x-gateway-error", "backend_error"), ("via", "1.1 ferrum-edge")], body);
+        for (trust, trusted) in [(trusted_verified(compat), true), (FerrumTrust::NotConfigured, false)] {
             let d = diagnose_http(&r, body, trust);
             assert!(!codes(&d).contains(&"ferrum.token.connection_failure"));
-            assert!(!d.findings.iter().flat_map(|f| f.evidence.iter()).any(|e| {
-                e.value.contains("upstream.connection_limit")
-            }));
-            assert!(d.findings.iter().all(|f| {
-                !f.code.starts_with("ferrum.") || f.confidence <= Confidence::Likely
-            }));
+            assert!(!d.findings.iter().flat_map(|f| f.evidence.iter()).any(|e| { e.value.contains("upstream.connection_limit") }));
+            assert_public_ferrum_confidence(&d);
             if !trusted {
                 assert!(codes(&d).contains(&"ferrum.marker.unverified"));
-                assert!(!codes(&d)
-                    .iter()
-                    .any(|c| c.starts_with("ferrum.token") || c.starts_with("ferrum.outcome")));
+                assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.token") || c.starts_with("ferrum.outcome")));
             }
         }
     }

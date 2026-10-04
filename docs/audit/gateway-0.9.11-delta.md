@@ -56,7 +56,9 @@ and lookup work while retaining repeated-header and invalid-value behavior. The
 [authoritative token finalizer][token-finalizer] and [H3 finalizers][h3-finalizers] keep the
 same overwrite/strip boundaries. `degraded` remains fallback selection, not failure by itself.
 Plugin reject decorators and non-Ferrum endpoints can still imitate public markers.
-Marker-derived findings remain at most likely; absent markers do not establish upstream origin.
+Marker-derived attribution remains at most likely; absent markers do not establish upstream origin.
+An untrusted `ferrum.marker.unverified` finding confirms only that a header was observed:
+its confidence is confirmed, its scope is unknown and it grants no gateway attribution.
 
 There is one actual protocol-header correction: [Via selection][via] now reads the response's
 HTTP version for streamed direct-H1, Unix-socket and HBONE inner H1 bodies. Unix/HBONE H1
@@ -192,7 +194,9 @@ operator `dispatch_policy_rejected`; the eligible bodyless GET on 0.9.11 require
 The latter diagnosis stays in the unknown-confidence ambiguous pooled family, with its token
 at most likely. Both paths require independent occupant/no-probe and connection-count evidence,
 backend-observed recovery and application lookalikes; the untrusted pass permits no token/outcome
-attribution. No broad status acceptance, profile override or new skip was introduced. The retained
+attribution. The ceiling and both lookalikes explicitly require the unverified marker observation
+to be confirmed with unknown scope; every other public Ferrum finding stays at most likely.
+No broad status acceptance, profile override or new skip was introduced. The retained
 reqwest signature remains covered by public-signal contract tests on every catalog.
 
 Fresh review and hosted Rust failures at `32da237dc255cc8159c93fdbbcfd1f85b9cceedf` also
@@ -201,6 +205,10 @@ use the deliberately unsupported `ferrum-edge-unsupported-test-release`; positiv
 and per-record catalog expectations include 0.9.11 while retaining confidence, scope and forbidden
 claims. The new catalog's shipping panic citations now point to `Cargo.toml:507` and `:537`
 at c764084, and its retained reqwest condition explicitly excludes eligible direct-H1 attempts.
+Fresh review and completed native failure logs at `c74fcc340838eb6d28bb5334d8d9629176e3c0e2`
+identified a blanket confidence assertion that rejected valid untrusted marker observations.
+The controls now distinguish observation from attribution without changing diagnosis behavior.
+All formatter edits from that head's hosted Linux diff have been applied to the three Rust files.
 
 The new source key/field audit does not replace hosted gateway config validation. Root must
 qualify the repaired exact head, especially direct-H1 reuse/framing, gRPC cancellation,

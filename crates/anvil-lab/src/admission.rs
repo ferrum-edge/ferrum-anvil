@@ -331,13 +331,7 @@ fn up018(env: &Env) -> Fut<'_> {
         let log = &m.backend.log;
         let direct_h1 = crate::gateway::current_lock().release == "v0.9.11";
         let (status, marker, body, token, class) = if direct_h1 {
-            (
-                502,
-                "connection_failure",
-                r#"{"error":"Backend unavailable"}"#,
-                "ferrum.token.connection_failure",
-                "backend_connection_limit",
-            )
+            (502, "connection_failure", r#"{"error":"Backend unavailable"}"#, "ferrum.token.connection_failure", "backend_connection_limit")
         } else {
             (
                 503,
@@ -347,28 +341,18 @@ fn up018(env: &Env) -> Fut<'_> {
                 "dispatch_policy_rejected",
             )
         };
-        let connections_before = log
-            .entries()
-            .iter()
-            .filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
-            .count();
+        let connections_before = log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count();
         let probe_path = "/delay-headers/11";
-        let (first, o, seen, ops) =
-            hold_and_probe(env, &H1_LANE, log, H1_PROXY_ID, probe_path).await;
+        let (first, o, seen, ops) = hold_and_probe(env, &H1_LANE, log, H1_PROXY_ID, probe_path).await;
         // Ground truth: the cap was reached and the probe never left the gateway.
         c.success(CheckKind::GroundTruth, &first);
         c.add(
             CheckKind::GroundTruth,
             "backend served the occupant and never saw the probe",
-            seen.iter().any(|(_, p)| p == "/delay-headers/3000")
-                && !seen.iter().any(|(_, p)| p == probe_path),
+            seen.iter().any(|(_, p)| p == "/delay-headers/3000") && !seen.iter().any(|(_, p)| p == probe_path),
             format!("{seen:?}"),
         );
-        let connections_after = log
-            .entries()
-            .iter()
-            .filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
-            .count();
+        let connections_after = log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count();
         c.add(
             CheckKind::GroundTruth,
             "backend opened at most one additional connection during the hold",
@@ -400,12 +384,7 @@ fn up018(env: &Env) -> Fut<'_> {
         c.token(&o, token, env.trusted);
         c.max_confidence(&o, token, Confidence::Likely);
         c.absent_prefix(&o, "ferrum.backend_passthrough");
-        no_scope(
-            &mut c,
-            &o,
-            SourceScope::UpstreamApplication,
-            Confidence::Likely,
-        );
+        no_scope(&mut c, &o, SourceScope::UpstreamApplication, Confidence::Likely);
         no_scope(&mut c, &o, SourceScope::ClientToPeer, Confidence::Likely);
         for term in ["crash", "unhealthy", "backend is down", "overload"] {
             no_claim(&mut c, &o, term, Confidence::Unknown);
@@ -455,36 +434,15 @@ fn up018(env: &Env) -> Fut<'_> {
         }
         // Recovery: the slot is free again once the occupant finished.
         let before = log.count_requests();
-        let r = send(
-            &env.engine,
-            &mesh::request(m, &H1_LANE, env.trusted, "/delay-headers/10"),
-        )
-        .await;
+        let r = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, "/delay-headers/10")).await;
         c.success(CheckKind::Recovery, &r);
-        c.add(
-            CheckKind::Recovery,
-            "recovery request reached the backend",
-            backend_saw(log, before, "/delay-headers/10") == 1,
-            "",
-        );
+        c.add(CheckKind::Recovery, "recovery request reached the backend", backend_saw(log, before, "/delay-headers/10") == 1, "");
         // Lookalike A: the application's own 503 through the same capped route.
-        let look_path = format!(
-            "/status/503?body={}",
-            enc(r#"{"error":"service unavailable","source":"application"}"#)
-        );
+        let look_path = format!("/status/503?body={}", enc(r#"{"error":"service unavailable","source":"application"}"#));
         let before = log.count_requests();
-        let look = send(
-            &env.engine,
-            &mesh::request(m, &H1_LANE, env.trusted, &look_path),
-        )
-        .await;
+        let look = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, &look_path)).await;
         c.status_in(&look, &[503]);
-        c.add(
-            CheckKind::GroundTruth,
-            "application 503 lookalike reached the backend",
-            backend_saw(log, before, &look_path) == 1,
-            "",
-        );
+        c.add(CheckKind::GroundTruth, "application 503 lookalike reached the backend", backend_saw(log, before, &look_path) == 1, "");
         c.token(&look, "ferrum.token.backend_error", env.trusted);
         c.add(
             CheckKind::Diagnosis,
@@ -498,24 +456,10 @@ fn up018(env: &Env) -> Fut<'_> {
         // is identical, so attribution remains at most likely.
         let same_path = format!("/status/{status}?body={}", enc(body));
         let before = log.count_requests();
-        let same = send(
-            &env.engine,
-            &mesh::request(m, &H1_LANE, env.trusted, &same_path),
-        )
-        .await;
+        let same = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, &same_path)).await;
         c.status_in(&same, &[status]);
-        c.add(
-            CheckKind::GroundTruth,
-            "application lookalike has the identical body",
-            body_text(&same) == body,
-            body_text(&same),
-        );
-        c.add(
-            CheckKind::GroundTruth,
-            "identical-body lookalike reached the backend",
-            backend_saw(log, before, &same_path) == 1,
-            "",
-        );
+        c.add(CheckKind::GroundTruth, "application lookalike has the identical body", body_text(&same) == body, body_text(&same));
+        c.add(CheckKind::GroundTruth, "identical-body lookalike reached the backend", backend_saw(log, before, &same_path) == 1, "");
         c.add(
             CheckKind::GroundTruth,
             "application lookalike is stamped backend_error",
@@ -544,27 +488,30 @@ fn up018(env: &Env) -> Fut<'_> {
             caveat(&mut c, &same, "ferrum.outcome", "identical");
         }
         for output in [&o, &look, &same] {
-            c.add(
-                CheckKind::Diagnosis,
-                "public Ferrum evidence never exceeds likely confidence",
-                output
-                    .record
-                    .findings
-                    .iter()
-                    .all(|f| !f.code.starts_with("ferrum.") || f.confidence <= Confidence::Likely),
-                format!("{:?}", codes(output)),
-            );
+            for f in output.record.findings.iter().filter(|f| f.code.starts_with("ferrum.")) {
+                if f.code == "ferrum.marker.unverified" {
+                    c.add(
+                        CheckKind::Diagnosis,
+                        "unverified marker confirms only header observation with unknown scope",
+                        f.confidence == Confidence::Confirmed && f.scope == SourceScope::Unknown,
+                        format!("{:?}/{:?}", f.confidence, f.scope),
+                    );
+                } else {
+                    c.add(
+                        CheckKind::Diagnosis,
+                        format!("{} public attribution confidence at most likely", f.code),
+                        f.confidence <= Confidence::Likely,
+                        format!("{:?}", f.confidence),
+                    );
+                }
+            }
             if !env.trusted {
+                c.has(output, "ferrum.marker.unverified");
                 c.absent_prefix(output, "ferrum.token");
                 c.absent_prefix(output, "ferrum.outcome");
             }
         }
-        Outcome {
-            main: Some(o),
-            recovery: Some(r),
-            checks: c,
-            operator_log: ops,
-        }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 

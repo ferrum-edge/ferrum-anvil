@@ -8,6 +8,9 @@
   assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
   UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
   no-probe/recovery evidence, ambiguous diagnosis, confidence ceilings and lookalikes.
+  Untrusted marker observations are explicitly confirmed with unknown scope, without
+  gateway token/outcome attribution; all other public Ferrum findings stay at most likely.
+  Apply the hosted Linux formatter diff to the changed Rust files.
   Correct the new catalog's shipping panic citations and retained reqwest condition.
   Fresh hosted Rust and all-profile lab qualification remains pending; no native acceptance
   or release claim is added.

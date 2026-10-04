@@ -49,13 +49,15 @@ cargo run -p anvil-lab -- --release v0.9.5 run policy --untrusted-pass   # the e
 
 Setup, binary lookup, results layout and the two passes: [README.md](README.md). The drain profile
 also archives the operator log of every drained instance (`gateway-operator*.log`). In the untrusted
-pass a Ferrum-like header may only surface as `ferrum.marker.unverified`.
+pass a Ferrum-like header may only surface as `ferrum.marker.unverified`: confirmed header
+observation with unknown scope, without gateway token/outcome attribution. UP-018 asserts
+these semantics for the ceiling and both application lookalikes on every supported release.
 
 **Trust ceiling.** The ordinary profile uses plain HTTP; UP-018 uses verified SVID-mTLS to the
-mesh egress listener. Every marker-derived and body-derived claim remains capped at `likely`,
+mesh egress listener. Every marker-derived and body-derived attribution remains capped at `likely`,
 including on that authenticated channel: public markers do not prove who authored the body.
 `X-Gateway-Error` and `X-Gateway-Upstream-Status` can be spoofed on 0.9.5 and 0.9.7 (see GW-019
-below), so `confirmed` is not reachable from these public signals.
+below), so these public signals cannot confirm gateway attribution.
 
 ### Evidence types
 

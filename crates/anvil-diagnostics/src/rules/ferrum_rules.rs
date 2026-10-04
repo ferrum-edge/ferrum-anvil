@@ -861,12 +861,7 @@ mod tests {
         let u = find(&f, "ferrum.catalog.unavailable").expect("catalog-unavailable finding");
         assert_eq!(u.confidence, Confidence::Unknown);
         assert_eq!(u.scope, SourceScope::Unknown);
-        assert!(
-            u.explanation.contains(UNSUPPORTED_COMPATIBILITY_ID)
-                && u.explanation.contains("ferrum-edge-0.9.7"),
-            "{}",
-            u.explanation
-        );
+        assert!(u.explanation.contains(UNSUPPORTED_COMPATIBILITY_ID) && u.explanation.contains("ferrum-edge-0.9.7"), "{}", u.explanation);
         assert!(!f.iter().any(|x| x.code.starts_with("ferrum.outcome") || x.code == "ferrum.backend_passthrough"), "{:?}", codes(&f));
         let t = find(&f, "ferrum.token.backend_timeout").expect("shared token meaning still applies");
         assert_eq!(t.confidence, Confidence::Likely);
@@ -883,12 +878,7 @@ mod tests {
         );
         // A token outside the shared vocabulary stays unknown.
         let r = response(502, "application/json", &[("x-gateway-error", "upstream_reset")]);
-        let f = diagnose_as(
-            Protocol::Http,
-            &r,
-            br#"{"error":"x"}"#,
-            UNSUPPORTED_COMPATIBILITY_ID,
-        );
+        let f = diagnose_as(Protocol::Http, &r, br#"{"error":"x"}"#, UNSUPPORTED_COMPATIBILITY_ID);
         let unknown = find(&f, "ferrum.marker.unknown_token").expect("unknown token finding");
         assert_eq!(unknown.confidence, Confidence::Unknown);
         let missing = format!("no catalog for {UNSUPPORTED_COMPATIBILITY_ID}");
@@ -1001,8 +991,7 @@ mod tests {
         let t911 = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.11");
         let t911 = find(&t911, "ferrum.token.backend_timeout").unwrap();
         assert!(
-            t911.explanation.contains("Ferrum Edge 0.9.11")
-                && t911.explanation.contains("a backend held the request"),
+            t911.explanation.contains("Ferrum Edge 0.9.11") && t911.explanation.contains("a backend held the request"),
             "{}",
             t911.explanation
         );
@@ -1015,11 +1004,7 @@ mod tests {
     #[test]
     fn records_name_the_catalog_actually_used() {
         let v = crate::render::catalog().version.clone();
-        let t = |id: &str| FerrumTrust::Trusted {
-            profile_name: "p".into(),
-            compatibility_id: id.into(),
-            channel_authenticated: true,
-        };
+        let t = |id: &str| FerrumTrust::Trusted { profile_name: "p".into(), compatibility_id: id.into(), channel_authenticated: true };
         let supported = [
             "ferrum-edge-0.9.5",
             "ferrum-edge-0.9.7",
@@ -1035,14 +1020,8 @@ mod tests {
             crate::catalog_version_for(&t(UNSUPPORTED_COMPATIBILITY_ID)),
             format!("findings:{v} ferrum:{UNSUPPORTED_COMPATIBILITY_ID}(no-catalog)")
         );
-        assert_eq!(
-            crate::catalog_version_for(&FerrumTrust::NotConfigured),
-            format!("findings:{v} ferrum:none")
-        );
-        assert_eq!(
-            crate::catalog_version(),
-            format!("findings:{v} ferrum:{}", supported.join(","))
-        );
+        assert_eq!(crate::catalog_version_for(&FerrumTrust::NotConfigured), format!("findings:{v} ferrum:none"));
+        assert_eq!(crate::catalog_version(), format!("findings:{v} ferrum:{}", supported.join(",")));
     }
 
     fn codes(f: &[DiagnosticFinding]) -> Vec<&str> {
