@@ -21,6 +21,8 @@
   independent review and all 14 hosted checks across CI, Desktop E2E and Lab.
   The [upgrade guide](docs/upgrade-guide.md#qualification-of-the-code-candidate)
   records the exact platform evidence and remaining human owner decision.
+  That evidence predates the integration of current main's diagnostic importer;
+  the integrated candidate still needs fresh hosted CI and root review.
 
 ### Fixed
 
@@ -44,6 +46,13 @@
 
 ### Added
 
+- Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
+  finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
+  input and a stateless IPC parser preserve redacted producer facts as unverified
+  claims with unknown Anvil confidence, including forged authentication claims.
+  Pins the additive `contracts-edge-0.9.9-r2` contracts and a real immutable Alloy
+  hosted exporter golden. No requests, persistence, vault access or Edge lookups
+  follow an import (ferrum-edge/ferrum-alloy#27; cross-repo qualification pending).
 - Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
   v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
   It knows the release's new `ai_prompt_shield` MCP refusals: `400`

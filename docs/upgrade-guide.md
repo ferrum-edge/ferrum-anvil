@@ -87,9 +87,29 @@ Windows, including the migrated native file-grant session invocation and locked
 backend rejection. The E2E binaries were also correctly refused by the release
 checker because they contain deliberate test hooks. They are not release assets.
 
-This documentation follow-up still requires fresh hosted CI at its own PR head
-before root presents the candidate for the human owner's approval. Approval
+The subsequent documentation head
+`2724afb186ebf6d982ca9a197c813989b2640e1d` also completed hosted
+[CI](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956183),
+[Desktop E2E](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956185)
+and [Lab](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956118)
+successfully. These results and reviews qualify those preceding exact heads.
+
+The current candidate integrates main
+`c19c0a6abba896bfec972b3e083179c55ef8e38c` (diagnostic-import PR #312) into
+that documentation head. The native IPC registration retains the execution
+command wrapper and adds the stateless `diagnostic_import_preview` command to
+its generated fallback handler. Imported diagnostic JSON grants no request,
+vault, identity, persistence, private-file or network authority. The candidate's
+session attempt binding, payload epoch fences and checked spec approval order
+are unchanged.
+
+This integration has static inspection and diff checks only. Fresh hosted CI
+and root review of the new exact head remain pending; the preceding green
+results do not qualify it. Owner decisions on the UUID command/event migration
+and supported vault/spec behavior also remain pending. Approval of the migration
 would adopt the explicit attempt identity for all three released IPC calls and
 the matching desktop interactive event envelopes. Keeping the released id-only
-contract requires a different stale-invocation design. No approval or published
-patched release is inferred from passing CI.
+contract requires a different stale-invocation design. No approval, supported
+policy adoption or published patched release is inferred from this integration
+or passing CI. Neither GHSA-mg45-vx3j-wmq8 nor GHSA-3793-f3j3-mjpr is closed by
+this candidate qualification.

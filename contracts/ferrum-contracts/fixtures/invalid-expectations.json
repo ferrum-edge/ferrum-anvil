@@ -1,0 +1,159 @@
+{
+  "diagnostic-finding/invalid/alloy-only-evidence-source.json": {
+    "instance_path": "/evidence/0/source",
+    "keyword": "oneOf",
+    "top_keyword": "oneOf"
+  },
+  "diagnostic-finding/invalid/missing-does-not-prove.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "diagnostic-finding/invalid/probability-confidence.json": {
+    "instance_path": "/confidence",
+    "keyword": "enum"
+  },
+  "diagnostic-ref/invalid/created-at-not-rfc3339.json": {
+    "instance_path": "/created_at",
+    "keyword": "format"
+  },
+  "diagnostic-ref/invalid/detail-missing-backend-dispatch.json": {
+    "instance_path": "/detail",
+    "keyword": "required"
+  },
+  "diagnostic-ref/invalid/granular-class-as-token.json": {
+    "instance_path": "/gateway_error",
+    "keyword": "enum"
+  },
+  "diagnostic-ref/invalid/malformed-ref.json": {
+    "instance_path": "/ref",
+    "keyword": "pattern"
+  },
+  "diagnostic-ref/invalid/uppercase-replica-id.json": {
+    "instance_path": "/replica_id",
+    "keyword": "pattern"
+  },
+  "diagnostic-ref/invalid/unknown-schema-version.json": {
+    "instance_path": "/schema_version",
+    "keyword": "enum"
+  },
+  "diagnostic-report/invalid/finding-missing-owner.json": {
+    "instance_path": "/findings/0",
+    "keyword": "required"
+  },
+  "diagnostic-report/invalid/missing-collection.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "diagnostic-report/invalid/unsupported-major.json": {
+    "instance_path": "/schema_version",
+    "keyword": "pattern"
+  },
+  "diagnostic-report/invalid/uppercase-span-id.json": {
+    "instance_path": "/observations/0/span/span_id",
+    "keyword": "pattern"
+  },
+  "gitforgeops-resource/invalid/consumer-missing-username.json": {
+    "instance_path": "/spec",
+    "keyword": "required"
+  },
+  "gitforgeops-resource/invalid/lowercase-kind.json": {
+    "instance_path": "/kind",
+    "keyword": "enum"
+  },
+  "gitforgeops-resource/invalid/missing-spec.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "gitforgeops-resource/invalid/plugin-config-unknown-scope.json": {
+    "instance_path": "/spec/scope",
+    "keyword": "enum"
+  },
+  "gitforgeops-resource/invalid/unknown-kind.json": {
+    "instance_path": "/kind",
+    "keyword": "enum"
+  },
+  "service-manifest/invalid/base-path-without-trailing-slash.json": {
+    "instance_path": "/api/service_base_path",
+    "keyword": "pattern"
+  },
+  "service-manifest/invalid/client-cert-without-key.json": {
+    "instance_path": "/upstream",
+    "keyword": "dependentRequired"
+  },
+  "service-manifest/invalid/agents-enabled-not-boolean.json": {
+    "instance_path": "/agents/enabled",
+    "keyword": "type"
+  },
+  "service-manifest/invalid/http3-protocol.json": {
+    "instance_path": "/upstream/protocols/1",
+    "keyword": "enum"
+  },
+  "service-manifest/invalid/agents-bad-namespace.json": {
+    "instance_path": "/agents/namespace",
+    "keyword": "pattern"
+  },
+  "service-manifest/invalid/tls-path-with-http-scheme.json": {
+    "instance_path": "/upstream/scheme",
+    "keyword": "const"
+  },
+  "service-manifest/invalid/unknown-field.json": {
+    "instance_path": "/upstream",
+    "keyword": "additionalProperties"
+  },
+  "service-manifest/invalid/unsupported-major.json": {
+    "instance_path": "/schema_version",
+    "keyword": "pattern"
+  },
+  "service-manifest/invalid/agents-unknown-key.json": {
+    "instance_path": "/agents",
+    "keyword": "additionalProperties"
+  },
+  "vocabulary-gateway-errors/invalid/class-not-snake-case.json": {
+    "instance_path": "/error_classes/0/value",
+    "keyword": "pattern"
+  },
+  "vocabulary-gateway-errors/invalid/token-without-meaning.json": {
+    "instance_path": "/x_gateway_error_tokens/0",
+    "keyword": "required"
+  },
+  "vocabulary-gateway-errors/invalid/wrong-version.json": {
+    "instance_path": "/version",
+    "keyword": "const"
+  },
+  "vocabulary-gateway-headers/invalid/prefix-without-trailing-dash.json": {
+    "instance_path": "/headers/0/name",
+    "keyword": "pattern"
+  },
+  "vocabulary-gateway-headers/invalid/short-commit.json": {
+    "instance_path": "/headers/1/sources/0/commit",
+    "keyword": "pattern"
+  },
+  "vocabulary-gateway-headers/invalid/unknown-role.json": {
+    "instance_path": "/headers/1/role",
+    "keyword": "enum"
+  },
+  "vocabulary-plugin-catalog/invalid/bad-schema-pointer.json": {
+    "instance_path": "/plugins/0/config_schema/pointer",
+    "keyword": "pattern"
+  },
+  "vocabulary-plugin-catalog/invalid/unknown-failure-policy.json": {
+    "instance_path": "/plugins/0/failure_policy",
+    "keyword": "enum"
+  },
+  "vocabulary-plugin-catalog/invalid/unknown-protocol.json": {
+    "instance_path": "/plugins/0/protocols/1",
+    "keyword": "enum"
+  },
+  "vocabulary-plugin-catalog/invalid/unknown-websocket-framing-plugin.json": {
+    "instance_path": "/websocket_framing_plugins/0",
+    "keyword": "enum"
+  },
+  "vocabulary-provisioned-by/invalid/untrimmed-value.json": {
+    "instance_path": "/values/0/value",
+    "keyword": "pattern"
+  },
+  "vocabulary-provisioned-by/invalid/wrong-label-key.json": {
+    "instance_path": "/label/key",
+    "keyword": "const"
+  }
+}

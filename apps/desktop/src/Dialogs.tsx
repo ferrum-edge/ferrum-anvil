@@ -1,6 +1,7 @@
 // Management dialogs: environments, connection profiles, export/import and
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
+import { DiagnosticImport } from "./DiagnosticImport";
 import { api, type ExportPreview, type FileGrant, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
 import type {
   AppSettings,
@@ -960,7 +961,7 @@ export function ImportDialog(props: {
   workspaceName: string | null;
   onSpecImported: (r: SpecImported) => void;
 }) {
-  const [tab, setTab] = useState<"spec" | "bundle">("spec");
+  const [tab, setTab] = useState<"spec" | "bundle" | "diagnostic">("spec");
   const [file, setFile] = useState<FileGrant | null>(null);
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
@@ -1091,6 +1092,7 @@ export function ImportDialog(props: {
         tabs={[
           { id: "spec" as const, label: "API spec or collection" },
           { id: "bundle" as const, label: "Anvil bundle / backup" },
+          { id: "diagnostic" as const, label: "Diagnostic preview" },
         ]}
         value={tab}
         onChange={(next) => {
@@ -1099,6 +1101,7 @@ export function ImportDialog(props: {
       />
       {tab === "spec" && <SpecImport workspaceId={props.workspaceId} workspaceName={props.workspaceName} onImported={props.onSpecImported} />}
       {tab === "bundle" && bundleBody()}
+      {tab === "diagnostic" && <DiagnosticImport />}
     </Modal>
   );
   function bundleBody() {

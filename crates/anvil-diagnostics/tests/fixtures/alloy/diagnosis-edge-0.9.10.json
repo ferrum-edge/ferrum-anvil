@@ -1,0 +1,473 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.0",
+  "collection": {
+    "collector": {
+      "kind": "collector",
+      "name": "edge-e2e"
+    },
+    "method": "otlp_file_import",
+    "verification": "unverified",
+    "notes": [
+      "converted from an OTLP/JSON file; producer attribution comes from resource attributes and is not authenticated"
+    ]
+  },
+  "subject": {
+    "trace_id": "4171c4d607174af0921e64f059299cb0",
+    "request_id": "c453bb0d-accf-4708-9aa5-4e5326d72962",
+    "service": "edge-demo-api",
+    "route": "/items/{id}"
+  },
+  "observations": [
+    {
+      "id": "edge:3df7825fa178418e:total",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "measurement",
+      "name": "edge.request.total",
+      "availability": "measured",
+      "value": 122.203675,
+      "unit": "ms",
+      "boundaries": {
+        "start": "edge.request_received",
+        "end": "edge.transaction_summary"
+      },
+      "clock": "monotonic_local",
+      "scope": {
+        "leg": "gateway",
+        "gateway": "ferrum-edge-ferrum"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "3df7825fa178418e"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/3df7825fa178418e"
+    },
+    {
+      "id": "edge:3df7825fa178418e:backend_ttfb",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "measurement",
+      "name": "edge.backend.time_to_headers",
+      "availability": "measured",
+      "value": 122.129106,
+      "unit": "ms",
+      "boundaries": {
+        "start": "edge.backend_dispatch_start",
+        "end": "edge.backend_response_headers"
+      },
+      "clock": "monotonic_local",
+      "scope": {
+        "leg": "gateway_to_service",
+        "gateway": "ferrum-edge-ferrum"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "3df7825fa178418e"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/3df7825fa178418e"
+    },
+    {
+      "id": "edge:3df7825fa178418e:backend_total",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "measurement",
+      "name": "edge.backend.total",
+      "availability": "measured",
+      "value": 122.129106,
+      "unit": "ms",
+      "boundaries": {
+        "start": "edge.backend_dispatch_start",
+        "end": "edge.backend_body_buffered"
+      },
+      "clock": "monotonic_local",
+      "scope": {
+        "leg": "gateway_to_service",
+        "gateway": "ferrum-edge-ferrum"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "3df7825fa178418e"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/3df7825fa178418e"
+    },
+    {
+      "id": "edge:3df7825fa178418e:plugins",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "measurement",
+      "name": "edge.plugin_execution",
+      "availability": "measured",
+      "value": 0.039084,
+      "unit": "ms",
+      "boundaries": {
+        "start": "edge.plugin_phases",
+        "end": "edge.plugin_phases"
+      },
+      "clock": "monotonic_local",
+      "scope": {
+        "leg": "gateway",
+        "gateway": "ferrum-edge-ferrum"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "3df7825fa178418e"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/3df7825fa178418e"
+    },
+    {
+      "id": "edge:3df7825fa178418e:response",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "event",
+      "name": "edge.response",
+      "availability": "measured",
+      "clock": "wall_clock",
+      "interval": {
+        "start_unix_nano": 1791123618658684620,
+        "end_unix_nano": 1791123618780888295
+      },
+      "scope": {
+        "leg": "client_to_gateway",
+        "gateway": "ferrum-edge-ferrum"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "3df7825fa178418e"
+      },
+      "attributes": {
+        "proxy_id": "edge-demo-api",
+        "status": "200"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/3df7825fa178418e"
+    },
+    {
+      "id": "edge:0ec99a8f38ec4311:attempt",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "event",
+      "name": "edge.backend.attempt",
+      "availability": "measured",
+      "scope": {
+        "leg": "gateway_to_service",
+        "gateway": "ferrum-edge-ferrum",
+        "attempt": 1
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "0ec99a8f38ec4311",
+        "parent_span_id": "3df7825fa178418e"
+      },
+      "attributes": {
+        "attempt": "1"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/0ec99a8f38ec4311"
+    },
+    {
+      "id": "edge:0ec99a8f38ec4311:attempt_duration",
+      "producer": {
+        "kind": "edge",
+        "name": "ferrum-edge",
+        "version": "0.9.10"
+      },
+      "kind": "measurement",
+      "name": "edge.backend.attempt.duration",
+      "availability": "measured",
+      "value": 122.066127,
+      "unit": "ms",
+      "boundaries": {
+        "start": "edge.backend_attempt_dispatch",
+        "end": "edge.backend_attempt_completion"
+      },
+      "clock": "monotonic_local",
+      "interval": {
+        "start_unix_nano": 1791123618658764497,
+        "end_unix_nano": 1791123618780830624
+      },
+      "scope": {
+        "leg": "gateway_to_service",
+        "gateway": "ferrum-edge-ferrum",
+        "attempt": 1
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "0ec99a8f38ec4311",
+        "parent_span_id": "3df7825fa178418e"
+      },
+      "attributes": {
+        "attempt": "1"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/0ec99a8f38ec4311"
+    },
+    {
+      "id": "alloy:700309ff6e3e7db6:time_to_headers",
+      "producer": {
+        "kind": "alloy",
+        "name": "ferrum-alloy-telemetry",
+        "version": "0.1.0",
+        "instance": "2671823c-beec-4162-afd3-3fc73e93a5c5"
+      },
+      "kind": "measurement",
+      "name": "alloy.server.time_to_headers",
+      "availability": "measured",
+      "value": 120.956318,
+      "unit": "ms",
+      "boundaries": {
+        "start": "alloy.middleware_entry",
+        "end": "alloy.response_headers_produced"
+      },
+      "clock": "monotonic_local",
+      "interval": {
+        "start_unix_nano": 1791123618659143382,
+        "end_unix_nano": 1791123618780099700
+      },
+      "scope": {
+        "leg": "service",
+        "service": "edge-demo-api"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "700309ff6e3e7db6",
+        "parent_span_id": "0ec99a8f38ec4311"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/700309ff6e3e7db6"
+    },
+    {
+      "id": "alloy:700309ff6e3e7db6:body",
+      "producer": {
+        "kind": "alloy",
+        "name": "ferrum-alloy-telemetry",
+        "version": "0.1.0",
+        "instance": "2671823c-beec-4162-afd3-3fc73e93a5c5"
+      },
+      "kind": "measurement",
+      "name": "alloy.server.body_duration",
+      "availability": "measured",
+      "value": 0.193952,
+      "unit": "ms",
+      "boundaries": {
+        "start": "alloy.response_headers_produced",
+        "end": "alloy.response_body_finalized"
+      },
+      "clock": "monotonic_local",
+      "scope": {
+        "leg": "service",
+        "service": "edge-demo-api"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "700309ff6e3e7db6",
+        "parent_span_id": "0ec99a8f38ec4311"
+      },
+      "attributes": {
+        "body.outcome": "completed"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/700309ff6e3e7db6"
+    },
+    {
+      "id": "alloy:700309ff6e3e7db6:duration",
+      "producer": {
+        "kind": "alloy",
+        "name": "ferrum-alloy-telemetry",
+        "version": "0.1.0",
+        "instance": "2671823c-beec-4162-afd3-3fc73e93a5c5"
+      },
+      "kind": "measurement",
+      "name": "alloy.server.duration",
+      "availability": "measured",
+      "value": 121.15027,
+      "unit": "ms",
+      "boundaries": {
+        "start": "alloy.middleware_entry",
+        "end": "alloy.response_body_finalized"
+      },
+      "clock": "monotonic_local",
+      "scope": {
+        "leg": "service",
+        "service": "edge-demo-api"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "700309ff6e3e7db6",
+        "parent_span_id": "0ec99a8f38ec4311"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/700309ff6e3e7db6"
+    },
+    {
+      "id": "alloy:700309ff6e3e7db6:response",
+      "producer": {
+        "kind": "alloy",
+        "name": "ferrum-alloy-telemetry",
+        "version": "0.1.0",
+        "instance": "2671823c-beec-4162-afd3-3fc73e93a5c5"
+      },
+      "kind": "event",
+      "name": "alloy.response",
+      "availability": "measured",
+      "scope": {
+        "leg": "service",
+        "service": "edge-demo-api"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "700309ff6e3e7db6",
+        "parent_span_id": "0ec99a8f38ec4311"
+      },
+      "attributes": {
+        "peer_trust": "verified_identity",
+        "route": "/items/{id}",
+        "status": "200",
+        "trace_parent": "accepted_remote"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/700309ff6e3e7db6"
+    },
+    {
+      "id": "alloy:d3caab0b332f6ce9:operation",
+      "producer": {
+        "kind": "alloy",
+        "name": "ferrum-alloy-telemetry",
+        "version": "0.1.0",
+        "instance": "2671823c-beec-4162-afd3-3fc73e93a5c5"
+      },
+      "kind": "measurement",
+      "name": "alloy.operation.duration",
+      "availability": "measured",
+      "value": 120.46456,
+      "unit": "ms",
+      "boundaries": {
+        "start": "alloy.operation_start",
+        "end": "alloy.operation_end"
+      },
+      "clock": "monotonic_local",
+      "interval": {
+        "start_unix_nano": 1791123618659325783,
+        "end_unix_nano": 1791123618779867918
+      },
+      "scope": {
+        "leg": "service_to_dependency",
+        "service": "edge-demo-api"
+      },
+      "span": {
+        "trace_id": "4171c4d607174af0921e64f059299cb0",
+        "span_id": "d3caab0b332f6ce9",
+        "parent_span_id": "700309ff6e3e7db6"
+      },
+      "attributes": {
+        "operation.kind": "client",
+        "operation.name": "inventory.lookup"
+      },
+      "trust": "unverified",
+      "evidence_ref": "otlp:span/d3caab0b332f6ce9"
+    }
+  ],
+  "findings": [
+    {
+      "code": "alloy.service.operation_dominates",
+      "rule_id": "alloy.r002",
+      "rule_version": 3,
+      "title": "An instrumented operation dominated the service's time to response headers",
+      "explanation": "The application-observed operation \"inventory.lookup\" took 120.5 ms of the 121.0 ms the service spent before producing response headers (100%). Only the single largest operation is compared; overlapping operations are never added together.",
+      "scope": "upstream_application",
+      "confidence": "likely",
+      "severity": "warning",
+      "evidence": [
+        {
+          "source": "service_telemetry",
+          "key": "alloy.server.time_to_headers",
+          "value": "121.0 ms"
+        },
+        {
+          "source": "service_telemetry",
+          "key": "alloy.operation.duration",
+          "value": "120.5 ms (inventory.lookup)"
+        }
+      ],
+      "alternatives": [
+        "the dependency was slow",
+        "the operation waited on a contended resource (pool, lock, or rate limit) that is inside the measured interval"
+      ],
+      "does_not_prove": [
+        "which part of the operation was slow",
+        "that removing the operation would reduce end-user latency by the same amount"
+      ],
+      "remediation": [],
+      "owner": "api_owner",
+      "confirm_with": [
+        "the dependency's own server-side measurements for the same time window",
+        "pool wait measurements (alloy.db.pool_wait) for the same request"
+      ],
+      "supporting_observations": [
+        "alloy:700309ff6e3e7db6:time_to_headers",
+        "alloy:d3caab0b332f6ce9:operation"
+      ],
+      "missing_evidence": []
+    },
+    {
+      "code": "alloy.gateway.timings_not_comparable",
+      "rule_id": "alloy.r003",
+      "rule_version": 3,
+      "title": "Gateway and service timings are not comparable",
+      "explanation": "The gateway's backend measurement boundaries could not be matched to a service measurement (unknown response buffering mode or missing service measurement), so no difference is computed.",
+      "scope": "gateway_to_upstream",
+      "confidence": "unknown",
+      "severity": "info",
+      "evidence": [
+        {
+          "source": "gateway_telemetry",
+          "key": "gateway.latency.backend_ttfb_ms",
+          "value": "122.1 ms"
+        },
+        {
+          "source": "service_telemetry",
+          "key": "alloy.server_span",
+          "value": "linked"
+        }
+      ],
+      "alternatives": [],
+      "does_not_prove": [
+        "whether the gateway or service was fast or slow",
+        "the size or cause of any gateway-to-service timing difference"
+      ],
+      "remediation": [],
+      "owner": "unknown",
+      "confirm_with": [],
+      "supporting_observations": [
+        "alloy:700309ff6e3e7db6:time_to_headers",
+        "edge:3df7825fa178418e:backend_ttfb"
+      ],
+      "missing_evidence": [
+        "gateway response buffering mode",
+        "matching service measurement"
+      ]
+    }
+  ]
+}

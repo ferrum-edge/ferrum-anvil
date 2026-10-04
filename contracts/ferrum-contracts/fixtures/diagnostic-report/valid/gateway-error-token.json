@@ -1,0 +1,29 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.1",
+  "collection": { "collector": { "kind": "client", "name": "fixture" }, "method": "fixture", "verification": "unverified" },
+  "observations": [
+    {
+      "id": "client-header",
+      "producer": { "kind": "client", "name": "curl" },
+      "kind": "event",
+      "name": "client.response_header",
+      "availability": "measured",
+      "scope": { "leg": "client_to_gateway" },
+      "attributes": { "header": "X-Gateway-Error", "value": "connection_failure" },
+      "trust": "user_asserted",
+      "x-future-field": { "anything": true }
+    },
+    {
+      "id": "client-rtt",
+      "producer": { "kind": "client", "name": "curl" },
+      "kind": "measurement",
+      "name": "client.total_time",
+      "availability": "measured",
+      "value": 5012.0,
+      "unit": "ms",
+      "scope": { "leg": "client_to_gateway" },
+      "trust": "user_asserted"
+    }
+  ]
+}
