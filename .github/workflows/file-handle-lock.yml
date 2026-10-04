@@ -1,12 +1,15 @@
-# One-off contractor lock resolution. No project build scripts, tests, secrets,
-# caches, model tools, or repository write permission. Root applies the artifact.
-name: File handle dependency lock (draft)
+# One-off hosted lock resolution and license inventory. No project builds,
+# tests, secrets, caches, model tools, or repository write permission.
+# Root verifies and applies the immutable artifacts separately.
+name: File handle dependency artifacts (draft)
 
 on:
   push:
     branches: [fix/retained-file-and-export-handles]
     paths:
       - crates/anvil-app/Cargo.toml
+      - Cargo.lock
+      - scripts/licenses.mjs
       - .github/workflows/file-handle-lock.yml
 
 permissions:
@@ -50,4 +53,89 @@ jobs:
           name: file-handle-lock-${{ github.sha }}
           path: lock-artifact/
           if-no-files-found: error
+          retention-days: 7
+
+  licenses:
+    name: Generate third-party license artifact (draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE_SHA: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+      RUSTUP_TOOLCHAIN: 1.90.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require the exact source on a GitHub-hosted runner
+        shell: bash
+        run: |
+          test "${GITHUB_ACTIONS:-}" = "true"
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install the declared MSRV toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          node --version
+          rustc --version
+          cargo --version
+      - name: Generate and verify the real license inventory
+        shell: bash
+        env:
+          SOURCE_REF: ${{ github.ref }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          # npm metadata comes directly from the committed package-lock.json;
+          # no npm install or lifecycle scripts are needed. The generator uses
+          # cargo metadata --locked under RUSTUP_TOOLCHAIN=1.90.0, without builds.
+          node scripts/licenses.mjs
+          node scripts/licenses.mjs --check
+          git diff --exit-code -- ':(exclude)THIRD_PARTY_LICENSES.md'
+          git diff --cached --exit-code
+          git diff --check
+          test -z "$(git ls-files --others --exclude-standard)"
+          test -f THIRD_PARTY_LICENSES.md
+          test ! -L THIRD_PARTY_LICENSES.md
+          artifact_dir="$RUNNER_TEMP/file-handle-licenses"
+          mkdir "$artifact_dir"
+          cp THIRD_PARTY_LICENSES.md "$artifact_dir/THIRD_PARTY_LICENSES.md"
+          {
+            printf 'source_sha=%s\nsource_ref=%s\n' "$SOURCE_SHA" "$SOURCE_REF"
+            printf 'repository=%s\nrun_id=%s\nrun_attempt=%s\n' "$GITHUB_REPOSITORY" "$RUN_ID" "$RUN_ATTEMPT"
+            printf 'run_url=%s/%s/actions/runs/%s/attempts/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RUN_ID" "$RUN_ATTEMPT"
+            printf 'workflow_ref=%s\nworkflow_sha=%s\n' "$WORKFLOW_REF" "$WORKFLOW_SHA"
+            printf 'runner_environment=%s\nrunner_os=%s\nrunner_arch=%s\n' "$RUNNER_ENVIRONMENT" "$RUNNER_OS" "$RUNNER_ARCH"
+            printf 'node_version=%s\n' "$(node --version)"
+            printf 'rustc_version=%s\n' "$(rustc --version)"
+            printf 'cargo_version=%s\n' "$(cargo --version)"
+            printf 'rustup_toolchain=%s\n' "$RUSTUP_TOOLCHAIN"
+            printf 'command=node scripts/licenses.mjs\n'
+            printf 'verification_command=node scripts/licenses.mjs --check\n'
+            printf 'npm_metadata=committed apps/desktop/package-lock.json; no install\n'
+            sha256sum Cargo.lock apps/desktop/package-lock.json scripts/licenses.mjs deny.toml
+          } > "$artifact_dir/PROVENANCE"
+          cd "$artifact_dir"
+          sha256sum THIRD_PARTY_LICENSES.md PROVENANCE > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: file-handle-licenses-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/file-handle-licenses/THIRD_PARTY_LICENSES.md
+            ${{ runner.temp }}/file-handle-licenses/SHA256SUMS
+            ${{ runner.temp }}/file-handle-licenses/PROVENANCE
+          if-no-files-found: error
+          overwrite: false
           retention-days: 7
