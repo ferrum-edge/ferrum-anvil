@@ -3,13 +3,20 @@
 Anvil vendors the Ferrum Edge contracts it consumes under
 [`contracts/ferrum-contracts`](../contracts/ferrum-contracts). The current pin
 is recorded in `contracts/ferrum-contracts/PIN`: tag
-`contracts-edge-0.9.9`, commit `25c4e9e00033d7941a1dd0ab733fa74e735546ae` (Ferrum Edge
+`contracts-edge-0.9.9-r2`, commit `591c73a3f965fdab440c3a76b2707accdf491ba5` (Ferrum Edge
 v0.9.9). The tag also covers Ferrum Edge v0.9.10, the lab's default pin:
 v0.9.10 changed no contract source, so `ferrum-contracts` maps it to the same
 tag. That tag marks `X-Ferrum-Diagnostic-Ref` released in v0.9.9 and
 publishes `schemas/diagnostic-ref/v1.schema.json` with its fixtures under
 `contracts/ferrum-contracts`. Anvil reads the header and lookup record (see
 [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)).
+The additive r2 pin preserves every previously vendored hash from
+`25c4e9e00033d7941a1dd0ab733fa74e735546ae` and adds the diagnostic-report v1
+schema, its twelve report fixtures and the full canonical negative-expectations
+manifest. Read-only diagnostic import consumes these files without granting trust
+to the reported claims; see
+[shared-diagnostics-import.md](architecture/shared-diagnostics-import.md).
+
 The offline `anvil-diagnostics` test suite checks every vendored file against
 its pinned SHA-256, compares the local gateway vocabulary, header list and
 DiagnosticFinding schema with the vendor copy (the vocabulary against the

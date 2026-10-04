@@ -123,8 +123,9 @@ Ferrum Edge contracts are maintained in the organization's central store:
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts), which
 publishes shared vocabularies, JSON schemas and fixtures.
 Anvil consumes gateway vocabularies and headers, the DiagnosticFinding schema
-and fixtures, and the diagnostic-ref v1 schema and fixtures.
-These files are pinned to `contracts-edge-0.9.9` in
+and fixtures, the diagnostic-ref v1 schema and fixtures, and the diagnostic-report
+v1 schema and its shared import fixtures. These files are pinned to
+`contracts-edge-0.9.9-r2` in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and vendored
 under [`contracts/ferrum-contracts`](contracts/ferrum-contracts).
 See [docs/ferrum-contracts.md](docs/ferrum-contracts.md) for the detailed pin and update process.

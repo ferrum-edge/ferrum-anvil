@@ -1,1 +1,4 @@
 contracts/ferrum-contracts/** -text
+crates/anvil-diagnostics/tests/fixtures/alloy/diagnose.rs -text
+crates/anvil-diagnostics/tests/fixtures/alloy/diagnosis-edge-0.9.10.json -text
+crates/anvil-diagnostics/tests/fixtures/alloy/diagnostic-report.v1.schema.json -text
