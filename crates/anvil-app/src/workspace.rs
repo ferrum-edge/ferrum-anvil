@@ -141,14 +141,7 @@ impl App {
             validate_folder_parent_in(s, ws, parent)?;
             let siblings: Vec<Folder> = s.list(kind::FOLDER, Some(ws))?;
             f.sort_key = siblings.iter().filter(|f| f.parent_id == parent).count() as f64 + 1.0;
-            s.put(
-                kind::FOLDER,
-                &f.meta.id,
-                Some(ws),
-                parent.as_ref(),
-                f.sort_key,
-                &f,
-            )
+            s.put(kind::FOLDER, &f.meta.id, Some(ws), parent.as_ref(), f.sort_key, &f)
         })?;
         Ok(f)
     }
@@ -162,20 +155,10 @@ impl App {
             let stored: Option<Folder> = s.get(kind::FOLDER, &f.meta.id)?;
             validate_folder_parent_in(s, &f.workspace_id, f.parent_id)?;
             f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
-            f.import_environment_ids = stored
-                .as_ref()
-                .map(|s| s.import_environment_ids.clone())
-                .unwrap_or_default();
+            f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
             f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
             f.meta.updated_at = chrono::Utc::now();
-            s.put(
-                kind::FOLDER,
-                &f.meta.id,
-                Some(&f.workspace_id),
-                f.parent_id.as_ref(),
-                f.sort_key,
-                &f,
-            )
+            s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)
         })?;
         Ok(f)
     }
@@ -190,20 +173,11 @@ impl App {
                 return Ok(Err(AppError::NotFound("folder".into())));
             };
             if !f.import_root {
-                return Ok(Err(AppError::Invalid(
-                    "only the root folder of an imported collection has a scope of its own".into(),
-                )));
+                return Ok(Err(AppError::Invalid("only the root folder of an imported collection has a scope of its own".into())));
             }
             f.use_workspace_scope = allow;
             f.meta.updated_at = chrono::Utc::now();
-            s.put(
-                kind::FOLDER,
-                &f.meta.id,
-                Some(&f.workspace_id),
-                f.parent_id.as_ref(),
-                f.sort_key,
-                &f,
-            )?;
+            s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
             Ok(Ok(f))
         })?
     }
@@ -433,14 +407,7 @@ impl App {
                 // request. Create that parent first, in this same transaction.
                 // Any later failure rolls both rows back.
                 if new {
-                    s.put(
-                        kind::REQUEST,
-                        &r.meta.id,
-                        Some(&r.workspace_id),
-                        r.folder_id.as_ref(),
-                        r.sort_key,
-                        &r,
-                    )?;
+                    s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
                 }
                 let rev = RequestRevision {
                     id: Id::new(),
@@ -791,18 +758,12 @@ impl App {
 /// Validate placement under the same write lock as a folder create/save.
 /// A concurrent delete cannot leave the new row under a deleted owner or
 /// parent; a foreign parent cannot supply another workspace's inherited scope.
-fn validate_folder_parent_in(
-    s: &StoreTx<'_>,
-    ws: &Id,
-    parent: Option<Id>,
-) -> anvil_storage::store::Result<()> {
+fn validate_folder_parent_in(s: &StoreTx<'_>, ws: &Id, parent: Option<Id>) -> anvil_storage::store::Result<()> {
     if s.get::<Workspace>(kind::WORKSPACE, ws)?.is_none() {
         return Err(StoreError::NotFound("workspace".into()));
     }
     if let Some(id) = parent {
-        let folder: Folder = s
-            .get(kind::FOLDER, &id)?
-            .ok_or_else(|| StoreError::NotFound("folder".into()))?;
+        let folder: Folder = s.get(kind::FOLDER, &id)?.ok_or_else(|| StoreError::NotFound("folder".into()))?;
         if folder.workspace_id != *ws {
             return Err(StoreError::Ownership);
         }

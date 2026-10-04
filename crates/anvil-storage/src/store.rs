@@ -342,13 +342,7 @@ fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
     Ok(ObjectIdentity { id, owner, parent })
 }
 
-fn validate_object(
-    k: &str,
-    id: &str,
-    owner: Option<&str>,
-    parent: Option<&str>,
-    json: &[u8],
-) -> Result<()> {
+fn validate_object(k: &str, id: &str, owner: Option<&str>, parent: Option<&str>, json: &[u8]) -> Result<()> {
     let identity = object_identity(k, json)?;
     if identity.id.is_some_and(|sealed| sealed.to_string() != id)
         || identity.parent.map(|p| p.to_string()).as_deref() != parent
@@ -1248,11 +1242,7 @@ struct ObjectRow {
 
 impl ObjectRow {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            owner: row.get(0)?,
-            parent: row.get(1)?,
-            payload: row.get(2)?,
-        })
+        Ok(Self { owner: row.get(0)?, parent: row.get(1)?, payload: row.get(2)? })
     }
 }
 
@@ -1270,13 +1260,7 @@ impl Records<'_> {
         let id_s = id.to_string();
         let owner = workspace_id.map(|w| w.to_string());
         let parent = parent_id.map(|p| p.to_string());
-        validate_object(
-            kind,
-            &id_s,
-            owner.as_deref(),
-            parent.as_deref(),
-            &json,
-        )?;
+        validate_object(kind, &id_s, owner.as_deref(), parent.as_deref(), &json)?;
         if let Some(existing) = self.object_row(kind, &id_s)? {
             // An altered index must fail before a save can seal its lie into
             // a new payload, even when the submitted owner matches that index.
@@ -1324,28 +1308,13 @@ impl Records<'_> {
     fn object_row(&self, kind: &str, id: &str) -> Result<Option<ObjectRow>> {
         Ok(self
             .conn
-            .query_row(
-                "SELECT workspace_id, parent_id, payload FROM objects WHERE kind=?1 AND id=?2",
-                params![kind, id],
-                ObjectRow::read,
-            )
+            .query_row("SELECT workspace_id, parent_id, payload FROM objects WHERE kind=?1 AND id=?2", params![kind, id], ObjectRow::read)
             .optional()?)
     }
 
     fn open_object(&self, kind: &str, id: &str, row: &ObjectRow) -> Result<Zeroizing<Vec<u8>>> {
-        let pt = crypto::open(
-            &self.key,
-            &aad("objects", kind, id),
-            &row.payload,
-        )
-        .map_err(|_| StoreError::Integrity)?;
-        validate_object(
-            kind,
-            id,
-            row.owner.as_deref(),
-            row.parent.as_deref(),
-            &pt,
-        )?;
+        let pt = crypto::open(&self.key, &aad("objects", kind, id), &row.payload).map_err(|_| StoreError::Integrity)?;
+        validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
         if kind == kind::REVISION {
             self.validate_revision_owner(row.owner.as_deref(), row.parent.as_deref())?;
         }
@@ -1353,13 +1322,8 @@ impl Records<'_> {
     }
 
     fn validate_revision_owner(&self, owner: Option<&str>, parent: Option<&str>) -> Result<()> {
-        let request_id: Id = parent
-            .ok_or(StoreError::Integrity)?
-            .parse()
-            .map_err(|_| StoreError::Integrity)?;
-        let request = self
-            .get::<anvil_domain::workspace::RequestDefinition>(kind::REQUEST, &request_id)?
-            .ok_or(StoreError::Integrity)?;
+        let request_id: Id = parent.ok_or(StoreError::Integrity)?.parse().map_err(|_| StoreError::Integrity)?;
+        let request = self.get::<anvil_domain::workspace::RequestDefinition>(kind::REQUEST, &request_id)?.ok_or(StoreError::Integrity)?;
         if Some(request.workspace_id.to_string()).as_deref() != owner {
             return Err(StoreError::Integrity);
         }
@@ -1375,18 +1339,15 @@ impl Records<'_> {
                     "SELECT workspace_id, parent_id, payload, id FROM objects
                      WHERE kind=?1 AND workspace_id=?2 ORDER BY sort_key, updated_at",
                 )?;
-                st.query_map(params![kind, w.to_string()], |r| {
-                    Ok((r.get(3)?, ObjectRow::read(r)?))
-                })?
-                .collect::<std::result::Result<_, _>>()?
+                st.query_map(params![kind, w.to_string()], |r| Ok((r.get(3)?, ObjectRow::read(r)?)))?
+                    .collect::<std::result::Result<_, _>>()?
             }
             None => {
                 let mut st = self.conn.prepare(
                     "SELECT workspace_id, parent_id, payload, id FROM objects
                      WHERE kind=?1 ORDER BY sort_key, updated_at",
                 )?;
-                st.query_map(params![kind], |r| Ok((r.get(3)?, ObjectRow::read(r)?)))?
-                    .collect::<std::result::Result<_, _>>()?
+                st.query_map(params![kind], |r| Ok((r.get(3)?, ObjectRow::read(r)?)))?.collect::<std::result::Result<_, _>>()?
             }
         };
         for (id, row) in rows {

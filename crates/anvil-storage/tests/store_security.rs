@@ -52,14 +52,8 @@ fn plaintext_leak_audit_db_wal_checkpoints() {
     store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "audit")).unwrap();
     let id = Id::new();
     let mut spec = anvil_domain::request::RequestSpec::http("GET", PLANTED[1]);
-    spec.headers.push(anvil_domain::request::KeyValue::new(
-        "Authorization",
-        format!("Bearer {}", PLANTED[0]),
-    ));
-    spec.body = anvil_domain::request::Body::Raw {
-        text: PLANTED[3].into(),
-        content_type: None,
-    };
+    spec.headers.push(anvil_domain::request::KeyValue::new("Authorization", format!("Bearer {}", PLANTED[0])));
+    spec.body = anvil_domain::request::Body::Raw { text: PLANTED[3].into(), content_type: None };
     let req = serde_json::json!({
         "id": id,
         "schema_version": anvil_domain::SCHEMA_VERSION,

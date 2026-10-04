@@ -14,9 +14,7 @@ use serde_json::{Value, json};
 fn open() -> (tempfile::TempDir, App) {
     let root = tempfile::tempdir().unwrap();
     let pm = ProfileManager::new(root.path());
-    let (profile, key, _) = pm
-        .create_passphrase("owner binding", "test passphrase", KdfParams::testing())
-        .unwrap();
+    let (profile, key, _) = pm.create_passphrase("owner binding", "test passphrase", KdfParams::testing()).unwrap();
     let header = anvil_storage::vault::read_header(&profile.dir).unwrap();
     let app = App::open(profile.dir, header, key).unwrap();
     (root, app)
@@ -93,29 +91,11 @@ fn list(app: &App, k: &str, ws: &Id) -> anvil_app::Result<Value> {
 
 fn objects(app: &App, ws: Id) -> Vec<(&'static str, Id, Value)> {
     let folder = app.create_folder(&ws, None, "folder").unwrap();
-    let request = app
-        .create_request(
-            &ws,
-            Some(folder.meta.id),
-            "request",
-            RequestSpec::http("GET", "https://original.invalid/"),
-        )
-        .unwrap();
+    let request = app.create_request(&ws, Some(folder.meta.id), "request", RequestSpec::http("GET", "https://original.invalid/")).unwrap();
     let environment = app.create_environment(&ws, "environment", vec![]).unwrap();
-    let scenario = app
-        .create_scenario(
-            &ws,
-            "scenario",
-            vec![ScenarioStep {
-                request_id: request.meta.id,
-                enabled: true,
-                delay_ms: 0,
-            }],
-        )
-        .unwrap();
-    let dataset = app
-        .create_dataset(&ws, "dataset", DatasetFormat::Csv, b"column\nvalue\n", vec![])
-        .unwrap();
+    let scenario =
+        app.create_scenario(&ws, "scenario", vec![ScenarioStep { request_id: request.meta.id, enabled: true, delay_ms: 0 }]).unwrap();
+    let dataset = app.create_dataset(&ws, "dataset", DatasetFormat::Csv, b"column\nvalue\n", vec![]).unwrap();
     let mut out = vec![
         (kind::FOLDER, folder.meta.id, json!(folder)),
         (kind::REQUEST, request.meta.id, json!(request)),
@@ -160,14 +140,7 @@ fn ipc_reachable_saves_reject_existing_ids_under_a_different_workspace() {
     let (_root, app) = open();
     let a = app.create_workspace("A").unwrap().meta.id;
     let b = app.create_workspace("B").unwrap().meta.id;
-    let target = app
-        .create_request(
-            &b,
-            None,
-            "target",
-            RequestSpec::http("GET", "https://target.invalid/"),
-        )
-        .unwrap();
+    let target = app.create_request(&b, None, "target", RequestSpec::http("GET", "https://target.invalid/")).unwrap();
     for (k, _id, mut value) in objects(&app, a) {
         save(&app, k, value.clone()).unwrap();
         let original = snapshot(&app);
@@ -196,12 +169,7 @@ fn app_lists_and_saves_refuse_offline_owner_edits_without_adopting_them() {
     let b = app.create_workspace("B").unwrap().meta.id;
     for (k, id, mut value) in objects(&app, a) {
         // SQLite-only attacker: no DEK and no change to the encrypted bytes.
-        db(&app)
-            .execute(
-                "UPDATE objects SET workspace_id=?1 WHERE kind=?2 AND id=?3",
-                params![b.to_string(), k, id.to_string()],
-            )
-            .unwrap();
+        db(&app).execute("UPDATE objects SET workspace_id=?1 WHERE kind=?2 AND id=?3", params![b.to_string(), k, id.to_string()]).unwrap();
         assert!(matches!(list(&app, k, &b), Err(AppError::Store(StoreError::Integrity))), "{k}");
         let tampered = snapshot(&app);
         value["workspace_id"] = json!(b);
@@ -211,14 +179,7 @@ fn app_lists_and_saves_refuse_offline_owner_edits_without_adopting_them() {
             value["steps"] = json!([]);
         }
         if k == kind::LOAD_PLAN {
-            let target = app
-                .create_request(
-                    &b,
-                    None,
-                    "target",
-                    RequestSpec::http("GET", "https://target.invalid/"),
-                )
-                .unwrap();
+            let target = app.create_request(&b, None, "target", RequestSpec::http("GET", "https://target.invalid/")).unwrap();
             value["chain"] = json!([target.meta.id]);
         }
         let before_save = snapshot(&app);
@@ -228,12 +189,7 @@ fn app_lists_and_saves_refuse_offline_owner_edits_without_adopting_them() {
         if k != kind::LOAD_PLAN {
             assert_eq!(before_save, tampered);
         }
-        db(&app)
-            .execute(
-                "UPDATE objects SET workspace_id=?1 WHERE kind=?2 AND id=?3",
-                params![a.to_string(), k, id.to_string()],
-            )
-            .unwrap();
+        db(&app).execute("UPDATE objects SET workspace_id=?1 WHERE kind=?2 AND id=?3", params![a.to_string(), k, id.to_string()]).unwrap();
     }
 }
 
@@ -246,14 +202,7 @@ fn explicit_folder_and_request_moves_keep_owner_revisions_and_referential_integr
     let right = app.create_folder(&a, None, "right").unwrap();
     let foreign = app.create_folder(&b, None, "foreign").unwrap();
     let child = app.create_folder(&a, Some(left.meta.id), "child").unwrap();
-    let request = app
-        .create_request(
-            &a,
-            Some(child.meta.id),
-            "request",
-            RequestSpec::http("GET", "https://original.invalid/"),
-        )
-        .unwrap();
+    let request = app.create_request(&a, Some(child.meta.id), "request", RequestSpec::http("GET", "https://original.invalid/")).unwrap();
     let moved = app.move_folder(&child.meta.id, Some(right.meta.id), 3.0).unwrap();
     assert_eq!(moved.workspace_id, a);
     assert_eq!(moved.parent_id, Some(right.meta.id));
@@ -300,10 +249,7 @@ fn request_save_cannot_use_another_requests_revision_and_failure_rolls_back_new_
              WHEN NEW.kind='request' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
         )
         .unwrap();
-    let changed = RequestDefinition {
-        spec: RequestSpec::http("POST", "https://changed.invalid/"),
-        ..first
-    };
+    let changed = RequestDefinition { spec: RequestSpec::http("POST", "https://changed.invalid/"), ..first };
     assert!(matches!(app.save_request(changed), Err(AppError::Store(StoreError::Db(_)))));
     assert_eq!(snapshot(&app), original, "new revision and parent update must roll back together");
 }

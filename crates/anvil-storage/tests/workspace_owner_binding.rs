@@ -20,23 +20,12 @@ struct Object {
 
 impl Object {
     fn put(&self, store: &Store) -> Result<(), StoreError> {
-        store.put(
-            self.kind,
-            &self.id,
-            self.owner.as_ref(),
-            self.parent.as_ref(),
-            1.0,
-            &self.value,
-        )
+        store.put(self.kind, &self.id, self.owner.as_ref(), self.parent.as_ref(), 1.0, &self.value)
     }
 }
 
 fn fixture(k: &'static str, ws: Id, request: Id) -> Object {
-    let id = if k == kind::DEVICE_IDENTITY_SEAL {
-        ws
-    } else {
-        Id::new()
-    };
+    let id = if k == kind::DEVICE_IDENTITY_SEAL { ws } else { Id::new() };
     let now = chrono::Utc::now();
     let mut value = json!({
         "id": id,
@@ -135,13 +124,7 @@ fn fixture(k: &'static str, ws: Id, request: Id) -> Object {
         }
         _ => panic!("uncovered kind {k}"),
     }
-    Object {
-        kind: k,
-        id,
-        owner,
-        parent,
-        value,
-    }
+    Object { kind: k, id, owner, parent, value }
 }
 
 fn kinds() -> Vec<&'static str> {
@@ -180,15 +163,7 @@ fn row(db: &Connection, object: &Object) -> StoredRow {
         "SELECT workspace_id,parent_id,sort_key,updated_at,payload FROM objects
          WHERE kind=?1 AND id=?2",
         params![object.kind, object.id.to_string()],
-        |r| {
-            Ok(StoredRow {
-                owner: r.get(0)?,
-                parent: r.get(1)?,
-                sort_key: r.get(2)?,
-                updated_at: r.get(3)?,
-                payload: r.get(4)?,
-            })
-        },
+        |r| Ok(StoredRow { owner: r.get(0)?, parent: r.get(1)?, sort_key: r.get(2)?, updated_at: r.get(3)?, payload: r.get(4)? }),
     )
     .unwrap()
 }
@@ -254,16 +229,7 @@ fn every_kind_preserves_existing_owner_in_direct_and_transactional_updates() {
             object.value["workspace_id"] = json!(b);
         }
         assert!(object.put(&store).is_err(), "{k} moved on direct put");
-        let result = store.atomically(|tx| {
-            tx.put(
-                k,
-                &object.id,
-                object.owner.as_ref(),
-                object.parent.as_ref(),
-                999.0,
-                &object.value,
-            )
-        });
+        let result = store.atomically(|tx| tx.put(k, &object.id, object.owner.as_ref(), object.parent.as_ref(), 999.0, &object.value));
         assert!(result.is_err(), "{k} moved on transactional put");
         assert_eq!(row(&db, &object), original, "{k} changed a refused row");
         store.delete(k, &object.id).unwrap();
@@ -278,24 +244,13 @@ fn every_kind_checks_id_kind_and_parent_metadata_before_returning_payloads() {
         let object = fixture(k, a, request);
         object.put(&store).unwrap();
         let other = Id::new();
-        db.execute(
-            "UPDATE objects SET id=?1 WHERE kind=?2 AND id=?3",
-            params![other.to_string(), k, object.id.to_string()],
-        )
-        .unwrap();
+        db.execute("UPDATE objects SET id=?1 WHERE kind=?2 AND id=?3", params![other.to_string(), k, object.id.to_string()]).unwrap();
         assert!(matches!(store.get::<Value>(k, &other), Err(StoreError::Integrity)), "{k}");
         assert!(matches!(store.list::<Value>(k, None), Err(StoreError::Integrity)), "{k}");
-        db.execute(
-            "UPDATE objects SET id=?1 WHERE kind=?2 AND id=?3",
-            params![object.id.to_string(), k, other.to_string()],
-        )
-        .unwrap();
+        db.execute("UPDATE objects SET id=?1 WHERE kind=?2 AND id=?3", params![object.id.to_string(), k, other.to_string()]).unwrap();
 
-        db.execute(
-            "UPDATE objects SET parent_id=?1 WHERE kind=?2 AND id=?3",
-            params![other.to_string(), k, object.id.to_string()],
-        )
-        .unwrap();
+        db.execute("UPDATE objects SET parent_id=?1 WHERE kind=?2 AND id=?3", params![other.to_string(), k, object.id.to_string()])
+            .unwrap();
         assert!(matches!(store.get::<Value>(k, &object.id), Err(StoreError::Integrity)), "{k}");
         assert!(matches!(store.list::<Value>(k, None), Err(StoreError::Integrity)), "{k}");
         assert!(object.put(&store).is_err(), "{k} repaired an untrusted parent on save");
@@ -304,16 +259,9 @@ fn every_kind_checks_id_kind_and_parent_metadata_before_returning_payloads() {
             params![object.parent.map(|p| p.to_string()), k, object.id.to_string()],
         )
         .unwrap();
-        assert!(matches!(
-            store.get::<Value>("unrecognized", &object.id),
-            Err(StoreError::Integrity)
-        ));
+        assert!(matches!(store.get::<Value>("unrecognized", &object.id), Err(StoreError::Integrity)));
         assert!(matches!(store.list::<Value>("unrecognized", None), Err(StoreError::Integrity)));
-        db.execute(
-            "DELETE FROM objects WHERE kind='unrecognized' AND id=?1",
-            params![object.id.to_string()],
-        )
-        .unwrap();
+        db.execute("DELETE FROM objects WHERE kind='unrecognized' AND id=?1", params![object.id.to_string()]).unwrap();
     }
 }
 
@@ -333,22 +281,15 @@ fn already_sealed_wrong_id_owner_type_and_parent_are_refused_without_resealing()
         // metadata-only attacker above. Keep the released AAD exactly.
         let aad = format!("anvil/v1/objects/{}/{}", object.kind, object.id);
         let payload = crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&value).unwrap());
-        db.execute(
-            "UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3",
-            params![payload, object.kind, object.id.to_string()],
-        )
-        .unwrap();
+        db.execute("UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3", params![payload, object.kind, object.id.to_string()]).unwrap();
         let invalid = row(&db, &object);
         assert!(matches!(store.get::<Value>(object.kind, &object.id), Err(StoreError::Integrity)));
         assert!(matches!(store.list::<Value>(object.kind, Some(&a)), Err(StoreError::Integrity)));
         assert!(object.put(&store).is_err());
         assert_eq!(row(&db, &object), invalid);
     }
-    db.execute(
-        "UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3",
-        params![valid.payload, object.kind, object.id.to_string()],
-    )
-    .unwrap();
+    db.execute("UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3", params![valid.payload, object.kind, object.id.to_string()])
+        .unwrap();
 
     let revision = fixture(kind::REVISION, a, request);
     revision.put(&store).unwrap();
@@ -356,11 +297,7 @@ fn already_sealed_wrong_id_owner_type_and_parent_are_refused_without_resealing()
     wrong_parent["request_id"] = json!(Id::new());
     let aad = format!("anvil/v1/objects/revision/{}", revision.id);
     let payload = crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&wrong_parent).unwrap());
-    db.execute(
-        "UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2",
-        params![payload, revision.id.to_string()],
-    )
-    .unwrap();
+    db.execute("UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2", params![payload, revision.id.to_string()]).unwrap();
     assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)));
 }
 
@@ -382,11 +319,7 @@ fn failed_owner_change_rolls_back_earlier_writes_and_revisions_follow_sealed_req
     assert!(matches!(result, Err(StoreError::Ownership)));
     assert_eq!(row(&db, &env), original);
     // Editing the parent request's owner cannot validate a revision's owner.
-    db.execute(
-        "UPDATE objects SET workspace_id=?1 WHERE kind='request' AND id=?2",
-        params![b.to_string(), request.to_string()],
-    )
-    .unwrap();
+    db.execute("UPDATE objects SET workspace_id=?1 WHERE kind='request' AND id=?2", params![b.to_string(), request.to_string()]).unwrap();
     assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)));
 }
 
@@ -402,13 +335,8 @@ fn new_objects_require_consistent_identity_and_an_existing_workspace() {
         object.value = value;
         object.parent = Some(Id::new());
         assert!(object.put(&store).is_err(), "{k} accepted a mismatched parent");
-        let count: i64 = db
-            .query_row(
-                "SELECT count(*) FROM objects WHERE kind=?1 AND id=?2",
-                params![k, object.id.to_string()],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let count: i64 =
+            db.query_row("SELECT count(*) FROM objects WHERE kind=?1 AND id=?2", params![k, object.id.to_string()], |r| r.get(0)).unwrap();
         assert_eq!(count, 0, "{k} partially created a rejected object");
     }
     for k in kinds() {

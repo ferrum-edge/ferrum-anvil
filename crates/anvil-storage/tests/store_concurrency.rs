@@ -171,14 +171,7 @@ fn store_calls_inside_its_own_transaction_are_rejected_not_deadlocked() {
     let (kept, stray) = (Id::new(), Id::new());
     let r: Result<(), StoreError> = store.atomically(|tx| {
         tx.put(kind::WORKSPACE, &kept, None, None, 0.0, &workspace(&kept, "kept"))?;
-        let direct = store.put(
-            kind::WORKSPACE,
-            &stray,
-            None,
-            None,
-            0.0,
-            &workspace(&stray, "stray"),
-        );
+        let direct = store.put(kind::WORKSPACE, &stray, None, None, 0.0, &workspace(&stray, "stray"));
         assert!(matches!(direct, Err(StoreError::TransactionActive)));
         assert!(matches!(store.get::<Value>(kind::WORKSPACE, &kept), Err(StoreError::TransactionActive)));
         assert!(matches!(store.atomically(|_| Ok(())), Err(StoreError::TransactionActive)), "nested transactions are rejected");
@@ -238,18 +231,7 @@ fn every_transaction_ends_before_the_connection_is_released() {
     assert_no_open_transaction(dir.path());
     assert_eq!(name(&store, &id), None);
 
-    store
-        .atomically(|tx| {
-            tx.put(
-                kind::WORKSPACE,
-                &id,
-                None,
-                None,
-                0.0,
-                &workspace(&id, "committed"),
-            )
-        })
-        .unwrap();
+    store.atomically(|tx| tx.put(kind::WORKSPACE, &id, None, None, 0.0, &workspace(&id, "committed"))).unwrap();
     assert_no_open_transaction(dir.path());
     assert_eq!(name(&store, &id).as_deref(), Some("committed"));
 }
