@@ -1,0 +1,10 @@
+commit 0c260f5379939ff46d681666bfbcd65b8518b08d
+run 37208769030
+artifact 11305688717
+archive_sha256 159bef8a6b7b021b8498a93a12172ba8cd2dd227172ced4659af6902bd3965d9
+member e2e/diagnosis.json diagnosis-edge-0.9.10.json
+source crates/ferrum-alloy-cli/src/diagnose.rs diagnose.rs
+source contracts/diagnostics/diagnostic-report.v1.schema.json diagnostic-report.v1.schema.json
+sha256 6977f23339de05e8c05f4ac1a165699ca953fc8d83aa6ac3af58628cbec4d6c2 diagnose.rs
+sha256 8a494b383b1b7ff7d6907644f1cc7d2c7225ce41dc06d7b8900f6cefb3f1e9d4 diagnosis-edge-0.9.10.json
+sha256 88d880f0f3a1c9f6e2b7a1a2f9962cf517831714903577e9876baa9ce8d87979 diagnostic-report.v1.schema.json
