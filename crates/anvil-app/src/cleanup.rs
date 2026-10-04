@@ -213,10 +213,7 @@ fn plan_in(s: &StoreRead<'_>, cutoff: i64) -> anvil_storage::store::Result<Plan>
                     id = %m.id,
                     "a stored revision does not decode; its row and stored files are kept"
                 );
-                undecodable.push(UndecodableObject {
-                    kind: kind::REVISION.into(),
-                    id: m.id,
-                });
+                undecodable.push(UndecodableObject { kind: kind::REVISION.into(), id: m.id });
             }
             Err(e) => return Err(e),
         }

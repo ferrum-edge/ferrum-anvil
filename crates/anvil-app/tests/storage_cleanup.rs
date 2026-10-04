@@ -249,10 +249,7 @@ fn an_object_that_does_not_decode_keeps_every_file_and_is_named() {
     let done = app.clean_up_storage().unwrap();
     let named = vec![
         UndecodableObject { kind: kind::REQUEST.into(), id },
-        UndecodableObject {
-            kind: kind::REVISION.into(),
-            id: damaged.revision_id.unwrap().to_string(),
-        },
+        UndecodableObject { kind: kind::REVISION.into(), id: damaged.revision_id.unwrap().to_string() },
     ];
     assert_eq!(done.undecodable, named);
     assert_eq!(done.orphaned_revisions, 0);

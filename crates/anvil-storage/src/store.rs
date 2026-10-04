@@ -1088,10 +1088,7 @@ impl StoreTx<'_> {
         for id in revisions {
             self.delete(kind::REVISION, &id)?;
         }
-        self.tx.execute(
-            "DELETE FROM objects WHERE workspace_id=?1 AND kind<>?2",
-            params![ws, kind::REVISION],
-        )?;
+        self.tx.execute("DELETE FROM objects WHERE workspace_id=?1 AND kind<>?2", params![ws, kind::REVISION])?;
         self.tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws])?;
         self.tx.execute("DELETE FROM secrets WHERE workspace_id=?1", params![ws])?;
         self.tx.execute("DELETE FROM history WHERE workspace_id=?1", params![ws])?;
@@ -1189,10 +1186,7 @@ impl StoreRead<'_> {
     /// or exclude an orphan from a portable backup; it never adopts or reseals
     /// the row. Keep undecodable rows and their pins until safely resolved.
     #[doc(hidden)]
-    pub fn orphan_revision_attachment_refs_for_retention(
-        &self,
-        id: &Id,
-    ) -> Result<Option<HashSet<String>>> {
+    pub fn orphan_revision_attachment_refs_for_retention(&self, id: &Id) -> Result<Option<HashSet<String>>> {
         self.records()?.orphan_revision_attachment_refs_for_retention(id)
     }
 
@@ -1289,10 +1283,7 @@ impl ObjectRow {
 
 // Only canonical content hashes may leave the restricted orphan inspection.
 // Walk the typed spec's serialization so all stored attachment variants count.
-fn collect_retention_attachment_refs(
-    value: &serde_json::Value,
-    refs: &mut HashSet<String>,
-) -> Result<()> {
+fn collect_retention_attachment_refs(value: &serde_json::Value, refs: &mut HashSet<String>) -> Result<()> {
     match value {
         serde_json::Value::Object(fields) => {
             if fields.get("kind").and_then(|v| v.as_str()) == Some("stored") {
@@ -1401,33 +1392,19 @@ impl Records<'_> {
         Ok(())
     }
 
-    fn orphan_revision_attachment_refs_for_retention(
-        &self,
-        id: &Id,
-    ) -> Result<Option<HashSet<String>>> {
+    fn orphan_revision_attachment_refs_for_retention(&self, id: &Id) -> Result<Option<HashSet<String>>> {
         let id_s = id.to_string();
         let Some(row) = self.object_row(kind::REVISION, &id_s)? else {
             return Ok(None);
         };
-        let pt = crypto::open(
-            &self.key,
-            &aad("objects", kind::REVISION, &id_s),
-            &row.payload,
-        )
-        .map_err(|_| StoreError::Integrity)?;
+        let pt = crypto::open(&self.key, &aad("objects", kind::REVISION, &id_s), &row.payload).map_err(|_| StoreError::Integrity)?;
         let revision: anvil_domain::workspace::RequestRevision = serde_json::from_slice(&pt)?;
         if revision.id != *id {
             return Err(StoreError::Integrity);
         }
         // Presence, not the parent index or a failed ordinary parent read:
         // a corrupt or metadata-tampered existing request is not an orphan.
-        if self
-            .object_row(
-                kind::REQUEST,
-                &revision.request_id.to_string(),
-            )?
-            .is_some()
-        {
+        if self.object_row(kind::REQUEST, &revision.request_id.to_string())?.is_some() {
             return Ok(None);
         }
         let spec = serde_json::to_value(&revision.spec)?;

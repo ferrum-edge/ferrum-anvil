@@ -369,36 +369,19 @@ fn orphan_inspection_returns_only_hashes_and_never_bypasses_a_present_parent() {
     let forged = row(&db, &revision);
     // Even a corrupt parent remains present, so this cannot become an
     // alternative reader for live revision data or reference authorization.
-    db.execute(
-        "UPDATE objects SET payload=x'00' WHERE kind='request' AND id=?1",
-        params![request.to_string()],
-    )
-    .unwrap();
-    let refs = store
-        .read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id))
-        .unwrap();
+    db.execute("UPDATE objects SET payload=x'00' WHERE kind='request' AND id=?1", params![request.to_string()]).unwrap();
+    let refs = store.read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id)).unwrap();
     assert_eq!(refs, None);
-    assert!(matches!(
-        store.get::<Value>(kind::REVISION, &revision.id),
-        Err(StoreError::Integrity)
-    ));
+    assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)));
     store.delete(kind::REQUEST, &request).unwrap();
-    let refs = store
-        .read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id))
-        .unwrap();
+    let refs = store.read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id)).unwrap();
     assert_eq!(refs, Some(std::collections::HashSet::from([hash])));
-    assert!(matches!(
-        store.get::<Value>(kind::REVISION, &revision.id),
-        Err(StoreError::Integrity)
-    ));
+    assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)));
     assert!(store.list::<Value>(kind::REVISION, Some(&b)).is_err());
     assert!(revision.put(&store).is_err(), "reference inspection cannot reseal or adopt it");
     assert_eq!(row(&db, &revision), forged);
     store.lock();
-    assert!(matches!(
-        store.read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id)),
-        Err(StoreError::Locked)
-    ));
+    assert!(matches!(store.read_consistently(|r| r.orphan_revision_attachment_refs_for_retention(&revision.id)), Err(StoreError::Locked)));
 }
 
 #[test]
@@ -424,16 +407,10 @@ fn orphan_inspection_refuses_ciphertext_wrong_ids_and_non_hash_attachment_data()
         crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&wrong_id).unwrap()),
         crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&invalid_hash).unwrap()),
     ] {
-        db.execute(
-            "UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2",
-            params![payload, revision.id.to_string()],
-        )
-        .unwrap();
+        db.execute("UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2", params![payload, revision.id.to_string()]).unwrap();
         let before = row(&db, &revision);
         assert!(matches!(
-            store.read_consistently(|r| {
-                r.orphan_revision_attachment_refs_for_retention(&revision.id)
-            }),
+            store.read_consistently(|r| { r.orphan_revision_attachment_refs_for_retention(&revision.id) }),
             Err(StoreError::Integrity)
         ));
         assert_eq!(row(&db, &revision), before);

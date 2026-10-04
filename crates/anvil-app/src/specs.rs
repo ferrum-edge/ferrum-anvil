@@ -432,11 +432,7 @@ impl App {
                 }
                 s.put(kind::REQUEST, &q.meta.id, Some(&q.workspace_id), q.folder_id.as_ref(), q.sort_key, &q)?;
             }
-            let removed: Vec<RequestDefinition> = previous
-                .iter()
-                .filter(|q| deleted.contains(&q.meta.id))
-                .cloned()
-                .collect();
+            let removed: Vec<RequestDefinition> = previous.iter().filter(|q| deleted.contains(&q.meta.id)).cloned().collect();
             delete_requests_in(s, &removed)?;
             for e in &environments {
                 s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, e)?;

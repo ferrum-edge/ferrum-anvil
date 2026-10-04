@@ -1073,10 +1073,7 @@ fn unstored(sha256: &str) -> AppError {
 /// ones a user added, unless a user attached it within [`ATTACHMENT_GRACE`]
 /// ([`held_release_waits_in`]), as [`release_held_attachment_in`] does, in
 /// one pass over the referrers.
-pub(crate) fn delete_requests_in(
-    s: &StoreTx<'_>,
-    requests: &[RequestDefinition],
-) -> anvil_storage::store::Result<()> {
+pub(crate) fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]) -> anvil_storage::store::Result<()> {
     let mut specs = Vec::new();
     for r in requests {
         specs.push(serde_json::to_value(&r.spec)?);

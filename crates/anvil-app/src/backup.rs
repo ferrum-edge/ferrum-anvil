@@ -119,10 +119,7 @@ pub const NOT_CARRIED_KINDS: &[(&str, &str)] = &[
 
 /// Every store table and how a full backup covers it.
 pub const TABLES: &[(&str, &str)] = &[
-    (
-        "objects",
-        "OBJECT_KINDS with reported orphan exclusions; attachment indexes rebuilt on restore",
-    ),
+    ("objects", "OBJECT_KINDS with reported orphan exclusions; attachment indexes rebuilt on restore"),
     ("secrets", "every vault secret, workspace-owned and profile-level"),
     ("blobs", "attachment contents and stored response bodies, with the attachments and history records that use them"),
     ("history", "every execution record with its stored response body"),
@@ -641,9 +638,7 @@ impl App {
                 rows.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
                 for m in rows {
                     let id: Id = m.id.parse().map_err(|_| StoreError::Integrity)?;
-                    if *k == kind::REVISION
-                        && r.orphan_revision_attachment_refs_for_retention(&id)?.is_some()
-                    {
+                    if *k == kind::REVISION && r.orphan_revision_attachment_refs_for_retention(&id)?.is_some() {
                         // No historical owner can be established. Keep the
                         // original row in the profile/checkpoints, without
                         // exposing its spec or assigning a workspace in the
@@ -687,16 +682,7 @@ impl App {
             let linked_files = r.object_meta(kind::LINKED_FILE)?.len();
             Ok(Raw { objects, excluded, index, secrets, history, load_reports, token_files, linked_files })
         })?;
-        let Raw {
-            objects,
-            mut excluded,
-            index,
-            secrets,
-            history,
-            load_reports,
-            token_files,
-            linked_files,
-        } = raw;
+        let Raw { objects, mut excluded, index, secrets, history, load_reports, token_files, linked_files } = raw;
         let mut attachments = Vec::new();
         for (entry, blob) in &index {
             match (entry.get("attachment").and_then(Value::as_str), blob) {
