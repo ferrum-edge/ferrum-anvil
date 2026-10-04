@@ -141,13 +141,14 @@ Publication never resolves a checked temporary name again:
 - **Windows:** the exclusively created staging file is opened with
   `GENERIC_READ | GENERIC_WRITE | DELETE` and only `FILE_SHARE_READ`. Other
   handles cannot write or delete/replace it while retained. Publication calls
-  `SetFileInformationByHandle(FileRenameInfoEx)` on that exact handle with
+  `NtSetInformationFile(FileRenameInformation)` on that exact handle with
   the retained destination directory as `RootDirectory`, a single UTF-16
-  leaf, and flags **zero**. No replacement or POSIX-overwrite flag is set.
+  leaf, and `ReplaceIfExists` **FALSE**. NT information class 10 is distinct
+  from Win32 class 22; no extended or POSIX-overwrite flags are used.
   Successful native rename consumes the source name; there is no hard-link
-  fallback and no successful additional `.partial` link. Windows 10 RS1 or
-  newer and filesystem support for this operation are required. Unsupported
-  operations fail instead of falling back to an unsafe publication.
+  fallback and no successful additional `.partial` link. Filesystem support
+  for native same-volume rename is required. Unsupported operations fail
+  instead of falling back to an unsafe publication.
 - **macOS:** an exclusively created, mode-0600 staging file is published
   by `rustix::fs::fclonefileat` from the retained descriptor into the retained
   destination directory. Apple documents atomic all-or-nothing creation,
@@ -227,6 +228,38 @@ contracts require real hosted APFS qualification. A later ACL postcheck does
 In particular, [Apple SMB creation](https://github.com/apple-oss-distributions/SMBClient/blob/main/kernel/smbfs/smbfs_vnops.c)
 applies some security attributes after creation; this candidate rejects SMB
 before creation and does not claim to qualify its handle access semantics.
+
+At `ccb7fa3`, the optional policy run `37207104534` created and attached its
+private APFS image, passed the real Ignore Ownership rejection and synthetic
+rejection tests, then failed three owned-APFS tests after staging dispatch.
+It detached the image and reported `cleanup_status=0`. The main macOS job
+`111450479381` in run `37207107457` exposed the producer's `ENOENT` rather
+than just the missed-barrier assertion. These are producer failures, not an
+image-creation or mount-allowlist failure.
+
+Static inspection of Apple's [acl_get_fd_np implementation](https://github.com/apple-oss-distributions/Libc/blob/main/posix1e/acl_file.c)
+and [statx_np implementation](https://github.com/apple-oss-distributions/Libc/blob/main/sys/statx_np.c)
+identifies a zero-entry ACL loss: `statx_np` requires the returned security
+length to reach `sizeof(struct kauth_filesec)`, which includes a placeholder
+ACE. A valid empty ACL occupies only `KAUTH_FILESEC_SIZE(0)` (44 bytes,
+versus 68 with one ACE), so Libc clears its ACL property and the caller gets
+`ENOENT`. This size check matches the hosted failure; the changed producer
+still needs hosted verification.
+
+The candidate now uses documented descriptor-only `fgetattrlist` with
+`ATTR_CMN_EXTENDED_SECURITY`. Apple's [getattrlist contract](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2)
+and [native attribute packing](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_attrlist.c)
+return a native `kauth_filesec` through an `attrreference_t`, including empty
+ACL flags. The output accepts only the exact 56-byte single-attribute layout:
+4-byte length, 8-byte reference, and 44-byte zero-entry filesec. It checks
+the reference offset/length, magic, zero entry count and `NO_INHERIT` bit.
+`FSOPT_REPORT_FULLSIZE` exposes truncation; missing, nonempty, truncated or
+unexpected security data fail closed. The installed macOS 15.4 SDK's
+`sys/attr.h` and `sys/kauth.h` and locked libc definitions match these types.
+The initial ACL, reinstatement, mode/UID checks and inherited-ACL barriers
+remain in place. New native mutations remove the ACL, add an ACE or widen
+mode after successful staging; each must reject before plaintext, leave no
+final output, and preserve the retry grant and descriptor accounting.
 
 Retaining a directory descriptor does not freeze mount policy. All checks
 assume ownership enforcement and the audited native filesystem implementation
@@ -332,7 +365,40 @@ Primary native API evidence, inspected as data without local execution:
 [XNU fclonefileat source-vnode acquisition](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
 [Windows FILE_RENAME_INFO root/flags](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info),
 [Windows rename requirements and no-replace semantics](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information),
-[Windows SDK information-class enum](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/minwinbase.h).
+[Windows SDK information-class enum](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/minwinbase.h),
+[NtSetInformationFile and user-mode naming](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile),
+[IO_STATUS_BLOCK ABI and return-status rules](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_io_status_block),
+[Microsoft's native bindings](https://github.com/microsoft/windows-rs/blob/0.59.0/crates/libs/sys/src/Windows/Wdk/Storage/FileSystem/mod.rs),
+and [NTSTATUS conversion](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-rtlntstatustodoserror).
+
+Hosted Windows job `111447130869` in run `37205965474` failed four library
+and two export integration tests at Win32 publication with error 87. Static
+SDK comparison confirms the former class 22 (`FileRenameInfoEx`), union,
+pointer alignment, byte count, buffer capacity and ordinary relative leaf;
+the source already requests DELETE and the root remains the held directory.
+Microsoft's FILE_RENAME_INFO documentation explicitly permits a relative
+name with that directory handle. The older SetFileInformationByHandle
+supported-class table is therefore not evidence that class 22 is invalid.
+No particular internal cause for that Win32 rejection is established here.
+
+The repair directly uses the documented NT rooted rename form: class 10,
+BOOLEAN replacement field, same held root and same exclusively owned source.
+The isolated FFI also supplies the SDK's status/pointer union plus ULONG_PTR
+IO status block. The locked cap-std creation path sets
+`FILE_SYNCHRONOUS_IO_NONALERT`, so completion precedes buffer destruction;
+errors use the returned NTSTATUS and `RtlNtStatusToDosError`, not stale
+GetLastError. No access, root acquisition, source identity or overwrite
+policy is relaxed. New Windows-native seam tests require real Unicode-name
+publication with unchanged file ID/owner/group/DACL, consumption of the owned
+staging name, preservation of a foreign staging hard link, and unchanged
+parent identity. Planted ordinary files and outside hard links must produce
+a collision error, retain both identities/security descriptors and bytes,
+then allow the same source handle to publish to a fresh leaf. Error 87 or a
+blanket native failure cannot satisfy these controls. Earlier ancestor
+junction, foreign-source and final hard-link barriers remain unchanged.
+These tests are written, not run locally or claimed qualified. Fresh focused
+review of both native boundaries and all-platform hosted gates remain root's
+required follow-up after this push.
 
 The source namespace proof assumes the kernel, this process/descriptor table,
 and its mount namespace are trusted. The advisory's actor may replace selected

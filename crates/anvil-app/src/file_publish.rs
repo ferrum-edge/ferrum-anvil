@@ -120,7 +120,7 @@ fn publish(file: &File, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()>
     Ok(())
 }
 
-// Audited Darwin boundary: public opaque ACL/filesec APIs, no C struct layout.
+// Audited Darwin boundary: public ACL/filesec APIs and SDK attribute layout.
 // Primary contracts: Apple Libc sys/openx_np.c and include/sys/acl.h;
 // XNU bsd/kern/kern_authorization.c (kauth_acl_inherit) and
 // bsd/vfs/vfs_syscalls.c (open_extended, fchdir, clonefile_internal).
@@ -244,12 +244,9 @@ mod macos {
     unsafe extern "C" {
         fn acl_init(count: c_int) -> *mut c_void;
         fn acl_free(acl: *mut c_void) -> c_int;
-        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
         fn acl_set_fd_np(fd: c_int, acl: *mut c_void, kind: c_int) -> c_int;
-        fn acl_get_entry(acl: *mut c_void, index: c_int, entry: *mut *mut c_void) -> c_int;
         fn acl_get_flagset_np(acl: *mut c_void, flags: *mut *mut c_void) -> c_int;
         fn acl_add_flag_np(flags: *mut c_void, flag: c_int) -> c_int;
-        fn acl_get_flag_np(flags: *mut c_void, flag: c_int) -> c_int;
         fn filesec_init() -> *mut c_void;
         fn filesec_free(security: *mut c_void);
         fn filesec_set_property(security: *mut c_void, property: c_int, value: *const c_void) -> c_int;
@@ -361,16 +358,73 @@ mod macos {
         if metadata.mode() & 0o777 != 0o600 || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(io::Error::other("export requires owner-only mode and ownership"));
         }
-        // SAFETY: live borrowed descriptor; Libc returns a separately owned ACL.
-        let acl = Acl::new(unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) })?;
-        let flags = acl.flags()?;
-        let mut entry = std::ptr::null_mut();
-        // SAFETY: live ACL/flagset and an initialized entry output pointer.
-        // Darwin returns -1 with EINVAL at the end of an empty ACL, unlike
-        // the POSIX ACL iterator convention. Other errors fail closed.
-        let (no_inherit, first) = unsafe { (acl_get_flag_np(flags, ACL_FLAG_NO_INHERIT), acl_get_entry(acl.0, 0, &mut entry)) };
-        let empty = first == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL);
-        if no_inherit != 1 || !empty {
+        check_empty_acl(file)
+    }
+
+    // sys/kauth.h: KAUTH_FILESEC_SIZE(0), without the placeholder first ACE.
+    // Libc's acl_get_fd_np/statx_np loses this valid 44-byte empty ACL by
+    // testing against sizeof(kauth_filesec), which includes one 24-byte ACE.
+    // getattrlist(2) returns the native filesec directly, including its flags.
+    #[repr(C)]
+    #[derive(Default)]
+    struct EmptyFilesec {
+        magic: u32,
+        _owner: [u8; 16],
+        _group: [u8; 16],
+        entry_count: u32,
+        flags: u32,
+    }
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: u32,
+        reference: libc::attrreference_t,
+        security: EmptyFilesec,
+    }
+
+    fn check_empty_acl(file: &File) -> io::Result<()> {
+        use std::mem::{offset_of, size_of};
+
+        let mut attributes = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: libc::ATTR_CMN_EXTENDED_SECURITY,
+            volattr: 0,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0,
+        };
+        let mut result = SecurityAttributes {
+            length: 0,
+            reference: libc::attrreference_t {
+                attr_dataoffset: 0,
+                attr_length: 0,
+            },
+            security: EmptyFilesec::default(),
+        };
+        const _: () = assert!(size_of::<EmptyFilesec>() == 44);
+        const _: () = assert!(offset_of!(SecurityAttributes, security) == 12);
+        const _: () = assert!(size_of::<SecurityAttributes>() == 56);
+        // SAFETY: SDK attrlist and a fully initialized, 4-byte-aligned output
+        // buffer are borrowed for a synchronous descriptor query. Request
+        // only extended security. REPORT_FULLSIZE detects truncation of a
+        // nonempty ACL; no absent, truncated or unexpected layout is accepted.
+        checked(unsafe {
+            libc::fgetattrlist(
+                file.as_raw_fd(),
+                (&mut attributes as *mut libc::attrlist).cast(),
+                (&mut result as *mut SecurityAttributes).cast(),
+                size_of::<SecurityAttributes>(),
+                libc::FSOPT_REPORT_FULLSIZE,
+            )
+        })?;
+        if result.length != 56
+            || result.reference.attr_dataoffset != 8
+            || result.reference.attr_length != 44
+            || result.security.magic != 0x012c_c16d
+            || result.security.entry_count != 0
+            || result.security.flags & (1 << 17) == 0
+        {
             return Err(io::Error::other("export requires an empty non-inheriting ACL"));
         }
         Ok(())
@@ -395,16 +449,37 @@ mod windows {
 
     #[repr(C)]
     struct RenameInfo {
-        flags: u32,
+        replace_if_exists: u8,
         root_directory: *mut c_void,
         file_name_length: u32,
         file_name: [u16; 1],
     }
 
-    #[link(name = "kernel32")]
+    // winternl.h IO_STATUS_BLOCK: NTSTATUS/PVOID union, then ULONG_PTR.
+    #[repr(C)]
+    union IoStatus {
+        _status: i32,
+        pointer: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: IoStatus,
+        information: usize,
+    }
+
+    #[link(name = "ntdll")]
     unsafe extern "system" {
-        #[link_name = "SetFileInformationByHandle"]
-        fn set_file_information_by_handle(file: *mut c_void, class: i32, information: *const c_void, size: u32) -> i32;
+        #[link_name = "NtSetInformationFile"]
+        fn nt_set_information_file(
+            file: *mut c_void,
+            status: *mut IoStatusBlock,
+            information: *mut c_void,
+            size: u32,
+            class: i32,
+        ) -> i32;
+        #[link_name = "RtlNtStatusToDosError"]
+        fn rtl_nt_status_to_dos_error(status: i32) -> u32;
     }
 
     pub(super) fn publish(file: &File, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()> {
@@ -423,17 +498,59 @@ mod windows {
         assert!(align_of::<usize>() >= align_of::<RenameInfo>());
         let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
         let pointer = storage.as_mut_ptr().cast::<RenameInfo>();
+        let mut completion = IoStatusBlock {
+            status: IoStatus {
+                pointer: std::ptr::null_mut(),
+            },
+            information: 0,
+        };
         // SAFETY: storage is aligned, initialized and large enough for the
         // complete header plus all UTF-16 units. Both handles are borrowed
-        // from live owners through the synchronous call. Class 22 is
-        // FileRenameInfoEx; flags 0 forbids replacement/POSIX overwrite.
-        let ok = unsafe {
-            pointer.write(RenameInfo { flags: 0, root_directory: dir.dir().as_raw_handle(), file_name_length: bytes32, file_name: [0] });
+        // from live owners. create() uses cap-std's synchronous NtCreateFile
+        // handle (FILE_SYNCHRONOUS_IO_NONALERT), so all I/O completes before
+        // these buffers drop. NT class 10 is FileRenameInformation, whose
+        // documented relative form takes a directory handle and simple name.
+        // FALSE forbids replacement; no extended/POSIX flags are requested.
+        // Use the native rooted-name contract directly instead of relying on
+        // SetFileInformationByHandle's Win32 path-form handling.
+        let status = unsafe {
+            // Write fields individually so the zeroed union/padding bytes
+            // stay initialized too, rather than copying Rust struct padding.
+            (*pointer).replace_if_exists = 0;
+            (*pointer).root_directory = dir.dir().as_raw_handle();
+            (*pointer).file_name_length = bytes32;
             let destination = storage.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>();
             std::ptr::copy_nonoverlapping(name.as_ptr(), destination, name.len());
-            set_file_information_by_handle(file.as_raw_handle(), 22, pointer.cast(), size32)
+            nt_set_information_file(
+                file.as_raw_handle(),
+                &mut completion,
+                pointer.cast(),
+                size32,
+                10,
+            )
         };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        if status < 0 {
+            // Nt APIs return NTSTATUS, not a Win32 last-error value.
+            // SAFETY: this conversion accepts any NTSTATUS and borrows nothing.
+            let code = unsafe { rtl_nt_status_to_dos_error(status) };
+            let code = i32::try_from(code)
+                .map_err(|_| io::Error::other(format!("rename failed: NTSTATUS {status:#x}")))?;
+            Err(io::Error::from_raw_os_error(code))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn native_rename_layout_matches_the_windows_sdk() {
+        let pointer = size_of::<usize>();
+        assert_eq!(offset_of!(RenameInfo, root_directory), pointer);
+        assert_eq!(offset_of!(RenameInfo, file_name_length), 2 * pointer);
+        assert_eq!(offset_of!(RenameInfo, file_name), 2 * pointer + 4);
+        assert_eq!(size_of::<RenameInfo>(), 2 * pointer + 8);
+        assert_eq!(size_of::<IoStatus>(), pointer);
+        assert_eq!(offset_of!(IoStatusBlock, information), pointer);
+        assert_eq!(size_of::<IoStatusBlock>(), 2 * pointer);
     }
 }
 
