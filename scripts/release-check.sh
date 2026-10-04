@@ -285,6 +285,9 @@ import sys
 
 try:
     root = os.path.abspath(sys.argv[1])
+    # Trusted TMPDIR ancestors may be aliases. Resolve only the containment
+    # boundary; keep the supplied root for O_NOFOLLOW opens and identity checks.
+    containment_root = str(Path(root).resolve(strict=True))
     count = int(sys.argv[2])
     needles = [value.encode() for value in sys.argv[3:3 + count]]
     markers = [value.encode() for value in sys.argv[3 + count:]]
@@ -324,7 +327,7 @@ try:
                 seen[path] = before
             if stat.S_ISLNK(before.st_mode):
                 target = Path(path).resolve()
-                if os.path.commonpath((root, target)) != root:
+                if os.path.commonpath((containment_root, target)) != containment_root:
                     raise ValueError("symlink escapes the extraction directory")
             elif stat.S_ISDIR(before.st_mode):
                 child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
@@ -370,9 +373,11 @@ try:
     root_fd = os.open(root, directory_flags)
     try:
         before_root = os.fstat(root_fd)
+        unchanged(before_root, os.stat(containment_root, follow_symlinks=False), containment_root)
         walk(root, root_fd)
         # Recheck earlier files after later candidates have been read, too.
         walk(root, root_fd, verify=True)
+        unchanged(before_root, os.stat(containment_root, follow_symlinks=False), containment_root)
         unchanged(before_root, os.stat(root, follow_symlinks=False), root)
     finally:
         os.close(root_fd)

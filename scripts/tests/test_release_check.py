@@ -205,6 +205,15 @@ class ReleaseCheckAppImage(unittest.TestCase):
         self.assertFalse(self.apprun_sentinel.exists())
         self.assertFalse(self.desktop_sentinel.exists())
 
+    def aliased_tmpdir_env(self):
+        temporary = self.case_root / "temporary"
+        temporary.mkdir()
+        alias = self.case_root / "temporary-alias"
+        alias.symlink_to(temporary, target_is_directory=True)
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(alias.resolve(strict=True), temporary.resolve(strict=True))
+        return {**self.env, "TMPDIR": str(alias)}
+
     def test_native_malicious_runtime_is_never_invoked(self):
         evidence, _ = self.check(self.image(), 0)
         self.assertEqual(evidence["artifacts"][0]["executables"], 1)
@@ -584,6 +593,7 @@ class ReleaseCheckAppImage(unittest.TestCase):
         host.write_bytes((self.fixture_root / "desktop").read_bytes() + b"\0/wdio/eval\0")
         host.chmod(0o755)
         before = host.read_bytes()
+        environments = (self.env, self.aliased_tmpdir_env())
         for kind in ("apprun", "file", "directory", "relative"):
             with self.subTest(kind=kind):
                 appdir = self.case_root / f"symlink-{kind}"
@@ -599,13 +609,15 @@ class ReleaseCheckAppImage(unittest.TestCase):
                 payload = squashfs_payload(appdir, self.case_root / f"symlink-{kind}.squashfs")
                 image = self.image()
                 image.write_bytes(self.native_runtime + payload)
-                for options in ((), ("--runtime-probe", "--probe-seconds", "1")):
-                    _, output = self.check(image, 2, *options)
-                    self.assertIn("symlink escapes the extraction directory", output)
-                    self.assertEqual(host.read_bytes(), before)
-                    self.assert_no_payload_execution()
+                for env in environments:
+                    for options in ((), ("--runtime-probe", "--probe-seconds", "1")):
+                        with self.subTest(tmpdir=env.get("TMPDIR"), options=options):
+                            _, output = self.check(image, 2, *options, env=env)
+                            self.assertIn("symlink escapes the extraction directory", output)
+                            self.assertEqual(host.read_bytes(), before)
+                            self.assert_no_payload_execution()
 
-    def test_contained_apprun_symlink_remains_supported(self):
+    def test_contained_apprun_symlink_with_aliased_tmpdir_remains_supported(self):
         appdir = self.case_root / "contained-link"
         shutil.copytree(self.fixture_root / "clean", appdir)
         (appdir / "AppRun").rename(appdir / "usr/bin/launcher")
@@ -613,9 +625,12 @@ class ReleaseCheckAppImage(unittest.TestCase):
         payload = squashfs_payload(appdir, self.case_root / "contained-link.squashfs")
         image = self.image()
         image.write_bytes(self.native_runtime + payload)
-        evidence, _ = self.check(image, 0)
-        self.assertEqual(evidence["artifacts"][0]["executables"], 1)
-        self.assert_no_payload_execution()
+        for env in (self.env, self.aliased_tmpdir_env()):
+            with self.subTest(tmpdir=env.get("TMPDIR")):
+                evidence, _ = self.check(image, 0, env=env)
+                self.assertEqual(evidence["artifacts"][0]["executables"], 1)
+                self.assertEqual(evidence["artifacts"][0]["runtime_probe"], "skipped")
+                self.assert_no_payload_execution()
 
     def test_foreign_payload_and_empty_scan_fail_closed(self):
         for payload, message in (

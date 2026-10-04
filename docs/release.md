@@ -191,6 +191,8 @@ The CI release-checker jobs (Ubuntu 22.04 and 24.04) and release preflight run
 include a native malicious runtime whose sentinel must never appear, real
 compressed SquashFS payloads, both ELF boundary layouts across architectures,
 forbidden markers in a library, malformed images and missing extraction tools.
+Contained `AppRun` symlinks also pass with a trusted symlinked `TMPDIR`; escaping
+links still fail under both ordinary and aliased temporary directories.
 Separate explicit-probe tests prove that extracted `AppRun` launches only when
 requested, that environment-created profiles fail the probe, and that early
 exit is inconclusive; a listener answering the WebDriver status request also
