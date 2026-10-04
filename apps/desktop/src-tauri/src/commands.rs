@@ -555,6 +555,7 @@ struct SendArgs {
 struct OpenSessionArgs {
     input: SendInput,
     execution_id: String,
+    #[serde(deserialize_with = "nonempty_attempt_id")]
     attempt_id: String,
 }
 
@@ -574,6 +575,7 @@ struct McpArgs {
 #[serde(rename_all = "camelCase")]
 struct SessionArgs {
     execution_id: String,
+    #[serde(deserialize_with = "nonempty_attempt_id")]
     attempt_id: String,
     command: SessionCommand,
 }
@@ -582,7 +584,17 @@ struct SessionArgs {
 #[serde(rename_all = "camelCase")]
 struct CancelSessionArgs {
     execution_id: String,
+    #[serde(deserialize_with = "nonempty_attempt_id")]
     attempt_id: String,
+}
+
+/// Reject empty attempts while decoding, before native state or admission is read.
+fn nonempty_attempt_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let attempt = String::deserialize(deserializer)?;
+    if attempt.is_empty() {
+        return Err(serde::de::Error::custom("attemptId must be nonempty"));
+    }
+    Ok(attempt)
 }
 
 pub(crate) fn with_execution_commands(
@@ -649,43 +661,65 @@ where
     F: FnOnce(AppHandle, C, A) -> Fut + Send + 'static,
     Fut: Future<Output = R<T>> + Send + 'static,
 {
-    let args = match invoke.message.payload() {
+    let handle = invoke.message.webview().app_handle().clone();
+    let resolver = invoke.resolver;
+    dispatch_payload_command(
+        handle.clone(),
+        invoke.message.payload(),
+        admit,
+        move |admitted, args| work(handle, admitted, args),
+        move |response| match response {
+            tauri::ipc::InvokeResponse::Ok(body) => resolver.respond(Ok(body)),
+            tauri::ipc::InvokeResponse::Err(err) => resolver.respond(Result::<(), _>::Err(err)),
+        },
+    );
+}
+
+/// The production decoder/admission/work gate, shared with tests without a native window.
+fn dispatch_payload_command<S, A, C, T, F, Fut>(
+    source: S,
+    payload: &tauri::ipc::InvokeBody,
+    admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>,
+    work: F,
+    reply: impl FnOnce(tauri::ipc::InvokeResponse) + Send + 'static,
+) where
+    S: PayloadState,
+    A: serde::de::DeserializeOwned + Send + 'static,
+    C: Send + 'static,
+    T: Serialize + Send + 'static,
+    F: FnOnce(C, A) -> Fut + Send + 'static,
+    Fut: Future<Output = R<T>> + Send + 'static,
+{
+    let args = match payload {
         tauri::ipc::InvokeBody::Json(value) => serde_json::from_value::<A>(value.clone()),
         _ => {
-            invoke.resolver.reject("expected JSON execution arguments");
+            reply(R::<T>::Err("expected JSON execution arguments".into()).into());
             return;
         }
     };
     let args = match args {
         Ok(args) => args,
         Err(err) => {
-            invoke.resolver.reject(err.to_string());
-            return;
-        }
-    };
-    let handle = invoke.message.webview().app_handle().clone();
-    let fence = match handle.state::<DesktopState>().admit_payload() {
-        Ok(fence) => fence,
-        Err(err) => {
-            invoke.resolver.reject(err);
+            reply(R::<T>::Err(err.to_string()).into());
             return;
         }
     };
     // Controls bind the exact pending/open slot synchronously at IPC
     // admission, before the command future can be delayed by scheduling.
-    let admitted = match admit(&handle.state::<DesktopState>(), fence.clone(), &args) {
+    let admission: R<_> = source.with_state(|st| {
+        let fence = st.admit_payload()?;
+        let admitted = admit(st, fence.clone(), &args)?;
+        Ok((fence, admitted))
+    });
+    let (fence, admitted) = match admission {
         Ok(admitted) => admitted,
         Err(err) => {
-            invoke.resolver.reject(err);
+            reply(R::<T>::Err(err).into());
             return;
         }
     };
-    let resolver = invoke.resolver;
-    let future = work(handle.clone(), admitted, args);
-    dispatch_payload_reply(handle, fence, future, move |response| match response {
-        tauri::ipc::InvokeResponse::Ok(body) => resolver.respond(Ok(body)),
-        tauri::ipc::InvokeResponse::Err(err) => resolver.respond(Result::<(), _>::Err(err)),
-    });
+    let future = work(admitted, args);
+    dispatch_payload_reply(source, fence, future, reply);
 }
 
 /// The production async work/IPC serialization/enqueue path. Only the final
@@ -1262,8 +1296,180 @@ pub(crate) mod tests {
     use super::*;
     use crate::state::Running;
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    #[derive(Clone)]
+    struct ObservedPayloadState {
+        state: Arc<DesktopState>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl PayloadState for ObservedPayloadState {
+        fn with_state<T>(&self, f: impl FnOnce(&DesktopState) -> T) -> T {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            f(&self.state)
+        }
+    }
+
+    fn assert_rejected_session_command<A, C>(
+        st: &Arc<DesktopState>,
+        payload: serde_json::Value,
+        admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>,
+        expected: &str,
+    ) where
+        A: serde::de::DeserializeOwned + Send + 'static,
+        C: Send + 'static,
+    {
+        let source = ObservedPayloadState { state: st.clone(), reads: Arc::default() };
+        let admissions = AtomicUsize::new(0);
+        let work_created = Arc::new(AtomicUsize::new(0));
+        let work_count = work_created.clone();
+        let activity = *st.last_activity.lock();
+        let epoch = st.epoch();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        // This is the gate called by payload_reply_admitted, including its
+        // real decoder, admit_payload, control admission and work dispatch.
+        dispatch_payload_command(
+            source.clone(),
+            &tauri::ipc::InvokeBody::Json(payload),
+            |st, fence, args: &A| {
+                admissions.fetch_add(1, Ordering::SeqCst);
+                admit(st, fence, args)
+            },
+            move |_, _| {
+                work_count.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<(), String>(()) }
+            },
+            move |response| reply_tx.send(response).unwrap(),
+        );
+        let response = reply_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        match response {
+            tauri::ipc::InvokeResponse::Err(err) => assert_eq!(err.0, serde_json::json!(expected)),
+            _ => panic!("invalid session input reached work"),
+        }
+        assert_eq!(source.reads.load(Ordering::SeqCst), 0, "native state accessed");
+        assert_eq!(admissions.load(Ordering::SeqCst), 0, "command admitted");
+        assert_eq!(work_created.load(Ordering::SeqCst), 0, "work future created");
+        assert_eq!(*st.last_activity.lock(), activity, "vault activity changed");
+        assert_eq!(st.epoch(), epoch);
+        assert!(st.running.lock().is_empty(), "execution registered");
+        assert!(st.sessions.lock().is_empty(), "session registered");
+    }
+
+    #[test]
+    fn missing_and_empty_session_attempts_have_no_production_gate_effects() {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (app, _) = create(&st, "session gate");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let execution_id = Id::new().to_string();
+        let input = serde_json::json!({
+            "workspace_id": Id::new(), "request_id": null,
+            "spec": RequestSpec::http("GET", "tcp://127.0.0.1:1"),
+            "environment_id": null, "send_anyway": false, "run_override": null
+        });
+        let command = SessionCommand::SendText { text: "must not reach engine".into() };
+        for locked in [false, true] {
+            if locked {
+                st.lock();
+            }
+            for empty in [false, true] {
+                let mut open = serde_json::json!({ "input": input, "executionId": execution_id });
+                let mut send = serde_json::json!({
+                    "executionId": execution_id, "command": command
+                });
+                let mut cancel = serde_json::json!({ "executionId": execution_id });
+                if empty {
+                    for payload in [&mut open, &mut send, &mut cancel] {
+                        payload["attemptId"] = serde_json::json!("");
+                    }
+                }
+                let expected = if empty {
+                    "attemptId must be nonempty"
+                } else {
+                    "missing field `attemptId`"
+                };
+                let admit_open = |_: &DesktopState, fence, _: &OpenSessionArgs| Ok(fence);
+                assert_rejected_session_command(&st, open, admit_open, expected);
+                assert_rejected_session_command(
+                    &st,
+                    send,
+                    |st, fence, args: &SessionArgs| {
+                        crate::cmd_sessions::admit_control(
+                            st,
+                            fence,
+                            &args.execution_id,
+                            &args.attempt_id,
+                        )
+                    },
+                    expected,
+                );
+                assert_rejected_session_command(
+                    &st,
+                    cancel,
+                    |st, fence, args: &CancelSessionArgs| {
+                        crate::cmd_sessions::admit_cancel(
+                            st,
+                            fence,
+                            &args.execution_id,
+                            &args.attempt_id,
+                        )
+                    },
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonempty_session_attempt_reaches_production_work_unchanged() {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (app, _) = create(&st, "matching session gate");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let source = ObservedPayloadState { state: st, reads: Arc::default() };
+        let execution_id = Id::new().to_string();
+        let attempt_id = Id::new().to_string();
+        let payload = serde_json::json!({
+            "input": {
+                "workspace_id": Id::new(), "request_id": null, "spec": null,
+                "environment_id": null, "send_anyway": false, "run_override": null
+            },
+            "executionId": execution_id, "attemptId": attempt_id
+        });
+        let admissions = AtomicUsize::new(0);
+        let work_polled = Arc::new(AtomicUsize::new(0));
+        let work_count = work_polled.clone();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dispatch_payload_command(
+            source.clone(),
+            &tauri::ipc::InvokeBody::Json(payload),
+            |st, fence, _: &OpenSessionArgs| {
+                admissions.fetch_add(1, Ordering::SeqCst);
+                st.check_payload(&fence)?;
+                Ok(fence)
+            },
+            move |_, args| async move {
+                work_count.fetch_add(1, Ordering::SeqCst);
+                Ok((args.execution_id, args.attempt_id))
+            },
+            move |response| reply_tx.send(response).unwrap(),
+        );
+        let response = reply_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        match response {
+            tauri::ipc::InvokeResponse::Ok(body) => {
+                let identity = body.deserialize::<(String, String)>().unwrap();
+                assert_eq!(identity, (execution_id, attempt_id));
+            }
+            _ => panic!("matching session input was rejected"),
+        }
+        let reads = source.reads.load(Ordering::SeqCst);
+        assert_eq!(reads, 2, "admission and reply delivery");
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(work_polled.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn session_ipc_requires_the_expected_attempt_identity_before_dispatch() {
@@ -1298,11 +1504,9 @@ pub(crate) mod tests {
         let open: OpenSessionArgs = serde_json::from_value(open).unwrap();
         let send: SessionArgs = serde_json::from_value(send).unwrap();
         let cancel: CancelSessionArgs = serde_json::from_value(cancel).unwrap();
-        for (execution, attempt) in [
-            (open.execution_id, open.attempt_id),
-            (send.execution_id, send.attempt_id),
-            (cancel.execution_id, cancel.attempt_id),
-        ] {
+        for (execution, attempt) in
+            [(open.execution_id, open.attempt_id), (send.execution_id, send.attempt_id), (cancel.execution_id, cancel.attempt_id)]
+        {
             assert_eq!(execution, execution_id);
             assert_eq!(attempt, attempt_id);
         }

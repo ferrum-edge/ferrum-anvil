@@ -142,7 +142,7 @@ describe("file grants", () => {
     return [
       ["effective_request", { input }],
       ["send_request", { input, executionId: randomUUID() }],
-      ["session_open", { input, executionId: randomUUID() }],
+      ["session_open", { input, executionId: randomUUID(), attemptId: randomUUID() }],
       ["oauth_token_status", { input }],
     ];
   }
