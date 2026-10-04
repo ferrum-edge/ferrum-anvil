@@ -857,6 +857,16 @@ export type AuthConfig =
       type: "multi";
     };
 /**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ImportedDiagnosticKind".
+ */
+export type ImportedDiagnosticKind = "report" | "alloy_cli" | "finding" | "reference";
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ImportedDiagnosticTrust".
+ */
+export type ImportedDiagnosticTrust = "unverified";
+/**
  * Explicit user decision that a destination is a Ferrum Edge gateway.
  *
  * Without such a profile a `X-Gateway-Error` header is only a "Ferrum-like
@@ -1639,12 +1649,14 @@ export interface AnvilContracts {
   AppSettings?: AppSettings;
   Dataset?: Dataset;
   DiagnosticFinding?: DiagnosticFinding;
+  DiagnosticImportInput?: DiagnosticImportInput;
   DriftReport?: DriftReport;
   EffectiveSettings?: EffectiveSettings;
   Environment?: Environment;
   ExecutionEvent?: ExecutionEvent;
   ExecutionRecord?: ExecutionRecord;
   Folder?: Folder;
+  ImportedDiagnosticPreview?: ImportedDiagnosticPreview;
   IntegrationProfile?: IntegrationProfile;
   LintReport?: LintReport;
   LoadPlan?: LoadPlan;
@@ -1976,6 +1988,13 @@ export interface Evidence {
 export interface Remediation {
   text: string;
   owner: Owner;
+}
+/**
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "DiagnosticImportInput".
+ */
+export interface DiagnosticImportInput {
+  text: string;
 }
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -3584,6 +3603,24 @@ export interface JwtSvidConfig {
    */
   header_name?: string;
   prefix?: string;
+}
+/**
+ * `reported_json` preserves producer claims, after credential redaction. Its confidence,
+ * verification, trust and authenticated fields never determine Anvil's assessment.
+ * Rust serializes the JSON text so native IPC never rounds producer integers in JavaScript.
+ * This DTO is ephemeral IPC and is not persisted.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "ImportedDiagnosticPreview".
+ */
+export interface ImportedDiagnosticPreview {
+  kind: ImportedDiagnosticKind;
+  trust: ImportedDiagnosticTrust;
+  confidence: Confidence;
+  observation_count: number;
+  finding_count: number;
+  reported_json: string;
+  warnings: string[];
 }
 /**
  * Host/port pattern a TLS profile or client identity is bound to. Wildcards

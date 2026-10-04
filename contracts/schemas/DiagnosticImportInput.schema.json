@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiagnosticImportInput",
+  "type": "object",
+  "properties": {
+    "text": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "text"
+  ]
+}

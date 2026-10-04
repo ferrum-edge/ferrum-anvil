@@ -1,0 +1,98 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.0",
+  "collection": {
+    "collector": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "version": "0.1.0" },
+    "method": "fixture",
+    "verification": "unverified"
+  },
+  "subject": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "route": "/orders/export" },
+  "observations": [
+    {
+      "id": "alloy-server-ttfh",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.server.time_to_headers",
+      "availability": "measured",
+      "value": 100.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000000000000, "end_unix_nano": 1790000000100000000 },
+      "scope": { "leg": "service", "service": "orders-api" },
+      "span": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "span_id": "b7ad6b7169203331" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-server-body",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.server.body_duration",
+      "availability": "measured",
+      "value": 900.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "scope": { "leg": "service", "service": "orders-api" },
+      "span": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "span_id": "b7ad6b7169203331" },
+      "attributes": { "body.outcome": "completed" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-server-duration",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.server.duration",
+      "availability": "measured",
+      "value": 1000.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "scope": { "leg": "service", "service": "orders-api" },
+      "span": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "span_id": "b7ad6b7169203331" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-auth-check",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.operation.duration",
+      "availability": "measured",
+      "value": 20.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000010000000, "end_unix_nano": 1790000000030000000 },
+      "scope": { "leg": "service", "service": "orders-api" },
+      "span": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "span_id": "a1a2a3a4a5a6a7a8", "parent_span_id": "b7ad6b7169203331" },
+      "attributes": { "operation.name": "auth.check" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-cache-fill",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.operation.duration",
+      "availability": "measured",
+      "value": 70.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000060000000, "end_unix_nano": 1790000000130000000 },
+      "scope": { "leg": "service", "service": "orders-api" },
+      "span": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "span_id": "b1b2b3b4b5b6b7b8", "parent_span_id": "b7ad6b7169203331" },
+      "attributes": { "operation.name": "cache.fill" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-db-stream-rows",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.operation.duration",
+      "availability": "measured",
+      "value": 80.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000200000000, "end_unix_nano": 1790000000280000000 },
+      "scope": { "leg": "service_to_dependency", "service": "orders-api" },
+      "span": { "trace_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b", "span_id": "c1d2e3f405060708", "parent_span_id": "b7ad6b7169203331" },
+      "attributes": { "operation.name": "orders.stream_rows", "operation.kind": "db" },
+      "trust": "unverified"
+    }
+  ]
+}

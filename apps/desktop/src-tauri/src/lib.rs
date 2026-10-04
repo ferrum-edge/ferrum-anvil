@@ -1,5 +1,6 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_diagnostic_import;
 mod cmd_drift;
 mod cmd_files;
 mod cmd_identity;
@@ -124,6 +125,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            cmd_diagnostic_import::diagnostic_import_preview,
             commands::app_status,
             commands::profiles_list,
             commands::profile_create,

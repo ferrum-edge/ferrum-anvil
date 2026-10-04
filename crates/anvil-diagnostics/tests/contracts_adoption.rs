@@ -37,7 +37,7 @@ fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<S
     (missing, extra)
 }
 
-/// The Ferrum Edge releases the pinned tag covers. `contracts-edge-0.9.9` is
+/// The Ferrum Edge releases the pinned tag covers. `contracts-edge-0.9.9-r2` is
 /// cut from Edge v0.9.9, and v0.9.10 changed no contract source, so
 /// ferrum-contracts maps v0.9.10 to the same tag (its docs/versioning.md).
 /// Each release's catalog must agree with the pinned vocabularies.
@@ -124,8 +124,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
             _ => panic!("malformed PIN line: {line}"),
         }
     }
-    assert_eq!(tag, Some("contracts-edge-0.9.9"));
-    assert_eq!(commit, Some("25c4e9e00033d7941a1dd0ab733fa74e735546ae"));
+    assert_eq!(tag, Some("contracts-edge-0.9.9-r2"));
+    assert_eq!(commit, Some("591c73a3f965fdab440c3a76b2707accdf491ba5"));
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
         "vocabularies/gateway-headers.json",
@@ -146,6 +146,20 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         "fixtures/diagnostic-ref/invalid/malformed-ref.json",
         "fixtures/diagnostic-ref/invalid/unknown-schema-version.json",
         "fixtures/diagnostic-ref/invalid/uppercase-replica-id.json",
+        "schemas/diagnostic-report/v1.schema.json",
+        "fixtures/diagnostic-report/valid/db-operation-after-headers.json",
+        "fixtures/diagnostic-report/valid/db-operation-dominates.json",
+        "fixtures/diagnostic-report/valid/edge-rejected-before-upstream.json",
+        "fixtures/diagnostic-report/valid/forged-verified-claim.json",
+        "fixtures/diagnostic-report/valid/gateway-error-token.json",
+        "fixtures/diagnostic-report/valid/service-exceeds-gateway.json",
+        "fixtures/diagnostic-report/valid/service-span-missing.json",
+        "fixtures/diagnostic-report/valid/unattributed-interval.json",
+        "fixtures/diagnostic-report/invalid/finding-missing-owner.json",
+        "fixtures/diagnostic-report/invalid/missing-collection.json",
+        "fixtures/diagnostic-report/invalid/unsupported-major.json",
+        "fixtures/diagnostic-report/invalid/uppercase-span-id.json",
+        "fixtures/invalid-expectations.json",
     ]
     .into_iter()
     .map(String::from)
