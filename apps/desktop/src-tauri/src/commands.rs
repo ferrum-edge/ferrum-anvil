@@ -1097,7 +1097,7 @@ mod tests {
             let worker = scope.spawn(move || {
                 ingest_private_key(worker_st, seen, token, &workspace.to_string(), "abandoned", || {
                     claimed_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
                 })
             });
             claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
@@ -1139,7 +1139,7 @@ mod tests {
             let worker = scope.spawn(move || {
                 ingest_private_key(worker_st, seen, token, &workspace.to_string(), "abandoned", || {
                     claimed_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
                 })
             });
             claimed_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();

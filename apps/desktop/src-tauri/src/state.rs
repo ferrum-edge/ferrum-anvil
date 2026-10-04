@@ -649,7 +649,7 @@ pub(crate) mod tests {
             let switch = scope.spawn(move || {
                 switch_st.set_app_since_with(b, switch_st.epoch(), |published| {
                     assert!(published_tx.send(published.clone()).is_ok());
-                    release_rx.recv().unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
                 })
             });
             let published = published_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
