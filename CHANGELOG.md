@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
+  assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
+  UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
+  no-probe/recovery evidence, ambiguous diagnosis, confidence ceilings and lookalikes.
+  Correct the new catalog's shipping panic citations and retained reqwest condition.
+  Fresh hosted Rust and all-profile lab qualification remains pending; no native acceptance
+  or release claim is added.
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
   the filesystem. Missing tools, unsupported formats, malformed metadata,

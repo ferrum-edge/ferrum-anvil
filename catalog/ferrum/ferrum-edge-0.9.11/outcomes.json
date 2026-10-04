@@ -3135,7 +3135,7 @@
           "sha": "c764084"
         }
       ],
-      "condition": "reqwest (HTTP/1.1) lane: DestinationRule connectionPool.tcp.maxConnections reached for the destination; no socket opened.",
+      "condition": "Retained reqwest lane (first attempts not selected for direct H1, or retry attempts): DestinationRule connectionPool.tcp.maxConnections reached for the destination; no socket opened. Eligible bodyless HTTP/1.1 first attempts use upstream.connection_limit.pooled on 0.9.11.",
       "error_class": "dispatch_policy_rejected",
       "public_signal": {
         "http_status": 503,
@@ -3155,7 +3155,7 @@
       "fixture_ids": [
         "UP-018"
       ],
-      "notes": "Same condition on direct-H2/H3/gRPC pools surfaces as 502 'Backend unavailable' + connection_failure (upstream.connection_limit.pooled). WebSocket upgrade path uses the same 503 body (mod.rs:15268). No Content-Type header on the HTTP/1.1 / HTTP/2 backend-response path: the gateway builds this body with an empty header map (lab-observed over HTTP/1.1 on 0.9.5 and 0.9.7: UP-018; the v0.9.5 audit had recorded application/json). The HTTP/3 writer was not lab-checked. v0.9.11: eligible direct-H1 dispatch now uses the pooled typed backend_connection_limit classifier; reqwest remains for ineligible bodies and retry attempts. v0.9.11: this distinct refusal remains on retained reqwest/retry lanes; eligible first-attempt HTTP/1.1 uses the direct Hyper pool and the coarse 502 connection_failure outcome upstream.connection_limit.pooled. Historical UP-018 asserts the original reqwest signal and needs exact-head hosted investigation against that default change."
+      "notes": "Same condition on direct-H2/H3/gRPC pools surfaces as 502 'Backend unavailable' + connection_failure (upstream.connection_limit.pooled). WebSocket upgrade path uses the same 503 body (src/proxy/mod.rs:15546). No Content-Type header on the HTTP/1.1 / HTTP/2 backend-response path: the gateway builds this body with an empty header map (lab-observed over HTTP/1.1 on 0.9.5 and 0.9.7: UP-018; the v0.9.5 audit had recorded application/json). The HTTP/3 writer was not lab-checked. v0.9.11: eligible direct-H1 dispatch now uses the pooled typed backend_connection_limit classifier; reqwest remains for ineligible bodies and retry attempts. v0.9.11: this distinct refusal remains on retained reqwest/retry lanes; eligible first-attempt HTTP/1.1 uses the direct Hyper pool and the coarse 502 connection_failure outcome upstream.connection_limit.pooled. UP-018 asserts this exact reqwest signal on 0.9.5/7/8/9/10 and the exact coarse direct-H1 signal on 0.9.11; fresh all-profile hosted qualification remains pending."
     },
     {
       "id": "upstream.h1_pending_limit.reqwest",
@@ -5795,7 +5795,7 @@
       "remediation": "Ask the gateway operator for the custom plugin's contract; add a signed/schema-validated local rule extension if needed.",
       "owner": "unknown",
       "fixture_ids": [],
-      "notes": "PluginFailurePolicy (FailClosed / KeepLastKnownGood / OptionalFailOpen, src/plugins/mod.rs:1303-1311) governs only construction/reload failures, not runtime rejects; there is no runtime 'plugin error' status. Hooks return PluginResult, not Result, so there is no request-time plugin-error channel and no per-hook HTTP timeout (gRPC calls end at the client deadline with grpc-status 4 'Deadline exceeded at gateway'). Release builds use panic = \"abort\" (Cargo.toml:474), so a panic in any plugin kills the whole gateway process and resets every in-flight connection; there is no generic 500. A custom plugin that produces response bodies without declaring response_body_production surfaces as 503 {\"error\":\"Response buffering capacity exceeded\"}. See also plugin.custom.* records."
+      "notes": "PluginFailurePolicy (FailClosed / KeepLastKnownGood / OptionalFailOpen, src/plugins/mod.rs:1303-1311) governs only construction/reload failures, not runtime rejects; there is no runtime 'plugin error' status. Hooks return PluginResult, not Result, so there is no request-time plugin-error channel and no per-hook HTTP timeout (gRPC calls end at the client deadline with grpc-status 4 'Deadline exceeded at gateway'). Release builds use panic = \"abort\" (Cargo.toml:507), so a panic in any plugin kills the whole gateway process and resets every in-flight connection; there is no generic 500. A custom plugin that produces response bodies without declaring response_body_production surfaces as 503 {\"error\":\"Response buffering capacity exceeded\"}. See also plugin.custom.* records."
     },
     {
       "id": "gateway.admission.adaptive_concurrency",
@@ -23335,13 +23335,13 @@
       "source": [
         {
           "path": "Cargo.toml",
-          "line": 488,
+          "line": 507,
           "symbol": "[profile.release] panic = \"abort\"",
           "sha": "c764084"
         },
         {
           "path": "Cargo.toml",
-          "line": 518,
+          "line": 537,
           "symbol": "[profile.max-perf] panic = \"abort\"",
           "sha": "c764084"
         },

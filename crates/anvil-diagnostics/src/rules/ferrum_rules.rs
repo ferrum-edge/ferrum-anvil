@@ -582,6 +582,9 @@ mod tests {
     use anvil_domain::outcome::ProtocolStatus;
     use anvil_domain::request::Protocol;
 
+    // Deliberately unsupported, independent of which numbered release ships next.
+    const UNSUPPORTED_COMPATIBILITY_ID: &str = "ferrum-edge-unsupported-test-release";
+
     #[test]
     fn token_scope_and_owner_cover_the_pinned_vocabulary() {
         let contract: serde_json::Value =
@@ -851,31 +854,49 @@ mod tests {
     /// finding, and only the release-neutral token meaning (capped at likely).
     #[test]
     fn unknown_release_gets_no_catalog_and_only_shared_token_semantics() {
+        assert!(crate::ferrum::catalog_for(UNSUPPORTED_COMPATIBILITY_ID).is_none());
         let body = br#"{"error":"Backend timeout"}"#;
         let r = response(504, "application/json", &[("x-gateway-error", "backend_timeout")]);
-        let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.11");
+        let f = diagnose_as(Protocol::Http, &r, body, UNSUPPORTED_COMPATIBILITY_ID);
         let u = find(&f, "ferrum.catalog.unavailable").expect("catalog-unavailable finding");
         assert_eq!(u.confidence, Confidence::Unknown);
-        assert!(u.explanation.contains("ferrum-edge-0.9.11") && u.explanation.contains("ferrum-edge-0.9.7"), "{}", u.explanation);
+        assert_eq!(u.scope, SourceScope::Unknown);
+        assert!(
+            u.explanation.contains(UNSUPPORTED_COMPATIBILITY_ID)
+                && u.explanation.contains("ferrum-edge-0.9.7"),
+            "{}",
+            u.explanation
+        );
         assert!(!f.iter().any(|x| x.code.starts_with("ferrum.outcome") || x.code == "ferrum.backend_passthrough"), "{:?}", codes(&f));
         let t = find(&f, "ferrum.token.backend_timeout").expect("shared token meaning still applies");
         assert_eq!(t.confidence, Confidence::Likely);
+        assert_eq!(t.scope, SourceScope::GatewayToUpstream);
         let text = format!("{} {:?}", t.explanation, t.does_not_prove);
         assert!(
             !text.contains("0.9.5")
                 && !text.contains("0.9.7")
                 && !text.contains("0.9.8")
                 && !text.contains("0.9.9")
-                && !text.contains("0.9.10"),
+                && !text.contains("0.9.10")
+                && !text.contains("0.9.11"),
             "no release-specific claim for an unaudited release: {text}"
         );
         // A token outside the shared vocabulary stays unknown.
         let r = response(502, "application/json", &[("x-gateway-error", "upstream_reset")]);
-        let f = diagnose_as(Protocol::Http, &r, br#"{"error":"x"}"#, "ferrum-edge-0.9.11");
-        assert!(find(&f, "ferrum.marker.unknown_token").is_some_and(|x| x.explanation.contains("no catalog for ferrum-edge-0.9.11")));
+        let f = diagnose_as(
+            Protocol::Http,
+            &r,
+            br#"{"error":"x"}"#,
+            UNSUPPORTED_COMPATIBILITY_ID,
+        );
+        let unknown = find(&f, "ferrum.marker.unknown_token").expect("unknown token finding");
+        assert_eq!(unknown.confidence, Confidence::Unknown);
+        let missing = format!("no catalog for {UNSUPPORTED_COMPATIBILITY_ID}");
+        assert!(unknown.explanation.contains(&missing));
         // A plain success with no marker needs no catalog at all.
         let r = response(200, "application/json", &[]);
-        assert!(find(&diagnose_as(Protocol::Http, &r, b"{}", "ferrum-edge-0.9.11"), "ferrum.catalog.unavailable").is_none());
+        let f = diagnose_as(Protocol::Http, &r, b"{}", UNSUPPORTED_COMPATIBILITY_ID);
+        assert!(find(&f, "ferrum.catalog.unavailable").is_none());
     }
 
     /// The route-timeout 504 body exists only in the 0.9.7 audit; the same
@@ -903,6 +924,7 @@ mod tests {
             ("ferrum-edge-0.9.8", "Ferrum Edge 0.9.8"),
             ("ferrum-edge-0.9.9", "Ferrum Edge 0.9.9"),
             ("ferrum-edge-0.9.10", "Ferrum Edge 0.9.10"),
+            ("ferrum-edge-0.9.11", "Ferrum Edge 0.9.11"),
         ] {
             let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
             let f = diagnose_as(Protocol::Http, &r, body, compat);
@@ -922,13 +944,23 @@ mod tests {
             let r = response(504, "application/json", &[("x-gateway-error", "backend_timeout")]);
             let f = diagnose_as(Protocol::Http, &r, body, compat);
             assert_eq!(candidates(&f), ["upstream.route_request_timeout.backend_held"], "{compat}");
+            let o = find(&f, "ferrum.outcome").expect("backend-held catalog outcome");
+            assert_eq!(o.confidence, Confidence::Likely);
+            assert_eq!(o.scope, SourceScope::GatewayToUpstream);
+            let t = find(&f, "ferrum.token.backend_timeout").expect("backend-held token finding");
+            assert_eq!(t.confidence, Confidence::Likely);
+            assert_eq!(t.scope, SourceScope::GatewayToUpstream);
+            assert!(find(&f, "ferrum.token.request_timeout").is_none());
         }
 
         // Releases without the token report it as unknown instead of guessing.
         let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
-        for compat in ["ferrum-edge-0.9.7", "ferrum-edge-0.9.11"] {
+        for compat in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", UNSUPPORTED_COMPATIBILITY_ID] {
             let f = diagnose_as(Protocol::Http, &r, body, compat);
-            assert!(find(&f, "ferrum.marker.unknown_token").is_some(), "{compat}: {:?}", codes(&f));
+            let unknown = find(&f, "ferrum.marker.unknown_token").expect("unknown request_timeout");
+            assert_eq!(unknown.confidence, Confidence::Unknown, "{compat}");
+            assert_eq!(unknown.scope, SourceScope::Unknown, "{compat}");
+            assert!(candidates(&f).is_empty(), "{compat}: {:?}", candidates(&f));
             assert!(find(&f, "ferrum.token.request_timeout").is_none(), "{compat}");
         }
     }
@@ -966,7 +998,15 @@ mod tests {
             "{}",
             t910.explanation
         );
-        for f in [t95, t97, t98, t99, t910] {
+        let t911 = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.11");
+        let t911 = find(&t911, "ferrum.token.backend_timeout").unwrap();
+        assert!(
+            t911.explanation.contains("Ferrum Edge 0.9.11")
+                && t911.explanation.contains("a backend held the request"),
+            "{}",
+            t911.explanation
+        );
+        for f in [t95, t97, t98, t99, t910, t911] {
             assert_eq!(f.confidence, Confidence::Likely);
             assert!(f.does_not_prove.iter().any(|d| d == "That the backend received the request."), "{:?}", f.does_not_prove);
         }
@@ -975,17 +1015,33 @@ mod tests {
     #[test]
     fn records_name_the_catalog_actually_used() {
         let v = crate::render::catalog().version.clone();
-        let t = |id: &str| FerrumTrust::Trusted { profile_name: "p".into(), compatibility_id: id.into(), channel_authenticated: true };
-        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.10")), format!("findings:{v} ferrum:ferrum-edge-0.9.10"));
-        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.9")), format!("findings:{v} ferrum:ferrum-edge-0.9.9"));
-        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.8")), format!("findings:{v} ferrum:ferrum-edge-0.9.8"));
-        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.7")), format!("findings:{v} ferrum:ferrum-edge-0.9.7"));
-        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-0.9.5")), format!("findings:{v} ferrum:ferrum-edge-0.9.5"));
-        assert_eq!(crate::catalog_version_for(&t("ferrum-edge-2.0")), format!("findings:{v} ferrum:ferrum-edge-2.0(no-catalog)"));
-        assert_eq!(crate::catalog_version_for(&FerrumTrust::NotConfigured), format!("findings:{v} ferrum:none"));
+        let t = |id: &str| FerrumTrust::Trusted {
+            profile_name: "p".into(),
+            compatibility_id: id.into(),
+            channel_authenticated: true,
+        };
+        let supported = [
+            "ferrum-edge-0.9.5",
+            "ferrum-edge-0.9.7",
+            "ferrum-edge-0.9.8",
+            "ferrum-edge-0.9.9",
+            "ferrum-edge-0.9.10",
+            "ferrum-edge-0.9.11",
+        ];
+        for id in supported {
+            assert_eq!(crate::catalog_version_for(&t(id)), format!("findings:{v} ferrum:{id}"));
+        }
+        assert_eq!(
+            crate::catalog_version_for(&t(UNSUPPORTED_COMPATIBILITY_ID)),
+            format!("findings:{v} ferrum:{UNSUPPORTED_COMPATIBILITY_ID}(no-catalog)")
+        );
+        assert_eq!(
+            crate::catalog_version_for(&FerrumTrust::NotConfigured),
+            format!("findings:{v} ferrum:none")
+        );
         assert_eq!(
             crate::catalog_version(),
-            format!("findings:{v} ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,ferrum-edge-0.9.8,ferrum-edge-0.9.9,ferrum-edge-0.9.10")
+            format!("findings:{v} ferrum:{}", supported.join(","))
         );
     }
 

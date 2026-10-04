@@ -184,15 +184,30 @@ The lock files record all other exact byte digests without guessed naming.
 
 Hosted lab still fetches real release binaries and verifies the selected lock before execution.
 The PR matrix uses the candidate default; nightly retains all six releases, with 0.9.10 as an
-explicit historical selector. Existing loopback profiles, resource counts, configuration key
-allowlists, protocol assertions and untrusted-pass/forbidden-claim checks are unchanged.
+explicit historical selector. Existing loopback profiles, resource counts and configuration key
+allowlists are unchanged. UP-018 now asserts each release's exact HTTP/1.1 ceiling signal:
+0.9.5/7/8/9/10 retain 503/`backend_error`/`{"error":"Backend connection limit exceeded"}` and
+operator `dispatch_policy_rejected`; the eligible bodyless GET on 0.9.11 requires
+502/`connection_failure`/`{"error":"Backend unavailable"}` and operator `backend_connection_limit`.
+The latter diagnosis stays in the unknown-confidence ambiguous pooled family, with its token
+at most likely. Both paths require independent occupant/no-probe and connection-count evidence,
+backend-observed recovery and application lookalikes; the untrusted pass permits no token/outcome
+attribution. No broad status acceptance, profile override or new skip was introduced. The retained
+reqwest signature remains covered by public-signal contract tests on every catalog.
+
+Fresh review and hosted Rust failures at `32da237dc255cc8159c93fdbbcfd1f85b9cceedf` also
+identified stale unsupported-release and record-version test expectations. Negative controls now
+use the deliberately unsupported `ferrum-edge-unsupported-test-release`; positive timeout/token
+and per-record catalog expectations include 0.9.11 while retaining confidence, scope and forbidden
+claims. The new catalog's shipping panic citations now point to `Cargo.toml:507` and `:537`
+at c764084, and its retained reqwest condition explicitly excludes eligible direct-H1 attempts.
+
 The new source key/field audit does not replace hosted gateway config validation. Root must
-inspect red logs and qualify the exact head, especially direct-H1 reuse/framing, gRPC cancellation,
-small-window/write bounds, SSE quality and live G01. In particular, historical UP-018's
-reqwest-H1 assertions require 503/backend_error and the specific ceiling body. The new eligible
-direct-H1 first attempt uses the pooled 502/connection_failure response; this source-visible
-risk needs hosted investigation. The original UP-018 assertions are preserved, with no relaxed
-status/body/confidence checks or invented pass. This adoption grants no Anvil release/tag,
+qualify the repaired exact head, especially direct-H1 reuse/framing, gRPC cancellation,
+small-window/write bounds, SSE quality, live G01 and the full `admission` profile. The green
+[initial Lab run](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37243246063) selected
+only `core`; it supplies no UP-018 qualification. Fresh all-profile hosted qualification and
+Rust/native gates remain pending, with no invented pass. This adoption grants no Anvil release/tag,
 available-now status or native signing/OAuth acceptance; human identity/signing gates remain open.
 The six separate safety proposals #306–#311 are outside this worktree's assignment.
 

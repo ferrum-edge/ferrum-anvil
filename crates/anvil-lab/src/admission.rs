@@ -320,72 +320,171 @@ async fn hold_and_probe(
     (first, o, seen, op_log(&m.gateway, from, proxy_id).await)
 }
 
-/// UP-018 (reqwest HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
+/// UP-018 (HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
 /// mesh_external destination; the only connection is held by a slow
 /// request, so the next request needs a second socket and is refused.
+/// 0.9.11 uses direct H1 for this bodyless GET; earlier releases use reqwest.
 fn up018(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let m = &env.mesh;
         let log = &m.backend.log;
+        let direct_h1 = crate::gateway::current_lock().release == "v0.9.11";
+        let (status, marker, body, token, class) = if direct_h1 {
+            (
+                502,
+                "connection_failure",
+                r#"{"error":"Backend unavailable"}"#,
+                "ferrum.token.connection_failure",
+                "backend_connection_limit",
+            )
+        } else {
+            (
+                503,
+                "backend_error",
+                r#"{"error":"Backend connection limit exceeded"}"#,
+                "ferrum.token.backend_error",
+                "dispatch_policy_rejected",
+            )
+        };
+        let connections_before = log
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
+            .count();
         let probe_path = "/delay-headers/11";
-        let (first, o, seen, ops) = hold_and_probe(env, &H1_LANE, log, H1_PROXY_ID, probe_path).await;
+        let (first, o, seen, ops) =
+            hold_and_probe(env, &H1_LANE, log, H1_PROXY_ID, probe_path).await;
         // Ground truth: the cap was reached and the probe never left the gateway.
         c.success(CheckKind::GroundTruth, &first);
         c.add(
             CheckKind::GroundTruth,
             "backend served the occupant and never saw the probe",
-            seen.iter().any(|(_, p)| p == "/delay-headers/3000") && !seen.iter().any(|(_, p)| p == probe_path),
+            seen.iter().any(|(_, p)| p == "/delay-headers/3000")
+                && !seen.iter().any(|(_, p)| p == probe_path),
             format!("{seen:?}"),
         );
-        c.operator_class(&ops, H1_PROXY_ID, &["dispatch_policy_rejected", "backend_connection_limit"]);
-        // Public evidence.
-        c.status_in(&o, &[503]);
+        let connections_after = log
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. }))
+            .count();
         c.add(
             CheckKind::GroundTruth,
-            "gateway-authored connection-limit body",
-            body_text(&o).contains("Backend connection limit exceeded"),
+            "backend opened at most one additional connection during the hold",
+            connections_after <= connections_before + 1,
+            format!("before {connections_before}, after {connections_after}"),
+        );
+        c.operator_class(&ops, H1_PROXY_ID, &[class]);
+        // Public evidence.
+        c.status_in(&o, &[status]);
+        c.add(
+            CheckKind::GroundTruth,
+            "exact connection-ceiling body for the selected release's HTTP/1.1 lane",
+            body_text(&o) == body,
             body_text(&o),
         );
+        c.add(
+            CheckKind::GroundTruth,
+            "exact connection-ceiling marker for the selected release's HTTP/1.1 lane",
+            header(&o, "x-gateway-error") == [marker],
+            format!("{:?}", header(&o, "x-gateway-error")),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "connection-ceiling response has no Content-Type",
+            header(&o, "content-type").is_empty(),
+            format!("{:?}", header(&o, "content-type")),
+        );
         c.not_success(&o);
-        c.token(&o, "ferrum.token.backend_error", env.trusted);
-        c.max_confidence(&o, "ferrum.token.backend_error", Confidence::Likely);
+        c.token(&o, token, env.trusted);
+        c.max_confidence(&o, token, Confidence::Likely);
         c.absent_prefix(&o, "ferrum.backend_passthrough");
-        no_scope(&mut c, &o, SourceScope::UpstreamApplication, Confidence::Likely);
+        no_scope(
+            &mut c,
+            &o,
+            SourceScope::UpstreamApplication,
+            Confidence::Likely,
+        );
         no_scope(&mut c, &o, SourceScope::ClientToPeer, Confidence::Likely);
         for term in ["crash", "unhealthy", "backend is down", "overload"] {
             no_claim(&mut c, &o, term, Confidence::Unknown);
         }
         if env.trusted {
-            c.scope(&o, "ferrum.token.backend_error", SourceScope::Unknown);
-            let got = catalog_outcome(&o);
-            c.add(
-                CheckKind::Diagnosis,
-                "catalog outcome upstream.connection_limit.reqwest",
-                got.as_deref() == Some("upstream.connection_limit.reqwest"),
-                format!("{got:?}; {:?}", codes(&o)),
-            );
-            c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
-            c.scope(&o, "ferrum.outcome", SourceScope::GatewayAdmission);
-            caveat(&mut c, &o, "ferrum.outcome", "identical");
+            if direct_h1 {
+                c.scope(&o, token, SourceScope::GatewayToUpstream);
+                c.absent_prefix(&o, "ferrum.token.backend_error");
+                c.has(&o, "ferrum.outcome_ambiguous");
+                c.max_confidence(&o, "ferrum.outcome_ambiguous", Confidence::Unknown);
+                c.scope(&o, "ferrum.outcome_ambiguous", SourceScope::Unknown);
+                caveat(&mut c, &o, "ferrum.outcome_ambiguous", "identical");
+                let ids = catalog_ids(&o);
+                c.add(
+                    CheckKind::Diagnosis,
+                    "direct-H1 ceiling stays in the shared pooled setup-failure family",
+                    [
+                        "upstream.connection_limit.pooled",
+                        "upstream.connect.refused",
+                        "upstream.tls.handshake_failed_setup_phase",
+                        "upstream.port_exhaustion",
+                    ]
+                    .iter()
+                    .all(|id| ids.iter().any(|i| i == *id))
+                        && !ids.iter().any(|i| i == "upstream.connection_limit.reqwest")
+                        && !has_code(&o, "ferrum.outcome"),
+                    format!("{ids:?}; {:?}", codes(&o)),
+                );
+                for term in ["dns", "tls", "refused", "connection ceiling", "connection_limit"] {
+                    no_claim(&mut c, &o, term, Confidence::Likely);
+                }
+            } else {
+                c.scope(&o, "ferrum.token.backend_error", SourceScope::Unknown);
+                let got = catalog_outcome(&o);
+                c.add(
+                    CheckKind::Diagnosis,
+                    "catalog outcome upstream.connection_limit.reqwest",
+                    got.as_deref() == Some("upstream.connection_limit.reqwest"),
+                    format!("{got:?}; {:?}", codes(&o)),
+                );
+                c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
+                c.scope(&o, "ferrum.outcome", SourceScope::GatewayAdmission);
+                caveat(&mut c, &o, "ferrum.outcome", "identical");
+            }
+        } else {
+            c.absent_prefix(&o, "ferrum.outcome");
         }
         // Recovery: the slot is free again once the occupant finished.
         let before = log.count_requests();
-        let r = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, "/delay-headers/10")).await;
+        let r = send(
+            &env.engine,
+            &mesh::request(m, &H1_LANE, env.trusted, "/delay-headers/10"),
+        )
+        .await;
         c.success(CheckKind::Recovery, &r);
-        c.add(CheckKind::Recovery, "recovery request reached the backend", backend_saw(log, before, "/delay-headers/10") == 1, "");
+        c.add(
+            CheckKind::Recovery,
+            "recovery request reached the backend",
+            backend_saw(log, before, "/delay-headers/10") == 1,
+            "",
+        );
         // Lookalike A: the application's own 503 through the same capped route.
+        let look_path = format!(
+            "/status/503?body={}",
+            enc(r#"{"error":"service unavailable","source":"application"}"#)
+        );
+        let before = log.count_requests();
         let look = send(
             &env.engine,
-            &mesh::request(
-                m,
-                &H1_LANE,
-                env.trusted,
-                &format!("/status/503?body={}", enc(r#"{"error":"service unavailable","source":"application"}"#)),
-            ),
+            &mesh::request(m, &H1_LANE, env.trusted, &look_path),
         )
         .await;
         c.status_in(&look, &[503]);
+        c.add(
+            CheckKind::GroundTruth,
+            "application 503 lookalike reached the backend",
+            backend_saw(log, before, &look_path) == 1,
+            "",
+        );
         c.token(&look, "ferrum.token.backend_error", env.trusted);
         c.add(
             CheckKind::Diagnosis,
@@ -393,23 +492,79 @@ fn up018(env: &Env) -> Fut<'_> {
             !catalog_ids(&look).iter().any(|i| i.starts_with("upstream.connection_limit")),
             format!("{:?}", codes(&look)),
         );
-        // Lookalike B: byte-identical application body — the honest best is
-        // "likely" with the identical-bytes caveat, never more.
+        // Lookalike B: the same status/body authored by the application.
+        // On direct H1 the gateway stamps backend_error, so it cannot match
+        // the pooled connection_failure family. On reqwest the full signal
+        // is identical, so attribution remains at most likely.
+        let same_path = format!("/status/{status}?body={}", enc(body));
+        let before = log.count_requests();
         let same = send(
             &env.engine,
-            &mesh::request(
-                m,
-                &H1_LANE,
-                env.trusted,
-                &format!("/status/503?body={}", enc(r#"{"error":"Backend connection limit exceeded"}"#)),
-            ),
+            &mesh::request(m, &H1_LANE, env.trusted, &same_path),
         )
         .await;
+        c.status_in(&same, &[status]);
+        c.add(
+            CheckKind::GroundTruth,
+            "application lookalike has the identical body",
+            body_text(&same) == body,
+            body_text(&same),
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "identical-body lookalike reached the backend",
+            backend_saw(log, before, &same_path) == 1,
+            "",
+        );
+        c.add(
+            CheckKind::GroundTruth,
+            "application lookalike is stamped backend_error",
+            header(&same, "x-gateway-error") == ["backend_error"],
+            format!("{:?}", header(&same, "x-gateway-error")),
+        );
+        c.token(&same, "ferrum.token.backend_error", env.trusted);
+        c.max_confidence(&same, "ferrum.token.backend_error", Confidence::Likely);
         c.max_confidence(&same, "ferrum.outcome", Confidence::Likely);
-        if env.trusted {
+        if direct_h1 {
+            c.absent_prefix(&same, "ferrum.token.connection_failure");
+            c.add(
+                CheckKind::Diagnosis,
+                "application 502 with the same body is not called a connection ceiling",
+                !catalog_ids(&same).iter().any(|i| i.starts_with("upstream.connection_limit")),
+                format!("{:?}", codes(&same)),
+            );
+        } else if env.trusted {
+            c.has(&same, "ferrum.outcome");
+            c.add(
+                CheckKind::Diagnosis,
+                "identical reqwest lookalike retains the same catalog outcome",
+                catalog_outcome(&same).as_deref() == Some("upstream.connection_limit.reqwest"),
+                format!("{:?}", catalog_ids(&same)),
+            );
             caveat(&mut c, &same, "ferrum.outcome", "identical");
         }
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+        for output in [&o, &look, &same] {
+            c.add(
+                CheckKind::Diagnosis,
+                "public Ferrum evidence never exceeds likely confidence",
+                output
+                    .record
+                    .findings
+                    .iter()
+                    .all(|f| !f.code.starts_with("ferrum.") || f.confidence <= Confidence::Likely),
+                format!("{:?}", codes(output)),
+            );
+            if !env.trusted {
+                c.absent_prefix(output, "ferrum.token");
+                c.absent_prefix(output, "ferrum.outcome");
+            }
+        }
+        Outcome {
+            main: Some(o),
+            recovery: Some(r),
+            checks: c,
+            operator_log: ops,
+        }
     })
 }
 
