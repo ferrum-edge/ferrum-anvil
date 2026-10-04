@@ -91,11 +91,7 @@ fn cookie_kind(name: &str) -> Option<CookieKind> {
     }
 }
 
-fn collect_cookie(
-    text: &str,
-    kind: CookieKind,
-    credentials: &mut Credentials,
-) -> Result<(), ImportError> {
+fn collect_cookie(text: &str, kind: CookieKind, credentials: &mut Credentials) -> Result<(), ImportError> {
     // A Set-Cookie value is the first pair; Path/Domain/Expires are attributes,
     // not additional cookies. Multiple Set-Cookie headers can be array entries.
     for pair in text.split(';') {
@@ -145,19 +141,12 @@ fn sensitive(name: &str) -> bool {
     is_credential_name(name, &[]) || name.to_ascii_lowercase().contains("cookie")
 }
 
-fn collect(
-    value: &Value,
-    hidden: bool,
-    cookie: Option<CookieKind>,
-    credentials: &mut Credentials,
-) -> Result<(), ImportError> {
+fn collect(value: &Value, hidden: bool, cookie: Option<CookieKind>, credentials: &mut Credentials) -> Result<(), ImportError> {
     match value {
         Value::String(text) => {
             let credential = hidden
                 || text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----")
-                || text.split_whitespace().any(|word| {
-                    word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic")
-                });
+                || text.split_whitespace().any(|word| word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic"));
             if credential && !text.is_empty() {
                 credentials.component(text)?;
                 let mut words = text.split_whitespace();
@@ -180,23 +169,13 @@ fn collect(
             }
         }
         Value::Object(object) => {
-            let pair = ["key", "name", "header"].iter().any(|key| {
-                object.get(*key).and_then(Value::as_str).is_some_and(sensitive)
-            });
-            let pair_cookie = ["key", "name", "header"].iter().find_map(|key| {
-                object.get(*key).and_then(Value::as_str).and_then(cookie_kind)
-            });
+            let pair = ["key", "name", "header"].iter().any(|key| object.get(*key).and_then(Value::as_str).is_some_and(sensitive));
+            let pair_cookie =
+                ["key", "name", "header"].iter().find_map(|key| object.get(*key).and_then(Value::as_str).and_then(cookie_kind));
             for (key, value) in object {
                 collect_urls(key, credentials)?;
-                let cookie = cookie
-                    .or(cookie_kind(key))
-                    .or(if key == "value" { pair_cookie } else { None });
-                collect(
-                    value,
-                    hidden || sensitive(key) || pair && key == "value",
-                    cookie,
-                    credentials,
-                )?;
+                let cookie = cookie.or(cookie_kind(key)).or(if key == "value" { pair_cookie } else { None });
+                collect(value, hidden || sensitive(key) || pair && key == "value", cookie, credentials)?;
             }
         }
         _ => {}
@@ -331,10 +310,7 @@ mod tests {
             credentials.register("duplicate-token").unwrap();
         }
         assert_eq!(credentials.secrets.len(), 1);
-        assert_eq!(
-            credentials.register("duplicate-token"),
-            Err(ImportError::Limit)
-        );
+        assert_eq!(credentials.register("duplicate-token"), Err(ImportError::Limit));
 
         let mut report: Value = serde_json::from_str(REPORT).unwrap();
         let text = "x".repeat(anvil_diagnostics::import::MAX_STRING_BYTES);

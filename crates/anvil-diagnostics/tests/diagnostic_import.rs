@@ -278,8 +278,10 @@ fn alloy_cli_envelope_is_distinct_from_the_report_contract() {
 fn immutable_real_alloy_exporter_golden_preserves_every_reported_fact() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alloy");
     let pin = std::fs::read_to_string(root.join("PIN")).unwrap();
-    assert!(pin.contains("commit 0c260f5379939ff46d681666bfbcd65b8518b08d\n"));
-    assert!(pin.contains("run 37208769030\nartifact 11305688717\n"));
+    let pin_lines: Vec<_> = pin.lines().collect();
+    assert!(pin_lines.contains(&"commit 0c260f5379939ff46d681666bfbcd65b8518b08d"));
+    assert!(pin_lines.contains(&"run 37208769030"));
+    assert!(pin_lines.contains(&"artifact 11305688717"));
     let mut pinned = BTreeSet::new();
     for line in pin.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();

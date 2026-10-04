@@ -232,7 +232,6 @@ describe("read-only diagnostic import through native IPC", () => {
     }
     const cases = [
       golden.slice(0, -20),
-      " ".repeat(4 * 1024 * 1024 + 1),
       JSON.stringify({ ...report, extensions: { password: "x".repeat(2049) } }),
       JSON.stringify({
         ...report,
@@ -253,6 +252,35 @@ describe("read-only diagnostic import through native IPC", () => {
       expect(result.err?.startsWith("Diagnostic ")).toBe(true);
       expect(result.err?.includes("credential-canary")).toBe(false);
     }
+    const oversized = await browser.execute(
+      async (length: number) => {
+        const internals = (window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<unknown> };
+        }).__TAURI_INTERNALS__;
+        try {
+          return {
+            ok: await internals.invoke("diagnostic_import_preview", {
+              input: { text: " ".repeat(length) },
+            }),
+          };
+        } catch (error) {
+          const message =
+            typeof error === "string"
+              ? error
+              : error instanceof Error
+                ? error.message
+                : JSON.stringify(error);
+          return { err: message };
+        }
+      },
+      4 * 1024 * 1024 + 1,
+    ) as { ok?: unknown; err?: string };
+    expect(oversized.ok === undefined).toBe(true);
+    expect(oversized.err).toBe(
+      "Diagnostic JSON exceeds a byte, depth, string or collection limit.",
+    );
+    expect(oversized.err?.includes("credential-canary")).toBe(false);
+    expect(fixture.requests.length).toBe(0);
     for (const input of [
       { text: forged, path: "/diagnostic.json" },
       { text: forged, url: fixture.url },
