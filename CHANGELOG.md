@@ -17,6 +17,10 @@
   approved: root whole-change review, fresh independent review and all hosted
   CI must pass before root asks the owner to approve it. Do not merge or release
   the candidate before that approval.
+  Code head `3a804efaea7d7431dd1c2fba65e86a4251f16b84` passed root and fresh
+  independent review and all 14 hosted checks across CI, Desktop E2E and Lab.
+  The [upgrade guide](docs/upgrade-guide.md#qualification-of-the-code-candidate)
+  records the exact platform evidence and remaining human owner decision.
 
 ### Fixed
 

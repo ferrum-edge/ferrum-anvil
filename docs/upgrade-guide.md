@@ -61,3 +61,35 @@ carry snake-case `attempt_id` alongside `execution_id`. Match both identities
 before displaying messages or retiring an attempt. Manual-send events, domain
 and CLI event shapes, and non-interactive RPC arguments are unchanged by this
 proposal; it requires no shared generated-schema change.
+
+
+### Qualification of the code candidate
+
+Root reviewed the complete change and every repair delta at code head
+`3a804efaea7d7431dd1c2fba65e86a4251f16b84`. Fresh independent security and
+concurrency reviews, including the final full-queue cancellation proof review,
+reported no remaining findings. All 14 check runs came from GitHub Actions and
+completed successfully; all seven required branch checks passed. The hosted
+[CI](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210166266),
+[Desktop E2E](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210166268)
+and [Lab](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210166272)
+workflows all completed successfully on that exact code head.
+
+Linux and macOS ran 68 desktop library tests, including the production decoder's
+missing/empty attempt rejection before effects, the valid-attempt control,
+stale native SEND/CANCEL admission, an actual 256-entry engine queue interrupted
+by both cancellation and lock, late callback/reply fences, same-inode source
+changes, and lock/unlock between approval verification and native writes.
+Windows ran the workspace Rust checks and the compiled desktop E2E suite; this
+is not a claim that the desktop library unit tests ran on Windows. The real
+Tauri/webview E2E suites passed all 10 spec files on each of Linux, macOS and
+Windows, including the migrated native file-grant session invocation and locked
+backend rejection. The E2E binaries were also correctly refused by the release
+checker because they contain deliberate test hooks. They are not release assets.
+
+This documentation follow-up still requires fresh hosted CI at its own PR head
+before root presents the candidate for the human owner's approval. Approval
+would adopt the explicit attempt identity for all three released IPC calls and
+the matching desktop interactive event envelopes. Keeping the released id-only
+contract requires a different stale-invocation design. No approval or published
+patched release is inferred from passing CI.
