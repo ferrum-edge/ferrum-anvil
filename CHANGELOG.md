@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
+  Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
+  the filesystem. Missing tools, unsupported formats, malformed metadata,
+  extraction errors or a missing `AppRun` fail closed. The intentional
+  `--runtime-probe` remains a separate explicit opt-in that launches the
+  extracted `AppRun`.
+
 ### Added
 
 - Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
