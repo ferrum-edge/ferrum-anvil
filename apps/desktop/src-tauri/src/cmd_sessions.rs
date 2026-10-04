@@ -764,58 +764,76 @@ mod tests {
             let (entered_tx, entered_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel();
             let release = parking_lot::Mutex::new(release_rx);
+            let consumer_release = Arc::new(parking_lot::Mutex::new(None));
+            let observed_release = consumer_release.clone();
             let sink: anvil_transport::EventFn = Arc::new(move |ev| {
                 if matches!(ev, ExecutionEvent::AttemptStarted { .. }) {
                     // Stall the real consumer before it can take a command.
-                    entered_tx.send(()).unwrap();
-                    release.lock().recv_timeout(BOUND).unwrap();
+                    let _ = entered_tx.send(());
+                    *observed_release.lock() = Some(release.lock().recv_timeout(BOUND));
                 }
             });
             let (slot, _peer) = open_tcp(&st, &fence, &execution_id, Some(sink)).await;
-            entered_rx.recv_timeout(BOUND).unwrap();
-            for _ in 0..256 {
-                let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
-                tokio::time::timeout(BOUND, session_send(&st, control, SessionCommand::SendText { text: "queued".into() }))
-                    .await
-                    .expect("the real queue's existing capacity")
-                    .unwrap();
-            }
-            let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
-            let cancel = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
-            let (waiting_tx, waiting_rx) = oneshot::channel();
-            let sending = async {
-                let mut send = std::pin::pin!(session_send(&st, control, SessionCommand::SendText { text: "blocked".into() }));
-                let mut waiting_tx = Some(waiting_tx);
-                let result = std::future::poll_fn(|cx| {
-                    let polled = send.as_mut().poll(cx);
-                    if polled.is_pending()
-                        && let Some(waiting_tx) = waiting_tx.take()
-                    {
-                        waiting_tx.send(()).unwrap();
-                    }
-                    polled
-                })
-                .await;
-                assert_eq!(result, Err("CANCELED".into()));
-            };
-            let canceling = async {
-                waiting_rx.await.unwrap();
-                // The first Pending is observed on the actual production
-                // send. It still owns the async slot mutex at this barrier.
-                assert!(slot.session.try_lock().is_err());
-                if how == "cancel" {
-                    session_cancel(&st, cancel).await.unwrap();
-                } else {
-                    st.lock();
-                    slot.abort().await;
+            let proof = async {
+                entered_rx.recv_timeout(BOUND).map_err(|err| format!("the real consumer must enter its barrier: {err}"))?;
+                for _ in 0..256 {
+                    let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id)?;
+                    tokio::time::timeout(BOUND, session_send(&st, control, SessionCommand::SendText { text: "queued".into() }))
+                        .await
+                        .map_err(|err| format!("the real queue's existing capacity must be available: {err}"))??;
                 }
-                assert!(slot.session.try_lock().is_ok());
+                let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id)?;
+                let cancel = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id)?;
+                let (waiting_tx, waiting_rx) = oneshot::channel();
+                let sending = async {
+                    let mut send = std::pin::pin!(session_send(&st, control, SessionCommand::SendText { text: "blocked".into() }));
+                    let mut waiting_tx = Some(waiting_tx);
+                    let sent = std::future::poll_fn(|cx| {
+                        let polled = send.as_mut().poll(cx);
+                        if polled.is_pending()
+                            && let Some(waiting_tx) = waiting_tx.take()
+                        {
+                            let _ = waiting_tx.send(());
+                        }
+                        polled
+                    })
+                    .await;
+                    if sent != Err(crate::commands::CANCELED.into()) {
+                        return Err(format!("the blocked send must settle as CANCELED, got {sent:?}"));
+                    }
+                    Ok::<_, String>(())
+                };
+                let canceling = async {
+                    waiting_rx.await.map_err(|err| format!("the actual send must become Pending before cancellation: {err}"))?;
+                    // The first Pending is observed on the actual production
+                    // send. It still owns the async slot mutex at this barrier.
+                    if slot.session.try_lock().is_ok() {
+                        return Err("the Pending send must still own the slot mutex".into());
+                    }
+                    if how == "cancel" {
+                        session_cancel(&st, cancel).await?;
+                    } else {
+                        st.lock();
+                        slot.abort().await;
+                    }
+                    // Lock also spawns an aborter. Tokio's fair mutex may
+                    // reserve the next guard for it after our abort returns.
+                    // Await our turn and release it so all aborters can settle.
+                    drop(slot.session.lock().await);
+                    Ok::<_, String>(())
+                };
+                tokio::try_join!(sending, canceling)?;
+                Ok::<_, String>(())
             };
-            let settled = tokio::time::timeout(BOUND, async { tokio::join!(sending, canceling) }).await;
-            release_tx.send(()).unwrap();
-            settled.expect("cancel must release a send waiting on the real bounded queue");
+            let settled = tokio::time::timeout(BOUND, proof).await;
+            // Preserve a failed proof until the blocked consumer is released
+            // and its real engine task has been joined, including on timeout.
+            let released = release_tx.send(());
             finish_slot(&slot).await;
             remove_slot(&st, &execution_id, &slot);
+            settled.expect("cancel must release a send waiting on the real bounded queue").expect("the cancellation proof must hold");
+            released.expect("release the stalled real consumer");
+            assert_eq!(*consumer_release.lock(), Some(Ok(())), "the consumer must stay blocked until the proof settles: {how}");
         }
     }
 
