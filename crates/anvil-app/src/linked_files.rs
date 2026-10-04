@@ -132,12 +132,7 @@ impl App {
     }
 
     /// Bind only in the exact epoch in which the native dialog started.
-    pub fn bind_linked_file_at(
-        &self,
-        referrer: LinkedFileReferrer,
-        picked: &Path,
-        epoch: LinkedFileEpoch,
-    ) -> Result<LinkedFileChoice> {
+    pub fn bind_linked_file_at(&self, referrer: LinkedFileReferrer, picked: &Path, epoch: LinkedFileEpoch) -> Result<LinkedFileChoice> {
         let selected = self.choose_linked_file(picked)?;
         let path = linked_path(&selected)?;
         #[cfg(test)]
@@ -259,11 +254,7 @@ impl App {
 
     /// Import callers acquire this guard while holding the store transaction,
     /// return it through commit, then retire exactly the committed deletions.
-    pub(crate) fn retire_linked_selections(
-        &self,
-        mut state: parking_lot::MutexGuard<'_, LinkedSelections>,
-        deleted: &[Id],
-    ) {
+    pub(crate) fn retire_linked_selections(&self, mut state: parking_lot::MutexGuard<'_, LinkedSelections>, deleted: &[Id]) {
         let retired = retire_selections(&mut state, deleted);
         drop(state);
         drop(retired);
@@ -358,11 +349,7 @@ impl App {
     }
 }
 
-fn replace_selection(
-    state: &mut LinkedSelections,
-    id: Id,
-    selected: Arc<SelectedFile>,
-) -> Option<Arc<SelectedFile>> {
+fn replace_selection(state: &mut LinkedSelections, id: Id, selected: Arc<SelectedFile>) -> Option<Arc<SelectedFile>> {
     let previous = state.handles.insert(id, selected);
     if let Some(previous) = &previous {
         previous.revoke();
@@ -371,10 +358,7 @@ fn replace_selection(
 }
 
 fn retire_selections(state: &mut LinkedSelections, ids: &[Id]) -> Vec<Arc<SelectedFile>> {
-    ids.iter()
-        .filter_map(|id| state.handles.remove(id))
-        .inspect(|selected| selected.revoke())
-        .collect()
+    ids.iter().filter_map(|id| state.handles.remove(id)).inspect(|selected| selected.revoke()).collect()
 }
 
 fn named_in(s: &StoreTx<'_>, referrer: LinkedFileReferrer) -> anvil_storage::store::Result<Vec<String>> {

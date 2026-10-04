@@ -52,18 +52,14 @@ fn publish(file: &File, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()>
     let proc = open("/proc", flags | OFlags::NOFOLLOW, Mode::empty())?;
     // Refuse an ordinary directory masquerading as procfs. Mount namespace
     // administration and process/descriptor injection are outside the threat.
-    if fstatfs(&proc)?.f_type != libc::PROC_SUPER_MAGIC as _ {
+    let is_procfs = libc::c_long::try_from(fstatfs(&proc)?.f_type)
+        .is_ok_and(|f_type| f_type == libc::PROC_SUPER_MAGIC);
+    if !is_procfs {
         return Err(io::Error::other("descriptor publication needs authentic procfs"));
     }
     let descriptors = openat(&proc, "self/fd", flags, Mode::empty())?;
     let source = file.as_raw_fd().to_string();
-    linkat(
-        &descriptors,
-        source,
-        dir.dir(),
-        name,
-        AtFlags::SYMLINK_FOLLOW,
-    )?;
+    linkat(&descriptors, source, dir.dir(), name, AtFlags::SYMLINK_FOLLOW)?;
     Ok(())
 }
 
@@ -138,11 +134,7 @@ mod macos {
         fn acl_get_flag_np(flags: *mut c_void, flag: c_int) -> c_int;
         fn filesec_init() -> *mut c_void;
         fn filesec_free(security: *mut c_void);
-        fn filesec_set_property(
-            security: *mut c_void,
-            property: c_int,
-            value: *const c_void,
-        ) -> c_int;
+        fn filesec_set_property(security: *mut c_void, property: c_int, value: *const c_void) -> c_int;
         fn openx_np(name: *const c_char, flags: c_int, security: *mut c_void) -> c_int;
         fn pthread_fchdir_np(fd: c_int) -> c_int;
     }
@@ -151,11 +143,7 @@ mod macos {
 
     impl Acl {
         fn new(pointer: *mut c_void) -> io::Result<Self> {
-            if pointer.is_null() {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(Self(pointer))
-            }
+            if pointer.is_null() { Err(io::Error::last_os_error()) } else { Ok(Self(pointer)) }
         }
 
         fn flags(&self) -> io::Result<*mut c_void> {
@@ -183,11 +171,7 @@ mod macos {
     }
 
     fn checked(result: c_int) -> io::Result<()> {
-        if result == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        if result == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
     pub(super) fn create(dir: &SelectedDirectory) -> io::Result<File> {
@@ -219,20 +203,11 @@ mod macos {
         // exact public ABI types (mode_t and acl_t); filesec copies them.
         unsafe {
             checked(acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT))?;
-            checked(filesec_set_property(
-                security.0,
-                FILESEC_MODE,
-                (&mode as *const libc::mode_t).cast(),
-            ))?;
-            checked(filesec_set_property(
-                security.0,
-                FILESEC_ACL,
-                (&acl.0 as *const *mut c_void).cast(),
-            ))?;
+            checked(filesec_set_property(security.0, FILESEC_MODE, (&mode as *const libc::mode_t).cast()))?;
+            checked(filesec_set_property(security.0, FILESEC_ACL, (&acl.0 as *const *mut c_void).cast()))?;
             checked(pthread_fchdir_np(dir.dir().as_raw_fd()))?;
         }
-        let flags =
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         // SAFETY: a live filesec and NUL-terminated single component are
         // borrowed through atomic exclusive creation relative to the vnode
         // retained by this thread's cwd. No inherited allow ACE can appear.
@@ -265,12 +240,7 @@ mod macos {
         // SAFETY: live ACL/flagset and an initialized entry output pointer.
         // Darwin returns -1 with EINVAL at the end of an empty ACL, unlike
         // the POSIX ACL iterator convention. Other errors fail closed.
-        let (no_inherit, first) = unsafe {
-            (
-                acl_get_flag_np(flags, ACL_FLAG_NO_INHERIT),
-                acl_get_entry(acl.0, 0, &mut entry),
-            )
-        };
+        let (no_inherit, first) = unsafe { (acl_get_flag_np(flags, ACL_FLAG_NO_INHERIT), acl_get_entry(acl.0, 0, &mut entry)) };
         let empty = first == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL);
         if no_inherit != 1 || !empty {
             return Err(io::Error::other("export requires an empty non-inheriting ACL"));
@@ -306,12 +276,7 @@ mod windows {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         #[link_name = "SetFileInformationByHandle"]
-        fn set_file_information_by_handle(
-            file: *mut c_void,
-            class: i32,
-            information: *const c_void,
-            size: u32,
-        ) -> i32;
+        fn set_file_information_by_handle(file: *mut c_void, class: i32, information: *const c_void, size: u32) -> i32;
     }
 
     pub(super) fn publish(file: &File, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()> {
@@ -322,9 +287,7 @@ mod windows {
         }
         let bytes = name.len().checked_mul(2).ok_or_else(|| io::Error::other("name too long"))?;
         let offset = offset_of!(RenameInfo, file_name);
-        let size = size_of::<RenameInfo>()
-            .checked_add(bytes)
-            .ok_or_else(|| io::Error::other("name too long"))?;
+        let size = size_of::<RenameInfo>().checked_add(bytes).ok_or_else(|| io::Error::other("name too long"))?;
         let size32 = u32::try_from(size).map_err(|_| io::Error::other("name too long"))?;
         let bytes32 = u32::try_from(bytes).map_err(|_| io::Error::other("name too long"))?;
         // usize storage provides the C struct's pointer alignment on both
@@ -337,26 +300,12 @@ mod windows {
         // from live owners through the synchronous call. Class 22 is
         // FileRenameInfoEx; flags 0 forbids replacement/POSIX overwrite.
         let ok = unsafe {
-            pointer.write(RenameInfo {
-                flags: 0,
-                root_directory: dir.dir().as_raw_handle(),
-                file_name_length: bytes32,
-                file_name: [0],
-            });
+            pointer.write(RenameInfo { flags: 0, root_directory: dir.dir().as_raw_handle(), file_name_length: bytes32, file_name: [0] });
             let destination = storage.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>();
             std::ptr::copy_nonoverlapping(name.as_ptr(), destination, name.len());
-            set_file_information_by_handle(
-                file.as_raw_handle(),
-                22,
-                pointer.cast(),
-                size32,
-            )
+            set_file_information_by_handle(file.as_raw_handle(), 22, pointer.cast(), size32)
         };
-        if ok == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 }
 

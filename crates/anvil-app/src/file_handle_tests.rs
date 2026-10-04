@@ -276,17 +276,25 @@ fn publication_never_moves_a_foreign_source_at_either_publication_barrier() {
                     match std::fs::rename(&source, &moved) {
                         Ok(()) => preserved = Some(moved),
                         Err(err) => {
-                            assert!(cfg!(windows));
-                            assert!(matches!(err.raw_os_error(), Some(5 | 32)));
-                            return;
+                            #[cfg(windows)]
+                            {
+                                assert!(matches!(err.raw_os_error(), Some(5 | 32)));
+                                return;
+                            }
+                            #[cfg(not(windows))]
+                            panic!("could not rename publication source on this platform: {err}");
                         }
                     }
                     source
                 } else {
-                    assert!(cfg!(target_os = "linux"), "only Linux uses an unnamed source");
                     // There is no source pathname to swap. Inject a foreign
                     // partial anyway: publication must never claim or use it.
-                    tree.original_dir().join(".anvil-forged.partial")
+                    #[cfg(target_os = "linux")]
+                    {
+                        tree.original_dir().join(".anvil-forged.partial")
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    panic!("expected a named publication source on this platform");
                 };
                 std::fs::hard_link(tree.outside.join("inner/rows.csv"), &temporary).unwrap();
                 foreign_name = Some(temporary);
@@ -300,9 +308,8 @@ fn publication_never_moves_a_foreign_source_at_either_publication_barrier() {
         if let Some(path) = preserved {
             assert_eq!(std::fs::read(path).unwrap(), b"our export");
         }
-        if cfg!(windows) {
-            assert_eq!(std::fs::read_dir(tree.original_dir()).unwrap().count(), 2);
-        }
+        #[cfg(windows)]
+        assert_eq!(std::fs::read_dir(tree.original_dir()).unwrap().count(), 2);
         tree.outside_untouched();
     }
 }

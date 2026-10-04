@@ -227,9 +227,7 @@ fn bind_picked_at_checkpoints(
     let choice = match bind {
         Bind::TokenFile => Ok(None),
         Bind::Linked(referrer) => app.bind_linked_file_at(*referrer, path, linked_epoch).map(Some),
-        Bind::Relocate(referrer, old) => {
-            app.relocate_linked_file_at(*referrer, old, path, linked_epoch).map(Some)
-        }
+        Bind::Relocate(referrer, old) => app.relocate_linked_file_at(*referrer, old, path, linked_epoch).map(Some),
     }
     .map_err(|err| if unchanged() { e(err) } else { GrantError::Revoked.to_string() })?;
     let (id, bound) = if let Some(choice) = &choice {
@@ -402,10 +400,7 @@ mod tests {
                 let old = if relocate { root.0.join("gone.bin").display().to_string() } else { canonical.clone() };
                 let workspace = app.create_workspace("W").unwrap();
                 let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/x");
-                spec.body = Body::Binary {
-                    attachment: AttachmentRef::LinkedFile { path: old.clone() },
-                    content_type: None,
-                };
+                spec.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: old.clone() }, content_type: None };
                 let request = app.create_request(&workspace.meta.id, None, "upload", spec.clone()).unwrap();
                 let referrer = LinkedFileReferrer::Request { id: request.meta.id };
                 let bind = if relocate { Bind::Relocate(referrer, old) } else { Bind::Linked(referrer) };

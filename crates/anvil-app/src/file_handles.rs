@@ -46,9 +46,7 @@ impl DescriptorLease {
     fn grow(&mut self) -> io::Result<()> {
         self.budget
             .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                (used < MAX_DESCRIPTORS).then_some(used + 1)
-            })
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| (used < MAX_DESCRIPTORS).then_some(used + 1))
             .map_err(|_| invalid("too many retained file descriptors; release selections first"))?;
         self.count += 1;
         Ok(())
