@@ -183,6 +183,11 @@ fn jar_cookies(
     headers: &mut Vec<(String, String)>,
 ) -> Option<SessionCookies> {
     if !b.prep.settings.cookies {
+        for n in http_exec::cookie_header_budget(headers).0 {
+            if !b.inferred.contains(&n) {
+                b.inferred.push(n);
+            }
+        }
         return None;
     }
     let target = http_target(target);

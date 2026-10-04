@@ -608,7 +608,9 @@ fn cookie_name(pair: &str) -> &str {
 /// configured cookie of the same name. Returns a note for each stored cookie
 /// that cannot be sent (its value is not a valid header value).
 pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target, headers: &mut Vec<(String, String)>) -> Vec<String> {
-    let Some(stored) = engine.cookie_header(isolation, target) else { return vec![] };
+    let limit = crate::cookies::MAX_COOKIE_HEADER_BYTES;
+    let (mut notes, mut bytes) = cookie_header_budget(headers);
+    let Some(stored) = engine.cookie_header(isolation, target) else { return notes };
     let sent: Vec<String> = headers
         .iter()
         .filter(|(n, _)| n.eq_ignore_ascii_case("cookie"))
@@ -616,8 +618,7 @@ pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target,
         .map(|p| cookie_name(p).to_string())
         .filter(|n| !n.is_empty())
         .collect();
-    let mut notes = vec![];
-    let mut added = vec![];
+    let mut added = String::new();
     for pair in stored.split(';').map(str::trim).filter(|p| !p.is_empty()) {
         let name = cookie_name(pair);
         if sent.iter().any(|s| s == name) {
@@ -627,18 +628,57 @@ pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target,
             notes.push(format!("stored cookie '{name}' not sent: its value is not a valid header value"));
             continue;
         }
-        added.push(pair);
+        let size = pair.len() + if bytes == 0 { 0 } else { 2 };
+        if bytes + size > limit {
+            notes.push(
+                "a stored cookie exceeds the 8 KiB request cookie budget".into(),
+            );
+            continue;
+        }
+        if !added.is_empty() {
+            added.push_str("; ");
+        }
+        added.push_str(pair);
+        bytes += size;
     }
     if added.is_empty() {
         return notes;
     }
-    let added = added.join("; ");
     match headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
         Some((_, v)) if v.trim().is_empty() => *v = added,
-        Some((_, v)) => *v = format!("{v}; {added}"),
+        Some((_, v)) => {
+            // Both allocations are independently bounded by the checked size.
+            v.push_str("; ");
+            v.push_str(&added);
+        }
         None => headers.push(("Cookie".into(), added)),
     }
     notes
+}
+
+/// The independent output ceiling also applies when automatic cookies are off.
+pub(crate) fn cookie_header_budget(headers: &mut Vec<(String, String)>) -> (Vec<String>, usize) {
+    let limit = crate::cookies::MAX_COOKIE_HEADER_BYTES;
+    let mut notes = vec![];
+    let mut bytes = 0;
+    // Cap all final Cookie fields together, including explicitly configured
+    // credentials, before adding jar state or allocating a combined value.
+    headers.retain(|(name, value)| {
+        if !name.eq_ignore_ascii_case("cookie") {
+            return true;
+        }
+        let added = value.len() + if bytes == 0 { 0 } else { 2 };
+        if bytes + added > limit {
+            notes.push(
+                "a Cookie header exceeds the 8 KiB request cookie budget".into(),
+            );
+            false
+        } else {
+            bytes += added;
+            true
+        }
+    });
+    (notes, bytes)
 }
 
 /// Whether a request body holds a resolved secret value byte for byte (at
@@ -792,6 +832,7 @@ pub(crate) async fn execute_viewing(
         tls_profile: prep.tls_profile_name.clone(),
         proxy: prep.proxy.clone(),
     };
+    let destination = anvil_transport::destination::DestinationPolicy::default();
     let original_origin = current.target.origin();
     // The hop behind `last`: its origin decides the Ferrum attribution of the
     // final response, and the record's TLS and proxy summary describe it.
@@ -848,11 +889,14 @@ pub(crate) async fn execute_viewing(
         }
         // Cookies from the workspace jar (never across workspaces), after
         // the request's own cookies, which win over a stored one.
-        if prep.settings.cookies {
-            for n in add_jar_cookies(engine, &ctx.isolation, &current.target, &mut headers) {
-                if !prep.inferred.contains(&n) {
-                    prep.inferred.push(n);
-                }
+        let cookie_notes = if prep.settings.cookies {
+            add_jar_cookies(engine, &ctx.isolation, &current.target, &mut headers)
+        } else {
+            cookie_header_budget(&mut headers).0
+        };
+        for n in cookie_notes {
+            if !prep.inferred.contains(&n) {
+                prep.inferred.push(n);
             }
         }
         let header_pairs = match wire_headers(&headers) {
@@ -939,11 +983,27 @@ pub(crate) async fn execute_viewing(
         }
         let (outs, closed_under) = match version {
             HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback => {
-                let e = engine.h3.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
+                let e = engine.h3.execute_attempt_guarded(
+                    &plan,
+                    index,
+                    reason.clone(),
+                    &events,
+                    &cancel,
+                    Some((&destination, redirects > 0)),
+                )
+                .await;
                 (e.outputs, e.resend_on_new_connection)
             }
             _ => {
-                let e = engine.http.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
+                let e = engine.http.execute_attempt_guarded(
+                    &plan,
+                    index,
+                    reason.clone(),
+                    &events,
+                    &cancel,
+                    Some((&destination, redirects > 0)),
+                )
+                .await;
                 // The TCP fallback gets the transport's resend of a request
                 // that never left, not the engine's: its next attempt would
                 // go out over HTTP/3 again.

@@ -9,6 +9,7 @@
 
 pub mod assertions;
 pub mod context;
+mod cookies;
 pub mod gateway_detail;
 #[doc(hidden)]
 pub mod h3_exec;
@@ -102,7 +103,7 @@ pub(crate) struct CookieJars {
 
 #[derive(Default)]
 struct Jars {
-    by_isolation: HashMap<String, cookie_store::CookieStore>,
+    by_isolation: HashMap<String, cookies::BoundedJar>,
     /// Advanced for an isolation by [`Engine::clear_isolation`] (a workspace
     /// delete) when it removes that isolation's jar, before that isolation's
     /// prepared TLS configurations are dropped; 0 when never cleared.
@@ -120,10 +121,8 @@ impl CookieJars {
     /// `Secure`, expiry), as `name=value` pairs.
     pub(crate) fn header(&self, isolation: &str, t: &prepare::Target) -> Option<String> {
         let url = url::Url::parse(&t.url()).ok()?;
-        let jars = self.jars.lock();
-        let jar = jars.by_isolation.get(isolation)?;
-        let pairs: Vec<String> = jar.get_request_values(&url).map(|(n, v)| format!("{n}={v}")).collect();
-        if pairs.is_empty() { None } else { Some(pairs.join("; ")) }
+        let mut jars = self.jars.lock();
+        jars.by_isolation.get_mut(isolation)?.header(&url)
     }
 
     /// Keep the response's cookies, unless the jars were cleared since
@@ -150,8 +149,13 @@ impl CookieJars {
             return false;
         }
         let jar = jars.by_isolation.entry(isolation.to_string()).or_default();
+        jar.purge_expired();
         let mut skipped_secret_name = false;
         for v in set_cookie {
+            // Bound the untrusted input before parsing, redaction or an owned copy.
+            if v.len() > cookies::MAX_SET_COOKIE_BYTES {
+                continue;
+            }
             let secret_name = v.split(';').next().and_then(|pair| pair.split_once('=')).is_some_and(|(name, _)| {
                 let name = name.trim();
                 redactor.text(name) != name || redactor.hides_secret(name)
@@ -161,7 +165,7 @@ impl CookieJars {
                 continue;
             }
             let Some(cookie) = scoped_cookie(v, &url) else { continue };
-            let _ = jar.insert(cookie, &url);
+            jar.insert(cookie, v.len());
         }
         skipped_secret_name
     }
@@ -182,16 +186,23 @@ impl CookieJars {
 
 /// The cookie that a `Set-Cookie` value received from `url` sets, or `None`
 /// when it is not stored. The jar applies the domain, path, `Secure` and
-/// expiry rules, but it has no public suffix list: a `Domain` attribute that
-/// is a public suffix (`com`, `co.uk`, `github.io`) or an unknown single-label
-/// domain (`internal`, `lan`, `corp`) could scope a cookie too broadly. Such a
+/// expiry rules. A `Domain` attribute that is a public suffix (`com`,
+/// `co.uk`, `github.io`) or has an unknown suffix (`internal`, `lan`, `corp`)
+/// could scope a cookie too broadly. Such a
 /// cookie is refused unless the domain is the request host itself; then it is
 /// kept as a host-only cookie (RFC 6265 §5.3, step 5).
 fn scoped_cookie(set_cookie: &str, url: &url::Url) -> Option<cookie_store::Cookie<'static>> {
+    if set_cookie.len() > cookies::MAX_SET_COOKIE_BYTES
+        || url.host_str().is_some_and(|h| h.len() > cookies::MAX_SET_COOKIE_BYTES)
+        || url.path().len() > cookies::MAX_SET_COOKIE_BYTES
+    {
+        return None;
+    }
     let mut cookie = cookie_store::Cookie::parse(set_cookie, url).ok()?.into_owned();
     let restricted = matches!(
         &cookie.domain,
         cookie_store::CookieDomain::Suffix(d) if is_public_suffix(d) || is_single_label_domain(d)
+            || !psl::suffix(d.as_bytes()).is_some_and(|s| s.is_known())
     );
     if restricted {
         if !cookie.domain.host_is_identical(url) {
@@ -623,6 +634,72 @@ mod tests {
 
     fn target(url: &str) -> prepare::Target {
         prepare::parse_target(url, &["https"], &mut Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn cookie_output_cap_includes_configured_cookies_and_keeps_redaction() {
+        let e = Engine::new();
+        let t = target("https://example.com/");
+        let redactor = redact::Redactor::default();
+        e.store_cookies(
+            e.execution_epoch("ws"),
+            "ws",
+            &t,
+            &with_set_cookie(&["sid=from-jar", "other=value"]),
+            &redactor,
+        );
+        let mut headers = vec![("Cookie".into(), format!("sid={}", "v".repeat(8188)))];
+        let notes = http_exec::add_jar_cookies(&e, "ws", &t, &mut headers);
+        assert!(!notes.is_empty());
+        assert_eq!(headers[0].1.len(), cookies::MAX_COOKIE_HEADER_BYTES);
+        assert!(!headers[0].1.contains("from-jar"), "configured tuple wins");
+        assert!(!headers[0].1.contains("other=value"));
+        let mut headers = vec![("Cookie".into(), "x".repeat(8193))];
+        let notes = http_exec::add_jar_cookies(&e, "ws", &t, &mut headers);
+        assert!(!notes.is_empty());
+        assert_eq!(headers[0].1, "sid=from-jar; other=value");
+        let entries = headers
+            .iter()
+            .map(|(name, value)| anvil_domain::execution::HeaderEntry {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        assert!(!serde_json::to_string(&redactor.headers(&entries)).unwrap().contains("from-jar"));
+        assert_eq!(e.cookie_header("other-isolation", &t), None);
+    }
+
+    #[test]
+    fn bounded_jar_stores_after_lock_only_with_a_current_epoch_and_keeps_secret_name_rule() {
+        let e = Engine::new();
+        let t = target("https://example.com/");
+        let old = e.execution_epoch("ws");
+        e.clear_sensitive_state();
+        let response = with_set_cookie(&["sid=value"]);
+        e.store_cookies(old, "ws", &t, &response, &redact::Redactor::default());
+        assert!(!e.has_cookie_jar("ws"));
+        let resolver = vars::Resolver::new(
+            vec![vars::VarLayer {
+                label: "test".into(),
+                vars: vec![vars::VarEntry {
+                    name: "secret".into(),
+                    value: "secret-cookie-name".into(),
+                    secret: true,
+                }],
+            }],
+            None,
+        );
+        resolver.resolve("{{secret}}", "test").unwrap();
+        let redactor = redact::Redactor::for_execution(&resolver, &[]);
+        let response = with_set_cookie(&["secret-cookie-name=value", "sid=ordinary"]);
+        assert!(e.store_cookies(e.execution_epoch("ws"), "ws", &t, &response, &redactor));
+        assert_eq!(e.cookie_header("ws", &t).as_deref(), Some("sid=ordinary"));
+        let old = e.execution_epoch("ws");
+        e.clear_isolation("ws");
+        e.store_cookies(old, "ws", &t, &response, &redactor);
+        assert!(!e.has_cookie_jar("ws"));
+        e.store_cookies(e.execution_epoch("ws"), "ws", &t, &response, &redactor);
+        assert_eq!(e.cookie_header("ws", &t).as_deref(), Some("sid=ordinary"));
     }
 
     /// A server cannot scope a cookie to a public suffix (ICANN or private

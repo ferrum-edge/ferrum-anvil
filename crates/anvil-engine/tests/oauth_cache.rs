@@ -137,6 +137,90 @@ fn oauth(addr: SocketAddr, grant: OAuthGrant, audience: &str) -> OAuth2Config {
     }
 }
 
+#[tokio::test]
+async fn nonliteral_cleartext_issuers_fail_before_any_token_or_api_request_for_all_grants() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    for grant in [
+        OAuthGrant::ClientCredentials,
+        OAuthGrant::RefreshToken,
+        OAuthGrant::AuthorizationCodePkce,
+    ] {
+        let mut config = oauth(addr, grant, "api-a");
+        config.token_url = format!("http://issuer.test:{}/token", addr.port());
+        config.client_secret = SensitiveValue::template("unused-credential-canary");
+        let mut c = ctx(addr, config);
+        c.settings_layers.push((
+            "test".into(),
+            anvil_domain::settings::SettingsOverrides {
+                dns_overrides: vec![anvil_domain::settings::DnsOverride {
+                    host: "issuer.test".into(),
+                    addresses: vec!["127.0.0.1".into()],
+                }],
+                ..Default::default()
+            },
+        ));
+        let o = send(&Engine::new(), &c).await;
+        assert_eq!(failure_kind(&o), Some(FailureKind::AuthPreparationFailed));
+        assert!(!serde_json::to_string(&o.record).unwrap().contains("unused-credential-canary"));
+    }
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 0);
+    assert!(fx.token_forms.lock().unwrap().is_empty());
+    assert!(fx.api_hits().is_empty());
+}
+
+#[tokio::test]
+async fn https_issuer_acquisition_still_uses_configured_trust_and_delivers_a_token() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let pki = anvil_fixtures::LabPki::generate();
+    let tls = anvil_fixtures::TlsServerOptions::new(
+        pki.server.chain_with(&pki.ca),
+        pki.server.key.clone(),
+    );
+    let issuer = anvil_fixtures::http::serve("127.0.0.1:0", Some(tls)).await.unwrap();
+    let (addr, fx) = Fixture::start().await;
+    let mut config = oauth(addr, OAuthGrant::ClientCredentials, "api-a");
+    config.token_url = format!("https://api.anvil.test:{}/oauth/token", issuer.addr.port());
+    config.client_id = "anvil-client".into();
+    config.client_secret = SensitiveValue::template("anvil-secret");
+    config.client_auth = OAuthClientAuth::BasicHeader;
+    let mut c = ctx(addr, config);
+    let profile = anvil_domain::tls::TlsProfile {
+        id: anvil_domain::Id::new(),
+        workspace_id: anvil_domain::Id::new(),
+        name: "issuer-trust".into(),
+        verify: true,
+        use_system_roots: false,
+        extra_roots_pem: vec![pki.ca.cert.clone()],
+        client_identity: None,
+        bindings: vec![],
+        min_version: anvil_domain::tls::TlsMinVersion::Tls12,
+        server_name_override: None,
+        server_spiffe: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    c.settings_layers.push((
+        "test".into(),
+        anvil_domain::settings::SettingsOverrides {
+            tls_profile_id: Some(profile.id),
+            dns_overrides: vec![anvil_domain::settings::DnsOverride {
+                host: "api.anvil.test".into(),
+                addresses: vec!["127.0.0.1".into()],
+            }],
+            ..Default::default()
+        },
+    ));
+    c.tls_profiles.push(profile);
+    let o = send(&Engine::new(), &c).await;
+    assert_eq!(status(&o), Some(200));
+    assert_eq!(*issuer.state.oauth_token_requests.lock(), 1);
+    assert_eq!(fx.api_hits(), vec!["Bearer fx-token-1".to_string()]);
+    assert!(!serde_json::to_string(&o.record).unwrap().contains("anvil-secret"));
+    issuer.shutdown();
+}
+
 fn ctx(addr: SocketAddr, config: OAuth2Config) -> ExecutionContext {
     let mut spec = RequestSpec::http("GET", &format!("http://{addr}/api"));
     spec.auth = AuthConfig::OAuth2 { config };

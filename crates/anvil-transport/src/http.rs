@@ -754,14 +754,44 @@ impl HttpTransport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> HttpExecution {
-        let key = pool_key(plan);
+        self.execute_attempt_guarded(
+            plan,
+            index,
+            reason,
+            events,
+            cancel,
+            None,
+        )
+        .await
+    }
+
+    /// Engine HTTP execution with resolved-destination redirect authority.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_attempt_guarded(
+        &self,
+        plan: &HttpPlan,
+        index: u32,
+        reason: AttemptReason,
+        events: &EventCtx,
+        cancel: &CancellationToken,
+        destination: Option<(&crate::destination::DestinationPolicy, bool)>,
+    ) -> HttpExecution {
         let mut outputs = Vec::new();
         let mut resend_on_new_connection = None;
         let mut attempt_reason = reason;
         // HBONE tunnels carry one execution's identity and headers: fresh per attempt.
         let mut allow_pool = plan.keepalive && !crate::hbone::is_hbone(plan.proxy.as_ref());
         for attempt_index in (index..).take(2) {
-            let (out, closed) = self.execute_once(plan, &key, attempt_index, attempt_reason.clone(), allow_pool, events, cancel).await;
+            let (out, closed) = self.execute_once(
+                plan,
+                attempt_index,
+                attempt_reason.clone(),
+                allow_pool,
+                events,
+                cancel,
+                destination,
+            )
+            .await;
             outputs.push(out);
             match closed {
                 Some(ClosedUnder::Unsent(after)) => {
@@ -782,12 +812,12 @@ impl HttpTransport {
     async fn execute_once(
         &self,
         plan: &HttpPlan,
-        key: &str,
         index: u32,
         reason: AttemptReason,
         allow_pool: bool,
         events: &EventCtx,
         cancel: &CancellationToken,
+        destination: Option<(&crate::destination::DestinationPolicy, bool)>,
     ) -> (AttemptOutput, Option<ClosedUnder>) {
         let mut early = (plan.early_data != EarlyDataIntent::Off && plan.https).then(|| EarlyAttempt {
             obs: early_observation(plan.early_data, EarlyDataTransport::Tls),
@@ -795,7 +825,17 @@ impl HttpTransport {
             send: false,
             t0: None,
         });
-        let (mut out, closed) = self.execute_once_inner(plan, key, index, reason, allow_pool, events, cancel, &mut early).await;
+        let (mut out, closed) = self.execute_once_inner(
+            plan,
+            index,
+            reason,
+            allow_pool,
+            events,
+            cancel,
+            &mut early,
+            destination,
+        )
+        .await;
         if let Some(e) = early {
             let t0 = e.t0.unwrap_or_else(Instant::now);
             e.finish(&mut out.observation, t0);
@@ -807,13 +847,13 @@ impl HttpTransport {
     async fn execute_once_inner(
         &self,
         plan: &HttpPlan,
-        key: &str,
         index: u32,
         reason: AttemptReason,
         allow_pool: bool,
         events: &EventCtx,
         cancel: &CancellationToken,
         early: &mut Option<EarlyAttempt>,
+        destination: Option<(&crate::destination::DestinationPolicy, bool)>,
     ) -> (AttemptOutput, Option<ClosedUnder>) {
         let started_at = Utc::now();
         // A resend after a reused connection was found closed goes out on a
@@ -885,6 +925,24 @@ impl HttpTransport {
             let f = TransportFailure::new(Phase::Prepare, FailureKind::TlsProfileInvalid, "no TLS configuration for https request");
             return (fail(rec, obs, f, DispatchState::NotDispatched), None);
         }
+
+        let pinned;
+        let plan = if let Some((policy, redirected)) = destination {
+            pinned = match policy
+                .pin(plan, redirected, &mut rec, total_deadline, cancel)
+                .await
+            {
+                Ok(p) => p,
+                Err(f) => return (fail(rec, obs, f, DispatchState::NotDispatched), None),
+            };
+            &pinned
+        } else {
+            plan
+        };
+        // The validated answer is part of the key: another execution's private
+        // connection, or an older DNS answer, cannot satisfy this attempt.
+        let key_owned = pool_key(plan);
+        let key = key_owned.as_str();
 
         // ---- acquire a connection ----
         // Those of the execution (else taken now, first): a connection this

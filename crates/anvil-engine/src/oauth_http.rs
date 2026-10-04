@@ -46,6 +46,7 @@ pub struct EngineTokenHttp<'a> {
 
 impl EngineTokenHttp<'_> {
     fn plan(&self, url: &str, form: Vec<(String, String)>, basic: Option<(String, String)>) -> Result<HttpPlan, String> {
+        require_secure_token_endpoint(url)?;
         let mut inferred = vec![];
         let t = prepare::parse_target(url, &["https", "http"], &mut inferred).map_err(|e| e.message)?;
         let body: String = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form.iter()).finish();
@@ -129,6 +130,8 @@ impl TokenHttp for EngineTokenHttp<'_> {
 /// Resolve an OAuth 2 profile's templates and secret references.
 pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &Resolver) -> Result<OAuthResolved, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
+    let token_url = r.resolve(&config.token_url, "auth.token_url")?;
+    require_secure_token_endpoint(&token_url).map_err(fail)?;
     let (raw_secret, _) =
         resolve_sensitive(&config.client_secret, ctx.secrets.as_ref()).map_err(|e| fail(format!("auth.client_secret: {e}")))?;
     // Only interactive grants visit the authorization endpoint.
@@ -138,7 +141,7 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
     };
     Ok(OAuthResolved {
         grant: config.grant,
-        token_url: r.resolve(&config.token_url, "auth.token_url")?,
+        token_url,
         authorization_url,
         client_id: r.resolve(&config.client_id, "auth.client_id")?,
         client_secret: Zeroizing::new(r.resolve(&raw_secret, "auth.client_secret")?),
@@ -148,6 +151,140 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
         token_cache_id: config.token_cache_id,
         refresh_skew_secs: config.refresh_skew_secs as i64,
     })
+}
+
+/// The common acquisition boundary, checked before resolving credentials and
+/// again before constructing transport headers/body. DNS names (including
+/// localhost) cannot opt into cleartext; only a canonical literal loopback can.
+fn require_secure_token_endpoint(raw: &str) -> Result<(), String> {
+    let u = url::Url::parse(raw)
+        .map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
+    let loopback = match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback())
+        }
+        _ => false,
+    };
+    if u.scheme() == "https" || (u.scheme() == "http" && loopback) {
+        Ok(())
+    } else {
+        Err("the OAuth token endpoint requires HTTPS or literal-loopback HTTP".into())
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use crate::vars::{VarEntry, VarLayer};
+    use anvil_domain::request::RequestSpec;
+    use anvil_domain::secret::SensitiveValue;
+
+    #[test]
+    fn endpoint_policy_requires_https_or_canonical_literal_loopback() {
+        for url in [
+            "https://issuer.example/token",
+            "https://10.0.0.1/token",
+            "http://127.0.0.1/token",
+            "http://127.1/token",
+            "http://[::1]/token",
+            "http://[::ffff:127.0.0.1]/token",
+        ] {
+            assert!(require_secure_token_endpoint(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://issuer.example/token",
+            "http://localhost/token",
+            "http://localhost./token",
+            "http://10.0.0.1/token",
+            "http://[::ffff:10.0.0.1]/token",
+            "http://[::]/token",
+            "ftp://127.0.0.1/token",
+        ] {
+            assert!(require_secure_token_endpoint(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn all_grants_validate_resolved_url_before_resolving_client_credentials() {
+        let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
+        for grant in [
+            OAuthGrant::ClientCredentials,
+            OAuthGrant::RefreshToken,
+            OAuthGrant::AuthorizationCodePkce,
+        ] {
+            let config = OAuth2Config {
+                grant,
+                token_url: "{{endpoint}}".into(),
+                client_id: "{{client}}".into(),
+                client_secret: SensitiveValue::template("{{credential}}"),
+                authorization_url: String::new(),
+                scope: String::new(),
+                audience: String::new(),
+                client_auth: OAuthClientAuth::RequestBody,
+                token_cache_id: None,
+                refresh_skew_secs: 30,
+            };
+            let resolver = Resolver::new(
+                vec![VarLayer {
+                    label: "test".into(),
+                    vars: vec![
+                        VarEntry {
+                            name: "endpoint".into(),
+                            value: "http://issuer.example/token".into(),
+                            secret: false,
+                        },
+                        VarEntry {
+                            name: "client".into(),
+                            value: "unused-client".into(),
+                            secret: true,
+                        },
+                        VarEntry {
+                            name: "credential".into(),
+                            value: "unused-credential".into(),
+                            secret: true,
+                        },
+                    ],
+                }],
+                None,
+            );
+            let error = resolve_oauth(&config, &ctx, &resolver).err().unwrap();
+            assert_eq!(error.kind, FailureKind::AuthPreparationFailed);
+            assert!(error.message.contains("HTTPS"));
+            assert!(resolver.used_secrets.lock().is_empty());
+            assert_eq!(resolver.used.lock().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn common_transport_rejects_forms_and_basic_auth_without_dispatch() {
+        let engine = Engine::new();
+        let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
+        let settings = EffectiveSettings::default();
+        let http = EngineTokenHttp {
+            engine: &engine,
+            ctx: &ctx,
+            settings: &settings,
+            epoch: engine.sensitive_epoch(),
+        };
+        for grant in ["client_credentials", "refresh_token", "authorization_code"] {
+            let result = http.post_form(
+                "http://localhost/token",
+                vec![
+                    ("grant_type".into(), grant.into()),
+                    ("code_verifier".into(), "unused-verifier".into()),
+                ],
+                Some(("unused-client".into(), "unused-secret".into())),
+            )
+            .await;
+            assert!(result.unwrap_err().contains("HTTPS"));
+        }
+        assert_eq!(engine.http.pool.stats().connections, 0);
+        assert_eq!(
+            engine.tokens.requests.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+        );
+    }
 }
 
 /// Token-cache key: the workspace isolation plus every setting that decides
@@ -182,6 +319,7 @@ pub(crate) async fn acquire(
     cfg: &OAuthResolved,
     cancel: &CancellationToken,
 ) -> Result<CachedToken, AuthError> {
+    require_secure_token_endpoint(&cfg.token_url).map_err(AuthError::Invalid)?;
     let http = EngineTokenHttp { engine, ctx, settings, epoch };
     // Taken before the jar generation is read: a delete advances the jar
     // generation before it clears the workspace's tokens, so either the
@@ -326,6 +464,7 @@ pub async fn redeem_authorization_code(
     redirect_uri: &str,
     cancel: &CancellationToken,
 ) -> Result<TokenSummary, AuthError> {
+    require_secure_token_endpoint(&target.resolved.token_url).map_err(AuthError::Invalid)?;
     // `generation` was taken before this check: a delete that is not seen
     // here clears the workspace's tokens after it, and the store is refused.
     if workspace_deleted_since(engine, engine.epoch_for(ctx), ctx) {

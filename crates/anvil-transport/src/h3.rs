@@ -1411,7 +1411,9 @@ impl H3Transport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> AttemptOutput {
-        self.execute_once(plan, index, reason, events, cancel).await.0
+        self.execute_once(plan, index, reason, events, cancel, None)
+            .await
+            .0
     }
 
     /// [`H3Transport::execute`], sending the request once more on a new
@@ -1434,11 +1436,41 @@ impl H3Transport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> H3Execution {
+        self.execute_attempt_guarded(
+            plan,
+            index,
+            reason,
+            events,
+            cancel,
+            None,
+        )
+        .await
+    }
+
+    /// Engine HTTP/3 execution with the same redirect authority as TCP.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_attempt_guarded(
+        &self,
+        plan: &HttpPlan,
+        index: u32,
+        reason: AttemptReason,
+        events: &EventCtx,
+        cancel: &CancellationToken,
+        destination: Option<(&crate::destination::DestinationPolicy, bool)>,
+    ) -> H3Execution {
         let mut outputs = Vec::new();
         let mut resend_on_new_connection = None;
         let mut attempt_reason = reason;
         for attempt_index in (index..).take(2) {
-            let (out, closed) = self.execute_once(plan, attempt_index, attempt_reason.clone(), events, cancel).await;
+            let (out, closed) = self.execute_once(
+                plan,
+                attempt_index,
+                attempt_reason.clone(),
+                events,
+                cancel,
+                destination,
+            )
+            .await;
             outputs.push(out);
             match closed {
                 Some(ClosedUnder::Unsent(after)) => attempt_reason = AttemptReason::ReusedConnectionClosed { after },
@@ -1452,6 +1484,7 @@ impl H3Transport {
         H3Execution { outputs, resend_on_new_connection }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_once(
         &self,
         plan: &HttpPlan,
@@ -1459,6 +1492,7 @@ impl H3Transport {
         reason: AttemptReason,
         events: &EventCtx,
         cancel: &CancellationToken,
+        destination: Option<(&crate::destination::DestinationPolicy, bool)>,
     ) -> (AttemptOutput, Option<ClosedUnder>) {
         // A resend after a reused connection failed the request goes out on
         // a new connection, never on a pooled or kept one.
@@ -1479,6 +1513,33 @@ impl H3Transport {
             response_status: None,
             failure: None,
             duration_us: 0,
+        };
+        let total_deadline = plan
+            .timeouts
+            .total_ms
+            .map(|ms| Instant::now() + Duration::from_millis(ms));
+        let pinned;
+        let plan = if let Some((policy, redirected)) = destination {
+            pinned = match policy
+                .pin(plan, redirected, &mut rec, total_deadline, cancel)
+                .await
+            {
+                Ok(p) => p,
+                Err(f) => {
+                    let out = fail_attempt(
+                        rec,
+                        obs,
+                        f,
+                        DispatchState::NotDispatched,
+                        None,
+                        events,
+                    );
+                    return (out, None);
+                }
+            };
+            &pinned
+        } else {
+            plan
         };
         let early_on = plan.early_data != EarlyDataIntent::Off;
         let local_track = || early_on.then(|| EarlyTrack::new(plan.early_data));
@@ -1506,12 +1567,23 @@ impl H3Transport {
         };
         let header_bytes = logical_header_bytes(plan, &uri);
         obs.bytes.request_headers_logical = header_bytes;
-        let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         // The field-section limit is part of the key: a connection advertises
         // (and enforces) the limit it was opened with, so a request with a
         // smaller one never reuses a connection that accepts more.
         let (host, fs) = (plan.host.to_ascii_lowercase(), field_section_limit(&plan.limits));
-        let key = format!("{}|h3://{host}:{}|{}|fs={fs}", plan.isolation, plan.port, prepared.fingerprint);
+        let dns = format!(
+            "{:?}{:?}{:?}",
+            plan.dns.resolver,
+            plan.dns.overrides,
+            plan.dns.ip_preference,
+        );
+        let key = format!(
+            "{}|h3://{host}:{}|{}|fs={fs}|dns:{}",
+            plan.isolation,
+            plan.port,
+            prepared.fingerprint,
+            crate::certs::sha256_hex(dns.as_bytes()),
+        );
 
         // Those of the execution (else taken now, first): what this attempt
         // opens is pooled, and the tickets it receives are kept, only if

@@ -206,6 +206,45 @@ async fn an_http_login_cookie_is_sent_on_the_sse_handshake() {
 }
 
 #[tokio::test]
+async fn cumulative_cookie_eviction_and_output_cap_apply_to_redirect_and_session_handshakes() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    // Fill the site count budget through actual HTTP responses, then add one
+    // more through a real SSE handshake using the same bounded jar.
+    for i in 0..180 {
+        ok(&e, &get(&f.url(&format!("/set-cookie?name=c{i}&value=v")))).await;
+    }
+    let s = ok(
+        &e,
+        &sse(&f.url("/sse?count=1&interval=1&set_cookie=session%3Dfrom-handshake")),
+    )
+    .await;
+    assert_eq!(s.record.response.as_ref().unwrap().status, 200);
+    let to = url::form_urlencoded::byte_serialize(f.url("/echo").as_bytes()).collect::<String>();
+    let o = ok(&e, &get(&f.url(&format!("/redirect?status=307&to={to}")))).await;
+    assert_eq!(o.record.attempts.len(), 2);
+    let cookie = cookie_on(&f, "/echo").unwrap();
+    assert_eq!(cookie.split("; ").count(), 180);
+    assert!(!cookie.split("; ").any(|p| p == "c0=v"), "creation order breaks equal LRU ties");
+    assert!(cookie.contains("session=from-handshake"));
+    // Large values exercise the independent header cap on HTTP and SSE, while
+    // response state is still larger than one permitted output header.
+    for i in 0..4 {
+        let path = format!("/set-cookie?name=large{i}&value={}", "v".repeat(3000));
+        ok(&e, &get(&f.url(&path))).await;
+    }
+    ok(&e, &get(&f.url("/echo"))).await;
+    assert!(cookie_on(&f, "/echo").unwrap().len() <= 8192);
+    ok(&e, &sse(&f.url("/sse?count=1&interval=1"))).await;
+    assert!(cookie_on(&f, "/sse").unwrap().len() <= 8192);
+    assert!(
+        !serde_json::to_string(&o.record).unwrap().contains("from-handshake"),
+        "request cookies stay redacted",
+    );
+}
+
+#[tokio::test]
 async fn an_http_login_cookie_is_sent_on_the_websocket_handshake() {
     init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
