@@ -139,7 +139,22 @@ compares profile/workspace/history/settings state and hashes the throw-away
 profile's persisted bytes (including vault/database/WAL), without decrypting
 secrets. A loopback fixture observes no fetches to the supplied credential and
 markup URLs; this is a targeted network control, not a capture of all OS traffic.
-These added native tests require hosted results before qualification is claimed.
+Native qualification at code commit `925e96253d36ea69a5f52a83a9c21602bb7557e4`,
+against main `4254ea84c101bdc9231a4c6f455421e22468d0ec`, passed all fourteen
+cases of the diagnostic-import spec on Linux, macOS and Windows. Root read the
+actual logs for [Linux job 111471676088](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471676088),
+[macOS job 111471675865](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471675865)
+and [Windows job 111471676069](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471676069).
+Each runner completed all eleven native spec files. The duplicate-key cases use
+an otherwise valid report, including an escaped alias, and require the fixed JSON
+error; caps, schema failures, oversized real IPC input and rejected capabilities
+are independent cases. The shared-fixture, real golden timestamp and credential
+no-effect cases also passed. Root separately verified the downloaded producer
+archive and its GitHub source identity, every golden/source digest and the
+canonical contract pins. This is native fixture and producer evidence; final
+landing still requires all fresh hosted checks for the final documentation head.
+The cross-repository qualification below remains PROPOSED.
+
 Local validation is static only; formatting, compile, lint and execution gates
 belong to GitHub-hosted CI.
 
