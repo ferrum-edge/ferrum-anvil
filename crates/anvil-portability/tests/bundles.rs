@@ -1122,9 +1122,7 @@ fn full_backups_are_never_written_or_opened_as_bundles() {
             assert!(e.to_string().contains("restore from an ANVILBAK backup"), "{e}");
         }
     }
-    let objects_only = edit_json(&bytes, "workspace/objects.json", |o| {
-        o["app_settings"] = serde_json::Value::Object(Default::default())
-    });
+    let objects_only = edit_json(&bytes, "workspace/objects.json", |o| o["app_settings"] = serde_json::Value::Object(Default::default()));
     assert!(matches!(bundle::open(&objects_only, None), Err(BundleError::PassphraseRequired)));
     let e = bundle::open(&objects_only, Some(pass)).unwrap_err();
     assert!(matches!(e, BundleError::LegacyFullBackup), "{e}");

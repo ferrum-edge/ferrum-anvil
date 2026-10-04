@@ -437,12 +437,7 @@ struct ReadLimits {
     ratio: u64,
 }
 
-const READ_LIMITS: ReadLimits = ReadLimits {
-    entries: MAX_ENTRIES,
-    total: MAX_TOTAL_BYTES,
-    entry: MAX_ENTRY_BYTES,
-    ratio: MAX_RATIO,
-};
+const READ_LIMITS: ReadLimits = ReadLimits { entries: MAX_ENTRIES, total: MAX_TOTAL_BYTES, entry: MAX_ENTRY_BYTES, ratio: MAX_RATIO };
 
 struct EntryInfo {
     index: usize,
@@ -453,12 +448,7 @@ struct EntryInfo {
 // zip's name index keeps only the last record for a repeated raw filename.
 // Walk the central headers too, without decoding or expanding their payloads,
 // so duplicates cannot hide entry counts, types or sizes from preflight.
-fn check_directory(
-    bytes: &[u8],
-    start: u64,
-    indexed_count: usize,
-    limits: ReadLimits,
-) -> Result<(), BundleError> {
+fn check_directory(bytes: &[u8], start: u64, indexed_count: usize, limits: ReadLimits) -> Result<(), BundleError> {
     let invalid = || BundleError::NotABundle("invalid central directory".into());
     let mut offset = usize::try_from(start).map_err(|_| invalid())?;
     let mut names = BTreeSet::new();
@@ -468,24 +458,15 @@ fn check_directory(
         let header = bytes.get(offset..header_end).ok_or_else(invalid)?;
         let length = |at| u16::from_le_bytes([header[at], header[at + 1]]) as usize;
         let name_end = header_end.checked_add(length(28)).ok_or_else(invalid)?;
-        let end = name_end
-            .checked_add(length(30))
-            .and_then(|n| n.checked_add(length(32)))
-            .ok_or_else(invalid)?;
+        let end = name_end.checked_add(length(30)).and_then(|n| n.checked_add(length(32))).ok_or_else(invalid)?;
         let name = bytes.get(header_end..name_end).ok_or_else(invalid)?;
         bytes.get(name_end..end).ok_or_else(invalid)?;
         count = count.checked_add(1).ok_or_else(invalid)?;
         if count > limits.entries {
-            return Err(BundleError::Limits(format!(
-                "{count} entries (max {})",
-                limits.entries
-            )));
+            return Err(BundleError::Limits(format!("{count} entries (max {})", limits.entries)));
         }
         if !names.insert(name) {
-            return Err(BundleError::Unsafe(
-                String::from_utf8_lossy(name).into_owned(),
-                "duplicate entry".into(),
-            ));
+            return Err(BundleError::Unsafe(String::from_utf8_lossy(name).into_owned(), "duplicate entry".into()));
         }
         offset = end;
     }
@@ -500,10 +481,7 @@ fn check_entry_size(name: &str, info: &EntryInfo, limits: ReadLimits) -> Result<
     // overflow even when a hostile compressed size is near u64::MAX.
     let ratio = info.declared / info.compressed.max(1);
     if info.declared > limits.entry || ratio > limits.ratio {
-        return Err(BundleError::Limits(format!(
-            "entry '{name}' declares {} bytes (compression ratio {ratio})",
-            info.declared
-        )));
+        return Err(BundleError::Limits(format!("entry '{name}' declares {} bytes (compression ratio {ratio})", info.declared)));
     }
     Ok(())
 }
@@ -528,15 +506,11 @@ fn preflight<R: Read + Seek>(
         if f.enclosed_name().is_none() {
             return Err(BundleError::Unsafe(name, "path escapes the archive".into()));
         }
-        let info = EntryInfo {
-            index,
-            declared: f.size(),
-            compressed: f.compressed_size(),
-        };
+        let info = EntryInfo { index, declared: f.size(), compressed: f.compressed_size() };
         check_entry_size(&name, &info, limits)?;
-        remaining = remaining.checked_sub(info.declared).ok_or_else(|| {
-            BundleError::Limits("declared total uncompressed size exceeds the budget".into())
-        })?;
+        remaining = remaining
+            .checked_sub(info.declared)
+            .ok_or_else(|| BundleError::Limits("declared total uncompressed size exceeds the budget".into()))?;
         if entries.insert(name.clone(), info).is_some() {
             return Err(BundleError::Unsafe(name, "duplicate entry".into()));
         }
@@ -561,18 +535,14 @@ fn read_entry<R: Read + Seek>(
 ) -> Result<(Vec<u8>, String), BundleError> {
     check_entry_size(name, info, limits)?;
     let available = (*remaining).min(limits.entry);
-    *remaining = remaining.checked_sub(info.declared).ok_or_else(|| {
-        BundleError::Limits("total uncompressed size exceeds the remaining budget".into())
-    })?;
-    let bound = available
-        .checked_add(1)
-        .ok_or_else(|| BundleError::Limits("read budget overflow".into()))?;
-    let capacity = usize::try_from(info.declared)
-        .map_err(|_| BundleError::Limits("entry does not fit in memory".into()))?;
+    *remaining = remaining
+        .checked_sub(info.declared)
+        .ok_or_else(|| BundleError::Limits("total uncompressed size exceeds the remaining budget".into()))?;
+    let bound = available.checked_add(1).ok_or_else(|| BundleError::Limits("read budget overflow".into()))?;
+    let capacity = usize::try_from(info.declared).map_err(|_| BundleError::Limits("entry does not fit in memory".into()))?;
     let mut reader = zr.by_index(info.index)?.take(bound);
     let mut data = Vec::new();
-    data.try_reserve_exact(capacity)
-        .map_err(|_| BundleError::Limits("cannot allocate entry within the budget".into()))?;
+    data.try_reserve_exact(capacity).map_err(|_| BundleError::Limits("cannot allocate entry within the budget".into()))?;
     let mut hash = Sha256::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -588,18 +558,12 @@ fn read_entry<R: Read + Seek>(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             result => result?,
         };
-        let actual = (data.len() as u64)
-            .checked_add(n as u64)
-            .ok_or_else(|| BundleError::Limits("inflated size overflow".into()))?;
+        let actual = (data.len() as u64).checked_add(n as u64).ok_or_else(|| BundleError::Limits("inflated size overflow".into()))?;
         if actual > available {
-            return Err(BundleError::Limits(format!(
-                "entry '{name}' expands beyond the remaining budget"
-            )));
+            return Err(BundleError::Limits(format!("entry '{name}' expands beyond the remaining budget")));
         }
         if actual > info.declared || (n == 0 && actual != info.declared) {
-            return Err(BundleError::Invalid(format!(
-                "entry '{name}' inflated size does not match its declared size"
-            )));
+            return Err(BundleError::Invalid(format!("entry '{name}' inflated size does not match its declared size")));
         }
         if n == 0 {
             break;
@@ -610,24 +574,15 @@ fn read_entry<R: Read + Seek>(
     Ok((data, hex::encode(hash.finalize())))
 }
 
-fn verify_digest(
-    name: &str,
-    digest: &str,
-    checksums: &BTreeMap<String, String>,
-) -> Result<(), BundleError> {
-    if checksums.get(name).is_some_and(|expected| expected == digest) {
-        Ok(())
-    } else {
-        Err(BundleError::Checksum(name.to_string()))
-    }
+fn verify_digest(name: &str, digest: &str, checksums: &BTreeMap<String, String>) -> Result<(), BundleError> {
+    if checksums.get(name).is_some_and(|expected| expected == digest) { Ok(()) } else { Err(BundleError::Checksum(name.to_string())) }
 }
 
 /// Open and fully validate a bundle. Nothing is written anywhere.
 /// Directory and mandatory metadata checks precede payload expansion. The
 /// supported 1 GiB output budget is not a bound on parser or process memory.
 pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleError> {
-    let zr = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|e| BundleError::NotABundle(e.to_string()))?;
+    let zr = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| BundleError::NotABundle(e.to_string()))?;
     open_archive(bytes, zr, passphrase, READ_LIMITS)
 }
 
@@ -641,30 +596,14 @@ fn open_archive<R: Read + Seek>(
 ) -> Result<Opened, BundleError> {
     let entries = preflight(&mut zr, bytes, limits)?;
     let mut remaining = limits.total;
-    let (manifest_bytes, manifest_digest) = read_entry(
-        &mut zr,
-        MANIFEST_ENTRY,
-        &entries[MANIFEST_ENTRY],
-        &mut remaining,
-        limits,
-    )?;
+    let (manifest_bytes, manifest_digest) = read_entry(&mut zr, MANIFEST_ENTRY, &entries[MANIFEST_ENTRY], &mut remaining, limits)?;
     let checksums: BTreeMap<String, String> = {
-        let (data, _) = read_entry(
-            &mut zr,
-            CHECKSUMS_ENTRY,
-            &entries[CHECKSUMS_ENTRY],
-            &mut remaining,
-            limits,
-        )?;
+        let (data, _) = read_entry(&mut zr, CHECKSUMS_ENTRY, &entries[CHECKSUMS_ENTRY], &mut remaining, limits)?;
         serde_json::from_slice(&data)?
     };
     for name in entries.keys().filter(|name| name.as_str() != CHECKSUMS_ENTRY) {
         match checksums.get(name) {
-            Some(digest)
-                if digest.len() == 64
-                    && digest
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {}
+            Some(digest) if digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {}
             _ => return Err(BundleError::Checksum(name.clone())),
         }
     }
@@ -674,25 +613,19 @@ fn open_archive<R: Read + Seek>(
         }
     }
     verify_digest(MANIFEST_ENTRY, &manifest_digest, &checksums)?;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| BundleError::NotABundle(format!("manifest: {e}")))?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(|e| BundleError::NotABundle(format!("manifest: {e}")))?;
     drop(manifest_bytes);
     if manifest.format != FORMAT {
         return Err(BundleError::NotABundle(format!("unknown format '{}'", manifest.format)));
     }
     if manifest.format_version > FORMAT_VERSION {
-        return Err(BundleError::FutureFormat {
-            found: manifest.format_version,
-            supported: FORMAT_VERSION,
-        });
+        return Err(BundleError::FutureFormat { found: manifest.format_version, supported: FORMAT_VERSION });
     }
     // Full backups were once written as bundles, with a vault that bound
     // nothing else in the archive. One that still describes itself as such
     // is refused before any object is interpreted or the vault is opened;
     // one relabelled as a workspace bundle has a format 1 vault (below).
-    if is_full_backup(manifest.kind, manifest.mode)
-        || entries.contains_key("settings/portable.json")
-    {
+    if is_full_backup(manifest.kind, manifest.mode) || entries.contains_key("settings/portable.json") {
         return Err(BundleError::LegacyFullBackup);
     }
     // A vault is only ever opened as part of the exact bundle it was sealed
@@ -702,17 +635,13 @@ fn open_archive<R: Read + Seek>(
         (Some(_), ExportMode::EncryptedTransfer) if !entries.contains_key(VAULT_ENTRY) => {
             return Err(BundleError::Checksum(format!("{VAULT_ENTRY} (missing)")));
         }
-        (Some(_), ExportMode::EncryptedTransfer)
-            if manifest.format_version < MIN_VAULT_FORMAT_VERSION =>
-        {
+        (Some(_), ExportMode::EncryptedTransfer) if manifest.format_version < MIN_VAULT_FORMAT_VERSION => {
             return Err(BundleError::UnboundVault);
         }
         (Some(_), ExportMode::EncryptedTransfer) => {}
         (None, ExportMode::ShareSafely) if !entries.contains_key(VAULT_ENTRY) => {}
         _ => {
-            return Err(BundleError::Invalid(
-                "the manifest's export mode does not match the bundle's encrypted vault".into(),
-            ));
+            return Err(BundleError::Invalid("the manifest's export mode does not match the bundle's encrypted vault".into()));
         }
     }
     // A passphrase is only ever checked against a vault. One given for a
@@ -731,9 +660,7 @@ fn open_archive<R: Read + Seek>(
         if v.cipher != "xchacha20poly1305" || v.envelope_version != crypto::ENVELOPE_V1 {
             return Err(BundleError::Invalid("unsupported vault cipher or envelope version".into()));
         }
-        let salt = base64::engine::general_purpose::STANDARD
-            .decode(&v.salt_b64)
-            .map_err(|_| BundleError::Invalid("vault salt".into()))?;
+        let salt = base64::engine::general_purpose::STANDARD.decode(&v.salt_b64).map_err(|_| BundleError::Invalid("vault salt".into()))?;
         crypto::check_salt(&salt).map_err(BundleError::UnsupportedKdf)?;
         if passphrase.is_none() {
             return Err(BundleError::PassphraseRequired);
@@ -769,16 +696,9 @@ fn open_archive<R: Read + Seek>(
     if let Some(v) = &manifest.vault {
         let salt = vault_salt.as_ref().ok_or_else(|| BundleError::Invalid("vault salt".into()))?;
         let pass = passphrase.ok_or(BundleError::PassphraseRequired)?;
-        let (enc, digest) = read_entry(
-            &mut zr,
-            VAULT_ENTRY,
-            &entries[VAULT_ENTRY],
-            &mut remaining,
-            limits,
-        )?;
+        let (enc, digest) = read_entry(&mut zr, VAULT_ENTRY, &entries[VAULT_ENTRY], &mut remaining, limits)?;
         verify_digest(VAULT_ENTRY, &digest, &checksums)?;
-        let key = crypto::derive(pass.as_bytes(), salt, &v.kdf)
-            .map_err(|e| BundleError::Invalid(e.to_string()))?;
+        let key = crypto::derive(pass.as_bytes(), salt, &v.kdf).map_err(|e| BundleError::Invalid(e.to_string()))?;
         // The listing still binds every other entry's exact bytes. Remaining
         // payload digests are checked below before Opened can be returned.
         let aad = vault_aad(manifest.format_version, &checksums);
@@ -789,20 +709,14 @@ fn open_archive<R: Read + Seek>(
         // each of which must still hold its placeholder.
         let listed = manifest.placeholders.iter().map(|p| (&p.pointer, &p.placeholder));
         if !payload.literals.iter().map(|l| (&l.pointer, &l.placeholder)).eq(listed) {
-            return Err(BundleError::Invalid(
-                "the encrypted vault does not match the manifest's placeholders".into(),
-            ));
+            return Err(BundleError::Invalid("the encrypted vault does not match the manifest's placeholders".into()));
         }
         sanitize::restore(&mut objects, &payload.literals).map_err(BundleError::Invalid)?;
         secrets = payload.secrets;
         secrets_restored = true;
     }
-    let mut graph: PortableGraph = serde_json::from_value(objects).map_err(|e| {
-        BundleError::Invalid(format!(
-            "objects.json does not match schema {}: {e}",
-            manifest.schema_version
-        ))
-    })?;
+    let mut graph: PortableGraph = serde_json::from_value(objects)
+        .map_err(|e| BundleError::Invalid(format!("objects.json does not match schema {}: {e}", manifest.schema_version)))?;
     graph.secrets = secrets;
     for (name, info) in &entries {
         if let Some(h) = name.strip_prefix("attachments/") {
@@ -831,12 +745,7 @@ fn open_archive<R: Read + Seek>(
     crate::validate::clear_token_cache_ids(&mut graph);
     // A gateway profile's diagnostic reference lookup never arrives in a bundle.
     warnings.extend(crate::validate::clear_gateway_lookups(&mut graph));
-    Ok(Opened {
-        manifest,
-        graph,
-        warnings,
-        secrets_restored,
-    })
+    Ok(Opened { manifest, graph, warnings, secrets_restored })
 }
 
 #[cfg(test)]
@@ -884,11 +793,7 @@ mod read_tests {
             payloads.push((f.name().to_string(), start..start + f.compressed_size()));
         }
         let counts = Rc::new(RefCell::new(BTreeMap::new()));
-        let reader = TrackedReader {
-            cursor: Cursor::new(bytes),
-            payloads,
-            counts: counts.clone(),
-        };
+        let reader = TrackedReader { cursor: Cursor::new(bytes), payloads, counts: counts.clone() };
         let archive = zip::ZipArchive::new(reader).unwrap();
         // Directory discovery may scan the end of a small archive. Count
         // reads after discovery, through preflight and actual entry readers.
@@ -925,11 +830,8 @@ mod read_tests {
     }
 
     fn update_checksums(files: &mut Files) {
-        let checksums: BTreeMap<_, _> = files
-            .iter()
-            .filter(|(name, _)| name != CHECKSUMS_ENTRY)
-            .map(|(name, data)| (name.clone(), sha256(data)))
-            .collect();
+        let checksums: BTreeMap<_, _> =
+            files.iter().filter(|(name, _)| name != CHECKSUMS_ENTRY).map(|(name, data)| (name.clone(), sha256(data))).collect();
         let data = serde_json::to_vec(&checksums).unwrap();
         files.iter_mut().find(|(name, _)| name == CHECKSUMS_ENTRY).unwrap().1 = data;
     }
@@ -1010,11 +912,7 @@ mod read_tests {
         for (field, value, expected) in [
             ("format", serde_json::json!("unknown"), "not_bundle"),
             ("format_version", serde_json::json!(FORMAT_VERSION + 1), "future_format"),
-            (
-                "schema_version",
-                serde_json::json!(anvil_domain::SCHEMA_VERSION + 1),
-                "future_schema",
-            ),
+            ("schema_version", serde_json::json!(anvil_domain::SCHEMA_VERSION + 1), "future_schema"),
             ("schema_version", serde_json::json!(0), "old_schema"),
             ("kind", serde_json::json!("backup"), "backup"),
         ] {
@@ -1037,12 +935,7 @@ mod read_tests {
     #[test]
     fn checksum_metadata_is_validated_before_attachment_expansion() {
         let original = fixture(ExportMode::ShareSafely);
-        let attachment = original
-            .iter()
-            .find(|(n, _)| n.starts_with("attachments/"))
-            .unwrap()
-            .0
-            .clone();
+        let attachment = original.iter().find(|(n, _)| n.starts_with("attachments/")).unwrap().0.clone();
         let mut malformed = original.clone();
         malformed.iter_mut().find(|(n, _)| n == CHECKSUMS_ENTRY).unwrap().1 = b"{".to_vec();
         assert!(matches!(refused_before_payloads(&malformed), BundleError::Json(_)));
@@ -1075,10 +968,7 @@ mod read_tests {
             ("envelope_version", serde_json::json!(255)),
             ("salt_b64", serde_json::json!("invalid base64")),
             ("salt_b64", serde_json::json!("AA==")),
-            (
-                "kdf",
-                serde_json::json!({"algorithm": "argon2id", "m_cost": 0, "t_cost": 1, "p_cost": 1}),
-            ),
+            ("kdf", serde_json::json!({"algorithm": "argon2id", "m_cost": 0, "t_cost": 1, "p_cost": 1})),
         ] {
             let mut files = original.clone();
             edit_json(&mut files, MANIFEST_ENTRY, |m| m["vault"][field] = value);
@@ -1116,30 +1006,17 @@ mod read_tests {
         let bytes = pack(&files, zip::CompressionMethod::Stored, false);
         let limits = boundary_limits(&files);
         for smaller in [
-            ReadLimits {
-                entries: limits.entries - 1,
-                ..limits
-            },
-            ReadLimits {
-                total: limits.total - 1,
-                ..limits
-            },
-            ReadLimits {
-                entry: limits.entry - 1,
-                ..limits
-            },
+            ReadLimits { entries: limits.entries - 1, ..limits },
+            ReadLimits { total: limits.total - 1, ..limits },
+            ReadLimits { entry: limits.entry - 1, ..limits },
         ] {
             assert!(matches!(assert_preflight_refusal(&bytes, smaller), BundleError::Limits(_)));
         }
         let attachment = &files[0].0;
         let offset = central_offset(&bytes, attachment);
         let mut oversized = bytes.clone();
-        oversized[offset + 24..offset + 28]
-            .copy_from_slice(&((MAX_ENTRY_BYTES + 1) as u32).to_le_bytes());
-        assert!(matches!(
-            assert_preflight_refusal(&oversized, READ_LIMITS),
-            BundleError::Limits(_)
-        ));
+        oversized[offset + 24..offset + 28].copy_from_slice(&((MAX_ENTRY_BYTES + 1) as u32).to_le_bytes());
+        assert!(matches!(assert_preflight_refusal(&oversized, READ_LIMITS), BundleError::Limits(_)));
         let mut ratio = bytes;
         ratio[offset + 20..offset + 24].copy_from_slice(&1u32.to_le_bytes());
         assert!(matches!(assert_preflight_refusal(&ratio, READ_LIMITS), BundleError::Limits(_)));
@@ -1151,8 +1028,7 @@ mod read_tests {
         let bytes = pack(&files, zip::CompressionMethod::Stored, false);
         let offset = central_offset(&bytes, &files[1].0);
         let mut duplicate = bytes.clone();
-        duplicate[offset + 46..offset + 46 + files[0].0.len()]
-            .copy_from_slice(files[0].0.as_bytes());
+        duplicate[offset + 46..offset + 46 + files[0].0.len()].copy_from_slice(files[0].0.as_bytes());
         // zip's indexed length is now one smaller; our raw directory walk
         // must still see and refuse the duplicate before opening any entry.
         let indexed_count = zip::ZipArchive::new(Cursor::new(&duplicate)).unwrap().len();
@@ -1164,19 +1040,13 @@ mod read_tests {
         for mode in [0o120600u32, 0o040600, 0o010600, 0o020600] {
             let mut wrong_type = bytes.clone();
             wrong_type[offset + 38..offset + 42].copy_from_slice(&(mode << 16).to_le_bytes());
-            assert!(matches!(
-                assert_preflight_refusal(&wrong_type, READ_LIMITS),
-                BundleError::Unsafe(..)
-            ));
+            assert!(matches!(assert_preflight_refusal(&wrong_type, READ_LIMITS), BundleError::Unsafe(..)));
         }
         for name in ["unexpected.json", "../escape", "attachments/not-a-hash"] {
             let mut unsupported = files.clone();
             unsupported.push((name.into(), vec![1; 32]));
             let archive = pack(&unsupported, zip::CompressionMethod::Stored, false);
-            assert!(matches!(
-                assert_preflight_refusal(&archive, READ_LIMITS),
-                BundleError::Unsafe(..)
-            ));
+            assert!(matches!(assert_preflight_refusal(&archive, READ_LIMITS), BundleError::Unsafe(..)));
         }
     }
 
@@ -1205,13 +1075,7 @@ mod read_tests {
                 update_checksums(&mut edited);
                 let changed = pack(&edited, zip::CompressionMethod::Stored, false);
                 let (archive, _) = tracked(&changed);
-                let error = open_archive(
-                    &changed,
-                    archive,
-                    pass,
-                    boundary_limits(&edited),
-                )
-                .unwrap_err();
+                let error = open_archive(&changed, archive, pass, boundary_limits(&edited)).unwrap_err();
                 assert!(matches!(error, BundleError::WrongPassphrase));
             }
         }
@@ -1236,12 +1100,7 @@ mod read_tests {
     #[test]
     fn lying_sizes_and_descriptors_cannot_overrun_remaining_aggregate() {
         let files = fixture(ExportMode::ShareSafely);
-        let name = files
-            .iter()
-            .filter(|(n, _)| n.starts_with("attachments/"))
-            .map(|(n, _)| n)
-            .max()
-            .unwrap();
+        let name = files.iter().filter(|(n, _)| n.starts_with("attachments/")).map(|(n, _)| n).max().unwrap();
         let actual = files.iter().find(|(n, _)| n == name).unwrap().1.len() as u64;
         for descriptor in [false, true] {
             let bytes = pack(&files, zip::CompressionMethod::Stored, descriptor);
@@ -1251,11 +1110,7 @@ mod read_tests {
             for declared in [7u64, actual - 1, actual + 1] {
                 let mut lying = bytes.clone();
                 lying[offset + 24..offset + 28].copy_from_slice(&(declared as u32).to_le_bytes());
-                let limits = ReadLimits {
-                    total: boundary_limits(&files).total - actual + declared,
-                    entry: actual + 1,
-                    ..READ_LIMITS
-                };
+                let limits = ReadLimits { total: boundary_limits(&files).total - actual + declared, entry: actual + 1, ..READ_LIMITS };
                 let (archive, counts) = tracked(&lying);
                 let error = open_archive(&lying, archive, None, limits).unwrap_err();
                 if declared < actual {
@@ -1293,15 +1148,8 @@ mod read_tests {
         let name = format!("attachments/{}", "a".repeat(64));
         let files = vec![(name.clone(), vec![1; 64])];
         let bytes = pack(&files, zip::CompressionMethod::Stored, false);
-        let info = EntryInfo {
-            index: 0,
-            declared: 7,
-            compressed: 64,
-        };
-        let limits = ReadLimits {
-            entry: 7,
-            ..READ_LIMITS
-        };
+        let info = EntryInfo { index: 0, declared: 7, compressed: 64 };
+        let limits = ReadLimits { entry: 7, ..READ_LIMITS };
         for budget in [6, 7, 100] {
             let (mut archive, counts) = tracked(&bytes);
             let mut remaining = budget;
@@ -1320,37 +1168,15 @@ mod read_tests {
     #[test]
     fn ratio_arithmetic_preserves_boundaries_without_overflow() {
         for compressed in [0, 1, 10, u64::MAX] {
-            let info = EntryInfo {
-                index: 0,
-                declared: 200,
-                compressed,
-            };
+            let info = EntryInfo { index: 0, declared: 200, compressed };
             check_entry_size("attachment", &info, READ_LIMITS).unwrap();
         }
-        let info = EntryInfo {
-            index: 0,
-            declared: 2009,
-            compressed: 10,
-        };
+        let info = EntryInfo { index: 0, declared: 2009, compressed: 10 };
         check_entry_size("attachment", &info, READ_LIMITS).unwrap();
-        let too_large = EntryInfo {
-            declared: 2010,
-            ..info
-        };
-        assert!(matches!(
-            check_entry_size("attachment", &too_large, READ_LIMITS),
-            Err(BundleError::Limits(_))
-        ));
-        let info = EntryInfo {
-            index: 0,
-            declared: u64::MAX,
-            compressed: u64::MAX,
-        };
-        let limits = ReadLimits {
-            entry: u64::MAX,
-            total: u64::MAX,
-            ..READ_LIMITS
-        };
+        let too_large = EntryInfo { declared: 2010, ..info };
+        assert!(matches!(check_entry_size("attachment", &too_large, READ_LIMITS), Err(BundleError::Limits(_))));
+        let info = EntryInfo { index: 0, declared: u64::MAX, compressed: u64::MAX };
+        let limits = ReadLimits { entry: u64::MAX, total: u64::MAX, ..READ_LIMITS };
         check_entry_size("attachment", &info, limits).unwrap();
     }
 }
