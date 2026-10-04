@@ -81,18 +81,54 @@ The [hosted Linux formatter diff](https://github.com/ferrum-edge/ferrum-anvil/ac
 has been applied literally. The initial macOS boundary test also failed import
 validation because its synthetic secret had an invalid ID and no workspace owner;
 the fixture now carries a valid ID and an included owner workspace.
-Corrected exact-head qualification and CI are
-**pending hosted execution**; no local project code was run.
-Root must link exact-head runs/artifacts and independently review results before
-asking for approval. Synthetic data is not a legitimate export corpus, desktop
-concurrency, a binary measurement, Windows RSS qualification or a worst-case proof.
+Exact-source hosted RSS qualification passed on `843e750eb2a27636b3ff9fd19b5b6d936f3b71cd`
+in [run 37195941241](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37195941241):
+Linux job 111417695811 and macOS job 111417695940 both succeeded. Each host ran
+21 fresh-process cases using separate compiled variants and harness-embedded
+snapshot/variant provenance. The scalar artifacts are
+[Linux 11300537977](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37195941241)
+(SHA-256 `753f7b4d7e6996426dcebc2618c9f71c4da0812081b31716e76f6b5325ca6f0f`) and
+[macOS 11300837077](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37195941241)
+(SHA-256 `091422fbf09cb7c2c79e89f52332945e00f4c7568f573e15670fef18ff62d547`).
+Linux GNU `time` values reported in KiB were converted to bytes; macOS values are
+the reported `maximumresidentsetsize` bytes. Representative maximum RSS was:
+
+| Case | Linux bytes | macOS bytes |
+|---|---:|---:|
+| candidate `proposal_exact` | 77,385,728 | 74,760,192 |
+| candidate `metadata_exact` | 108,961,792 | 107,069,440 |
+| candidate `refused_released_exact` | 24,735,744 | 22,085,632 |
+| preflight `released_exact` | 1,099,431,936 | 1,018,937,344 |
+| released `released_exact` | 2,175,176,704 | 1,648,197,632 |
+
+The candidate boundary case was below half of both measured baselines on each
+host, and the ceiling control passed. Invalid metadata and one-byte over-limit
+refusals had controlled low RSS. These are measurements of synthetic source-test
+binaries. They are not measurements of released desktop binaries or a legitimate
+export corpus, and do not prove worst-case behavior, OOM safety, or whole-process
+DoS resistance.
+
+The measurement run does not make the ordinary CI result green. On the same
+`843e750` source, [ordinary CI run 37195941263](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37195941263)
+failed on Linux, macOS and Windows because Clippy's `option_env_unwrap` lint
+rejected `.expect()` on the harness's compile-time `option_env!` values. Commit
+`722bb8bc844feabe63e9ec6ae436d041be1e0878` changes only that compiled-metadata
+extraction to `let Some(...) else`; it does not change limits, runtime behavior,
+or harness identity. The correction received a fresh independent harness review
+with five APPROVED findings. The rerun of the resource qualification on that exact head
+[passed on Linux and macOS](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37196753225).
+Its ordinary [canonical CI run](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37196753237)
+was still in progress at this check: Linux and Windows Rust jobs had passed, while
+macOS Rust tests were still running. Fresh final-head canonical CI is therefore
+still required. No local project code was run.
 
 These byte limits do not eliminate all DoS: ZIP central-directory parsing happens
 before the count cap, input/archive buffers and parsed JSON/history can amplify
 memory, and vault plaintext adds overhead. Existing unauthenticated KDF bounds
 still permit 256 MiB memory and substantial CPU work. Share-safe hashes do not
-authenticate authors. Peak RSS and OS OOM behavior remain unverified until hosted
-runs; bounded synthetic results cannot establish a universal resident-memory cap.
+authenticate authors. The hosted measurements establish RSS only for the tested
+synthetic cases; they do not establish a universal resident-memory cap or OS OOM
+behavior.
 
 ## Alternative preserving large-archive compatibility
 
