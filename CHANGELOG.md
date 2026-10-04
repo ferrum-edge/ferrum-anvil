@@ -108,6 +108,15 @@
 
 ### Fixed
 
+- Portable bundles: validate archive declarations and mandatory manifest,
+  checksum, format, schema and vault metadata before expanding payloads.
+  Charge the remaining aggregate budget before allocating each entry,
+  verify actual ZIP sizes against declarations, and hash attachments during
+  reading without retaining a second copy. The supported 1 GiB total,
+  512 MiB per-entry, 200 compression-ratio and 20,000-entry limits are
+  unchanged. Valid large bundles and large metadata can still consume
+  substantial memory; this addresses the validation-order and accounting
+  part of GHSA-jqq4-v58m-6fcw, not the remaining resource-policy decision.
 - Load preflight: iteration variables, dataset columns, values extracted by
   earlier chain steps and dynamic helpers in the path, query, method, headers
   or body of a fixed origin no longer stop a plan (#288). The preflight judges

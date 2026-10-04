@@ -22,6 +22,30 @@
 - Import happens in two steps: preview, then apply.
   - **Checks:** size limits, path traversal, symlinks, zip bombs and
     checksums. A wrong passphrase is rejected before anything changes.
+    Before expanding entries, the reader checks central-directory names,
+    regular-file types, duplicates (including raw names hidden by the ZIP
+    name index), entry counts, declared sizes and the declared aggregate,
+    and requires the manifest, checksum list and objects entry. It reads
+    the manifest and checksums first, validates checksum coverage and the
+    manifest digest, then checks format, schema and vault metadata before
+    reading objects, the vault, attachments or history. Each subsequent
+    entry is hashed while reading and verified before use; every digest is
+    verified before an opened bundle is returned.
+  - **Budgets:** at most 20,000 entries, 512 MiB per entry and 1 GiB total
+    inflated bytes, including manifest and checksums. Metadata uses the
+    same per-entry budget. The compression-ratio check preserves the
+    existing integer quotient: inflated bytes / max(compressed bytes, 1)
+    must be at most 200. The remaining aggregate is charged before each
+    allocation. Reads stop at the smaller of the entry and remaining
+    budgets plus one sentinel byte, and also probe the declared size plus
+    one; actual sizes must equal declarations. Attachments move directly
+    into the opened graph without a second retained copy.
+    These are byte/work limits, not a resident-memory guarantee: valid
+    untrusted bundles can still retain close to 1 GiB, with additional
+    archive, parser, ciphertext/plaintext, input-buffer and KDF overhead.
+    Large mandatory metadata remains supported too. Reducing these
+    budgets or changing the in-memory opened-bundle contract needs an
+    owner decision; see the [resource-policy proposal](../security/bundle-resource-policy-proposal.md).
   - **Conflicts:** merge, replace or duplicate (duplicate remaps ids and
     labels name clashes).
   - **Atomicity:** a checkpoint is taken first and the import runs as one

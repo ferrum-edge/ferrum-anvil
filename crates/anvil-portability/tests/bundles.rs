@@ -240,8 +240,8 @@ fn data_007_traversal_symlink_and_bomb_are_rejected() {
     assert!(matches!(bundle::open(&absolute, None), Err(BundleError::Unsafe(..))));
     let link = zip_with(&[("manifest.json", b"{}")], Some("attachments/0000000000000000000000000000000000000000000000000000000000000000"));
     assert!(matches!(bundle::open(&link, None), Err(BundleError::Unsafe(..))));
-    // Highly compressible 300 MB entry disguised as an attachment.
-    let big = vec![0u8; 300 * 1024 * 1024];
+    // One MiB is enough to exceed the production compression-ratio limit.
+    let big = vec![0u8; 1024 * 1024];
     let name = format!("attachments/{}", "a".repeat(64));
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     w.start_file(name, zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap();
