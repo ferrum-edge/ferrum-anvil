@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Breaking (unapproved proposal)
+
+- Interactive desktop RPC: `session_open`, `session_send` and `session_cancel`
+  require an explicit UUID `attemptId` in addition to `executionId`. Direct
+  callers must generate a fresh attempt for each OPEN and pass that same string
+  to every SEND/CANCEL for it. Missing identity fails before engine work;
+  stale SEND/CANCEL cannot capture a replacement with the same execution id.
+  The candidate rejects released id-only OPEN/SEND/CANCEL calls and removes
+  OPEN's hidden native attempt fallback. OPEN still returns the execution-id
+  string, and session command bodies and domain/CLI event shapes are unchanged.
+  The bundled Workbench supplies the identity. See the
+  [upgrade guide](docs/upgrade-guide.md). This compatibility break is not owner
+  approved: root whole-change review, fresh independent review and all hosted
+  CI must pass before root asks the owner to approve it. Do not merge or release
+  the candidate before that approval.
+
 ### Fixed
 
 - Desktop session and execution payloads are admitted under an unlocked

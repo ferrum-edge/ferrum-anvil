@@ -81,8 +81,13 @@ CLI (`anvil`) = same anvil-app services without a webview.
 - **Session controls own an admitted slot.** A pending open publishes its
   slot and cancellation token under its admission, then fills the same slot
   with the engine handle. Send/cancel IPC captures that exact slot and the
-  invocation profile/epoch before scheduling. Cancellation IPC also requires
-  the expected attempt id; an id-only `session_cancel` caller fails closed.
+  invocation profile/epoch before scheduling. Both `session_send` and
+  `session_cancel` require the originating `attemptId` and compare it before
+  capturing a slot. A command from an old console cannot capture a replacement
+  even if it first reaches native admission after the old slot has retired,
+  within the same epoch and before the old completion reaches the renderer.
+  This guarantee does not assume Tauri invocation reordering. Missing attempt
+  identity fails JSON decoding before admission or engine work.
   The control checks its admitted state under shared delivery access at each
   synchronous effect. A stale control cannot drive a new pending or live slot
   with a reused renderer execution id, even within the same epoch. A finalizer
@@ -92,16 +97,21 @@ CLI (`anvil`) = same anvil-app services without a webview.
   through enqueue. A replacement already registered under the same execution
   id suppresses both the full completion and the scalar `LOCKED` fallback.
   Retired, unreplaced attempts still complete normally, including scalar
-  retirement after lock or a profile transition. `session_open` accepts
+  retirement after lock or a profile transition. `session_open` requires
   a renderer `attemptId`, independent of `executionId`, and echoes it as
   `attempt_id` in every `session-ended` packet. Workbench matches both before
-  retiring controls, showing a view/error or refreshing history. Direct IPC
-  callers that omit `attemptId` still receive a generated native attempt id;
-  the open result remains the execution id. Whether to adopt this compatibility
-  behavior as a released contract remains unapproved. This implementation is
-  an unreleased PR candidate, not evidence that the behavior has been adopted
-  for a release. Pointer-checked cleanup and recording into the originally
-  admitted profile are unchanged.
+  retiring controls, showing a view/error or refreshing history. The open
+  result remains the execution-id string. An id-only OPEN is rejected before
+  context/engine work; there is no generated hidden attempt fallback. Direct
+  callers must generate a fresh UUID attempt and pass that same string to
+  OPEN/SEND/CANCEL, as the bundled Workbench does. This is a concrete,
+  **unapproved breaking compatibility proposal** for the released id-only
+  desktop IPC, not an approved release contract. Root whole-change review,
+  fresh independent review and all hosted CI must pass before root asks the
+  owner to approve the break; the candidate must not be merged or released
+  before that approval. See the [upgrade guide](upgrade-guide.md).
+  Pointer-checked cleanup and recording into the originally admitted profile
+  are unchanged.
 - **Session cancellation cannot wait behind its own send.** Each pending/open
   slot has an independent cancellation token. Cancellation signals it under
   the gate before awaiting the slot, interrupting both a slot wait and a
@@ -129,15 +139,20 @@ For the desktop only, interactive-session `execution-event` packets wrap the
 domain event with an `attempt_id`; Workbench shows session messages only when
 the attempt matches, while attempt-tagged progress is excluded from the manual
 progress display. Manual-send events remain raw domain events, and the domain
-and CLI event shapes are unchanged. This envelope does not add
-an expected-attempt argument to `session_send`; that IPC still uses its current
-execution-id-only shape. Ordinary Workbench connections continue to use fresh
-execution UUIDs. Native barrier tests call the production finish/history and
-completion sinks with real engine handles; their substituted receivers and the
-renderer delayed-event fake do not prove end-to-end Tauri/webview transport
-ordering. No renderer predicate supplies the security fence. Gate acquisition
-precedes profile/key/grant access; finalizers complete engine/history work
-before taking it. Cache cleanup runs with admission closed and without the
+and CLI event shapes are unchanged. Workbench's console callback carries its
+own execution and attempt UUIDs through the desktop API for every command,
+including text, close and half-close. Ordinary connections still generate fresh
+execution UUIDs. Native tests pause old invocations before admission and replace
+their execution id with pending/live attempts across same-epoch retirement,
+lock/unlock and profile publication. Matching controls, including controls
+admitted while pending, exercise the real engine queue and TCP bytes, write FIN,
+continued reads and local close. Completion tests call the production
+finish/history and completion sinks with real engine handles. The renderer
+fake also retains the old console while another tab opens the replacement;
+its substituted backend and delayed-event receivers do not prove end-to-end
+Tauri/webview transport ordering. No renderer predicate supplies the security
+fence. Gate acquisition precedes profile/key/grant access; finalizers complete
+engine/history work before taking it. Cache cleanup runs with admission closed and without the
 delivery gate; callbacks reject before acquiring the app guard, so a cache
 owner cannot wait for the lock operation that is clearing that cache. The
 existing PEM grant claim and revocation mutex/transaction ordering is unchanged.

@@ -992,7 +992,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   <SessionConsole
                     protocol={tab.req.spec.protocol ?? "http"}
                     messages={tab.session.messages}
-                    onSend={(c) => api.sessionSend(tab.session!.execId, c)}
+                    onSend={(c) => api.sessionSend(tab.session!.execId, tab.session!.attemptId, c)}
                     onCancel={() => void cancelSession(tab.session!.execId, tab.session!.attemptId)}
                   />
                 ) : (

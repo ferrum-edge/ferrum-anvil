@@ -847,7 +847,8 @@ export const api = {
 
   sessionOpen: (input: SendInput, executionId: string, attemptId: string) =>
     call<string>("session_open", { input, executionId, attemptId }),
-  sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
+  sessionSend: (executionId: string, attemptId: string, command: SessionCommand) =>
+    call<void>("session_send", { executionId, attemptId, command }),
   sessionCancel: (executionId: string, attemptId: string) =>
     call<void>("session_cancel", { executionId, attemptId }),
 

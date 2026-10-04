@@ -311,6 +311,79 @@ describe("switching workspaces", () => {
 });
 
 describe("session controls", () => {
+  it.each(["text", "close", "half-close"])(
+    "keeps an old console's %s bound to its attempt after native retirement and ID reuse",
+    async (action) => {
+      const owners = new Map<string, string>();
+      const effects: unknown[] = [];
+      backend({
+        session_open: ({ executionId, attemptId }) => {
+          if (typeof executionId !== "string" || typeof attemptId !== "string") {
+            throw new Error("missing session identity");
+          }
+          if (owners.has(executionId)) throw new Error("duplicate execution ID");
+          owners.set(executionId, attemptId);
+          return executionId;
+        },
+        session_send: ({ executionId, attemptId, command }) => {
+          if (typeof executionId !== "string" || owners.get(executionId) !== attemptId) {
+            throw new Error("the session is no longer open");
+          }
+          effects.push(command);
+          return null;
+        },
+      });
+      requests.s1 = request("s1", "A", "Socket", { protocol: "tcp" });
+      requests.s2 = request("s2", "A", "Peer", { protocol: "tcp" });
+      await boot();
+      await openTab("Socket");
+      const executionId = "00000000-0000-7000-8000-000000000060";
+      const oldAttempt = "00000000-0000-7000-8000-000000000061";
+      const newAttempt = "00000000-0000-7000-8000-000000000062";
+      const ids = vi.spyOn(crypto, "randomUUID");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(oldAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+      await act(async () => {});
+      // Native retires A before history finalization/completion. Its actual
+      // console remains mounted in the tab; no IPC admission reordering is used.
+      owners.delete(executionId);
+      await openTab("Peer");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(newAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+      await act(async () => {});
+      fireEvent.click(openTabs().getByRole("tab", { name: /Socket/ }));
+      const command =
+        action === "text"
+          ? { command: "send_text", text: "console payload" }
+          : action === "close"
+            ? { command: "close", code: 1000, reason: "" }
+            : { command: "half_close" };
+      const send = () => {
+        if (action === "text") {
+          fireEvent.change(screen.getByLabelText("Message"), { target: { value: "console payload" } });
+          fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+        } else {
+          const name = action === "close" ? "Close" : "Half-close";
+          fireEvent.click(screen.getByRole("button", { name, exact: true }));
+        }
+      };
+      send();
+      await screen.findByText("the session is no longer open");
+      expect(calls("session_send")).toEqual([{ executionId, attemptId: oldAttempt, command }]);
+      expect(effects).toEqual([]);
+      expect(owners.get(executionId)).toBe(newAttempt);
+      fireEvent.click(openTabs().getByRole("tab", { name: /Peer/ }));
+      send();
+      await waitFor(() => expect(effects).toEqual([command]));
+      expect(calls("session_send")).toEqual([
+        { executionId, attemptId: oldAttempt, command },
+        { executionId, attemptId: newAttempt, command },
+      ]);
+    },
+  );
+
   it.each(["full", "scalar"])(
     "keeps the original %s completion owner after a duplicate open is rejected",
     async (completion) => {
@@ -346,7 +419,7 @@ describe("session controls", () => {
       expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Ping" }));
       await waitFor(() =>
-        expect(calls("session_send")).toEqual([{ executionId, command: { command: "ping" } }]),
+        expect(calls("session_send")).toEqual([{ ...cancelArgs(), command: { command: "ping" } }]),
       );
       const historyReads = calls("history_list").length;
       emit("session-ended", {
@@ -419,7 +492,9 @@ describe("session controls", () => {
       expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
       expect(screen.queryByRole("status")).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Ping" }));
-      await waitFor(() => expect(calls("session_send")).toHaveLength(1));
+      await waitFor(() =>
+        expect(calls("session_send")).toEqual([{ ...cancelArgs(1), command: { command: "ping" } }]),
+      );
       const historyReads = calls("history_list").length;
       emit("session-ended", {
         execution_id: executionId,
@@ -706,7 +781,7 @@ describe("session controls", () => {
     expect(openSessions.has(executionId)).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Ping" }));
     await waitFor(() =>
-      expect(calls("session_send")).toEqual([{ executionId, command: { command: "ping" } }]),
+      expect(calls("session_send")).toEqual([{ ...cancelArgs(1), command: { command: "ping" } }]),
     );
 
     // The matching generation still retires normally, for either packet form.

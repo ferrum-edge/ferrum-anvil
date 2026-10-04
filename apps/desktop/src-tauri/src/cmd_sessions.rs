@@ -90,24 +90,20 @@ pub(crate) struct SessionControl {
     slot: SessionSlot,
 }
 
-pub(crate) fn admit_control(st: &DesktopState, fence: PayloadFence, execution_id: &str) -> R<SessionControl> {
-    admit_control_for_attempt(st, fence, execution_id, None)
-}
-
-/// Cancellation may arrive from an old Workbench after a remount. Resolve
-/// the expected attempt at IPC admission, before capturing the native slot.
-pub(crate) fn admit_cancel(st: &DesktopState, fence: PayloadFence, execution_id: &str, attempt_id: &str) -> R<SessionControl> {
-    admit_control_for_attempt(st, fence, execution_id, Some(attempt_id))
-}
-
-fn admit_control_for_attempt(st: &DesktopState, fence: PayloadFence, execution_id: &str, attempt_id: Option<&str>) -> R<SessionControl> {
+/// Send and cancel may arrive after an execution id has been reused. Resolve
+/// the required expected attempt at IPC admission, before capturing its slot.
+pub(crate) fn admit_control(st: &DesktopState, fence: PayloadFence, execution_id: &str, attempt_id: &str) -> R<SessionControl> {
     st.deliver_payload(&fence, || {
         let (owner, slot) = st.sessions.lock().get(execution_id).cloned().ok_or("the session is no longer open")?;
-        if !owner.same_owner(&fence) || attempt_id.is_some_and(|expected| expected != slot.attempt_id.as_str()) {
+        if !owner.same_owner(&fence) || attempt_id != slot.attempt_id {
             return Err("the session is no longer open".into());
         }
         Ok(SessionControl { fence: fence.clone(), execution_id: execution_id.into(), slot })
     })?
+}
+
+pub(crate) fn admit_cancel(st: &DesktopState, fence: PayloadFence, execution_id: &str, attempt_id: &str) -> R<SessionControl> {
+    admit_control(st, fence, execution_id, attempt_id)
 }
 
 impl SessionControl {
@@ -347,10 +343,12 @@ mod tests {
     use anvil_app::profiles::{ProfileManager, Unlock};
     use anvil_domain::Id;
     use anvil_domain::events::ExecutionEvent;
-    use anvil_domain::execution::ExecutionRecord;
+    use anvil_domain::execution::{Direction, ExecutionRecord};
+    use anvil_domain::outcome::{ClosedBy, ProtocolStatus, TransportState};
     use anvil_domain::request::{Protocol, RequestSpec, TcpFraming, TcpSpec};
     use anvil_engine::context::ExecutionContext;
     use std::sync::mpsc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
     const BOUND: Duration = Duration::from_secs(10);
@@ -367,6 +365,21 @@ mod tests {
         execution_id: &str,
         sink: Option<anvil_transport::EventFn>,
     ) -> (SessionSlot, tokio::net::TcpListener) {
+        let (pending, mut registration) = register_session(st, fence, execution_id, &Id::new().to_string()).unwrap();
+        let slot = registration.slot.clone();
+        let listener = open_registered_tcp(st, fence, execution_id, pending, &slot, sink).await;
+        registration.published = true;
+        (slot, listener)
+    }
+
+    async fn open_registered_tcp(
+        st: &DesktopState,
+        fence: &PayloadFence,
+        execution_id: &str,
+        pending: PendingEntry,
+        slot: &SessionSlot,
+        sink: Option<anvil_transport::EventFn>,
+    ) -> tokio::net::TcpListener {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut spec = RequestSpec::http("GET", &format!("tcp://{}", listener.local_addr().unwrap()));
         spec.protocol = Protocol::Tcp;
@@ -375,19 +388,16 @@ mod tests {
             framing: TcpFraming::NewlineDelimited,
             payloads: vec![],
             half_close_after_send: false,
-            read_idle_ms: 1000,
+            read_idle_ms: 10_000,
             max_read_bytes: 4096,
             expect_frames: 0,
             proxy_protocol: None,
         });
-        let (pending, mut registration) = register_session(st, fence, execution_id, &Id::new().to_string()).unwrap();
-        let slot = registration.slot.clone();
         let open =
             fence.app.engine.open_session(ExecutionContext::standalone(spec), EventCtx { execution_id: id(execution_id).unwrap(), sink });
         let (session, canceled) = pending.open(open, |session| session).await.unwrap();
-        publish_handle(st, fence, &slot, session, canceled).await;
-        registration.published = true;
-        (slot, listener)
+        publish_handle(st, fence, slot, session, canceled).await;
+        listener
     }
 
     async fn finish_slot(slot: &SessionSlot) {
@@ -501,7 +511,7 @@ mod tests {
                     assert_eq!(old_epoch.err(), Some("LOCKED".into()));
                 }
                 if live {
-                    let send = admit_control(&st, fresh.clone(), &execution_id).unwrap();
+                    let send = admit_control(&st, fresh.clone(), &execution_id, &slot.attempt_id).unwrap();
                     let command = SessionCommand::SendText { text: "replacement".into() };
                     session_send(&st, send, command).await.unwrap();
                 }
@@ -514,6 +524,139 @@ mod tests {
                 finish_slot(&slot).await;
                 remove_slot(&st, &execution_id, &slot);
                 drop((peer, pending, registration));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sends_delayed_before_admission_cannot_drive_pending_or_live_replacements() {
+        for transition in ["same-epoch", "lock-unlock", "profile"] {
+            for live in [false, true] {
+                let root = TempRoot::new();
+                let st = DesktopState::new(root.0.clone());
+                let (app, dir) = create(&st, "old send");
+                st.set_app_since(app, st.epoch()).unwrap();
+                let old_fence = st.admit_payload().unwrap();
+                let execution_id = Id::new().to_string();
+                let (old_slot, _old_peer) = open_tcp(&st, &old_fence, &execution_id, None).await;
+                let old_attempt = old_slot.attempt_id.clone();
+                let commands = [
+                    SessionCommand::SendText { text: "stale-canary".into() },
+                    SessionCommand::Close { code: 1000, reason: String::new() },
+                    SessionCommand::HalfClose,
+                ];
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let (release_tx, release_rx) = oneshot::channel();
+                let (message_tx, mut message_rx) = tokio::sync::mpsc::unbounded_channel();
+                let sink: anvil_transport::EventFn = Arc::new(move |event| {
+                    if let ExecutionEvent::Message { message, .. } = event
+                        && message.direction == Direction::Received
+                    {
+                        let _ = message_tx.send(message);
+                    }
+                });
+                let invoking = async {
+                    // Renderer commands already own E/A, but have NOT reached
+                    // native admission. Today's fence must not bind them to B.
+                    ready_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    let fence = st.admit_payload().unwrap();
+                    for command in commands {
+                        let sent = match admit_control(&st, fence.clone(), &execution_id, &old_attempt) {
+                            Ok(control) => session_send(&st, control, command).await,
+                            Err(err) => Err(err),
+                        };
+                        assert_eq!(sent, Err("the session is no longer open".into()), "{transition}, live={live}");
+                    }
+                    let canceled = admit_cancel(&st, fence, &execution_id, &old_attempt);
+                    assert_eq!(canceled.err(), Some("the session is no longer open".into()));
+                };
+                let replacing = async {
+                    ready_rx.await.unwrap();
+                    match transition {
+                        "same-epoch" => {
+                            // The real old handle ends and its slot retires
+                            // before history/completion can retire its console.
+                            finish_slot(&old_slot).await;
+                            remove_slot(&st, &execution_id, &old_slot);
+                        }
+                        "lock-unlock" => {
+                            st.lock();
+                            let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+                            st.unlock_since(&old_fence.app, key, st.epoch()).unwrap();
+                        }
+                        "profile" => {
+                            let (other, _) = create(&st, "new send");
+                            st.set_app_since(other, st.epoch()).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    finish_slot(&old_slot).await;
+                    let fresh = st.admit_payload().unwrap();
+                    let attempt = Id::new().to_string();
+                    let (pending, mut registration) = register_session(&st, &fresh, &execution_id, &attempt).unwrap();
+                    let slot = registration.slot.clone();
+                    let (pending, listener) = if live {
+                        let listener = open_registered_tcp(&st, &fresh, &execution_id, pending, &slot, Some(sink.clone())).await;
+                        registration.published = true;
+                        (None, Some(listener))
+                    } else {
+                        (Some(pending), None)
+                    };
+                    release_tx.send(()).unwrap();
+                    (fresh, registration, pending, listener)
+                };
+                let work = async { tokio::join!(invoking, replacing) };
+                let (_, (fresh, mut registration, pending, listener)) = tokio::time::timeout(BOUND, work).await.unwrap();
+                let slot = registration.slot.clone();
+                assert_ne!(slot.attempt_id, old_attempt);
+                assert!(!slot.cancel.is_cancelled());
+                if let Some(pending) = &pending {
+                    assert!(!pending.token().is_cancelled());
+                    assert!(slot.session.lock().await.is_none());
+                }
+                if transition != "same-epoch" {
+                    let stale_epoch = admit_control(&st, old_fence, &execution_id, &slot.attempt_id);
+                    assert_eq!(stale_epoch.err(), Some("LOCKED".into()));
+                }
+                // Matching controls can also be admitted while B is pending;
+                // publishing its real handle keeps the same captured slot.
+                let send = admit_control(&st, fresh.clone(), &execution_id, &slot.attempt_id).unwrap();
+                let half_close = admit_control(&st, fresh.clone(), &execution_id, &slot.attempt_id).unwrap();
+                let close = admit_control(&st, fresh.clone(), &execution_id, &slot.attempt_id).unwrap();
+                let listener = match pending {
+                    Some(pending) => {
+                        let peer = open_registered_tcp(&st, &fresh, &execution_id, pending, &slot, Some(sink)).await;
+                        registration.published = true;
+                        peer
+                    }
+                    None => listener.unwrap(),
+                };
+                let (mut peer, _) = tokio::time::timeout(BOUND, listener.accept()).await.unwrap().unwrap();
+                let command = SessionCommand::SendText { text: "fresh".into() };
+                session_send(&st, send, command).await.unwrap();
+                let mut bytes = [0; 6];
+                tokio::time::timeout(BOUND, peer.read_exact(&mut bytes)).await.unwrap().unwrap();
+                assert_eq!(&bytes, b"fresh\n", "stale SendText/Close/HalfClose must leave B usable");
+                session_send(&st, half_close, SessionCommand::HalfClose).await.unwrap();
+                let mut extra = [0; 1];
+                let eof = tokio::time::timeout(BOUND, peer.read(&mut extra)).await.unwrap().unwrap();
+                assert_eq!(eof, 0, "matching HalfClose must send FIN with no stale payload queued");
+                peer.write_all(b"still reading\n").await.unwrap();
+                let message = tokio::time::timeout(BOUND, message_rx.recv()).await.unwrap().unwrap();
+                assert!(message.preview.contains("still reading"), "matching HalfClose preserves reads");
+                assert!(!slot.session.lock().await.as_ref().unwrap().is_finished());
+                let command = SessionCommand::Close { code: 1000, reason: String::new() };
+                session_send(&st, close, command).await.unwrap();
+                let session = slot.session.lock().await.take().unwrap();
+                let out = tokio::time::timeout(BOUND, session.finish()).await.unwrap();
+                assert_eq!(out.record.outcome.transport, TransportState::Completed);
+                assert!(matches!(
+                    out.record.outcome.protocol_status,
+                    ProtocolStatus::Tcp { bytes_sent: 6, half_closed: true, closed_by: ClosedBy::Client, .. }
+                ));
+                assert!(!slot.cancel.is_cancelled(), "matching Close finishes without cancellation");
+                remove_slot(&st, &execution_id, &slot);
             }
         }
     }
@@ -561,7 +704,7 @@ mod tests {
         let (session, canceled) = pending.open(open, |session| session).await.unwrap();
         publish_handle(&st, &fence, &slot, session, canceled).await;
         registration.published = true;
-        let send = admit_control(&st, fence.clone(), &execution_id).unwrap();
+        let send = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
         let command = SessionCommand::SendText { text: "real packet payload".into() };
         session_send(&st, send, command).await.unwrap();
         let packet = tokio::time::timeout(BOUND, message_rx.recv()).await.unwrap().unwrap();
@@ -631,14 +774,14 @@ mod tests {
             let (slot, _peer) = open_tcp(&st, &fence, &execution_id, Some(sink)).await;
             entered_rx.recv_timeout(BOUND).unwrap();
             for _ in 0..256 {
-                let control = admit_control(&st, fence.clone(), &execution_id).unwrap();
+                let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
                 tokio::time::timeout(BOUND, session_send(&st, control, SessionCommand::SendText { text: "queued".into() }))
                     .await
                     .expect("the real queue's existing capacity")
                     .unwrap();
             }
-            let control = admit_control(&st, fence.clone(), &execution_id).unwrap();
-            let cancel = admit_control(&st, fence.clone(), &execution_id).unwrap();
+            let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
+            let cancel = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
             let (waiting_tx, waiting_rx) = oneshot::channel();
             let sending = async {
                 let mut send = std::pin::pin!(session_send(&st, control, SessionCommand::SendText { text: "blocked".into() }));
@@ -688,8 +831,8 @@ mod tests {
                 let execution_id = Id::new().to_string();
                 let (old_pending, old_registration) = register_session(&st, &old_fence, &execution_id, &Id::new().to_string()).unwrap();
                 let old_slot = old_registration.slot.clone();
-                let send = admit_control(&st, old_fence.clone(), &execution_id).unwrap();
-                let cancel = admit_control(&st, old_fence.clone(), &execution_id).unwrap();
+                let send = admit_control(&st, old_fence.clone(), &execution_id, &old_slot.attempt_id).unwrap();
+                let cancel = admit_control(&st, old_fence.clone(), &execution_id, &old_slot.attempt_id).unwrap();
                 let (ready_tx, ready_rx) = oneshot::channel();
                 let (release_tx, release_rx) = oneshot::channel();
                 let controls = async {
@@ -745,10 +888,10 @@ mod tests {
                     assert!(!pending.token().is_cancelled());
                 }
                 if live {
-                    let control = admit_control(&st, fresh.clone(), &execution_id).unwrap();
+                    let control = admit_control(&st, fresh.clone(), &execution_id, &slot.attempt_id).unwrap();
                     session_send(&st, control, SessionCommand::SendText { text: "fresh".into() }).await.unwrap();
                 }
-                let control = admit_control(&st, fresh, &execution_id).unwrap();
+                let control = admit_control(&st, fresh, &execution_id, &slot.attempt_id).unwrap();
                 session_cancel(&st, control).await.unwrap();
                 assert!(slot.cancel.is_cancelled());
                 if let Some(pending) = pending.as_ref() {
@@ -769,10 +912,10 @@ mod tests {
         let fence = st.admit_payload().unwrap();
         let execution_id = Id::new().to_string();
         let (slot, _peer) = open_tcp(&st, &fence, &execution_id, None).await;
-        let send = admit_control(&st, fence.clone(), &execution_id).unwrap();
+        let send = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
         session_send(&st, send, SessionCommand::SendText { text: "ordinary".into() }).await.unwrap();
         assert!(!slot.cancel.is_cancelled());
-        let cancel = admit_control(&st, fence.clone(), &execution_id).unwrap();
+        let cancel = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
         session_cancel(&st, cancel).await.unwrap();
         assert!(slot.cancel.is_cancelled());
         let session = slot.session.lock().await.take();
@@ -832,7 +975,8 @@ mod tests {
         let received = parking_lot::Mutex::new(Vec::new());
         emit_ended(&st, &fence, &old_slot, ended, |ev| received.lock().push(ev));
         assert!(received.lock().is_empty(), "old scalar completion must not retire replacement");
-        let cancel = admit_control(&st, fresh, &execution_id).unwrap();
+        let attempt = &registration.slot.attempt_id;
+        let cancel = admit_control(&st, fresh, &execution_id, attempt).unwrap();
         session_cancel(&st, cancel).await.unwrap();
         assert!(pending.token().is_cancelled());
     }
@@ -915,11 +1059,11 @@ mod tests {
                 }
                 // Its production controls still reach the replacement.
                 if live {
-                    let send = admit_control(&st, fresh.clone(), &execution_id).unwrap();
+                    let send = admit_control(&st, fresh.clone(), &execution_id, &slot.attempt_id).unwrap();
                     let command = SessionCommand::SendText { text: "replacement".into() };
                     session_send(&st, send, command).await.unwrap();
                 }
-                let cancel = admit_control(&st, fresh, &execution_id).unwrap();
+                let cancel = admit_control(&st, fresh, &execution_id, &slot.attempt_id).unwrap();
                 session_cancel(&st, cancel).await.unwrap();
                 assert!(slot.cancel.is_cancelled());
                 finish_slot(&slot).await;
