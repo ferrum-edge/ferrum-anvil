@@ -25,6 +25,9 @@ Preview and write count actual serialized JSON/JSONL lengths through a bounded
 writer, including the manifest, checksum list and the sealed vault's 41-byte
 envelope overhead. Attachment sizes/counts are checked before object preparation;
 complete preflight precedes payload buffers, ZIP output and key derivation.
+The app preview uses the same interactive KDF metadata as production write,
+without deriving a key. Testing KDF metadata would undercount an encrypted
+manifest by one byte (`m_cost` 1024 rather than 65536).
 Write borrows attachment bytes. It checks the finished ZIP against import
 preflight; entries exceeding the compression-ratio rule are rewritten as Stored,
 so highly compressible valid exports remain importable, with larger file sizes.
@@ -45,7 +48,14 @@ is introduced. Full ANVILBAK backups and their reader are outside this candidate
 `bundle-resources.yml` is a read-only PR/manual workflow on Ubuntu 24.04/macOS 15.
 It compares this candidate, landed preflight and pinned released 0.1.1 source
 `d69aa97fbe0cb670a1a6a0462c8826a820144bf6`, using the same ignored test harness.
-Generation/builds run outside measurement; each opening gets a fresh process.
+The candidate checkout names the exact PR head; each snapshot has its own Cargo
+target directory. Cargo's artifact output identifies each test executable, whose
+SHA-256 is checked before generation/timing. The harness verifies its embedded
+snapshot/variant identity before opening and asserts the named variant's limits
+and expected accept/refuse result,
+rather than inferring the variant from whichever library was built last.
+Generation/builds run outside measurement; OS time measures the recorded test
+executable directly, and each opening gets a fresh process.
 Synthetic streamed fixtures cover exact 1 GiB/512 MiB and 64 MiB/32 MiB, one-byte
 entry/total excess, invalid manifest/checksums and an exact 32 MiB valid manifest.
 Fixture archives are capped at 64 MiB compressed, generation at 1 GiB inflated;
@@ -56,7 +66,23 @@ uploaded. Fixture regression ceilings (512 MiB candidate, 3 GiB baselines,
 Candidate boundary RSS must also be below half each 1 GiB baseline's measured RSS.
 Ordinary hosted CI retains format/vault positives and read-counter barriers on
 Linux/macOS/Windows. No existing job guard or trusted-policy exception changes.
-Measured results: **pending hosted execution**; no local project code was run.
+Exact serialized boundary regressions exercise preview, write and open with a
+fixed prepared timestamp, production KDF metadata, the 41-byte sealed envelope,
+and one-byte entry/aggregate excess. They show the one-byte encrypted-manifest
+undercount with testing KDF parameters. An app regression covers share-safe and
+encrypted export at exactly 32 MiB per attachment and one byte over.
+
+Initial hosted qualification at `fecc636348fdedf5314f9505ba77fcd96860e574`
+[failed during fixture generation on Linux and macOS](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37194746083):
+the completed ZIP was read through a write-only `File::create` handle. It produced
+no opening RSS results. Generation now closes that handle and reopens read-only;
+the original shared-target build also could not establish snapshot provenance.
+The [hosted Linux formatter diff](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37194746032/job/111414173216)
+has been applied literally. The initial macOS boundary test also failed import
+validation because its synthetic secret had an invalid ID and no workspace owner;
+the fixture now carries a valid ID and an included owner workspace.
+Corrected exact-head qualification and CI are
+**pending hosted execution**; no local project code was run.
 Root must link exact-head runs/artifacts and independently review results before
 asking for approval. Synthetic data is not a legitimate export corpus, desktop
 concurrency, a binary measurement, Windows RSS qualification or a worst-case proof.

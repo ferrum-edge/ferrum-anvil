@@ -13,18 +13,31 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
 const MIB: u64 = 1024 * 1024;
-const CASES: [&str; 7] = [
-    "proposal_exact",
-    "released_exact",
-    "entry_over",
-    "total_over",
-    "invalid_manifest",
-    "invalid_checksums",
-    "metadata_exact",
-];
+const CASES: [&str; 7] =
+    ["proposal_exact", "released_exact", "entry_over", "total_over", "invalid_manifest", "invalid_checksums", "metadata_exact"];
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("ANVIL_RESOURCE_FIXTURES").expect("hosted fixture directory"))
+}
+
+fn assert_snapshot() -> String {
+    let variant = std::env::var("ANVIL_RESOURCE_VARIANT").expect("hosted variant");
+    let snapshot = std::env::var("ANVIL_RESOURCE_EXPECTED_SNAPSHOT").expect("hosted snapshot");
+    let built_variant = option_env!("ANVIL_RESOURCE_BUILD_VARIANT").expect("embedded variant");
+    let built_snapshot = option_env!("ANVIL_RESOURCE_BUILD_SNAPSHOT").expect("embedded snapshot");
+    assert_eq!(variant, built_variant, "measured binary must match the named variant");
+    assert_eq!(snapshot, built_snapshot, "measured binary must match the exact snapshot");
+    let (total, entry) = match variant.as_str() {
+        "candidate" => (64 * MIB, 32 * MIB),
+        "preflight" | "released" => (1024 * MIB, 512 * MIB),
+        _ => panic!("unknown qualification variant"),
+    };
+    assert_eq!(bundle::MAX_TOTAL_BYTES, total);
+    assert_eq!(bundle::MAX_ENTRY_BYTES, entry);
+    assert_eq!(bundle::MAX_ENTRIES, 20_000);
+    assert_eq!(bundle::MAX_RATIO, 200);
+    println!("variant={variant} snapshot={snapshot} total_limit={total} entry_limit={entry}");
+    variant
 }
 
 fn base_files() -> BTreeMap<String, Vec<u8>> {
@@ -81,10 +94,7 @@ fn attachment_name(length: u64, tile: &[u8]) -> String {
 }
 
 fn checksums(files: &BTreeMap<String, Vec<u8>>, names: &[String]) -> BTreeMap<String, String> {
-    let mut out: BTreeMap<_, _> = files
-        .iter()
-        .map(|(name, data)| (name.clone(), hex::encode(Sha256::digest(data))))
-        .collect();
+    let mut out: BTreeMap<_, _> = files.iter().map(|(name, data)| (name.clone(), hex::encode(Sha256::digest(data)))).collect();
     for name in names {
         out.insert(name.clone(), name.strip_prefix("attachments/").unwrap().into());
     }
@@ -115,9 +125,7 @@ fn generate(case: &str, path: &Path) {
     }
     // Names/digests have fixed encoded lengths, so metadata overhead is exact
     // before attachment hashes are known. Fixtures include this overhead.
-    let placeholders: Vec<_> = (0..attachment_count)
-        .map(|index| format!("attachments/{index:064x}"))
-        .collect();
+    let placeholders: Vec<_> = (0..attachment_count).map(|index| format!("attachments/{index:064x}")).collect();
     let overhead = files.values().map(|data| data.len() as u64).sum::<u64>()
         + serde_json::to_vec_pretty(&checksums(&files, &placeholders)).unwrap().len() as u64;
     let total = match case {
@@ -135,11 +143,7 @@ fn generate(case: &str, path: &Path) {
         _ => vec![first, total - overhead - first],
     };
     let tiles: Vec<_> = (0..attachment_count).map(|index| tile(index as u64 + 17)).collect();
-    let names: Vec<_> = lengths
-        .iter()
-        .zip(&tiles)
-        .map(|(length, tile)| attachment_name(*length, tile))
-        .collect();
+    let names: Vec<_> = lengths.iter().zip(&tiles).map(|(length, tile)| attachment_name(*length, tile)).collect();
     let mut digests = checksums(&files, &names);
     if case == "invalid_checksums" {
         digests.insert("manifest.json".into(), "0".repeat(64));
@@ -147,8 +151,7 @@ fn generate(case: &str, path: &Path) {
     files.insert("checksums.json".into(), serde_json::to_vec_pretty(&digests).unwrap());
     assert_eq!(files.values().map(|data| data.len() as u64).sum::<u64>(), overhead);
     let mut writer = zip::ZipWriter::new(File::create(path).unwrap());
-    let deflated = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let deflated = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for ((name, length), tile) in names.iter().zip(&lengths).zip(&tiles) {
         writer.start_file(name.as_str(), deflated).unwrap();
         chunks(*length, tile, |data| writer.write_all(data).unwrap());
@@ -165,7 +168,9 @@ fn generate(case: &str, path: &Path) {
     }
     let file = writer.finish().unwrap();
     assert!(file.metadata().unwrap().len() <= 64 * MIB);
-    let mut archive = zip::ZipArchive::new(file).unwrap();
+    // File::create is write-only, including the handle returned by finish.
+    drop(file);
+    let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
     let mut expanded = 0;
     for index in 0..archive.len() {
         let entry = archive.by_index_raw(index).unwrap();
@@ -179,6 +184,7 @@ fn generate(case: &str, path: &Path) {
 #[test]
 #[ignore = "bounded fixture generation for GitHub-hosted resource qualification only"]
 fn generate_resource_fixtures() {
+    assert_eq!(assert_snapshot(), "candidate");
     let dir = fixture_dir();
     std::fs::create_dir_all(&dir).unwrap();
     for case in CASES {
@@ -189,6 +195,7 @@ fn generate_resource_fixtures() {
 #[test]
 #[ignore = "run each case in a fresh process under the hosted OS RSS collector"]
 fn measure_resource_open() {
+    let variant = assert_snapshot();
     let case = std::env::var("ANVIL_RESOURCE_CASE").expect("hosted case");
     assert!(CASES.contains(&case.as_str()));
     let path = fixture_dir().join(format!("{case}.zip"));
@@ -205,24 +212,16 @@ fn measure_resource_open() {
         }
         total
     };
-    let released = bundle::MAX_TOTAL_BYTES == 1024 * MIB;
-    assert_eq!(bundle::MAX_ENTRY_BYTES, if released { 512 * MIB } else { 32 * MIB });
-    assert_eq!(bundle::MAX_TOTAL_BYTES, if released { 1024 * MIB } else { 64 * MIB });
     let result = bundle::open(&bytes, None);
     match case.as_str() {
         "invalid_manifest" => assert!(matches!(result, Err(BundleError::NotABundle(_)))),
         "invalid_checksums" => assert!(matches!(result, Err(BundleError::Checksum(_)))),
-        "released_exact" | "entry_over" | "total_over" if !released => {
+        "released_exact" | "entry_over" | "total_over" if variant == "candidate" => {
             assert!(matches!(result, Err(BundleError::Limits(_))));
         }
         _ => {
             let opened = result.unwrap();
-            let retained = opened
-                .graph
-                .attachments
-                .values()
-                .map(|data| data.len() as u64)
-                .sum::<u64>();
+            let retained = opened.graph.attachments.values().map(|data| data.len() as u64).sum::<u64>();
             assert_eq!(retained, expected_retained);
             assert!(retained <= bundle::MAX_TOTAL_BYTES);
             if case == "metadata_exact" {

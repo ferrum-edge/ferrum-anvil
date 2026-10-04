@@ -216,9 +216,8 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     // Reject known attachment sizes/counts before preparing object/secret copies.
     // The complete preflight below also charges serialized metadata and payloads.
     let mut remaining = MAX_TOTAL_BYTES;
-    let extra = 3
-        + usize::from(opts.include_history && !graph.history.is_empty())
-        + usize::from(opts.mode == ExportMode::EncryptedTransfer);
+    let extra =
+        3 + usize::from(opts.include_history && !graph.history.is_empty()) + usize::from(opts.mode == ExportMode::EncryptedTransfer);
     if graph.attachments.len().saturating_add(extra) > MAX_ENTRIES {
         return Err(BundleError::Limits("too many export entries".into()));
     }
@@ -321,11 +320,7 @@ impl Write for LengthWriter {
 }
 
 fn export_size_error(name: &str, limits: ReadLimits) -> BundleError {
-    BundleError::Limits(format!(
-        "export entry '{name}' exceeds the {}-byte entry or {}-byte total budget",
-        limits.entry,
-        limits.total
-    ))
+    BundleError::Limits(format!("export entry '{name}' exceeds the {}-byte entry or {}-byte total budget", limits.entry, limits.total))
 }
 
 fn charge_json<T: Serialize>(
@@ -336,25 +331,12 @@ fn charge_json<T: Serialize>(
     remaining: &mut u64,
     limits: ReadLimits,
 ) -> Result<(), BundleError> {
-    let mut writer = LengthWriter {
-        bytes: overhead,
-        bound: (*remaining).min(limits.entry),
-    };
+    let mut writer = LengthWriter { bytes: overhead, bound: (*remaining).min(limits.entry) };
     if overhead > writer.bound {
         return Err(export_size_error(name, limits));
     }
-    let result = if pretty {
-        serde_json::to_writer_pretty(&mut writer, value)
-    } else {
-        serde_json::to_writer(&mut writer, value)
-    };
-    result.map_err(|e| {
-        if e.is_io() {
-            export_size_error(name, limits)
-        } else {
-            BundleError::Json(e)
-        }
-    })?;
+    let result = if pretty { serde_json::to_writer_pretty(&mut writer, value) } else { serde_json::to_writer(&mut writer, value) };
+    result.map_err(|e| if e.is_io() { export_size_error(name, limits) } else { BundleError::Json(e) })?;
     charge_entry_bytes(name, writer.bytes, remaining, limits)
 }
 
@@ -372,14 +354,7 @@ fn export_preflight(
     let mut checksums = BTreeMap::new();
     let mut exported_manifest = manifest.clone();
     let mut names = vec![MANIFEST_ENTRY.to_string(), "workspace/objects.json".to_string()];
-    charge_json(
-        "workspace/objects.json",
-        objects,
-        true,
-        0,
-        &mut remaining,
-        limits,
-    )?;
+    charge_json("workspace/objects.json", objects, true, 0, &mut remaining, limits)?;
     for (hash, data) in &graph.attachments {
         let name = format!("attachments/{hash}");
         safe_name(&name)?;
@@ -388,18 +363,10 @@ fn export_preflight(
     }
     if opts.include_history && !graph.history.is_empty() {
         let name = "history/records.jsonl";
-        let mut writer = LengthWriter {
-            bytes: 0,
-            bound: remaining.min(limits.entry),
-        };
+        let mut writer = LengthWriter { bytes: 0, bound: remaining.min(limits.entry) };
         for record in &graph.history {
-            serde_json::to_writer(&mut writer, record).map_err(|e| {
-                if e.is_io() {
-                    export_size_error(name, limits)
-                } else {
-                    BundleError::Json(e)
-                }
-            })?;
+            serde_json::to_writer(&mut writer, record)
+                .map_err(|e| if e.is_io() { export_size_error(name, limits) } else { BundleError::Json(e) })?;
             writer.write_all(b"\n").map_err(|_| export_size_error(name, limits))?;
         }
         charge_entry_bytes(name, writer.bytes, &mut remaining, limits)?;
@@ -407,14 +374,7 @@ fn export_preflight(
     }
     if opts.mode == ExportMode::EncryptedTransfer {
         check_kdf(&opts.kdf)?;
-        charge_json(
-            VAULT_ENTRY,
-            vault,
-            false,
-            VAULT_ENVELOPE_OVERHEAD,
-            &mut remaining,
-            limits,
-        )?;
+        charge_json(VAULT_ENTRY, vault, false, VAULT_ENVELOPE_OVERHEAD, &mut remaining, limits)?;
         exported_manifest.vault = Some(VaultInfo {
             kdf: opts.kdf,
             salt_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 16]),
@@ -429,38 +389,15 @@ fn export_preflight(
     for name in names {
         checksums.insert(name, "0".repeat(64));
     }
-    charge_json(
-        MANIFEST_ENTRY,
-        &exported_manifest,
-        true,
-        0,
-        &mut remaining,
-        limits,
-    )?;
-    charge_json(
-        CHECKSUMS_ENTRY,
-        &checksums,
-        true,
-        0,
-        &mut remaining,
-        limits,
-    )
+    charge_json(MANIFEST_ENTRY, &exported_manifest, true, 0, &mut remaining, limits)?;
+    charge_json(CHECKSUMS_ENTRY, &checksums, true, 0, &mut remaining, limits)
 }
 
-fn zip_export_files(
-    files: &[(String, Cow<'_, [u8]>)],
-    stored: &BTreeSet<String>,
-) -> Result<Vec<u8>, BundleError> {
+fn zip_export_files(files: &[(String, Cow<'_, [u8]>)], stored: &BTreeSet<String>) -> Result<Vec<u8>, BundleError> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, data) in files {
-        let method = if stored.contains(name) {
-            zip::CompressionMethod::Stored
-        } else {
-            zip::CompressionMethod::Deflated
-        };
-        let options = SimpleFileOptions::default()
-            .compression_method(method)
-            .unix_permissions(0o600);
+        let method = if stored.contains(name) { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+        let options = SimpleFileOptions::default().compression_method(method).unix_permissions(0o600);
         writer.start_file(name.as_str(), options)?;
         writer.write_all(data)?;
     }
@@ -468,15 +405,20 @@ fn zip_export_files(
 }
 
 pub fn preview(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<ExportPreview, BundleError> {
-    let (manifest, objects, vault) = prepare(graph, opts)?;
-    export_preflight(
-        graph,
-        opts,
-        &manifest,
-        &objects,
-        &vault,
-        READ_LIMITS,
-    )?;
+    let prepared = prepare(graph, opts)?;
+    preview_prepared(graph, opts, prepared, READ_LIMITS)
+}
+
+type PreparedExport = (Manifest, serde_json::Value, VaultPayload);
+
+fn preview_prepared(
+    graph: &PortableGraph,
+    opts: &ExportOptions<'_>,
+    prepared: PreparedExport,
+    limits: ReadLimits,
+) -> Result<ExportPreview, BundleError> {
+    let (manifest, objects, vault) = prepared;
+    export_preflight(graph, opts, &manifest, &objects, &vault, limits)?;
     Ok(ExportPreview {
         manifest,
         secrets_included: vault.secrets.len(),
@@ -487,21 +429,21 @@ pub fn preview(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<Export
 
 /// Write a bundle to bytes.
 pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>, ExportPreview), BundleError> {
-    let (mut manifest, objects, vault) = prepare(graph, opts)?;
+    let prepared = prepare(graph, opts)?;
+    write_prepared(graph, opts, prepared, READ_LIMITS)
+}
+
+fn write_prepared(
+    graph: &PortableGraph,
+    opts: &ExportOptions<'_>,
+    prepared: PreparedExport,
+    limits: ReadLimits,
+) -> Result<(Vec<u8>, ExportPreview), BundleError> {
+    let (mut manifest, objects, vault) = prepared;
     // Check exact serialized lengths before payload buffers, ZIP output or KDF work.
-    export_preflight(
-        graph,
-        opts,
-        &manifest,
-        &objects,
-        &vault,
-        READ_LIMITS,
-    )?;
+    export_preflight(graph, opts, &manifest, &objects, &vault, limits)?;
     let mut files: Vec<(String, Cow<'_, [u8]>)> = Vec::new();
-    files.push((
-        "workspace/objects.json".into(),
-        Cow::Owned(serde_json::to_vec_pretty(&objects)?),
-    ));
+    files.push(("workspace/objects.json".into(), Cow::Owned(serde_json::to_vec_pretty(&objects)?)));
     for (hash, data) in &graph.attachments {
         if sha256(data) != *hash {
             return Err(BundleError::Invalid(format!("attachment {hash} does not match its content hash")));
@@ -543,17 +485,14 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
         files.push((VAULT_ENTRY.into(), Cow::Owned(sealed)));
     }
     files.insert(0, (MANIFEST_ENTRY.into(), Cow::Owned(manifest_bytes)));
-    files.push((
-        CHECKSUMS_ENTRY.into(),
-        Cow::Owned(serde_json::to_vec_pretty(&checksums)?),
-    ));
+    files.push((CHECKSUMS_ENTRY.into(), Cow::Owned(serde_json::to_vec_pretty(&checksums)?)));
     let mut stored = BTreeSet::new();
     let mut bytes = zip_export_files(&files, &stored)?;
     {
         let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))?;
         for index in 0..archive.len() {
             let f = archive.by_index_raw(index)?;
-            if f.size() / f.compressed_size().max(1) > MAX_RATIO {
+            if f.size() / f.compressed_size().max(1) > limits.ratio {
                 stored.insert(f.name().to_string());
             }
         }
@@ -566,7 +505,7 @@ pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>
         bytes = zip_export_files(&files, &stored)?;
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))?;
-    preflight(&mut archive, &bytes, READ_LIMITS)?;
+    preflight(&mut archive, &bytes, limits)?;
     drop(archive);
     let preview = ExportPreview {
         manifest,
@@ -714,23 +653,14 @@ fn check_entry_size(name: &str, info: &EntryInfo, limits: ReadLimits) -> Result<
 }
 
 fn charge_total_bytes(size: u64, remaining: &mut u64) -> Result<(), BundleError> {
-    *remaining = remaining
-        .checked_sub(size)
-        .ok_or_else(|| BundleError::Limits("total uncompressed size exceeds the byte budget".into()))?;
+    *remaining =
+        remaining.checked_sub(size).ok_or_else(|| BundleError::Limits("total uncompressed size exceeds the byte budget".into()))?;
     Ok(())
 }
 
-fn charge_entry_bytes(
-    name: &str,
-    size: u64,
-    remaining: &mut u64,
-    limits: ReadLimits,
-) -> Result<(), BundleError> {
+fn charge_entry_bytes(name: &str, size: u64, remaining: &mut u64, limits: ReadLimits) -> Result<(), BundleError> {
     if size > limits.entry {
-        return Err(BundleError::Limits(format!(
-            "entry '{name}' exceeds the {}-byte entry budget",
-            limits.entry
-        )));
+        return Err(BundleError::Limits(format!("entry '{name}' exceeds the {}-byte entry budget", limits.entry)));
     }
     charge_total_bytes(size, remaining)
 }
@@ -1120,6 +1050,30 @@ mod read_tests {
         }
     }
 
+    fn export_boundary_graph(value: &str) -> PortableGraph {
+        use anvil_domain::workspace::{Meta, Workspace};
+
+        let meta = Meta::new();
+        let workspace_id = Some(meta.id.to_string());
+        let workspace = Workspace {
+            meta,
+            name: "Boundary".into(),
+            description: String::new(),
+            settings: Default::default(),
+            variables: Vec::new(),
+            auth: Default::default(),
+            active_environment_id: None,
+        };
+        let mut graph = PortableGraph { workspaces: vec![workspace], ..Default::default() };
+        for data in [vec![17; 2048], vec![23; 2048]] {
+            graph.attachments.insert(sha256(&data), data);
+        }
+        graph.history.push(serde_json::json!({"status": "redacted"}));
+        let secret = SecretValue { label: "test".into(), value: value.into(), workspace_id };
+        graph.secrets.insert(anvil_domain::Id::new().to_string(), secret);
+        graph
+    }
+
     fn assert_no_payload_reads(counts: &ReadCounts, metadata_allowed: bool) {
         for (name, count) in counts.borrow().iter() {
             if !metadata_allowed || (name != MANIFEST_ENTRY && name != CHECKSUMS_ENTRY) {
@@ -1424,14 +1378,7 @@ mod read_tests {
         let mut remaining = MAX_TOTAL_BYTES;
         let mut total = 0;
         for (name, info) in entries {
-            let (data, _) = read_entry(
-                &mut archive,
-                &name,
-                &info,
-                &mut remaining,
-                READ_LIMITS,
-            )
-            .unwrap();
+            let (data, _) = read_entry(&mut archive, &name, &info, &mut remaining, READ_LIMITS).unwrap();
             total += data.len() as u64;
             drop(data);
             assert_eq!(remaining, MAX_TOTAL_BYTES - total);
@@ -1442,26 +1389,13 @@ mod read_tests {
     #[test]
     fn policy_boundaries_are_inclusive_and_all_entries_share_the_budget() {
         for name in [MANIFEST_ENTRY, CHECKSUMS_ENTRY, VAULT_ENTRY, "workspace/objects.json"] {
-            let info = EntryInfo {
-                index: 0,
-                declared: MAX_ENTRY_BYTES,
-                compressed: MAX_ENTRY_BYTES,
-            };
+            let info = EntryInfo { index: 0, declared: MAX_ENTRY_BYTES, compressed: MAX_ENTRY_BYTES };
             check_entry_size(name, &info, READ_LIMITS).unwrap();
             let larger = EntryInfo { declared: MAX_ENTRY_BYTES + 1, ..info };
-            assert!(matches!(
-                check_entry_size(name, &larger, READ_LIMITS),
-                Err(BundleError::Limits(_))
-            ));
+            assert!(matches!(check_entry_size(name, &larger, READ_LIMITS), Err(BundleError::Limits(_))));
         }
         let mut remaining = MAX_TOTAL_BYTES;
-        charge_entry_bytes(
-            MANIFEST_ENTRY,
-            MAX_ENTRY_BYTES,
-            &mut remaining,
-            READ_LIMITS,
-        )
-        .unwrap();
+        charge_entry_bytes(MANIFEST_ENTRY, MAX_ENTRY_BYTES, &mut remaining, READ_LIMITS).unwrap();
         charge_entry_bytes("attachment", MAX_ENTRY_BYTES, &mut remaining, READ_LIMITS).unwrap();
         assert_eq!(remaining, 0);
         assert!(matches!(charge_total_bytes(1, &mut remaining), Err(BundleError::Limits(_))));
@@ -1470,19 +1404,7 @@ mod read_tests {
     #[test]
     fn export_preflight_counts_exact_metadata_payload_history_and_vault_lengths() {
         for mode in [ExportMode::ShareSafely, ExportMode::EncryptedTransfer] {
-            let mut graph = PortableGraph::default();
-            for data in [vec![17; 2048], vec![23; 2048]] {
-                graph.attachments.insert(sha256(&data), data);
-            }
-            graph.history.push(serde_json::json!({"status": "redacted"}));
-            graph.secrets.insert(
-                "test".into(),
-                SecretValue {
-                    label: "test".into(),
-                    value: "private-test-value".into(),
-                    workspace_id: None,
-                },
-            );
+            let graph = export_boundary_graph("private-test-value");
             let opts = ExportOptions {
                 kind: BundleKind::Workspace,
                 mode,
@@ -1502,29 +1424,13 @@ mod read_tests {
             }
             let limits = boundary_limits(&files);
             let (_, objects, vault) = prepare(&graph, &opts).unwrap();
-            export_preflight(
-                &graph,
-                &opts,
-                &preview.manifest,
-                &objects,
-                &vault,
-                limits,
-            )
-            .unwrap();
+            export_preflight(&graph, &opts, &preview.manifest, &objects, &vault, limits).unwrap();
             for smaller in [
                 ReadLimits { total: limits.total - 1, ..limits },
                 ReadLimits { entry: limits.entry - 1, ..limits },
                 ReadLimits { entries: limits.entries - 1, ..limits },
             ] {
-                let error = export_preflight(
-                    &graph,
-                    &opts,
-                    &preview.manifest,
-                    &objects,
-                    &vault,
-                    smaller,
-                )
-                .unwrap_err();
+                let error = export_preflight(&graph, &opts, &preview.manifest, &objects, &vault, smaller).unwrap_err();
                 assert!(matches!(error, BundleError::Limits(_)));
                 assert!(!error.to_string().contains("private-test-value"));
             }
@@ -1556,23 +1462,96 @@ mod read_tests {
     }
 
     #[test]
+    fn production_preview_and_write_agree_at_exact_serialized_boundaries() {
+        for mode in [ExportMode::ShareSafely, ExportMode::EncryptedTransfer] {
+            let graph = export_boundary_graph("private-boundary-value");
+            let opts = ExportOptions {
+                kind: BundleKind::Workspace,
+                mode,
+                passphrase: Some("correct horse battery"),
+                include_history: true,
+                kdf: KdfParams::interactive(),
+                app_version: "test",
+            };
+            let mut prepared = prepare(&graph, &opts).unwrap();
+            // Exercise the production paths with one stable timestamp, not a
+            // second prepare whose fractional timestamp length could differ.
+            prepared.0.created_at = "2026-10-04T00:00:00Z".parse().unwrap();
+            let data = prepared.clone();
+            let (bytes, written) = write_prepared(&graph, &opts, data, READ_LIMITS).unwrap();
+            let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+            let mut files = Vec::new();
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index).unwrap();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).unwrap();
+                files.push((entry.name().to_string(), data));
+            }
+            let limits = boundary_limits(&files);
+            let data = prepared.clone();
+            let dry = preview_prepared(&graph, &opts, data, limits).unwrap();
+            assert_eq!(dry.manifest.counts, written.manifest.counts);
+            assert_eq!(dry.secrets_included, written.secrets_included);
+            let data = prepared.clone();
+            let (exact, _) = write_prepared(&graph, &opts, data, limits).unwrap();
+            let (archive, _) = tracked(&exact);
+            let pass = (mode == ExportMode::EncryptedTransfer).then_some("correct horse battery");
+            let opened = open_archive(&exact, archive, pass, limits).unwrap();
+            assert_eq!(opened.graph.attachments, graph.attachments);
+            // The JSONL bytes are charged even when normalization omits an
+            // unreadable history record after the archive has been verified.
+            assert!(opened.graph.history.is_empty());
+            let note = "not valid execution records";
+            assert!(opened.warnings.iter().any(|warning| warning.contains(note)));
+            if pass.is_some() {
+                assert_eq!(opened.graph.secrets, graph.secrets);
+            } else {
+                assert!(opened.graph.secrets.is_empty());
+            }
+            for smaller in [
+                ReadLimits { total: limits.total - 1, ..limits },
+                ReadLimits { entry: limits.entry - 1, ..limits },
+                ReadLimits { entries: limits.entries - 1, ..limits },
+            ] {
+                let data = prepared.clone();
+                let dry_error = preview_prepared(&graph, &opts, data, smaller).unwrap_err();
+                let data = prepared.clone();
+                let write_error = write_prepared(&graph, &opts, data, smaller).unwrap_err();
+                for error in [dry_error, write_error] {
+                    assert!(matches!(error, BundleError::Limits(_)));
+                    assert!(!error.to_string().contains("private-boundary-value"));
+                }
+            }
+            if mode == ExportMode::EncryptedTransfer {
+                let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&prepared.2).unwrap());
+                let sealed = &files.iter().find(|(name, _)| name == VAULT_ENTRY).unwrap().1;
+                assert_eq!(VAULT_ENVELOPE_OVERHEAD, 41);
+                assert_eq!(sealed.len(), plaintext.len() + 41);
+                let production_len = serde_json::to_vec_pretty(&written.manifest).unwrap().len();
+                let mut cheap_manifest = written.manifest;
+                cheap_manifest.vault.as_mut().unwrap().kdf = KdfParams::testing();
+                let testing_len = serde_json::to_vec_pretty(&cheap_manifest).unwrap().len();
+                assert_eq!(production_len, testing_len + 1, "m_cost 65536 vs 1024");
+                let cheap = ExportOptions { kdf: KdfParams::testing(), ..opts };
+                let smaller = ReadLimits { total: limits.total - 1, ..limits };
+                let data = prepared.clone();
+                preview_prepared(&graph, &cheap, data, smaller).unwrap();
+                let data = prepared.clone();
+                let (cheap_bytes, _) = write_prepared(&graph, &cheap, data, smaller).unwrap();
+                let (archive, _) = tracked(&cheap_bytes);
+                open_archive(&cheap_bytes, archive, pass, smaller).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn export_metadata_history_and_vault_share_the_attachment_entry_cap() {
-        for name in [
-            MANIFEST_ENTRY,
-            CHECKSUMS_ENTRY,
-            "workspace/objects.json",
-            "history/records.jsonl",
-            VAULT_ENTRY,
-        ] {
+        for name in [MANIFEST_ENTRY, CHECKSUMS_ENTRY, "workspace/objects.json", "history/records.jsonl", VAULT_ENTRY] {
             let mut graph = PortableGraph::default();
             let mode = if name == VAULT_ENTRY {
                 graph.secrets.insert(
                     "test".into(),
-                    SecretValue {
-                        label: "test".into(),
-                        value: "private-test-value".repeat(256),
-                        workspace_id: None,
-                    },
+                    SecretValue { label: "test".into(), value: "private-test-value".repeat(256), workspace_id: None },
                 );
                 ExportMode::EncryptedTransfer
             } else {
@@ -1601,15 +1580,7 @@ mod read_tests {
                 objects = serde_json::json!({"sample": "x".repeat(4096)});
             }
             let limits = ReadLimits { entry: 2048, ..READ_LIMITS };
-            let error = export_preflight(
-                &graph,
-                &opts,
-                &manifest,
-                &objects,
-                &vault,
-                limits,
-            )
-            .unwrap_err();
+            let error = export_preflight(&graph, &opts, &manifest, &objects, &vault, limits).unwrap_err();
             assert!(matches!(error, BundleError::Limits(_)));
             assert!(error.to_string().contains(name), "{name}: {error}");
             assert!(!error.to_string().contains("private-test-value"));

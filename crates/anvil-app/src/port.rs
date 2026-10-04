@@ -186,7 +186,8 @@ impl App {
             mode,
             passphrase: Some("preview-only-passphrase"),
             include_history,
-            kdf: KdfParams::testing(),
+            // Preview counts production metadata without deriving a key.
+            kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
         };
         Ok(bundle::preview(&g, &opts)?)

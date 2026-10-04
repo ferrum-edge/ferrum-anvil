@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - "crates/anvil-portability/**"
+      - "crates/anvil-app/src/port.rs"
+      - "crates/anvil-app/tests/bundle_import.rs"
       - ".github/workflows/bundle-resources.yml"
   workflow_dispatch:
 
@@ -30,10 +32,13 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Released anvil-v0.1.1 source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,16 +61,58 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target"
+          mkdir -p "$RUNNER_TEMP/bundle-resource-builds" "$RUNNER_TEMP/bundle-resource-results"
           for variant in candidate preflight released; do
+            source="$GITHUB_WORKSPACE"
+            snapshot="$CANDIDATE_SHA"
+            if [ "$variant" = preflight ]; then
+              snapshot=76ed2bc3569bae64e691ecbf1a16e17bf7743107
+            elif [ "$variant" = released ]; then
+              snapshot=d69aa97fbe0cb670a1a6a0462c8826a820144bf6
+            fi
             if [ "$variant" != candidate ]; then
+              source="$GITHUB_WORKSPACE/$variant"
               cp crates/anvil-portability/tests/bundle_resources.rs \
                 "$variant/crates/anvil-portability/tests/bundle_resources.rs"
             fi
-            manifest="$variant/Cargo.toml"
-            if [ "$variant" = candidate ]; then manifest=Cargo.toml; fi
-            cargo test --manifest-path "$manifest" --locked \
-              -p anvil-portability --test bundle_resources --no-run
+            test "$(git -C "$source" rev-parse HEAD)" = "$snapshot"
+            git -C "$source" diff --exit-code -- crates/anvil-portability/src Cargo.lock
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target/$variant"
+            export ANVIL_RESOURCE_BUILD_VARIANT="$variant"
+            export ANVIL_RESOURCE_BUILD_SNAPSHOT="$snapshot"
+            cargo test --manifest-path "$source/Cargo.toml" --locked \
+              -p anvil-portability --test bundle_resources --no-run --message-format=json \
+              >"$RUNNER_TEMP/bundle-resource-builds/$variant.jsonl"
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          variant = os.environ["ANVIL_RESOURCE_BUILD_VARIANT"]
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          target = pathlib.Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+          records = [json.loads(line) for line in
+                     (root / "bundle-resource-builds" / f"{variant}.jsonl").read_text().splitlines()]
+          binaries = [pathlib.Path(record["executable"]).resolve() for record in records
+                      if record.get("reason") == "compiler-artifact"
+                      and record["target"]["name"] == "bundle_resources"
+                      and record["profile"]["test"] and record.get("executable")]
+          assert len(binaries) == 1, "exactly one qualification test executable required"
+          binary = binaries[0]
+          assert binary.is_relative_to(target), "executable must belong to its variant target"
+          evidence = {
+              "variant": variant,
+              "snapshot": os.environ["ANVIL_RESOURCE_BUILD_SNAPSHOT"],
+              "executable": str(binary),
+              "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "harness_sha256": hashlib.sha256(pathlib.Path(
+                  "crates/anvil-portability/tests/bundle_resources.rs").read_bytes()).hexdigest(),
+          }
+          (root / "bundle-resource-results" / f"{variant}-build.json").write_text(
+              json.dumps(evidence, indent=2) + "\n")
+          print(json.dumps(evidence))
+          PY
           done
       - name: Generate bounded synthetic fixtures in a separate process
         timeout-minutes: 5
@@ -74,10 +121,26 @@ jobs:
           ANVIL_RESOURCE_FIXTURES: ${{ runner.temp }}/bundle-resource-fixtures
         run: |
           set -euo pipefail
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target"
-          cargo test --manifest-path Cargo.toml --locked \
-            -p anvil-portability --test bundle_resources -- \
-            --ignored --exact generate_resource_fixtures --nocapture
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target/candidate"
+          export ANVIL_RESOURCE_VARIANT=candidate
+          export ANVIL_RESOURCE_EXPECTED_SNAPSHOT="$CANDIDATE_SHA"
+          binary=$(python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "bundle-resource-results"
+          evidence = json.loads((root / "candidate-build.json").read_text())
+          assert evidence["variant"] == "candidate"
+          assert evidence["snapshot"] == os.environ["CANDIDATE_SHA"]
+          binary = pathlib.Path(evidence["executable"])
+          assert binary.resolve().is_relative_to(pathlib.Path(os.environ["CARGO_TARGET_DIR"]))
+          assert hashlib.sha256(binary.read_bytes()).hexdigest() == evidence["sha256"]
+          print(binary)
+          PY
+          )
+          "$binary" --ignored --exact generate_resource_fixtures --nocapture
       - name: Measure fresh opening processes (Linux KiB, macOS bytes)
         timeout-minutes: 15
         shell: bash
@@ -85,14 +148,34 @@ jobs:
           ANVIL_RESOURCE_FIXTURES: ${{ runner.temp }}/bundle-resource-fixtures
         run: |
           set -euo pipefail
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target"
-          mkdir -p "$RUNNER_TEMP/bundle-resource-results"
           for variant in candidate preflight released; do
-            # Switching snapshots can rebuild the crate. Do that before timing.
-            manifest="$variant/Cargo.toml"
-            if [ "$variant" = candidate ]; then manifest=Cargo.toml; fi
-            cargo test --manifest-path "$manifest" --locked \
-              -p anvil-portability --test bundle_resources --no-run
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/bundle-resource-target/$variant"
+            export ANVIL_RESOURCE_VARIANT="$variant"
+            # Verify the recorded executable before timing; never rebuild here.
+            binary=$(python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          variant = os.environ["ANVIL_RESOURCE_VARIANT"]
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "bundle-resource-results"
+          evidence = json.loads((root / f"{variant}-build.json").read_text())
+          expected = {"candidate": os.environ["CANDIDATE_SHA"],
+                      "preflight": "76ed2bc3569bae64e691ecbf1a16e17bf7743107",
+                      "released": "d69aa97fbe0cb670a1a6a0462c8826a820144bf6"}
+          assert evidence["variant"] == variant and evidence["snapshot"] == expected[variant]
+          binary = pathlib.Path(evidence["executable"])
+          assert binary.resolve().is_relative_to(pathlib.Path(os.environ["CARGO_TARGET_DIR"]))
+          assert hashlib.sha256(binary.read_bytes()).hexdigest() == evidence["sha256"]
+          print(binary)
+          PY
+          )
+            case "$variant" in
+              candidate) export ANVIL_RESOURCE_EXPECTED_SNAPSHOT="$CANDIDATE_SHA" ;;
+              preflight) export ANVIL_RESOURCE_EXPECTED_SNAPSHOT=76ed2bc3569bae64e691ecbf1a16e17bf7743107 ;;
+              released) export ANVIL_RESOURCE_EXPECTED_SNAPSHOT=d69aa97fbe0cb670a1a6a0462c8826a820144bf6 ;;
+            esac
             for case in proposal_exact released_exact entry_over total_over \
               invalid_manifest invalid_checksums metadata_exact; do
               export ANVIL_RESOURCE_CASE="$case"
@@ -101,14 +184,10 @@ jobs:
                 # Only the measured process gets a 4 GiB virtual-memory ceiling;
                 # fixture buffers are bounded independently by the Rust harness.
                 (ulimit -v 4194304; /usr/bin/time -v \
-                  cargo test --manifest-path "$manifest" --locked \
-                    -p anvil-portability --test bundle_resources -- \
-                    --ignored --exact measure_resource_open --nocapture) >"$metric" 2>&1
+                  "$binary" --ignored --exact measure_resource_open --nocapture) >"$metric" 2>&1
               else
-                /usr/bin/time -l \
-                  cargo test --manifest-path "$manifest" --locked \
-                    -p anvil-portability --test bundle_resources -- \
-                    --ignored --exact measure_resource_open --nocapture >"$metric" 2>&1
+                /usr/bin/time -l "$binary" \
+                  --ignored --exact measure_resource_open --nocapture >"$metric" 2>&1
               fi
               cat "$metric"
             done
