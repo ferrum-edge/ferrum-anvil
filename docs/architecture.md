@@ -81,22 +81,27 @@ CLI (`anvil`) = same anvil-app services without a webview.
 - **Session controls own an admitted slot.** A pending open publishes its
   slot and cancellation token under its admission, then fills the same slot
   with the engine handle. Send/cancel IPC captures that exact slot and the
-  invocation profile/epoch before scheduling. The control checks both under
-  shared delivery access at each synchronous effect. A stale control cannot
-  drive a new pending or live slot with a reused renderer execution id, even
-  within the same epoch. A finalizer removes only its own slot.
+  invocation profile/epoch before scheduling. Cancellation IPC also requires
+  the expected attempt id; an id-only `session_cancel` caller fails closed.
+  The control checks its admitted state under shared delivery access at each
+  synchronous effect. A stale control cannot drive a new pending or live slot
+  with a reused renderer execution id, even within the same epoch. A finalizer
+  removes only its own slot.
 - **Session completion owns an attempt.** After engine/history finalization,
   completion checks the exact native slot and holds the session registry mutex
   through enqueue. A replacement already registered under the same execution
   id suppresses both the full completion and the scalar `LOCKED` fallback.
   Retired, unreplaced attempts still complete normally, including scalar
-  retirement after lock or a profile transition. `session_open` also accepts
+  retirement after lock or a profile transition. `session_open` accepts
   a renderer `attemptId`, independent of `executionId`, and echoes it as
   `attempt_id` in every `session-ended` packet. Workbench matches both before
   retiring controls, showing a view/error or refreshing history. Direct IPC
-  callers that omit `attemptId` receive a fresh native generation; the open
-  result remains the execution id. Pointer-checked cleanup and recording into
-  the originally admitted profile are unchanged.
+  callers that omit `attemptId` still receive a generated native attempt id;
+  the open result remains the execution id. Whether to adopt this compatibility
+  behavior as a released contract remains unapproved. This implementation is
+  an unreleased PR candidate, not evidence that the behavior has been adopted
+  for a release. Pointer-checked cleanup and recording into the originally
+  admitted profile are unchanged.
 - **Session cancellation cannot wait behind its own send.** Each pending/open
   slot has an independent cancellation token. Cancellation signals it under
   the gate before awaiting the slot, interrupting both a slot wait and a
@@ -114,20 +119,28 @@ CLI (`anvil`) = same anvil-app services without a webview.
 The boundary is native enqueue, before the actual lock operation can finish.
 It cannot retract a payload already queued to the webview before that boundary.
 The session completion generation prevents an old full or scalar packet from
-retiring a replacement even if it was queued before replacement registration,
-or before lock/profile teardown. It does not erase a view already displayed to
-the old attempt before teardown. Execution message/progress packets still carry
-only the execution id; this completion fix does not add generation filtering to
-those packets. Ordinary Workbench connections continue to use fresh execution
-UUIDs. Native barrier tests call the production finish/history and completion
-sinks with real engine handles; their substituted receivers and the renderer's
-delayed-event fake do not prove end-to-end Tauri/webview transport behavior.
-No renderer predicate supplies the security fence. Gate acquisition precedes
-profile/key/grant access; finalizers complete engine/history work before taking
-it. Cache cleanup runs with admission closed and without the delivery gate;
-callbacks reject before acquiring the app guard, so a cache owner cannot wait
-for the lock operation that is clearing that cache. The existing PEM grant claim
-and revocation mutex/transaction ordering is unchanged.
+being newly enqueued after a replacement owns the slot. A packet enqueued
+before replacement registration or lock/profile teardown can still be delivered
+afterward; Workbench's attempt identity checks prevent that packet from
+retiring or replacing the newer attempt's state. They do not erase a view
+already displayed for the old attempt before teardown.
+
+For the desktop only, interactive-session `execution-event` packets wrap the
+domain event with an `attempt_id`; Workbench shows session messages only when
+the attempt matches, while attempt-tagged progress is excluded from the manual
+progress display. Manual-send events remain raw domain events, and the domain
+and CLI event shapes are unchanged. This envelope does not add
+an expected-attempt argument to `session_send`; that IPC still uses its current
+execution-id-only shape. Ordinary Workbench connections continue to use fresh
+execution UUIDs. Native barrier tests call the production finish/history and
+completion sinks with real engine handles; their substituted receivers and the
+renderer delayed-event fake do not prove end-to-end Tauri/webview transport
+ordering. No renderer predicate supplies the security fence. Gate acquisition
+precedes profile/key/grant access; finalizers complete engine/history work
+before taking it. Cache cleanup runs with admission closed and without the
+delivery gate; callbacks reject before acquiring the app guard, so a cache
+owner cannot wait for the lock operation that is clearing that cache. The
+existing PEM grant claim and revocation mutex/transaction ordering is unchanged.
 
 ### Store work
 
