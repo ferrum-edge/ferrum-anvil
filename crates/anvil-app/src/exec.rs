@@ -19,6 +19,7 @@ use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_storage::Store;
 use anvil_transport::recorder::EventCtx;
 use bytes::Bytes;
+use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,12 +38,11 @@ impl SecretResolver for StoreSecrets {
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
         match self.store.get_workspace_secret(&r.id, &self.workspace) {
             Ok(Some((_, v))) => Ok(v),
-            Ok(None) => Err(format!(
-                "secret '{}' is not in this workspace's vault (it may belong to another workspace or not have been imported)",
-                r.label
-            )),
+            Ok(None) => Err(
+                "the secret is not in this workspace's vault (it may belong to another workspace or not have been imported)".into(),
+            ),
             Err(anvil_storage::StoreError::Locked) => Err("Anvil is locked".into()),
-            Err(e) => Err(e.to_string()),
+            Err(_) => Err("could not read the workspace vault".into()),
         }
     }
 }
@@ -50,39 +50,61 @@ impl SecretResolver for StoreSecrets {
 /// The vault secrets an execution context names, looked up through
 /// [`StoreSecrets`] when the context is built, which [`App::send`] and the
 /// other async paths do on a blocking thread. OAuth credentials are only
-/// prefetched after a fixed token endpoint passes its policy check; credentials
-/// for templated endpoints resolve on demand after acquisition validates the
-/// expanded endpoint. Each prefetched lookup keeps its outcome, so a secret
+/// prefetched after a fixed token endpoint passes its policy check. OAuth
+/// vault variables retain their layer/entry references here; templated endpoints
+/// defer all credential aliases until the expanded endpoint is validated.
+/// Each prefetched lookup keeps its outcome, so a secret
 /// that is missing, owned by another workspace or unreadable still fails where
 /// it is used. Fails closed once the store is locked.
 pub struct ResolvedSecrets {
-    resolved: HashMap<SecretRef, std::result::Result<Zeroizing<String>, String>>,
+    resolved: Mutex<HashMap<SecretRef, std::result::Result<Zeroizing<String>, String>>>,
+    variables: HashMap<(usize, usize), SecretRef>,
     /// Looks up a reference not prefetched, including deferred OAuth credentials.
     store: StoreSecrets,
 }
 
 impl ResolvedSecrets {
     /// Look up every secret named in `parts` (see [`secret_parts`]).
-    fn lookup(store: StoreSecrets, parts: &[serde_json::Value]) -> ResolvedSecrets {
+    fn lookup(
+        store: StoreSecrets,
+        parts: &[serde_json::Value],
+        variables: HashMap<(usize, usize), SecretRef>,
+        prefetch_variables: bool,
+    ) -> ResolvedSecrets {
         let mut refs = HashSet::new();
         parts.iter().for_each(|p| collect_secret_refs(p, &mut refs));
+        if prefetch_variables {
+            refs.extend(variables.values().cloned());
+        }
         let mut resolved = HashMap::new();
         for r in refs {
             let v = store.resolve(&r);
             resolved.insert(r, v);
         }
-        ResolvedSecrets { resolved, store }
+        ResolvedSecrets { resolved: Mutex::new(resolved), variables, store }
     }
 }
 
 impl SecretResolver for ResolvedSecrets {
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+        self.variables.get(&(layer, variable)).cloned()
+    }
+
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
         if self.store.store.is_locked() {
             return Err("Anvil is locked".into());
         }
-        match self.resolved.get(r) {
+        let mut resolved = self.resolved.lock();
+        match resolved.get(r) {
             Some(v) => v.clone(),
-            None => crate::blocking_in_place(|| self.store.resolve(r)),
+            None => {
+                // Freeze the first deferred outcome too: producer validation
+                // and subsequent wire materialization must see the same vault
+                // value, even if the stored issuer changes between them.
+                let value = crate::blocking_in_place(|| self.store.resolve(r));
+                resolved.insert(r.clone(), value.clone());
+                value
+            }
         }
     }
 }
@@ -92,6 +114,12 @@ impl SecretResolver for ResolvedSecrets {
 /// settings select (with the selected proxy's own TLS profile), as JSON.
 /// Any other profile's secrets are looked up only if they are used.
 fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
+    // A credential can also occur in a header, another auth profile or a
+    // selected TLS/proxy profile. None of those aliases may prefetch it before
+    // the effective OAuth endpoint is eligible.
+    if oauth_needs_deferral(&ctx.effective_auth().1) {
+        return Ok(Vec::new());
+    }
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
     let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
     let tls: Vec<_> = selected_tls_profiles(ctx).collect();
@@ -110,6 +138,14 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
         serde_json::to_value(proxy)?,
         serde_json::to_value(integration)?,
     ])
+}
+
+fn oauth_needs_deferral(auth: &AuthConfig) -> bool {
+    match auth.oauth_profile() {
+        Err(_) => true,
+        Ok(Some(config)) => config.token_url.contains("{{") || require_secure_token_endpoint(&config.token_url).is_err(),
+        Ok(None) => false,
+    }
 }
 
 /// A fixed endpoint can be checked before freezing its vault credential.
@@ -172,18 +208,32 @@ impl AttachmentResolver for StoreAttachments {
     }
 }
 
-fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver) -> std::result::Result<VarLayer, AppError> {
+fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver, defer: bool) -> Result<(VarLayer, Vec<(usize, SecretRef)>)> {
     let mut out = Vec::new();
+    let mut deferred = Vec::new();
     for v in vars.iter().filter(|v| v.enabled) {
         let value = match &v.value {
             SensitiveValue::Template { value } => value.clone(),
             SensitiveValue::Secret { secret } => {
-                secrets.resolve(secret).map(|z| z.to_string()).map_err(|e| AppError::Invalid(format!("variable '{}': {e}", v.name)))?
+                if defer {
+                    // The resolver retains this reference and materializes its
+                    // value on use; the entry still supplies precedence and
+                    // sensitivity metadata without freezing credential bytes.
+                    deferred.push((out.len(), secret.clone()));
+                    String::new()
+                } else {
+                    secrets.resolve(secret).map(|z| z.to_string()).map_err(|_| {
+                        AppError::Invalid(
+                            "could not resolve a secret variable; it may be missing or not in this workspace's vault; check the vault and active variables"
+                                .into(),
+                        )
+                    })?
+                }
             }
         };
         out.push(VarEntry { name: v.name.clone(), value, secret: v.secret || matches!(v.value, SensitiveValue::Secret { .. }) });
     }
-    Ok(VarLayer { label, vars: out })
+    Ok((VarLayer { label, vars: out }, deferred))
 }
 
 /// Options for one send.
@@ -296,15 +346,27 @@ impl App {
         }
         auth_layers.push(("request".into(), owned(&spec.auth, req.as_ref().map(|r| r.meta.id))));
         let mut var_layers = Vec::new();
+        let mut deferred_variables = HashMap::new();
+        let effective_auth = auth_layers.iter().rev().find(|(_, auth)| !matches!(auth, AuthConfig::Inherit));
+        let defer = effective_auth.is_some_and(|(_, auth)| !matches!(auth.oauth_profile(), Ok(None)));
+        let prefetch_variables = effective_auth.is_none_or(|(_, auth)| !oauth_needs_deferral(auth));
+        let mut add_layer = |label: String, vars: &[Variable]| -> Result<()> {
+            let (layer, deferred) = layer(label, vars, &secrets, defer)?;
+            for (variable, reference) in deferred {
+                deferred_variables.insert((var_layers.len(), variable), reference);
+            }
+            var_layers.push(layer);
+            Ok(())
+        };
         if sealed.is_none() {
-            var_layers.push(layer("workspace".into(), &ws.variables, &secrets)?);
+            add_layer("workspace".into(), &ws.variables)?;
         }
         // An import root's variables were the source's workspace variables,
         // so they rank where those would in a workspace of its own: below
         // the environment.
         let (base, nested) = inner.split_at(root.map_or(0, |i| i + 1) - sealed.unwrap_or(0));
         for f in base {
-            var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
+            add_layer(format!("folder:{}", f.name), &f.variables)?;
         }
         let selected_env = opts.environment.or(ws.active_environment_id);
         let environments = self.environments(ws_id)?;
@@ -321,10 +383,10 @@ impl App {
         let env_id = env_id.filter(|eid| sealed.is_none_or(|i| chain[i].import_environment_ids.contains(eid)));
         if let Some(eid) = env_id {
             let env = environments.into_iter().find(|e| e.meta.id == eid).ok_or_else(|| AppError::NotFound("environment".into()))?;
-            var_layers.push(layer(format!("environment:{}", env.name), &env.variables, &secrets)?);
+            add_layer(format!("environment:{}", env.name), &env.variables)?;
         }
         for f in nested {
-            var_layers.push(layer(format!("folder:{}", f.name), &f.variables, &secrets)?);
+            add_layer(format!("folder:{}", f.name), &f.variables)?;
         }
         // Attachments referenced by the spec.
         let mut index = std::collections::HashMap::new();
@@ -380,7 +442,7 @@ impl App {
         self.check_device_identity(&ws, &ctx)?;
         self.check_token_files(&ctx.effective_auth().1)?;
         let parts = secret_parts(&ctx)?;
-        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts));
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts, deferred_variables, prefetch_variables));
         Ok(ctx)
     }
 

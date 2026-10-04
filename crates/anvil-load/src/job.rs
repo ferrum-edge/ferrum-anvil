@@ -28,7 +28,8 @@ use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::tls::{ClientIdentity, ProxyProfile, TlsProfile};
 use anvil_engine::ExecutionContext;
 use anvil_engine::context::{AttachmentResolver, MemoryAttachments, MemorySecrets};
-use anvil_engine::vars::{VarEntry, VarLayer};
+use anvil_engine::oauth_http::{OAUTH_PER_RUN_VALUE, mask_oauth_dynamic, validate_worker_oauth_endpoint};
+use anvil_engine::vars::{Resolver, VarEntry, VarLayer};
 use base64::Engine as _;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -298,10 +299,39 @@ fn plan_request_ids(plan: &LoadPlan) -> Vec<Id> {
     ids
 }
 
+fn worker_endpoint_resolver(ctx: &ExecutionContext, id: &Id, plan: &LoadPlan, job: &LoadJob) -> Resolver {
+    let mut layers = ctx.var_layers.clone();
+    let stand_in = |name: &str| VarEntry { name: name.into(), value: OAUTH_PER_RUN_VALUE.into(), secret: false };
+    layers.push(VarLayer { label: "load".into(), vars: vec![stand_in("anvil.iteration"), stand_in("anvil.vu")] });
+    if ctx.scope.is_none()
+        && let Some(dataset) = &job.dataset
+    {
+        layers.push(VarLayer { label: "dataset".into(), vars: dataset.columns.iter().map(|name| stand_in(name)).collect() });
+    }
+    let earlier = plan.chain.iter().rposition(|step| step == id).map_or(&[][..], |last| &plan.chain[..last]);
+    let mut extracted: Vec<VarEntry> = Vec::new();
+    for step in earlier.iter().filter_map(|step| job.requests.get(step)).filter(|step| step.scope == ctx.scope) {
+        for extraction in &step.spec.extractions {
+            if !extracted.iter().any(|entry| entry.name == extraction.variable) {
+                extracted.push(stand_in(&extraction.variable));
+            }
+        }
+    }
+    layers.push(VarLayer { label: "iteration (extracted)".into(), vars: extracted });
+    Resolver::new(layers, ctx.seed).with_secrets(ctx.secrets.clone()).with_value_transform(mask_oauth_dynamic)
+}
+
 impl WorkerJob {
     /// Build the wire job from resolved in-process contexts, resolving only
     /// the secrets and attachments the plan's requests reference.
     pub fn from_load_job(plan: &LoadPlan, job: &LoadJob, options: RunOptions) -> Result<WorkerJob, LoadError> {
+        // Validate every referenced endpoint before any credential is exported,
+        // including credentials in an earlier request of a refused plan.
+        for id in plan_request_ids(plan) {
+            let ctx =
+                job.requests.get(&id).ok_or_else(|| LoadError::Invalid(format!("request {id} referenced by the plan was not resolved")))?;
+            validate_worker_oauth_endpoint(ctx, &worker_endpoint_resolver(ctx, &id, plan, job)).map_err(LoadError::Invalid)?;
+        }
         let mut requests = Vec::new();
         let mut secrets: Vec<ScopedSecret> = Vec::new();
         let mut attachments: Vec<WireAttachment> = Vec::new();
@@ -312,8 +342,22 @@ impl WorkerJob {
                 if secrets.iter().any(|s| s.id == r.id) {
                     continue;
                 }
-                let v = ctx.secrets.resolve(&r).map_err(|e| LoadError::Invalid(format!("secret '{}': {e}", r.label)))?;
+                let v = ctx.secrets.resolve(&r).map_err(|_| {
+                    LoadError::Invalid("could not resolve a load credential; check the vault and active variables".into())
+                })?;
                 secrets.push(ScopedSecret { id: r.id, value: SecretString(v) });
+            }
+            let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+            let mut var_layers = Vec::new();
+            for (layer_index, layer) in ctx.var_layers.iter().enumerate() {
+                let mut vars = Vec::new();
+                for (variable_index, variable) in layer.vars.iter().enumerate() {
+                    let value = resolver.variable_value(layer_index, variable_index).map_err(|_| {
+                        LoadError::Invalid("could not resolve a load variable; check the vault and active variables".into())
+                    })?;
+                    vars.push(WireVar { name: variable.name.clone(), value: SecretString::new(value), secret: variable.secret });
+                }
+                var_layers.push(WireVarLayer { label: layer.label.clone(), vars });
             }
             let mut spec = ctx.spec.clone();
             for a in attachment_refs_mut(&mut spec) {
@@ -346,18 +390,7 @@ impl WorkerJob {
                 spec,
                 settings_layers: ctx.settings_layers.clone(),
                 auth_layers: vec![ctx.effective_auth()],
-                var_layers: ctx
-                    .var_layers
-                    .iter()
-                    .map(|l| WireVarLayer {
-                        label: l.label.clone(),
-                        vars: l
-                            .vars
-                            .iter()
-                            .map(|v| WireVar { name: v.name.clone(), value: SecretString::new(v.value.clone()), secret: v.secret })
-                            .collect(),
-                    })
-                    .collect(),
+                var_layers,
                 tls_profiles: tls.into_iter().cloned().collect(),
                 proxy_profiles: proxy.cloned().into_iter().collect(),
                 integrations: ctx

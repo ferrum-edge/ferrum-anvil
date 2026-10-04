@@ -72,8 +72,12 @@ fn resolve_auth(
 ) -> Result<ResolvedAuth, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let sens = |v: &anvil_domain::secret::SensitiveValue, field: &str| -> Result<Zeroizing<String>, TransportFailure> {
-        let (raw, _) = resolve_sensitive(v, ctx.secrets.as_ref()).map_err(|e| fail(format!("{field}: {e}")))?;
-        let resolved = r.resolve(&raw, field)?;
+        let (raw, _) =
+            resolve_sensitive(v, ctx.secrets.as_ref()).map_err(|_| fail(format!("could not resolve {field}; check the vault and active variables")))?;
+        let resolved = r.resolve(&raw, field).map_err(|mut failure| {
+            failure.message = format!("could not resolve {field}; check the vault and active variables");
+            failure
+        })?;
         Ok(Zeroizing::new(resolved))
     };
     Ok(match auth {
@@ -219,17 +223,31 @@ pub(crate) fn prepared_from_profile(
         if binding_matches(&p.bindings, &bind) {
             s.client_identity = Some(match id {
                 anvil_domain::tls::ClientIdentity::Pem { cert_chain_pem, private_key_pem } => {
-                    let (key, _) = resolve_sensitive(private_key_pem, ctx.secrets.as_ref()).map_err(|e| {
-                        TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e)
-                            .with_field("tls.client_identity.private_key")
+                    let (key, _) = resolve_sensitive(private_key_pem, ctx.secrets.as_ref()).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::ClientIdentityInvalid,
+                            "could not resolve the TLS private key; check the vault",
+                        )
+                        .with_field("tls.client_identity.private_key")
                     })?;
                     ClientIdentityMaterial { cert_chain_pem: cert_chain_pem.clone(), private_key_pem: key }
                 }
                 anvil_domain::tls::ClientIdentity::Pkcs12 { bundle_b64, password } => {
-                    let (b, _) = resolve_sensitive(bundle_b64, ctx.secrets.as_ref())
-                        .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e))?;
-                    let (pw, _) = resolve_sensitive(password, ctx.secrets.as_ref())
-                        .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e))?;
+                    let (b, _) = resolve_sensitive(bundle_b64, ctx.secrets.as_ref()).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::ClientIdentityInvalid,
+                            "could not resolve the TLS identity bundle; check the vault",
+                        )
+                    })?;
+                    let (pw, _) = resolve_sensitive(password, ctx.secrets.as_ref()).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::ClientIdentityInvalid,
+                            "could not resolve the TLS identity password; check the vault",
+                        )
+                    })?;
                     crate::pkcs12::to_pem(&b, &pw)?
                 }
                 anvil_domain::tls::ClientIdentity::WorkloadApi { .. } => unreachable!("handled above"),
@@ -342,7 +360,8 @@ pub(crate) fn proxy_for(
     let (host, port) = anvil_transport::net::parse_proxy_address(&p.address)?;
     let credentials = match (&p.username, &p.password) {
         (Some(u), Some(pw)) => {
-            let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref()).map_err(|e| proxy_invalid(e, "proxy.password"))?;
+            let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref())
+                .map_err(|_| proxy_invalid("could not resolve the proxy password; check the vault", "proxy.password"))?;
             Some((u.clone(), v))
         }
         (Some(u), None) => Some((u.clone(), Zeroizing::new(String::new()))),
@@ -447,6 +466,7 @@ pub(crate) fn prepare_all_at(
     r: &Resolver,
     allowed: &[&str],
 ) -> Result<Prepared, TransportFailure> {
+    crate::oauth_http::validate_oauth_endpoint(ctx, r)?;
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let http = prepare::prepare_http_with_redaction_names(
         &ctx.spec,
@@ -464,6 +484,9 @@ pub(crate) fn prepare_all_at(
         .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     let mut oauth_key = None;
     let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key)?;
+    if matches!(auth_cfg.oauth_profile(), Ok(Some(_))) {
+        r.materialize_variables()?;
+    }
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };
     let tls_scheme = matches!(http.target.scheme.as_str(), "https" | "wss" | "grpcs");
     let (tls, tls_name, bindings) = if tls_scheme {
@@ -781,7 +804,10 @@ pub(crate) async fn execute_viewing(
     // a delete of its workspace is not kept: its prepared TLS material, its
     // cookies, its connections and its session tickets.
     let epoch = engine.epoch_for(ctx);
-    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+    if let Err(failure) = crate::oauth_http::validate_oauth_endpoint(ctx, &resolver) {
+        return record::local_failure_with(ctx, &resolver, started_at, failure, None);
+    }
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;

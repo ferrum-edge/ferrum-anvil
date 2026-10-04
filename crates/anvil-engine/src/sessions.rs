@@ -1965,7 +1965,10 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     // TLS material prepared after a lock or a workspace delete is not cached,
     // and handshake cookies received after either are not kept.
     let epoch = engine.epoch_for(ctx);
-    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+    if let Err(failure) = crate::oauth_http::validate_oauth_endpoint(ctx, &resolver) {
+        return record::local_failure_with(ctx, &resolver, started_at, failure, None);
+    }
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
@@ -2147,10 +2150,14 @@ impl Engine {
         let epoch = self.epoch_for(&ctx);
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
-        let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+        let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
         let cancel = CancellationToken::new();
         let fallback = Box::new(ctx.clone());
-        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver, &cancel).await;
+        let (materialized, workload) = if let Err(failure) = crate::oauth_http::validate_oauth_endpoint(&ctx, &resolver) {
+            (Err(failure), Default::default())
+        } else {
+            crate::workload::prepare(self, &ctx, &resolver, &cancel).await
+        };
         let (ctx, prepared, workload) = match materialized {
             Ok(m) => {
                 let ctx = m.unwrap_or(ctx);

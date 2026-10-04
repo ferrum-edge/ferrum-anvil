@@ -477,6 +477,86 @@ async fn vault_expansion_failures_are_sanitized_before_status_browser_events_and
 }
 
 #[tokio::test]
+async fn credential_variable_failures_keep_endpoint_policy_and_never_disclose_vault_errors() {
+    use anvil_domain::workspace::Variable;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "credential variable errors");
+    let (header, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, header, key).unwrap();
+    let mut ws = app.create_workspace("Credential variable errors").unwrap();
+    let opened = AtomicUsize::new(0);
+    let opener = |_: &str| {
+        opened.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    for endpoint in ["http://issuer.example.test/token".to_string(), idp.token_endpoint(), "{{issuer}}".into()] {
+        for (value, missing) in [("{{missing-variable-canary}}", false), ("{{credential}}", false), ("canary", true)] {
+            let credential = app.set_secret(&ws.meta.id, "missing-reference-label-canary", value).unwrap();
+            ws.variables = vec![
+                Variable::plain("issuer", &idp.token_endpoint()),
+                Variable {
+                    name: "credential".into(),
+                    value: SensitiveValue::Secret { secret: credential.clone() },
+                    secret: true,
+                    enabled: true,
+                    description: String::new(),
+                },
+                Variable::plain("nested_credential", "{{credential}}"),
+            ];
+            app.save_workspace(ws.clone()).unwrap();
+            if missing {
+                app.store.delete_secret(&credential.id).unwrap();
+            }
+            let mut spec = RequestSpec::http("GET", &idp.api_url());
+            spec.auth = AuthConfig::OAuth2 {
+                config: OAuth2Config {
+                    grant: OAuthGrant::AuthorizationCodePkce,
+                    token_url: endpoint.clone(),
+                    authorization_url: idp.authorization_endpoint(),
+                    client_id: idp.client_id(),
+                    client_secret: SensitiveValue::template("{{nested_credential}}"),
+                    scope: "orders.read".into(),
+                    audience: String::new(),
+                    client_auth: OAuthClientAuth::RequestBody,
+                    token_cache_id: None,
+                    refresh_skew_secs: 30,
+                },
+            };
+            let request = app.create_request(&ws.meta.id, None, "Credential variable", spec).unwrap();
+            let rid = Some(request.meta.id);
+            let opts = SendOptions::default();
+            let expected = if endpoint.starts_with("http://issuer") {
+                "the OAuth token endpoint requires HTTPS or literal-loopback HTTP"
+            } else {
+                "could not resolve auth.client_secret; check the vault and active variables"
+            };
+            assert_eq!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap_err().to_string(), expected);
+            let events = Mutex::new(Vec::new());
+            let observer = |event| events.lock().unwrap().push(event);
+            let error = app
+                .oauth_sign_in(rid, &ws.meta.id, None, &opts, &opener, &observer, &FlowOptions::default(), &CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(*events.lock().unwrap(), vec![FlowEvent::Failed { kind: FlowErrorKind::Configuration, message: expected.into() }]);
+            assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("canary"));
+            let output = send(&app, &ws.meta.id, rid).await;
+            assert_eq!(output.record.outcome.dispatch, anvil_domain::execution::DispatchState::NotDispatched);
+            assert_eq!(output.record.attempts[0].failure.as_ref().unwrap().message, expected);
+            assert!(!serde_json::to_string(&output.record).unwrap().contains("canary"));
+        }
+    }
+    assert_eq!(opened.load(Ordering::SeqCst), 0);
+    assert!(idp.grants_seen().is_empty());
+    assert_eq!(idp.api_requests(), (0, 0));
+}
+
+#[tokio::test]
 async fn oauth_tokens_are_cached_per_workspace_folder_or_request_that_defines_the_profile() {
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "bob");

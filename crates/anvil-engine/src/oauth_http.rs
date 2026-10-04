@@ -138,8 +138,7 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
             failure
         })
     };
-    let token_url = resolve(&config.token_url, "auth.token_url")?;
-    require_secure_token_endpoint(&token_url).map_err(fail)?;
+    let token_url = resolve_token_endpoint(config, r)?;
     let (raw_secret, _) = resolve_sensitive(&config.client_secret, ctx.secrets.as_ref())
         .map_err(|_| fail("could not resolve auth.client_secret; check the vault and active variables".into()))?;
     // Only interactive grants visit the authorization endpoint.
@@ -159,6 +158,100 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
         token_cache_id: config.token_cache_id,
         refresh_skew_secs: config.refresh_skew_secs as i64,
     })
+}
+
+fn resolve_token_endpoint(config: &OAuth2Config, r: &Resolver) -> Result<String, TransportFailure> {
+    if let Some((template, endpoint)) = r.oauth_endpoint.lock().as_ref()
+        && template == &config.token_url
+    {
+        return Ok(endpoint.clone());
+    }
+    let endpoint = r.resolve(&config.token_url, "auth.token_url").map_err(|mut failure| {
+        failure.message = "could not resolve auth.token_url; check the vault and active variables".into();
+        failure
+    })?;
+    require_secure_token_endpoint(&endpoint).map_err(|message| {
+        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth")
+    })?;
+    *r.oauth_endpoint.lock() = Some((config.token_url.clone(), endpoint.clone()));
+    Ok(endpoint)
+}
+
+/// Check the effective endpoint before any HTTP request fields, mixed auth
+/// profiles, workload identities or deferred vault variables are materialized.
+/// The acquisition uses this same expansion, including dynamic helper state.
+pub fn validate_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(), TransportFailure> {
+    let (_, auth) = ctx.effective_auth();
+    let config = auth.oauth_profile().map_err(|message| {
+        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth")
+    })?;
+    if let Some(config) = config {
+        resolve_token_endpoint(config, r)?;
+    }
+    Ok(())
+}
+
+/// A load producer cannot authorize an origin from one sample of a dynamic
+/// helper, dataset cell or extracted value. These markers preserve its origin
+/// proof while allowing per-run paths and literal-loopback ports.
+pub const OAUTH_PER_RUN_VALUE: &str = "anvil-oauth-per-run-value";
+
+pub fn mask_oauth_dynamic(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(open) = rest.find("{{") {
+        output.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            output.push_str(&rest[open..]);
+            return output;
+        };
+        if after[..close].trim().starts_with('$') {
+            output.push_str(OAUTH_PER_RUN_VALUE);
+        } else {
+            output.push_str(&rest[open..open + 2 + close + 2]);
+        }
+        rest = &after[close + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Validate the expanded origin at the producer, before resolving or exporting
+/// any credential. The worker checks the actual endpoint again on acquisition.
+pub fn validate_worker_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(), String> {
+    let (_, auth) = ctx.effective_auth();
+    let Some(config) = auth.oauth_profile().map_err(str::to_string)? else {
+        return Ok(());
+    };
+    let mut endpoint = r
+        .resolve(&mask_oauth_dynamic(&config.token_url), "auth.token_url")
+        .map_err(|_| "could not resolve auth.token_url; check the vault and active variables".to_string())?;
+    let varies = |value: &str| value.contains(OAUTH_PER_RUN_VALUE);
+    let (scheme, rest) = endpoint.split_once("://").unwrap_or(("", endpoint.as_str()));
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    if varies(scheme) {
+        return Err("the OAuth token endpoint scheme depends on per-run values".into());
+    }
+    if varies(authority) {
+        let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
+        let (host, port) = authority.split_at(host_end.unwrap_or(authority.len()));
+        let Some(port) = port.strip_prefix(':').filter(|_| !varies(host)) else {
+            return Err("the OAuth token endpoint host depends on per-run values".into());
+        };
+        let loopback = url::Url::parse(&format!("http://{host}/")).ok().is_some_and(|url| match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()),
+            _ => false,
+        });
+        if !loopback || !port.replace(OAUTH_PER_RUN_VALUE, "").bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("a per-run OAuth token endpoint port requires a fixed literal-loopback host and digits".into());
+        }
+        let start = endpoint.len() - rest.len() + host.len() + 1;
+        let end = endpoint.len() - rest.len() + authority.len();
+        endpoint.replace_range(start..end, "1");
+    }
+    require_secure_token_endpoint(&endpoint.replace(OAUTH_PER_RUN_VALUE, "1"))
 }
 
 /// The common acquisition boundary, checked before resolving credentials and
@@ -388,12 +481,14 @@ pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, Tra
     let (scope_label, auth) = ctx.effective_auth();
     let config =
         auth.oauth_profile().map_err(fail)?.ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
+    let r = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+    resolve_token_endpoint(config, &r)?;
     if config.grant == OAuthGrant::ClientCredentials {
         return Err(fail("this OAuth profile uses the client-credentials grant, which needs no browser sign-in"));
     }
-    let r = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // Resolved once: the endpoint the browser visits is the one in the key.
     let resolved = resolve_oauth(config, ctx, &r)?;
+    r.materialize_variables()?;
     if resolved.authorization_url.trim().is_empty() {
         return Err(fail("the OAuth profile has no authorization URL; set it to the issuer's authorization endpoint")
             .with_field("auth.authorization_url"));

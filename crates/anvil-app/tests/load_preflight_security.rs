@@ -8,10 +8,11 @@ use anvil_domain::auth::{AuthConfig, KeyLocation, OAuth2Config, OAuthClientAuth,
 use anvil_domain::execution::{DispatchState, FailureKind};
 use anvil_domain::load::{ConnectionMode, LoadPlan, Workload};
 use anvil_domain::request::{KeyValue, Protocol, RequestSpec};
-use anvil_domain::secret::SensitiveValue;
+use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::{DnsOverride, ProxySelection};
 use anvil_domain::tls::{ProxyKind, ProxyProfile};
-use anvil_domain::workspace::DatasetFormat;
+use anvil_domain::workspace::{DatasetFormat, Variable};
+use anvil_engine::context::SecretResolver;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_storage::KdfParams;
@@ -22,6 +23,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 fn new_app(root: &std::path::Path) -> App {
     let manager = ProfileManager::new(root);
@@ -106,6 +108,55 @@ fn oauth(url: &str) -> AuthConfig {
             token_cache_id: None,
             refresh_skew_secs: 30,
         },
+    }
+}
+
+fn vault_variable(name: &str, secret: &SecretRef) -> Variable {
+    Variable {
+        name: name.into(),
+        value: SensitiveValue::Secret { secret: secret.clone() },
+        secret: true,
+        enabled: true,
+        description: String::new(),
+    }
+}
+
+struct CountedSecrets {
+    inner: Arc<dyn SecretResolver>,
+    reads: Arc<Mutex<Vec<Id>>>,
+}
+
+impl SecretResolver for CountedSecrets {
+    fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
+        self.reads.lock().unwrap().push(reference.id);
+        self.inner.resolve(reference)
+    }
+
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+        self.inner.variable_secret(layer, variable)
+    }
+}
+
+struct ReplaceIssuerAfterRead {
+    inner: Arc<dyn SecretResolver>,
+    store: Arc<anvil_storage::Store>,
+    workspace: Id,
+    issuer: SecretRef,
+}
+
+impl SecretResolver for ReplaceIssuerAfterRead {
+    fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
+        let value = self.inner.resolve(reference)?;
+        if reference.id == self.issuer.id {
+            self.store
+                .put_secret(&self.issuer.id, Some(&self.workspace), &self.issuer.label, "http://changed-issuer-canary.test/token")
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(value)
+    }
+
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+        self.inner.variable_secret(layer, variable)
     }
 }
 
@@ -458,6 +509,316 @@ fn oauth_endpoint_expansion_errors_do_not_expose_vault_derived_variable_names() 
     let error = app.load_preflight(&p).unwrap_err().to_string();
     assert_eq!(error, "could not resolve OAuth token URL; check the vault and active variables");
     assert!(!error.contains("vault-canary"));
+}
+
+#[tokio::test]
+async fn app_and_worker_producer_check_ineligible_issuers_before_nested_vault_variables_and_aliases() {
+    anvil_transport::init();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Credential variables").unwrap();
+    let expected = "the OAuth token endpoint requires HTTPS or literal-loopback HTTP";
+    for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
+        for endpoint_source in ["literal", "template", "vault"] {
+            for missing in [false, true] {
+                let credential = app.set_secret(&ws.meta.id, "credential-label-canary", "{{credential-value-canary}}").unwrap();
+                let endpoint = "http://issuer.example.test/token";
+                let issuer = app.set_secret(&ws.meta.id, "issuer", endpoint).unwrap();
+                ws.variables = vec![
+                    vault_variable("oauth_secret", &credential),
+                    Variable::plain("nested_credential", "{{oauth_secret}}"),
+                    Variable::plain("credential_cycle", "{{credential_cycle}}"),
+                    Variable::plain("issuer", "{{issuer_value}}"),
+                    if endpoint_source == "vault" {
+                        vault_variable("issuer_value", &issuer)
+                    } else {
+                        Variable::plain("issuer_value", endpoint)
+                    },
+                ];
+                app.save_workspace(ws.clone()).unwrap();
+                if missing {
+                    app.store.delete_secret(&credential.id).unwrap();
+                }
+                let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+                // HTTP preparation and an earlier mixed-auth profile must not
+                // materialize aliases of the credential before the OAuth gate.
+                spec.headers.push(KeyValue::new("X-Credential", "{{nested_credential}}"));
+                let mut auth = oauth(if endpoint_source == "literal" { endpoint } else { "{{issuer}}" });
+                if let AuthConfig::OAuth2 { config } = &mut auth {
+                    config.grant = grant;
+                    config.client_id = "{{missing-client-canary}}".into();
+                    config.client_secret = SensitiveValue::template("{{nested_credential}}{{credential_cycle}}");
+                    config.authorization_url = "http://127.0.0.1:8080/authorize".into();
+                }
+                spec.auth = AuthConfig::Multi {
+                    profiles: vec![
+                        AuthConfig::ApiKey {
+                            name: "X-API-Key".into(),
+                            value: SensitiveValue::Secret { secret: credential.clone() },
+                            location: KeyLocation::Header,
+                        },
+                        auth,
+                    ],
+                };
+                let p = plan(&app, ws.meta.id, spec);
+                let mut job = app.load_job(&p).expect("context defers unvalidated credential variables");
+                let ctx = job.requests.get_mut(&p.chain[0]).unwrap();
+                assert!(ctx.secrets.variable_secret(0, 0).is_some(), "the credential reference is retained");
+                // Deletion exposes any eager prefetch, including a duplicate
+                // direct reference through the spec or mixed effective auth.
+                app.store.delete_secret(&credential.id).unwrap();
+                assert!(ctx.secrets.resolve(&credential).is_err(), "credential was prefetched before eligibility");
+                let reads = Arc::new(Mutex::new(Vec::new()));
+                ctx.secrets = Arc::new(CountedSecrets { inner: ctx.secrets.clone(), reads: reads.clone() });
+                let output = send(ctx).await;
+                assert_eq!(output.record.outcome.dispatch, DispatchState::NotDispatched);
+                assert_eq!(output.record.attempts[0].failure.as_ref().unwrap().message, expected);
+                assert!(!serde_json::to_string(&output.record).unwrap().contains("canary"));
+                let error = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap_err();
+                assert_eq!(error.to_string(), expected);
+                assert!(!error.to_string().contains("canary"), "no wire job or credential-bearing error is produced");
+                assert!(!reads.lock().unwrap().contains(&credential.id), "neither production sink read the credential");
+                assert_eq!(app.load_preflight(&p).unwrap_err().to_string(), expected);
+                assert_eq!(app.worker_job(&p, true).unwrap_err().to_string(), expected);
+                assert_eq!(
+                    app.oauth_token_status(Some(p.chain[0]), &ws.meta.id, None, &anvil_app::exec::SendOptions::default())
+                        .unwrap_err()
+                        .to_string(),
+                    expected,
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn app_worker_round_trip_preserves_eligible_vault_issuers_and_credential_variables() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Eligible credential variables").unwrap();
+    for https in [false, true] {
+        let pki = anvil_fixtures::LabPki::generate();
+        let tls = https.then(|| anvil_fixtures::TlsServerOptions::new(pki.server.chain_with(&pki.ca), pki.server.key.clone()));
+        let api = anvil_fixtures::http::serve("127.0.0.1:0", tls).await.unwrap();
+        let endpoint = if https { api.url_host("api.anvil.test", "/oauth/token") } else { api.url("/oauth/token") };
+        let trust = app
+            .save_tls_profile(anvil_domain::tls::TlsProfile {
+                id: Id::new(),
+                workspace_id: ws.meta.id,
+                name: "issuer trust".into(),
+                verify: true,
+                use_system_roots: false,
+                extra_roots_pem: vec![pki.ca.cert.clone()],
+                client_identity: None,
+                bindings: vec![],
+                min_version: anvil_domain::tls::TlsMinVersion::Tls12,
+                server_name_override: None,
+                server_spiffe: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        for variable_credential in [false, true] {
+            let credential = app.set_secret(&ws.meta.id, "client secret", "anvil-secret").unwrap();
+            let issuer = app.set_secret(&ws.meta.id, "issuer URL", &endpoint).unwrap();
+            ws.variables = vec![
+                vault_variable("issuer_value", &issuer),
+                Variable::plain("issuer", "{{issuer_value}}"),
+                vault_variable("oauth_secret", &credential),
+                Variable::plain("nested_credential", "{{oauth_secret}}"),
+            ];
+            ws.settings.tls_profile_id = Some(trust.id);
+            ws.settings.dns_overrides = vec![DnsOverride { host: "api.anvil.test".into(), addresses: vec!["127.0.0.1".into()] }];
+            app.save_workspace(ws.clone()).unwrap();
+            let mut spec = RequestSpec::http("GET", &api.url("/echo"));
+            spec.auth = oauth("{{issuer}}");
+            if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+                config.client_id = "anvil-client".into();
+                config.client_auth = OAuthClientAuth::BasicHeader;
+                config.client_secret = if variable_credential {
+                    SensitiveValue::template("{{nested_credential}}")
+                } else {
+                    SensitiveValue::Secret { secret: credential.clone() }
+                };
+            }
+            let p = plan(&app, ws.meta.id, spec);
+            let preflight = app.load_preflight(&p).unwrap();
+            assert_eq!(preflight.destinations.len(), 2);
+            assert_eq!(send(&context(&app, &p)).await.record.response.unwrap().status, 200);
+            let wire = app.worker_job(&p, true).unwrap();
+            let json = serde_json::to_string(&wire).unwrap();
+            let wire: anvil_load::WorkerJob = serde_json::from_str(&json).unwrap();
+            assert!(!format!("{wire:?}").contains("anvil-secret"));
+            app.store.delete_secret(&credential.id).unwrap();
+            app.store.delete_secret(&issuer.id).unwrap();
+            let (plan, job, options) = wire.into_load_job().unwrap();
+            let report = tokio::time::timeout(
+                Duration::from_secs(10),
+                anvil_load::LoadRun::prepare(plan, job, options).unwrap().execute(CancellationToken::new(), None),
+            )
+            .await
+            .expect("worker acquisition completes against the loopback fixture");
+            assert_eq!(report.counts.completed, 1);
+            assert_eq!(report.counts.transport_failures, 0);
+            assert_eq!(report.counts.application_failures, 0);
+        }
+        // Per-run paths and literal-loopback ports remain supported, even
+        // when their templates are reached through a vault-backed issuer.
+        let credential = app.set_secret(&ws.meta.id, "dataset client secret", "anvil-secret").unwrap();
+        let scheme = if https { "https" } else { "http" };
+        let issuer = app
+            .set_secret(&ws.meta.id, "dataset issuer", &format!("{scheme}://127.0.0.1:{{{{port}}}}/oauth/token?row={{{{row}}}}"))
+            .unwrap();
+        ws.variables = vec![vault_variable("issuer", &issuer), vault_variable("oauth_secret", &credential)];
+        app.save_workspace(ws.clone()).unwrap();
+        let dataset = app
+            .create_dataset(
+                &ws.meta.id,
+                "issuer path",
+                DatasetFormat::Csv,
+                format!("port,row\n{},one\n", api.addr.port()).as_bytes(),
+                vec![],
+            )
+            .unwrap();
+        let mut spec = RequestSpec::http("GET", &api.url("/echo"));
+        spec.auth = oauth("{{issuer}}");
+        if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+            config.client_id = "anvil-client".into();
+            config.client_auth = OAuthClientAuth::BasicHeader;
+            config.client_secret = SensitiveValue::template("{{oauth_secret}}");
+        }
+        let mut p = plan(&app, ws.meta.id, spec);
+        p.dataset_id = Some(dataset.meta.id);
+        assert!(app.load_preflight(&p).is_ok());
+        let wire = app.worker_job(&p, true).unwrap();
+        let (plan, job, options) = wire.into_load_job().unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            anvil_load::LoadRun::prepare(plan, job, options).unwrap().execute(CancellationToken::new(), None),
+        )
+        .await
+        .expect("dataset issuer acquisition completes");
+        assert_eq!(report.counts.completed, 1);
+        assert_eq!(report.counts.transport_failures, 0);
+        assert_eq!(*api.state.oauth_token_requests.lock(), 5);
+        api.shutdown();
+    }
+}
+
+#[test]
+fn worker_producer_masks_helpers_inside_vault_issuers_and_sanitizes_missing_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Producer eligibility").unwrap();
+    let credential = app.set_secret(&ws.meta.id, "credential-label-canary", "credential-value-canary").unwrap();
+    for issuer_value in [
+        "{{$randomFrom http://127.0.0.1/token|http://issuer.example.test/token}}",
+        "{{missing-issuer-canary}}",
+        "{{issuer}}",
+    ] {
+        let issuer = app.set_secret(&ws.meta.id, "issuer", issuer_value).unwrap();
+        ws.variables = vec![vault_variable("issuer", &issuer), vault_variable("oauth_secret", &credential)];
+        app.save_workspace(ws.clone()).unwrap();
+        let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+        spec.auth = oauth("{{issuer}}");
+        if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+            config.client_secret = SensitiveValue::Secret { secret: credential.clone() };
+        }
+        let p = plan(&app, ws.meta.id, spec);
+        let mut job = app.load_job(&p).unwrap();
+        let ctx = job.requests.get_mut(&p.chain[0]).unwrap();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        ctx.secrets = Arc::new(CountedSecrets { inner: ctx.secrets.clone(), reads: reads.clone() });
+        let error = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap_err().to_string();
+        assert!(!error.contains("canary"));
+        assert!(error.contains("per-run values") || error == "could not resolve auth.token_url; check the vault and active variables");
+        assert!(!reads.lock().unwrap().contains(&credential.id));
+    }
+    app.store.delete_secret(&credential.id).unwrap();
+    for direct in [false, true] {
+        ws.variables = vec![
+            Variable::plain("issuer", "https://issuer.example.test/token"),
+            vault_variable("oauth_secret", &credential),
+        ];
+        app.save_workspace(ws.clone()).unwrap();
+        let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+        spec.auth = oauth("{{issuer}}");
+        if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+            config.client_secret = if direct {
+                SensitiveValue::Secret { secret: credential.clone() }
+            } else {
+                SensitiveValue::template("{{oauth_secret}}")
+            };
+        }
+        let p = plan(&app, ws.meta.id, spec);
+        assert!(app.load_preflight(&p).is_ok(), "preflight validates eligibility without consuming credentials");
+        let error = app.worker_job(&p, true).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            if direct {
+                "could not resolve a load credential; check the vault and active variables"
+            } else {
+                "could not resolve a load variable; check the vault and active variables"
+            },
+        );
+        assert!(!error.contains("canary"));
+    }
+}
+
+#[test]
+fn ordinary_vault_variables_keep_their_snapshot_and_layer_errors_do_not_quote_names_or_labels() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Ordinary variables").unwrap();
+    let secret = app.set_secret(&ws.meta.id, "ordinary vault value", "echo").unwrap();
+    let missing = SecretRef { id: Id::new(), label: "missing-label-canary".into() };
+    let mut disabled = vault_variable("disabled-name-canary", &missing);
+    disabled.enabled = false;
+    ws.variables = vec![vault_variable("path", &secret), disabled];
+    app.save_workspace(ws.clone()).unwrap();
+    let p = plan(&app, ws.meta.id, RequestSpec::http("GET", "http://127.0.0.1:8080/{{path}}"));
+    let job = app.load_job(&p).unwrap();
+    app.store.delete_secret(&secret.id).unwrap();
+    let wire = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap();
+    assert_eq!(wire.requests[0].var_layers[0].vars[0].value.expose(), "echo");
+    assert!(wire.requests[0].var_layers[0].vars[0].secret);
+    assert_eq!(wire.requests[0].var_layers[0].vars.len(), 1);
+    ws.variables = vec![vault_variable("missing-name-canary", &missing)];
+    app.save_workspace(ws).unwrap();
+    let error = app.load_job(&p).err().unwrap().to_string();
+    assert!(error.contains("could not resolve a secret variable"));
+    assert!(!error.contains("canary"));
+}
+
+#[test]
+fn worker_serializes_the_issuer_snapshot_that_passed_eligibility_even_if_the_vault_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Issuer snapshot").unwrap();
+    let issuer = app.set_secret(&ws.meta.id, "issuer", "https://issuer.example.test/token").unwrap();
+    let credential = app.set_secret(&ws.meta.id, "client secret", "eligible-credential-canary").unwrap();
+    ws.variables = vec![vault_variable("issuer", &issuer), vault_variable("oauth_secret", &credential)];
+    app.save_workspace(ws.clone()).unwrap();
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+    spec.auth = oauth("{{issuer}}");
+    if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+        config.client_secret = SensitiveValue::template("{{oauth_secret}}");
+    }
+    let p = plan(&app, ws.meta.id, spec);
+    let mut job = app.load_job(&p).unwrap();
+    let ctx = job.requests.get_mut(&p.chain[0]).unwrap();
+    ctx.secrets = Arc::new(ReplaceIssuerAfterRead {
+        inner: ctx.secrets.clone(),
+        store: app.store.clone(),
+        workspace: ws.meta.id,
+        issuer: issuer.clone(),
+    });
+    let wire = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap();
+    assert_eq!(wire.requests[0].var_layers[0].vars[0].value.expose(), "https://issuer.example.test/token");
+    assert!(!serde_json::to_string(&wire).unwrap().contains("changed-issuer-canary"));
+    assert_eq!(app.worker_job(&p, true).unwrap_err().to_string(), "the OAuth token endpoint requires HTTPS or literal-loopback HTTP");
 }
 
 #[test]

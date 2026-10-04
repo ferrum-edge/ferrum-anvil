@@ -297,6 +297,18 @@ impl App {
             };
             let (_, auth) = ctx.effective_auth();
             let oauth = auth.oauth_profile().map_err(|message| AppError::Invalid(message.into()))?;
+            if let Some(oauth) = oauth {
+                // Check before resolving the API URL, headers or mixed auth:
+                // those fields may alias a deferred credential variable.
+                let proven = match prove_url(&resolver, &oauth.token_url, "auth.token_url") {
+                    Ok(proven) => proven,
+                    Err(UrlProblem::Unresolved(_)) => {
+                        return Err(AppError::Invalid("could not resolve OAuth token URL; check the vault and active variables".into()));
+                    }
+                    Err(UrlProblem::PerRun(origin)) => return Err(refuse("OAuth token URL", origin)),
+                };
+                anvil_engine::oauth_http::require_secure_token_endpoint(&proven.probe).map_err(AppError::Invalid)?;
+            }
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
                     // Resolve the URL first; a forward proxy also routes by
@@ -550,7 +562,7 @@ fn preflight_resolver(ctx: &anvil_engine::ExecutionContext, id: &Id, p: &LoadPla
     if !extracted.is_empty() {
         layers.push(VarLayer { label: "iteration (extracted)".into(), vars: extracted });
     }
-    Resolver::new(layers, None)
+    Resolver::new(layers, None).with_secrets(ctx.secrets.clone()).with_value_transform(mask_dynamic_expressions)
 }
 
 /// The part of a URL's origin a per-run value reaches, and where those values

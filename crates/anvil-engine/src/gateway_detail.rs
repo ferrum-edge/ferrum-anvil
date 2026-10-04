@@ -315,7 +315,7 @@ pub async fn lookup_recorded(
     attempt: &AttemptObservation,
     cancel: &CancellationToken,
 ) -> GatewayDetail {
-    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
     let lookup = Lookup { engine, epoch: engine.epoch_for(ctx), ctx, settings: &settings, resolver: &resolver };

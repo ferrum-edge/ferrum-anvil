@@ -126,6 +126,25 @@ TLS/proxy secret preparation or dispatch. Client credentials, refresh tokens,
 authorization codes and PKCE use that same boundary. Errors do not quote the
 endpoint or credential material.
 
+For OAuth execution contexts, vault-backed variables retain their references
+until the effective OAuth endpoint has been checked. The normal recursive
+resolver still applies layer precedence, nesting and cycle detection; unrelated
+ordinary requests retain their frozen variable values. A fixed eligible endpoint
+can prefetch credential and variable outcomes after its literal check. A templated
+or ineligible endpoint defers all credential aliases, including mixed-auth and
+selected-profile references, so headers or other request fields cannot bypass
+the endpoint-first order. Credential and variable lookup failures are sanitized
+before App errors, browser flow events, history or worker IPC are constructed.
+
+The load producer repeats eligibility validation before resolving or serializing
+any credentials or variables. Acknowledgement does not bypass this check. Dataset,
+extraction and dynamic-helper values cannot authorize a per-run issuer origin;
+per-run paths and ports after a fixed literal-loopback host retain the existing
+preflight rules. The worker repeats the literal policy at actual acquisition.
+These ordering repairs still require fresh independent review and exact-head
+Linux, macOS and Windows hosted qualification; they do not qualify the whole
+original PR or approve either candidate policy.
+
 IPv4, IPv6 and IPv4-mapped IPv6 loopback literals are accepted after URL
 canonicalization (including shortened IPv4 spelling). DNS names, including
 localhost and names overridden to loopback, do not qualify for cleartext. HTTPS
