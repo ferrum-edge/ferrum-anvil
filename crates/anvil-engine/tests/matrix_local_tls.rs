@@ -155,21 +155,39 @@ async fn local_008_resolver_deadline_is_local_and_cause_beyond_resolver_unknown(
 #[tokio::test]
 async fn local_010_connect_deadline_does_not_claim_firewall_or_backend() {
     init();
-    // TEST-NET-1 (RFC 5737) is not routed; connects stall or are refused by
-    // the local network stack. Either way nothing reached a server.
+    // The candidate refuses TEST-NET before dialing. Saturate a real
+    // loopback listener instead, so this still exercises the connect deadline.
+    let stalled = anvil_fixtures::dns::stalled_listener("127.0.0.1:0").unwrap();
     let c = with_settings(
-        ctx(RequestSpec::http("GET", "http://192.0.2.1:9/")),
+        ctx(RequestSpec::http(
+            "GET",
+            &format!("http://{}/", stalled.addr),
+        )),
         SettingsOverrides { timeouts: Some(TimeoutOverrides { connect_ms: Some(Some(400)), ..Default::default() }), ..Default::default() },
     );
     let o = run(&c).await;
     let k = last_failure(&o);
-    assert!(matches!(k, FailureKind::ConnectTimeout | FailureKind::NetworkUnreachable | FailureKind::HostUnreachable), "{k:?}");
+    assert_eq!(k, FailureKind::ConnectTimeout);
     assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
     assert!(o.record.response.is_none(), "no invented HTTP headers");
     for f in &o.record.findings {
         assert!(!(f.confidence == Confidence::Confirmed && f.explanation.to_lowercase().contains("firewall")), "{}", f.code);
         assert!(!f.code.starts_with("ferrum.") && !f.code.starts_with("http."), "{}", f.code);
     }
+    // With the same deadline and an accepting loopback peer, the request succeeds.
+    let peer = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let positive = with_settings(
+        ctx(RequestSpec::http("GET", &peer.url("/echo"))),
+        SettingsOverrides {
+            timeouts: Some(TimeoutOverrides {
+                connect_ms: Some(Some(400)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    assert_eq!(run(&positive).await.record.response.unwrap().status, 200);
+    assert_eq!(peer.log.count_requests(), 1);
 }
 
 #[tokio::test]

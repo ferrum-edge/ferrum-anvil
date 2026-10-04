@@ -292,15 +292,37 @@ async fn proxy_resolved_names_ignore_client_pins_including_oauth_and_no_proxy() 
         let mut spec = routed(RequestSpec::http("GET", &api.url("/api")), &profile);
         spec.auth = oauth(&token_url);
         let p = plan(&app, ws, spec.clone());
-        assert!(warns(&app, &p));
-        let _ = send(&context(&app, &p)).await;
-        assert!(recorder.requests().last().unwrap().contains("issuer.example.test"));
+        let before = recorder.requests().len();
+        let api_before = api.requests().len();
+        if scheme == "http" {
+            assert!(app
+                .load_preflight(&p)
+                .unwrap_err()
+                .to_string()
+                .contains("HTTPS or literal-loopback HTTP"));
+            let o = send(&context(&app, &p)).await;
+            assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+            assert_eq!(
+                recorder.requests().len(),
+                before,
+                "ineligible token URL never reaches the proxy"
+            );
+            assert_eq!(api.requests().len(), api_before);
+        } else {
+            assert!(warns(&app, &p));
+            let _ = send(&context(&app, &p)).await;
+            assert!(recorder
+                .requests()
+                .last()
+                .unwrap()
+                .contains("issuer.example.test"));
+        }
 
         // Port-free NO_PROXY makes the same fixed pin authoritative on the client.
         let bypass = proxy(&app, ws, kind, &recorder.address.to_string(), "127.0.0.1,api.example.test,issuer.example.test");
-        // Use cleartext so the direct recording server needs no TLS.
+        // A literal-loopback HTTP issuer is eligible and bypasses the proxy.
         spec = routed(RequestSpec::http("GET", &api.url("/api")), &bypass);
-        spec.auth = oauth(&format!("http://issuer.example.test:{}/token", api.address.port()));
+        spec.auth = oauth(&api.url("/token"));
         let p = plan(&app, ws, spec);
         assert!(!warns(&app, &p));
         let before = recorder.requests().len();
@@ -311,6 +333,82 @@ async fn proxy_resolved_names_ignore_client_pins_including_oauth_and_no_proxy() 
         assert!(!warns(&app, &direct));
         assert_eq!(send(&context(&app, &direct)).await.record.response.unwrap().status, 200);
         assert_eq!(recorder.requests().len(), before);
+    }
+}
+
+#[tokio::test]
+async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch() {
+    anvil_transport::init();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Issuer eligibility").unwrap().meta.id;
+    let api = Recorder::start(false).await;
+    let recorder = Recorder::start(false).await;
+    let profile = proxy(
+        &app,
+        ws,
+        ProxyKind::Http,
+        &recorder.address.to_string(),
+        "",
+    );
+    for host in ["localhost", "issuer.example.test", "[::ffff:192.168.1.1]"] {
+        pin(&app, ws, host, &["127.0.0.1"]);
+        for proxied in [false, true] {
+            let mut spec = RequestSpec::http("GET", &api.url("/api"));
+            spec.auth = oauth(&format!(
+                "http://{host}:{}/token?hidden=endpoint-material",
+                api.address.port()
+            ));
+            if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+                config.client_id = "{{missing_client_id}}".into();
+                config.client_secret = SensitiveValue::template("{{missing_client_secret}}");
+            }
+            if proxied {
+                spec = routed(spec, &profile);
+            }
+            let p = plan(&app, ws, spec);
+            let error = app.load_preflight(&p).unwrap_err().to_string();
+            assert!(error.contains("HTTPS or literal-loopback HTTP"));
+            assert!(!error.contains("endpoint-material"));
+            assert!(!error.contains("missing_client"));
+            let o = send(&context(&app, &p)).await;
+            assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+            assert_eq!(
+                o.record
+                    .attempts
+                    .last()
+                    .unwrap()
+                    .failure
+                    .as_ref()
+                    .unwrap()
+                    .kind,
+                FailureKind::AuthPreparationFailed
+            );
+            assert!(api.requests().is_empty());
+            assert!(recorder.requests().is_empty());
+        }
+    }
+}
+
+#[test]
+fn oauth_preflight_uses_the_common_canonical_literal_policy_and_keeps_consent() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Canonical issuers").unwrap().meta.id;
+    for endpoint in [
+        "http://127.0.0.1:8080/token",
+        "http://127.1:8080/token",
+        "http://[::1]:8080/token",
+        "http://[::ffff:127.0.0.1]:8080/token",
+        "https://issuer.example.test/token",
+    ] {
+        let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+        spec.auth = oauth(endpoint);
+        let p = plan(&app, ws, spec);
+        let preflight = app.load_preflight(&p).unwrap();
+        assert_eq!(preflight.destinations.len(), 2);
+        assert!(preflight.destinations[1].starts_with("OAuth token URL "));
+        assert_eq!(warns(&app, &p), endpoint.starts_with("https"));
     }
 }
 
@@ -755,7 +853,7 @@ async fn hbone_receives_unpinned_target_and_oauth_names_despite_client_overrides
     assert_eq!(endpoint.connects().last().unwrap().authority, "api.example.test:8080");
 
     let mut spec = routed(RequestSpec::http("GET", &api.url("/api")), &profile);
-    spec.auth = oauth("http://issuer.example.test:8080/token");
+    spec.auth = oauth("https://issuer.example.test:8080/token");
     let token = plan(&app, ws, spec.clone());
     assert!(warns(&app, &token));
     let _ = send(&context(&app, &token)).await;
@@ -765,7 +863,7 @@ async fn hbone_receives_unpinned_target_and_oauth_names_despite_client_overrides
     profile.no_proxy = "127.0.0.1,api.example.test,issuer.example.test".into();
     profile = app.save_proxy_profile(profile).unwrap();
     spec = routed(RequestSpec::http("GET", &api.url("/api")), &profile);
-    spec.auth = oauth(&format!("http://issuer.example.test:{}/token", api.address.port()));
+    spec.auth = oauth(&api.url("/token"));
     let bypass = plan(&app, ws, spec);
     assert!(!warns(&app, &bypass));
     let before = endpoint.connects().len();

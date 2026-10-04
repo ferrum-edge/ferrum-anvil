@@ -3,9 +3,16 @@
 Status: candidate only, owner unapproved. This branch changes the supported HTTP
 profile and security tradeoffs. It must not be merged, activated, represented as an
 approved release profile, or used to close the advisories until root completes its
-review, fresh independent security/concurrency review, hosted qualification, queued
-App/contract work and CHANGELOG, and then obtains the owner's explicit decision.
+review, fresh independent security/concurrency review, hosted qualification and
+the root-owned CHANGELOG follow-up, and then obtains the owner's explicit decision.
 Candidate preparation was authorized; adopting these defaults was not.
+
+The candidate now implements the core, App preflight, target-API sign-in/status
+and desktop guidance contract described below. Implementation is not runtime
+qualification or owner approval. Cookie eviction/output omission, unknown-suffix
+domain behavior, intentional private-original authority, original proxy trust,
+proxy redirect refusal and HTTP issuer restrictions remain DRAFT and OWNER
+UNAPPROVED. No scope approval is inferred from fixing the accepted findings.
 
 ## Source and finding scope
 
@@ -73,6 +80,14 @@ over-budget configured fields and stored pairs before combined allocation. Budge
 notes contain no cookie material. Existing header validation, request redaction
 and refusal of response cookie names containing request secrets remain in force.
 
+The aggregate check runs after every HTTP attempt's signing and after session
+signing, including the initial SSE send, TCP fallback, every SSE reconnection,
+gRPC reflection requests and reflected calls. A JWT targeting Cookie cannot
+restore an initially withheld field when its time claims change. Session records
+retain a generic budget reason without the token or cookie value. MASQUE applies
+the same aggregate check after CONNECT auth and before constructing the HTTP/3
+tunnel wire plan, including configured fields when automatic cookies are off.
+
 Domain, path, Secure, HttpOnly and expiry parsing/matching still use cookie_store.
 The pinned PSL still includes private suffixes such as github.io. Unknown suffixes
 are now host-only: a Domain attribute is accepted only when it equals the request
@@ -115,11 +130,23 @@ IPv4, IPv6 and IPv4-mapped IPv6 loopback literals are accepted after URL
 canonicalization (including shortened IPv4 spelling). DNS names, including
 localhost and names overridden to loopback, do not qualify for cleartext. HTTPS
 and intentional literal-loopback issuers remain supported. No insecure override
-is added. The identity crate's existing browser predicate also accepts localhost
-and is private to that crate; it is therefore not a coherent reusable engine
-predicate for this stricter proposal. Identity sources are outside this worker's
-ownership. UI guidance should tell users to configure a loopback IP for HTTP
-issuers; the common sink enforces this regardless of browser entry-point behavior.
+is added. App load preflight uses the same public engine predicate for the
+resolved token endpoint before client credential expansion or dispatch. Proxy
+routing, NO_PROXY and fixed client DNS pins do not make a cleartext DNS-name token
+endpoint eligible. Eligible HTTPS endpoints still need remote load consent when
+their destination is remote or unproven; literal eligibility is not a promise
+that a configured proxy stays on this machine.
+
+Target-API browser token validation uses that same predicate, including mapped
+loopback literals. App token status and browser sign-in return the same generic
+configuration failure for an ineligible token URL, before opening a browser or
+contacting the issuer. The browser observer receives a terminal configuration
+failure. The desktop auth editor surfaces rejected status queries as unavailable
+with their reason, rather than silently showing an ordinary signed-out status,
+and guides users to HTTPS or a loopback IP. The external browser's separate
+authorization-URL policy still permits HTTP localhost; client DNS overrides
+cannot prove that browser destination local. This candidate's stricter literal
+rule governs token acquisition, not application-login provider policy.
 
 Proxy settings remain available for original token acquisition, and requests do
 not automatically follow issuer redirects. HTTPS alone does not remove configured
@@ -224,6 +251,15 @@ form/Basic sink. A new trusted HTTPS issuer test checks real Basic client
 acquisition and token delivery; existing real loopback acquisition, refresh, code
 redemption and revocation tests continue to supply positive transport coverage.
 
+Additional production-path regressions cover an initially withheld oversized
+Cookie JWT with changed time claims on a real SSE reconnection and on a gRPC call
+signed after real reflection, alongside under-budget controls. HTTP and SSE cover
+automatic jars both on and off. Real MASQUE CONNECT-UDP tests cover configured
+and auth-added over-budget fields, good under-budget fields, and several fields
+whose individual sizes fit but aggregate does not. Tests check wire ground truth,
+generic omission reasons and record redaction without printing credentials.
+Their runtime results remain pending hosted qualification.
+
 Destination tests cover literal classes, mapped/transition classes, mixed-record
 and override rejection before pool checkout, all proxy modes, QUIC refusal and
 cancellation/deadline boundaries. A deterministic UDP DNS server supplies actual
@@ -244,26 +280,39 @@ repository currently configures rustfmt at 140 columns with Max heuristics; this
 assignment requested hand formatting at 100/60. Root must apply the actual hosted
 formatter diff as directed during qualification; no local formatter was used.
 
-Queued files outside this worker's scope:
+Completed App and desktop contract work:
 
-- `crates/anvil-app/tests/load_preflight_security.rs`: existing tests around lines
-  303, 758 and 768 expect nonliteral cleartext OAuth endpoints to reach a proxy or
-  direct fixture. Replace those positives with literal-loopback HTTP or trusted
-  HTTPS fixtures and retain negative no-dispatch assertions; do not weaken the
-  preflight/consent/authority tests.
-- `crates/anvil-app/src/load.rs`: reconcile preflight endpoint eligibility and
-  destination descriptions with sink rejection of nonliteral HTTP issuers; retain
-  the existing native purpose, consent and proxy-authority proofs.
-- `crates/anvil-app/src/identity.rs` and `crates/anvil-app/tests/identity.rs`:
-  check how secure-endpoint failure is surfaced to the browser flow and token
-  profile status. Report consistent literal-loopback guidance without a bypass.
-- `apps/desktop/src/AuthEditor.tsx`, `apps/desktop/src/ScopeSettings.tsx` and their
-  relevant tests, plus root-owned `CHANGELOG.md`: document candidate quotas,
-  unknown-suffix behavior, special-address and opaque-proxy redirect refusals,
-  and OAuth HTTP literal-loopback restriction after the other App worker exits.
-  Root must finish any queued UI/API contract coverage sequentially. No schema
-  change or new setting is introduced by this core.
+- `crates/anvil-app/src/load.rs` shares the token endpoint policy with the engine
+  sink. `load_preflight_security.rs` replaces incompatible cleartext-name positives
+  with HTTPS proxy authority and literal-loopback HTTP direct controls, and adds
+  no-dispatch negatives before missing client credentials. Consent, browser
+  locality, proxy authority, native purpose and dynamic-origin proofs remain.
+- `crates/anvil-app/src/identity.rs`, its tests and
+  `crates/anvil-identity/src/api_oauth.rs` align token status/browser failure and
+  mapped-loopback token eligibility. A real mapped-loopback App sign-in control
+  complements the existing IPv4 loopback flow; failures check no browser opening,
+  no issuer grants and the same secret-free observer/status reason.
+- `apps/desktop/src/AuthEditor.tsx` and `ScopeSettings.tsx` expose the token
+  restriction, quotas, unknown-suffix rules, special-address refusal and proxy
+  redirect tradeoffs as an owner-unapproved draft. Renderer tests cover workspace
+  and folder guidance, status errors, successful status refresh and stale-status
+  rejection. No schema change, bypass or new setting is introduced.
+
+Same-head Linux CI evidence from `7fa3505dbbe1111c7f74399dbbb5f639f6d16a36`
+([job](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37201500822/job/111433994603))
+passed formatting and clippy but failed the two older App cleartext-name issuer
+expectations and `matrix_local_tls::local_010_connect_deadline_does_not_claim_firewall_or_backend`.
+The latter used TEST-NET, now rejected before dialing. Its candidate replacement
+uses the existing saturated-loopback listener with the same 400 ms connect
+deadline, requires an actual ConnectTimeout, retains no-dispatch/diagnostic
+assertions and adds an accepting-loopback control. No timeout increase, skip or
+policy bypass was added. These repairs have not yet been hosted-qualified.
+
+`CHANGELOG.md` remains a root-owned sequential follow-up after the FS writer
+exits. This worker intentionally does not edit it. Root owns exact-head hosted
+qualification, fresh independent review and the explicit owner decision.
 
 No advisory state, PR metadata, release range or approval status was changed by
 this implementer. Root owns opening the draft and all further review/qualification;
-this delivery is a core candidate, not a complete or approved PR.
+this delivery completes the scoped implementation contract, not qualification,
+advisory closure or approval of the supported behavior changes.

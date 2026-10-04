@@ -156,7 +156,7 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
 /// The common acquisition boundary, checked before resolving credentials and
 /// again before constructing transport headers/body. DNS names (including
 /// localhost) cannot opt into cleartext; only a canonical literal loopback can.
-fn require_secure_token_endpoint(raw: &str) -> Result<(), String> {
+pub fn require_secure_token_endpoint(raw: &str) -> Result<(), String> {
     let u = url::Url::parse(raw).map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
     let loopback = match u.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),

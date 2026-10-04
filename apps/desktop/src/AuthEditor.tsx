@@ -240,6 +240,13 @@ function OAuthFields({ c, onChange, workspaceId }: { c: OAuth2Config; onChange: 
         </select>
       </label>
       <Text label="Token URL" value={c.token_url} onChange={(token_url) => onChange({ ...c, token_url: token_url ?? "" })} />
+      <p className="hint">
+        Candidate HTTP policy (draft; owner approval pending): token acquisition requires HTTPS or
+        literal-loopback HTTP, such as http://127.0.0.1 or http://[::1]. IPv4-mapped IPv6 loopback
+        literals also qualify. localhost and other DNS names do not qualify for HTTP, even with a
+        loopback DNS override. This applies to every grant and refresh; there is no insecure
+        override.
+      </p>
       {c.grant === "authorization_code_pkce" && <Text label="Authorization URL" value={c.authorization_url} onChange={(authorization_url) => onChange({ ...c, authorization_url: authorization_url ?? "" })} />}
       <Text label="Client id" value={c.client_id} onChange={(client_id) => onChange({ ...c, client_id: client_id ?? "" })} />
       <SecretField label="Client secret (optional for public clients)" value={c.client_secret} onChange={(client_secret) => onChange({ ...c, client_secret: client_secret as OAuth2Config["client_secret"] })} workspaceId={workspaceId} />
@@ -272,10 +279,39 @@ function OAuthSignIn({ input }: { input: SendInput | null }) {
   const [events, setEvents] = useState<FlowEvent[]>([]);
   const [attempt, setAttempt] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [statusErr, setStatusErr] = useState<string | null>(null);
   const refresh = () => {
-    if (input) void api.oauthTokenStatus(input).then(setStatus).catch(() => setStatus(null));
+    if (input) {
+      void api.oauthTokenStatus(input).then(
+        (next) => {
+          setStatus(next);
+          setStatusErr(null);
+        },
+        (error: Error) => {
+          setStatus(null);
+          setStatusErr(error.message);
+        },
+      );
+    }
   };
-  useEffect(refresh, [JSON.stringify(input)]);
+  useEffect(() => {
+    let active = true;
+    setStatus(null);
+    setStatusErr(null);
+    if (input) {
+      void api.oauthTokenStatus(input).then(
+        (next) => {
+          if (active) setStatus(next);
+        },
+        (error: Error) => {
+          if (active) setStatusErr(error.message);
+        },
+      );
+    }
+    return () => {
+      active = false;
+    };
+  }, [JSON.stringify(input)]);
   useEffect(() => {
     const un = onOAuthFlow((e) => {
       if (e.attempt === attempt) setEvents((x) => [...x, e.event]);
@@ -297,7 +333,7 @@ function OAuthSignIn({ input }: { input: SendInput | null }) {
             {status.refresh_token_available ? " · refreshable" : ""}
           </span>
         ) : (
-          <span className="badge">not signed in</span>
+          <span className="badge">{statusErr ? "status unavailable" : "not signed in"}</span>
         )}
         <span className="spacer" />
         {attempt ? (
@@ -344,6 +380,11 @@ function OAuthSignIn({ input }: { input: SendInput | null }) {
         </div>
       )}
       {err && <div className="bad-box">{err}</div>}
+      {statusErr && (
+        <div className="bad-box" role="alert">
+          Sign-in status unavailable: {statusErr}
+        </div>
+      )}
       <p className="hint">Tokens stay in memory in the backend and are cleared on lock; sending uses the cached token and its refresh token.</p>
     </fieldset>
   );

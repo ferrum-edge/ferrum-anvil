@@ -4,7 +4,7 @@
 //! the engine sends with. Nothing is returned that could reveal the token.
 
 use crate::flow::{AuthorizationRequest, authorize_in_browser};
-use crate::{BrowserOpener, FlowError, FlowEvent, FlowObserver, FlowOptions, failed, require_secure_endpoint};
+use crate::{BrowserOpener, FlowError, FlowEvent, FlowObserver, FlowOptions, failed};
 use anvil_auth::AuthError;
 use anvil_domain::auth::OAuthGrant;
 use anvil_engine::oauth_http::{self, InteractiveOAuth, TokenSummary};
@@ -49,8 +49,8 @@ pub async fn authorize_api(
         Ok(t) => t,
         Err(e) => return Err(failed(observer, e)),
     };
-    if let Err(e) = require_secure_endpoint("the token URL", &t.token_url) {
-        return Err(failed(observer, e));
+    if let Err(message) = oauth_http::require_secure_token_endpoint(&t.token_url) {
+        return Err(failed(observer, FlowError::Configuration(message)));
     }
     let generation = oauth_http::sign_in_generation(engine, &t);
     let request = AuthorizationRequest { authorization_endpoint: &t.authorization_endpoint, client_id: &t.client_id, scope: &t.scope };

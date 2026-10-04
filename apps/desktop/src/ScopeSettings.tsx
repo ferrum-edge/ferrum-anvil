@@ -140,7 +140,49 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
           <VariablesEditor vars={vars} onChange={(v) => patch({ variables: v })} workspaceId={props.workspaceId} />
         </>
       )}
-      {tab === "settings" && <SettingsOverridesEditor value={settings} onChange={(s) => patch({ settings: s })} profiles={props.profiles} />}
+      {tab === "settings" && (
+        <>
+          <div className="hint" role="note" aria-label="Candidate HTTP policy">
+            <p>
+              Candidate HTTP policy — draft; owner approval pending. These limits also apply to
+              inherited settings.
+            </p>
+            <p>
+              Cookies: 4 KiB per incoming Set-Cookie value, 8 KiB per retained cookie including
+              accounted metadata, 180 cookies / 128 KiB per registrable site, and 3,000 cookies /
+              2 MiB per workspace. Expired cookies are removed on access; quota eviction uses least
+              recent access. All outgoing Cookie fields together are capped at 8 KiB, including
+              configured credentials even when the cookie jar is off. Whole fields or stored pairs
+              that do not fit are withheld. Eviction or omission can end sessions or change load
+              results.
+            </p>
+            <p>
+              Private public-suffix entries keep sites separate. Unknown suffixes use host-only
+              cookies; a Domain attribute must equal the request host and cannot share cookies with
+              siblings. Ordinary domain, path, Secure, HttpOnly and expiry matching still apply.
+            </p>
+            <p>
+              Direct redirects use the addresses pinned for the actual connection. A public original
+              cannot redirect into private, loopback, link-local or shared address space.
+              Intentional private originals can redirect within their address class or to public
+              addresses;
+              special or mixed-zone addresses are refused. This is an address-class boundary, not
+              authorization for a particular server.
+            </p>
+            <p>
+              Redirects through remote-resolution HTTP, HTTPS CONNECT, SOCKS5 or HBONE proxies fail
+              closed, including same-host redirects. Explicit original proxied requests remain
+              supported; client DNS overrides do not prove a proxy's destination. OAuth token URLs
+              require HTTPS or literal-loopback HTTP; localhost and DNS overrides do not qualify.
+            </p>
+          </div>
+          <SettingsOverridesEditor
+            value={settings}
+            onChange={(s) => patch({ settings: s })}
+            profiles={props.profiles}
+          />
+        </>
+      )}
       {tab === "scope" && importRoot && <ImportRootScope folder={importRoot} busy={scopeBusy} error={scopeErr} onSet={(allow) => void setWorkspaceScope(importRoot, allow)} />}
       {tab === "about" && (
         <div className="form">

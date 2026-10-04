@@ -14,7 +14,10 @@ use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::Folder;
 use anvil_fixtures::idp::{IdpFixture, IdpOptions, simulate_browser};
 use anvil_identity::mock::{MockProvider, MockProviderConfig};
-use anvil_identity::{Availability, FlowOptions, IdentityProvider, NoEvents, VerifiedIdentity};
+use anvil_identity::{
+    Availability, FlowErrorKind, FlowEvent, FlowOptions, IdentityProvider, NoEvents,
+    VerifiedIdentity,
+};
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_storage::vault::VaultError;
@@ -315,6 +318,153 @@ async fn target_api_sign_in_through_the_app_is_session_only() {
     assert_eq!(kind(&send(&app, &ws.meta.id, rid).await), Some(FailureKind::OAuthInteractionRequired));
     assert_eq!(idp.api_requests(), (1, 1));
     assert!(!idp.grants_seen().iter().any(|g| g == "client_credentials"));
+}
+
+#[tokio::test]
+async fn ineligible_token_urls_surface_the_same_failure_to_status_and_browser_observers() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "issuer policy");
+    let (header, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, header, key).unwrap();
+    let ws = app.create_workspace("Issuer policy").unwrap();
+    let opened = AtomicUsize::new(0);
+    let opener = |_: &str| {
+        opened.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let expected = "the OAuth token endpoint requires HTTPS or literal-loopback HTTP";
+    for endpoint in [
+        "http://localhost:8080/token?hidden=endpoint-material",
+        "http://issuer.example.test/token?hidden=endpoint-material",
+        "http://[::ffff:192.168.1.1]/token?hidden=endpoint-material",
+    ] {
+        let mut spec = RequestSpec::http("GET", &idp.api_url());
+        spec.auth = AuthConfig::OAuth2 {
+            config: OAuth2Config {
+                grant: OAuthGrant::AuthorizationCodePkce,
+                token_url: endpoint.into(),
+                authorization_url: idp.authorization_endpoint(),
+                client_id: "{{missing_client_id}}".into(),
+                client_secret: SensitiveValue::template("{{missing_client_secret}}"),
+                scope: String::new(),
+                audience: String::new(),
+                client_auth: OAuthClientAuth::BasicHeader,
+                token_cache_id: None,
+                refresh_skew_secs: 30,
+            },
+        };
+        let req = app
+            .create_request(&ws.meta.id, None, "Refused issuer", spec)
+            .unwrap();
+        let rid = Some(req.meta.id);
+        let opts = SendOptions::default();
+        assert_eq!(
+            app.oauth_token_status(rid, &ws.meta.id, None, &opts)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        let events = Mutex::new(Vec::new());
+        let observer = |event| events.lock().unwrap().push(event);
+        let error = app
+            .oauth_sign_in(
+                rid,
+                &ws.meta.id,
+                None,
+                &opts,
+                &opener,
+                &observer,
+                &FlowOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![FlowEvent::Failed {
+                kind: FlowErrorKind::Configuration,
+                message: expected.into()
+            }]
+        );
+    }
+    assert_eq!(
+        opened.load(Ordering::SeqCst),
+        0,
+        "no browser opened for an ineligible issuer"
+    );
+    assert!(
+        idp.grants_seen().is_empty(),
+        "no credentials reached the issuer"
+    );
+    assert_eq!(idp.api_requests(), (0, 0));
+}
+
+#[tokio::test]
+async fn mapped_loopback_token_endpoint_can_complete_app_browser_sign_in() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "mapped issuer");
+    let (header, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, header, key).unwrap();
+    let ws = app.create_workspace("Mapped issuer").unwrap();
+    let mut spec = RequestSpec::http("GET", &idp.api_url());
+    spec.auth = AuthConfig::OAuth2 {
+        config: OAuth2Config {
+            grant: OAuthGrant::AuthorizationCodePkce,
+            token_url: idp
+                .token_endpoint()
+                .replace("127.0.0.1", "[::ffff:127.0.0.1]"),
+            authorization_url: idp.authorization_endpoint(),
+            client_id: idp.client_id(),
+            client_secret: SensitiveValue::default(),
+            scope: "orders.read".into(),
+            audience: String::new(),
+            client_auth: OAuthClientAuth::RequestBody,
+            token_cache_id: None,
+            refresh_skew_secs: 30,
+        },
+    };
+    let req = app
+        .create_request(&ws.meta.id, None, "Mapped loopback", spec)
+        .unwrap();
+    let rid = Some(req.meta.id);
+    let opts = SendOptions::default();
+    assert!(app
+        .oauth_token_status(rid, &ws.meta.id, None, &opts)
+        .unwrap()
+        .is_none());
+    app.oauth_sign_in(
+        rid,
+        &ws.meta.id,
+        None,
+        &opts,
+        &browser,
+        &NoEvents,
+        &FlowOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(app
+        .oauth_token_status(rid, &ws.meta.id, None, &opts)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        send(&app, &ws.meta.id, rid)
+            .await
+            .record
+            .response
+            .unwrap()
+            .status,
+        200
+    );
+    assert_eq!(idp.api_requests(), (1, 1));
 }
 
 #[tokio::test]

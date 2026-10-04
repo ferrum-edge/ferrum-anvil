@@ -295,6 +295,93 @@ async fn udp_through_a_masque_proxy_echoes_and_records_the_tunnel() {
 }
 
 #[tokio::test]
+async fn masque_connect_caps_configured_and_auth_cookies_after_auth() {
+    use anvil_domain::auth::KeyLocation;
+    init();
+    let proxy = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let e = Engine::new();
+    for auth in [false, true] {
+        for size in [128, 9 * 1024] {
+            let mut spec = masque_spec(
+                &format!("udp://{}", echo.addr),
+                &format!("https://127.0.0.1:{}", proxy.addr.port()),
+                None,
+                MasqueDatagramMode::Auto,
+                &["budget-control"],
+            );
+            let value = format!("masque-cookie-{}", "x".repeat(size));
+            if auth {
+                spec.auth = AuthConfig::ApiKey {
+                    name: "sid".into(),
+                    value: SensitiveValue::template(value.clone()),
+                    location: KeyLocation::Cookie,
+                };
+            } else {
+                spec.headers
+                    .push(KeyValue::new("Cookie", &format!("sid={value}")));
+            }
+            let o = run(&e, &lab_ctx(spec, None)).await;
+            assert_eq!(tunnel(&o).0, 1);
+            assert_eq!(
+                tunnel(&o).1,
+                1,
+                "the tunnel still echoes under either policy result"
+            );
+            let headers = proxy.log.last_request_headers().unwrap();
+            let values: Vec<&str> = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(
+                values.is_empty(),
+                size > 8192,
+                "CONNECT Cookie withholding"
+            );
+            if size < 8192 {
+                let expected = format!("sid={value}");
+                assert!(values.contains(&expected.as_str()));
+            }
+            assert_eq!(
+                o.record.prepared.inferred.iter().any(|note| {
+                    note == "a Cookie header exceeds the 8 KiB request cookie budget"
+                }),
+                size > 8192
+            );
+            assert!(!serde_json::to_string(&o.record).unwrap().contains(&value));
+        }
+    }
+    // Each field fits alone. Their aggregate, including separators, does not.
+    let mut spec = masque_spec(
+        &format!("udp://{}", echo.addr),
+        &format!("https://127.0.0.1:{}", proxy.addr.port()),
+        None,
+        MasqueDatagramMode::Auto,
+        &["aggregate-control"],
+    );
+    spec.headers.push(KeyValue::new(
+        "Cookie",
+        &format!("first={}", "a".repeat(5000)),
+    ));
+    spec.headers.push(KeyValue::new(
+        "cookie",
+        &format!("second={}", "b".repeat(5000)),
+    ));
+    let o = run(&e, &lab_ctx(spec, None)).await;
+    assert_eq!(tunnel(&o).1, 1);
+    let headers = proxy.log.last_request_headers().unwrap();
+    let values: Vec<&str> = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(values.len(), 1, "only one configured field fits");
+    assert!(values[0].starts_with("first="));
+    assert!(values[0].len() <= 8192);
+}
+
+#[tokio::test]
 async fn masque_refusal_is_the_proxys_answer_not_a_claim_about_the_target() {
     init();
     let proxy = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
