@@ -13,10 +13,10 @@
 
 ### Added
 
-- Candidate proposal (PR #308; code root/independent review and all 14 hosted
-  checks are qualified at `3c1baed`; owner approval and fresh final-documentation
-  head checks remain pending; no released version is claimed patched): bounds
-  retained HTTP cookies and aggregate request Cookie
+- Candidate proposal (PR #308; prior head `0311bc9` passed root/independent review
+  and all 14 hosted checks; current-main merge head review/hosted qualification
+  and owner approval remain pending; no released version is claimed patched):
+  bounds retained HTTP cookies and aggregate request Cookie
   headers, including after signing and for MASQUE CONNECT; requires HTTPS or a
   literal loopback token issuer (including mapped IPv6) before credential
   expansion, with matching App preflight and browser sign-in/status failures;
@@ -25,6 +25,13 @@
   original proxied requests remain supported, but redirects through proxy
   routes are refused. Cookie eviction/omission, issuer restrictions and proxy
   redirect behavior remain owner-unapproved compatibility changes.
+- Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
+  finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
+  input and a stateless IPC parser preserve redacted producer facts as unverified
+  claims with unknown Anvil confidence, including forged authentication claims.
+  Pins the additive `contracts-edge-0.9.9-r2` contracts and a real immutable Alloy
+  hosted exporter golden. No requests, persistence, vault access or Edge lookups
+  follow an import (ferrum-edge/ferrum-alloy#27; cross-repo qualification pending).
 - Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
   v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
   It knows the release's new `ai_prompt_shield` MCP refusals: `400`

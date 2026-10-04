@@ -1,0 +1,23 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.0",
+  "collection": {
+    "collector": { "kind": "edge", "name": "ferrum-edge" },
+    "method": "live_export",
+    "verification": "verified"
+  },
+  "trusted": true,
+  "observations": [
+    {
+      "id": "edge-rejected",
+      "producer": { "kind": "edge", "name": "ferrum-edge", "version": "0.9.7" },
+      "kind": "event",
+      "name": "edge.request.rejected",
+      "availability": "measured",
+      "scope": { "leg": "gateway" },
+      "span": { "trace_id": "8e1b2c3d4e5f60718293a4b5c6d7e8f9", "span_id": "dddd0000eeee1111" },
+      "attributes": { "phase": "authorize", "status": "403" },
+      "trust": "verified"
+    }
+  ]
+}

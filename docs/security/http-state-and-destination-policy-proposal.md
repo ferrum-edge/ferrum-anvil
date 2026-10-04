@@ -3,9 +3,10 @@
 Status: candidate only, owner unapproved. This branch changes the supported HTTP
 profile and security tradeoffs. It must not be merged, activated, represented as an
 approved release profile, or used to close the advisories until root completes its
-review and fresh exact-head hosted qualification of the final documentation
+review and fresh exact-head hosted qualification of the current-main merge
 commit, and then obtains the owner's explicit decision. Root and independent
-security/concurrency reviews of the code candidate are complete.
+security/concurrency reviews of the prior candidate are complete; review and
+hosted qualification of this merge head remain pending.
 Candidate preparation was authorized; adopting these defaults was not.
 
 The candidate now implements the core, App preflight, target-API sign-in/status
@@ -29,7 +30,7 @@ All three reports concern a source snapshot based on
 distributed 0.1.1 binary or any other released version is affected. This candidate
 does not establish an affected or patched release range.
 
-Current main still retained an unbounded `CookieStore` per isolation, resolved
+The original preparation base retained an unbounded `CookieStore` per isolation, resolved
 OAuth client secrets before endpoint policy, and followed redirects without a
 resolved-address authority boundary. Existing epoch/generation fences, native
 purpose controls, token revocation, prepared private-key handling, client identity
@@ -366,8 +367,44 @@ recorded candidate's hosted coverage, not physical OS-provider acceptance,
 renderer-independent native network consent, a memory/RSS benchmark, an
 authenticated diagnostic producer, or a patched released binary.
 
-This qualification-only documentation update creates a new head. Root must wait
-for all hosted checks on that exact head before presenting the adoption decision.
+The subsequent documentation head was
+`0311bc9fc270067a5fe2bf1ad188a969f60c1039`, against main
+`4254ea84c101bdc9231a4c6f455421e22468d0ec`. Root's
+[owner decision comment](https://github.com/ferrum-edge/ferrum-anvil/pull/308#issuecomment-5981720123)
+records complete root/delta and independent security/concurrency reviews, all 14
+check-runs and all three workflows successful, all seven effective required gates
+successful from Actions app 15368, and no remaining review threads:
+
+- [CI 37212996224](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37212996224).
+- [Desktop E2E 37212996232](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37212996232).
+- [Lab 37212996255](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37212996255).
+
 Owner approval of cookie eviction/omission, issuer restrictions, address classes
 and proxy redirect compatibility remains required. None of the three advisories
 is closed by this qualification record.
+
+### Current-main integration — pending qualification
+
+This normal merge refreshes PR #308 from the qualified prior head
+`0311bc9fc270067a5fe2bf1ad188a969f60c1039` with main
+`c19c0a6abba896bfec972b3e083179c55ef8e38c`, which includes diagnostic-import
+PR #312. Those are the first and second parents of this merge. The prior
+successful exact-head evidence above does not qualify the merge head containing
+this update. Root owns fresh exact-head review and hosted CI; the supported HTTP
+profile decision remains pending and the PR remains a draft.
+
+The sole merge conflict was the adjacent Added entries in `CHANGELOG.md`.
+Both the HTTP candidate and main's diagnostic-import entry remain under
+`[Unreleased]`; released sections are unchanged. No integration logic repair was
+needed. HTTP candidate source and regression assertions remain unchanged from
+the prior head, including bounded cookies/PSL handling, canonical HTTPS or
+literal-loopback OAuth boundaries, pinned redirect destinations, proxy redirect
+refusal and recorded-lookup/native-ordering proof. Intentional initial
+private/loopback destinations and original proxy trust retain the same limits.
+
+Main's diagnostic importer, contracts, tests and documentation are retained
+unchanged. Its dedicated text-only IPC command remains stateless; imported JSON
+does not gain request, vault, persistence, lookup or identity authority. Existing
+owner questions and physical packaged-platform, process RSS and native consent
+limitations remain. No supported policy is adopted, advisory closed or patched
+released version claimed by this integration.
