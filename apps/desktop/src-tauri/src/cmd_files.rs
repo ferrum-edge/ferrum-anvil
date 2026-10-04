@@ -14,7 +14,7 @@ use crate::commands::{R, blocking, e, id};
 use crate::state::DesktopState;
 use anvil_app::App;
 use anvil_app::file_grants::{Access, FileGrant, FilePurpose, GrantError};
-use anvil_app::linked_files::{LinkedFileReferrer, LinkedFileStatus};
+use anvil_app::linked_files::{LinkedFileEpoch, LinkedFileReferrer, LinkedFileStatus};
 use anvil_app::token_files::TokenFileBinding;
 use serde::Deserialize;
 use std::path::Path;
@@ -99,7 +99,10 @@ async fn choose_native(
     let generation = st.file_grants.generation();
     // The profile the dialog is shown for. Held weakly: an open dialog does
     // not keep a profile that has since been closed in memory.
-    let shown_for = Arc::downgrade(&st.app()?);
+    let shown_app = st.app()?;
+    let linked_epoch = shown_app.linked_file_epoch();
+    let shown_for = Arc::downgrade(&shown_app);
+    drop(shown_app);
     let options = options.unwrap_or_default();
     match purpose.access() {
         Access::Write if options.multiple => return Err("a save dialog chooses one file".into()),
@@ -149,7 +152,7 @@ async fn choose_native(
     for file in picked {
         let path = file.into_path().map_err(|x| x.to_string())?;
         let grant = match (&bind, purpose.access()) {
-            (Some(bind), _) => bind_picked(&st, &app, generation, bind, &path)?,
+            (Some(bind), _) => bind_picked(&st, &app, generation, linked_epoch, bind, &path)?,
             (None, _) if purpose == FilePurpose::PemPrivateKey => {
                 st.file_grants.grant_private_key_at(&app, &path, generation).map_err(|x| x.to_string())?
             }
@@ -196,27 +199,50 @@ fn bind_target(purpose: FilePurpose, referrer: Option<LinkedFileReferrer>, old_p
 /// Bind the file picked in a dialog shown in `generation` for `app`, as
 /// `bind` says. Nothing is bound or written once a lock or another profile
 /// has intervened since the dialog was shown.
-fn bind_picked(st: &DesktopState, app: &Arc<App>, generation: u64, bind: &Bind, path: &Path) -> Result<FileGrant, String> {
-    // Whether no lock and no other profile has intervened since the dialog was shown.
+fn bind_picked(
+    st: &DesktopState,
+    app: &Arc<App>,
+    generation: u64,
+    linked_epoch: LinkedFileEpoch,
+    bind: &Bind,
+    path: &Path,
+) -> Result<FileGrant, String> {
+    bind_picked_at_checkpoints(st, app, (generation, linked_epoch), bind, path, |_| {})
+}
+
+fn bind_picked_at_checkpoints(
+    st: &DesktopState,
+    app: &Arc<App>,
+    epochs: (u64, LinkedFileEpoch),
+    bind: &Bind,
+    path: &Path,
+    mut checkpoint: impl FnMut(&str),
+) -> Result<FileGrant, String> {
+    let (generation, linked_epoch) = epochs;
     let unchanged = || st.file_grants.generation() == generation && st.is_current(app);
-    // Checked again right before the bind: a profile opened since the check
-    // in `file_choose` must not have the file bound into the one it replaced.
     if !unchanged() {
         return Err(GrantError::Revoked.to_string());
     }
-    let (id, bound) = match bind {
-        Bind::TokenFile => app.bind_token_file(path).map(|b| (b.id, b.path)),
-        Bind::Linked(referrer) => app.bind_linked_file(*referrer, path).map(|b| (b.id, b.path)),
-        Bind::Relocate(referrer, old) => app.relocate_linked_file(*referrer, old, path).map(|b| (b.id, b.path)),
+    checkpoint("prechecked");
+    let choice = match bind {
+        Bind::TokenFile => Ok(None),
+        Bind::Linked(referrer) => app.bind_linked_file_at(*referrer, path, linked_epoch).map(Some),
+        Bind::Relocate(referrer, old) => {
+            app.relocate_linked_file_at(*referrer, old, path, linked_epoch).map(Some)
+        }
     }
-    .map_err(e)?;
-    // A lock or another profile opening during the bind returns nothing to
-    // the webview. The binding is kept: it names only a file the user chose
-    // in the native dialog, lets nothing read it without a request that
-    // names it, and may predate this choice, so removing it here could drop
-    // a binding the user made earlier. So is a relocation written by then:
-    // it names only the file the user picked for that request or dataset.
+    .map_err(|err| if unchanged() { e(err) } else { GrantError::Revoked.to_string() })?;
+    let (id, bound) = if let Some(choice) = &choice {
+        (choice.binding.id, choice.binding.path.clone())
+    } else {
+        let binding = app.bind_token_file(path).map_err(e)?;
+        (binding.id, binding.path)
+    };
+    checkpoint("bound");
     if !unchanged() {
+        if let Some(choice) = &choice {
+            app.revoke_linked_file_choice(choice);
+        }
         return Err(GrantError::Revoked.to_string());
     }
     let file_name = Path::new(&bound).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -330,18 +356,20 @@ mod tests {
         // The dialog is shown, then the app locks and is unlocked again
         // before the user picks the file.
         let generation = st.file_grants.generation();
+        let linked_epoch = app.linked_file_epoch();
         st.lock();
         let seen = st.epoch();
         let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
         st.unlock_since(&app, key, seen).unwrap();
-        assert_eq!(bind_picked(&st, &app, generation, &relocate, &picked), Err(GrantError::Revoked.to_string()));
+        assert_eq!(bind_picked(&st, &app, generation, linked_epoch, &relocate, &picked), Err(GrantError::Revoked.to_string()));
         assert_eq!(app.request(&r.meta.id).unwrap().spec, spec, "the request is not rewritten");
         assert!(app.linked_file_bindings().unwrap().is_empty(), "nothing is bound");
 
         // Still locked when the file is picked: nothing is written either.
         let generation = st.file_grants.generation();
+        let linked_epoch = app.linked_file_epoch();
         st.lock();
-        assert_eq!(bind_picked(&st, &app, generation, &relocate, &picked), Err(GrantError::Revoked.to_string()));
+        assert_eq!(bind_picked(&st, &app, generation, linked_epoch, &relocate, &picked), Err(GrantError::Revoked.to_string()));
         let seen = st.epoch();
         let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
         st.unlock_since(&app, key, seen).unwrap();
@@ -349,12 +377,71 @@ mod tests {
 
         // A dialog shown after the unlock relocates the reference.
         let generation = st.file_grants.generation();
-        let grant = bind_picked(&st, &app, generation, &relocate, &picked).unwrap();
+        let linked_epoch = app.linked_file_epoch();
+        let grant = bind_picked(&st, &app, generation, linked_epoch, &relocate, &picked).unwrap();
         assert_eq!(grant.path.as_deref(), Some(picked_path.as_str()));
         assert_eq!(grant.file_name, "upload.bin");
         let Body::Binary { attachment, .. } = app.request(&r.meta.id).unwrap().spec.body else { panic!("binary body") };
         assert_eq!(attachment, AttachmentRef::LinkedFile { path: picked_path.clone() });
         let bound: Vec<_> = app.linked_file_bindings().unwrap().into_iter().map(|b| (b.referrer, b.path)).collect();
         assert_eq!(bound, vec![(referrer, picked_path)]);
+    }
+
+    #[tokio::test]
+    async fn linked_dialog_authority_cannot_cross_the_bind_precheck_or_postcheck() {
+        for relocate in [false, true] {
+            for barrier in ["prechecked", "bound"] {
+                let root = TempRoot::new();
+                let st = DesktopState::new(root.0.clone());
+                let (app, dir) = create(&st, "A");
+                st.set_app_since(app, st.epoch()).unwrap();
+                let app = st.app().unwrap();
+                let picked = root.0.join("upload.bin");
+                std::fs::write(&picked, "chosen payload").unwrap();
+                let canonical = std::fs::canonicalize(&picked).unwrap().to_str().unwrap().to_string();
+                let old = if relocate { root.0.join("gone.bin").display().to_string() } else { canonical.clone() };
+                let workspace = app.create_workspace("W").unwrap();
+                let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/x");
+                spec.body = Body::Binary {
+                    attachment: AttachmentRef::LinkedFile { path: old.clone() },
+                    content_type: None,
+                };
+                let request = app.create_request(&workspace.meta.id, None, "upload", spec.clone()).unwrap();
+                let referrer = LinkedFileReferrer::Request { id: request.meta.id };
+                let bind = if relocate { Bind::Relocate(referrer, old) } else { Bind::Linked(referrer) };
+                let epochs = (st.file_grants.generation(), app.linked_file_epoch());
+                // The real desktop path pauses after its optimistic check,
+                // then lock/unlock completes before the issuer can capture
+                // any new generation. It must use the dialog's old epoch.
+                let result = bind_picked_at_checkpoints(&st, &app, epochs, &bind, &picked, |point| {
+                    if point == barrier {
+                        st.lock();
+                        let seen = st.epoch();
+                        let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+                        st.unlock_since(&app, key, seen).unwrap();
+                    }
+                });
+                assert_eq!(result, Err(GrantError::Revoked.to_string()));
+                let status = app.linked_file_status(referrer).unwrap();
+                assert!(status.iter().all(|s| s.state != anvil_app::linked_files::LinkedFileState::Bound));
+                let saved = app.request(&request.meta.id).unwrap();
+                let Body::Binary { attachment, .. } = saved.spec.body else { panic!("binary body") };
+                let load = app
+                    .build_context(Some(request.meta.id), &workspace.meta.id, None, &Default::default())
+                    .and_then(|context| context.attachments.load(&attachment).map_err(anvil_app::AppError::Invalid));
+                assert!(load.is_err());
+                if barrier == "prechecked" {
+                    assert!(app.linked_file_bindings().unwrap().is_empty());
+                    assert_eq!(app.request(&request.meta.id).unwrap().spec, spec);
+                }
+                // A new dialog still establishes usable authority.
+                let epochs = (st.file_grants.generation(), app.linked_file_epoch());
+                let fresh = Bind::Linked(referrer);
+                let target = if barrier == "prechecked" && relocate { &bind } else { &fresh };
+                let grant = bind_picked(&st, &app, epochs.0, epochs.1, target, &picked).unwrap();
+                assert_eq!(grant.path, Some(canonical));
+                assert_eq!(app.linked_file_status(referrer).unwrap()[0].state, anvil_app::linked_files::LinkedFileState::Bound);
+            }
+        }
     }
 }

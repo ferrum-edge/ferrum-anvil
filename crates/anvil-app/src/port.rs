@@ -367,9 +367,11 @@ impl App {
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
         // erase whatever other callers saved since it was taken.
-        let (plan, notes) = self.store.atomically(|s| {
+        let (plan, notes, selections, deleted) = self.store.atomically(|s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
+            let selections = self.linked_file_handles.lock();
+            let mut deleted = Vec::new();
             let existing = existing(&s.as_read())?;
             let stored = stored_among(&s.as_read(), &uncarried)?;
             let notes = match uncarried_warnings(&uncarried, &stored, "bundle", "imported") {
@@ -554,6 +556,7 @@ impl App {
             let bindings: Vec<LinkedFileBinding> = s.list(kind::LINKED_FILE, None)?;
             for b in bindings.iter().filter(|b| written.contains(&b.referrer.id())) {
                 s.delete(kind::LINKED_FILE, &b.id)?;
+                deleted.push(b.id);
             }
             for (id, v) in &g.secrets {
                 if let Ok(sid) = id.parse::<Id>() {
@@ -568,8 +571,9 @@ impl App {
             // This device's JWT-SVID stays out of every workspace written here
             // until the user allows it on this device.
             crate::device_identity::seal_in(s, g.workspaces.iter().map(|w| &w.meta.id))?;
-            Ok(Ok((plan, notes)))
+            Ok(Ok((plan, notes, selections, deleted)))
         })??;
+        self.retire_linked_selections(selections, &deleted);
         for (sha, bytes) in &g.attachments {
             // The items written above reference it, so it is not marked as
             // added by a user (see `App::put_attachment`).

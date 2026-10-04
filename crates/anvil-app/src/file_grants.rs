@@ -30,7 +30,8 @@
 //! `linked_file_relocate` to repoint it to a new location,
 //! `anvil_app::linked_files`).
 
-use crate::file_handles::{SelectedDirectory, SelectedFile, file_id, no_reparse, open_regular_at};
+use crate::file_handles::publication::OwnedPublication;
+use crate::file_handles::{DescriptorBudget, SelectedDirectory, SelectedFile};
 use anvil_domain::Id;
 use anvil_domain::secret::SecretRef;
 use parking_lot::Mutex;
@@ -242,6 +243,7 @@ pub struct FileGrants {
     state: Mutex<State>,
     next_seq: AtomicU64,
     ttl: Duration,
+    budget: Arc<DescriptorBudget>,
 }
 
 /// A spent private-key grant awaiting its vault write. Its bytes stay native
@@ -277,7 +279,12 @@ impl Default for FileGrants {
 
 impl FileGrants {
     pub fn new(ttl: Duration) -> Self {
-        FileGrants { state: Mutex::new(State { entries: HashMap::new(), generation: 0 }), next_seq: AtomicU64::new(0), ttl }
+        FileGrants {
+            state: Mutex::new(State { entries: HashMap::new(), generation: 0 }),
+            next_seq: AtomicU64::new(0),
+            ttl,
+            budget: Arc::default(),
+        }
     }
 
     /// The current revocation generation. Take it before showing a dialog and
@@ -321,9 +328,8 @@ impl FileGrants {
         if !picked.is_absolute() {
             return Err(GrantError::Invalid("the chosen file has no absolute path".into()));
         }
-        let selected = SelectedFile::choose(picked).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::InvalidInput { GrantError::Invalid(err.to_string()) } else { io(err) }
-        })?;
+        let selected = SelectedFile::choose(picked, &self.budget)
+            .map_err(|err| if err.kind() == std::io::ErrorKind::InvalidInput { GrantError::Invalid(err.to_string()) } else { io(err) })?;
         let file_name = display_name(selected.path.file_name());
         self.insert(purpose, Target::Read(Arc::new(selected)), file_name, generation, vault)
     }
@@ -348,7 +354,7 @@ impl FileGrants {
         let canonical = std::fs::canonicalize(parent).map_err(io)?;
         #[cfg(test)]
         crate::file_handles::test_checkpoint("write_choose_canonical");
-        let dir = Arc::new(SelectedDirectory::open(&canonical).map_err(io)?);
+        let dir = Arc::new(SelectedDirectory::open(&canonical, &self.budget).map_err(io)?);
         let name = SelectedDirectory::leaf(picked).map_err(io)?;
         refuse_directory(&dir, &name)?;
         let file_name = display_name(Some(&name));
@@ -568,64 +574,22 @@ fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
 /// replacing rename cannot exclude a raced replacement on POSIX. This draft
 /// refuses overwrites rather than unlinking a different object.
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
-    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-    use cap_std::fs::OpenOptions;
-
     let Target::Write { dir, name } = target else {
         return Err(GrantError::WrongPurpose);
     };
     #[cfg(test)]
     crate::file_handles::test_checkpoint("write_selected");
     refuse_occupied(dir, name)?;
-    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true).follow(FollowSymlinks::No);
-    #[cfg(unix)]
-    if owner_only {
-        use cap_std::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(not(unix))]
-    let _ = owner_only;
-    let mut file = dir.dir().open_with(&tmp, &options).map_err(io)?.into_std();
-    let meta = file.metadata().map_err(io)?;
-    if !meta.is_file() || !no_reparse(&meta) {
-        return Err(GrantError::Changed);
-    }
-    let id = file_id(&file, &meta).map_err(io)?;
-    // Never remove a temporary pathname on failure: its name may already
-    // belong to somebody else. Leaking our partial is preferable to unlinking
-    // a foreign replacement. The same rule applies after publication.
-    file.write_all(bytes).map_err(io)?;
-    file.sync_all().map_err(io)?;
+    let mut publication = OwnedPublication::create(dir, owner_only).map_err(io)?;
+    publication.file.write_all(bytes).map_err(io)?;
+    publication.file.sync_all().map_err(io)?;
     #[cfg(test)]
     crate::file_handles::test_checkpoint("write_synced");
-    let Some((check, meta)) = open_regular_at(dir.dir(), &tmp).map_err(io)? else {
-        return Err(GrantError::Changed);
-    };
-    if file_id(&check, &meta).map_err(io)? != id {
-        return Err(GrantError::Changed);
-    }
     #[cfg(test)]
     crate::file_handles::test_checkpoint("write_verified");
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    rustix::fs::renameat_with(dir.dir(), &tmp, dir.dir(), name, rustix::fs::RenameFlags::NOREPLACE).map_err(|err| io(err.into()))?;
-    #[cfg(windows)]
-    {
-        // cap-std 4.0.3 has no no-replace rename on Windows. Hard-link
-        // publication never removes an occupied destination. The partial is
-        // deliberately retained. This is an explicit qualification blocker,
-        // not a claim of handle-relative atomic rename on Windows.
-        dir.dir().hard_link(&tmp, dir.dir(), name).map_err(io)?;
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    return Err(GrantError::Invalid("export publication is unsupported on this platform".into()));
-    let Some((published, meta)) = open_regular_at(dir.dir(), name).map_err(io)? else {
-        return Err(GrantError::Changed);
-    };
-    if file_id(&published, &meta).map_err(io)? != id {
-        return Err(GrantError::Changed);
-    }
+    // The kernel publishes this owned object. No source name is re-resolved,
+    // and no postcheck or rollback can modify a raced foreign destination.
+    publication.publish(dir, name).map_err(io)?;
     Ok(())
 }
 

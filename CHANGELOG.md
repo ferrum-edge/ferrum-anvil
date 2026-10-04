@@ -8,10 +8,13 @@
   handles for linked reads and export creation. Linked bindings require native
   reselection after restart/lock and leaf replacement; exports refuse occupied
   destination names. This candidate is **not qualified for release**: dependency
-  lock generation, all-platform hosted validation, replacement/persistence owner
-  decisions, and a stronger publish primitive remain pending. Windows currently
-  uses no-clobber hard-link publication and preserves its partial source file.
-  See `docs/security/file-handle-safety.md` for the concrete draft and blockers.
+  all-platform hosted validation and replacement/persistence owner decisions
+  remain pending. Publication now uses owned Linux descriptors, macOS native
+  descriptor cloning, and Windows native handle rename with no successful extra
+  output link. Linked chooser epochs, replacement revocation, committed binding
+  retirement and retained-descriptor budgets are fenced. macOS clone support
+  and retained staging data still require owner qualification. The real hosted
+  lockfile is preserved. See `docs/security/file-handle-safety.md`.
 
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts

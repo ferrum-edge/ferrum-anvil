@@ -139,9 +139,10 @@ impl AttachmentResolver for StoreAttachments {
                 if self.app_store.is_locked() {
                     return Err(AppError::Locked.to_string());
                 }
-                let selected = self.linked_handles.get(path).ok_or_else(|| {
-                    "the linked local file needs a fresh native selection in this session; choose it again".to_string()
-                })?;
+                let selected = self
+                    .linked_handles
+                    .get(path)
+                    .ok_or_else(|| "the linked local file needs a fresh native selection in this session; choose it again".to_string())?;
                 read_bound_file(selected, FilePurpose::Attachment.max_read_bytes(), "file").map(Bytes::from).map_err(|e| e.to_string())
             }
             AttachmentRef::LinkedFile { path } => Err(format!("the linked local file '{path}' was not chosen on this device")),

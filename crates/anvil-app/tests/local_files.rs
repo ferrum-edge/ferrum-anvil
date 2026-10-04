@@ -620,6 +620,7 @@ fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() 
         let dir = canonical(files.path()).join("dir");
         std::fs::create_dir(&dir).unwrap();
         let inner = canary_file(&dir, "rows.csv");
+        std::fs::write(&inner, "value\nchosen\n").unwrap();
         let d = app.save_dataset(linked_dataset(ws.meta.id, &inner)).unwrap();
         let referrer = LinkedFileReferrer::Dataset { id: d.meta.id };
         assert_eq!(states(&app, referrer), vec![LinkedFileState::Unbound]);

@@ -39,9 +39,10 @@ fn partial_files(dir: &Path) -> Vec<String> {
 }
 
 fn assert_partial_policy(dir: &Path, publications: usize) {
-    // The draft Windows no-clobber hard-link fallback deliberately preserves
-    // its source name. POSIX no-replace rename consumes the source name.
-    assert_eq!(partial_files(dir).len(), if cfg!(windows) { publications } else { 0 });
+    // Linux has no named staging file; Windows moves the owned handle and
+    // leaves no additional link. macOS preserves uncertain staging names:
+    // its descriptor clone creates a distinct output inode (see security doc).
+    assert_eq!(partial_files(dir).len(), if cfg!(target_os = "macos") { publications } else { 0 });
 }
 
 fn vault(root: &Path) -> (App, Id) {

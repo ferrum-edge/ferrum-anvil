@@ -569,9 +569,10 @@ impl App {
         let checkpoint = self.store.checkpoint("before-restore")?;
         // A refusal returns before anything is written; the transaction then
         // commits no change.
-        let (plan, notes) = self.store.atomically(|s| {
+        let (plan, notes, selections, deleted) = self.store.atomically(|s| {
             // Read inside the transaction, so every check sees exactly what
             // the writes below land on.
+            let selections = self.linked_file_handles.lock();
             let local = local(&s.as_read(), &d)?;
             let (plan, mut notes) = match checked_plan(&d, &local, policy, approval) {
                 Ok(checked) => checked,
@@ -618,12 +619,13 @@ impl App {
                     s.delete(kind::API_RULESET, &ruleset.id)?;
                 }
             }
-            write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
+            let deleted = write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
             // This device's workload identity stays out of every workspace
             // written here until the user allows it on this device.
             crate::device_identity::seal_in(s, d.graph.workspaces.iter().map(|w| &w.meta.id))?;
-            Ok(Ok((plan, notes)))
+            Ok(Ok((plan, notes, selections, deleted)))
         })??;
+        self.retire_linked_selections(selections, &deleted);
         Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string()), port::file_sha256(bytes)))
     }
 
@@ -1280,7 +1282,7 @@ impl Writer<'_, '_> {
 }
 
 /// Write every item with the row metadata the app itself gives it.
-fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
+fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<Vec<Id>> {
     let g = &d.graph;
     for x in &g.workspaces {
         w.put(kind::WORKSPACE, &x.meta.id, None, None, 0.0, x)?;
@@ -1346,9 +1348,11 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     let requests = g.requests.iter().map(|r| (kind::REQUEST, r.meta.id));
     let datasets = g.datasets.iter().map(|x| (kind::DATASET, x.meta.id));
     let written: HashSet<Id> = requests.chain(datasets).filter(|(k, id)| !w.keep(k, &id.to_string())).map(|(_, id)| id).collect();
+    let mut deleted = Vec::new();
     let bindings: Vec<LinkedFileBinding> = w.tx.list(kind::LINKED_FILE, None)?;
     for b in bindings.iter().filter(|b| written.contains(&b.referrer.id())) {
         w.tx.delete(kind::LINKED_FILE, &b.id)?;
+        deleted.push(b.id);
     }
     for (id, owner, s) in &d.secrets {
         if !w.keep(SECRET, &s.id) {
@@ -1377,7 +1381,7 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
             w.tx.put_load_report(&r.run_id, Some(&r.plan.workspace_id), r.started_at.timestamp_millis(), r)?;
         }
     }
-    Ok(())
+    Ok(deleted)
 }
 
 #[cfg(test)]

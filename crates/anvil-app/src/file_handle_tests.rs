@@ -108,6 +108,7 @@ impl Tree {
     }
 
     fn outside_untouched(&self) {
+        assert_eq!(std::fs::read_dir(&self.outside).unwrap().count(), 1);
         assert_eq!(std::fs::read(self.outside.join("inner/rows.csv")).unwrap(), OUTSIDE);
         assert!(!self.outside.join("inner/report.json").exists());
         assert_eq!(std::fs::read_dir(self.outside.join("inner")).unwrap().count(), 1);
@@ -173,11 +174,8 @@ fn grant_write_creates_only_in_the_retained_parent_after_a_real_ancestor_swap() 
     let tree = Tree::new();
     let grants = FileGrants::default();
     let grant = grants.grant_write(FilePurpose::BundleExport, &tree.destination()).unwrap();
-    let result = race(
-        "write_selected",
-        move || grants.write(&grant.token, FilePurpose::BundleExport, b"chosen export"),
-        || tree.swap(true),
-    );
+    let result =
+        race("write_selected", move || grants.write(&grant.token, FilePurpose::BundleExport, b"chosen export"), || tree.swap(true));
     assert_eq!(result.unwrap(), 13);
     assert_eq!(std::fs::read(tree.original_dir().join("report.json")).unwrap(), b"chosen export");
     tree.outside_untouched();
@@ -258,56 +256,87 @@ fn a_destination_planted_after_sync_is_never_truncated_or_unlinked() {
 }
 
 #[test]
-fn a_foreign_temporary_name_is_preserved_when_the_open_file_identity_disagrees() {
-    let tree = Tree::new();
-    let grants = FileGrants::default();
-    let grant = grants.grant_write(FilePurpose::BundleExport, &tree.destination()).unwrap();
-    let mut temporary = None;
-    let result = race(
-        "write_synced",
-        move || grants.write(&grant.token, FilePurpose::BundleExport, b"our export"),
-        || {
-            let path = std::fs::read_dir(tree.original_dir())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| path.extension().is_some_and(|ext| ext == "partial"))
-                .unwrap();
-            std::fs::rename(&path, tree.original_dir().join("our-preserved-partial")).unwrap();
-            std::fs::write(&path, b"foreign temporary").unwrap();
-            temporary = Some(path);
-        },
-    );
-    assert_eq!(result.unwrap_err(), GrantError::Changed);
-    assert_eq!(std::fs::read(temporary.unwrap()).unwrap(), b"foreign temporary");
-    assert_eq!(std::fs::read(tree.original_dir().join("our-preserved-partial")).unwrap(), b"our export");
-    assert!(!tree.destination().exists());
-    tree.outside_untouched();
+fn publication_never_moves_a_foreign_source_at_either_publication_barrier() {
+    for point in ["write_synced", "write_verified"] {
+        let tree = Tree::new();
+        let grants = FileGrants::default();
+        let grant = grants.grant_write(FilePurpose::BundleExport, &tree.destination()).unwrap();
+        let mut foreign_name = None;
+        let mut preserved = None;
+        let result = race(
+            point,
+            move || grants.write(&grant.token, FilePurpose::BundleExport, b"our export"),
+            || {
+                let source = std::fs::read_dir(tree.original_dir())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| path.extension().is_some_and(|ext| ext == "partial"));
+                let temporary = if let Some(source) = source {
+                    let moved = tree.original_dir().join("our-preserved-partial");
+                    match std::fs::rename(&source, &moved) {
+                        Ok(()) => preserved = Some(moved),
+                        Err(err) => {
+                            assert!(cfg!(windows));
+                            assert!(matches!(err.raw_os_error(), Some(5 | 32)));
+                            return;
+                        }
+                    }
+                    source
+                } else {
+                    assert!(cfg!(target_os = "linux"), "only Linux uses an unnamed source");
+                    // There is no source pathname to swap. Inject a foreign
+                    // partial anyway: publication must never claim or use it.
+                    tree.original_dir().join(".anvil-forged.partial")
+                };
+                std::fs::hard_link(tree.outside.join("inner/rows.csv"), &temporary).unwrap();
+                foreign_name = Some(temporary);
+            },
+        );
+        assert_eq!(result.unwrap(), 10);
+        assert_eq!(std::fs::read(tree.destination()).unwrap(), b"our export");
+        if let Some(path) = foreign_name {
+            assert_eq!(std::fs::read(path).unwrap(), OUTSIDE);
+        }
+        if let Some(path) = preserved {
+            assert_eq!(std::fs::read(path).unwrap(), b"our export");
+        }
+        if cfg!(windows) {
+            assert_eq!(std::fs::read_dir(tree.original_dir()).unwrap().count(), 2);
+        }
+        tree.outside_untouched();
+    }
 }
 
 #[test]
-fn draft_publish_blocker_a_name_swap_after_identity_check_is_detected_but_not_rolled_back() {
+fn publication_preserves_an_outside_hardlink_planted_at_the_destination() {
+    for point in ["write_synced", "write_verified"] {
+        let tree = Tree::new();
+        let grants = FileGrants::default();
+        let grant = grants.grant_write(FilePurpose::BundleExport, &tree.destination()).unwrap();
+        let result = race(
+            point,
+            move || grants.write(&grant.token, FilePurpose::BundleExport, b"our export"),
+            || std::fs::hard_link(tree.outside.join("inner/rows.csv"), tree.destination()).unwrap(),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(tree.destination()).unwrap(), OUTSIDE);
+        tree.outside_untouched();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_never_follows_a_destination_symlink_planted_at_the_final_barrier() {
     let tree = Tree::new();
     let grants = FileGrants::default();
     let grant = grants.grant_write(FilePurpose::BundleExport, &tree.destination()).unwrap();
     let result = race(
         "write_verified",
         move || grants.write(&grant.token, FilePurpose::BundleExport, b"our export"),
-        || {
-            let temporary = std::fs::read_dir(tree.original_dir())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| path.extension().is_some_and(|ext| ext == "partial"))
-                .unwrap();
-            std::fs::rename(&temporary, tree.original_dir().join("our-preserved-partial")).unwrap();
-            std::fs::write(temporary, b"foreign temporary").unwrap();
-        },
+        || std::os::unix::fs::symlink(tree.outside.join("inner/report.json"), tree.destination()).unwrap(),
     );
-    assert_eq!(result.unwrap_err(), GrantError::Changed);
-    // This deliberately proves the remaining blocker: a name-based publish
-    // can move the foreign source before the post-publish check refuses it.
-    // Preserve both objects instead of attempting an unsafe rollback/unlink.
-    assert_eq!(std::fs::read(tree.destination()).unwrap(), b"foreign temporary");
-    assert_eq!(std::fs::read(tree.original_dir().join("our-preserved-partial")).unwrap(), b"our export");
+    assert!(result.is_err());
+    assert!(std::fs::symlink_metadata(tree.destination()).unwrap().file_type().is_symlink());
     tree.outside_untouched();
 }
 
@@ -412,5 +441,161 @@ fn a_fifo_swapped_after_the_regular_leaf_filter_never_blocks_the_actual_linked_r
         },
     );
     assert!(result.unwrap_err().to_string().contains("not a regular file"));
+    tree.outside_untouched();
+}
+
+#[test]
+fn replacement_revokes_the_old_context_before_unlocking_the_registry() {
+    let tree = Tree::new();
+    let profiles = tempfile::tempdir().unwrap();
+    let app = Arc::new(app(profiles.path()));
+    let workspace = app.create_workspace("files").unwrap();
+    let attachment = AttachmentRef::LinkedFile { path: tree.source().to_str().unwrap().into() };
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9");
+    spec.body = Body::Binary { attachment: attachment.clone(), content_type: None };
+    let request = app.create_request(&workspace.meta.id, None, "upload", spec).unwrap();
+    let referrer = LinkedFileReferrer::Request { id: request.meta.id };
+    app.bind_linked_file(referrer, &tree.source()).unwrap();
+    let context = app.build_context(Some(request.meta.id), &workspace.meta.id, None, &Default::default()).unwrap();
+    let worker_app = app.clone();
+    let source = tree.source();
+    let result = race(
+        "linked_replaced_before_drop",
+        move || worker_app.bind_linked_file(referrer, &source),
+        || {
+            app.lock();
+            let (_, key) = ProfileManager::unlock(&app.dir, crate::profiles::Unlock::Passphrase("test passphrase")).unwrap();
+            app.unlock(key).unwrap();
+            assert!(context.attachments.load(&attachment).is_err());
+        },
+    );
+    assert!(result.is_ok());
+    assert!(context.attachments.load(&attachment).is_err());
+    tree.outside_untouched();
+}
+
+#[test]
+fn relocation_retires_committed_deleted_handles_and_keeps_descriptor_use_constant() {
+    let tree = Tree::new();
+    let profiles = tempfile::tempdir().unwrap();
+    let app = app(profiles.path());
+    let second = tree.original_dir().join("second.csv");
+    std::fs::write(&second, CHOSEN).unwrap();
+    let dataset = dataset(&app, &tree.source());
+    let referrer = LinkedFileReferrer::Dataset { id: dataset.meta.id };
+    let binding = app.bind_linked_file(referrer, &tree.source()).unwrap();
+    let budget = app.linked_file_handles.lock().budget.clone();
+    let baseline = budget.used();
+    let mut path = binding.path;
+    for turn in 0..60 {
+        let picked = if turn % 2 == 0 { second.clone() } else { tree.source() };
+        path = app.relocate_linked_file(referrer, &path, &picked).unwrap().path;
+        assert_eq!(app.linked_file_bindings().unwrap().len(), 1);
+        assert_eq!(app.linked_file_handles.lock().handles.len(), 1);
+        assert_eq!(budget.used(), baseline);
+    }
+    app.lock();
+    assert_eq!(budget.used(), 0);
+    tree.outside_untouched();
+}
+
+#[test]
+fn retained_contexts_charge_real_chains_and_files_even_after_registry_retirement() {
+    use super::{DescriptorBudget, MAX_DESCRIPTORS, SelectedFile};
+    let tree = Tree::new();
+    let budget = Arc::new(DescriptorBudget::default());
+    let mut retained = Vec::new();
+    while let Ok(selected) = SelectedFile::choose(&tree.source(), &budget) {
+        retained.push(Arc::new(selected));
+    }
+    assert!(!retained.is_empty());
+    let each = retained[0].parent.chain.len() + 1;
+    assert_eq!(budget.used(), retained.len() * each);
+    assert!(budget.used() <= MAX_DESCRIPTORS);
+    assert!(MAX_DESCRIPTORS - budget.used() < each);
+    for selected in &retained {
+        selected.revoke();
+    }
+    assert_eq!(budget.used(), retained.len() * each);
+    drop(retained);
+    assert_eq!(budget.used(), 0);
+    assert!(SelectedFile::choose(&tree.source(), &budget).is_ok());
+    tree.outside_untouched();
+}
+
+#[test]
+fn an_import_retires_deleted_bindings_and_revokes_old_contexts_after_commit() {
+    use crate::port::ImportApproval;
+    use anvil_portability::ExportMode;
+    use anvil_portability::plan::ConflictPolicy;
+    let tree = Tree::new();
+    let profiles = tempfile::tempdir().unwrap();
+    let app = app(profiles.path());
+    let workspace = app.create_workspace("files").unwrap();
+    let attachment = AttachmentRef::LinkedFile { path: tree.source().to_str().unwrap().into() };
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9");
+    spec.body = Body::Binary { attachment: attachment.clone(), content_type: None };
+    let request = app.create_request(&workspace.meta.id, None, "upload", spec).unwrap();
+    let referrer = LinkedFileReferrer::Request { id: request.meta.id };
+    app.bind_linked_file(referrer, &tree.source()).unwrap();
+    let context = app.build_context(Some(request.meta.id), &workspace.meta.id, None, &Default::default()).unwrap();
+    let budget = app.linked_file_handles.lock().budget.clone();
+    let (bytes, _) = app.export(Some(&workspace.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
+    let approval = ImportApproval::for_file(&bytes, vec![workspace.meta.id]);
+    assert!(app.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace).is_err());
+    assert_eq!(context.attachments.load(&attachment).unwrap().as_ref(), CHOSEN);
+    app.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace, &approval).unwrap();
+    assert!(app.linked_file_bindings().unwrap().is_empty());
+    assert!(app.linked_file_handles.lock().handles.is_empty());
+    assert!(context.attachments.load(&attachment).is_err());
+    assert!(budget.used() > 0, "the old context still owns descriptors");
+    drop(context);
+    assert_eq!(budget.used(), 0);
+    tree.outside_untouched();
+}
+
+#[test]
+fn backup_restore_retires_only_committed_deleted_selections() {
+    use crate::port::ImportApproval;
+    use anvil_portability::plan::ConflictPolicy;
+    let tree = Tree::new();
+    let profiles = tempfile::tempdir().unwrap();
+    let app = app(profiles.path());
+    let dataset = dataset(&app, &tree.source());
+    let referrer = LinkedFileReferrer::Dataset { id: dataset.meta.id };
+    app.bind_linked_file(referrer, &tree.source()).unwrap();
+    let budget = app.linked_file_handles.lock().budget.clone();
+    let baseline = budget.used();
+    let (bytes, _) = app.export_backup_with("export passphrase 1", anvil_storage::KdfParams::testing()).unwrap();
+    let approval = ImportApproval::for_file(&bytes, vec![dataset.workspace_id]);
+    assert!(app.restore(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace).is_err());
+    assert_eq!(budget.used(), baseline);
+    assert_dataset_bytes(app.run_dataset(&dataset).unwrap(), CHOSEN);
+    app.restore_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &approval).unwrap();
+    assert_eq!(budget.used(), baseline);
+    app.restore_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Replace, &approval).unwrap();
+    assert!(app.linked_file_bindings().unwrap().is_empty());
+    assert!(app.linked_file_handles.lock().handles.is_empty());
+    assert_eq!(budget.used(), 0);
+    assert!(app.run_dataset(&dataset).is_err());
+    tree.outside_untouched();
+}
+
+#[test]
+fn a_stale_postcheck_receipt_cannot_revoke_a_subsequent_selection() {
+    let tree = Tree::new();
+    let profiles = tempfile::tempdir().unwrap();
+    let app = app(profiles.path());
+    let dataset = dataset(&app, &tree.source());
+    let referrer = LinkedFileReferrer::Dataset { id: dataset.meta.id };
+    let epoch = app.linked_file_epoch();
+    let old = app.bind_linked_file_at(referrer, &tree.source(), epoch).unwrap();
+    let old_selected = app.linked_file_handles.lock().handles.get(&old.binding.id).unwrap().clone();
+    let fresh = app.bind_linked_file_at(referrer, &tree.source(), epoch).unwrap();
+    app.revoke_linked_file_choice(&old);
+    assert!(old_selected.open().is_err());
+    assert_dataset_bytes(app.run_dataset(&dataset).unwrap(), CHOSEN);
+    app.revoke_linked_file_choice(&fresh);
+    assert!(app.run_dataset(&dataset).is_err());
     tree.outside_untouched();
 }

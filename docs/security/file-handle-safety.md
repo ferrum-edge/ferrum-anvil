@@ -2,15 +2,18 @@
 
 Owner decision: **root**. This branch is a review candidate, not an approved
 compatibility change or a qualified fix. Do not close the advisory or claim a
-patched release from this work. The assignment's requirement for cross-platform
-handle-relative atomic rename is **not yet satisfied**.
+patched release from this work. The accepted publication, revocation, dialog
+and retirement defects have concrete source changes below; **all-platform
+hosted qualification is still required**. macOS uses descriptor cloning rather
+than rename and retains uncertain staging names; its support/retention contract
+needs owner attention before integration.
 
 The assigned source base is `4254ea84c101bdc9231a4c6f455421e22468d0ec`.
 [GHSA-6hc8-xjvq-478g](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-6hc8-xjvq-478g)
 reports an ancestor rename followed by symlink/junction replacement between
-canonicalization and a fresh pathname open/create. The advisory's original
-sealed snapshot is a different revision; neither it nor this static inspection
-establishes the affected released binaries.
+canonicalization and a fresh pathname open/create. The advisory API was read in this round. It scopes the finding to reported
+revision `b7aca6f46988dacdaec97f4d2a0af0f8fe238d7e`; neither that sealed snapshot
+nor this static inspection establishes affected released binaries.
 
 ## Implemented candidate
 
@@ -34,10 +37,12 @@ private-key vault ingestion consume these same opened objects. Private-key grant
 remain unavailable through renderer reads, single-use, vault-bound and fenced
 through the existing zeroizing claim and guarded secret transaction.
 
-Referrer records, relocation transactions, imports remaining inert, workspace
-checks, grant purpose, token opacity, grant bounds, TTL and dialog generation
-checks stay in their existing services. No IPC, chooser UI, spec source/approval
-binding, identity backup, HTTP or transport source is changed. `FileGrants`
+Referrer records, imports remaining inert, workspace checks, grant purpose,
+token opacity, token bounds, TTL and PEM vault fencing stay in their services.
+Only the native file chooser changes in the desktop shell. Linked deletion
+hooks in App bundle import and backup restore retire committed selections;
+shared native state, other native commands, HTTP, identity and transport
+implementations are outside this change. `FileGrants`
 method signatures remain compatible with the separate #307 byte-approval work.
 `StoreAttachments` gains an internal retained-selection map; external literal
 construction of that public struct is therefore a Rust source-compatibility
@@ -74,10 +79,33 @@ preserved. Alternatives require a reviewed persistent binding format and
 permission/migration policy, or an explicit capability-transfer design. This
 document does not assert approval for either alternative.
 
-Retained chains consume descriptors. The linked-selection registry currently
-has no new eviction/resource policy; stale records removed by import are not
-used for new contexts, but their handles may remain cached until session lock
-or close. Resource bounds and stale-cache cleanup need root review.
+Selection replacement revokes the removed selection under the registry
+mutex, before it becomes invisible to lock. Relocation, bundle import and
+backup restore carry that mutex guard through the successful database commit,
+retire exactly the committed deleted bindings, and mark them revoked before
+releasing the mutex. Rollback/refusal leaves existing authority intact. Native
+file acquisition and descriptor closure occur outside that mutex; database
+operations during these commits do run under it. Lock order is store transaction
+then selection registry; the store is never acquired while holding the registry
+alone. Old request contexts cannot regain removed authority after unlock.
+
+The desktop captures an opaque linked-selection epoch before opening its
+dialog, passes it through bind/relocate, and the issuer checks that exact epoch
+under the registry mutex held through commit and selection publication. The
+postcheck has a receipt for exactly its selected object: it revokes that object
+and removes it only if it is still the registry entry, preserving a subsequent
+choice. A stale dialog cannot adopt the newer generation after its precheck.
+
+Each opened App session and each FileGrants registry has a **512-descriptor**
+retention budget, independent of the token bound. Each retained root/component
+directory and selected original file is charged before opening; export staging
+also reserves a descriptor. The charge survives registry removal, revocation
+and TTL expiry while an old context or in-flight operation retains the object,
+and is released after actual descriptor closure. New acquisitions fail cleanly
+when exhausted; no live authority is silently evicted by this budget. Temporary
+metadata clones and reopened reads/procfs handles are short-lived I/O rather
+than retained selections. This per-session bound does not cap all unrelated
+process descriptors or an unlimited number of separately opened profiles.
 
 ## Export and publish decisions required
 
@@ -95,28 +123,79 @@ including one planted after the precheck. No destination ownership inference is
 used to authorize an overwrite. This intentionally changes existing-file export
 behavior and the old symlink-replacement positive; root must decide the contract.
 
-Linux and macOS use safe `rustix::fs::renameat_with(..., NOREPLACE)` relative to
-the retained parent. Windows uses cap-std's no-clobber hard-link publication.
-That Windows operation is **not atomic rename** and leaves the `.partial` source
-as an additional link to the output. It relies on the retained directory chain
-for the library's pathname-based hard-link implementation. It does not meet the
-requested native handle-relative rename requirement and needs replacement.
+Publication never resolves a checked temporary name again:
 
-Temporary identity is checked on an opened object before publication, and the
-published object is checked afterward. These checks are **not a source-name
-compare-and-swap**. An actor able to replace the temporary leaf after its last
-check can cause the foreign source to be moved/published inside the selected
-directory before the postcheck returns `Changed`. The deterministic
-`draft_publish_blocker_a_name_swap_after_identity_check_is_detected_but_not_rolled_back`
-test intentionally records this remaining blocker. A check-and-rename loop is
-not a remediation for it. Root needs an audited file-descriptor/handle publish
-primitive on each OS, or a separately approved staging/permission contract.
+- **Linux:** `rustix::fs::openat` creates an unnamed `O_TMPFILE` in the
+  retained parent. After write and file fsync, `linkat` publishes that owned
+  descriptor to one unoccupied leaf. `AT_EMPTY_PATH` is attempted first;
+  unprivileged callers use the documented `AT_SYMLINK_FOLLOW` link through
+  kernel-owned `/proc/self/fd/<live-fd>`. `/proc` is opened no-follow and its
+  filesystem type must be `PROC_SUPER_MAGIC`; an ordinary fake directory is
+  refused. There is no mutable staging leaf for an attacker to replace, and
+  no partial on success or failure. The filesystem must support `O_TMPFILE`
+  and hard-link publication; the unprivileged path requires authentic procfs.
+  No named-source rename fallback is used. This creates a link atomically;
+  it is not a claim that an unnamed inode has undergone rename.
+- **Windows:** the exclusively created staging file is opened with
+  `GENERIC_READ | GENERIC_WRITE | DELETE` and only `FILE_SHARE_READ`. Other
+  handles cannot write or delete/replace it while retained. Publication calls
+  `SetFileInformationByHandle(FileRenameInfoEx)` on that exact handle with
+  the retained destination directory as `RootDirectory`, a single UTF-16
+  leaf, and flags **zero**. No replacement or POSIX-overwrite flag is set.
+  Successful native rename consumes the source name; there is no hard-link
+  fallback and no successful additional `.partial` link. Windows 10 RS1 or
+  newer and filesystem support for this operation are required. Unsupported
+  operations fail instead of falling back to an unsafe publication.
+- **macOS:** an exclusively created, mode-0600 staging file is published
+  by `rustix::fs::fclonefileat` from the retained descriptor into the retained
+  destination directory. Apple documents atomic all-or-nothing creation,
+  refusal of existing destinations, and a separate copy-on-write inode.
+  XNU gets the source vnode from the descriptor (`fp_getfvp`), not its staging
+  pathname. A foreign replacement/hard-link/symlink at that pathname is
+  never published or treated as ours. The filesystem must support cloning
+  (normally APFS), and source/destination must share a volume. There is no
+  name-based copy/rename fallback on unsupported volumes.
 
-No uncertain temporary/final pathname is unlinked on failure or rolled back.
-A foreign replacement and our abandoned partial are preserved, even if that
-leaks a partial. Windows keeps a partial on successful publication too. These
-leaks can carry export data with the original purpose's permissions. Parent
-directory power-loss durability is not claimed by the file-only fsync.
+**macOS staging-retention constraint:** the public API audited here has no
+unlink-by-descriptor operation. A pathname identity check followed by unlink
+would again risk deleting a foreign replacement. This candidate therefore
+preserves the uncertain named staging entry on success and failure, including
+its mode-0600 export data. The clone is an independent inode; this is not the
+removed Windows extra-output-link bug. Root must qualify/replace this concrete
+retention policy, or supply an independently reviewed staging authority model.
+Random names and mode 0700 alone do not prove a namespace inaccessible to a
+same-user actor. Windows may also retain its own staging entry on failure; it
+never cleans up a pathname whose ownership is uncertain.
+
+No uncertain final name is rolled back or unlinked. Native publication itself
+refuses a destination planted after the optimistic precheck. No post-publication
+identity check is used as authorization or as an attempted repair after moving
+a foreign source. A concurrent attacker can still change their writable
+namespace after our publication; this does not authorize the application to
+follow or overwrite that entry. File-only fsync does not claim parent-directory
+power-loss durability or macOS clone-metadata durability.
+
+Primary native API evidence, inspected as data without local execution:
+[Linux O_TMPFILE and fd-link publication](https://man7.org/linux/man-pages/man2/open.2.html),
+[Linux linkat semantics](https://man7.org/linux/man-pages/man2/link.2.html),
+[rustix 1.1.5 safe at APIs](https://github.com/bytecodealliance/rustix/blob/v1.1.5/src/fs/at.rs),
+[Apple clonefile contract](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/clonefile.2),
+[XNU fclonefileat source-vnode acquisition](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
+[Windows FILE_RENAME_INFO root/flags](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info),
+[Windows rename requirements and no-replace semantics](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information),
+[Windows SDK information-class enum](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/minwinbase.h).
+
+The source namespace proof assumes the kernel, this process/descriptor table,
+and its mount namespace are trusted. The advisory's actor may replace selected
+ancestor and leaf entries, including as the same user, but cannot change
+kernel-owned procfs fd links, inject/close our live descriptor, or administer
+our mount namespace. Such process/mount control invalidates this model and
+requires stronger process isolation. Native directory authority does not make
+selected writable file contents immutable against an actor who can directly
+write them. The Windows FFI boundary is narrowly isolated with `allow(unsafe_code)`:
+C layout, buffer alignment/length, live borrowed handles, UTF-16 leaf validation
+and synchronous buffer lifetime are explained at the call site. Its ABI and
+runtime behavior remain all-platform hosted qualification requirements.
 
 The existing grant reservation semantics remain: `take` linearizes a write
 before revocation; a reserved write may finish after `revoke_all`. A failed
@@ -150,28 +229,27 @@ All three `.cargo_vcs_info.json` files name upstream commit
 and [pathname-based Windows rename](https://github.com/bytecodealliance/cap-std/blob/b7acf8e8807fe3fab991884d2208b7e03d35a409/cap-primitives/src/windows/fs/rename_unchecked.rs).
 The archives use edition 2021 and do not declare a package MSRV. Compatibility
 of their full resolved graph with Anvil's Rust 1.90 is not proved by inspection.
-Application code introduces no unsafe code or lint exemption.
+Only the isolated Windows publication FFI introduces unsafe code, with its
+specific layout/lifetime justification; other native filesystem calls use
+safe published APIs.
 The direct safe `rustix` dependency is pinned to the already locked 1.1.5;
 its downloaded archive hash matches the existing Cargo.lock checksum
 `891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d`.
 
-`Cargo.lock` is intentionally unchanged, rather than inventing a dependency
-graph locally. The narrowly scoped `file-handle-lock.yml` workflow runs only
-on pushes to `fix/retained-file-and-export-handles`, checks out the exact push
-SHA without persisted credentials, has only `contents: read`, uses no secrets
-or caches, and resolves with Rust 1.90.0 on GitHub-hosted Linux. It executes no
-project build scripts or tests and uploads the real lock, its SHA-256, exact
-source SHA, run/attempt and toolchain provenance. It cannot write back to Git.
-Root must download the artifact for the immutable pushed SHA, verify provenance
-and hash, inspect the graph/MSRV/licenses/advisories, and apply it in the next
-round. Existing `--locked` CI cannot qualify this branch until that handoff.
+Root already applied the genuine hosted artifact in commit
+`b0e563049f021db8a17eff7f5c9c983ed1c81f72` (110 additions). This round preserves
+that complete lock graph and every existing pin without changes. The current
+lock SHA-256 is `f13b887c98c44bfbad98c823c9b3db39353e0f692df7274bcd0d34b1a7de8b49`.
+No dependency is added by this round, and no local resolver or hand-built lock
+is used. The dedicated hosted workflow remains available for real dependency
+changes; it has no repository write permission or persisted credentials.
 
 ## Hosted proof plan and current evidence
 
 No repository code, formatter, compiler, test or build system was executed
 locally. Static source/diff inspection, archive/index integrity comparison and
-`git diff --check` are the local evidence. The tests below have been written,
-**not executed**. Root owns all-platform CI and independent security review.
+`git diff --check` are the local evidence. New/changed regressions below have been written,
+**not executed in this round**. Root owns all-platform CI and independent security review.
 
 The unit tests inject bounded two-way rendezvous barriers inside actual linked
 dataset/request reads, native chooser handle acquisition and `FileGrants::write`.
@@ -185,7 +263,23 @@ Protected tests assert original selected bytes, unchanged outside files, no
 created outside output or partial, and policy-consistent output in the retained
 directory. Other tests cover chooser-time swaps, opened file ID replacement,
 in-place edits, inert restart records, old lock epochs, occupied final-leaf
-races, preserved foreign temporaries, and the explicit source-publish blocker.
-Existing native PEM, purpose, TTL, size, FIFO, import/referrer and permission
+races, outside-canary hard links injected as source/destination, descriptor
+budgets, 60 relocations with constant registry/descriptor use, old contexts
+across replacement plus lock/unlock, committed import/restore retirement and
+rollback/refusal preservation. Actual desktop bind/relocate regressions pause
+after the precheck and after binding, lock/unlock, prove no usable grant remains,
+and exercise a fresh positive choice. Existing native PEM, purpose, TTL, size, FIFO, import/referrer and permission
 tests remain relevant. Some positive tests explicitly adopt the **draft**
 no-overwrite/reselection policy; they are not evidence of unchanged compatibility.
+
+Current prior-head hosted evidence was read, rather than repeating the obsolete
+missing-lock diagnosis. CI run `37201183351` at b0 failed Linux formatting in
+`exec.rs`, `file_grants.rs`, and `file_handle_tests.rs` (the printed edits are
+applied here). macOS compiled and reached tests, failing the linked-dataset
+positive fixture at `tests/local_files.rs:634`; its non-CSV canary fixture is
+changed to valid CSV here. Supply-chain cargo-deny passed; the generated
+`THIRD_PARTY_LICENSES.md` check failed as stale. Lab and desktop E2E passed at b0.
+These prior-head results do not validate the new native operations, FFI,
+concurrency regressions or formatter changes. Root owns the pushed candidate's
+Linux/macOS/Windows gates, hosted license regeneration outside this worker's
+file scope, and compatibility/retention decisions. No fix is declared qualified.

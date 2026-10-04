@@ -9,12 +9,63 @@ use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[path = "file_publish.rs"]
+pub(crate) mod publication;
+
+/// Charged until the last retained handle closes, including old contexts.
+/// Each grant registry and opened profile has its own 512-descriptor budget.
+#[derive(Debug, Default)]
+pub(crate) struct DescriptorBudget {
+    used: AtomicUsize,
+}
+
+const MAX_DESCRIPTORS: usize = 512;
+
+#[derive(Debug)]
+pub(crate) struct DescriptorLease {
+    budget: Arc<DescriptorBudget>,
+    count: usize,
+}
+
+impl DescriptorBudget {
+    pub(crate) fn reserve(self: &Arc<Self>) -> io::Result<DescriptorLease> {
+        let mut lease = DescriptorLease { budget: self.clone(), count: 0 };
+        lease.grow()?;
+        Ok(lease)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+}
+
+impl DescriptorLease {
+    fn grow(&mut self) -> io::Result<()> {
+        self.budget
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                (used < MAX_DESCRIPTORS).then_some(used + 1)
+            })
+            .map_err(|_| invalid("too many retained file descriptors; release selections first"))?;
+        self.count += 1;
+        Ok(())
+    }
+}
+
+impl Drop for DescriptorLease {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.count, Ordering::AcqRel);
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct LinkedSelections {
     pub(crate) generation: u64,
     pub(crate) handles: HashMap<anvil_domain::Id, Arc<SelectedFile>>,
+    pub(crate) budget: Arc<DescriptorBudget>,
 }
 
 impl LinkedSelections {
@@ -67,19 +118,21 @@ pub(crate) fn no_reparse(meta: &Metadata) -> bool {
     }
 }
 
-/// Keep the entire chain, including on Windows where cap-std's rename and
-/// hard-link implementation depends on handles denying directory deletion.
+/// Keep the entire chain, including on Windows where retained handles deny
+/// directory deletion throughout component acquisition and selected I/O.
 /// No absolute pathname is reconstructed by application code for I/O.
 #[derive(Debug)]
 pub(crate) struct SelectedDirectory {
     chain: Vec<Dir>,
+    // Drop the descriptors before returning their budget.
+    _lease: DescriptorLease,
 }
 
 impl SelectedDirectory {
     /// `path` is an absolute, already canonical chooser result. Each normal
     /// component is opened alone with no-follow, relative to the preceding
     /// descriptor. A swapped symlink/junction cannot be traversed.
-    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path, budget: &Arc<DescriptorBudget>) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(invalid("the chosen directory has no absolute path"));
         }
@@ -105,8 +158,10 @@ impl SelectedDirectory {
                 _ => return Err(invalid("the chosen directory contains a non-normal component")),
             }
         }
+        let mut lease = budget.reserve()?;
         let mut chain = vec![Dir::open_ambient_dir(root, cap_std::ambient_authority())?];
         for name in names {
+            lease.grow()?;
             let next = chain.last().expect("root handle").open_dir_nofollow(name)?;
             let meta = next.try_clone()?.into_std_file().metadata()?;
             if !meta.is_dir() || !no_reparse(&meta) {
@@ -114,11 +169,15 @@ impl SelectedDirectory {
             }
             chain.push(next);
         }
-        Ok(Self { chain })
+        Ok(Self { chain, _lease: lease })
     }
 
     pub(crate) fn dir(&self) -> &Dir {
         self.chain.last().expect("root handle")
+    }
+
+    pub(crate) fn reserve(&self) -> io::Result<DescriptorLease> {
+        self._lease.budget.reserve()
     }
 
     pub(crate) fn leaf(path: &Path) -> io::Result<OsString> {
@@ -143,25 +202,28 @@ pub(crate) struct SelectedFile {
     original: File,
     id: FileId,
     revoked: AtomicBool,
+    _lease: DescriptorLease,
 }
 
 impl SelectedFile {
-    pub(crate) fn choose(picked: &Path) -> io::Result<Self> {
+    pub(crate) fn choose(picked: &Path, budget: &Arc<DescriptorBudget>) -> io::Result<Self> {
         if !picked.is_absolute() {
             return Err(invalid("the chosen file has no absolute path"));
         }
         let path = std::fs::canonicalize(picked)?;
-        Self::open_canonical(path)
+        Self::open_canonical(path, budget)
     }
 
-    pub(crate) fn open_canonical(path: PathBuf) -> io::Result<Self> {
+    pub(crate) fn open_canonical(path: PathBuf, budget: &Arc<DescriptorBudget>) -> io::Result<Self> {
         #[cfg(test)]
         test_checkpoint("choose_canonical");
-        let parent = Arc::new(SelectedDirectory::open(path.parent().ok_or_else(|| invalid("not a regular file"))?)?);
+        let directory = path.parent().ok_or_else(|| invalid("not a regular file"))?;
+        let parent = Arc::new(SelectedDirectory::open(directory, budget)?);
         let name = SelectedDirectory::leaf(&path)?;
+        let lease = budget.reserve()?;
         let (original, meta) = open_regular_at(parent.dir(), &name)?.ok_or_else(|| invalid("not a regular file"))?;
         let id = file_id(&original, &meta)?;
-        Ok(Self { path, parent, name, original, id, revoked: AtomicBool::new(false) })
+        Ok(Self { path, parent, name, original, id, revoked: AtomicBool::new(false), _lease: lease })
     }
 
     pub(crate) fn open(&self) -> io::Result<Option<(File, Metadata)>> {

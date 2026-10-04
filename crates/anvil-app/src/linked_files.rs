@@ -31,7 +31,7 @@
 //! bound for that referrer, and only at their metadata: it never reads a
 //! file, and never touches a path that was not chosen.
 
-use crate::file_handles::SelectedFile;
+use crate::file_handles::{LinkedSelections, SelectedFile};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
@@ -107,29 +107,87 @@ pub struct LinkedFileStatus {
     pub problem: Option<String>,
 }
 
+/// Opaque native-dialog epoch. Capture before showing the dialog.
+#[derive(Clone, Copy)]
+pub struct LinkedFileEpoch(u64);
+
+/// Receipt for exactly the authority installed by one chooser. A stale
+/// desktop postcheck can revoke it without revoking a subsequent choice.
+pub struct LinkedFileChoice {
+    pub binding: LinkedFileBinding,
+    selected: Arc<SelectedFile>,
+}
+
 impl App {
     /// Bind the linked file the user picked in the native open dialog for
     /// `referrer`, which must name that file. Only the desktop's
     /// `file_choose` calls this, with the dialog's result.
     pub fn bind_linked_file(&self, referrer: LinkedFileReferrer, picked: &Path) -> Result<LinkedFileBinding> {
-        let generation = self.linked_file_handles.lock().generation;
-        let canonical = crate::token_files::chosen_path(picked, "linked file")?;
-        let selected = Arc::new(SelectedFile::open_canonical(canonical.into())?);
+        let epoch = self.linked_file_epoch();
+        Ok(self.bind_linked_file_at(referrer, picked, epoch)?.binding)
+    }
+
+    pub fn linked_file_epoch(&self) -> LinkedFileEpoch {
+        LinkedFileEpoch(self.linked_file_handles.lock().generation)
+    }
+
+    /// Bind only in the exact epoch in which the native dialog started.
+    pub fn bind_linked_file_at(
+        &self,
+        referrer: LinkedFileReferrer,
+        picked: &Path,
+        epoch: LinkedFileEpoch,
+    ) -> Result<LinkedFileChoice> {
+        let selected = self.choose_linked_file(picked)?;
         let path = linked_path(&selected)?;
-        if !self.named_linked_files(referrer)?.contains(&path) {
-            return Err(AppError::Invalid(format!(
-                "the chosen file '{path}' is not the linked file this {} names; attach the file instead",
-                referrer.noun()
-            )));
-        }
-        if let Some(b) = self.linked_file_bindings()?.into_iter().find(|b| b.referrer == referrer && b.path == path) {
-            self.remember_linked_selection(&b, selected, generation)?;
-            return Ok(b);
-        }
-        let b = LinkedFileBinding { id: Id::new(), referrer, path, bound_at: Utc::now() };
-        self.store.put(kind::LINKED_FILE, &b.id, None, None, 0.0, &b)?;
-        self.remember_linked_selection(&b, selected, generation)?;
-        Ok(b)
+        #[cfg(test)]
+        crate::file_handles::test_checkpoint("linked_choice_pre_publish");
+        let (binding, mut state) = self.store.atomically(|s| {
+            let state = self.linked_file_handles.lock();
+            if state.generation != epoch.0 {
+                return Ok(Err(AppError::Locked));
+            }
+            if !named_in(s, referrer)?.contains(&path) {
+                return Ok(Err(not_named(&path, referrer)));
+            }
+            let existing = s.list::<LinkedFileBinding>(kind::LINKED_FILE, None)?;
+            let binding = match existing.into_iter().find(|b| b.referrer == referrer && b.path == path) {
+                Some(binding) => binding,
+                None => {
+                    let binding = LinkedFileBinding { id: Id::new(), referrer, path, bound_at: Utc::now() };
+                    s.put(kind::LINKED_FILE, &binding.id, None, None, 0.0, &binding)?;
+                    binding
+                }
+            };
+            // Hold registry synchronization through commit and publication.
+            Ok(Ok((binding, state)))
+        })??;
+        let retired = replace_selection(&mut state, binding.id, selected.clone());
+        drop(state);
+        #[cfg(test)]
+        crate::file_handles::test_checkpoint("linked_replaced_before_drop");
+        drop(retired);
+        Ok(LinkedFileChoice { binding, selected })
+    }
+
+    fn choose_linked_file(&self, picked: &Path) -> Result<Arc<SelectedFile>> {
+        let canonical = crate::token_files::chosen_path(picked, "linked file")?;
+        let budget = self.linked_file_handles.lock().budget.clone();
+        Ok(Arc::new(SelectedFile::open_canonical(canonical.into(), &budget)?))
+    }
+
+    /// Revoke exactly this chooser's authority after a desktop postcheck.
+    pub fn revoke_linked_file_choice(&self, choice: &LinkedFileChoice) {
+        let retired = {
+            let mut state = self.linked_file_handles.lock();
+            choice.selected.revoke();
+            if state.handles.get(&choice.binding.id).is_some_and(|s| Arc::ptr_eq(s, &choice.selected)) {
+                state.handles.remove(&choice.binding.id)
+            } else {
+                None
+            }
+        };
+        drop(retired);
     }
 
     /// Repoint the linked file `old_path` that the saved request or dataset
@@ -147,49 +205,68 @@ impl App {
     /// new one. Another request or dataset that names the old path is left
     /// as it is, and stays unbound until the file is chosen for it.
     pub fn relocate_linked_file(&self, referrer: LinkedFileReferrer, old_path: &str, picked: &Path) -> Result<LinkedFileBinding> {
-        if !self.named_linked_files(referrer)?.iter().any(|p| p == old_path) {
-            return Err(not_named(old_path, referrer));
-        }
-        let generation = self.linked_file_handles.lock().generation;
-        let canonical = crate::token_files::chosen_path(picked, "linked file")?;
-        let selected = Arc::new(SelectedFile::open_canonical(canonical.into())?);
+        let epoch = self.linked_file_epoch();
+        Ok(self.relocate_linked_file_at(referrer, old_path, picked, epoch)?.binding)
+    }
+
+    /// Relocate only in the exact epoch in which the native dialog started.
+    pub fn relocate_linked_file_at(
+        &self,
+        referrer: LinkedFileReferrer,
+        old_path: &str,
+        picked: &Path,
+        epoch: LinkedFileEpoch,
+    ) -> Result<LinkedFileChoice> {
+        let selected = self.choose_linked_file(picked)?;
         let path = linked_path(&selected)?;
         let fresh = LinkedFileBinding { id: Id::new(), referrer, path: path.clone(), bound_at: Utc::now() };
-        let binding = self.store.atomically(|s| {
-            // The request or dataset may have changed since the check above.
+        #[cfg(test)]
+        crate::file_handles::test_checkpoint("linked_choice_pre_publish");
+        let (binding, deleted, mut state) = self.store.atomically(|s| {
+            let state = self.linked_file_handles.lock();
+            if state.generation != epoch.0 {
+                return Ok(Err(AppError::Locked));
+            }
             if let Err(e) = repoint_in(s, referrer, old_path, &path)? {
                 return Ok(Err(e));
             }
             let mut kept = None;
+            let mut deleted = Vec::new();
             for b in s.list::<LinkedFileBinding>(kind::LINKED_FILE, None)?.into_iter().filter(|b| b.referrer == referrer) {
                 if b.path == path {
                     kept = kept.or(Some(b));
                 } else if b.path == old_path {
                     s.delete(kind::LINKED_FILE, &b.id)?;
+                    deleted.push(b.id);
                 }
             }
-            if let Some(b) = kept {
-                return Ok(Ok(b));
-            }
-            s.put(kind::LINKED_FILE, &fresh.id, None, None, 0.0, &fresh)?;
-            Ok(Ok(fresh))
+            let binding = if let Some(b) = kept {
+                b
+            } else {
+                s.put(kind::LINKED_FILE, &fresh.id, None, None, 0.0, &fresh)?;
+                fresh
+            };
+            Ok(Ok((binding, deleted, state)))
         })??;
-        self.remember_linked_selection(&binding, selected, generation)?;
-        Ok(binding)
+        // Only committed deletions retire selections. Revoke before releasing
+        // the registry, and close descriptors after releasing it.
+        let mut retired = retire_selections(&mut state, &deleted);
+        retired.extend(replace_selection(&mut state, binding.id, selected.clone()));
+        drop(state);
+        drop(retired);
+        Ok(LinkedFileChoice { binding, selected })
     }
 
-    fn remember_linked_selection(&self, binding: &LinkedFileBinding, selected: Arc<SelectedFile>, generation: u64) -> Result<()> {
-        let previous = {
-            let mut state = self.linked_file_handles.lock();
-            if state.generation != generation {
-                return Err(AppError::Locked);
-            }
-            state.handles.insert(binding.id, selected)
-        };
-        if let Some(previous) = previous {
-            previous.revoke();
-        }
-        Ok(())
+    /// Import callers acquire this guard while holding the store transaction,
+    /// return it through commit, then retire exactly the committed deletions.
+    pub(crate) fn retire_linked_selections(
+        &self,
+        mut state: parking_lot::MutexGuard<'_, LinkedSelections>,
+        deleted: &[Id],
+    ) {
+        let retired = retire_selections(&mut state, deleted);
+        drop(state);
+        drop(retired);
     }
 
     /// Snapshot only selections whose binding still belongs to this referrer.
@@ -279,6 +356,44 @@ impl App {
         let selected = self.linked_file_handles.lock().handles.get(&binding.id).cloned().ok_or_else(reselect)?;
         read_bound_file(&selected, max, "dataset")
     }
+}
+
+fn replace_selection(
+    state: &mut LinkedSelections,
+    id: Id,
+    selected: Arc<SelectedFile>,
+) -> Option<Arc<SelectedFile>> {
+    let previous = state.handles.insert(id, selected);
+    if let Some(previous) = &previous {
+        previous.revoke();
+    }
+    previous
+}
+
+fn retire_selections(state: &mut LinkedSelections, ids: &[Id]) -> Vec<Arc<SelectedFile>> {
+    ids.iter()
+        .filter_map(|id| state.handles.remove(id))
+        .inspect(|selected| selected.revoke())
+        .collect()
+}
+
+fn named_in(s: &StoreTx<'_>, referrer: LinkedFileReferrer) -> anvil_storage::store::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    match referrer {
+        LinkedFileReferrer::Request { id } => {
+            if let Some(request) = s.get::<RequestDefinition>(kind::REQUEST, &id)? {
+                linked_paths(&serde_json::to_value(request.spec)?, &mut paths);
+            }
+        }
+        LinkedFileReferrer::Dataset { id } => {
+            if let Some(dataset) = s.get::<Dataset>(kind::DATASET, &id)?
+                && let AttachmentRef::LinkedFile { path } = dataset.attachment
+            {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(paths)
 }
 
 /// Rewrite every linked file `referrer` names at `old` to name `new`, in
