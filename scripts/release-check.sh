@@ -132,9 +132,10 @@ if [ "$graph" = 1 ]; then
 fi
 
 # ------------------------------------------------------------ helpers
-is_exe() { # ELF, Mach-O (thin/fat, both endians), PE
+is_exe() { # ELF, Mach-O (thin/fat, both endians), PE; 2 = read error
   local magic
-  magic="$(LC_ALL=C od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')"
+  [ -f "$1" ] && [ -r "$1" ] || return 2
+  magic="$(LC_ALL=C od -An -tx1 -N4 "$1" | tr -d ' \n')" || return 2
   case "$magic" in
     7f454c46|cffaedfe|cefaedfe|feedfacf|feedface|cafebabe|bebafeca) return 0 ;;
     4d5a*) return 0 ;;
@@ -270,6 +271,120 @@ except (OSError, RuntimeError, ValueError) as error:
 PY
 }
 
+# Classify and scan each AppImage file through one descriptor, opened relative
+# to directory descriptors without following links. A readability precheck alone
+# cannot protect a later od/grep open from replacement or an I/O error. Read all
+# regular files to EOF and reject changes; emit NUL-separated scan records only
+# after the entire tree succeeds. The input runtime and payload are never run.
+appimage_scan() {
+  python3 -I - "$1" "${#NEEDLES[@]}" "${NEEDLES[@]}" "${MARKERS[@]}" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+try:
+    root = os.path.abspath(sys.argv[1])
+    count = int(sys.argv[2])
+    needles = [value.encode() for value in sys.argv[3:3 + count]]
+    markers = [value.encode() for value in sys.argv[3 + count:]]
+    desktop = [b"com.ferrumedge.anvil", b"__TAURI_INTERNALS__"]
+    patterns = needles + markers + desktop
+    overlap = max(map(len, patterns)) - 1
+    records = []
+    seen = {}
+    directory_names = {}
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def unchanged(before, after, path):
+        if identity(before) != identity(after):
+            raise ValueError(f"file changed during inspection: {path!r}")
+
+    def walk(directory, directory_fd, verify=False):
+        before_directory = os.fstat(directory_fd)
+        names = os.listdir(directory_fd)
+        if verify:
+            unchanged(seen[directory], before_directory, directory)
+            if set(names) != directory_names[directory]:
+                raise ValueError(f"directory changed during inspection: {directory!r}")
+        else:
+            seen[directory] = before_directory
+            directory_names[directory] = set(names)
+        for name in names:
+            path = os.path.join(directory, name)
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if verify:
+                unchanged(seen[path], before, path)
+            else:
+                seen[path] = before
+            if stat.S_ISLNK(before.st_mode):
+                target = Path(path).resolve()
+                if os.path.commonpath((root, target)) != root:
+                    raise ValueError("symlink escapes the extraction directory")
+            elif stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                try:
+                    unchanged(before, os.fstat(child_fd), path)
+                    walk(path, child_fd, verify)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode) and not verify:
+                file_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                with os.fdopen(file_fd, "rb") as image:
+                    unchanged(before, os.fstat(image.fileno()), path)
+                    magic = image.read(4)
+                    executable = (magic.hex() in (
+                        "7f454c46", "cffaedfe", "cefaedfe", "feedfacf", "feedface",
+                        "cafebabe", "bebafeca",
+                    ) or magic.startswith(b"MZ"))
+                    found = set()
+                    total = len(magic)
+                    tail = magic
+                    while True:
+                        chunk = image.read(1024 * 1024)
+                        data = tail + chunk
+                        if executable:
+                            found.update(pattern for pattern in patterns if pattern in data)
+                        total += len(chunk)
+                        if not chunk:
+                            break
+                        tail = data[-overlap:]
+                    unchanged(before, os.fstat(image.fileno()), path)
+                    if total != before.st_size:
+                        raise ValueError(f"short read during inspection: {path!r}")
+                if executable:
+                    records.append((
+                        os.fsencode(path),
+                        b"\n".join(needle for needle in needles if needle in found),
+                        b"1" if any(marker in found for marker in markers) else b"0",
+                        b"1" if all(marker in found for marker in desktop) else b"0",
+                    ))
+            unchanged(before, os.stat(name, dir_fd=directory_fd, follow_symlinks=False), path)
+        unchanged(before_directory, os.fstat(directory_fd), directory)
+
+    root_fd = os.open(root, directory_flags)
+    try:
+        before_root = os.fstat(root_fd)
+        walk(root, root_fd)
+        # Recheck earlier files after later candidates have been read, too.
+        walk(root, root_fd, verify=True)
+        unchanged(before_root, os.stat(root, follow_symlinks=False), root)
+    finally:
+        os.close(root_fd)
+    for record in records:
+        for field in record:
+            sys.stdout.buffer.write(field + b"\0")
+except (OSError, RuntimeError, ValueError) as error:
+    print(f"AppImage content: could not read a stable extraction tree: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Unpack an artifact into $2 (a directory); print nothing on success.
 unpack() {
   local a="$1" out="$2"
@@ -328,16 +443,28 @@ unpack() {
   esac
 }
 
-scan_file() { # prints needle hits, one per line
+contains_string() { # 0 = match, 1 = no match, 2 = read error
+  local rc=0
+  [ -f "$2" ] && [ -r "$2" ] || return 2
+  # -q may return success after a match even when a read error also occurs.
+  LC_ALL=C grep -a -F -- "$1" "$2" >/dev/null || rc=$?
+  case "$rc" in 0|1) return "$rc" ;; *) return 2 ;; esac
+}
+scan_file() { # prints needle hits, one per line; 2 = read error
   local f="$1" n
   for n in "${NEEDLES[@]}"; do
-    if LC_ALL=C grep -a -q -F -- "$n" "$f"; then printf '%s\n' "$n"; fi
+    local rc=0
+    contains_string "$n" "$f" || rc=$?
+    case "$rc" in 0) printf '%s\n' "$n" ;; 1) ;; *) return 2 ;; esac
   done
+  return 0
 }
 has_marker() {
   local f="$1" m
   for m in "${MARKERS[@]}"; do
-    if LC_ALL=C grep -a -q -F -- "$m" "$f"; then return 0; fi
+    local rc=0
+    contains_string "$m" "$f" || rc=$?
+    case "$rc" in 0) return 0 ;; 1) ;; *) return 2 ;; esac
   done
   return 1
 }
@@ -401,9 +528,13 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
   if [ ! -e "$path" ]; then bad_input "$a does not exist"; continue; fi
   dir="$work/a$idx"
   files=()
+  appimage=0; scanned=0; scan_hits=(); scan_markers=(); scan_desktops=()
+  rc=1
+  if [ -f "$path" ]; then rc=0; is_exe "$path" || rc=$?; fi
+  if [ "$rc" -gt 1 ]; then bad_input "$a: could not read file for classification"; continue; fi
   # Installers that are themselves executables (NSIS, and an AppImage, whose
   # ELF runtime carries the app in a squashfs payload) are unpacked instead.
-  if [ -f "$path" ] && is_exe "$path" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe|*.AppImage) false ;; *) true ;; esac; then
+  if [ "$rc" = 0 ] && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe|*.AppImage) false ;; *) true ;; esac; then
     files=("$path")
   else
     if [ -d "$path" ]; then
@@ -412,24 +543,63 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
       rc=0; unpack "$path" "$dir" || rc=$?
       if [ "$rc" = 2 ]; then bad_input "$a: unsupported artifact type"; continue; fi
       if [ "$rc" != 0 ]; then bad_input "$a: could not unpack"; continue; fi
+      case "$a" in *.AppImage) appimage=1 ;; esac
     fi
-    while IFS= read -r -d '' f; do
-      if is_exe "$f"; then files+=("$f"); fi
-    done < <(find -P "$dir" -type f -print0 2>/dev/null)
+    candidates="$work/candidates.$idx"
+    case "$appimage" in
+      1)
+        if ! appimage_scan "$dir/squashfs-root" >"$candidates"; then
+          bad_input "$a: could not inspect AppImage contents"; continue
+        fi
+        scanned=1
+        while IFS= read -r -d '' f && IFS= read -r -d '' hits && \
+          IFS= read -r -d '' marker && IFS= read -r -d '' desktop; do
+          files+=("$f"); scan_hits+=("$hits"); scan_markers+=("$marker"); scan_desktops+=("$desktop")
+        done <"$candidates" ;;
+      *)
+        if ! find -P "$dir" -type f -print0 >"$candidates"; then
+          bad_input "$a: could not enumerate regular files"; continue
+        fi
+        classification_error=0
+        while IFS= read -r -d '' f; do
+          rc=0; is_exe "$f" || rc=$?
+          case "$rc" in
+            0) files+=("$f") ;;
+            1) ;;
+            *) bad_input "$f: could not read file for classification"; classification_error=1; break ;;
+          esac
+        done <"$candidates"
+        [ "$classification_error" = 0 ] || continue ;;
+    esac
   fi
   if [ ${#files[@]} -eq 0 ]; then bad_input "$a: no executable images found"; continue; fi
 
-  art_hits=0; art_marker=0; hit_list=""
-  for f in "${files[@]}"; do
-    hits="$(scan_file "$f")"
-    if has_marker "$f"; then art_marker=1; fi
+  art_hits=0; art_marker=0; hit_list=""; content_error=0
+  for ((file_index = 0; file_index < ${#files[@]}; file_index++)); do
+    f="${files[$file_index]}"
+    if [ "$scanned" = 1 ]; then
+      hits="${scan_hits[$file_index]}"
+      [ "${scan_markers[$file_index]}" = 0 ] || art_marker=1
+    else
+      if ! hits="$(scan_file "$f")"; then
+        bad_input "$f: could not read file for hook scan"; content_error=1; break
+      fi
+      rc=0; has_marker "$f" || rc=$?
+      case "$rc" in
+        0) art_marker=1 ;;
+        1) ;;
+        *) bad_input "$f: could not read file for marker scan"; content_error=1; break ;;
+      esac
+    fi
     if [ -n "$hits" ]; then
       art_hits=1
       fail "$(basename "$f"): contains test-only strings: $(printf '%s' "$hits" | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
       hit_list="$hit_list$(printf '%s' "$hits" | tr '\n' '|')"
     fi
   done
-  if [ "$art_marker" = 0 ]; then
+  if [ "$content_error" = 1 ]; then
+    status="error"
+  elif [ "$art_marker" = 0 ]; then
     bad_input "$a: no Anvil marker string found in ${#files[@]} executable(s) — refusing to pass an artifact whose contents could not be read"
     status="error"
   elif [ "$art_hits" = 1 ]; then
@@ -440,17 +610,28 @@ for a in ${artifacts[@]+"${artifacts[@]}"}; do
   fi
 
   probe_status="skipped"
-  if [ "$probe" = 1 ]; then
+  if [ "$probe" = 1 ] && [ "$status" != "error" ]; then
     # Probe the desktop app: the executable carrying both the app identifier
     # and the Tauri runtime (the CLI also contains the identifier).
     target=""
-    for f in "${files[@]}"; do
+    for ((file_index = 0; file_index < ${#files[@]}; file_index++)); do
+      f="${files[$file_index]}"
       case "$f" in *.dll|*.so|*.so.*|*.dylib) continue ;; esac
-      if LC_ALL=C grep -a -q -F "com.ferrumedge.anvil" "$f" && LC_ALL=C grep -a -q -F "__TAURI_INTERNALS__" "$f"; then
-        target="$f"; break
+      if [ "$scanned" = 1 ]; then
+        if [ "${scan_desktops[$file_index]}" = 1 ]; then target="$f"; break; fi
+      else
+        rc=0; contains_string "com.ferrumedge.anvil" "$f" || rc=$?
+        if [ "$rc" = 0 ]; then contains_string "__TAURI_INTERNALS__" "$f" || rc=$?; fi
+        case "$rc" in
+          0) target="$f"; break ;;
+          1) ;;
+          *) bad_input "$f: could not read file for probe selection"; status="error"; break ;;
+        esac
       fi
     done
-    if [ -z "$target" ]; then
+    if [ "$status" = "error" ]; then
+      probe_status="error"
+    elif [ -z "$target" ]; then
       say "      probe: no desktop executable in this artifact (skipped)"
     else
       [ -x "$target" ] || chmod +x "$target" 2>/dev/null || true

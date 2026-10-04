@@ -94,6 +94,8 @@ class ReleaseCheckAppImage(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         require_github_hosted()
+        if os.geteuid() == 0:
+            raise RuntimeError("release checker permission fixtures require a non-root runner")
         for tool in ("gcc", "mksquashfs", "unsquashfs", "python3", "curl"):
             if shutil.which(tool) is None:
                 raise RuntimeError(f"hosted fixture dependency missing: {tool}")
@@ -176,7 +178,9 @@ class ReleaseCheckAppImage(unittest.TestCase):
         report = self.case_root / "report.json"
         report.unlink(missing_ok=True)
         image_path = image if image.is_absolute() else (cwd or self.case_root) / image
-        before = image_path.read_bytes(), stat.S_IMODE(image_path.stat().st_mode)
+        before = None if image_path.is_dir() else (
+            image_path.read_bytes(), stat.S_IMODE(image_path.stat().st_mode)
+        )
         result = hosted_subprocess(
             ["/bin/bash", str(CHECKER), "--no-graph", "--report", str(report),
              *options, str(image)],
@@ -187,7 +191,10 @@ class ReleaseCheckAppImage(unittest.TestCase):
         output = result.stdout + result.stderr
         # Check this first so an execution regression is explicit even if exit/status fails.
         self.assertFalse(self.runtime_sentinel.exists(), output)
-        self.assertEqual(before, (image_path.read_bytes(), stat.S_IMODE(image_path.stat().st_mode)))
+        if before is not None:
+            self.assertEqual(before, (
+                image_path.read_bytes(), stat.S_IMODE(image_path.stat().st_mode)
+            ))
         self.assertEqual(result.returncode, expected, output)
         evidence = json.loads(report.read_text())
         self.assertEqual(evidence["graph"], "skipped")
@@ -252,6 +259,287 @@ class ReleaseCheckAppImage(unittest.TestCase):
     def test_clean_newline_filename_is_scanned(self):
         evidence, _ = self.check(self.image(payload="clean-newline"), 0)
         self.assertEqual(evidence["artifacts"][0]["executables"], 2)
+        self.assert_no_payload_execution()
+
+    def permission_payload(self, content, mode, label):
+        appdir = self.case_root / f"permissions-{label}"
+        shutil.copytree(self.fixture_root / "clean", appdir)
+        candidate = appdir / "usr/lib/guarded.so"
+        candidate.parent.mkdir()
+        candidate.write_bytes(content)
+        candidate.chmod(mode)
+        if mode == 0:
+            # Prove this process cannot bypass permissions before building the image.
+            with self.assertRaises(PermissionError):
+                candidate.read_bytes()
+            # mksquashfs must read the input; its per-file action sets the stored mode.
+            candidate.chmod(0o644)
+        squashfs = self.case_root / f"permissions-{label}.squashfs"
+        options = ["-action", "chmod(000)@name(guarded.so)"] if mode == 0 else []
+        run([
+            "mksquashfs", str(appdir), str(squashfs), "-noappend", "-no-xattrs",
+            "-all-root", "-processors", "1", "-comp", "gzip", *options,
+        ])
+        image = self.image()
+        image.write_bytes(self.native_runtime + squashfs.read_bytes())
+        return image
+
+    def permission_extractor_env(self):
+        path = self.case_root / "permission-extractor"
+        path.mkdir(exist_ok=True)
+        trusted = shutil.which("unsquashfs")
+        self.assertIsNotNone(trusted)
+        proof = self.case_root / "extracted-permissions.json"
+        extractor = path / "unsquashfs"
+        extractor.write_text(
+            '#!/usr/bin/python3 -I\n'
+            'import json, os, pathlib, stat, subprocess, sys\n'
+            'if (os.environ.get("GITHUB_ACTIONS") != "true" or\n'
+            '        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):\n'
+            '    raise RuntimeError("hosted fixture required")\n'
+            f'result = subprocess.run([{trusted!r}, *sys.argv[1:]], check=False)\n'
+            'if result.returncode == 0 and "-d" in sys.argv:\n'
+            '    root = pathlib.Path(sys.argv[sys.argv.index("-d") + 1])\n'
+            '    candidate = root / "usr/lib/guarded.so"\n'
+            '    try:\n'
+            '        candidate.read_bytes()\n'
+            '        readable = True\n'
+            '    except PermissionError:\n'
+            '        readable = False\n'
+            f'    pathlib.Path({str(proof)!r}).write_text(json.dumps({{\n'
+            '        "mode": stat.S_IMODE(candidate.stat().st_mode),\n'
+            '        "uid": os.geteuid(), "readable": readable,\n'
+            '    }))\n'
+            'sys.exit(result.returncode)\n'
+        )
+        extractor.chmod(0o755)
+        return {**self.env, "PATH": str(path) + os.pathsep + os.environ["PATH"]}, proof
+
+    def test_every_regular_squashfs_file_must_actually_be_readable(self):
+        env, proof = self.permission_extractor_env()
+        for label, content, executables in (
+            ("image", b"\x7fELF\0ANVIL_DATA_DIR\0", 2),
+            ("data", b"ordinary non-executable data\0", 1),
+        ):
+            for mode, expected in ((0o644, 0), (0, 2)):
+                with self.subTest(label=label, mode=mode):
+                    image = self.permission_payload(content, mode, f"{label}-{mode}")
+                    evidence, output = self.check(image, expected, env=env)
+                    permissions = json.loads(proof.read_text())
+                    self.assertNotEqual(permissions["uid"], 0)
+                    self.assertEqual(permissions["mode"], mode)
+                    self.assertEqual(permissions["readable"], mode != 0)
+                    if mode:
+                        self.assertEqual(evidence["artifacts"][0]["executables"], executables)
+                    else:
+                        self.assertIn("Permission denied", output)
+                        self.assertIn("could not inspect AppImage contents", output)
+                        self.check(image, 2, "--runtime-probe", "--probe-seconds", "1", env=env)
+                    self.assert_no_payload_execution()
+        image = self.permission_payload(b"\x7fELF\0/wdio/eval\0", 0, "hidden-hook")
+        self.check(image, 2, env=env)
+        self.assertFalse(json.loads(proof.read_text())["readable"])
+        self.assert_no_payload_execution()
+
+    def tool_read_error_env(self, tool, candidate, needle=None, match_and_error=False):
+        path = self.case_root / f"fault-{tool}-{needle or 'header'}-{match_and_error}"
+        path.mkdir()
+        trusted = shutil.which(tool)
+        self.assertIsNotNone(trusted)
+        proof = path / "read-status"
+        wrapper = path / tool
+        condition = f'[ "$file" = {shlex.quote(str(candidate))} ]'
+        if needle:
+            condition += f' && [ "$needle" = {shlex.quote(needle)} ]'
+        if match_and_error:
+            blocked = path / "unreadable"
+            blocked.write_text("unreadable extra grep input")
+            blocked.chmod(0)
+            operation = f'  {shlex.quote(trusted)} "$@" {shlex.quote(str(blocked))}\n'
+        else:
+            operation = '  chmod 000 "$file" || exit 3\n'
+            operation += f'  {shlex.quote(trusted)} "$@"\n'
+        script = (
+            '#!/bin/sh\n'
+            'file=""; needle=""\n'
+            'for arg do needle="$file"; file="$arg"; done\n'
+            f'if {condition}; then\n'
+        )
+        script += operation
+        script += (
+            '  status=$?\n'
+            f'  printf "%s\\n" "$status" > {shlex.quote(str(proof))}\n'
+            '  exit "$status"\n'
+            'fi\n'
+            f'exec {shlex.quote(trusted)} "$@"\n'
+        )
+        wrapper.write_text(script)
+        wrapper.chmod(0o755)
+        return {**self.env, "PATH": str(path) + os.pathsep + os.environ["PATH"]}, proof
+
+    def test_actual_od_and_grep_errors_cannot_hide_behind_a_good_marker(self):
+        for tool, needle, message, match_and_error in (
+            ("od", None, "classification", False),
+            ("grep", "tauri-plugin-wdio-webdriver", "hook scan", False),
+            ("grep", "ANVIL_DATA_DIR", "marker scan", False),
+            ("grep", "ANVIL_DATA_DIR", "marker scan", True),
+        ):
+            with self.subTest(tool=tool, needle=needle, match_and_error=match_and_error):
+                appdir = self.case_root / f"read-error-{message}-{match_and_error}"
+                shutil.copytree(self.fixture_root / "clean", appdir)
+                candidate = appdir / "guarded.so"
+                candidate.write_bytes(b"\x7fELF\0ANVIL_DATA_DIR\0")
+                evidence, _ = self.check(appdir, 0)
+                self.assertEqual(evidence["artifacts"][0]["executables"], 2)
+                env, proof = self.tool_read_error_env(tool, candidate, needle, match_and_error)
+                _, output = self.check(appdir, 2, env=env)
+                self.assertIn(f"could not read file for {message}", output)
+                self.assertGreater(int(proof.read_text()), 1 if tool == "grep" else 0)
+                if not match_and_error:
+                    with self.assertRaises(PermissionError):
+                        candidate.read_bytes()
+                self.assert_no_payload_execution()
+
+    def scan_fault_env(self, kind, host):
+        path = self.case_root / f"scan-fault-{kind}"
+        path.mkdir()
+        proof = path / "fault-ran"
+        host_opened = path / "host-opened"
+        preamble = (
+            'import os, pathlib\n'
+            f'_host = {str(host)!r}\n'
+            f'_proof = pathlib.Path({str(proof)!r})\n'
+            f'_host_opened = pathlib.Path({str(host_opened)!r})\n'
+            '_real_open = os.open\n'
+            'def _fault_open(name, flags, *args, **kwargs):\n'
+            '    directory_fd = kwargs.get("dir_fd")\n'
+        )
+        if kind in ("file-symlink", "directory-symlink"):
+            name = "guarded.so" if kind == "file-symlink" else "lib"
+            preamble += f'    if name == {name!r} and directory_fd is not None:\n'
+            if kind == "file-symlink":
+                preamble += '        os.unlink(name, dir_fd=directory_fd)\n'
+            else:
+                preamble += (
+                    '        os.rename(name, "moved-lib", src_dir_fd=directory_fd,\n'
+                    '                  dst_dir_fd=directory_fd)\n'
+                )
+            preamble += (
+                '        os.symlink(_host, name, dir_fd=directory_fd)\n'
+                '        _proof.write_text("replaced before open")\n'
+            )
+        preamble += (
+            '    fd = _real_open(name, flags, *args, **kwargs)\n'
+            '    opened, outside = os.fstat(fd), os.stat(_host)\n'
+            '    if (opened.st_dev, opened.st_ino) == (outside.st_dev, outside.st_ino):\n'
+            '        _host_opened.write_text("opened outside the extraction tree")\n'
+            '    return fd\n'
+            'os.open = _fault_open\n'
+        )
+        if kind in ("change", "io"):
+            preamble += (
+                '_real_fdopen = os.fdopen\n'
+                'class _FaultReader:\n'
+                '    def __init__(self, image, filename):\n'
+                '        self.image, self.filename, self.header_read = image, filename, False\n'
+                '    def __enter__(self):\n'
+                '        self.image.__enter__()\n'
+                '        return self\n'
+                '    def __exit__(self, *args):\n'
+                '        return self.image.__exit__(*args)\n'
+                '    def fileno(self):\n'
+                '        return self.image.fileno()\n'
+                '    def read(self, size):\n'
+            )
+            if kind == "io":
+                preamble += (
+                    '        if self.header_read:\n'
+                    '            _proof.write_text("I/O error after the header")\n'
+                    '            raise OSError(5, "injected I/O error after classification")\n'
+                )
+            preamble += (
+                '        data = self.image.read(size)\n'
+                '        if not self.header_read:\n'
+                '            self.header_read = True\n'
+            )
+            if kind == "change":
+                preamble += (
+                    '            with open(self.filename, "ab") as changed:\n'
+                    '                changed.write(b"changed after the header")\n'
+                    '            _proof.write_text("changed during the scan")\n'
+                )
+            preamble += (
+                '        return data\n'
+                'def _fault_fdopen(fd, *args, **kwargs):\n'
+                '    filename = os.readlink(f"/proc/self/fd/{fd}")\n'
+                '    image = _real_fdopen(fd, *args, **kwargs)\n'
+                '    if filename.endswith("/guarded.so"):\n'
+                '        return _FaultReader(image, filename)\n'
+                '    return image\n'
+                'os.fdopen = _fault_fdopen\n'
+            )
+        python = path / "python3"
+        python.write_text(
+            '#!/usr/bin/python3 -I\n'
+            'import os, subprocess, sys\n'
+            'if (os.environ.get("GITHUB_ACTIONS") != "true" or\n'
+            '        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):\n'
+            '    raise RuntimeError("hosted fixture required")\n'
+            'source = sys.stdin.read()\n'
+            'args = sys.argv[3:]\n'
+            'if len(args) > 2 and args[0].endswith("/squashfs-root"):\n'
+            f'    source = {preamble!r} + source\n'
+            'result = subprocess.run([sys.executable, "-I", "-", *args],\n'
+            '                        input=source, text=True, check=False)\n'
+            'sys.exit(result.returncode)\n'
+        )
+        python.chmod(0o755)
+        env = {**self.env, "PATH": str(path) + os.pathsep + os.environ["PATH"]}
+        return env, proof, host_opened
+
+    def test_replacement_changes_and_read_errors_during_appimage_scan_are_fatal(self):
+        host = self.case_root / "host"
+        host.mkdir()
+        host_file = host / "outside.so"
+        host_file.write_bytes(b"\x7fELF\0ANVIL_DATA_DIR\0/wdio/eval\0")
+        before = host_file.read_bytes()
+        for kind, message in (
+            ("file-symlink", "Too many levels of symbolic links"),
+            ("directory-symlink", "Not a directory"),
+            ("change", "file changed during inspection"),
+            ("io", "injected I/O error after classification"),
+        ):
+            with self.subTest(kind=kind):
+                image = self.permission_payload(b"\x7fELF\0ANVIL_DATA_DIR\0", 0o644, kind)
+                self.check(image, 0)
+                target = host if kind == "directory-symlink" else host_file
+                env, proof, host_opened = self.scan_fault_env(kind, target)
+                _, output = self.check(image, 2, env=env)
+                self.assertTrue(proof.exists(), output)
+                self.assertIn(message, output)
+                self.assertFalse(host_opened.exists(), output)
+                self.assertEqual(host_file.read_bytes(), before)
+                self.assert_no_payload_execution()
+
+    def test_enumeration_failure_cannot_hide_behind_a_good_marker(self):
+        appdir = self.case_root / "enumeration-error"
+        shutil.copytree(self.fixture_root / "clean", appdir)
+        blocked = appdir / "blocked"
+        blocked.mkdir()
+        blocked.chmod(0)
+        try:
+            _, output = self.check(appdir, 2)
+            self.assertIn("could not enumerate regular files", output)
+            self.assertIn("Permission denied", output)
+            self.assert_no_payload_execution()
+        finally:
+            blocked.chmod(0o755)
+
+    def test_hook_crossing_scan_chunk_boundary_is_rejected(self):
+        content = b"\x7fELF" + bytes(1024 * 1024 - 4) + b"/wdio/eval\0"
+        image = self.permission_payload(content, 0o644, "split-hook")
+        evidence, _ = self.check(image, 1)
+        self.assertIn("/wdio/eval", evidence["artifacts"][0]["hits"])
         self.assert_no_payload_execution()
 
     def test_newline_directory_cannot_redirect_a_scan_to_a_host_path(self):
@@ -520,6 +808,14 @@ class ReleaseCheckAppImage(unittest.TestCase):
 
 
 class HostedFixturePolicy(unittest.TestCase):
+    def test_root_cannot_bypass_permission_fixtures(self):
+        env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+        with patch.dict(os.environ, env, clear=True), patch("os.geteuid", return_value=0):
+            with patch("subprocess.run") as process:
+                with self.assertRaisesRegex(RuntimeError, "require a non-root runner"):
+                    ReleaseCheckAppImage.setUpClass()
+                process.assert_not_called()
+
     def test_non_hosted_environments_cannot_start_fixture_subprocesses(self):
         for actions, runner in (
             (None, None), ("true", None), (None, "github-hosted"),

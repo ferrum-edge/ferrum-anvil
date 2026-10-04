@@ -139,6 +139,11 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
    errors treated as fatal. The input is never made executable or invoked to
    extract contents or discover its offset. Missing tools, unsupported types,
    malformed metadata, corrupt filesystems and missing `AppRun` fail closed.
+   Every extracted regular file must be readable through EOF. Classification
+   and scanning use the same descriptor, with no symlink traversal; read errors
+   and changes to the extraction tree are fatal even if another file contains
+   a valid Anvil marker. Other artifact scans also reject classification,
+   enumeration and `grep` read errors; a normal no-match result remains valid.
 3. **Runtime probe** (`--runtime-probe`) — the desktop executable is launched
    with `TAURI_WEBDRIVER_PORT=<free port>`, `ANVIL_E2E_PROFILE` and
    `ANVIL_E2E_PASSPHRASE` set and a throw-away `ANVIL_DATA_DIR`. Nothing may
