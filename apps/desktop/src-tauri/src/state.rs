@@ -2,7 +2,7 @@
 //! lock enforcement happens here and there, never only in the webview.
 
 use anvil_app::file_grants::FileGrants;
-use anvil_app::profiles::ProfileManager;
+use anvil_app::profiles::{ProfileManager, UnlockAuthorization};
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::load::LoadReport;
@@ -135,6 +135,33 @@ impl DesktopState {
     /// before work that runs off the lock, and compared once it has ended.
     pub fn epoch(&self) -> u64 {
         self.lock_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Both an existing App and a newly opened App install only inside the
+    /// authorization's final profile fence. The epoch still lets desktop
+    /// lock/profile-switch win; no desktop mutex is held during derivation or
+    /// across an await. Call this on the command's blocking worker.
+    pub fn install_authorized(&self, authorization: UnlockAuthorization, seen: u64) -> Result<(), String> {
+        authorization
+            .install(|dir, header, key| {
+                if self.epoch() != seen {
+                    return Err(AppError::Locked);
+                }
+                let open = self.app.read().clone();
+                if let Some(app) = open
+                    && app.dir == dir
+                    && app.header.profile_id == header.profile_id
+                    && app.header.format == header.format
+                    && app.header.key_check == header.key_check
+                {
+                    self.unlock_since(&app, key, seen).map_err(AppError::Invalid)?;
+                } else {
+                    let app = App::open(dir, header, key)?;
+                    self.set_app_since(app, seen).map_err(AppError::Invalid)?;
+                }
+                Ok(())
+            })
+            .map_err(crate::commands::e)
     }
 
     /// Make `app` the open profile, unless a lock or another profile switch
@@ -428,6 +455,62 @@ pub fn cancel_pending(running: &Running, id: &Id) -> bool {
 pub(crate) mod tests {
     use super::*;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn a_header_change_between_authorization_and_install_refuses_new_and_existing_apps() {
+        use anvil_app::profiles::Unlock;
+        use anvil_storage::vault::{self, IdentityBindingPublication};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for existing in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let st = Arc::new(DesktopState::new(root.path().to_path_buf()));
+            let (summary, key, _) = st
+                .profiles
+                .create_passphrase_with_identity_expectation("draft fence", PASSPHRASE, anvil_storage::KdfParams::testing())
+                .unwrap();
+            if existing {
+                let app = ProfileManager::authorize_unlock(&summary.dir, Unlock::Passphrase(PASSPHRASE), None).unwrap().open().unwrap();
+                st.set_app_since(app, st.epoch()).unwrap();
+                st.lock();
+            }
+            let database = std::fs::read(summary.dir.join(anvil_storage::store::DB_FILE)).ok();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let worker_st = st.clone();
+            let dir = summary.dir.clone();
+            let worker = std::thread::spawn(move || {
+                let seen = worker_st.epoch();
+                let authorization = ProfileManager::authorize_unlock(&dir, Unlock::Passphrase(PASSPHRASE), None).unwrap();
+                ready_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                done_tx.send(worker_st.install_authorized(authorization, seen)).unwrap();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // The barrier is after initial authentication. There is no lock
+            // held here: a real publication can invalidate its snapshot.
+            let guard = vault::lock_identity_header(&summary.dir).unwrap();
+            let header = guard.read().unwrap();
+            guard.begin_identity_publication(&header, &key, IdentityBindingPublication { binding: None, contents: None }).unwrap();
+            drop(guard);
+            release_tx.send(()).unwrap();
+            assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+            worker.join().unwrap();
+            let open = st.app.read().clone();
+            if existing {
+                assert!(open.unwrap().is_locked());
+            } else {
+                assert!(open.is_none());
+            }
+            assert_eq!(std::fs::read(summary.dir.join(anvil_storage::store::DB_FILE)).ok(), database);
+            ProfileManager::recover_identity_publication(&summary.dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+            let authorization = ProfileManager::authorize_unlock(&summary.dir, Unlock::Passphrase(PASSPHRASE), None).unwrap();
+            st.install_authorized(authorization, st.epoch()).unwrap();
+            assert!(!st.app().unwrap().is_locked());
+        }
+    }
 
     #[tokio::test]
     async fn cancel_before_the_open_completes_abandons_it() {

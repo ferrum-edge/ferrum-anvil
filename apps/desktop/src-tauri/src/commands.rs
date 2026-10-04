@@ -130,17 +130,17 @@ pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<
     // Taken before the key derivation: a lock from now on wins over this.
     let seen = handle.state::<DesktopState>().epoch();
     blocking_unchecked(&handle, move |st| {
-        let (summary, key, recovery) = if keychain {
+        let (summary, _key, recovery) = if keychain {
             let (s, k) = st.profiles.create_keychain(&name).map_err(e)?;
             (s, k, None)
         } else {
-            let p = passphrase.ok_or("a passphrase is required")?;
-            let (s, k, r) = st.profiles.create_passphrase(&name, &p, KdfParams::interactive()).map_err(e)?;
+            let p = passphrase.as_deref().ok_or("a passphrase is required")?;
+            let (s, k, r) = st.profiles.create_passphrase(&name, p, KdfParams::interactive()).map_err(e)?;
             (s, k, Some(r.to_string()))
         };
-        let header = anvil_storage::vault::read_header(&summary.dir).map_err(|x| x.to_string())?;
-        let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
-        if st.set_app_since(app, seen).is_ok() {
+        let how = if keychain { Unlock::Keychain } else { Unlock::Passphrase(passphrase.as_deref().ok_or("a passphrase is required")?) };
+        let authorization = anvil_app::profiles::ProfileManager::authorize_unlock(&summary.dir, how, None).map_err(e)?;
+        if st.install_authorized(authorization, seen).is_ok() {
             st.touch();
         }
         Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
@@ -160,19 +160,8 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
             (None, Some(rk)) => Unlock::RecoveryKey(rk),
             (None, None) => Unlock::Keychain,
         };
-        let (header, key) = anvil_app::profiles::ProfileManager::unlock(&p.dir, how).map_err(e)?;
-        // Not held across the unlock: a lock waits on no store work of this one.
-        let open = st.app.read().clone();
-        if let Some(a) = open
-            && a.header.profile_id == header.profile_id
-        {
-            st.unlock_since(&a, key, seen)?;
-            st.touch();
-            st.flush_pending_reports();
-            return Ok(());
-        }
-        let app = App::open(p.dir, header, key).map_err(e)?;
-        st.set_app_since(app, seen)?;
+        let authorization = anvil_app::profiles::ProfileManager::authorize_unlock(&p.dir, how, None).map_err(e)?;
+        st.install_authorized(authorization, seen)?;
         st.touch();
         st.flush_pending_reports();
         Ok(())

@@ -44,10 +44,50 @@ pub struct ProfileManager {
     pub root: PathBuf,
 }
 
+#[derive(Clone, Copy)]
 pub enum Unlock<'a> {
     Passphrase(&'a str),
     RecoveryKey(&'a str),
     Keychain,
+}
+
+/// A single-use authorization, never a released installation lease. The
+/// checked header, key and provider proof remain private until the final fence.
+pub struct UnlockAuthorization {
+    dir: PathBuf,
+    header: ProfileHeader,
+    key: Key,
+    recovery: bool,
+    proof: Option<VerifiedIdentity>,
+}
+
+impl UnlockAuthorization {
+    /// Recheck the authenticated snapshot and current binding under the
+    /// profile lock, then keep the lock and binding descriptor through the
+    /// synchronous installation callback. Do not await or nest header writers
+    /// in this callback. This serializes cooperating Anvil writers, not an
+    /// external user replacing directories, lock files or mounted filesystems.
+    pub fn install<T>(self, install: impl FnOnce(PathBuf, ProfileHeader, Key) -> Result<T>) -> Result<T> {
+        let guard = vault::lock_identity_header(&self.dir)?;
+        let current = guard.read()?;
+        vault::authenticate_header(&current, &self.key)?;
+        if serde_json::to_vec(&current)? != serde_json::to_vec(&self.header)? {
+            return Err(vault::VaultError::HeaderTampered.into());
+        }
+        let binding = if self.recovery { None } else { identity::read_binding(&self.dir, &current)? };
+        if !self.recovery {
+            ProfileManager::check_binding(&current, &self.key, binding.as_ref(), self.proof.as_ref(), chrono::Utc::now())?;
+        }
+        let result = install(self.dir.clone(), current, self.key);
+        drop(binding);
+        drop(guard);
+        result
+    }
+
+    /// Open a new application while the final verification fence is held.
+    pub fn open(self) -> Result<crate::App> {
+        self.install(crate::App::open)
+    }
 }
 
 impl ProfileManager {
@@ -158,6 +198,15 @@ impl ProfileManager {
         Self::unlock_checked(dir, how, None, chrono::Utc::now())
     }
 
+    /// Draft source-compatible addition for installation consumers. Unlike
+    /// the historical tuple APIs, this carries authorization to the final
+    /// fence. No profile lock or binding descriptor survives between calls.
+    pub fn authorize_unlock(dir: &Path, how: Unlock<'_>, proof: Option<VerifiedIdentity>) -> Result<UnlockAuthorization> {
+        let recovery = matches!(how, Unlock::RecoveryKey(_));
+        let (header, key) = Self::unlock_checked(dir, how, proof.as_ref(), chrono::Utc::now())?;
+        Ok(UnlockAuthorization { dir: dir.to_path_buf(), header, key, recovery, proof })
+    }
+
     /// Unlock with the local secret *and* a provider sign-in that just
     /// happened. The proof never unlocks anything by itself: `how` must
     /// still unwrap the data key.
@@ -183,12 +232,26 @@ impl ProfileManager {
     ) -> Result<(ProfileHeader, Key)> {
         let guard = vault::lock_identity_header(dir)?;
         let h = guard.read()?;
-        let (mut h, k) = Self::unlock_header_checked(dir, &h, how, proof, now)?;
+        let (h, k) = Self::unlock_header_checked(dir, &h, how, proof, now)?;
         drop(guard);
+        if h.protection_mac.is_none() || (h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some()) {
+            Self::maintain_unlocked(dir, &h, &k);
+            // Maintenance's returned header never substitutes for authority.
+            // Re-enter the credential and recheck the current binding/policy
+            // under the profile lock before adopting any updated header.
+            let guard = vault::lock_identity_header(dir)?;
+            let current = guard.read()?;
+            return Self::unlock_header_checked(dir, &current, how, proof, now);
+        }
+        Ok((h, k))
+    }
+
+    fn maintain_unlocked(dir: &Path, h: &ProfileHeader, key: &Key) {
+        let mut maintenance = h.clone();
         // A header written by an earlier build gets its protection MAC (and
         // a keychain profile's entry its tag) now that the key is proven.
         if h.identity_binding.is_none() {
-            vault::upgrade_header(dir, &mut h, &k).ok();
+            vault::upgrade_header(dir, &mut maintenance, key).ok();
         }
         // A keychain entry left over from converting this profile to a
         // passphrase. It no longer unlocks anything; removing it is retried
@@ -196,13 +259,9 @@ impl ProfileManager {
         if h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some() {
             // Do not replace the checked snapshot with a concurrently changed
             // identity expectation returned by maintenance after releasing the lock.
-            let mut maintenance = h.clone();
             vault::retire_keychain_entry(dir, &mut maintenance).ok();
-            if h.identity_binding.is_none() {
-                h = maintenance;
-            }
+            // Maintenance is never authority for this already checked tuple.
         }
-        Ok((h, k))
     }
 
     fn unwrap_header(h: &ProfileHeader, how: Unlock<'_>) -> Result<Key> {
@@ -221,11 +280,12 @@ impl ProfileManager {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(ProfileHeader, Key)> {
         let recovery = matches!(how, Unlock::RecoveryKey(_));
-        let binding = match identity::read_binding(dir, h) {
-            Ok(b) => b,
-            Err(e) if !recovery => return Err(e),
-            Err(_) => None,
-        };
+        // Authenticate the recovery credential/header without even opening
+        // the binding. A FIFO, device or oversized file cannot impede recovery.
+        if recovery {
+            return Ok((h.clone(), Self::unwrap_header(h, how)?));
+        }
+        let binding = identity::read_binding(dir, h)?;
         // Early refusals use only the hint. Authentication below is mandatory
         // before ordinary unlock returns a key to an installer.
         if !recovery {
@@ -239,12 +299,29 @@ impl ProfileManager {
             }
         }
         let k = Self::unwrap_header(h, how)?;
-        if let Some(b) = &binding
-            && !recovery
-        {
-            identity::verify_binding(b, h, &k)?;
-        }
+        Self::check_binding(h, &k, binding.as_ref(), proof, now)?;
         Ok((h.clone(), k))
+    }
+
+    fn check_binding(
+        h: &ProfileHeader,
+        key: &Key,
+        binding: Option<&identity::ReadBinding>,
+        proof: Option<&VerifiedIdentity>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        match (binding, proof) {
+            (Some(b), Some(p)) => identity::check_proof(b.provider(), b.subject(), p, now)?,
+            (Some(b), None) if b.require_fresh_login() => {
+                return Err(IdentityPolicyError::FreshLoginRequired { provider: b.provider().to_string() }.into());
+            }
+            (None, Some(_)) => return Err(IdentityPolicyError::NotLinked.into()),
+            _ => {}
+        }
+        if let Some(b) = binding {
+            identity::verify_read_binding(b, h, key)?;
+        }
+        Ok(())
     }
 
     /// Resume only a previously authenticated journal, after explicit local
@@ -291,7 +368,7 @@ impl ProfileManager {
         let guard = vault::lock_identity_header(dir)?;
         let h = guard.read()?;
         identity::require_enrolled(&h)?;
-        let current = identity::read_binding(dir, &h).or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
+        let current = if recovery { None } else { identity::read_binding(dir, &h)? };
         let (h, k) = match &current {
             // Re-linking the same account (e.g. toggling the policy): the new
             // proof is also the fresh proof the current policy asks for.
@@ -300,6 +377,7 @@ impl ProfileManager {
             }
             _ => Self::unlock_header_checked(dir, &h, how, None, now)?,
         };
+        drop(current);
         identity::link(&guard, &h, &k, &proof, require_fresh_login, now)
     }
 
@@ -310,11 +388,12 @@ impl ProfileManager {
         let guard = vault::lock_identity_header(dir)?;
         let h = guard.read()?;
         identity::require_enrolled(&h)?;
-        let current = identity::read_binding(dir, &h).or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
+        let current = if recovery { None } else { identity::read_binding(dir, &h)? };
         if current.is_none() && !recovery {
             return Err(IdentityPolicyError::NotLinked.into());
         }
         let (h, key) = Self::unlock_header_checked(dir, &h, how, proof.as_ref(), chrono::Utc::now())?;
+        drop(current);
         identity::unlink(&guard, &h, &key)
     }
 
@@ -325,7 +404,7 @@ impl ProfileManager {
         let h = guard.read()?;
         vault::authenticate_header(&h, key)?;
         match identity::read_binding(dir, &h)? {
-            Some(b) => Ok(Some(identity::verify_binding(&b, &h, key)?)),
+            Some(b) => Ok(Some(identity::verify_read_binding(&b, &h, key)?)),
             None => Ok(None),
         }
     }

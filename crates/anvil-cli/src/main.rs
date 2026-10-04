@@ -523,15 +523,15 @@ fn open_app(cli: &Cli) -> Result<App> {
         Some(p) => pm.find(p)?,
         None => pm.list().into_iter().next().ok_or_else(|| anyhow!("no profile exists; run `anvil profile create <name>`"))?,
     };
-    let (header, key) = match summary.protection {
-        anvil_domain::workspace::ProtectionMode::OsKeychain => ProfileManager::unlock(&summary.dir, Unlock::Keychain)?,
+    let authorization = match summary.protection {
+        anvil_domain::workspace::ProtectionMode::OsKeychain => ProfileManager::authorize_unlock(&summary.dir, Unlock::Keychain, None)?,
         anvil_domain::workspace::ProtectionMode::Passphrase => {
             let p = passphrase(cli.passphrase_stdin, "ANVIL_PASSPHRASE")?
                 .ok_or_else(|| anyhow!("profile '{}' is locked: pass --passphrase-stdin or set ANVIL_PASSPHRASE", summary.display_name))?;
-            ProfileManager::unlock(&summary.dir, Unlock::Passphrase(&p))?
+            ProfileManager::authorize_unlock(&summary.dir, Unlock::Passphrase(&p), None)?
         }
     };
-    Ok(App::open(summary.dir, header, key)?)
+    Ok(authorization.open()?)
 }
 
 fn kv(h: &str) -> Result<KeyValue> {

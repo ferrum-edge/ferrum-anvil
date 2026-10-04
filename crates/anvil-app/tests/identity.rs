@@ -24,6 +24,141 @@ use tokio_util::sync::CancellationToken;
 
 const PASS: &str = "correct horse battery";
 
+#[cfg(unix)]
+mod fifo;
+
+fn bounded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    #[cfg(unix)]
+    {
+        fifo::within_seconds(f)
+    }
+    #[cfg(not(unix))]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || tx.send(f()).unwrap());
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("binding operation blocked");
+        worker.join().unwrap();
+        result
+    }
+}
+
+/// Real hostile directory entries, real mock-provider proof, production
+/// recovery operations. No reader/writer is attached to the FIFO to unblock it.
+async fn hostile_binding_recovery(make: fn(&Path)) {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let provider = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, recovery) = profile(root.path(), "hostile binding");
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&provider).await, false).unwrap();
+    let authorization = ProfileManager::authorize_unlock(&dir, Unlock::Passphrase(PASS), None).unwrap();
+    let file = dir.join(IDENTITY_FILE);
+    std::fs::remove_file(&file).unwrap();
+    make(&file);
+    let path = dir.clone();
+    bounded(move || {
+        rejected_install(&path);
+    });
+    assert!(authorization.open().is_err());
+    assert!(!dir.join(anvil_storage::store::DB_FILE).exists());
+    let header = std::fs::read(dir.join("profile.json")).unwrap();
+    let hostile = std::fs::symlink_metadata(&file).unwrap();
+    let outside = file.with_extension("target");
+    let target_bytes = std::fs::read(&outside).ok();
+    let proof = sign_in(&provider).await;
+    let path = dir.clone();
+    bounded(move || {
+        assert!(ProfileManager::unlock(&path, Unlock::RecoveryKey("wrong recovery key")).is_err());
+        assert!(ProfileManager::link_identity(&path, Unlock::RecoveryKey("wrong recovery key"), proof, false).is_err());
+        assert!(ProfileManager::unlink_identity(&path, Unlock::RecoveryKey("wrong recovery key"), None).is_err());
+    });
+    assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), header);
+    let after = std::fs::symlink_metadata(&file).unwrap();
+    assert_eq!(after.file_type(), hostile.file_type());
+    assert_eq!(after.len(), hostile.len());
+    assert_eq!(after.modified().unwrap(), hostile.modified().unwrap());
+
+    let path = dir.clone();
+    let key = recovery.clone();
+    bounded(move || {
+        assert!(ProfileManager::unlock(&path, Unlock::RecoveryKey(&key)).is_ok());
+        let app = ProfileManager::authorize_unlock(&path, Unlock::RecoveryKey(&key), None).unwrap().open().unwrap();
+        assert!(!app.is_locked());
+    });
+    assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), header, "unlock never repairs");
+    assert_eq!(std::fs::symlink_metadata(&file).unwrap().file_type(), hostile.file_type());
+    let proof = sign_in(&provider).await;
+    let path = dir.clone();
+    let key = recovery.clone();
+    bounded(move || {
+        ProfileManager::link_identity(&path, Unlock::RecoveryKey(&key), proof, false).unwrap();
+        assert!(ProfileManager::authorize_unlock(&path, Unlock::Passphrase(PASS), None).unwrap().open().is_ok());
+    });
+    std::fs::remove_file(&file).unwrap();
+    make(&file);
+    let path = dir.clone();
+    bounded(move || {
+        ProfileManager::unlink_identity(&path, Unlock::RecoveryKey(&recovery), None).unwrap();
+        assert!(ProfileManager::authorize_unlock(&path, Unlock::Passphrase(PASS), None).unwrap().open().is_ok());
+    });
+    assert!(!file.exists());
+    assert_eq!(std::fs::read(&outside).ok(), target_bytes, "recovery must not write through a link");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_actual_fifo_never_blocks_ordinary_refusal_or_recovery() {
+    hostile_binding_recovery(fifo::mkfifo).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_binding_symlink_never_authorizes_install_and_recovery_replaces_only_the_link() {
+    hostile_binding_recovery(|path| {
+        let target = path.with_extension("target");
+        std::fs::write(&target, b"outside binding target").unwrap();
+        std::os::unix::fs::symlink(target, path).unwrap();
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_device_link_cannot_exhaust_binding_reads_or_prevent_recovery() {
+    hostile_binding_recovery(|path| std::os::unix::fs::symlink("/dev/zero", path).unwrap()).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn an_actual_windows_reparse_binding_refuses_install_and_allows_recovery() {
+    hostile_binding_recovery(|path| {
+        let target = path.with_extension("target");
+        std::fs::write(&target, b"outside reparse target").unwrap();
+        // Hosted Windows must actually create the reparse point. Lack of
+        // privilege fails qualification; it is never treated as a passing skip.
+        std::os::windows::fs::symlink_file(target, path).unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_oversized_binding_refuses_install_and_recovery_does_not_read_it() {
+    hostile_binding_recovery(|path| std::fs::File::create(path).unwrap().set_len(8 * 1024 * 1024).unwrap()).await;
+}
+
+#[tokio::test]
+async fn a_policy_change_after_authorization_cannot_install_the_old_snapshot() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "install fence");
+    let authorization = ProfileManager::authorize_unlock(&dir, Unlock::Passphrase(PASS), None).unwrap();
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&provider(&idp)).await, true).unwrap();
+    assert!(authorization.open().is_err());
+    assert!(!dir.join(anvil_storage::store::DB_FILE).exists());
+    ProfileManager::authorize_unlock(&dir, Unlock::Passphrase(PASS), Some(sign_in(&provider(&idp)).await)).unwrap().open().unwrap();
+}
+
 fn browser(url: &str) -> Result<(), String> {
     let url = url.to_string();
     tokio::spawn(async move {
@@ -227,11 +362,13 @@ async fn relinking_and_unlinking_follow_the_policy() {
 fn rejected_install(dir: &Path) -> AppError {
     let before = std::fs::read(dir.join(anvil_storage::store::DB_FILE)).ok();
     let mut installed = false;
-    let result = ProfileManager::unlock(dir, Unlock::Passphrase(PASS)).and_then(|(h, key)| {
-        installed = true;
-        let app = App::open(dir.to_path_buf(), h, key)?;
-        app.create_workspace("must never be created")?;
-        Ok(app)
+    let result = ProfileManager::authorize_unlock(dir, Unlock::Passphrase(PASS), None).and_then(|authorization| {
+        authorization.install(|dir, h, key| {
+            installed = true;
+            let app = App::open(dir, h, key)?;
+            app.create_workspace("must never be created")?;
+            Ok(app)
+        })
     });
     assert!(!installed, "ordinary unlock returned a key to the installer");
     assert_eq!(std::fs::read(dir.join(anvil_storage::store::DB_FILE)).ok(), before);
@@ -669,4 +806,44 @@ async fn oauth_tokens_are_cached_per_workspace_folder_or_request_that_defines_th
     let r2 = key_of(None, oauth.clone());
     assert_ne!(r1, r2);
     assert_ne!(r1, a1);
+}
+
+#[test]
+fn a_cooperating_policy_writer_cannot_overtake_the_final_installation_callback() {
+    use anvil_storage::vault::{self, IdentityBindingPublication};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "installation barrier");
+    let header = vault::read_header(&dir).unwrap();
+    let key = vault::unlock_with_passphrase(&header, PASS).unwrap();
+    let authorization = ProfileManager::authorize_unlock(&dir, Unlock::Passphrase(PASS), None).unwrap();
+    let (inside_tx, inside_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (installed_tx, installed_rx) = mpsc::channel();
+    let installer = std::thread::spawn(move || {
+        let result = authorization.install(|dir, header, key| {
+            inside_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            App::open(dir, header, key)
+        });
+        installed_tx.send(result.is_ok()).unwrap();
+    });
+    inside_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (written_tx, written_rx) = mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let guard = vault::lock_identity_header(&dir).unwrap();
+        let result = guard.begin_identity_publication(&header, &key, IdentityBindingPublication { binding: None, contents: None });
+        written_tx.send(result.is_ok()).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(written_rx.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)));
+    release_tx.send(()).unwrap();
+    assert!(installed_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(written_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    installer.join().unwrap();
+    writer.join().unwrap();
 }

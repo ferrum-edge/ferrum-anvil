@@ -36,12 +36,17 @@ use anvil_storage::vault::{self, IdentityBindingPublication, IdentityHeaderGuard
 use anvil_storage::{Key, crypto};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::Read;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 pub const IDENTITY_FILE: &str = "identity.json";
 const FORMAT: &str = "anvil-identity-binding";
 const VERSION: u32 = 1;
+/// Includes the hex-encoded sealed envelope and the public hint.
+const MAX_BINDING_BYTES: u64 = 64 * 1024;
 /// A provider sign-in older than this does not count as "fresh".
 pub const FRESH_LOGIN_MAX_AGE_SECS: i64 = 300;
 /// Tolerated clock difference for a sign-in timestamped in the future.
@@ -124,6 +129,118 @@ impl BindingFile {
     }
 }
 
+/// Keep the descriptor alive until the sealed identity has been verified.
+pub(crate) struct ReadBinding {
+    binding: BindingFile,
+    file: File,
+    metadata: Metadata,
+    path: PathBuf,
+}
+
+impl Deref for ReadBinding {
+    type Target = BindingFile;
+
+    fn deref(&self) -> &BindingFile {
+        &self.binding
+    }
+}
+
+impl ReadBinding {
+    fn check_current(&self) -> Result<()> {
+        let current = std::fs::symlink_metadata(&self.path)?;
+        let held = self.file.metadata()?;
+        if !regular_binding(&current) || held.len() != self.metadata.len() || held.modified()? != self.metadata.modified()? {
+            return Err(IdentityPolicyError::BindingTampered.into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if current.dev() != held.dev() || current.ino() != held.ino() {
+                return Err(IdentityPolicyError::BindingTampered.into());
+            }
+        }
+        // Windows opens below deny write/delete sharing while this handle is
+        // held. Query its real type and attributes, not a path-only hint.
+        #[cfg(windows)]
+        {
+            let info = winapi_util::file::information(&self.file)?;
+            let current_file = open_binding(&self.path)?.ok_or(IdentityPolicyError::BindingTampered)?;
+            let current_info = winapi_util::file::information(&current_file)?;
+            if !winapi_util::file::typ(&self.file)?.is_disk()
+                || info.file_attributes() & 0x400 != 0
+                || info.volume_serial_number() != current_info.volume_serial_number()
+                || info.file_index() != current_info.file_index()
+            {
+                return Err(IdentityPolicyError::BindingTampered.into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn regular_binding(metadata: &Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT, including non-symlink reparse tags.
+        metadata.is_file() && metadata.file_attributes() & 0x400 == 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.is_file()
+    }
+}
+
+fn open_binding(path: &Path) -> Result<Option<File>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if !regular_binding(&metadata) || metadata.len() > MAX_BINDING_BYTES {
+        return Err(IdentityPolicyError::BindingTampered.into());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT; FILE_SHARE_READ only. No dependency
+        // on the pending filesystem-grant proposal is needed.
+        options.custom_flags(0x0020_0000).share_mode(1);
+    }
+    #[cfg(test)]
+    BEFORE_BINDING_OPEN.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook(path);
+        }
+    });
+    #[cfg(not(any(unix, windows)))]
+    return Err(IdentityPolicyError::BindingTampered.into());
+    #[cfg(any(unix, windows))]
+    {
+        let file = options.open(path)?;
+        if !regular_binding(&file.metadata()?) {
+            return Err(IdentityPolicyError::BindingTampered.into());
+        }
+        #[cfg(windows)]
+        if !winapi_util::file::typ(&file)?.is_disk() {
+            return Err(IdentityPolicyError::BindingTampered.into());
+        }
+        Ok(Some(file))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_BINDING_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
 fn path(dir: &Path) -> PathBuf {
     dir.join(IDENTITY_FILE)
 }
@@ -135,32 +252,61 @@ fn aad(h: &ProfileHeader) -> Vec<u8> {
 /// Read the exact binding committed by the header. Lock-screen callers have
 /// only an untrusted hint; ordinary unlock authenticates the header with its
 /// DEK before returning a key to the profile installer.
-pub(crate) fn read_binding(dir: &Path, h: &ProfileHeader) -> Result<Option<BindingFile>> {
+pub(crate) fn read_binding(dir: &Path, h: &ProfileHeader) -> Result<Option<ReadBinding>> {
     if h.identity_binding.as_ref().is_some_and(|e| e.pending.is_some()) {
         return Err(IdentityPolicyError::PublicationPending.into());
     }
-    let bytes = match std::fs::read(path(dir)) {
-        Ok(b) => Some(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
+    let path = path(dir);
+    let file = open_binding(&path)?;
+    let mut bytes = Vec::new();
+    let metadata = match &file {
+        Some(file) => {
+            let metadata = file.metadata()?;
+            if metadata.len() > MAX_BINDING_BYTES {
+                return Err(IdentityPolicyError::BindingTampered.into());
+            }
+            file.take(MAX_BINDING_BYTES + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_BINDING_BYTES {
+                return Err(IdentityPolicyError::BindingTampered.into());
+            }
+            Some(metadata)
+        }
+        None => None,
     };
     if let Some(expectation) = &h.identity_binding {
-        match (&expectation.binding, &bytes) {
+        match (&expectation.binding, &file) {
             (None, None) => return Ok(None),
-            (Some(expected), Some(bytes)) if expected.version == VERSION && *expected == vault::identity_binding_digest(bytes, VERSION) => {
+            (Some(expected), Some(_)) if expected.version == VERSION && *expected == vault::identity_binding_digest(&bytes, VERSION) => {
             }
             _ => return Err(IdentityPolicyError::BindingTampered.into()),
         }
     }
-    bytes.map(|b| parse_binding(&b)).transpose()
+    match (file, metadata) {
+        (Some(file), Some(metadata)) => {
+            let binding = ReadBinding { binding: parse_binding(&bytes)?, file, metadata, path };
+            binding.check_current()?;
+            Ok(Some(binding))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn parse_binding(bytes: &[u8]) -> Result<BindingFile> {
+    if bytes.len() as u64 > MAX_BINDING_BYTES {
+        return Err(IdentityPolicyError::BindingTampered.into());
+    }
     let f: BindingFile = serde_json::from_slice(bytes).map_err(|_| IdentityPolicyError::BindingTampered)?;
     if f.format != FORMAT || f.version != VERSION {
         return Err(IdentityPolicyError::BindingTampered.into());
     }
     Ok(f)
+}
+
+pub(crate) fn verify_read_binding(f: &ReadBinding, h: &ProfileHeader, dek: &Key) -> Result<LinkedIdentity> {
+    f.check_current()?;
+    let linked = verify_binding(f, h, dek)?;
+    f.check_current()?;
+    Ok(linked)
 }
 
 /// Open the sealed copy with the data key and require the plaintext hint to
@@ -191,7 +337,11 @@ fn binding_contents(h: &ProfileHeader, dek: &Key, linked: &LinkedIdentity) -> Re
         linked_at: linked.linked_at,
         sealed,
     };
-    Ok(serde_json::to_string_pretty(&f)?)
+    let contents = serde_json::to_string_pretty(&f)?;
+    if contents.len() as u64 > MAX_BINDING_BYTES {
+        return Err(AppError::Invalid("the identity binding exceeds 64 KiB".into()));
+    }
+    Ok(contents)
 }
 
 pub(crate) fn require_enrolled(h: &ProfileHeader) -> Result<()> {
@@ -321,5 +471,121 @@ impl App {
     pub fn oauth_sign_out(&self, request_id: Option<Id>, ws: &Id, draft: Option<RequestSpec>, opts: &SendOptions) -> Result<bool> {
         let ctx = self.build_context(request_id, ws, draft, opts)?;
         Ok(anvil_identity::api_oauth::sign_out(&self.engine, &ctx)?)
+    }
+}
+
+#[cfg(test)]
+mod binding_descriptor_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn bounded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || tx.send(f()).unwrap());
+        let result = rx.recv_timeout(Duration::from_secs(5)).expect("binding read blocked");
+        worker.join().unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_actual_character_device_is_refused_without_reading_it() {
+        use std::os::unix::fs::FileTypeExt;
+        assert!(std::fs::symlink_metadata("/dev/zero").unwrap().file_type().is_char_device());
+        bounded(|| assert!(open_binding(Path::new("/dev/zero")).is_err()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_metadata_never_blocks_the_descriptor_open() {
+        #[allow(unsafe_code)]
+        fn swap(path: &Path) {
+            use std::os::unix::ffi::OsStrExt;
+            std::fs::remove_file(path).unwrap();
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: a live NUL-terminated path, no pointer retained by mkfifo.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(IDENTITY_FILE);
+        std::fs::write(&path, b"regular file before swap").unwrap();
+        bounded(move || {
+            BEFORE_BINDING_OPEN.with(|hook| hook.set(Some(swap)));
+            assert!(open_binding(&path).is_err());
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_reparse_point_swapped_in_after_metadata_is_not_followed() {
+        fn swap(path: &Path) {
+            let target = path.with_extension("target");
+            std::fs::write(&target, b"outside target").unwrap();
+            std::fs::remove_file(path).unwrap();
+            std::os::windows::fs::symlink_file(target, path).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(IDENTITY_FILE);
+        std::fs::write(&path, b"regular file before swap").unwrap();
+        bounded(move || {
+            BEFORE_BINDING_OPEN.with(|hook| hook.set(Some(swap)));
+            assert!(open_binding(&path).is_err());
+        });
+    }
+
+    #[test]
+    fn parallel_replacement_cannot_substitute_the_descriptor_being_verified() {
+        let root = tempfile::tempdir().unwrap();
+        let created = vault::create_passphrase_profile_with_identity_expectation(
+            root.path(),
+            "descriptor",
+            "passphrase",
+            anvil_storage::KdfParams::testing(),
+        )
+        .unwrap();
+        let linked = LinkedIdentity {
+            provider: "mock".into(),
+            subject: "fixture".into(),
+            email: None,
+            require_fresh_login: false,
+            linked_at: Utc::now(),
+        };
+        let contents = binding_contents(&created.header, &created.dek, &linked).unwrap();
+        let guard = vault::lock_identity_header(root.path()).unwrap();
+        guard
+            .begin_identity_publication(
+                &created.header,
+                &created.dek,
+                IdentityBindingPublication {
+                    binding: Some(vault::identity_binding_digest(contents.as_bytes(), VERSION)),
+                    contents: Some(contents),
+                },
+            )
+            .unwrap();
+        let header = guard.finish_identity_publication(&created.dek).unwrap();
+        let held = read_binding(root.path(), &header).unwrap().unwrap();
+        let path = root.path().join(IDENTITY_FILE);
+        let replacement = path.clone();
+        let changed = bounded(move || std::fs::remove_file(&replacement));
+        #[cfg(unix)]
+        {
+            changed.unwrap();
+            std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+            assert!(verify_read_binding(&held, &header, &created.dek).is_err());
+        }
+        #[cfg(windows)]
+        {
+            // The actual Windows handle denies delete sharing throughout
+            // verification, so the competing replacement must fail.
+            assert!(changed.is_err());
+            assert_eq!(verify_read_binding(&held, &header, &created.dek).unwrap(), linked);
+            drop(held);
+            std::fs::remove_file(&path).unwrap();
+            let target = path.with_extension("target");
+            std::fs::write(&target, b"replacement").unwrap();
+            std::os::windows::fs::symlink_file(target, &path).unwrap();
+            assert!(read_binding(root.path(), &header).is_err());
+        }
     }
 }
