@@ -128,7 +128,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // Opens aborted before the backend registered them: canceled again once they open.
   const earlyAborts = useRef(new Set<string>());
   // Updated before invoking native open, so completion can arrive before React
-  // commits the tab update. Reusing an execution id replaces its generation.
+  // commits the tab update. Key by attempt so a rejected duplicate execution
+  // id never displaces the running attempt's completion owner.
   const sessionAttempts = useRef(new Map<string, string>());
 
   const notify = (m: string) => setToast(m);
@@ -204,12 +205,20 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // Live progress and session messages.
   useEffect(() => {
     const un = onExecutionEvent((ev) => {
-      if (ev.event === "body_progress") {
+      if (ev.event === "body_progress" && ev.attempt_id === undefined) {
         setTabs((ts) => ts.map((t) => (t.execId === ev.execution_id ? { ...t, progress: ev.bytes } : t)));
       } else if (ev.event === "message") {
         setTabs((ts) =>
           ts.map((t) =>
-            t.session?.execId === ev.execution_id ? { ...t, session: { ...t.session, messages: [...t.session.messages, ev.message].slice(-5000) } } : t,
+            t.session?.execId === ev.execution_id && t.session.attemptId === ev.attempt_id
+              ? {
+                  ...t,
+                  session: {
+                    ...t.session,
+                    messages: [...t.session.messages, ev.message].slice(-5000),
+                  },
+                }
+              : t,
           ),
         );
       }
@@ -219,8 +228,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         t.session?.execId === e.execution_id && t.session.attemptId === e.attempt_id;
       // Native enqueue can precede replacement while webview delivery follows
       // it. Only this renderer attempt may retire controls or show its result.
-      if (sessionAttempts.current.get(e.execution_id) !== e.attempt_id) return;
-      sessionAttempts.current.delete(e.execution_id);
+      if (sessionAttempts.current.get(e.attempt_id) !== e.execution_id) return;
+      sessionAttempts.current.delete(e.attempt_id);
       stopped.current.delete(e.attempt_id);
       setTabs((ts) =>
         ts.map((t) => (matches(t) ? { ...t, session: null, view: e.view ?? t.view } : t)),
@@ -453,7 +462,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (!t || !ws || t.running || t.session) return;
     const execId = uid();
     const attemptId = uid();
-    sessionAttempts.current.set(execId, attemptId);
+    sessionAttempts.current.set(attemptId, execId);
     updateTab(t.req.id, { session: { execId, attemptId, messages: [] }, view: null });
     opening.current.add(attemptId);
     try {
@@ -469,9 +478,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         attemptId,
       );
     } catch (e) {
-      if (sessionAttempts.current.get(execId) === attemptId) {
-        sessionAttempts.current.delete(execId);
-      }
+      sessionAttempts.current.delete(attemptId);
       opening.current.delete(attemptId);
       earlyAborts.current.delete(attemptId);
       // Only this open's session: the tab may hold a newer one by now.
@@ -501,12 +508,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // registered yet. The latter is canceled again once it opens (`connect`), or
   // right away if it opened while this cancel was on its way.
   const abortSession = async (sid: string, attemptId: string, retry = true): Promise<void> => {
-    const latest = sessionAttempts.current.get(sid);
-    if (latest && latest !== attemptId) return;
+    // Native admission checks the expected attempt even after this Workbench
+    // unmounts or its tab closes while an open reply is still pending.
     const wasOpening = opening.current.has(attemptId);
     stopped.current.add(attemptId);
     try {
-      await api.sessionCancel(sid);
+      await api.sessionCancel(sid, attemptId);
     } catch (e) {
       if (String((e as Error).message ?? e) !== "the session is no longer open") {
         stopped.current.delete(attemptId);
@@ -561,6 +568,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     }
     const cur = tabsRef.current.find((x) => x.req.id === id);
     if (cur && !(await stopWork(cur))) return;
+    if (cur?.session) sessionAttempts.current.delete(cur.session.attemptId);
     setTabs((ts) => ts.filter((x) => x.req.id !== id));
     setActive((a) => (a === id ? (tabsRef.current.find((x) => x.req.id !== id && x.wsId === t.wsId)?.req.id ?? null) : a));
   };
@@ -581,6 +589,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       if (results.includes(false)) return;
       if (n.kind === "folder") await api.deleteFolder(n.id);
       else await api.deleteRequest(n.id);
+      for (const t of gone) {
+        if (t.session) sessionAttempts.current.delete(t.session.attemptId);
+      }
       setTabs((ts) => ts.filter((t) => !ids.has(t.req.id)));
       setActive((a) => (a && ids.has(a) ? null : a));
       await loadTree();

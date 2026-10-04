@@ -583,6 +583,7 @@ struct SessionArgs {
 #[serde(rename_all = "camelCase")]
 struct CancelSessionArgs {
     execution_id: String,
+    attempt_id: String,
 }
 
 pub(crate) fn with_execution_commands(
@@ -614,14 +615,7 @@ pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
         }),
         "session_open" => payload_reply(invoke, |handle, fence, args: OpenSessionArgs| async move {
             let attempt_id = args.attempt_id.unwrap_or_else(|| Id::new().to_string());
-            crate::cmd_sessions::session_open(
-                handle,
-                fence,
-                args.input,
-                args.execution_id,
-                attempt_id,
-            )
-            .await
+            crate::cmd_sessions::session_open(handle, fence, args.input, args.execution_id, attempt_id).await
         }),
         "session_send" => payload_reply_admitted(
             invoke,
@@ -632,7 +626,7 @@ pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
         ),
         "session_cancel" => payload_reply_admitted(
             invoke,
-            |st, fence, args: &CancelSessionArgs| crate::cmd_sessions::admit_control(st, fence, &args.execution_id),
+            |st, fence, args: &CancelSessionArgs| crate::cmd_sessions::admit_cancel(st, fence, &args.execution_id, &args.attempt_id),
             |handle, control, _| async move { crate::cmd_sessions::session_cancel(&handle.state::<DesktopState>(), control).await },
         ),
         _ => invoke.resolver.reject("unknown execution command"),
@@ -1272,6 +1266,18 @@ pub(crate) mod tests {
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn cancellation_ipc_requires_the_expected_attempt_identity() {
+        let execution_id = Id::new().to_string();
+        let attempt_id = Id::new().to_string();
+        let legacy = serde_json::json!({ "executionId": execution_id });
+        assert!(serde_json::from_value::<CancelSessionArgs>(legacy).is_err());
+        let payload = serde_json::json!({ "executionId": execution_id, "attemptId": attempt_id });
+        let args: CancelSessionArgs = serde_json::from_value(payload).unwrap();
+        assert_eq!(args.execution_id, execution_id);
+        assert_eq!(args.attempt_id, attempt_id);
+    }
 
     pub(crate) fn payload_view() -> ExecutionView {
         let record = serde_json::from_value(serde_json::json!({

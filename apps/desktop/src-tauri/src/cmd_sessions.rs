@@ -3,10 +3,10 @@
 //! ends its record is stored in history like any other execution.
 
 use crate::commands::{ExecutionView, R, SendInput, body_view, e, execution_sink, id};
-use crate::state::{DesktopState, PayloadFence, PendingEntry};
+use crate::state::{DesktopState, PayloadFence, PayloadState, PendingEntry};
 use anvil_app::AppError;
 use anvil_app::exec::SendOptions;
-use anvil_domain::events::SessionCommand;
+use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_engine::sessions::SessionHandle;
 use anvil_transport::recorder::EventCtx;
 use serde::Serialize;
@@ -17,6 +17,8 @@ use tauri::{AppHandle, Emitter, Manager};
 pub type SessionSlot = Arc<OpenSession>;
 
 pub struct OpenSession {
+    /// The explicit renderer attempt admitted with this slot, never its reused id.
+    pub attempt_id: String,
     pub session: tokio::sync::Mutex<Option<SessionHandle>>,
     /// Interrupts a send waiting on the bounded command queue BEFORE any
     /// canceler tries to take `session`. It cannot be trapped by that wait.
@@ -56,15 +58,25 @@ fn remove_slot(st: &DesktopState, execution_id: &str, slot: &SessionSlot) {
     }
 }
 
-fn register_session<'a>(st: &'a DesktopState, fence: &PayloadFence, execution_id: &str) -> R<(PendingEntry, SessionRegistration<'a>)> {
+fn register_session<'a>(
+    st: &'a DesktopState,
+    fence: &PayloadFence,
+    execution_id: &str,
+    attempt_id: &str,
+) -> R<(PendingEntry, SessionRegistration<'a>)> {
     let exec_id = id(execution_id)?;
+    id(attempt_id)?;
     st.deliver_payload(fence, || {
         let mut sessions = st.sessions.lock();
         if sessions.contains_key(execution_id) {
             return Err(format!("attempt {execution_id} is already running"));
         }
         let pending = PendingEntry::register(&st.running, exec_id)?;
-        let slot = Arc::new(OpenSession { session: tokio::sync::Mutex::new(None), cancel: pending.token().clone() });
+        let slot = Arc::new(OpenSession {
+            attempt_id: attempt_id.into(),
+            session: tokio::sync::Mutex::new(None),
+            cancel: pending.token().clone(),
+        });
         sessions.insert(execution_id.into(), (fence.clone(), slot.clone()));
         Ok((pending, SessionRegistration { st, execution_id: execution_id.into(), slot, published: false }))
     })?
@@ -79,9 +91,19 @@ pub(crate) struct SessionControl {
 }
 
 pub(crate) fn admit_control(st: &DesktopState, fence: PayloadFence, execution_id: &str) -> R<SessionControl> {
+    admit_control_for_attempt(st, fence, execution_id, None)
+}
+
+/// Cancellation may arrive from an old Workbench after a remount. Resolve
+/// the expected attempt at IPC admission, before capturing the native slot.
+pub(crate) fn admit_cancel(st: &DesktopState, fence: PayloadFence, execution_id: &str, attempt_id: &str) -> R<SessionControl> {
+    admit_control_for_attempt(st, fence, execution_id, Some(attempt_id))
+}
+
+fn admit_control_for_attempt(st: &DesktopState, fence: PayloadFence, execution_id: &str, attempt_id: Option<&str>) -> R<SessionControl> {
     st.deliver_payload(&fence, || {
         let (owner, slot) = st.sessions.lock().get(execution_id).cloned().ok_or("the session is no longer open")?;
-        if !owner.same_owner(&fence) {
+        if !owner.same_owner(&fence) || attempt_id.is_some_and(|expected| expected != slot.attempt_id.as_str()) {
             return Err("the session is no longer open".into());
         }
         Ok(SessionControl { fence: fence.clone(), execution_id: execution_id.into(), slot })
@@ -115,6 +137,34 @@ pub struct SessionEnded {
     pub error: Option<String>,
 }
 
+/// Desktop-only envelope: domain/CLI events retain their existing shape.
+#[derive(Serialize, Clone)]
+pub struct SessionEvent {
+    pub attempt_id: String,
+    #[serde(flatten)]
+    pub event: ExecutionEvent,
+}
+
+/// Tag every real transport callback with its immutable registered attempt.
+/// The shared payload gate and exact-slot mutex stay held through enqueue.
+fn session_sink<S: PayloadState>(
+    source: S,
+    fence: PayloadFence,
+    execution_id: String,
+    slot: SessionSlot,
+    emit: impl Fn(SessionEvent) + Send + Sync + 'static,
+) -> anvil_transport::EventFn {
+    execution_sink(source.clone(), fence, false, move |event| {
+        source.with_state(|st| {
+            let sessions = st.sessions.lock();
+            if !sessions.get(&execution_id).is_some_and(|(_, current)| Arc::ptr_eq(current, &slot)) {
+                return;
+            }
+            emit(SessionEvent { attempt_id: slot.attempt_id.clone(), event: event.clone() });
+        });
+    })
+}
+
 /// Open a session. Returns the execution id used by message events.
 pub(crate) async fn session_open(
     handle: AppHandle,
@@ -125,10 +175,9 @@ pub(crate) async fn session_open(
 ) -> R<String> {
     let st = handle.state::<DesktopState>();
     let exec_id = id(&execution_id)?;
-    id(&attempt_id)?;
     // Publish a pending slot under the admitted epoch. Controls bind that
     // slot and its token now; the handle later fills the same slot.
-    let (pending, mut registration) = register_session(st.inner(), &fence, &execution_id)?;
+    let (pending, mut registration) = register_session(st.inner(), &fence, &execution_id, &attempt_id)?;
     let slot = registration.slot.clone();
     let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
@@ -147,9 +196,15 @@ pub(crate) async fn session_open(
         built => built.map_err(e)?,
     };
     let h2 = handle.clone();
-    let sink = execution_sink(handle.clone(), fence.clone(), false, move |ev| {
-        let _ = h2.emit("execution-event", ev);
-    });
+    let sink = session_sink(
+        handle.clone(),
+        fence.clone(),
+        execution_id.clone(),
+        slot.clone(),
+        move |ev| {
+            let _ = h2.emit("execution-event", ev);
+        },
+    );
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let Some((session, canceled)) = pending.open(open, |session| session).await else {
         return Err(CANCELED_BEFORE_OPEN.into());
@@ -205,12 +260,7 @@ async fn publish_handle(st: &DesktopState, fence: &PayloadFence, slot: &SessionS
     }
 }
 
-async fn finish_session(
-    app: &anvil_app::App,
-    execution_id: String,
-    attempt_id: String,
-    session: Option<SessionHandle>,
-) -> SessionEnded {
+async fn finish_session(app: &anvil_app::App, execution_id: String, attempt_id: String, session: Option<SessionHandle>) -> SessionEnded {
     match session {
         Some(session) => {
             let out = session.finish().await;
@@ -226,25 +276,14 @@ async fn finish_session(
             let error = recorded.map_err(e).err();
             SessionEnded { execution_id, attempt_id, view: Some(view), error }
         }
-        None => SessionEnded {
-            execution_id,
-            attempt_id,
-            view: None,
-            error: Some("the session was already finished".into()),
-        },
+        None => SessionEnded { execution_id, attempt_id, view: None, error: Some("the session was already finished".into()) },
     }
 }
 
 /// Check the exact native slot and enqueue atomically against registration.
 /// A retired, unreplaced attempt still sends completion (scalar if fenced).
 /// The renderer generation also rejects packets queued before replacement.
-fn emit_ended(
-    st: &DesktopState,
-    fence: &PayloadFence,
-    slot: &SessionSlot,
-    ev: SessionEnded,
-    emit: impl Fn(SessionEnded),
-) {
+fn emit_ended(st: &DesktopState, fence: &PayloadFence, slot: &SessionSlot, ev: SessionEnded, emit: impl Fn(SessionEnded)) {
     let execution_id = ev.execution_id.clone();
     let attempt_id = ev.attempt_id.clone();
     let deliver = |ev: SessionEnded| {
@@ -347,7 +386,7 @@ mod tests {
             expect_frames: 0,
             proxy_protocol: None,
         });
-        let (pending, mut registration) = register_session(st, fence, execution_id).unwrap();
+        let (pending, mut registration) = register_session(st, fence, execution_id, &Id::new().to_string()).unwrap();
         let slot = registration.slot.clone();
         let open =
             fence.app.engine.open_session(ExecutionContext::standalone(spec), EventCtx { execution_id: id(execution_id).unwrap(), sink });
@@ -363,6 +402,227 @@ mod tests {
         if let Some(session) = session {
             tokio::time::timeout(BOUND, session.finish()).await.expect("engine cancellation must finish");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rejected_duplicate_preserves_the_original_slot_and_full_or_scalar_completion() {
+        for scalar in [false, true] {
+            let root = TempRoot::new();
+            let st = DesktopState::new(root.0.clone());
+            let (app, _) = create(&st, "duplicate");
+            st.set_app_since(app, st.epoch()).unwrap();
+            let fence = st.admit_payload().unwrap();
+            let execution_id = Id::new().to_string();
+            let (slot, _peer) = open_tcp(&st, &fence, &execution_id, None).await;
+            let duplicate = Id::new().to_string();
+            let rejected = register_session(&st, &fence, &execution_id, &duplicate);
+            assert_eq!(rejected.err(), Some(format!("attempt {execution_id} is already running")));
+            assert!(st.sessions.lock().get(&execution_id).is_some_and(|(_, current)| Arc::ptr_eq(current, &slot)));
+            assert!(!slot.cancel.is_cancelled());
+            let attempt_id = slot.attempt_id.clone();
+            let control = admit_cancel(&st, fence.clone(), &execution_id, &attempt_id).unwrap();
+            session_cancel(&st, control).await.unwrap();
+            let taken = slot.session.lock().await.take();
+            assert!(taken.is_some());
+            let app = &fence.app;
+            let key = execution_id.clone();
+            let attempt = attempt_id.clone();
+            let finish = finish_session(app, key, attempt, taken);
+            let ended = tokio::time::timeout(BOUND, finish).await.unwrap();
+            assert!(ended.error.is_none());
+            let record_id = ended.view.as_ref().unwrap().record.id.to_string();
+            assert!(history_contains(app, &record_id));
+            remove_slot(&st, &execution_id, &slot);
+            if scalar {
+                st.lock();
+            }
+            let received = parking_lot::Mutex::new(Vec::new());
+            emit_ended(&st, &fence, &slot, ended, |event| {
+                assert!(st.sessions.try_lock().is_none(), "enqueue must exclude registration");
+                received.lock().push(serde_json::to_value(event).unwrap());
+            });
+            let received = received.into_inner();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0]["execution_id"], execution_id);
+            assert_eq!(received[0]["attempt_id"], attempt_id);
+            if scalar {
+                assert!(received[0]["view"].is_null());
+                assert_eq!(received[0]["error"], "LOCKED");
+            } else {
+                assert_eq!(received[0]["view"]["record"]["id"], record_id);
+                assert!(received[0]["error"].is_null());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn late_cancel_admission_cannot_capture_a_replacement_attempt() {
+        for transition in ["same-epoch", "lock-unlock", "profile"] {
+            for live in [false, true] {
+                let root = TempRoot::new();
+                let st = DesktopState::new(root.0.clone());
+                let (app, dir) = create(&st, "old");
+                st.set_app_since(app, st.epoch()).unwrap();
+                let fence = st.admit_payload().unwrap();
+                let execution_id = Id::new().to_string();
+                let old_attempt = Id::new().to_string();
+                let (old_pending, old_registration) = register_session(&st, &fence, &execution_id, &old_attempt).unwrap();
+                match transition {
+                    "same-epoch" => {
+                        remove_slot(&st, &execution_id, &old_registration.slot);
+                    }
+                    "lock-unlock" => {
+                        st.lock();
+                        let unlock = Unlock::Passphrase(PASSPHRASE);
+                        let (_, key) = ProfileManager::unlock(&dir, unlock).unwrap();
+                        st.unlock_since(&fence.app, key, st.epoch()).unwrap();
+                    }
+                    "profile" => {
+                        let (other, _) = create(&st, "new");
+                        st.set_app_since(other, st.epoch()).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                drop(old_pending);
+                let fresh = st.admit_payload().unwrap();
+                let new_attempt = Id::new().to_string();
+                let (slot, peer, pending, registration) = if live {
+                    let (slot, peer) = open_tcp(&st, &fresh, &execution_id, None).await;
+                    (slot, Some(peer), None, None)
+                } else {
+                    let (pending, registration) = register_session(&st, &fresh, &execution_id, &new_attempt).unwrap();
+                    (registration.slot.clone(), None, Some(pending), Some(registration))
+                };
+                drop(old_registration);
+                // This admission is new: a delayed renderer continuation may
+                // carry today's authorized epoch while expecting yesterday's slot.
+                let stale = admit_cancel(&st, fresh.clone(), &execution_id, &old_attempt);
+                assert_eq!(stale.err(), Some("the session is no longer open".into()));
+                assert!(!slot.cancel.is_cancelled(), "{transition}, live={live}");
+                if let Some(pending) = pending.as_ref() {
+                    assert!(!pending.token().is_cancelled());
+                }
+                if transition != "same-epoch" {
+                    let old_epoch = admit_cancel(&st, fence, &execution_id, &slot.attempt_id);
+                    assert_eq!(old_epoch.err(), Some("LOCKED".into()));
+                }
+                if live {
+                    let send = admit_control(&st, fresh.clone(), &execution_id).unwrap();
+                    let command = SessionCommand::SendText { text: "replacement".into() };
+                    session_send(&st, send, command).await.unwrap();
+                }
+                let cancel = admit_cancel(&st, fresh, &execution_id, &slot.attempt_id).unwrap();
+                session_cancel(&st, cancel).await.unwrap();
+                assert!(slot.cancel.is_cancelled());
+                if let Some(pending) = pending.as_ref() {
+                    assert!(pending.token().is_cancelled());
+                }
+                finish_slot(&slot).await;
+                remove_slot(&st, &execution_id, &slot);
+                drop((peer, pending, registration));
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn real_session_callbacks_carry_attempts_and_retired_sinks_cannot_enqueue() {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (app, _) = create(&st, "packets");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let fence = st.admit_payload().unwrap();
+        let execution_id = Id::new().to_string();
+        let old_attempt = Id::new().to_string();
+        let (pending, mut registration) = register_session(&st, &fence, &execution_id, &old_attempt).unwrap();
+        let slot = registration.slot.clone();
+        let received = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log = received.clone();
+        let state = st.clone();
+        let (message_tx, mut message_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = session_sink(
+            st.clone(),
+            fence.clone(),
+            execution_id.clone(),
+            slot.clone(),
+            move |packet| {
+                assert!(state.sessions.try_lock().is_none(), "enqueue must exclude registration");
+                let message = matches!(&packet.event, ExecutionEvent::Message { .. });
+                let value = serde_json::to_value(packet).unwrap();
+                log.lock().push(value.clone());
+                if message {
+                    message_tx.send(value).unwrap();
+                }
+            },
+        );
+        let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("tcp://{}", peer.local_addr().unwrap());
+        let mut spec = RequestSpec::http("GET", &url);
+        spec.protocol = Protocol::Tcp;
+        spec.tcp = Some(TcpSpec {
+            tls: false,
+            framing: TcpFraming::NewlineDelimited,
+            payloads: vec![],
+            half_close_after_send: false,
+            read_idle_ms: 1000,
+            max_read_bytes: 4096,
+            expect_frames: 0,
+            proxy_protocol: None,
+        });
+        let events = EventCtx { execution_id: id(&execution_id).unwrap(), sink: Some(sink.clone()) };
+        let open = fence.app.engine.open_session(ExecutionContext::standalone(spec), events);
+        let (session, canceled) = pending.open(open, |session| session).await.unwrap();
+        publish_handle(&st, &fence, &slot, session, canceled).await;
+        registration.published = true;
+        let send = admit_control(&st, fence.clone(), &execution_id).unwrap();
+        let command = SessionCommand::SendText { text: "real packet payload".into() };
+        session_send(&st, send, command).await.unwrap();
+        let packet = tokio::time::timeout(BOUND, message_rx.recv()).await.unwrap().unwrap();
+        assert_eq!(packet["event"], "message");
+        assert_eq!(packet["execution_id"], execution_id);
+        assert_eq!(packet["attempt_id"], old_attempt);
+        assert!(packet["message"]["preview"].as_str().unwrap().contains("real packet payload"));
+        finish_slot(&slot).await;
+        remove_slot(&st, &execution_id, &slot);
+        let new_attempt = Id::new().to_string();
+        let (_pending, replacement) = register_session(&st, &fence, &execution_id, &new_attempt).unwrap();
+        let count = received.lock().len();
+        let message = anvil_domain::execution::StreamMessage {
+            direction: anvil_domain::execution::Direction::Received,
+            offset_us: 1,
+            kind: "text".into(),
+            size: 5,
+            preview: "stale".into(),
+            preview_is_hex: false,
+            preview_truncated: false,
+            event_id: None,
+            event_type: None,
+        };
+        sink(ExecutionEvent::Message { execution_id: id(&execution_id).unwrap(), message });
+        sink(ExecutionEvent::BodyProgress { execution_id: id(&execution_id).unwrap(), bytes: 999 });
+        assert_eq!(received.lock().len(), count, "retired callbacks cannot enqueue under the same epoch");
+        let log = received.clone();
+        let fresh = session_sink(
+            st.clone(),
+            fence,
+            execution_id.clone(),
+            replacement.slot.clone(),
+            move |packet| log.lock().push(serde_json::to_value(packet).unwrap()),
+        );
+        fresh(ExecutionEvent::BodyProgress { execution_id: id(&execution_id).unwrap(), bytes: 64 });
+        {
+            let received = received.lock();
+            assert_eq!(received.len(), count + 1);
+            assert_eq!(received[count]["event"], "body_progress");
+            assert_eq!(received[count]["execution_id"], execution_id);
+            assert_eq!(received[count]["attempt_id"], new_attempt);
+            assert_eq!(received[count]["bytes"], 64);
+            for packet in &received[..count] {
+                assert_eq!(packet["attempt_id"], old_attempt);
+            }
+        }
+        st.lock();
+        fresh(ExecutionEvent::BodyProgress { execution_id: id(&execution_id).unwrap(), bytes: 128 });
+        assert_eq!(received.lock().len(), count + 1, "the shared epoch gate still fences packets");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -442,7 +702,7 @@ mod tests {
                 st.set_app_since(app, st.epoch()).unwrap();
                 let old_fence = st.admit_payload().unwrap();
                 let execution_id = Id::new().to_string();
-                let (old_pending, old_registration) = register_session(&st, &old_fence, &execution_id).unwrap();
+                let (old_pending, old_registration) = register_session(&st, &old_fence, &execution_id, &Id::new().to_string()).unwrap();
                 let old_slot = old_registration.slot.clone();
                 let send = admit_control(&st, old_fence.clone(), &execution_id).unwrap();
                 let cancel = admit_control(&st, old_fence.clone(), &execution_id).unwrap();
@@ -482,7 +742,7 @@ mod tests {
                         let (slot, peer) = open_tcp(&st, &fresh, &execution_id, None).await;
                         (slot, Some(peer), None)
                     } else {
-                        let (pending, mut registration) = register_session(&st, &fresh, &execution_id).unwrap();
+                        let (pending, mut registration) = register_session(&st, &fresh, &execution_id, &Id::new().to_string()).unwrap();
                         registration.published = true;
                         (registration.slot.clone(), None, Some(pending))
                     };
@@ -570,7 +830,7 @@ mod tests {
         let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
         st.unlock_since(&fence.app, key, st.epoch()).unwrap();
         let fresh = st.admit_payload().unwrap();
-        let (pending, registration) = register_session(&st, &fresh, &execution_id).unwrap();
+        let (pending, registration) = register_session(&st, &fresh, &execution_id, &Id::new().to_string()).unwrap();
         publish_handle(&st, &fence, &old_slot, session, true).await;
         let session = old_slot.session.lock().await.take();
         assert!(session.is_some(), "completed handle retained for finalization");
@@ -653,7 +913,7 @@ mod tests {
                         let (slot, peer) = open_tcp(&st, &fresh, &execution_id, None).await;
                         (None, None, slot, Some(peer))
                     } else {
-                        let (pending, reg) = register_session(&st, &fresh, &execution_id).unwrap();
+                        let (pending, reg) = register_session(&st, &fresh, &execution_id, &Id::new().to_string()).unwrap();
                         let slot = reg.slot.clone();
                         (Some(pending), Some(reg), slot, None)
                     };
@@ -696,7 +956,7 @@ mod tests {
             let view = payload_view();
             let execution_id = view.record.id.to_string();
             let attempt_id = Id::new().to_string();
-            let (pending, registration) = register_session(&st, &fence, &execution_id).unwrap();
+            let (pending, registration) = register_session(&st, &fence, &execution_id, &attempt_id).unwrap();
             let slot = registration.slot.clone();
             drop(pending);
             drop(registration);

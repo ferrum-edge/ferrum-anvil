@@ -129,6 +129,8 @@ export interface SessionEnded {
   view?: ExecutionView | null;
   error?: string | null;
 }
+/** Interactive packets always carry their admitted attempt; manual sends omit it. */
+export type NativeExecutionEvent = ExecutionEvent & { attempt_id?: string };
 export interface HistoryItem {
   id: string;
   /** Unix epoch milliseconds. */
@@ -846,7 +848,8 @@ export const api = {
   sessionOpen: (input: SendInput, executionId: string, attemptId: string) =>
     call<string>("session_open", { input, executionId, attemptId }),
   sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
-  sessionCancel: (executionId: string) => call<void>("session_cancel", { executionId }),
+  sessionCancel: (executionId: string, attemptId: string) =>
+    call<void>("session_cancel", { executionId, attemptId }),
 
   specPreview: (input: SpecInput, options: ImportOptions, target: SpecTarget) =>
     call<SpecPreview>("spec_preview", { input, options, target }),
@@ -894,8 +897,8 @@ export const api = {
     call<SecretRef>("import_pkcs12_file", { grant, workspaceId, label }),
 };
 
-export function onExecutionEvent(cb: (e: ExecutionEvent) => void): Promise<UnlistenFn> {
-  return listen<ExecutionEvent>("execution-event", (ev) => cb(ev.payload));
+export function onExecutionEvent(cb: (e: NativeExecutionEvent) => void): Promise<UnlistenFn> {
+  return listen<NativeExecutionEvent>("execution-event", (ev) => cb(ev.payload));
 }
 
 export function onLoadProgress(cb: (e: { run_key: string; progress: LoadProgress }) => void): Promise<UnlistenFn> {
