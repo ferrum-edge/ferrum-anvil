@@ -21,6 +21,15 @@ fn file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
     p
 }
 
+fn canonical_pem(pem: &str) -> Vec<u8> {
+    let mut canonical = String::new();
+    for line in pem.lines() {
+        canonical.push_str(line.trim().trim_start_matches('\u{feff}'));
+        canonical.push('\n');
+    }
+    canonical.into_bytes()
+}
+
 fn partial_files(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir)
         .unwrap()
@@ -230,11 +239,13 @@ fn certificate_chains_are_readable_but_comments_and_vault_disposition_are_not() 
     let chain = pki.client_a.chain_with(&pki.client_ca);
     let contents = format!("comment canary\n{chain}\ntrailing canary\n").replace('\n', "\r\n");
     let path = file(root.path(), "cert.pem", contents.as_bytes());
+    assert_eq!(std::fs::read(&path).unwrap(), contents.as_bytes());
     let grants = FileGrants::default();
     let grant = grants.grant_read(FilePurpose::PemCertificate, &path).unwrap();
+    let expected = canonical_pem(&chain);
     for _ in 0..2 {
         let returned = grants.read(&grant.token, FilePurpose::PemCertificate).unwrap();
-        assert_eq!(returned.bytes, chain.as_bytes());
+        assert_eq!(returned.bytes, expected);
     }
     assert!(grants.import_private_key(&app, &grant.token, &workspace, "confused").is_err());
     assert!(grants.is_empty());
@@ -246,6 +257,7 @@ fn a_read_grant_reads_the_chosen_file_and_can_be_reused() {
     let dir = tempfile::tempdir().unwrap();
     let pem = anvil_fixtures::LabPki::generate().ca.cert;
     let path = file(dir.path(), "cert.pem", pem.as_bytes());
+    let expected = canonical_pem(&pem);
     let grants = FileGrants::default();
     let g = grants.grant_read(FilePurpose::PemCertificate, &path).unwrap();
     assert_eq!(g.file_name, "cert.pem");
@@ -255,7 +267,7 @@ fn a_read_grant_reads_the_chosen_file_and_can_be_reused() {
     // Preview then apply read the same selection.
     for _ in 0..2 {
         let f = grants.read(&g.token, FilePurpose::PemCertificate).unwrap();
-        assert_eq!(f.bytes, pem.as_bytes());
+        assert_eq!(f.bytes, expected);
         assert_eq!(f.file_name, "cert.pem");
     }
     let again = grants.grant_read(FilePurpose::PemCertificate, &path).unwrap();
@@ -444,6 +456,7 @@ fn a_lock_while_the_dialog_is_open_grants_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let pem = anvil_fixtures::LabPki::generate().ca.cert;
     let src = file(dir.path(), "a.pem", pem.as_bytes());
+    let expected = canonical_pem(&pem);
     let dest = dir.path().join("out.anvil");
     let grants = FileGrants::default();
     let before = grants.generation();
@@ -455,7 +468,8 @@ fn a_lock_while_the_dialog_is_open_grants_nothing() {
     // A choice started after the lock is granted.
     let now = grants.generation();
     let g = grants.grant_read_at(FilePurpose::PemCertificate, &src, now).unwrap();
-    assert_eq!(grants.read(&g.token, FilePurpose::PemCertificate).unwrap().bytes, pem.as_bytes());
+    let returned = grants.read(&g.token, FilePurpose::PemCertificate).unwrap();
+    assert_eq!(returned.bytes, expected);
     assert!(!dest.exists());
 }
 
