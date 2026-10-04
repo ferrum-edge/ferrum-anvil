@@ -170,25 +170,25 @@ fn resolve_token_endpoint(config: &OAuth2Config, r: &Resolver) -> Result<String,
         failure.message = "could not resolve auth.token_url; check the vault and active variables".into();
         failure
     })?;
-    require_secure_token_endpoint(&endpoint).map_err(|message| {
-        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth")
-    })?;
+    require_secure_token_endpoint(&endpoint)
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     *r.oauth_endpoint.lock() = Some((config.token_url.clone(), endpoint.clone()));
     Ok(endpoint)
 }
 
-/// Check the effective endpoint before any HTTP request fields, mixed auth
-/// profiles, workload identities or deferred vault variables are materialized.
-/// The acquisition uses this same expansion, including dynamic helper state.
+/// Check the effective endpoint, then freeze the complete deferred variable
+/// scope before request fields, mixed auth credentials or workload identities
+/// are prepared. HTTP and every session entry point use this gate before effects.
+/// Acquisition uses the same endpoint expansion, including dynamic helper state.
 pub fn validate_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(), TransportFailure> {
     let (_, auth) = ctx.effective_auth();
-    let config = auth.oauth_profile().map_err(|message| {
-        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth")
-    })?;
+    let config = auth
+        .oauth_profile()
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     if let Some(config) = config {
         resolve_token_endpoint(config, r)?;
     }
-    Ok(())
+    r.materialize_variables()
 }
 
 /// A load producer cannot authorize an origin from one sample of a dynamic
@@ -483,12 +483,12 @@ pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, Tra
         auth.oauth_profile().map_err(fail)?.ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
     let r = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
     resolve_token_endpoint(config, &r)?;
+    r.materialize_variables()?;
     if config.grant == OAuthGrant::ClientCredentials {
         return Err(fail("this OAuth profile uses the client-credentials grant, which needs no browser sign-in"));
     }
     // Resolved once: the endpoint the browser visits is the one in the key.
     let resolved = resolve_oauth(config, ctx, &r)?;
-    r.materialize_variables()?;
     if resolved.authorization_url.trim().is_empty() {
         return Err(fail("the OAuth profile has no authorization URL; set it to the issuer's authorization endpoint")
             .with_field("auth.authorization_url"));

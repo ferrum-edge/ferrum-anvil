@@ -342,9 +342,10 @@ impl WorkerJob {
                 if secrets.iter().any(|s| s.id == r.id) {
                     continue;
                 }
-                let v = ctx.secrets.resolve(&r).map_err(|_| {
-                    LoadError::Invalid("could not resolve a load credential; check the vault and active variables".into())
-                })?;
+                let v = ctx
+                    .secrets
+                    .resolve(&r)
+                    .map_err(|_| LoadError::Invalid("could not resolve a load credential; check the vault and active variables".into()))?;
                 secrets.push(ScopedSecret { id: r.id, value: SecretString(v) });
             }
             let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());

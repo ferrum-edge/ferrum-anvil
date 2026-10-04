@@ -72,8 +72,8 @@ fn resolve_auth(
 ) -> Result<ResolvedAuth, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let sens = |v: &anvil_domain::secret::SensitiveValue, field: &str| -> Result<Zeroizing<String>, TransportFailure> {
-        let (raw, _) =
-            resolve_sensitive(v, ctx.secrets.as_ref()).map_err(|_| fail(format!("could not resolve {field}; check the vault and active variables")))?;
+        let (raw, _) = resolve_sensitive(v, ctx.secrets.as_ref())
+            .map_err(|_| fail(format!("could not resolve {field}; check the vault and active variables")))?;
         let resolved = r.resolve(&raw, field).map_err(|mut failure| {
             failure.message = format!("could not resolve {field}; check the vault and active variables");
             failure
@@ -484,9 +484,6 @@ pub(crate) fn prepare_all_at(
         .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     let mut oauth_key = None;
     let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key)?;
-    if matches!(auth_cfg.oauth_profile(), Ok(Some(_))) {
-        r.materialize_variables()?;
-    }
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };
     let tls_scheme = matches!(http.target.scheme.as_str(), "https" | "wss" | "grpcs");
     let (tls, tls_name, bindings) = if tls_scheme {

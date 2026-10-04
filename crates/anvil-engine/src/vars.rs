@@ -13,8 +13,10 @@ use crate::context::SecretResolver;
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
 use parking_lot::Mutex;
 use rand::{RngExt, SeedableRng};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use zeroize::Zeroizing;
 
 const MAX_DEPTH: usize = 16;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
@@ -36,6 +38,7 @@ pub struct VarLayer {
 pub struct Resolver {
     layers: Vec<VarLayer>,
     secrets: Option<Arc<dyn SecretResolver>>,
+    variable_values: Mutex<HashMap<(usize, usize), Zeroizing<String>>>,
     value_transform: Option<fn(&str) -> String>,
     pub(crate) oauth_endpoint: Mutex<Option<(String, String)>>,
     counter: AtomicU64,
@@ -63,6 +66,7 @@ impl Resolver {
         Resolver {
             layers,
             secrets: None,
+            variable_values: Mutex::new(HashMap::new()),
             value_transform: None,
             oauth_endpoint: Mutex::new(None),
             counter: AtomicU64::new(0),
@@ -75,7 +79,7 @@ impl Resolver {
         }
     }
 
-    /// Resolve deferred vault variables only when the winning entry is used.
+    /// Resolve deferred vault variables on use or during complete-scope preparation.
     pub fn with_secrets(mut self, secrets: Arc<dyn SecretResolver>) -> Self {
         self.secrets = Some(secrets);
         self
@@ -215,19 +219,29 @@ impl Resolver {
         Ok(out)
     }
 
-    /// The unexpanded value used when freezing a worker's original layers.
+    /// The frozen, unexpanded value used when preparing the original layers.
     /// Caller must validate the OAuth endpoint before materializing credentials.
     pub fn variable_value(&self, layer: usize, variable: usize) -> Result<String, TransportFailure> {
         let entry = &self.layers[layer].vars[variable];
         let value = match self.secrets.as_ref().and_then(|s| s.variable_secret(layer, variable)) {
-            Some(reference) => self.secrets.as_ref().unwrap().resolve(&reference).map(|value| value.to_string()).map_err(|_| {
-                TransportFailure::new(
-                    Phase::Prepare,
-                    FailureKind::AuthPreparationFailed,
-                    "could not resolve a secret variable; check the vault and active variables",
-                )
-                .with_field("variables")
-            })?,
+            Some(reference) => {
+                let mut values = self.variable_values.lock();
+                if let Some(value) = values.get(&(layer, variable)) {
+                    value.to_string()
+                } else {
+                    let value = self.secrets.as_ref().unwrap().resolve(&reference).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::AuthPreparationFailed,
+                            "could not resolve a secret variable; check the vault and active variables",
+                        )
+                        .with_field("variables")
+                    })?;
+                    let raw = value.to_string();
+                    values.insert((layer, variable), value);
+                    raw
+                }
+            }
             None => entry.value.clone(),
         };
         Ok(match self.value_transform {
@@ -236,8 +250,8 @@ impl Resolver {
         })
     }
 
-    /// Preserve enabled vault-variable lookup outcomes after OAuth validation,
-    /// including an unused or shadowed variable that previously failed layering.
+    /// Freeze every enabled vault variable after OAuth validation, including
+    /// unused and shadowed entries. Do not expand their data or dynamic helpers.
     pub(crate) fn materialize_variables(&self) -> Result<(), TransportFailure> {
         if let Some(secrets) = &self.secrets {
             for (layer_index, layer) in self.layers.iter().enumerate() {

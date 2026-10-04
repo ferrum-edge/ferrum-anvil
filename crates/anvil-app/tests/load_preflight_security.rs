@@ -575,11 +575,11 @@ async fn app_and_worker_producer_check_ineligible_issuers_before_nested_vault_va
                 assert_eq!(output.record.attempts[0].failure.as_ref().unwrap().message, expected);
                 assert!(!serde_json::to_string(&output.record).unwrap().contains("canary"));
                 let error = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap_err();
-                assert_eq!(error.to_string(), expected);
+                assert_eq!(error.to_string(), format!("invalid load plan: {expected}"));
                 assert!(!error.to_string().contains("canary"), "no wire job or credential-bearing error is produced");
                 assert!(!reads.lock().unwrap().contains(&credential.id), "neither production sink read the credential");
                 assert_eq!(app.load_preflight(&p).unwrap_err().to_string(), expected);
-                assert_eq!(app.worker_job(&p, true).unwrap_err().to_string(), expected);
+                assert_eq!(app.worker_job(&p, true).unwrap_err().to_string(), format!("invalid load plan: {expected}"));
                 assert_eq!(
                     app.oauth_token_status(Some(p.chain[0]), &ws.meta.id, None, &anvil_app::exec::SendOptions::default())
                         .unwrap_err()
@@ -713,11 +713,9 @@ fn worker_producer_masks_helpers_inside_vault_issuers_and_sanitizes_missing_cred
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Producer eligibility").unwrap();
     let credential = app.set_secret(&ws.meta.id, "credential-label-canary", "credential-value-canary").unwrap();
-    for issuer_value in [
-        "{{$randomFrom http://127.0.0.1/token|http://issuer.example.test/token}}",
-        "{{missing-issuer-canary}}",
-        "{{issuer}}",
-    ] {
+    for issuer_value in
+        ["{{$randomFrom http://127.0.0.1/token|http://issuer.example.test/token}}", "{{missing-issuer-canary}}", "{{issuer}}"]
+    {
         let issuer = app.set_secret(&ws.meta.id, "issuer", issuer_value).unwrap();
         ws.variables = vec![vault_variable("issuer", &issuer), vault_variable("oauth_secret", &credential)];
         app.save_workspace(ws.clone()).unwrap();
@@ -733,24 +731,19 @@ fn worker_producer_masks_helpers_inside_vault_issuers_and_sanitizes_missing_cred
         ctx.secrets = Arc::new(CountedSecrets { inner: ctx.secrets.clone(), reads: reads.clone() });
         let error = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap_err().to_string();
         assert!(!error.contains("canary"));
-        assert!(error.contains("per-run values") || error == "could not resolve auth.token_url; check the vault and active variables");
+        let message = error.strip_prefix("invalid load plan: ").unwrap();
+        assert!(message.contains("per-run values") || message == "could not resolve auth.token_url; check the vault and active variables");
         assert!(!reads.lock().unwrap().contains(&credential.id));
     }
     app.store.delete_secret(&credential.id).unwrap();
     for direct in [false, true] {
-        ws.variables = vec![
-            Variable::plain("issuer", "https://issuer.example.test/token"),
-            vault_variable("oauth_secret", &credential),
-        ];
+        ws.variables = vec![Variable::plain("issuer", "https://issuer.example.test/token"), vault_variable("oauth_secret", &credential)];
         app.save_workspace(ws.clone()).unwrap();
         let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
         spec.auth = oauth("{{issuer}}");
         if let AuthConfig::OAuth2 { config } = &mut spec.auth {
-            config.client_secret = if direct {
-                SensitiveValue::Secret { secret: credential.clone() }
-            } else {
-                SensitiveValue::template("{{oauth_secret}}")
-            };
+            config.client_secret =
+                if direct { SensitiveValue::Secret { secret: credential.clone() } } else { SensitiveValue::template("{{oauth_secret}}") };
         }
         let p = plan(&app, ws.meta.id, spec);
         assert!(app.load_preflight(&p).is_ok(), "preflight validates eligibility without consuming credentials");
@@ -758,9 +751,9 @@ fn worker_producer_masks_helpers_inside_vault_issuers_and_sanitizes_missing_cred
         assert_eq!(
             error,
             if direct {
-                "could not resolve a load credential; check the vault and active variables"
+                "invalid load plan: could not resolve a load credential; check the vault and active variables"
             } else {
-                "could not resolve a load variable; check the vault and active variables"
+                "invalid load plan: could not resolve a load variable; check the vault and active variables"
             },
         );
         assert!(!error.contains("canary"));
@@ -818,7 +811,10 @@ fn worker_serializes_the_issuer_snapshot_that_passed_eligibility_even_if_the_vau
     let wire = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap();
     assert_eq!(wire.requests[0].var_layers[0].vars[0].value.expose(), "https://issuer.example.test/token");
     assert!(!serde_json::to_string(&wire).unwrap().contains("changed-issuer-canary"));
-    assert_eq!(app.worker_job(&p, true).unwrap_err().to_string(), "the OAuth token endpoint requires HTTPS or literal-loopback HTTP");
+    assert_eq!(
+        app.worker_job(&p, true).unwrap_err().to_string(),
+        "invalid load plan: the OAuth token endpoint requires HTTPS or literal-loopback HTTP",
+    );
 }
 
 #[test]

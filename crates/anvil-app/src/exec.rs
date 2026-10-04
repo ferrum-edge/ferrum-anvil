@@ -38,9 +38,9 @@ impl SecretResolver for StoreSecrets {
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
         match self.store.get_workspace_secret(&r.id, &self.workspace) {
             Ok(Some((_, v))) => Ok(v),
-            Ok(None) => Err(
-                "the secret is not in this workspace's vault (it may belong to another workspace or not have been imported)".into(),
-            ),
+            Ok(None) => {
+                Err("the secret is not in this workspace's vault (it may belong to another workspace or not have been imported)".into())
+            }
             Err(anvil_storage::StoreError::Locked) => Err("Anvil is locked".into()),
             Err(_) => Err("could not read the workspace vault".into()),
         }

@@ -532,6 +532,8 @@ async fn credential_variable_failures_keep_endpoint_policy_and_never_disclose_va
             let opts = SendOptions::default();
             let expected = if endpoint.starts_with("http://issuer") {
                 "the OAuth token endpoint requires HTTPS or literal-loopback HTTP"
+            } else if missing {
+                "could not resolve a secret variable; check the vault and active variables"
             } else {
                 "could not resolve auth.client_secret; check the vault and active variables"
             };
