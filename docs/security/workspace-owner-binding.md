@@ -215,6 +215,25 @@ identities rather than partial workspace JSON. No tests, project tooling,
 builds or formatters were run locally. `git diff --check` and static review
 are the local checks; GitHub-hosted CI is the execution gate. Hosted results
 must be assessed independently before any merge or claim of a verified fix.
-The tests of revision parent checks do not establish the missing historical
-owner invariant; the proposed format needs an additional replay-after-reuse
-regression that requires rejection through the production store.
+
+For the candidate source commit
+[`006df0e`](https://github.com/ferrum-edge/ferrum-anvil/commit/006df0e58dded007b70f42e0a9761ab8c499164d),
+the hosted snapshot completed all 14 checks across three workflows:
+[`CI`](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214815702),
+[`Desktop E2E`](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214815668)
+and [`Lab`](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214815662).
+The Linux Rust job
+([`111473133193`](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214815702/job/111473133193))
+passed the Store and App workspace-owner tests, the stored-object decode
+logging test, and backup/reimport orphan-retention and cleanup coverage. The
+existing native specification suites passed on macOS, Linux and Windows; the
+new wrong-workspace App-save assertion is in the App Rust tests, not a new
+native suite case. These results qualify the candidate at `006df0e`; they do
+not qualify later source changes or establish the historical revision-owner
+invariant.
+
+The revision parent tests do not establish the missing historical owner
+invariant. The proposed format needs an additional replay-after-reuse
+regression that requires rejection through the production store. The
+candidate remains a partial remediation pending the owner decision and a
+review of fresh hosted results for the integrated branch.
