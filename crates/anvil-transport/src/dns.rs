@@ -26,7 +26,7 @@ pub struct DnsConfig {
     pub ip_preference: IpPreference,
 }
 
-fn parse_literal(host: &str) -> Option<IpAddr> {
+pub fn parse_literal(host: &str) -> Option<IpAddr> {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     h.parse::<IpAddr>().ok()
 }
@@ -48,9 +48,19 @@ pub fn apply_preference(mut addrs: Vec<SocketAddr>, pref: IpPreference) -> Vec<S
     }
 }
 
-pub async fn resolve(host: &str, port: u16, cfg: &DnsConfig, timeout: Option<Duration>) -> Result<Resolution, TransportFailure> {
+/// Fixed addresses used by the connector without contacting a resolver.
+/// `None` means send-time DNS can change the addresses; a preflight must not
+/// treat a one-time lookup as proof of locality.
+pub fn fixed_resolution(
+    host: &str,
+    port: u16,
+    cfg: &DnsConfig,
+) -> Option<Result<Resolution, TransportFailure>> {
     if let Some(ip) = parse_literal(host) {
-        return Ok(Resolution { addrs: vec![SocketAddr::new(ip, port)], source: "literal" });
+        return Some(Ok(Resolution {
+            addrs: vec![SocketAddr::new(ip, port)],
+            source: "literal",
+        }));
     }
     if let Some(ov) = cfg.overrides.iter().find(|o| o.host.eq_ignore_ascii_case(host)) {
         let mut addrs = Vec::new();
@@ -58,17 +68,29 @@ pub async fn resolve(host: &str, port: u16, cfg: &DnsConfig, timeout: Option<Dur
             match parse_literal(a) {
                 Some(ip) => addrs.push(SocketAddr::new(ip, port)),
                 None => {
-                    return Err(TransportFailure::new(
-                        Phase::Prepare,
-                        FailureKind::InvalidUrl,
-                        format!("DNS override for {host} contains a non-IP address: {a}"),
-                    )
-                    .with_field("settings.dns_overrides"));
+                    return Some(Err(
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::InvalidUrl,
+                            format!("DNS override for {host} contains a non-IP address: {a}"),
+                        )
+                        .with_field("settings.dns_overrides"),
+                    ));
                 }
             }
         }
         let addrs = apply_preference(addrs, cfg.ip_preference);
-        return Ok(Resolution { addrs, source: "override" });
+        return Some(Ok(Resolution {
+            addrs,
+            source: "override",
+        }));
+    }
+    None
+}
+
+pub async fn resolve(host: &str, port: u16, cfg: &DnsConfig, timeout: Option<Duration>) -> Result<Resolution, TransportFailure> {
+    if let Some(fixed) = fixed_resolution(host, port, cfg) {
+        return fixed;
     }
 
     let fut = async {

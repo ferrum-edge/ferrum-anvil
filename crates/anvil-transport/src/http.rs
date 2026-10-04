@@ -38,6 +38,18 @@ use tokio_util::sync::CancellationToken;
 
 const CHUNK: usize = 64 * 1024;
 
+/// Whether this hop sends an absolute URI to an HTTP forward proxy.
+pub fn forward_proxy_absolute_form(https: bool, is_h2: bool, proxy: Option<ProxyKind>) -> bool {
+    !https && !is_h2 && proxy == Some(ProxyKind::Http)
+}
+
+/// Parse an authority as the wire URI does, preserving the host spelling.
+/// URL normalization would turn a proxy-resolved name such as `127.1` into
+/// an IP literal even though that is not the authority the proxy receives.
+pub fn authority_host(authority: &str) -> Option<String> {
+    authority.parse::<http::uri::Authority>().ok().map(|a| a.host().to_string())
+}
+
 /// Fully prepared single-attempt HTTP request (final bytes; auth already applied).
 #[derive(Clone)]
 pub struct HttpPlan {
@@ -997,7 +1009,11 @@ impl HttpTransport {
 
         // ---- build the request ----
         let is_h2 = matches!(conn.sender, Sender::H2(_));
-        let absolute_form = !is_h2 && plan.proxy.as_ref().map(|p| p.kind == ProxyKind::Http && !plan.https).unwrap_or(false);
+        let absolute_form = forward_proxy_absolute_form(
+            plan.https,
+            is_h2,
+            plan.proxy.as_ref().map(|proxy| proxy.kind),
+        );
         let explicit_host = plan.headers.iter().find(|(n, _)| n == http::header::HOST).map(|(_, v)| v.to_str().unwrap_or("").to_string());
         let authority = explicit_host.clone().unwrap_or_else(|| plan.authority.clone());
         let uri_str = if is_h2 || absolute_form {

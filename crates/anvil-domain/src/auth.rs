@@ -238,7 +238,8 @@ pub enum AuthConfig {
         config: crate::workload::JwtSvidConfig,
     },
     /// Several explicit presentations in one request (e.g. mTLS + API key).
-    /// Order is preserved; conflicting headers fail validation.
+    /// Order is preserved; conflicting headers fail validation. At most one
+    /// OAuth profile, including nested sets, may acquire a token.
     Multi {
         profiles: Vec<AuthConfig>,
     },
@@ -252,6 +253,30 @@ fn default_auth_header() -> String {
 }
 
 impl AuthConfig {
+    /// The sole OAuth profile, including profiles inside nested multi-auth
+    /// sets. Every OAuth profile writes Authorization, so even identical
+    /// profiles conflict. Check before resolving secrets or acquiring tokens.
+    pub fn oauth_profile(&self) -> Result<Option<&OAuth2Config>, &'static str> {
+        match self {
+            Self::OAuth2 { config } => Ok(Some(config)),
+            Self::Multi { profiles } => {
+                let mut found = None;
+                for profile in profiles {
+                    if let Some(config) = profile.oauth_profile()? {
+                        if found.is_some() {
+                            return Err(
+                                "a multi-auth set can hold one OAuth 2 profile; several profiles would each set Authorization",
+                            );
+                        }
+                        found = Some(config);
+                    }
+                }
+                Ok(found)
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub fn kind_label(&self) -> &'static str {
         match self {
             AuthConfig::Inherit => "inherit",

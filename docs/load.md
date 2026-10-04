@@ -131,8 +131,8 @@ distribution. Datagram counts are what Anvil wrote into and read from the
 tunnel; what the proxy relayed to the target is never inferred. The
 preflight names the proxy next to the target, because every exchange's
 traffic reaches the proxy first, and warns that traffic leaves this machine
-when either the target or the proxy is not a loopback address or
-`localhost` (each host is judged on its own).
+when either the target or the proxy cannot be proven to use only loopback
+addresses (each host is judged on its own).
 
 gRPC calls the engine refuses on every send (native gRPC with HTTP/1.1-only,
 gRPC over HTTP/3 with a cleartext URL or through a proxy, gRPC-Web client or
@@ -227,14 +227,26 @@ first: a MASQUE proxy, or the selected proxy profile of any kind (HTTP,
 HTTPS, SOCKS5 or HBONE), e.g. `GET http://127.0.0.1:8080 via HTTP proxy
 proxy.example.test:3128`. The profile is picked exactly as the engine picks
 it: a target its `NO_PROXY` list bypasses is sent directly, so it is shown
-without the proxy. It warns that traffic leaves this machine when any address
-the transport's DNS policy resolves for a target or the proxy it actually uses
-is not loopback (each host is judged on its own). This includes configured DNS
-overrides and custom resolvers; failed or empty resolutions are treated as
-remote.
+without the proxy. Locality is proven only by an IP literal or a fixed DNS
+override whose addresses, after the transport's IP-family filtering, are all
+loopback. Literal addresses take precedence over overrides, exactly as at send.
+Invalid or empty fixed answers require the remote-traffic warning. Hostnames
+using the system or a custom resolver also require that warning, including
+`localhost`: preflight performs no DNS lookup. A loopback answer obtained once
+could change before send, and a blocking OS lookup could freeze confirmation
+even after its DNS deadline. Use a loopback literal or a fixed override for a
+direct local destination. Remote or unproven destinations still require explicit
+load confirmation and authorization to test the system.
 
-The preflight judges each origin from the URL alone (a request's URL and a
-MASQUE proxy URL, for every protocol), resolved as every iteration resolves
+For a proxied target, only a loopback literal proves locality. The proxy resolves
+the target name and ignores client DNS overrides, whether it is an HTTP forward
+proxy, CONNECT tunnel, SOCKS5, HBONE or MASQUE. The proxy endpoint itself uses
+the client's fixed-address rules. Proxy profile addresses retain the connector's
+host spelling: `127.1:3128` is a resolver-backed name unless explicitly overridden,
+rather than being normalized to `127.0.0.1`.
+
+The preflight judges each URL origin (a request's URL and a MASQUE proxy URL,
+for every protocol), resolved and parsed as every iteration resolves and parses
 it. The per-run values are `{{anvil.iteration}}` and `{{anvil.vu}}`, dataset
 columns, values extracted by chain steps, and dynamic helpers (`{{$…}}`,
 also when a variable's value contains one). They are layered above
@@ -243,10 +255,21 @@ them, so a dataset column or an extracted value named like an environment
 variable wins. A request sees the values extracted at every earlier chain
 position, including an earlier position of the same request (a chain
 `[A, A]` lets A's first send steer its second). Per-run values may fill the
-path, query, method, headers and body of a fixed origin: those fields are
-prepared and checked when each iteration is sent, not by the preflight, so a
-body such as `{"id": {{rowId}}}` does not stop the plan, and a per-run method
-is shown as written (`{{verb}} http://127.0.0.1:8080`).
+path, query, method, ordinary headers and body of a fixed origin: those fields
+are prepared and checked when each iteration is sent, so a body such as
+`{"id": {{rowId}}}` does not stop the plan, and a per-run method is shown as
+written (`{{verb}} http://127.0.0.1:8080`).
+
+A cleartext HTTP forward proxy can also route by the effective `Host` authority.
+Preflight checks the first configured Host after header-template resolution,
+then any auth-written Host that replaces it, using the execution path's authority
+semantics (also for SSE and gRPC-Web over HTTP/1.1). A fixed loopback literal
+Host remains local. A hostname Host, a per-run Host value or header name, or a
+Host generated from auth credentials requires the remote-traffic warning;
+client DNS overrides cannot constrain what the proxy resolves. The destination
+notes that the forward-proxy Host authority is remote or unproven and never
+shows Host values that may hold credentials. `NO_PROXY` continues to match the
+URL target, so bypassing the proxy restores direct URL-based routing.
 
 A per-run value in a URL's scheme or host makes the preflight refuse the plan,
 because it cannot prove that every iteration stays on loopback. The refusal
@@ -254,9 +277,17 @@ names the URL part and where the value comes from (a dataset column, an
 extracted value, an iteration variable or a dynamic helper), never the value.
 A request's effective OAuth profile is checked too: its token URL on every
 grant, and its authorization URL for authorization-code/PKCE and refresh-token
-grants, use the same per-run stand-ins and DNS/proxy checks. These auth-flow
+grants, use the same per-run stand-ins. Token requests use the same fixed-address
+and proxy checks, including their own `NO_PROXY` decision. Authorization URLs
+open in the external browser, whose DNS cannot be pinned by Anvil's overrides,
+so only literal loopback authorization hosts are proven local. These auth-flow
 destinations appear alongside the request in the preflight, so a dataset-driven
-issuer cannot send credentials off-machine without being surfaced.
+issuer cannot send credentials off-machine without being surfaced. Nested
+multi-auth sets are traversed completely: several OAuth profiles conflict on
+`Authorization` and are refused by both preflight and execution before any token
+acquisition or interactive sign-in. A single OAuth profile combined with other
+nonconflicting auth profiles remains supported.
+
 A per-run port is allowed only after a fixed loopback host, for example
 `http://127.0.0.1:{{port}}/`, with nothing but fixed digits beside the value
 (`:80{{n}}` is allowed, `:{{port}}@example.net` is refused). The URL is split
@@ -640,7 +671,7 @@ Observations that shaped the implementation:
 | LOAD-010 | `load_010_bounded_samples_under_sustained_failures_and_large_bodies`, `metrics::tests::load_010_…` |
 | LOAD-011 | `load_011_report_roundtrip_and_html_escape_response_content`, `report::tests::load_011_…`, `html::tests::load_011_…` |
 | LOAD-012 | not implemented |
-| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…`, `specs_load.rs::load_preflight_uses_transport_dns_overrides_for_loopback_judgments`, `specs_load.rs::load_preflight_checks_oauth_urls_with_per_run_values` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` (local-traffic warnings judge resolved target and proxy addresses, including OAuth flow URLs); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
+| LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…`, `specs_load.rs::load_preflight_uses_transport_dns_overrides_for_loopback_judgments`, `specs_load.rs::load_preflight_checks_oauth_urls_with_per_run_values` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` and `load_preflight_security.rs` (fixed-address locality, changing and silent DNS, escaped raw hosts, connector proxy spelling, recording HTTP/SOCKS5/HBONE target and OAuth routes, NO_PROXY, effective Host authority, and zero token requests for nested OAuth conflicts); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
 | LOAD-014 | `compare::tests::load_014_incompatible_runs_withhold_latency_deltas` |
 
 ### Live lab check (real gateway)

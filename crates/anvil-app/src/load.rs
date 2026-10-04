@@ -7,7 +7,7 @@ use crate::exec::SendOptions;
 use crate::file_grants::FilePurpose;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::auth::{AuthConfig, OAuthGrant};
+use anvil_domain::auth::OAuthGrant;
 use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, UnitSemantics};
 use anvil_domain::request::{AttachmentRef, Protocol};
 use anvil_domain::tls::{ProxyKind, ProxyProfile};
@@ -21,7 +21,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// The load runs of an opened profile, by workspace: a lock stops every
@@ -296,10 +295,12 @@ impl App {
                 let request = self.request(&id).map(|r| r.name).unwrap_or_default();
                 per_run_origin_refusal(&request, what, &origin)
             };
+            let (_, auth) = ctx.effective_auth();
+            let oauth = auth.oauth_profile().map_err(|message| AppError::Invalid(message.into()))?;
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
-                    // The method, headers and body never change the origin;
-                    // they are prepared and checked when each iteration sends.
+                    // Resolve the URL first; a forward proxy also routes by
+                    // the effective Host after header interpolation and auth.
                     let proven = match prove_url(&resolver, &ctx.spec.url, "url") {
                         Ok(proven) => proven,
                         Err(UrlProblem::Unresolved(message)) => return Err(AppError::Invalid(message)),
@@ -314,10 +315,12 @@ impl App {
                         _ => ctx.spec.method.trim().to_string(),
                     };
                     let mut d = format!("{method} {}", origin_label(&target.url(), proven.port_varies));
-                    let mut local = url_resolves_loopback(ctx, &target.url());
-                    if let Some(proxy) = proven.proxy(ctx, Protocol::Http) {
+                    let proxy = proven.proxy(ctx, Protocol::Http);
+                    let mut local = target_is_loopback(ctx, &target, proxy.is_some());
+                    if let Some(proxy) = proxy {
                         d.push_str(&proxy_label(proxy));
-                        local &= address_resolves_loopback(ctx, &proxy.address);
+                        local &= address_is_loopback(ctx, &proxy.address);
+                        local &= forward_authority_is_loopback(ctx, &target, proxy, &resolver, &mut d);
                     }
                     (d, local)
                 }
@@ -326,8 +329,7 @@ impl App {
             leaves |= !local;
             destinations.push(destination);
 
-            let (_, auth) = ctx.effective_auth();
-            if let Some(oauth) = effective_oauth(&auth) {
+            if let Some(oauth) = oauth {
                 let mut auth_urls = vec![("OAuth token URL", oauth.token_url.as_str())];
                 if matches!(oauth.grant, OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken) {
                     auth_urls.push(("OAuth authorization URL", oauth.authorization_url.as_str()));
@@ -344,11 +346,15 @@ impl App {
                         &mut Vec::new(),
                     )
                     .map_err(|f| AppError::Invalid(format!("{:?}: {}", f.kind, f.message)))?;
-                    let mut auth_local = url_resolves_loopback(ctx, &target.url());
+                    // Authorization opens in the external browser: client
+                    // DNS overrides cannot pin the browser's resolution.
+                    let browser = label == "OAuth authorization URL";
+                    let proxy = if browser { None } else { proven.proxy(ctx, Protocol::Http) };
+                    let mut auth_local = target_is_loopback(ctx, &target, browser || proxy.is_some());
                     let mut auth_destination = format!("{label} {}", origin_label(&target.url(), proven.port_varies));
-                    if let Some(proxy) = proven.proxy(ctx, Protocol::Http) {
+                    if let Some(proxy) = proxy {
                         auth_destination.push_str(&proxy_label(proxy));
-                        auth_local &= address_resolves_loopback(ctx, &proxy.address);
+                        auth_local &= address_is_loopback(ctx, &proxy.address);
                     }
                     leaves |= !auth_local;
                     destinations.push(auth_destination);
@@ -569,8 +575,15 @@ struct ProvenUrl {
 }
 
 impl ProvenUrl {
-    fn label(&self) -> String {
-        origin_label(&self.probe, self.port_varies)
+    fn label(&self, protocol: Protocol) -> String {
+        match anvil_engine::prepare::parse_target(
+            &self.probe,
+            anvil_load::protocol::send_schemes(protocol),
+            &mut Vec::new(),
+        ) {
+            Ok(target) => origin_label(&target.url(), self.port_varies),
+            Err(_) => url_origin(&self.probe),
+        }
     }
 
     /// The proxy profile the engine routes this URL through. With a per-run
@@ -680,21 +693,45 @@ fn session_destination(
         Protocol::Http => "HTTP",
         Protocol::Mcp => "MCP",
     };
-    let mut d = format!("{label} {}", target.as_ref().map_or_else(|| url_origin(&ctx.spec.url), ProvenUrl::label));
-    let mut local = target.as_ref().is_some_and(|target| url_resolves_loopback(ctx, &target.probe));
+    let parsed = target.as_ref().and_then(|target| {
+        anvil_load::protocol::route(ctx, &target.probe, protocol).map(|(target, _)| target)
+    });
+    let proxy = target.as_ref().and_then(|target| target.proxy(ctx, protocol));
+    let masque = ctx
+        .spec
+        .udp
+        .as_ref()
+        .and_then(|u| u.masque.as_ref())
+        .filter(|_| protocol == Protocol::Udp);
+    let mut d = format!(
+        "{label} {}",
+        target.as_ref().map_or_else(|| url_origin(&ctx.spec.url), |target| target.label(protocol)),
+    );
+    let mut local = parsed
+        .as_ref()
+        .is_some_and(|target| target_is_loopback(ctx, target, proxy.is_some() || masque.is_some()));
     // A datagram tunnel sends every exchange's traffic to the proxy first.
     // (The plan check refuses a MASQUE request a proxy profile also routes.)
-    if let Some(m) = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| protocol == Protocol::Udp) {
+    if let Some(m) = masque {
         let proxy = match prove_url(resolver, &m.proxy_url, "udp.masque.proxy_url") {
             Ok(proxy) => Some(proxy),
             Err(UrlProblem::Unresolved(_)) => None,
             Err(UrlProblem::PerRun(origin)) => return Err(("MASQUE proxy URL", origin)),
         };
-        d.push_str(&format!(" via MASQUE proxy {}", proxy.as_ref().map_or_else(|| url_origin(&m.proxy_url), ProvenUrl::label)));
-        local &= proxy.as_ref().is_some_and(|proxy| url_resolves_loopback(ctx, &proxy.probe));
-    } else if let Some(proxy) = target.as_ref().and_then(|target| target.proxy(ctx, protocol)) {
+        d.push_str(&format!(
+            " via MASQUE proxy {}",
+            proxy.as_ref().map_or_else(|| url_origin(&m.proxy_url), |proxy| proxy.label(Protocol::Http)),
+        ));
+        local &= proxy.as_ref().is_some_and(|proxy| {
+            anvil_load::protocol::route(ctx, &proxy.probe, Protocol::Http)
+                .is_some_and(|(target, _)| target_is_loopback(ctx, &target, false))
+        });
+    } else if let Some(proxy) = proxy {
         d.push_str(&proxy_label(proxy));
-        local &= address_resolves_loopback(ctx, &proxy.address);
+        local &= address_is_loopback(ctx, &proxy.address);
+        if let Some(target) = &parsed {
+            local &= forward_authority_is_loopback(ctx, target, proxy, resolver, &mut d);
+        }
     }
     Ok((d, local))
 }
@@ -710,33 +747,38 @@ fn proxy_label(proxy: &ProxyProfile) -> String {
     format!(" via {kind} proxy {}", proxy.address)
 }
 
-/// Whether the transport's DNS policy resolves `url` only to this machine.
-/// Resolution failures and empty answers fail closed as remote.
-fn url_resolves_loopback(ctx: &anvil_engine::ExecutionContext, url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url.trim()) else { return false };
-    let Some(host) = parsed.host_str().map(str::to_string) else { return false };
-    let Some(port) = parsed.port_or_known_default() else { return false };
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return ip_is_loopback(ip);
-    }
+/// Proof uses exactly the connector's fixed addresses. Never look up a
+/// name here: resolver results can change before send, and a synchronous
+/// preflight must not wait for the OS resolver's blocking task to finish.
+fn fixed_host_is_loopback(ctx: &anvil_engine::ExecutionContext, host: &str, port: u16) -> bool {
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
     let dns = anvil_transport::dns::DnsConfig {
         resolver: settings.resolver,
         overrides: settings.dns_overrides,
         ip_preference: settings.ip_preference,
     };
-    let timeout = settings.timeouts.dns_ms.map(Duration::from_millis);
-    std::thread::Builder::new()
-        .name("anvil-preflight-dns".into())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
-            runtime
-                .ok()
-                .and_then(|runtime| runtime.block_on(anvil_transport::dns::resolve(&host, port, &dns, timeout)).ok())
-                .is_some_and(|resolution| !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())))
+    anvil_transport::dns::fixed_resolution(host, port, &dns)
+        .and_then(std::result::Result::ok)
+        .is_some_and(|resolution| {
+            !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip()))
         })
-        .and_then(|thread| thread.join().map_err(|_| std::io::Error::other("preflight DNS thread panicked")))
-        .unwrap_or(false)
+}
+
+fn literal_is_loopback(host: &str) -> bool {
+    anvil_transport::dns::parse_literal(host).is_some_and(ip_is_loopback)
+}
+
+fn target_is_loopback(
+    ctx: &anvil_engine::ExecutionContext,
+    target: &anvil_engine::prepare::Target,
+    proxy_resolved: bool,
+) -> bool {
+    if proxy_resolved {
+        // The proxy receives this name unchanged and ignores client overrides.
+        literal_is_loopback(&target.host)
+    } else {
+        fixed_host_is_loopback(ctx, &target.host, target.port)
+    }
 }
 
 fn ip_is_loopback(ip: std::net::IpAddr) -> bool {
@@ -746,17 +788,54 @@ fn ip_is_loopback(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// Resolve a proxy profile's `host:port` with the transport's DNS policy.
-fn address_resolves_loopback(ctx: &anvil_engine::ExecutionContext, address: &str) -> bool {
-    url_resolves_loopback(ctx, &format!("http://{}", address.trim()))
+fn address_is_loopback(ctx: &anvil_engine::ExecutionContext, address: &str) -> bool {
+    anvil_transport::net::parse_proxy_address(address)
+        .is_ok_and(|(host, port)| fixed_host_is_loopback(ctx, &host, port))
 }
 
-fn effective_oauth(auth: &AuthConfig) -> Option<&anvil_domain::auth::OAuth2Config> {
-    match auth {
-        AuthConfig::OAuth2 { config } => Some(config),
-        AuthConfig::Multi { profiles } => profiles.iter().find_map(effective_oauth),
-        _ => None,
+/// A forward proxy routes the absolute URI using the effective Host. Check
+/// the same first-header/auth-replacement semantics as execution, without
+/// preparing the method or body or acquiring credentials. Dynamic header
+/// names and Host values are unproven, so they always require remote consent.
+fn forward_authority_is_loopback(
+    ctx: &anvil_engine::ExecutionContext,
+    target: &anvil_engine::prepare::Target,
+    proxy: &ProxyProfile,
+    resolver: &Resolver,
+    destination: &mut String,
+) -> bool {
+    use anvil_domain::request::GrpcWire;
+    use anvil_domain::settings::HttpVersionPolicy;
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    let http_family = matches!(ctx.spec.protocol, Protocol::Http | Protocol::Sse)
+        || (ctx.spec.protocol == Protocol::Grpc
+            && ctx.spec.grpc.as_ref().is_some_and(|g| g.wire != GrpcWire::Grpc));
+    let secure = matches!(target.scheme.as_str(), "https" | "wss" | "grpcs");
+    let h2_only = matches!(
+        settings.http_version,
+        HttpVersionPolicy::Http2Only | HttpVersionPolicy::H2c | HttpVersionPolicy::Http3Only
+    );
+    let absolute_form = anvil_transport::http::forward_proxy_absolute_form(
+        secure,
+        h2_only,
+        Some(proxy.kind),
+    );
+    if !http_family || !absolute_form {
+        return true;
     }
+    let authority = anvil_engine::prepare::preflight_authority(ctx, target, |template, field| {
+        let resolved = resolver.resolve(&mask_dynamic_expressions(template), field).ok()?;
+        per_run_sources(&resolved).is_empty().then_some(resolved)
+    });
+    let local = authority
+        .as_deref()
+        .and_then(anvil_transport::http::authority_host)
+        .is_some_and(|host| literal_is_loopback(&host));
+    if !local {
+        // Host can be an auth credential or secret variable: never display it.
+        destination.push_str(" (forward-proxy Host authority is remote or unproven)");
+    }
+    local
 }
 
 /// A host as a URL carries it: an IP literal (IPv6 in brackets) or a name.

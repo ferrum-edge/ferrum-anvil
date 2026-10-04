@@ -17,7 +17,7 @@ use crate::vars::Resolver;
 use crate::{Engine, SensitiveEpoch};
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, Generation, OAuthResolved, TokenHttp, TokenKey};
-use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
+use anvil_domain::auth::{OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::{AttemptReason, FailureKind, Phase, TransportFailure};
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
 use anvil_transport::dns::DnsConfig;
@@ -227,14 +227,6 @@ pub(crate) fn acquisition_failure(cfg: &OAuthResolved, e: AuthError, not_sent: &
     }
 }
 
-fn find_oauth(a: &AuthConfig) -> Option<&OAuth2Config> {
-    match a {
-        AuthConfig::OAuth2 { config } => Some(config),
-        AuthConfig::Multi { profiles } => profiles.iter().find_map(find_oauth),
-        _ => None,
-    }
-}
-
 /// The OAuth 2 profile in effect for an execution context, resolved for an
 /// interactive authorization-code + PKCE sign-in.
 pub struct InteractiveOAuth {
@@ -277,7 +269,10 @@ impl TokenSummary {
 pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, TransportFailure> {
     let fail = |m: &str| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let (scope_label, auth) = ctx.effective_auth();
-    let config = find_oauth(&auth).ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
+    let config = auth
+        .oauth_profile()
+        .map_err(fail)?
+        .ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
     if config.grant == OAuthGrant::ClientCredentials {
         return Err(fail("this OAuth profile uses the client-credentials grant, which needs no browser sign-in"));
     }

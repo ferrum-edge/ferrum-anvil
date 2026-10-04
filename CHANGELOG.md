@@ -111,17 +111,24 @@
 - Load preflight: iteration variables, dataset columns, values extracted by
   earlier chain steps and dynamic helpers in the path, query, method, headers
   or body of a fixed origin no longer stop a plan (#288). The preflight judges
-  each origin from the URL alone, with every per-run value layered above
+  each URL origin, with every per-run value layered above
   workspace, environment and folder variables as the worker layers it, and a
   repeated chain step sees what its earlier positions extracted. For HTTP and
   every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
   proxy URL), a per-run value that reaches the URL's scheme or host is
   refused, naming its source but never its value. A per-run port is allowed
-  only after a fixed loopback host. Loopback judgments now use the transport's
-  DNS policy, including overrides and custom resolvers, and require every
-  resolved address to be loopback; failed lookups count as remote. The
-  preflight also checks per-run OAuth token URLs and interactive authorization
-  URLs against the same origin and proxy rules (#295, #296).
+  only after a fixed loopback host. Locality now uses the execution parser
+  and connector's fixed literals/overrides with IP-family filtering; unpinned
+  system/custom DNS names require remote-traffic consent without a preflight
+  lookup, preventing DNS rebinding and blocking resolver shutdown waits.
+  Proxy-resolved target names remain unproven despite client overrides, and
+  proxy addresses use the connector's host spelling. HTTP forward-proxy
+  authority checks include fixed, templated and auth-written Host headers;
+  per-run Host values/names require the warning. OAuth token endpoints use
+  the same origin, fixed-address and NO_PROXY checks; external-browser
+  authorization names remain unproven. Nested conflicting OAuth profiles
+  are refused consistently before acquiring any token, while valid
+  single-OAuth multi-auth remains supported (#295, #296).
 - Desktop imports: refresh the selected workspace's environments, profiles,
   history and request tree after a spec import or bundle import. Open tabs for
   replaced requests now reload when clean; unsaved drafts and running sends or

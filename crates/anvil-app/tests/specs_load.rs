@@ -222,7 +222,12 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
         let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
         let pre = app.load_preflight(&p).unwrap();
         assert_eq!(pre.destinations, vec![destination.to_string()], "{url}");
-        assert!(!leaves_machine(&pre.warnings), "{url}: {:?}", pre.warnings);
+        assert_eq!(
+            leaves_machine(&pre.warnings),
+            url.starts_with("localhost:"),
+            "{url}: {:?}",
+            pre.warnings,
+        );
     }
 
     // A dynamic helper in the method is shown as written, not as one draw.
@@ -708,9 +713,12 @@ fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
     let pre = preflight(udp("udp://127.0.0.1:9", Some("https://{{remote_proxy}}")));
     assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via MASQUE proxy https://proxy.example.test:4433".to_string()]);
     assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
-    // Both local, including IPv6 loopback and `localhost`: no warning.
-    let pre = preflight(udp("udp://[::1]:9", Some("https://localhost:4433")));
+    // Both fixed loopback literals: no warning. A resolver-backed proxy
+    // name cannot prove locality, even when it is normally localhost.
+    let pre = preflight(udp("udp://[::1]:9", Some("https://[::1]:4433")));
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+    let pre = preflight(udp("udp://[::1]:9", Some("https://localhost:4433")));
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
 
     // A local target through a remote HBONE proxy profile, whose host merely
     // contains "localhost".
@@ -799,10 +807,12 @@ fn load_preflight_judges_every_proxy_profile_after_no_proxy() {
     let pre = preflight(http(), &profile(ProxyKind::Http, "proxy.example.test:3128", "localhost,127.0.0.1"));
     assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080".to_string()]);
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
-    // Both local: no warning.
-    let pre = preflight(http(), &profile(ProxyKind::Socks5, "localhost:1080", ""));
-    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080 via SOCKS5 proxy localhost:1080".to_string()]);
+    // Both fixed loopback literals: no warning.
+    let pre = preflight(http(), &profile(ProxyKind::Socks5, "127.0.0.1:1080", ""));
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080 via SOCKS5 proxy 127.0.0.1:1080".to_string()]);
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
+    let pre = preflight(http(), &profile(ProxyKind::Socks5, "localhost:1080", ""));
+    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
 
     // A datagram target a remote HBONE profile's NO_PROXY bypasses is sent
     // directly: no "via HBONE proxy" label and no warning.
