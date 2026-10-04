@@ -85,6 +85,16 @@ test("a rejected token status shows its configuration error", async () => {
   expect(backend.signIn).not.toHaveBeenCalled();
 });
 
+test("a sanitized vault resolution failure remains useful in the status alert", async () => {
+  const message = "could not resolve auth.client_secret; check the vault and active variables";
+  backend.status.mockRejectedValue(new Error(message));
+  render(editor());
+  expect((await screen.findByRole("alert")).textContent).toContain(message);
+  expect(screen.getByText("status unavailable")).toBeTruthy();
+  expect(document.body.textContent).not.toContain("vault-canary");
+  expect(backend.signIn).not.toHaveBeenCalled();
+});
+
 test("an eligible uncached profile is signed out and browser refusal remains visible", async () => {
   backend.status.mockResolvedValue(null);
   backend.signIn.mockRejectedValue(new Error(refusal));

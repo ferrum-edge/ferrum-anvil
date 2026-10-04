@@ -128,25 +128,47 @@ impl TokenHttp for EngineTokenHttp<'_> {
 }
 
 /// Resolve an OAuth 2 profile's templates and secret references.
-pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &Resolver) -> Result<OAuthResolved, TransportFailure> {
-    let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
-    let token_url = r.resolve(&config.token_url, "auth.token_url")?;
+pub(crate) fn resolve_oauth(
+    config: &OAuth2Config,
+    ctx: &ExecutionContext,
+    r: &Resolver,
+) -> Result<OAuthResolved, TransportFailure> {
+    let fail = |m: String| {
+        TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m)
+            .with_field("auth")
+    };
+    // Expansion errors may quote variable names obtained from vault values.
+    // Sanitize at their source, before history, flow observers or IPC see them.
+    let resolve = |value: &str, field: &str| {
+        r.resolve(value, field).map_err(|mut failure| {
+            failure.message =
+                format!("could not resolve {field}; check the vault and active variables");
+            failure
+        })
+    };
+    let token_url = resolve(&config.token_url, "auth.token_url")?;
     require_secure_token_endpoint(&token_url).map_err(fail)?;
-    let (raw_secret, _) =
-        resolve_sensitive(&config.client_secret, ctx.secrets.as_ref()).map_err(|e| fail(format!("auth.client_secret: {e}")))?;
+    let (raw_secret, _) = resolve_sensitive(&config.client_secret, ctx.secrets.as_ref())
+        .map_err(|_| {
+            fail(
+                "could not resolve auth.client_secret; check the vault and active variables".into(),
+            )
+        })?;
     // Only interactive grants visit the authorization endpoint.
     let authorization_url = match config.grant {
         OAuthGrant::ClientCredentials => String::new(),
-        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken => r.resolve(&config.authorization_url, "auth.authorization_url")?,
+        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken => {
+            resolve(&config.authorization_url, "auth.authorization_url")?
+        }
     };
     Ok(OAuthResolved {
         grant: config.grant,
         token_url,
         authorization_url,
-        client_id: r.resolve(&config.client_id, "auth.client_id")?,
-        client_secret: Zeroizing::new(r.resolve(&raw_secret, "auth.client_secret")?),
-        scope: r.resolve(&config.scope, "auth.scope")?,
-        audience: r.resolve(&config.audience, "auth.audience")?,
+        client_id: resolve(&config.client_id, "auth.client_id")?,
+        client_secret: Zeroizing::new(resolve(&raw_secret, "auth.client_secret")?),
+        scope: resolve(&config.scope, "auth.scope")?,
+        audience: resolve(&config.audience, "auth.audience")?,
         basic_client_auth: config.client_auth == OAuthClientAuth::BasicHeader,
         token_cache_id: config.token_cache_id,
         refresh_skew_secs: config.refresh_skew_secs as i64,

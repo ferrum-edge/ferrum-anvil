@@ -4,7 +4,7 @@
 //! condition was (or was not) reached.
 
 use anvil_domain::diagnostics::{Confidence, SourceScope};
-use anvil_domain::execution::{DispatchState, FailureKind, TlsVerification};
+use anvil_domain::execution::{DispatchState, FailureKind, Phase, PhaseStatus, TlsVerification};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::TransportState;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
@@ -18,6 +18,8 @@ use anvil_fixtures::raw::{self, RawMode};
 use anvil_fixtures::tlsserver::TlsServerOptions;
 use anvil_transport::recorder::EventCtx;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 fn init() {
@@ -157,14 +159,27 @@ async fn local_010_connect_deadline_does_not_claim_firewall_or_backend() {
     init();
     // The candidate refuses TEST-NET before dialing. Saturate a real
     // loopback listener instead, so this still exercises the connect deadline.
-    let stalled = anvil_fixtures::dns::stalled_listener("127.0.0.1:0").unwrap();
+    let (listener, _fillers) = saturated_loopback_listener().await;
+    let addr = listener.local_addr().unwrap();
     let c = with_settings(
-        ctx(RequestSpec::http("GET", &format!("http://{}/", stalled.addr))),
+        ctx(RequestSpec::http("GET", &format!("http://{addr}/"))),
         SettingsOverrides { timeouts: Some(TimeoutOverrides { connect_ms: Some(Some(400)), ..Default::default() }), ..Default::default() },
     );
     let o = run(&c).await;
     let k = last_failure(&o);
     assert_eq!(k, FailureKind::ConnectTimeout);
+    let attempt = o.record.attempts.last().unwrap();
+    let failure = attempt.failure.as_ref().unwrap();
+    assert_eq!(failure.phase, Phase::Connect);
+    assert_eq!(failure.deadline_ms, Some(400));
+    assert_eq!(attempt.phase(Phase::Connect).unwrap().status, PhaseStatus::TimedOut);
+    let connection = attempt.connection.as_ref().expect("recorded dial evidence");
+    assert_eq!(connection.resolved_addresses, [addr.to_string()]);
+    assert_eq!(connection.connect_attempts.len(), 1);
+    assert_eq!(connection.connect_attempts[0].address, addr.to_string());
+    assert_eq!(connection.connect_attempts[0].failure, Some(FailureKind::ConnectTimeout));
+    assert!(connection.connect_attempts[0].duration_us.is_some());
+    assert!(connection.remote_address.is_none(), "no completed TCP connection");
     assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
     assert!(o.record.response.is_none(), "no invented HTTP headers");
     for f in &o.record.findings {
@@ -179,6 +194,33 @@ async fn local_010_connect_deadline_does_not_claim_firewall_or_backend() {
     );
     assert_eq!(run(&positive).await.record.response.unwrap().status, 200);
     assert_eq!(peer.log.count_requests(), 1);
+}
+
+/// A positive backlog avoids Darwin's listen(0) → somaxconn behavior. Hold
+/// every completed connection and require two actual connect timeouts before
+/// handing the listener to the engine. Unsupported saturation fails the test.
+async fn saturated_loopback_listener() -> (TcpListener, Vec<TcpStream>) {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(1).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let deadline = Duration::from_millis(400);
+    let started = Instant::now();
+    let mut fillers = Vec::new();
+    loop {
+        assert!(started.elapsed() < Duration::from_secs(5), "listener did not saturate");
+        match tokio::time::timeout(deadline, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => fillers.push(stream),
+            Ok(Err(error)) => panic!("saturation probe failed without timing out: {error}"),
+            Err(_) => break,
+        }
+    }
+    assert!(!fillers.is_empty(), "listener accepted positive controls before saturating");
+    assert!(
+        tokio::time::timeout(deadline, TcpStream::connect(addr)).await.is_err(),
+        "a second probe must verify that the backlog remains saturated"
+    );
+    (listener, fillers)
 }
 
 #[tokio::test]

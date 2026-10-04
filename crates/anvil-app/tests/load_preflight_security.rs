@@ -330,6 +330,7 @@ async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch(
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let ws = app.create_workspace("Issuer eligibility").unwrap().meta.id;
+    let credential = app.set_secret(&ws, "OAuth credential", "{{vault-canary}}").unwrap();
     let api = Recorder::start(false).await;
     let recorder = Recorder::start(false).await;
     let profile = proxy(&app, ws, ProxyKind::Http, &recorder.address.to_string(), "");
@@ -340,7 +341,7 @@ async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch(
             spec.auth = oauth(&format!("http://{host}:{}/token?hidden=endpoint-material", api.address.port()));
             if let AuthConfig::OAuth2 { config } = &mut spec.auth {
                 config.client_id = "{{missing_client_id}}".into();
-                config.client_secret = SensitiveValue::template("{{missing_client_secret}}");
+                config.client_secret = SensitiveValue::Secret { secret: credential.clone() };
             }
             if proxied {
                 spec = routed(spec, &profile);
@@ -350,13 +351,140 @@ async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch(
             assert!(error.contains("HTTPS or literal-loopback HTTP"));
             assert!(!error.contains("endpoint-material"));
             assert!(!error.contains("missing_client"));
+            assert!(!error.contains("vault-canary"));
             let o = send(&context(&app, &p)).await;
             assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
             assert_eq!(o.record.attempts.last().unwrap().failure.as_ref().unwrap().kind, FailureKind::AuthPreparationFailed);
+            assert!(!serde_json::to_string(&o.record).unwrap().contains("vault-canary"));
             assert!(api.requests().is_empty());
             assert!(recorder.requests().is_empty());
         }
     }
+}
+
+#[test]
+fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Credential ordering").unwrap();
+    ws.variables.push(anvil_domain::workspace::Variable::plain(
+        "issuer",
+        "http://127.0.0.1:8080/token",
+    ));
+    app.save_workspace(ws.clone()).unwrap();
+    for grant in [
+        OAuthGrant::ClientCredentials,
+        OAuthGrant::RefreshToken,
+        OAuthGrant::AuthorizationCodePkce,
+    ] {
+        for (endpoint, prefetched) in [
+            ("http://127.0.0.1:8080/token", true),
+            ("https://issuer.example.test/token", true),
+            ("http://issuer.example.test/token", false),
+            ("http://[::ffff:192.168.1.1]/token", false),
+            ("{{issuer}}", false),
+        ] {
+            for inherited in [false, true] {
+                let secret = app
+                    .set_secret(&ws.meta.id, "OAuth credential", "original-vault-value")
+                    .unwrap();
+                let mut auth = oauth(endpoint);
+                if let AuthConfig::OAuth2 { config } = &mut auth {
+                    config.grant = grant;
+                    config.authorization_url = "http://127.0.0.1:8080/authorize".into();
+                    config.client_secret = SensitiveValue::Secret { secret: secret.clone() };
+                }
+                // Exercise both the spec's duplicate reference and inherited,
+                // nested effective auth. Neither may bypass the prefetch gate.
+                let nested = AuthConfig::Multi {
+                    profiles: vec![AuthConfig::Multi { profiles: vec![auth] }],
+                };
+                let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+                spec.auth = if inherited {
+                    ws.auth = nested;
+                    app.save_workspace(ws.clone()).unwrap();
+                    AuthConfig::Inherit
+                } else {
+                    nested
+                };
+                let p = plan(&app, ws.meta.id, spec);
+                let ctx = context(&app, &p);
+                // A genuinely prefetched vault value survives deletion from
+                // storage. A deferred reference must consult the real vault.
+                app.store.delete_secret(&secret.id).unwrap();
+                let resolved = ctx.secrets.resolve(&secret);
+                if prefetched {
+                    assert_eq!(resolved.unwrap().as_str(), "original-vault-value");
+                } else {
+                    assert!(
+                        resolved.is_err(),
+                        "unvalidated credential was prefetched: {endpoint}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn templated_eligible_oauth_endpoint_still_acquires_a_vault_backed_credential() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Deferred eligible issuer").unwrap();
+    let api = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    ws.variables.push(anvil_domain::workspace::Variable::plain(
+        "issuer",
+        &api.url("/oauth/token"),
+    ));
+    app.save_workspace(ws.clone()).unwrap();
+    let secret = app
+        .set_secret(&ws.meta.id, "OAuth credential", "anvil-secret")
+        .unwrap();
+    let mut spec = RequestSpec::http("GET", &api.url("/echo"));
+    spec.auth = oauth("{{issuer}}");
+    if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+        config.client_id = "anvil-client".into();
+        config.client_auth = OAuthClientAuth::BasicHeader;
+        config.client_secret = SensitiveValue::Secret { secret };
+    }
+    let p = plan(&app, ws.meta.id, spec);
+    assert!(!warns(&app, &p));
+    let output = send(&context(&app, &p)).await;
+    assert_eq!(output.record.response.unwrap().status, 200);
+    assert_eq!(*api.state.oauth_token_requests.lock(), 1);
+    assert_eq!(
+        api.log.requests(),
+        [("POST".into(), "/oauth/token".into()), ("GET".into(), "/echo".into())]
+    );
+}
+
+#[test]
+fn oauth_endpoint_expansion_errors_do_not_expose_vault_derived_variable_names() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let mut ws = app.create_workspace("Endpoint errors").unwrap();
+    let secret = app
+        .set_secret(&ws.meta.id, "Issuer URL", "{{vault-canary}}")
+        .unwrap();
+    ws.variables.push(anvil_domain::workspace::Variable {
+        name: "issuer".into(),
+        value: SensitiveValue::Secret { secret },
+        secret: true,
+        enabled: true,
+        description: String::new(),
+    });
+    app.save_workspace(ws.clone()).unwrap();
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+    spec.auth = oauth("{{issuer}}");
+    let p = plan(&app, ws.meta.id, spec);
+    let error = app.load_preflight(&p).unwrap_err().to_string();
+    assert_eq!(
+        error,
+        "could not resolve OAuth token URL; check the vault and active variables"
+    );
+    assert!(!error.contains("vault-canary"));
 }
 
 #[test]

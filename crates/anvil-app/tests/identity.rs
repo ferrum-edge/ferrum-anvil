@@ -32,6 +32,23 @@ fn browser(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn send(
+    app: &App,
+    ws: &anvil_domain::Id,
+    rid: Option<anvil_domain::Id>,
+) -> anvil_engine::ExecutionOutput {
+    app.send(
+        rid,
+        ws,
+        None,
+        SendOptions::default(),
+        EventCtx::none(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+}
+
 fn provider(idp: &IdpFixture) -> MockProvider {
     MockProvider::new(MockProviderConfig {
         authorization_endpoint: idp.authorization_endpoint(),
@@ -288,9 +305,6 @@ async fn target_api_sign_in_through_the_app_is_session_only() {
     let req = app.create_request(&ws.meta.id, None, "List orders", spec).unwrap();
     let rid = Some(req.meta.id);
     let opts = SendOptions::default();
-    async fn send(app: &App, ws: &anvil_domain::Id, rid: Option<anvil_domain::Id>) -> anvil_engine::ExecutionOutput {
-        app.send(rid, ws, None, SendOptions::default(), EventCtx::none(), CancellationToken::new()).await.unwrap()
-    }
     let kind = |o: &anvil_engine::ExecutionOutput| o.record.attempts.last().and_then(|a| a.failure.as_ref()).map(|f| f.kind);
 
     assert_eq!(kind(&send(&app, &ws.meta.id, rid).await), Some(FailureKind::OAuthInteractionRequired));
@@ -328,6 +342,9 @@ async fn ineligible_token_urls_surface_the_same_failure_to_status_and_browser_ob
     let (header, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
     let app = App::open(dir, header, key).unwrap();
     let ws = app.create_workspace("Issuer policy").unwrap();
+    let credential = app
+        .set_secret(&ws.meta.id, "OAuth credential", "{{vault-canary}}")
+        .unwrap();
     let opened = AtomicUsize::new(0);
     let opener = |_: &str| {
         opened.fetch_add(1, Ordering::SeqCst);
@@ -346,7 +363,7 @@ async fn ineligible_token_urls_surface_the_same_failure_to_status_and_browser_ob
                 token_url: endpoint.into(),
                 authorization_url: idp.authorization_endpoint(),
                 client_id: "{{missing_client_id}}".into(),
-                client_secret: SensitiveValue::template("{{missing_client_secret}}"),
+                client_secret: SensitiveValue::Secret { secret: credential.clone() },
                 scope: String::new(),
                 audience: String::new(),
                 client_auth: OAuthClientAuth::BasicHeader,
@@ -381,6 +398,9 @@ async fn mapped_loopback_token_endpoint_can_complete_app_browser_sign_in() {
     let (header, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
     let app = App::open(dir, header, key).unwrap();
     let ws = app.create_workspace("Mapped issuer").unwrap();
+    let credential = app
+        .set_secret(&ws.meta.id, "OAuth credential", "eligible-vault-credential")
+        .unwrap();
     let mut spec = RequestSpec::http("GET", &idp.api_url());
     spec.auth = AuthConfig::OAuth2 {
         config: OAuth2Config {
@@ -388,7 +408,7 @@ async fn mapped_loopback_token_endpoint_can_complete_app_browser_sign_in() {
             token_url: idp.token_endpoint().replace("127.0.0.1", "[::ffff:127.0.0.1]"),
             authorization_url: idp.authorization_endpoint(),
             client_id: idp.client_id(),
-            client_secret: SensitiveValue::default(),
+            client_secret: SensitiveValue::Secret { secret: credential },
             scope: "orders.read".into(),
             audience: String::new(),
             client_auth: OAuthClientAuth::RequestBody,
@@ -406,6 +426,105 @@ async fn mapped_loopback_token_endpoint_can_complete_app_browser_sign_in() {
     assert!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap().is_some());
     assert_eq!(send(&app, &ws.meta.id, rid).await.record.response.unwrap().status, 200);
     assert_eq!(idp.api_requests(), (1, 1));
+}
+
+#[tokio::test]
+async fn vault_expansion_failures_are_sanitized_before_status_browser_events_and_history() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "vault errors");
+    let (header, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir, header, key).unwrap();
+    let mut ws = app.create_workspace("Vault errors").unwrap();
+    let credential = app
+        .set_secret(&ws.meta.id, "OAuth credential", "{{vault-canary}}")
+        .unwrap();
+    ws.variables.push(anvil_domain::workspace::Variable::plain(
+        "issuer",
+        &idp.token_endpoint(),
+    ));
+    app.save_workspace(ws.clone()).unwrap();
+    let opened = AtomicUsize::new(0);
+    let opener = |_: &str| {
+        opened.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let expected = "could not resolve auth.client_secret; check the vault and active variables";
+    for (endpoint, missing) in [
+        (idp.token_endpoint(), false),
+        ("{{issuer}}".into(), false),
+        (idp.token_endpoint(), true),
+        ("{{issuer}}".into(), true),
+    ] {
+        if missing {
+            app.store.delete_secret(&credential.id).unwrap();
+        }
+        let mut spec = RequestSpec::http("GET", &idp.api_url());
+        spec.auth = AuthConfig::OAuth2 {
+            config: OAuth2Config {
+                grant: OAuthGrant::AuthorizationCodePkce,
+                token_url: endpoint,
+                authorization_url: idp.authorization_endpoint(),
+                client_id: idp.client_id(),
+                client_secret: SensitiveValue::Secret { secret: credential.clone() },
+                scope: "orders.read".into(),
+                audience: String::new(),
+                client_auth: OAuthClientAuth::RequestBody,
+                token_cache_id: None,
+                refresh_skew_secs: 30,
+            },
+        };
+        let req = app
+            .create_request(&ws.meta.id, None, "Vault-backed issuer", spec)
+            .unwrap();
+        let rid = Some(req.meta.id);
+        let opts = SendOptions::default();
+        assert_eq!(
+            app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap_err().to_string(),
+            expected
+        );
+        let events = Mutex::new(Vec::new());
+        let observer = |event| events.lock().unwrap().push(event);
+        let error = app
+            .oauth_sign_in(
+                rid,
+                &ws.meta.id,
+                None,
+                &opts,
+                &opener,
+                &observer,
+                &FlowOptions::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![FlowEvent::Failed {
+                kind: FlowErrorKind::Configuration,
+                message: expected.into()
+            }]
+        );
+        assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("vault-canary"));
+        let out = send(&app, &ws.meta.id, rid).await;
+        assert_eq!(
+            out.record.outcome.dispatch,
+            anvil_domain::execution::DispatchState::NotDispatched
+        );
+        assert_eq!(
+            out.record.attempts.last().unwrap().failure.as_ref().unwrap().message,
+            expected
+        );
+        assert!(!serde_json::to_string(&out.record).unwrap().contains("vault-canary"));
+    }
+    assert_eq!(opened.load(Ordering::SeqCst), 0);
+    assert!(idp.grants_seen().is_empty());
+    assert_eq!(idp.api_requests(), (0, 0));
 }
 
 #[tokio::test]

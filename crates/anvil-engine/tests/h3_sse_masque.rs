@@ -318,7 +318,7 @@ async fn masque_connect_caps_configured_and_auth_cookies_after_auth() {
                     location: KeyLocation::Cookie,
                 };
             } else {
-                spec.headers.push(KeyValue::new("Cookie", &format!("sid={value}")));
+                spec.headers.push(KeyValue::new("Cookie", format!("sid={value}")));
             }
             let o = run(&e, &lab_ctx(spec, None)).await;
             assert_eq!(tunnel(&o).0, 1);
@@ -346,8 +346,8 @@ async fn masque_connect_caps_configured_and_auth_cookies_after_auth() {
         MasqueDatagramMode::Auto,
         &["aggregate-control"],
     );
-    spec.headers.push(KeyValue::new("Cookie", &format!("first={}", "a".repeat(5000))));
-    spec.headers.push(KeyValue::new("cookie", &format!("second={}", "b".repeat(5000))));
+    spec.headers.push(KeyValue::new("Cookie", format!("first={}", "a".repeat(5000))));
+    spec.headers.push(KeyValue::new("cookie", format!("second={}", "b".repeat(5000))));
     let o = run(&e, &lab_ctx(spec, None)).await;
     assert_eq!(tunnel(&o).1, 1);
     let headers = proxy.log.last_request_headers().unwrap();

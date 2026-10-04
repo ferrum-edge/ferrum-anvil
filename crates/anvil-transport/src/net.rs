@@ -43,7 +43,21 @@ pub async fn connect_tcp(
     addrs: &[SocketAddr],
     deadline: Option<Duration>,
 ) -> Result<ConnectResult, (TransportFailure, Vec<ConnectAttempt>)> {
-    let r = race(addrs, deadline, TcpStream::connect).await?;
+    // Dial mapped IPv4 addresses with AF_INET, including on Windows where
+    // AF_INET6 sockets default to IPV6_V6ONLY. DNS evidence and HTTP policy/
+    // pool keys keep the original answer; per-dial evidence names this address.
+    // Native IPv6, TLS names and proxy target authorities are unchanged.
+    let dial_addrs: Vec<_> = addrs
+        .iter()
+        .map(|addr| match addr {
+            SocketAddr::V6(v6) if v6.scope_id() == 0 => v6
+                .ip()
+                .to_ipv4_mapped()
+                .map_or(*addr, |ip| SocketAddr::new(ip.into(), v6.port())),
+            _ => *addr,
+        })
+        .collect();
+    let r = race(&dial_addrs, deadline, TcpStream::connect).await?;
     let _ = r.stream.set_nodelay(true);
     Ok(r)
 }

@@ -11,6 +11,7 @@ use anvil_transport::http::{AttemptOutput, HttpPlan, HttpTransport};
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::tls::{self, ClientIdentityMaterial, TlsSettings};
 use bytes::Bytes;
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -115,6 +116,56 @@ async fn positive_control_http1_evidence_and_keepalive_reuse_proto_001() {
     assert_eq!(phase_status(&b, Phase::Connect), Some(PhaseStatus::Reused));
     assert!(b.observation.phase(Phase::Connect).unwrap().duration_us().is_none());
     assert_eq!(fx.log.count_requests(), 2);
+}
+
+#[tokio::test]
+async fn mapped_ipv4_tcp_dials_preserve_dns_evidence_authority_and_pool_isolation() {
+    init();
+    let fx = fxhttp::serve("127.0.0.1:0", None).await.unwrap();
+    let t = HttpTransport::new();
+    let mapped: SocketAddr = format!("[::ffff:127.0.0.1]:{}", fx.addr.port()).parse().unwrap();
+    let p = plan(&format!("http://{mapped}/echo"), None);
+    let a = run(&t, &p).await;
+    assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
+    assert_eq!(a.response.unwrap().status, 200);
+    assert!(fx.log.last_request_headers().unwrap().contains(&("host".into(), p.authority.clone())));
+    let connection = a.observation.connection.unwrap();
+    assert_eq!(connection.resolved_addresses, [mapped.to_string()]);
+    assert_eq!(connection.connect_attempts[0].address, fx.addr.to_string());
+    assert_eq!(connection.remote_address, Some(fx.addr.to_string()));
+    assert_eq!(connection.connect_attempts[0].failure, None);
+    assert!(!connection.reused);
+    let b = run(&t, &p).await;
+    assert!(b.observation.connection.unwrap().reused);
+    // The equivalent IPv4 literal is still a separate HTTP authority/key.
+    let ipv4 = run(&t, &plan(&fx.url("/echo"), None)).await;
+    assert!(!ipv4.observation.connection.unwrap().reused);
+    t.pool.clear();
+    let fresh = run(&t, &p).await;
+    assert!(fresh.observation.failure.is_none());
+    assert!(!fresh.observation.connection.unwrap().reused);
+    assert_eq!(fx.log.count_requests(), 4);
+}
+
+#[tokio::test]
+async fn mapped_override_keeps_the_tls_name_while_dialing_ipv4() {
+    init();
+    let fx = tls_fixture(&pki().server, ClientAuth::None).await;
+    let mut p = plan(&fx.url_host("localhost", "/echo"), None);
+    p.dns.overrides.push(anvil_domain::settings::DnsOverride {
+        host: "localhost".into(),
+        addresses: vec!["::ffff:127.0.0.1".into()],
+    });
+    let a = run(&HttpTransport::new(), &p).await;
+    assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
+    assert_eq!(a.response.unwrap().status, 200);
+    let connection = a.observation.connection.unwrap();
+    let mapped: SocketAddr = format!("[::ffff:127.0.0.1]:{}", fx.addr.port()).parse().unwrap();
+    assert_eq!(connection.resolved_addresses, [mapped.to_string()]);
+    assert_eq!(connection.connect_attempts[0].address, fx.addr.to_string());
+    let tls = connection.tls.unwrap();
+    assert_eq!(tls.sni.as_deref(), Some("localhost"));
+    assert!(matches!(tls.verification, TlsVerification::Verified));
 }
 
 #[tokio::test]

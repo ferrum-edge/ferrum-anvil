@@ -337,7 +337,11 @@ impl App {
                 for (label, template) in auth_urls {
                     let proven = match prove_url(&resolver, template, "auth URL") {
                         Ok(proven) => proven,
-                        Err(UrlProblem::Unresolved(message)) => return Err(AppError::Invalid(message)),
+                        Err(UrlProblem::Unresolved(_)) => {
+                            return Err(AppError::Invalid(format!(
+                                "could not resolve {label}; check the vault and active variables"
+                            )));
+                        }
                         Err(UrlProblem::PerRun(origin)) => return Err(refuse(label, origin)),
                     };
                     if label == "OAuth token URL" {

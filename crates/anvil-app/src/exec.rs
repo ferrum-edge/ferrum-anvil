@@ -14,6 +14,7 @@ use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::{AttachmentResolver, ExecutionContext, SecretResolver};
+use anvil_engine::oauth_http::require_secure_token_endpoint;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_storage::Store;
 use anvil_transport::recorder::EventCtx;
@@ -48,13 +49,15 @@ impl SecretResolver for StoreSecrets {
 
 /// The vault secrets an execution context names, looked up through
 /// [`StoreSecrets`] when the context is built, which [`App::send`] and the
-/// other async paths do on a blocking thread: the engine never waits on the
-/// store while it executes. Each lookup keeps its outcome, so a secret that
-/// is missing, owned by another workspace or unreadable still fails where it
-/// is used. Fails closed once the store is locked.
+/// other async paths do on a blocking thread. OAuth credentials are only
+/// prefetched after a fixed token endpoint passes its policy check; credentials
+/// for templated endpoints resolve on demand after acquisition validates the
+/// expanded endpoint. Each prefetched lookup keeps its outcome, so a secret
+/// that is missing, owned by another workspace or unreadable still fails where
+/// it is used. Fails closed once the store is locked.
 pub struct ResolvedSecrets {
     resolved: HashMap<SecretRef, std::result::Result<Zeroizing<String>, String>>,
-    /// Looks up a reference the context did not name when it was built.
+    /// Looks up a reference not prefetched, including deferred OAuth credentials.
     store: StoreSecrets,
 }
 
@@ -93,13 +96,43 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
     let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
     let tls: Vec<_> = selected_tls_profiles(ctx).collect();
     let integration = settings.integration_profile_id.and_then(|id| ctx.integrations.iter().find(|i| i.id == id));
+    let mut spec = ctx.spec.clone();
+    // Only effective auth is used. Inactive request auth must not cause an
+    // OAuth credential to be fetched through the spec's duplicate reference.
+    spec.auth = AuthConfig::None;
+    let mut auth = ctx.effective_auth().1;
+    let conflicting = auth.oauth_profile().is_err();
+    defer_unvalidated_oauth_secrets(&mut auth, conflicting);
     Ok(vec![
-        serde_json::to_value(&ctx.spec)?,
-        serde_json::to_value(ctx.effective_auth().1)?,
+        serde_json::to_value(spec)?,
+        serde_json::to_value(auth)?,
         serde_json::to_value(tls)?,
         serde_json::to_value(proxy)?,
         serde_json::to_value(integration)?,
     ])
+}
+
+/// A fixed endpoint can be checked before freezing its vault credential.
+/// Templated endpoints may depend on a later dataset row or dynamic helper:
+/// their credentials resolve on demand, after the acquisition sink checks
+/// the actual expanded endpoint. No unvalidated OAuth credential is prefetched.
+fn defer_unvalidated_oauth_secrets(auth: &mut AuthConfig, conflicting: bool) {
+    match auth {
+        AuthConfig::OAuth2 { config } => {
+            if conflicting
+                || config.token_url.contains("{{")
+                || require_secure_token_endpoint(&config.token_url).is_err()
+            {
+                config.client_secret = SensitiveValue::default();
+            }
+        }
+        AuthConfig::Multi { profiles } => {
+            for profile in profiles {
+                defer_unvalidated_oauth_secrets(profile, conflicting);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Every vault reference (`SensitiveValue::Secret`) in `v`.
