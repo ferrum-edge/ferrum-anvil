@@ -62,13 +62,9 @@ pub enum IdentityPolicyError {
     NotLinked,
     #[error("the identity binding of this profile was changed outside Anvil; unlock with the recovery key and link the account again")]
     BindingTampered,
-    #[error(
-        "an identity change was interrupted; explicitly recover its authenticated publication before ordinary unlock"
-    )]
+    #[error("an identity change was interrupted; explicitly recover its authenticated publication before ordinary unlock")]
     PublicationPending,
-    #[error(
-        "this legacy profile has no authenticated identity expectation; linking requires an explicitly created draft-format profile"
-    )]
+    #[error("this legacy profile has no authenticated identity expectation; linking requires an explicitly created draft-format profile")]
     LegacyEnrollmentRequired,
 }
 
@@ -151,9 +147,8 @@ pub(crate) fn read_binding(dir: &Path, h: &ProfileHeader) -> Result<Option<Bindi
     if let Some(expectation) = &h.identity_binding {
         match (&expectation.binding, &bytes) {
             (None, None) => return Ok(None),
-            (Some(expected), Some(bytes))
-                if expected.version == VERSION
-                    && *expected == vault::identity_binding_digest(bytes, VERSION) => {}
+            (Some(expected), Some(bytes)) if expected.version == VERSION && *expected == vault::identity_binding_digest(bytes, VERSION) => {
+            }
             _ => return Err(IdentityPolicyError::BindingTampered.into()),
         }
     }
@@ -161,8 +156,7 @@ pub(crate) fn read_binding(dir: &Path, h: &ProfileHeader) -> Result<Option<Bindi
 }
 
 fn parse_binding(bytes: &[u8]) -> Result<BindingFile> {
-    let f: BindingFile =
-        serde_json::from_slice(bytes).map_err(|_| IdentityPolicyError::BindingTampered)?;
+    let f: BindingFile = serde_json::from_slice(bytes).map_err(|_| IdentityPolicyError::BindingTampered)?;
     if f.format != FORMAT || f.version != VERSION {
         return Err(IdentityPolicyError::BindingTampered.into());
     }
@@ -209,21 +203,13 @@ pub(crate) fn require_enrolled(h: &ProfileHeader) -> Result<()> {
 
 pub(crate) fn unlink(guard: &IdentityHeaderGuard<'_>, h: &ProfileHeader, dek: &Key) -> Result<()> {
     require_enrolled(h)?;
-    guard.begin_identity_publication(
-        h,
-        dek,
-        IdentityBindingPublication { binding: None, contents: None },
-    )?;
+    guard.begin_identity_publication(h, dek, IdentityBindingPublication { binding: None, contents: None })?;
     guard.finish_identity_publication(dek)?;
     Ok(())
 }
 
 /// Validate journal data under the proven DEK before resuming publication.
-pub(crate) fn recover_publication(
-    guard: &IdentityHeaderGuard<'_>,
-    h: &ProfileHeader,
-    dek: &Key,
-) -> Result<()> {
+pub(crate) fn recover_publication(guard: &IdentityHeaderGuard<'_>, h: &ProfileHeader, dek: &Key) -> Result<()> {
     require_enrolled(h)?;
     vault::authenticate_header(h, dek)?;
     let pending = h
@@ -277,11 +263,7 @@ pub(crate) fn link(
     };
     let contents = binding_contents(h, dek, &linked)?;
     let binding = Some(vault::identity_binding_digest(contents.as_bytes(), VERSION));
-    guard.begin_identity_publication(
-        h,
-        dek,
-        IdentityBindingPublication { binding, contents: Some(contents) },
-    )?;
+    guard.begin_identity_publication(h, dek, IdentityBindingPublication { binding, contents: Some(contents) })?;
     guard.finish_identity_publication(dek)?;
     Ok(linked)
 }

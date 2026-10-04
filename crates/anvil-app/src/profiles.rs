@@ -118,12 +118,7 @@ impl ProfileManager {
         }
         let dir = self.profiles_dir().join(uuid::Uuid::now_v7().to_string());
         let c = if identity {
-            vault::create_passphrase_profile_with_identity_expectation(
-                &dir,
-                display_name,
-                passphrase,
-                kdf,
-            )?
+            vault::create_passphrase_profile_with_identity_expectation(&dir, display_name, passphrase, kdf)?
         } else {
             vault::create_passphrase_profile(&dir, display_name, passphrase, kdf)?
         };
@@ -237,10 +232,7 @@ impl ProfileManager {
             match (&binding, proof) {
                 (Some(b), Some(p)) => identity::check_proof(b.provider(), b.subject(), p, now)?,
                 (Some(b), None) if b.require_fresh_login() => {
-                    return Err(IdentityPolicyError::FreshLoginRequired {
-                        provider: b.provider().to_string(),
-                    }
-                    .into());
+                    return Err(IdentityPolicyError::FreshLoginRequired { provider: b.provider().to_string() }.into());
                 }
                 (None, Some(_)) => return Err(IdentityPolicyError::NotLinked.into()),
                 _ => {}
@@ -299,8 +291,7 @@ impl ProfileManager {
         let guard = vault::lock_identity_header(dir)?;
         let h = guard.read()?;
         identity::require_enrolled(&h)?;
-        let current = identity::read_binding(dir, &h)
-            .or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
+        let current = identity::read_binding(dir, &h).or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
         let (h, k) = match &current {
             // Re-linking the same account (e.g. toggling the policy): the new
             // proof is also the fresh proof the current policy asks for.
@@ -319,18 +310,11 @@ impl ProfileManager {
         let guard = vault::lock_identity_header(dir)?;
         let h = guard.read()?;
         identity::require_enrolled(&h)?;
-        let current = identity::read_binding(dir, &h)
-            .or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
+        let current = identity::read_binding(dir, &h).or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
         if current.is_none() && !recovery {
             return Err(IdentityPolicyError::NotLinked.into());
         }
-        let (h, key) = Self::unlock_header_checked(
-            dir,
-            &h,
-            how,
-            proof.as_ref(),
-            chrono::Utc::now(),
-        )?;
+        let (h, key) = Self::unlock_header_checked(dir, &h, how, proof.as_ref(), chrono::Utc::now())?;
         identity::unlink(&guard, &h, &key)
     }
 
