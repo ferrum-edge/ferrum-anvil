@@ -673,10 +673,7 @@ fn via_proxy(o: &ExecutionOutput, attempt: usize) -> Option<String> {
 fn assert_destination_refused(o: &ExecutionOutput) {
     let attempt = o.record.attempts.last().unwrap();
     assert_eq!(attempt.dispatch, anvil_domain::execution::DispatchState::NotDispatched);
-    assert_eq!(
-        attempt.failure.as_ref().unwrap().kind,
-        anvil_domain::execution::FailureKind::UnsupportedCombination,
-    );
+    assert_eq!(attempt.failure.as_ref().unwrap().kind, anvil_domain::execution::FailureKind::UnsupportedCombination,);
     assert!(attempt.connection.is_none(), "no pool checkout or connection occurred");
 }
 
@@ -685,15 +682,7 @@ async fn real_redirects_refuse_invalid_or_different_resolved_zones_before_dispat
     init();
     let origin = fx::serve("127.0.0.1:0", None).await.unwrap();
     let destination = fx::serve("127.0.0.1:0", None).await.unwrap();
-    for host in [
-        "10.0.0.1",
-        "169.254.169.254",
-        "100.64.0.1",
-        "224.0.0.1",
-        "0.0.0.0",
-        "[::ffff:10.0.0.1]",
-        "[2002:7f00:1::]",
-    ] {
+    for host in ["10.0.0.1", "169.254.169.254", "100.64.0.1", "224.0.0.1", "0.0.0.0", "[::ffff:10.0.0.1]", "[2002:7f00:1::]"] {
         let target = format!("http://{host}:{}/echo", destination.addr.port());
         let ctx = ctx_for(&origin.url(&format!("/redirect?status=307&to={}", url_encode(&target))));
         let o = run(&Engine::new(), &ctx).await;
@@ -706,10 +695,7 @@ async fn real_redirects_refuse_invalid_or_different_resolved_zones_before_dispat
     settings(
         &mut ctx,
         SettingsOverrides {
-            dns_overrides: vec![anvil_domain::settings::DnsOverride {
-                host: "alias.test".into(),
-                addresses: vec!["10.0.0.1".into()],
-            }],
+            dns_overrides: vec![anvil_domain::settings::DnsOverride { host: "alias.test".into(), addresses: vec!["10.0.0.1".into()] }],
             ..Default::default()
         },
     );
@@ -757,11 +743,7 @@ async fn redirect_from_an_opaque_proxy_origin_to_a_direct_route_is_refused() {
     assert_eq!(proxy.lines(), vec![format!("GET {} HTTP/1.1", a.url("/start"))], "only the first hop is proxied");
     assert_eq!(a.log.count_requests(), 0);
     assert!(via_proxy(&o, 0).is_some());
-    assert_eq!(
-        b.log.count_requests(),
-        0,
-        "an opaque original destination grants no direct-hop authority",
-    );
+    assert_eq!(b.log.count_requests(), 0, "an opaque original destination grants no direct-hop authority",);
     assert_destination_refused(&o);
 }
 

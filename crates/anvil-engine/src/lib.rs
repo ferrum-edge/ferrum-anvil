@@ -641,13 +641,7 @@ mod tests {
         let e = Engine::new();
         let t = target("https://example.com/");
         let redactor = redact::Redactor::default();
-        e.store_cookies(
-            e.execution_epoch("ws"),
-            "ws",
-            &t,
-            &with_set_cookie(&["sid=from-jar", "other=value"]),
-            &redactor,
-        );
+        e.store_cookies(e.execution_epoch("ws"), "ws", &t, &with_set_cookie(&["sid=from-jar", "other=value"]), &redactor);
         let mut headers = vec![("Cookie".into(), format!("sid={}", "v".repeat(8188)))];
         let notes = http_exec::add_jar_cookies(&e, "ws", &t, &mut headers);
         assert!(!notes.is_empty());
@@ -660,10 +654,7 @@ mod tests {
         assert_eq!(headers[0].1, "sid=from-jar; other=value");
         let entries = headers
             .iter()
-            .map(|(name, value)| anvil_domain::execution::HeaderEntry {
-                name: name.clone(),
-                value: value.clone(),
-            })
+            .map(|(name, value)| anvil_domain::execution::HeaderEntry { name: name.clone(), value: value.clone() })
             .collect::<Vec<_>>();
         assert!(!serde_json::to_string(&redactor.headers(&entries)).unwrap().contains("from-jar"));
         assert_eq!(e.cookie_header("other-isolation", &t), None);
@@ -681,11 +672,7 @@ mod tests {
         let resolver = vars::Resolver::new(
             vec![vars::VarLayer {
                 label: "test".into(),
-                vars: vec![vars::VarEntry {
-                    name: "secret".into(),
-                    value: "secret-cookie-name".into(),
-                    secret: true,
-                }],
+                vars: vec![vars::VarEntry { name: "secret".into(), value: "secret-cookie-name".into(), secret: true }],
             }],
             None,
         );

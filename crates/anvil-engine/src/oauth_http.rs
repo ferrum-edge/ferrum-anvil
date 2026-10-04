@@ -157,13 +157,10 @@ pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &R
 /// again before constructing transport headers/body. DNS names (including
 /// localhost) cannot opt into cleartext; only a canonical literal loopback can.
 fn require_secure_token_endpoint(raw: &str) -> Result<(), String> {
-    let u = url::Url::parse(raw)
-        .map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
+    let u = url::Url::parse(raw).map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
     let loopback = match u.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => {
-            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback())
-        }
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
         _ => false,
     };
     if u.scheme() == "https" || (u.scheme() == "http" && loopback) {
@@ -208,11 +205,7 @@ mod endpoint_tests {
     #[test]
     fn all_grants_validate_resolved_url_before_resolving_client_credentials() {
         let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
-        for grant in [
-            OAuthGrant::ClientCredentials,
-            OAuthGrant::RefreshToken,
-            OAuthGrant::AuthorizationCodePkce,
-        ] {
+        for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
             let config = OAuth2Config {
                 grant,
                 token_url: "{{endpoint}}".into(),
@@ -229,21 +222,9 @@ mod endpoint_tests {
                 vec![VarLayer {
                     label: "test".into(),
                     vars: vec![
-                        VarEntry {
-                            name: "endpoint".into(),
-                            value: "http://issuer.example/token".into(),
-                            secret: false,
-                        },
-                        VarEntry {
-                            name: "client".into(),
-                            value: "unused-client".into(),
-                            secret: true,
-                        },
-                        VarEntry {
-                            name: "credential".into(),
-                            value: "unused-credential".into(),
-                            secret: true,
-                        },
+                        VarEntry { name: "endpoint".into(), value: "http://issuer.example/token".into(), secret: false },
+                        VarEntry { name: "client".into(), value: "unused-client".into(), secret: true },
+                        VarEntry { name: "credential".into(), value: "unused-credential".into(), secret: true },
                     ],
                 }],
                 None,
@@ -261,29 +242,19 @@ mod endpoint_tests {
         let engine = Engine::new();
         let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
         let settings = EffectiveSettings::default();
-        let http = EngineTokenHttp {
-            engine: &engine,
-            ctx: &ctx,
-            settings: &settings,
-            epoch: engine.sensitive_epoch(),
-        };
+        let http = EngineTokenHttp { engine: &engine, ctx: &ctx, settings: &settings, epoch: engine.sensitive_epoch() };
         for grant in ["client_credentials", "refresh_token", "authorization_code"] {
-            let result = http.post_form(
-                "http://localhost/token",
-                vec![
-                    ("grant_type".into(), grant.into()),
-                    ("code_verifier".into(), "unused-verifier".into()),
-                ],
-                Some(("unused-client".into(), "unused-secret".into())),
-            )
-            .await;
+            let result = http
+                .post_form(
+                    "http://localhost/token",
+                    vec![("grant_type".into(), grant.into()), ("code_verifier".into(), "unused-verifier".into())],
+                    Some(("unused-client".into(), "unused-secret".into())),
+                )
+                .await;
             assert!(result.unwrap_err().contains("HTTPS"));
         }
         assert_eq!(engine.http.pool.stats().connections, 0);
-        assert_eq!(
-            engine.tokens.requests.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-        );
+        assert_eq!(engine.tokens.requests.load(std::sync::atomic::Ordering::Relaxed), 0,);
     }
 }
 

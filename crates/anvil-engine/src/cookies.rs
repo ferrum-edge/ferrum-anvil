@@ -34,11 +34,7 @@ impl BoundedJar {
     fn tick(&mut self) -> u64 {
         if self.clock == u64::MAX {
             // Rebase only ordering metadata, preserving ties and creation order.
-            let mut stamps: Vec<u64> = self
-                .entries
-                .iter()
-                .flat_map(|e| [e.used, e.created])
-                .collect();
+            let mut stamps: Vec<u64> = self.entries.iter().flat_map(|e| [e.used, e.created]).collect();
             stamps.sort_unstable();
             stamps.dedup();
             for e in &mut self.entries {
@@ -59,11 +55,7 @@ impl BoundedJar {
         let site = site_key(&domain);
         // raw_cookie retains its serialized backing string, while the parsed
         // domain/path and site are owned separately. Charge fixed metadata too.
-        let bytes = wire_bytes
-            + domain.len()
-            + cookie.path.as_ref().len()
-            + site.len()
-            + std::mem::size_of::<Entry>();
+        let bytes = wire_bytes + domain.len() + cookie.path.as_ref().len() + site.len() + std::mem::size_of::<Entry>();
         if bytes > MAX_ITEM_BYTES {
             return;
         }
@@ -96,21 +88,10 @@ impl BoundedJar {
                 usage.0 += e.bytes;
                 usage.1 += 1;
             }
-            let largest = sites
-                .into_iter()
-                .max_by_key(|(s, usage)| (*usage, *s))
-                .unwrap()
-                .0
-                .to_string();
+            let largest = sites.into_iter().max_by_key(|(s, usage)| (*usage, *s)).unwrap().0.to_string();
             self.evict(&largest);
         }
-        self.entries.push(Entry {
-            cookie,
-            site,
-            bytes,
-            used,
-            created: created.unwrap_or(used),
-        });
+        self.entries.push(Entry { cookie, site, bytes, used, created: created.unwrap_or(used) });
     }
 
     fn bytes(&self) -> usize {
@@ -118,14 +99,12 @@ impl BoundedJar {
     }
 
     fn site_usage(&self, site: &str) -> (usize, usize) {
-        self.entries
-            .iter()
-            .filter(|e| e.site == site)
-            .fold((0, 0), |(n, b), e| (n + 1, b + e.bytes))
+        self.entries.iter().filter(|e| e.site == site).fold((0, 0), |(n, b), e| (n + 1, b + e.bytes))
     }
 
     fn evict(&mut self, site: &str) {
-        let i = self.entries
+        let i = self
+            .entries
             .iter()
             .enumerate()
             .filter(|(_, e)| e.site == site)
@@ -137,13 +116,7 @@ impl BoundedJar {
 
     pub(crate) fn header(&mut self, url: &url::Url) -> Option<String> {
         self.purge_expired();
-        let mut indices: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.cookie.matches(url))
-            .map(|(i, _)| i)
-            .collect();
+        let mut indices: Vec<usize> = self.entries.iter().enumerate().filter(|(_, e)| e.cookie.matches(url)).map(|(i, _)| i).collect();
         indices.sort_by_key(|i| {
             let e = &self.entries[*i];
             (std::cmp::Reverse(e.cookie.path.as_ref().len()), e.created, *i)
@@ -226,10 +199,7 @@ mod tests {
         put(&mut jar, "a.example.com", "c0=longer; Path=/p0");
         assert_eq!(jar.entries.len(), MAX_SITE_COUNT);
         assert_eq!(jar.bytes(), before + 5, "replacement charges only the new size");
-        assert_eq!(
-            jar.header(&url).as_deref(),
-            Some("c0=longer; fresh=v"),
-        );
+        assert_eq!(jar.header(&url).as_deref(), Some("c0=longer; fresh=v"),);
         put(&mut jar, "a.example.com", "c0=deleted; Path=/p0; Max-Age=0");
         assert_eq!(jar.entries.len(), MAX_SITE_COUNT - 1);
         invariants(&jar);
@@ -308,25 +278,15 @@ mod tests {
         put(&mut jar, "sub.a.internal", "no=1; Domain=a.internal");
         put(&mut jar, "a.internal", "yes=1; Domain=a.internal");
         assert_eq!(jar.entries.len(), 1);
-        assert_eq!(
-            jar.header(&url::Url::parse("https://sub.a.internal/").unwrap()),
-            None,
-        );
+        assert_eq!(jar.header(&url::Url::parse("https://sub.a.internal/").unwrap()), None,);
     }
 
     #[test]
     fn giant_values_and_inherited_metadata_are_rejected_before_retention() {
         let mut jar = BoundedJar::default();
-        put(
-            &mut jar,
-            "example.com",
-            &format!("huge={}", "v".repeat(MAX_SET_COOKIE_BYTES)),
-        );
+        put(&mut jar, "example.com", &format!("huge={}", "v".repeat(MAX_SET_COOKIE_BYTES)));
         assert!(jar.entries.is_empty());
-        let url = url::Url::parse(&format!(
-            "https://example.com/{}/end",
-            "p".repeat(5000),
-        )).unwrap();
+        let url = url::Url::parse(&format!("https://example.com/{}/end", "p".repeat(5000),)).unwrap();
         assert!(crate::scoped_cookie("a=b", &url).is_none());
         let url = url::Url::parse("https://example.com/").unwrap();
         let cookie = crate::scoped_cookie("a=b", &url).unwrap();

@@ -630,9 +630,7 @@ pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target,
         }
         let size = pair.len() + if bytes == 0 { 0 } else { 2 };
         if bytes + size > limit {
-            notes.push(
-                "a stored cookie exceeds the 8 KiB request cookie budget".into(),
-            );
+            notes.push("a stored cookie exceeds the 8 KiB request cookie budget".into());
             continue;
         }
         if !added.is_empty() {
@@ -669,9 +667,7 @@ pub(crate) fn cookie_header_budget(headers: &mut Vec<(String, String)>) -> (Vec<
         }
         let added = value.len() + if bytes == 0 { 0 } else { 2 };
         if bytes + added > limit {
-            notes.push(
-                "a Cookie header exceeds the 8 KiB request cookie budget".into(),
-            );
+            notes.push("a Cookie header exceeds the 8 KiB request cookie budget".into());
             false
         } else {
             bytes += added;
@@ -983,27 +979,17 @@ pub(crate) async fn execute_viewing(
         }
         let (outs, closed_under) = match version {
             HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback => {
-                let e = engine.h3.execute_attempt_guarded(
-                    &plan,
-                    index,
-                    reason.clone(),
-                    &events,
-                    &cancel,
-                    Some((&destination, redirects > 0)),
-                )
-                .await;
+                let e = engine
+                    .h3
+                    .execute_attempt_guarded(&plan, index, reason.clone(), &events, &cancel, Some((&destination, redirects > 0)))
+                    .await;
                 (e.outputs, e.resend_on_new_connection)
             }
             _ => {
-                let e = engine.http.execute_attempt_guarded(
-                    &plan,
-                    index,
-                    reason.clone(),
-                    &events,
-                    &cancel,
-                    Some((&destination, redirects > 0)),
-                )
-                .await;
+                let e = engine
+                    .http
+                    .execute_attempt_guarded(&plan, index, reason.clone(), &events, &cancel, Some((&destination, redirects > 0)))
+                    .await;
                 // The TCP fallback gets the transport's resend of a request
                 // that never left, not the engine's: its next attempt would
                 // go out over HTTP/3 again.

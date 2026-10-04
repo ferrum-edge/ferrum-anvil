@@ -1411,9 +1411,7 @@ impl H3Transport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> AttemptOutput {
-        self.execute_once(plan, index, reason, events, cancel, None)
-            .await
-            .0
+        self.execute_once(plan, index, reason, events, cancel, None).await.0
     }
 
     /// [`H3Transport::execute`], sending the request once more on a new
@@ -1436,15 +1434,7 @@ impl H3Transport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> H3Execution {
-        self.execute_attempt_guarded(
-            plan,
-            index,
-            reason,
-            events,
-            cancel,
-            None,
-        )
-        .await
+        self.execute_attempt_guarded(plan, index, reason, events, cancel, None).await
     }
 
     /// Engine HTTP/3 execution with the same redirect authority as TCP.
@@ -1462,15 +1452,7 @@ impl H3Transport {
         let mut resend_on_new_connection = None;
         let mut attempt_reason = reason;
         for attempt_index in (index..).take(2) {
-            let (out, closed) = self.execute_once(
-                plan,
-                attempt_index,
-                attempt_reason.clone(),
-                events,
-                cancel,
-                destination,
-            )
-            .await;
+            let (out, closed) = self.execute_once(plan, attempt_index, attempt_reason.clone(), events, cancel, destination).await;
             outputs.push(out);
             match closed {
                 Some(ClosedUnder::Unsent(after)) => attempt_reason = AttemptReason::ReusedConnectionClosed { after },
@@ -1514,26 +1496,13 @@ impl H3Transport {
             failure: None,
             duration_us: 0,
         };
-        let total_deadline = plan
-            .timeouts
-            .total_ms
-            .map(|ms| Instant::now() + Duration::from_millis(ms));
+        let total_deadline = plan.timeouts.total_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
         let pinned;
         let plan = if let Some((policy, redirected)) = destination {
-            pinned = match policy
-                .pin(plan, redirected, &mut rec, total_deadline, cancel)
-                .await
-            {
+            pinned = match policy.pin(plan, redirected, &mut rec, total_deadline, cancel).await {
                 Ok(p) => p,
                 Err(f) => {
-                    let out = fail_attempt(
-                        rec,
-                        obs,
-                        f,
-                        DispatchState::NotDispatched,
-                        None,
-                        events,
-                    );
+                    let out = fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events);
                     return (out, None);
                 }
             };
@@ -1571,12 +1540,7 @@ impl H3Transport {
         // (and enforces) the limit it was opened with, so a request with a
         // smaller one never reuses a connection that accepts more.
         let (host, fs) = (plan.host.to_ascii_lowercase(), field_section_limit(&plan.limits));
-        let dns = format!(
-            "{:?}{:?}{:?}",
-            plan.dns.resolver,
-            plan.dns.overrides,
-            plan.dns.ip_preference,
-        );
+        let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference,);
         let key = format!(
             "{}|h3://{host}:{}|{}|fs={fs}|dns:{}",
             plan.isolation,

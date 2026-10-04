@@ -141,11 +141,7 @@ fn oauth(addr: SocketAddr, grant: OAuthGrant, audience: &str) -> OAuth2Config {
 async fn nonliteral_cleartext_issuers_fail_before_any_token_or_api_request_for_all_grants() {
     anvil_transport::init();
     let (addr, fx) = Fixture::start().await;
-    for grant in [
-        OAuthGrant::ClientCredentials,
-        OAuthGrant::RefreshToken,
-        OAuthGrant::AuthorizationCodePkce,
-    ] {
+    for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
         let mut config = oauth(addr, grant, "api-a");
         config.token_url = format!("http://issuer.test:{}/token", addr.port());
         config.client_secret = SensitiveValue::template("unused-credential-canary");
@@ -174,10 +170,7 @@ async fn https_issuer_acquisition_still_uses_configured_trust_and_delivers_a_tok
     anvil_transport::init();
     anvil_fixtures::init();
     let pki = anvil_fixtures::LabPki::generate();
-    let tls = anvil_fixtures::TlsServerOptions::new(
-        pki.server.chain_with(&pki.ca),
-        pki.server.key.clone(),
-    );
+    let tls = anvil_fixtures::TlsServerOptions::new(pki.server.chain_with(&pki.ca), pki.server.key.clone());
     let issuer = anvil_fixtures::http::serve("127.0.0.1:0", Some(tls)).await.unwrap();
     let (addr, fx) = Fixture::start().await;
     let mut config = oauth(addr, OAuthGrant::ClientCredentials, "api-a");
@@ -205,10 +198,7 @@ async fn https_issuer_acquisition_still_uses_configured_trust_and_delivers_a_tok
         "test".into(),
         anvil_domain::settings::SettingsOverrides {
             tls_profile_id: Some(profile.id),
-            dns_overrides: vec![anvil_domain::settings::DnsOverride {
-                host: "api.anvil.test".into(),
-                addresses: vec!["127.0.0.1".into()],
-            }],
+            dns_overrides: vec![anvil_domain::settings::DnsOverride { host: "api.anvil.test".into(), addresses: vec!["127.0.0.1".into()] }],
             ..Default::default()
         },
     ));

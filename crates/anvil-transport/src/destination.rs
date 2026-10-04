@@ -36,8 +36,7 @@ pub struct DestinationPolicy {
 }
 
 fn refused(message: &str) -> TransportFailure {
-    TransportFailure::new(Phase::Connect, FailureKind::UnsupportedCombination, message)
-        .with_field("settings.redirects")
+    TransportFailure::new(Phase::Connect, FailureKind::UnsupportedCombination, message).with_field("settings.redirects")
 }
 
 fn zone(ip: IpAddr) -> Option<Zone> {
@@ -94,10 +93,7 @@ fn zone(ip: IpAddr) -> Option<Zone> {
 
 impl DestinationPolicy {
     fn validate(&self, addrs: &[SocketAddr], redirected: bool) -> Result<(), TransportFailure> {
-        let first = addrs
-            .first()
-            .and_then(|a| zone(a.ip()))
-            .ok_or_else(|| refused("the destination has no permitted unicast address"))?;
+        let first = addrs.first().and_then(|a| zone(a.ip())).ok_or_else(|| refused("the destination has no permitted unicast address"))?;
         if addrs.iter().any(|a| zone(a.ip()) != Some(first)) {
             return Err(refused("the destination resolves to invalid or mixed network zones"));
         }
@@ -106,9 +102,7 @@ impl DestinationPolicy {
             Origin::Unresolved if !redirected => *origin = Origin::Resolved(first),
             Origin::Resolved(allowed) if first == allowed || first == Zone::Public => {}
             _ => {
-                return Err(refused(
-                    "the redirect or retry would leave the original destination's approved network zone",
-                ));
+                return Err(refused("the redirect or retry would leave the original destination's approved network zone"));
             }
         }
         Ok(())
@@ -125,11 +119,7 @@ impl DestinationPolicy {
         cancel: &CancellationToken,
     ) -> Result<HttpPlan, TransportFailure> {
         if cancel.is_cancelled() {
-            return Err(TransportFailure::new(
-                Phase::Dns,
-                FailureKind::Canceled,
-                "canceled before destination resolution",
-            ));
+            return Err(TransportFailure::new(Phase::Dns, FailureKind::Canceled, "canceled before destination resolution"));
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(TransportFailure::new(
@@ -141,9 +131,7 @@ impl DestinationPolicy {
         }
         if plan.proxy.is_some() {
             if redirected {
-                return Err(refused(
-                    "proxy redirects are unsupported: the resolved destination cannot be verified",
-                ));
+                return Err(refused("proxy redirects are unsupported: the resolved destination cannot be verified"));
             }
             // Preserve explicit original proxy requests. Even a later direct
             // NO_PROXY hop has no verified original zone to inherit.
@@ -152,10 +140,7 @@ impl DestinationPolicy {
             {
                 return Err(refused("the original destination is not a permitted unicast address"));
             }
-            if crate::http::forward_proxy_routes_authority(
-                plan.https,
-                plan.proxy.as_ref().map(|p| p.kind),
-            ) {
+            if crate::http::forward_proxy_routes_authority(plan.https, plan.proxy.as_ref().map(|p| p.kind)) {
                 let authority = plan
                     .headers
                     .iter()
@@ -166,9 +151,7 @@ impl DestinationPolicy {
                     && let Some(ip) = dns::parse_literal(&host)
                     && zone(ip).is_none()
                 {
-                    return Err(refused(
-                        "the proxy request authority is not a permitted unicast address",
-                    ));
+                    return Err(refused("the proxy request authority is not a permitted unicast address"));
                 }
             }
             *self.origin.lock() = Origin::OpaqueProxy;
@@ -214,14 +197,11 @@ impl DestinationPolicy {
         // Literals already bind their address. DNS overrides bind the exact
         // answer for names, including CNAME/multi-record/Happy Eyeballs paths.
         if dns::parse_literal(&plan.host).is_none() {
+            pinned.dns.overrides.retain(|o| !o.host.eq_ignore_ascii_case(&plan.host));
             pinned
                 .dns
                 .overrides
-                .retain(|o| !o.host.eq_ignore_ascii_case(&plan.host));
-            pinned.dns.overrides.push(DnsOverride {
-                host: plan.host.clone(),
-                addresses: resolution.addrs.iter().map(|a| a.ip().to_string()).collect(),
-            });
+                .push(DnsOverride { host: plan.host.clone(), addresses: resolution.addrs.iter().map(|a| a.ip().to_string()).collect() });
         }
         Ok(pinned)
     }
@@ -242,10 +222,7 @@ mod tests {
     use std::sync::Arc;
 
     fn addresses(values: &[&str]) -> Vec<SocketAddr> {
-        values
-            .iter()
-            .map(|v| SocketAddr::new(v.parse().unwrap(), 80))
-            .collect()
+        values.iter().map(|v| SocketAddr::new(v.parse().unwrap(), 80)).collect()
     }
 
     fn public_origin() -> DestinationPolicy {
@@ -324,16 +301,9 @@ mod tests {
             policy.validate(&addresses(&[first]), false).unwrap();
             assert!(policy.validate(&addresses(&[first]), true).is_ok());
             assert!(policy.validate(&addresses(&["8.8.8.8"]), true).is_ok());
-            let other = if zone(first.parse().unwrap()) == Some(Zone::Loopback) {
-                "10.0.0.1"
-            } else {
-                "127.0.0.1"
-            };
+            let other = if zone(first.parse().unwrap()) == Some(Zone::Loopback) { "10.0.0.1" } else { "127.0.0.1" };
             assert!(policy.validate(&addresses(&[other]), true).is_err());
-            assert!(
-                policy.validate(&addresses(&[other]), false).is_err(),
-                "retries inherit authority",
-            );
+            assert!(policy.validate(&addresses(&[other]), false).is_err(), "retries inherit authority",);
         }
         let policy = DestinationPolicy::default();
         assert!(policy.validate(&addresses(&["224.0.0.1"]), false).is_err());
@@ -346,33 +316,23 @@ mod tests {
         let fixture = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
         let transport = HttpTransport::new();
         let mut p = plan("sink.test", fixture.addr.port());
-        p.dns.overrides.push(DnsOverride {
-            host: p.host.clone(),
-            addresses: vec!["127.0.0.1".into()],
-        });
+        p.dns.overrides.push(DnsOverride { host: p.host.clone(), addresses: vec!["127.0.0.1".into()] });
         let cancel = CancellationToken::new();
-        let initial = transport
-            .execute(
-                &p,
-                0,
-                AttemptReason::Initial,
-                &EventCtx::none(),
-                &cancel,
-            )
-            .await;
+        let initial = transport.execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &cancel).await;
         assert!(initial[0].observation.failure.is_none());
         assert_eq!(fixture.log.count_requests(), 1);
         for values in [vec!["127.0.0.1"], vec!["::ffff:127.0.0.1"], vec!["8.8.8.8", "127.0.0.1"]] {
             p.dns.overrides[0].addresses = values.into_iter().map(str::to_string).collect();
-            let result = transport.execute_attempt_guarded(
-                &p,
-                1,
-                AttemptReason::Redirect { status: 307 },
-                &EventCtx::none(),
-                &cancel,
-                Some((&public_origin(), true)),
-            )
-            .await;
+            let result = transport
+                .execute_attempt_guarded(
+                    &p,
+                    1,
+                    AttemptReason::Redirect { status: 307 },
+                    &EventCtx::none(),
+                    &cancel,
+                    Some((&public_origin(), true)),
+                )
+                .await;
             let obs = &result.outputs[0].observation;
             assert_eq!(obs.dispatch, DispatchState::NotDispatched);
             assert_eq!(obs.failure.as_ref().unwrap().kind, FailureKind::UnsupportedCombination);
@@ -385,9 +345,7 @@ mod tests {
 
     /// Real custom DNS responses; mutable answers model a resolver changing
     /// after origin approval. No real public endpoint or internet is contacted.
-    async fn dns_server(
-        answers: Arc<Mutex<Vec<Ipv4Addr>>>,
-    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn dns_server(answers: Arc<Mutex<Vec<Ipv4Addr>>>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = socket.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -404,11 +362,7 @@ mod tests {
                 if end > n {
                     continue;
                 }
-                let ips = if buf[end - 4..end - 2] == [0, 1] {
-                    answers.lock().clone()
-                } else {
-                    vec![]
-                };
+                let ips = if buf[end - 4..end - 2] == [0, 1] { answers.lock().clone() } else { vec![] };
                 let mut reply = buf[..end].to_vec();
                 reply[2..4].copy_from_slice(&[0x81, 0x80]);
                 let cname = b"\x04sink\x04test\x00";
@@ -446,20 +400,11 @@ mod tests {
         let pinned = policy.pin(&p, false, &mut rec, None, &cancel).await.unwrap();
         *answers.lock() = vec!["127.0.0.1".parse().unwrap()];
         let fixed = dns::resolve(&p.host, p.port, &pinned.dns, None).await.unwrap();
-        assert_eq!(
-            fixed.addrs,
-            vec![SocketAddr::new("8.8.8.8".parse().unwrap(), p.port)],
-        );
+        assert_eq!(fixed.addrs, vec![SocketAddr::new("8.8.8.8".parse().unwrap(), p.port)],);
         let transport = HttpTransport::new();
-        let result = transport.execute_attempt_guarded(
-            &p,
-            1,
-            AttemptReason::Redirect { status: 308 },
-            &EventCtx::none(),
-            &cancel,
-            Some((&policy, true)),
-        )
-        .await;
+        let result = transport
+            .execute_attempt_guarded(&p, 1, AttemptReason::Redirect { status: 308 }, &EventCtx::none(), &cancel, Some((&policy, true)))
+            .await;
         assert_eq!(result.outputs[0].observation.dispatch, DispatchState::NotDispatched);
         assert!(result.outputs[0].observation.failure.as_ref().unwrap().message.contains("zone"));
         assert!(result.outputs[0].observation.connection.is_none());
@@ -468,15 +413,8 @@ mod tests {
         // through this same resolver and actual dial, and the connection is reused.
         let local = DestinationPolicy::default();
         for i in 0..2 {
-            let r = transport.execute_attempt_guarded(
-                &p,
-                i,
-                AttemptReason::Initial,
-                &EventCtx::none(),
-                &cancel,
-                Some((&local, i > 0)),
-            )
-            .await;
+            let r =
+                transport.execute_attempt_guarded(&p, i, AttemptReason::Initial, &EventCtx::none(), &cancel, Some((&local, i > 0))).await;
             let obs = &r.outputs[0].observation;
             assert!(obs.failure.is_none(), "{:?}", obs.failure);
             assert_eq!(obs.connection.as_ref().unwrap().reused, i > 0);
@@ -501,15 +439,16 @@ mod tests {
             });
             let policy = public_origin();
             let transport = HttpTransport::new();
-            let r = transport.execute_attempt_guarded(
-                &p,
-                1,
-                AttemptReason::Redirect { status: 307 },
-                &EventCtx::none(),
-                &CancellationToken::new(),
-                Some((&policy, true)),
-            )
-            .await;
+            let r = transport
+                .execute_attempt_guarded(
+                    &p,
+                    1,
+                    AttemptReason::Redirect { status: 307 },
+                    &EventCtx::none(),
+                    &CancellationToken::new(),
+                    Some((&policy, true)),
+                )
+                .await;
             assert!(r.outputs[0].observation.connection.is_none());
             assert!(r.outputs[0].observation.failure.as_ref().unwrap().message.contains("proxy"));
         }
@@ -522,34 +461,17 @@ mod tests {
         p.https = true;
         let cancel = CancellationToken::new();
         let h3 = crate::h3::H3Transport::new();
-        let r = h3.execute_attempt_guarded(
-            &p,
-            1,
-            AttemptReason::Redirect { status: 307 },
-            &EventCtx::none(),
-            &cancel,
-            Some((&policy, true)),
-        )
-        .await;
+        let r = h3
+            .execute_attempt_guarded(&p, 1, AttemptReason::Redirect { status: 307 }, &EventCtx::none(), &cancel, Some((&policy, true)))
+            .await;
         assert!(r.outputs[0].observation.connection.is_none());
         assert_eq!(r.outputs[0].observation.dispatch, DispatchState::NotDispatched);
-        assert_eq!(
-            r.outputs[0].observation.failure.as_ref().unwrap().kind,
-            FailureKind::UnsupportedCombination,
-        );
+        assert_eq!(r.outputs[0].observation.failure.as_ref().unwrap().kind, FailureKind::UnsupportedCombination,);
         let mut rec = Recorder::new(0, EventCtx::none());
-        let error = policy
-            .pin(&p, true, &mut rec, Some(Instant::now()), &cancel)
-            .await
-            .err()
-            .unwrap();
+        let error = policy.pin(&p, true, &mut rec, Some(Instant::now()), &cancel).await.err().unwrap();
         assert_eq!(error.kind, FailureKind::TotalTimeout);
         cancel.cancel();
-        let error = policy
-            .pin(&p, true, &mut rec, None, &cancel)
-            .await
-            .err()
-            .unwrap();
+        let error = policy.pin(&p, true, &mut rec, None, &cancel).await.err().unwrap();
         assert_eq!(error.kind, FailureKind::Canceled);
         assert!(rec.phases.is_empty(), "no resolver or dial started");
     }

@@ -754,15 +754,7 @@ impl HttpTransport {
         events: &EventCtx,
         cancel: &CancellationToken,
     ) -> HttpExecution {
-        self.execute_attempt_guarded(
-            plan,
-            index,
-            reason,
-            events,
-            cancel,
-            None,
-        )
-        .await
+        self.execute_attempt_guarded(plan, index, reason, events, cancel, None).await
     }
 
     /// Engine HTTP execution with resolved-destination redirect authority.
@@ -782,16 +774,8 @@ impl HttpTransport {
         // HBONE tunnels carry one execution's identity and headers: fresh per attempt.
         let mut allow_pool = plan.keepalive && !crate::hbone::is_hbone(plan.proxy.as_ref());
         for attempt_index in (index..).take(2) {
-            let (out, closed) = self.execute_once(
-                plan,
-                attempt_index,
-                attempt_reason.clone(),
-                allow_pool,
-                events,
-                cancel,
-                destination,
-            )
-            .await;
+            let (out, closed) =
+                self.execute_once(plan, attempt_index, attempt_reason.clone(), allow_pool, events, cancel, destination).await;
             outputs.push(out);
             match closed {
                 Some(ClosedUnder::Unsent(after)) => {
@@ -825,17 +809,7 @@ impl HttpTransport {
             send: false,
             t0: None,
         });
-        let (mut out, closed) = self.execute_once_inner(
-            plan,
-            index,
-            reason,
-            allow_pool,
-            events,
-            cancel,
-            &mut early,
-            destination,
-        )
-        .await;
+        let (mut out, closed) = self.execute_once_inner(plan, index, reason, allow_pool, events, cancel, &mut early, destination).await;
         if let Some(e) = early {
             let t0 = e.t0.unwrap_or_else(Instant::now);
             e.finish(&mut out.observation, t0);
@@ -928,10 +902,7 @@ impl HttpTransport {
 
         let pinned;
         let plan = if let Some((policy, redirected)) = destination {
-            pinned = match policy
-                .pin(plan, redirected, &mut rec, total_deadline, cancel)
-                .await
-            {
+            pinned = match policy.pin(plan, redirected, &mut rec, total_deadline, cancel).await {
                 Ok(p) => p,
                 Err(f) => return (fail(rec, obs, f, DispatchState::NotDispatched), None),
             };
