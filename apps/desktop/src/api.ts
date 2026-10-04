@@ -123,6 +123,12 @@ export interface ExecutionView {
   record: ExecutionRecord;
   body: BodyView;
 }
+export interface SessionEnded {
+  execution_id: string;
+  attempt_id: string;
+  view?: ExecutionView | null;
+  error?: string | null;
+}
 export interface HistoryItem {
   id: string;
   /** Unix epoch milliseconds. */
@@ -837,7 +843,8 @@ export const api = {
   oauthSignOut: (input: SendInput) => call<boolean>("oauth_sign_out", { input }),
   loginProviders: () => call<ProviderInfo[]>("login_providers"),
 
-  sessionOpen: (input: SendInput, executionId: string) => call<string>("session_open", { input, executionId }),
+  sessionOpen: (input: SendInput, executionId: string, attemptId: string) =>
+    call<string>("session_open", { input, executionId, attemptId }),
   sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
   sessionCancel: (executionId: string) => call<void>("session_cancel", { executionId }),
 
@@ -899,8 +906,8 @@ export function onLoadFinished(cb: (e: { run_key: string; run_id?: string | null
   return listen<{ run_key: string; run_id?: string | null; error?: string | null }>("load-finished", (ev) => cb(ev.payload));
 }
 
-export function onSessionEnded(cb: (e: { execution_id: string; view?: ExecutionView | null; error?: string | null }) => void): Promise<UnlistenFn> {
-  return listen<{ execution_id: string; view?: ExecutionView | null; error?: string | null }>("session-ended", (ev) => cb(ev.payload));
+export function onSessionEnded(cb: (e: SessionEnded) => void): Promise<UnlistenFn> {
+  return listen<SessionEnded>("session-ended", (ev) => cb(ev.payload));
 }
 
 export function onRunEvent(cb: (e: RunEvent) => void): Promise<UnlistenFn> {

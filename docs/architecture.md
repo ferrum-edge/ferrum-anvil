@@ -76,9 +76,8 @@ CLI (`anvil`) = same anvil-app services without a webview.
   unlock, even for the same profile. Final views and detailed errors use
   `deliver_payload` after work/history finalization; no async wait holds the
   gate. The native execution/session commands use an explicit Tauri IPC
-  responder under this gate, preserving their existing UI argument/result
-  types. A check followed by a generated async command return would leave
-  reply enqueue outside the boundary.
+  responder under this gate. A check followed by a generated async command
+  return would leave reply enqueue outside the boundary.
 - **Session controls own an admitted slot.** A pending open publishes its
   slot and cancellation token under its admission, then fills the same slot
   with the engine handle. Send/cancel IPC captures that exact slot and the
@@ -86,6 +85,18 @@ CLI (`anvil`) = same anvil-app services without a webview.
   shared delivery access at each synchronous effect. A stale control cannot
   drive a new pending or live slot with a reused renderer execution id, even
   within the same epoch. A finalizer removes only its own slot.
+- **Session completion owns an attempt.** After engine/history finalization,
+  completion checks the exact native slot and holds the session registry mutex
+  through enqueue. A replacement already registered under the same execution
+  id suppresses both the full completion and the scalar `LOCKED` fallback.
+  Retired, unreplaced attempts still complete normally, including scalar
+  retirement after lock or a profile transition. `session_open` also accepts
+  a renderer `attemptId`, independent of `executionId`, and echoes it as
+  `attempt_id` in every `session-ended` packet. Workbench matches both before
+  retiring controls, showing a view/error or refreshing history. Direct IPC
+  callers that omit `attemptId` receive a fresh native generation; the open
+  result remains the execution id. Pointer-checked cleanup and recording into
+  the originally admitted profile are unchanged.
 - **Session cancellation cannot wait behind its own send.** Each pending/open
   slot has an independent cancellation token. Cancellation signals it under
   the gate before awaiting the slot, interrupting both a slot wait and a
@@ -94,14 +105,23 @@ CLI (`anvil`) = same anvil-app services without a webview.
   real engine queue send checks the admission/slot and enqueues under shared
   access; a pending poll releases the synchronous gate before waiting. The
   existing cancellation grace, watcher polling, bounded transcripts and
-  history policy remain in
-  force. A suppressed session finalization still sends its execution id,
-  `view: null` and scalar `LOCKED` status; run completion may send its id and
-  scalar status too. Load progress metrics/report holding keep their existing
-  scalar/redacted reporting policy.
+  history policy remain in force. An unreplaced session finalization refused
+  by the payload fence still sends its execution id and attempt id,
+  `view: null` and scalar `LOCKED`
+  status; run completion may send its id and scalar status too. Load progress
+  metrics/report holding keep their existing scalar/redacted reporting policy.
 
 The boundary is native enqueue, before the actual lock operation can finish.
 It cannot retract a payload already queued to the webview before that boundary.
+The session completion generation prevents an old full or scalar packet from
+retiring a replacement even if it was queued before replacement registration,
+or before lock/profile teardown. It does not erase a view already displayed to
+the old attempt before teardown. Execution message/progress packets still carry
+only the execution id; this completion fix does not add generation filtering to
+those packets. Ordinary Workbench connections continue to use fresh execution
+UUIDs. Native barrier tests call the production finish/history and completion
+sinks with real engine handles; their substituted receivers and the renderer's
+delayed-event fake do not prove end-to-end Tauri/webview transport behavior.
 No renderer predicate supplies the security fence. Gate acquisition precedes
 profile/key/grant access; finalizers complete engine/history work before taking
 it. Cache cleanup runs with admission closed and without the delivery gate;

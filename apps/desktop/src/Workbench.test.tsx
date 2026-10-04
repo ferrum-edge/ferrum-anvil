@@ -25,7 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: (...a: unknown[]) => ask(...a), open: vi.fn(), save: vi.fn() }));
 
-import type { TreeNode } from "./api";
+import type { ExecutionView, TreeNode } from "./api";
 import type { Environment, LoadPlan, RequestDefinition, RequestSpec, TlsProfile, Workspace } from "./generated/contracts";
 import { newSpec } from "./RequestEditor";
 import { Workbench } from "./Workbench";
@@ -151,11 +151,42 @@ const environment = (id: string, wsId: string, name: string) => ({ id, workspace
 const tlsProfile = (id: string, wsId: string, name: string) => ({ id, workspace_id: wsId, name }) as TlsProfile;
 const historyItem = (id: string, url: string) => ({ id, started_at: 0, method: "GET", url, summary: "200 OK", status: 200 });
 
+function sessionView(text: string): ExecutionView {
+  return {
+    record: {
+      id: "00000000-0000-7000-8000-000000000001",
+      prepared: { method: "GET", url: "wss://s1.test/", headers: [] },
+      attempts: [],
+      outcome: {
+        transport: "completed",
+        application: "success",
+        assertions: "not_run",
+        protocol_status: { protocol: "none" },
+        dispatch: "sent",
+        warnings: [],
+        summary: "Session completed",
+      },
+      assertion_results: [],
+      findings: [],
+    },
+    body: {
+      text,
+      pretty: null,
+      hex: null,
+      is_binary: false,
+      decoded: false,
+      shown_bytes: text.length,
+      captured_bytes: text.length,
+    },
+  } as ExecutionView;
+}
+
 afterEach(() => {
   cleanup();
   invoke.mockReset();
   ask.mockReset();
   handlers.clear();
+  vi.restoreAllMocks();
 });
 
 describe("switching workspaces", () => {
@@ -204,7 +235,7 @@ describe("switching workspaces", () => {
 
     // The session ending while its workspace is hidden still clears it.
     await selectWorkspace("B", "Gamma");
-    emit("session-ended", { execution_id: execId });
+    emit("session-ended", { execution_id: execId, attempt_id: calls("session_open")[0].attemptId });
     await selectWorkspace("A", "Alpha");
     expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
     expect(screen.getByRole("option", { name: /One/ }).textContent).not.toContain("live");
@@ -296,13 +327,132 @@ describe("session controls", () => {
     await waitFor(() => expect(calls("session_open")).toHaveLength(1));
     const first = calls("session_open")[0].executionId as string;
     // The first session is reported over before its open settles; a second one starts.
-    emit("session-ended", { execution_id: first });
+    emit("session-ended", { execution_id: first, attempt_id: calls("session_open")[0].attemptId });
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(calls("session_open")).toHaveLength(2));
 
     await act(async () => connecting.get(first)!("connection refused"));
     expect((await screen.findByRole("status")).textContent).toContain("connection refused");
     expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+  });
+
+  it.each([
+    ["same epoch", "full"],
+    ["same epoch", "scalar"],
+    ["lock/unlock", "full"],
+    ["lock/unlock", "scalar"],
+    ["locked profile switch", "full"],
+    ["locked profile switch", "scalar"],
+  ])("ignores queued %s / %s completion after ID reuse", async (transition, completion) => {
+    backend({
+      session_open: (args) => {
+        openSessions.add(args.executionId as string);
+        return args.executionId;
+      },
+      session_send: () => null,
+    });
+    await boot();
+    await openTab("Socket");
+    const executionId = "00000000-0000-7000-8000-000000000010";
+    const oldAttempt = "00000000-0000-7000-8000-000000000011";
+    const newAttempt = "00000000-0000-7000-8000-000000000012";
+    const ids = vi.spyOn(crypto, "randomUUID");
+    ids.mockReturnValueOnce(executionId).mockReturnValueOnce(oldAttempt);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    expect(calls("session_open")[0]).toMatchObject({ executionId, attemptId: oldAttempt });
+    await act(async () => {});
+
+    // Hold a packet already accepted by native enqueue until after the new
+    // attempt exists. This fake tests renderer delivery, not Tauri transport.
+    const release = deferred<void>();
+    const delivery = release.promise.then(() =>
+      emit("session-ended", {
+        execution_id: executionId,
+        attempt_id: oldAttempt,
+        view: completion === "full" ? sessionView("old completion body") : null,
+        error: completion === "full" ? "old recording error" : "LOCKED",
+      }),
+    );
+    if (transition === "same epoch") {
+      ask.mockResolvedValueOnce(true);
+      fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+      await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+    } else {
+      // The lock screen removes Workbench; unlock/profile publication mounts
+      // another one. Native transition fencing is covered by the Rust tests.
+      cleanup();
+      openSessions.clear();
+      render(
+        <Workbench
+          onLock={() => {}}
+          profileName={transition === "lock/unlock" ? "test" : "other"}
+        />,
+      );
+      await screen.findByRole("treeitem", { name: /Alpha/ });
+    }
+    await openTab("Socket");
+    ids.mockReturnValueOnce(executionId).mockReturnValueOnce(newAttempt);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+    expect(calls("session_open")[1]).toMatchObject({ executionId, attemptId: newAttempt });
+    await act(async () => {});
+    const historyReads = calls("history_list").length;
+    await act(async () => {
+      release.resolve(undefined);
+      await delivery;
+    });
+    expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Abort" })).toBeTruthy();
+    expect(screen.queryByText("old completion body")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(calls("history_list")).toHaveLength(historyReads);
+    expect(openSessions.has(executionId)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Ping" }));
+    await waitFor(() =>
+      expect(calls("session_send")).toEqual([{ executionId, command: { command: "ping" } }]),
+    );
+
+    // The matching generation still retires normally, for either packet form.
+    openSessions.delete(executionId);
+    emit("session-ended", {
+      execution_id: executionId,
+      attempt_id: newAttempt,
+      view: completion === "full" ? sessionView("replacement completion body") : null,
+      error: completion === "full" ? null : "LOCKED",
+    });
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Abort" })).toBeNull();
+    if (completion === "full") {
+      expect(await screen.findByText("replacement completion body")).toBeTruthy();
+    } else {
+      expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
+    }
+    await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + 1));
+  });
+
+  it("retires a matching completion delivered before its open reply or tab render", async () => {
+    const open = deferred<string>();
+    backend({
+      session_open: (args) => {
+        emit("session-ended", {
+          execution_id: args.executionId,
+          attempt_id: args.attemptId,
+          view: null,
+          error: "LOCKED",
+        });
+        return open.promise;
+      },
+    });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Abort" })).toBeNull();
+    expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
+    await act(async () => open.resolve(calls("session_open")[0].executionId as string));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
   });
 });
 

@@ -109,6 +109,8 @@ const CANCELED_BEFORE_OPEN: &str = "the session was canceled before it opened";
 #[derive(Serialize, Clone)]
 pub struct SessionEnded {
     pub execution_id: String,
+    /// Renderer generation, distinct from a possibly reused execution id.
+    pub attempt_id: String,
     pub view: Option<ExecutionView>,
     pub error: Option<String>,
 }
@@ -119,9 +121,11 @@ pub(crate) async fn session_open(
     fence: crate::state::PayloadFence,
     input: SendInput,
     execution_id: String,
+    attempt_id: String,
 ) -> R<String> {
     let st = handle.state::<DesktopState>();
     let exec_id = id(&execution_id)?;
+    id(&attempt_id)?;
     // Publish a pending slot under the admitted epoch. Controls bind that
     // slot and its token now; the handle later fills the same slot.
     let (pending, mut registration) = register_session(st.inner(), &fence, &execution_id)?;
@@ -171,25 +175,13 @@ pub(crate) async fn session_open(
         let taken = slot.session.lock().await.take();
         let st = handle.state::<DesktopState>();
         remove_slot(st.inner(), &key, &slot);
-        let ev = match taken {
-            Some(s) => {
-                let out = s.finish().await;
-                // Into the profile the session was opened under, never the
-                // one open now; refused while that profile is locked.
-                let (out, recorded) = app.record_off_runtime(out).await;
-                let recorded = recorded.map_err(e);
-                let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
-                let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
-                let view = ExecutionView { body, record: out.record };
-                SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
-            }
-            None => SessionEnded { execution_id: key.clone(), view: None, error: Some("the session was already finished".into()) },
-        };
+        let ev = finish_session(&app, key, attempt_id, taken).await;
         // History finalization stays outside the delivery gate. Both the
         // view and any payload-bearing recording error are dropped together.
         tauri::async_runtime::spawn_blocking(move || {
             let st = handle.state::<DesktopState>();
-            emit_ended(st.inner(), &fence, ev, |ev| {
+            let st = st.inner();
+            emit_ended(st, &fence, &slot, ev, |ev| {
                 let _ = handle.emit("session-ended", ev);
             });
         });
@@ -213,11 +205,61 @@ async fn publish_handle(st: &DesktopState, fence: &PayloadFence, slot: &SessionS
     }
 }
 
-/// A refused final payload still retires the UI's session with scalar status.
-fn emit_ended(st: &DesktopState, fence: &crate::state::PayloadFence, ev: SessionEnded, emit: impl Fn(SessionEnded)) {
+async fn finish_session(
+    app: &anvil_app::App,
+    execution_id: String,
+    attempt_id: String,
+    session: Option<SessionHandle>,
+) -> SessionEnded {
+    match session {
+        Some(session) => {
+            let out = session.finish().await;
+            // Into the profile the session was opened under, never the one
+            // open now; refused while that profile is locked.
+            let (out, recorded) = app.record_off_runtime(out).await;
+            let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
+            let raw = &out.body;
+            let decoded = out.decoded_body.as_deref();
+            let content_type = ct.as_deref();
+            let body = body_view(raw, decoded, content_type);
+            let view = ExecutionView { body, record: out.record };
+            let error = recorded.map_err(e).err();
+            SessionEnded { execution_id, attempt_id, view: Some(view), error }
+        }
+        None => SessionEnded {
+            execution_id,
+            attempt_id,
+            view: None,
+            error: Some("the session was already finished".into()),
+        },
+    }
+}
+
+/// Check the exact native slot and enqueue atomically against registration.
+/// A retired, unreplaced attempt still sends completion (scalar if fenced).
+/// The renderer generation also rejects packets queued before replacement.
+fn emit_ended(
+    st: &DesktopState,
+    fence: &PayloadFence,
+    slot: &SessionSlot,
+    ev: SessionEnded,
+    emit: impl Fn(SessionEnded),
+) {
     let execution_id = ev.execution_id.clone();
-    if st.deliver_payload(fence, || emit(ev)).is_err() {
-        emit(SessionEnded { execution_id, view: None, error: Some("LOCKED".into()) });
+    let attempt_id = ev.attempt_id.clone();
+    let deliver = |ev: SessionEnded| {
+        let sessions = st.sessions.lock();
+        if sessions.get(&ev.execution_id).is_some_and(|(_, current)| !Arc::ptr_eq(current, slot)) {
+            return;
+        }
+        // Keep the registry guard through enqueue, including scalar fallback.
+        // This synchronous sink must not reenter the session registry.
+        emit(ev);
+    };
+    if st.deliver_payload(fence, || deliver(ev)).is_err() {
+        let error = Some("LOCKED".into());
+        let ended = SessionEnded { execution_id, attempt_id, view: None, error };
+        deliver(ended);
     }
 }
 
@@ -270,13 +312,19 @@ mod tests {
     use crate::commands::tests::payload_view;
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use anvil_app::profiles::{ProfileManager, Unlock};
+    use anvil_domain::Id;
     use anvil_domain::events::ExecutionEvent;
+    use anvil_domain::execution::ExecutionRecord;
     use anvil_domain::request::{Protocol, RequestSpec, TcpFraming, TcpSpec};
     use anvil_engine::context::ExecutionContext;
     use std::sync::mpsc;
     use tokio::sync::oneshot;
 
     const BOUND: Duration = Duration::from_secs(10);
+
+    fn history_contains(app: &anvil_app::App, record_id: &str) -> bool {
+        app.store.get_history::<ExecutionRecord>(record_id).unwrap().is_some()
+    }
 
     // A real engine handle and its real 256-entry command queue. The peer
     // remains listening until cleanup, without an artificial queue or handle.
@@ -483,12 +531,27 @@ mod tests {
         let cancel = admit_control(&st, fence.clone(), &execution_id).unwrap();
         session_cancel(&st, cancel).await.unwrap();
         assert!(slot.cancel.is_cancelled());
-        let session = slot.session.lock().await.take().unwrap();
-        let output = tokio::time::timeout(BOUND, session.finish()).await.unwrap();
-        let (output, recorded) = fence.app.record_off_runtime(output).await;
-        recorded.unwrap();
-        assert!(fence.app.store.get_history::<anvil_domain::execution::ExecutionRecord>(&output.record.id.to_string()).unwrap().is_some());
+        let session = slot.session.lock().await.take();
+        let app = &fence.app;
+        let key = execution_id.clone();
+        let attempt_id = Id::new().to_string();
+        let finish = finish_session(app, key, attempt_id.clone(), session);
+        let ended = tokio::time::timeout(BOUND, finish).await.unwrap();
+        assert!(ended.error.is_none());
+        let record_id = ended.view.as_ref().unwrap().record.id.to_string();
+        assert!(history_contains(app, &record_id));
         remove_slot(&st, &execution_id, &slot);
+        let received = parking_lot::Mutex::new(Vec::new());
+        emit_ended(&st, &fence, &slot, ended, |ev| {
+            assert!(st.sessions.try_lock().is_none(), "enqueue must exclude registration");
+            received.lock().push(serde_json::to_value(ev).unwrap());
+        });
+        let received = received.into_inner();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0]["execution_id"], execution_id);
+        assert_eq!(received[0]["attempt_id"], attempt_id);
+        assert_eq!(received[0]["view"]["record"]["id"], record_id);
+        assert!(received[0]["error"].is_null());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -509,24 +572,116 @@ mod tests {
         let fresh = st.admit_payload().unwrap();
         let (pending, registration) = register_session(&st, &fresh, &execution_id).unwrap();
         publish_handle(&st, &fence, &old_slot, session, true).await;
-        let session = old_slot.session.lock().await.take().expect("completed handle retained for finalization");
-        let output = tokio::time::timeout(BOUND, session.finish()).await.unwrap();
-        let (output, recorded) = fence.app.record_off_runtime(output).await;
-        recorded.unwrap();
-        assert!(fence.app.store.get_history::<anvil_domain::execution::ExecutionRecord>(&output.record.id.to_string()).unwrap().is_some());
+        let session = old_slot.session.lock().await.take();
+        assert!(session.is_some(), "completed handle retained for finalization");
+        let app = &fence.app;
+        let key = execution_id.clone();
+        let attempt_id = Id::new().to_string();
+        let finish = finish_session(app, key, attempt_id, session);
+        let ended = tokio::time::timeout(BOUND, finish).await.unwrap();
+        assert!(ended.error.is_none());
+        let record_id = ended.view.as_ref().unwrap().record.id.to_string();
+        assert!(history_contains(app, &record_id));
         remove_slot(&st, &execution_id, &old_slot);
         assert!(!pending.token().is_cancelled());
         assert!(st.sessions.lock().get(&execution_id).is_some_and(|(_, slot)| Arc::ptr_eq(slot, &registration.slot)));
-        let ct = output.record.response.as_ref().and_then(|r| r.body.content_type.as_deref());
-        let view = ExecutionView { body: body_view(&output.body, output.decoded_body.as_deref(), ct), record: output.record };
-        let ended = SessionEnded { execution_id: execution_id.clone(), view: Some(view), error: None };
-        emit_ended(&st, &fence, ended, |ev| {
-            assert!(ev.view.is_none());
-            assert_eq!(ev.error.as_deref(), Some("LOCKED"));
-        });
+        let received = parking_lot::Mutex::new(Vec::new());
+        emit_ended(&st, &fence, &old_slot, ended, |ev| received.lock().push(ev));
+        assert!(received.lock().is_empty(), "old scalar completion must not retire replacement");
         let cancel = admit_control(&st, fresh, &execution_id).unwrap();
         session_cancel(&st, cancel).await.unwrap();
         assert!(pending.token().is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn history_barrier_completion_cannot_retire_a_reused_id_slot() {
+        for transition in ["same-epoch", "lock-unlock", "locked-profile"] {
+            for live in [false, true] {
+                let root = TempRoot::new();
+                let st = DesktopState::new(root.0.clone());
+                let (app, dir) = create(&st, "old");
+                let (other, _) = create(&st, "other");
+                st.set_app_since(app, st.epoch()).unwrap();
+                let fence = st.admit_payload().unwrap();
+                let execution_id = Id::new().to_string();
+                let attempt_id = Id::new().to_string();
+                let (old_slot, _old_peer) = open_tcp(&st, &fence, &execution_id, None).await;
+                old_slot.abort().await;
+                let session = old_slot.session.lock().await.take();
+                assert!(session.is_some());
+                // The production watcher retires the slot before awaiting
+                // finish/history. Pause there, then install a replacement.
+                remove_slot(&st, &execution_id, &old_slot);
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let (release_tx, release_rx) = oneshot::channel();
+                let finalizing = async {
+                    ready_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    let app = &fence.app;
+                    let key = execution_id.clone();
+                    let ended = finish_session(app, key, attempt_id, session).await;
+                    let record_id = ended.view.as_ref().unwrap().record.id.to_string();
+                    if transition == "locked-profile" {
+                        assert!(app.is_locked());
+                        assert!(ended.error.is_some());
+                    } else {
+                        assert!(ended.error.is_none());
+                        assert!(history_contains(app, &record_id));
+                    }
+                    let received = parking_lot::Mutex::new(Vec::new());
+                    emit_ended(&st, &fence, &old_slot, ended, |ev| received.lock().push(ev));
+                    assert!(received.lock().is_empty(), "{transition}, live={live}");
+                };
+                let replacing = async {
+                    ready_rx.await.unwrap();
+                    match transition {
+                        "same-epoch" => {}
+                        "lock-unlock" => {
+                            st.lock();
+                            let unlock = Unlock::Passphrase(PASSPHRASE);
+                            let (_, key) = ProfileManager::unlock(&dir, unlock).unwrap();
+                            st.unlock_since(&fence.app, key, st.epoch()).unwrap();
+                        }
+                        "locked-profile" => {
+                            st.lock();
+                            st.set_app_since(other, st.epoch()).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    let fresh = st.admit_payload().unwrap();
+                    let (pending, registration, slot, peer) = if live {
+                        let (slot, peer) = open_tcp(&st, &fresh, &execution_id, None).await;
+                        (None, None, slot, Some(peer))
+                    } else {
+                        let (pending, reg) = register_session(&st, &fresh, &execution_id).unwrap();
+                        let slot = reg.slot.clone();
+                        (Some(pending), Some(reg), slot, None)
+                    };
+                    release_tx.send(()).unwrap();
+                    (fresh, pending, registration, slot, peer)
+                };
+                let work = async { tokio::join!(finalizing, replacing) };
+                let completed = tokio::time::timeout(BOUND, work).await.unwrap();
+                let (_, (fresh, pending, _registration, slot, _peer)) = completed;
+                let current = st.sessions.lock().get(&execution_id).cloned();
+                assert!(current.is_some_and(|(_, current)| Arc::ptr_eq(&current, &slot)));
+                assert!(!slot.cancel.is_cancelled());
+                if let Some(pending) = pending.as_ref() {
+                    assert!(!pending.token().is_cancelled());
+                }
+                // Its production controls still reach the replacement.
+                if live {
+                    let send = admit_control(&st, fresh.clone(), &execution_id).unwrap();
+                    let command = SessionCommand::SendText { text: "replacement".into() };
+                    session_send(&st, send, command).await.unwrap();
+                }
+                let cancel = admit_control(&st, fresh, &execution_id).unwrap();
+                session_cancel(&st, cancel).await.unwrap();
+                assert!(slot.cancel.is_cancelled());
+                finish_slot(&slot).await;
+                remove_slot(&st, &execution_id, &slot);
+            }
+        }
     }
 
     #[tokio::test]
@@ -538,10 +693,16 @@ mod tests {
             let (other, _) = create(&st, "other");
             st.set_app_since(app, st.epoch()).unwrap();
             let fence = st.admit_payload().unwrap();
+            let view = payload_view();
+            let execution_id = view.record.id.to_string();
+            let attempt_id = Id::new().to_string();
+            let (pending, registration) = register_session(&st, &fence, &execution_id).unwrap();
+            let slot = registration.slot.clone();
+            drop(pending);
+            drop(registration);
             let (ready_tx, ready_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let finalizing = async {
-                let view = payload_view();
                 let output = anvil_engine::ExecutionOutput {
                     record: view.record,
                     body: b"payload-canary".to_vec().into(),
@@ -559,18 +720,25 @@ mod tests {
                 }
                 let ended = SessionEnded {
                     execution_id: output.record.id.to_string(),
+                    attempt_id: attempt_id.clone(),
                     view: Some(ExecutionView { record: output.record, body: body_view(&output.body, None, None) }),
                     error: Some("payload-canary recording error".into()),
                 };
                 let received = parking_lot::Mutex::new(Vec::new());
-                emit_ended(&st, &fence, ended, |ev| received.lock().push(ev));
+                emit_ended(&st, &fence, &slot, ended, |ev| {
+                    assert!(st.sessions.try_lock().is_none(), "enqueue must exclude registration");
+                    received.lock().push(serde_json::to_value(ev).unwrap());
+                });
                 let received = received.into_inner();
                 assert_eq!(received.len(), 1);
+                assert_eq!(received[0]["execution_id"], execution_id);
+                assert_eq!(received[0]["attempt_id"], attempt_id);
                 if transition == "unchanged" {
-                    assert_eq!(received[0].view.as_ref().unwrap().body.text.as_deref(), Some("payload-canary"),);
+                    assert_eq!(received[0]["view"]["body"]["text"], "payload-canary");
+                    assert_eq!(received[0]["error"], "payload-canary recording error");
                 } else {
-                    assert!(received[0].view.is_none(), "{transition}");
-                    assert_eq!(received[0].error.as_deref(), Some("LOCKED"));
+                    assert!(received[0]["view"].is_null(), "{transition}");
+                    assert_eq!(received[0]["error"], "LOCKED");
                 }
             };
             let locking = async {

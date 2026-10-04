@@ -551,6 +551,16 @@ struct SendArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenSessionArgs {
+    input: SendInput,
+    execution_id: String,
+    // Older direct IPC callers can omit the renderer generation. Their
+    // completion still gets a fresh native attempt id.
+    attempt_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct PreviewArgs {
     input: SendInput,
 }
@@ -602,8 +612,16 @@ pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
         "mcp_discover_tools" => payload_reply(invoke, |handle, fence, args: McpArgs| async move {
             mcp_discover_tools(handle, fence, args.input, args.execution_id).await
         }),
-        "session_open" => payload_reply(invoke, |handle, fence, args: SendArgs| async move {
-            crate::cmd_sessions::session_open(handle, fence, args.input, args.execution_id).await
+        "session_open" => payload_reply(invoke, |handle, fence, args: OpenSessionArgs| async move {
+            let attempt_id = args.attempt_id.unwrap_or_else(|| Id::new().to_string());
+            crate::cmd_sessions::session_open(
+                handle,
+                fence,
+                args.input,
+                args.execution_id,
+                attempt_id,
+            )
+            .await
         }),
         "session_send" => payload_reply_admitted(
             invoke,
