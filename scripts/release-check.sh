@@ -8,7 +8,8 @@
 # .deb/.rpm/.AppImage, a Windows .msi or NSIS *-setup.exe, a .tar.gz/.tgz/.zip
 # archive, or a directory. Installers/archives are unpacked and every
 # executable image inside (ELF, Mach-O, PE: programs and shared libraries) is
-# scanned.
+# scanned. Type 2 AppImages require trusted python3 and unsquashfs tools on
+# PATH; inspection reads their ELF/SquashFS bytes without executing the image.
 #
 # Checks
 #   1. graph    `cargo tree` for anvil-desktop with the release feature set
@@ -128,6 +129,76 @@ is_exe() { # ELF, Mach-O (thin/fat, both endians), PE
   return 1
 }
 
+# Read the Type 2 filesystem offset as data, matching AppImage's runtime:
+# max(end of section-header table, end of last section). Never ask the input
+# runtime for its offset. Validate all file-backed ranges before extracting.
+# https://github.com/AppImage/type2-runtime/blob/main/src/runtime/runtime.c
+appimage_offset() {
+  python3 -I - "$1" <<'PY'
+import os
+import struct
+import sys
+
+try:
+    with open(sys.argv[1], "rb") as image:
+        size = os.fstat(image.fileno()).st_size
+
+        def read_at(offset, length):
+            if offset < 0 or length < 0 or offset + length > size:
+                raise ValueError("ELF/SquashFS range outside the image")
+            image.seek(offset)
+            data = image.read(length)
+            if len(data) != length:
+                raise ValueError("truncated AppImage")
+            return data
+
+        ident = read_at(0, 16)
+        if ident[:4] != b"\x7fELF" or ident[8:11] != b"AI\x02":
+            raise ValueError("expected a Type 2 ELF AppImage")
+        if ident[4] not in (1, 2) or ident[5] not in (1, 2) or ident[6] != 1:
+            raise ValueError("unsupported ELF class, byte order or version")
+        endian = "<" if ident[5] == 1 else ">"
+        elf64 = ident[4] == 2
+        header = struct.Struct(endian + ("HHIQQQIHHHHHH" if elf64 else "HHIIIIIHHHHHH"))
+        section = struct.Struct(endian + ("IIQQQQIIQQ" if elf64 else "IIIIIIIIII"))
+        program = struct.Struct(endian + ("IIQQQQQQ" if elf64 else "IIIIIIII"))
+        fields = header.unpack(read_at(16, header.size))
+        kind, _, version, _, phoff, shoff, _, ehsize, phsize, phnum, shsize, shnum, shstr = fields
+        if kind not in (2, 3) or version != 1 or ehsize != 16 + header.size:
+            raise ValueError("invalid ELF executable header")
+        if not shnum or shsize != section.size or shoff < ehsize or shstr >= shnum:
+            raise ValueError("missing or unsupported ELF section table")
+        if not phnum or phnum == 65535 or phsize != program.size or phoff < ehsize:
+            raise ValueError("missing or unsupported ELF program table")
+        table_end = shoff + shsize * shnum
+        read_at(shoff, shsize * shnum)
+        last = section.unpack(read_at(table_end - shsize, shsize))
+        offset = max(table_end, last[4] + last[5])
+        if offset >= size or offset >= 1 << 63 or phoff + phsize * phnum > offset:
+            raise ValueError("invalid filesystem offset")
+        for index in range(shnum):
+            entry = section.unpack(read_at(shoff + index * shsize, shsize))
+            # SHT_NULL and SHT_NOBITS do not occupy bytes in the file.
+            if entry[1] not in (0, 8) and entry[4] + entry[5] > offset:
+                raise ValueError("ELF section overlaps the filesystem")
+        for index in range(phnum):
+            entry = program.unpack(read_at(phoff + index * phsize, phsize))
+            start, length = (entry[2], entry[5]) if elf64 else (entry[1], entry[4])
+            if start + length > offset:
+                raise ValueError("ELF segment overlaps the filesystem")
+        superblock = read_at(offset, 96)
+        if superblock[:4] != b"hsqs" or struct.unpack_from("<HH", superblock, 28) != (4, 0):
+            raise ValueError("expected a SquashFS 4.0 filesystem at the ELF boundary")
+        used = struct.unpack_from("<Q", superblock, 40)[0]
+        if used < 96 or offset + used > size:
+            raise ValueError("truncated SquashFS filesystem")
+        print(offset)
+except (OSError, ValueError, struct.error) as error:
+    print(f"AppImage metadata: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Unpack an artifact into $2 (a directory); print nothing on success.
 unpack() {
   local a out="$2"
@@ -162,8 +233,13 @@ unpack() {
         return 1
       fi ;;
     *.AppImage)
-      chmod +x "$a"
-      (cd "$out" && "$a" --appimage-extract >/dev/null) ;;
+      command -v python3 >/dev/null || { echo "trusted python3 required for $a" >&2; return 1; }
+      command -v unsquashfs >/dev/null || { echo "trusted unsquashfs (squashfs-tools) required for $a" >&2; return 1; }
+      local offset
+      offset="$(appimage_offset "$a")" || return 1
+      unsquashfs -no-progress -no-xattrs -strict-errors -d "$out/squashfs-root" \
+        -o "$offset" "$a" >/dev/null || return 1
+      [ -f "$out/squashfs-root/AppRun" ] || { echo "AppImage has no AppRun: $a" >&2; return 1; } ;;
     *.msi)
       command -v powershell >/dev/null || command -v pwsh >/dev/null || { echo "Windows msiexec required for $a" >&2; return 1; }
       local ps; ps="$(command -v pwsh || command -v powershell)"

@@ -109,6 +109,12 @@ jobs:
         run: node scripts/licenses.mjs --check
       - name: Release graph has no WebDriver plugin / e2e feature
         run: scripts/release-check.sh
+      - name: Trusted AppImage extraction and fixture tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc python3 squashfs-tools
+      - name: AppImage inspection and explicit runtime-probe regressions
+        run: python3 -I scripts/tests/test_release_check.py
       - name: Diagnostic catalog drift
         run: cargo test --locked -p anvil-diagnostics --test catalog_drift
 
@@ -164,7 +170,7 @@ jobs:
           cache-on-failure: "false"
       - name: Bundling and inspection tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends libfuse2 rpm2cpio cpio libarchive-tools
+        run: sudo apt-get install -y --no-install-recommends libfuse2 rpm2cpio cpio libarchive-tools python3 squashfs-tools
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-cyclonedx@0.5.9

@@ -28,6 +28,8 @@ website are manual owner steps, taken only after the
 **Preflight** (Ubuntu): the tag must equal `anvil-v<version>` and the three
 version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --check`;
 `scripts/release-check.sh` (dependency graph); the diagnostic catalog drift test.
+The hosted AppImage checker regression suite also runs with distribution-provided
+`gcc`, `python3` and `squashfs-tools` before any release build.
 
 **Build** (one job per target):
 
@@ -126,14 +128,39 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
    `ANVIL_E2E_PROFILE`, `e2e: create profile failed`, `e2e: unlock failed`,
    `e2e_unlock`). Each artifact must also contain an Anvil marker string, so a
    compressed or foreign file can never pass by accident.
+   For `.AppImage` inputs, only the [Type 2 ELF + SquashFS format](https://github.com/AppImage/AppImageSpec/blob/master/draft.md#type-2-image-format)
+   is supported. Trusted `python3` and `unsquashfs` (`squashfs-tools` 4.5.1 or
+   later) must be installed on a trusted `PATH`; the Linux release job installs
+   them from the distribution. Isolated Python reads the 32/64-bit ELF metadata
+   in either byte order and derives the filesystem boundary using the
+   [official runtime's layout](https://github.com/AppImage/type2-runtime/blob/main/src/runtime/runtime.c).
+   `unsquashfs` reads the filesystem as data into `squashfs-root`, with extraction
+   errors treated as fatal. The input is never made executable or invoked to
+   extract contents or discover its offset. Missing tools, unsupported types,
+   malformed metadata, corrupt filesystems and missing `AppRun` fail closed.
 3. **Runtime probe** (`--runtime-probe`) — the desktop executable is launched
    with `TAURI_WEBDRIVER_PORT=<free port>`, `ANVIL_E2E_PROFILE` and
    `ANVIL_E2E_PASSPHRASE` set and a throw-away `ANVIL_DATA_DIR`. Nothing may
    answer `GET /status` on that port and no profile may appear in the data
-   directory. Only the process the probe started is stopped.
+   directory. AppImages launch the extracted `squashfs-root/AppRun` so bundled
+   WebKit helpers retain their environment; the input image's runtime is never
+   invoked. This option deliberately executes artifact contents: use it only
+   after establishing the artifact's provenance and any required signatures.
+   The probe stops the process it launched and leftover helpers in its own
+   temporary AppImage extraction directory.
 
 Exit status: `0` pass, `1` test hooks found, `2` usage error or an artifact
 that could not be inspected (never reported as a pass).
+
+The CI release-checker jobs (Ubuntu 22.04 and 24.04) and release preflight run
+`scripts/tests/test_release_check.py` against the actual checker. Hosted fixtures
+include a native malicious runtime whose sentinel must never appear, real
+compressed SquashFS payloads, both ELF boundary layouts across architectures,
+forbidden markers in a library, malformed images and missing extraction tools.
+Separate explicit-probe tests prove that extracted `AppRun` launches only when
+requested, that environment-created profiles fail the probe, and that early
+exit is inconclusive; a listener answering the WebDriver status request also
+fails. These fixture builds and script tests run on hosted CI.
 
 ## Signing and what "unsigned" means
 
