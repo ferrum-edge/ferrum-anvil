@@ -129,8 +129,9 @@ jobs:
           trap 'exit 130' INT
           trap 'exit 143' TERM
           printf 'source_sha=%s\nprivate_mount=%s\n' "$SOURCE_SHA" "$mount_path"
-          /usr/bin/hdiutil create -size 128m -fs APFS -volname AnvilPolicy \
-            -format UDRW "$image"
+          # hdiutil(1), create: empty images default to writable UDIF.
+          # -format is a source-image option requiring -srcfolder/-srcdevice.
+          /usr/bin/hdiutil create -size 128m -fs APFS -volname AnvilPolicy "$image"
           /usr/bin/hdiutil attach -nobrowse -owners off -mountpoint "$mount_path" "$image"
           export ANVIL_TEST_IGNORE_OWNERSHIP_MOUNT="$mount_path"
           ulimit -n 4096

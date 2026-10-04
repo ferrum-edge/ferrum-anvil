@@ -175,19 +175,19 @@ and an independently safe object-removal primitive.
 The allowlist requires the kernel filesystem name `apfs`, `MNT_LOCAL`, and
 ownership enforcement. It rejects SMB, NFS, WebDAV, FUSE, HFS, exFAT, NTFS,
 unknown or malformed type names, nonlocal mounts, `MNT_IGNORE_OWNERSHIP`,
-read-only, union, exported, automounted, snapshot and deprecated volfs profiles.
+read-only, union, exported, automounted and snapshot profiles.
 HFS is deliberately excluded: the owned clone-publication contract has not
 been qualified there. Only recognized flags for synchronization, execution,
 setuid/device restrictions, content protection, removable storage, quarantine,
-quota, root/data volume, browsing, journaling, xattrs, deferred writes, MAC
-labels, no-follow and access-time policy are allowed. All other visible bits
-fail closed. The extended field permits only `MNT_EXT_ROOT_DATA_VOL`; FSKit
+quota, root/data volume, volfs capability, browsing, journaling, xattrs, deferred
+writes, MAC labels, no-follow and access-time policy are allowed. All other
+visible bits fail closed. The extended field permits only `MNT_EXT_ROOT_DATA_VOL`; FSKit
 and unknown extended bits fail closed. Root must qualify legitimate destination
 profiles and approve this narrower support contract before integration.
 
 Static ABI verification used the installed Apple MacOSX26.5 SDK's
 `usr/include/sys/mount.h`, the
-[XNU mount definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/mount.h),
+[XNU mount definitions](https://github.com/apple-oss-distributions/xnu/blob/xnu-12377.1.9/bsd/sys/mount.h#L301),
 [XNU descriptor statfs implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
 [locked libc 0.2.189 definitions](https://github.com/rust-lang/libc/blob/0.2.189/src/unix/bsd/apple/mod.rs),
 and [rustix 1.1.5 native StatFs alias](https://github.com/bytecodealliance/rustix/blob/v1.1.5/src/backend/libc/fs/types.rs).
@@ -197,6 +197,22 @@ runtime VFS registration number, not a portable APFS magic number, so the
 policy uses the kernel's NUL-terminated `f_fstypename`. The preserved Linux
 procfs check uses the explicit fallible `libc::c_long` conversion from head
 `375128d4d51d4467af6e83559078d7d608c41c3c`.
+
+The actual macOS runner at `34fb9013921a6ea78e285b44c1b2af695f0efc0d`
+reported local APFS with visible flags `76582912` (`0x04909000`) and extended
+flags `1`. Its visible bits are `MNT_LOCAL` (`0x00001000`), `MNT_DOVOLFS`
+(`0x00008000`), `MNT_DONTBROWSE` (`0x00100000`), `MNT_JOURNALED`
+(`0x00800000`) and `MNT_MULTILABEL` (`0x04000000`). The former allowlist
+`0x9f9076de` excluded exactly `0x00008000` from that observed profile;
+extended bit 0 was already allowed. This caused rejection before staging and
+prevented the positive grant/export and inherited-ACL tests from reaching
+their barriers. Apple SDK `sys/mount.h:225` and the linked XNU definition
+identify `MNT_DOVOLFS` as filesystem support for volfs, deprecated since
+Mac OS X 10.5. It is a capability notification; ownership bypass is the
+separate `MNT_IGNORE_OWNERSHIP` bit (`0x00200000`). This repair admits only
+that identified capability, producing allowlist `0x9f90f6de`. No unknown bit,
+filesystem name or extended flag is newly allowed. The APFS-only support
+proposal remains **unapproved**, and this change is not a qualification pass.
 
 On ownership-enforcing local APFS, the candidate combines initial mode `0600`
 with an explicit empty `ACL_FLAG_NO_INHERIT` ACL through `openx_np`. XNU
@@ -234,13 +250,28 @@ creation, before plaintext and before cloning. Unsupported names and every
 unsupported visible/extended flag bit are covered. These are rejection tests,
 **not real SMB/NFS qualification**.
 
+The new positive production-seam regression isolates LOCAL alone and LOCAL
+with DOVOLFS, then replays the exact observed `0x04909000`/`1` profile. It
+requires real native staging, every write/publication barrier, successful
+descriptor cloning, exact canary bytes and mode `0600` on both staging and
+final files, grant consumption and zero surviving descriptor charges.
+Unsupported-bit tests omit bit 15 explicitly because it is now identified
+as safe; all previously rejected remaining bits and every unknown extended
+bit are tested against both the minimal and observed visible profiles.
+The real inherited-ACL and Ignore Ownership tests retain their assertions.
+
 The optional [hosted macOS qualification workflow](../../.github/workflows/macos-file-policy.yml)
 checks out the exact source SHA with a fully pinned action, read-only permission,
 no persisted credentials, no shared caches and no repository write-back. It
 creates its own APFS image under a private runner-temp path and attaches that
-image with `-owners off`. The ignored native test requires the GitHub-hosted
-environment and observes real APFS, LOCAL and IGNORE_OWNERSHIP descriptor fields
-before requiring rejection without staging. The workflow also runs the real
+image with `-owners off`. Empty image creation uses the default writable UDIF
+type without `-format`: Apple's installed `hdiutil(1)` manual, read as static
+text from `/usr/share/man/man1/hdiutil.1` (`create`, `-type` and image-from-source
+options), specifies that default and reserves `-format` for `-srcfolder` or
+`-srcdevice`. No local `hdiutil`, manual renderer or mount command was run.
+The ignored native test requires the GitHub-hosted environment and observes
+real APFS, LOCAL and IGNORE_OWNERSHIP descriptor fields before requiring
+rejection without staging. The workflow also runs the real
 inherited-ACL test and synthetic controls. An EXIT/signal cleanup trap is
 installed before image creation, identifies only this exact image path,
 detaches its owned device, removes the fixture only after successful detach,
@@ -249,10 +280,23 @@ runner/user volumes are never reconfigured. Forced runner destruction can
 interrupt cleanup; cancelled runs require explicit cleanup evidence and are
 not accepted as qualification.
 
-**Current evidence:** source/SDK inspection only; no new regression or image
-workflow has run in this implementation session. Root must inspect the new
-hosted run's test results and cleanup record, plus all-platform CI and a fresh
-independent security/workflow review. If APFS image attachment or the native
+**Current evidence:** qualification has **not passed**. At exact source
+`34fb9013921a6ea78e285b44c1b2af695f0efc0d`,
+[Linux CI](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37205965474/job/111447130732)
+printed 15 formatter hunks across `file_publish.rs` and
+`file_grant_native_tests.rs`; all printed edits are applied exactly in this
+repair. The [macOS CI job](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37205965474/job/111447130837)
+failed positive native grant/export and inherited-ACL tests with the observed
+profile above. The [private-image workflow](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37205961472/job/111447075654)
+failed at image creation with `-format requires -srcfolder or -srcdevice`;
+no image was attached and no security tests ran. Its `cleanup_status=0`
+records fixture cleanup, not successful qualification.
+
+This repair has only static source/SDK/manual and diff inspection plus
+`git diff --check`; its new/changed regressions have not run locally. Root
+must inspect fresh hosted runs at the pushed source SHA, including test
+results and completed cleanup, all-platform CI and a fresh independent
+security/workflow review. If APFS image attachment or the native
 Ignore Ownership assertion fails, the actionable human step is to run this
 workflow on an authorized GitHub-hosted macOS runner at the pushed source SHA,
 record `hdiutil` output, native descriptor flags and the private path, and require

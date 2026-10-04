@@ -66,8 +66,7 @@ fn publish(file: &File, dir: &SelectedDirectory, name: &OsStr) -> io::Result<()>
     let proc = open("/proc", flags | OFlags::NOFOLLOW, Mode::empty())?;
     // Refuse an ordinary directory masquerading as procfs. Mount namespace
     // administration and process/descriptor injection are outside the threat.
-    let is_procfs = libc::c_long::try_from(fstatfs(&proc)?.f_type)
-        .is_ok_and(|f_type| f_type == libc::PROC_SUPER_MAGIC);
+    let is_procfs = libc::c_long::try_from(fstatfs(&proc)?.f_type).is_ok_and(|f_type| f_type == libc::PROC_SUPER_MAGIC);
     if !is_procfs {
         return Err(io::Error::other("descriptor publication needs authentic procfs"));
     }
@@ -142,6 +141,9 @@ mod macos {
     // c_int. Preserve their bits explicitly, without an inferred `as _`.
     // Only these understood flags are allowed. In particular, read-only,
     // union, exported, ignore-ownership, automount and snapshot are refused.
+    // Apple SDK sys/mount.h identifies MNT_DOVOLFS (0x00008000) as the
+    // deprecated volfs capability, distinct from MNT_IGNORE_OWNERSHIP.
+    // Hosted owned APFS reports it; admit only this identified extra bit.
     // These three public SDK sys/mount.h flags are not named by libc 0.2.189.
     const MNT_REMOVABLE: u32 = 0x0000_0200;
     const MNT_NOFOLLOW: u32 = 0x0800_0000;
@@ -157,6 +159,7 @@ mod macos {
             | libc::MNT_LOCAL
             | libc::MNT_QUOTA
             | libc::MNT_ROOTFS
+            | libc::MNT_DOVOLFS
             | libc::MNT_DONTBROWSE
             | libc::MNT_JOURNALED
             | libc::MNT_NOUSERXATTR
@@ -225,10 +228,7 @@ mod macos {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_test_mount_profile<T>(
-        profile: Option<MountProfile>,
-        operation: impl FnOnce() -> T,
-    ) -> T {
+    pub(crate) fn with_test_mount_profile<T>(profile: Option<MountProfile>, operation: impl FnOnce() -> T) -> T {
         struct Restore(Option<MountProfile>);
         impl Drop for Restore {
             fn drop(&mut self) {
