@@ -9,15 +9,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-const REPORT: &str = include_str!(
-    "../../../../contracts/ferrum-contracts/schemas/diagnostic-report/v1.schema.json"
-);
-const FINDING: &str = include_str!(
-    "../../../../contracts/ferrum-contracts/schemas/diagnostic-finding/v1.schema.json"
-);
-const REFERENCE: &str = include_str!(
-    "../../../../contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json"
-);
+const REPORT: &str = include_str!("../../../../contracts/ferrum-contracts/schemas/diagnostic-report/v1.schema.json");
+const FINDING: &str = include_str!("../../../../contracts/ferrum-contracts/schemas/diagnostic-finding/v1.schema.json");
+const REFERENCE: &str = include_str!("../../../../contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json");
 
 #[derive(Default)]
 struct Node {
@@ -42,21 +36,9 @@ struct Node {
 
 fn compile(schema: &Value, root: &Value) -> Node {
     if let Some(reference) = schema["$ref"].as_str() {
-        assert!(
-            reference.starts_with("#/$defs/"),
-            "only local pinned references"
-        );
-        assert!(
-            schema
-                .as_object()
-                .expect("reference schema")
-                .keys()
-                .all(|key| matches!(key.as_str(), "$ref" | "description" | "title"))
-        );
-        return compile(
-            root.pointer(&reference[1..]).expect("pinned definition"),
-            root,
-        );
+        assert!(reference.starts_with("#/$defs/"), "only local pinned references");
+        assert!(schema.as_object().expect("reference schema").keys().all(|key| matches!(key.as_str(), "$ref" | "description" | "title")));
+        return compile(root.pointer(&reference[1..]).expect("pinned definition"), root);
     }
     // A pin update cannot silently add an assertion this consumer does not enforce.
     for key in schema.as_object().expect("schema object").keys() {
@@ -86,31 +68,18 @@ fn compile(schema: &Value, root: &Value) -> Node {
                 | "maxProperties"
         ));
     }
-    let list = |key: &str| {
-        schema[key]
-            .as_array()
-            .map(|values| values.iter().map(|value| compile(value, root)).collect())
-            .unwrap_or_default()
-    };
+    let list =
+        |key: &str| schema[key].as_array().map(|values| values.iter().map(|value| compile(value, root)).collect()).unwrap_or_default();
     let types = match &schema["type"] {
         Value::String(value) => vec![value.clone()],
-        Value::Array(values) => {
-            values.iter().map(|value| value.as_str().expect("type").into()).collect()
-        }
+        Value::Array(values) => values.iter().map(|value| value.as_str().expect("type").into()).collect(),
         Value::Null => Vec::new(),
         _ => panic!("pinned schema type"),
     };
-    assert!(types.iter().all(|kind| {
-        matches!(
-            kind.as_str(),
-            "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
-        )
-    }));
     assert!(
-        schema["format"]
-            .as_str()
-            .is_none_or(|format| matches!(format, "uint32" | "date-time"))
+        types.iter().all(|kind| { matches!(kind.as_str(), "object" | "array" | "string" | "number" | "integer" | "boolean" | "null") })
     );
+    assert!(schema["format"].as_str().is_none_or(|format| matches!(format, "uint32" | "date-time")));
     Node {
         types,
         constant: schema.get("const").cloned(),
@@ -119,19 +88,13 @@ fn compile(schema: &Value, root: &Value) -> Node {
         one: list("oneOf"),
         required: schema["required"]
             .as_array()
-            .map(|keys| {
-                keys.iter().map(|key| key.as_str().expect("required").into()).collect()
-            })
+            .map(|keys| keys.iter().map(|key| key.as_str().expect("required").into()).collect())
             .unwrap_or_default(),
         properties: schema["properties"]
             .as_object()
-            .map(|map| {
-                map.iter().map(|(key, value)| (key.clone(), compile(value, root))).collect()
-            })
+            .map(|map| map.iter().map(|(key, value)| (key.clone(), compile(value, root))).collect())
             .unwrap_or_default(),
-        additional: schema["additionalProperties"]
-            .as_object()
-            .map(|_| Box::new(compile(&schema["additionalProperties"], root))),
+        additional: schema["additionalProperties"].as_object().map(|_| Box::new(compile(&schema["additionalProperties"], root))),
         allow_additional: schema["additionalProperties"] != false,
         items: schema.get("items").map(|value| Box::new(compile(value, root))),
         pattern: schema["pattern"].as_str().map(|p| Regex::new(p).expect("pinned pattern")),
@@ -150,14 +113,12 @@ impl Node {
             || self.constant.as_ref().is_some_and(|v| v != value)
             || self.choices.as_ref().is_some_and(|values| !values.contains(value))
             || (!self.any.is_empty() && !self.any.iter().any(|node| node.accepts(value)))
-            || (!self.one.is_empty()
-                && self.one.iter().filter(|node| node.accepts(value)).count() != 1)
+            || (!self.one.is_empty() && self.one.iter().filter(|node| node.accepts(value)).count() != 1)
         {
             return false;
         }
         if let Some(number) = value.as_f64()
-            && (self.min.is_some_and(|min| number < min)
-                || self.max.is_some_and(|max| number > max))
+            && (self.min.is_some_and(|min| number < min) || self.max.is_some_and(|max| number > max))
         {
             return false;
         }
@@ -179,8 +140,7 @@ impl Node {
             }
         }
         if let Some(object) = value.as_object() {
-            if self.max_properties.is_some_and(|max| object.len() as u64 > max)
-                || !self.required.iter().all(|key| object.contains_key(key))
+            if self.max_properties.is_some_and(|max| object.len() as u64 > max) || !self.required.iter().all(|key| object.contains_key(key))
             {
                 return false;
             }
@@ -212,10 +172,8 @@ fn has_type(value: &Value, kind: &str) -> bool {
 pub(super) fn rfc3339(text: &str) -> bool {
     static RFC3339: OnceLock<Regex> = OnceLock::new();
     let syntax = RFC3339.get_or_init(|| {
-        Regex::new(
-            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$",
-        )
-        .expect("RFC 3339 pattern")
+        Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$")
+            .expect("RFC 3339 pattern")
     });
     syntax.is_match(text) && chrono::DateTime::parse_from_rfc3339(text).is_ok()
 }
@@ -233,9 +191,5 @@ pub(super) fn validate(value: &Value, kind: ImportedDiagnosticKind) -> Result<()
         ImportedDiagnosticKind::Finding => 1,
         ImportedDiagnosticKind::Reference => 2,
     };
-    if schemas[index].accepts(value) {
-        Ok(())
-    } else {
-        Err(ImportError::Contract)
-    }
+    if schemas[index].accepts(value) { Ok(()) } else { Err(ImportError::Contract) }
 }

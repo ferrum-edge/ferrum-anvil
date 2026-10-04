@@ -4,9 +4,7 @@
 mod bounds;
 mod schema;
 
-use anvil_domain::diagnostic_import::{
-    ImportedDiagnosticKind, ImportedDiagnosticPreview, ImportedDiagnosticTrust,
-};
+use anvil_domain::diagnostic_import::{ImportedDiagnosticKind, ImportedDiagnosticPreview, ImportedDiagnosticTrust};
 use anvil_domain::diagnostics::Confidence;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -33,10 +31,7 @@ pub enum ImportError {
 
 /// Redaction is mandatory at the boundary, before any producer value is returned.
 /// Supplied findings are retained only as claims; no diagnosis is computed from them.
-pub fn preview(
-    input: &[u8],
-    redact: &dyn Fn(&mut Value) -> Result<(), ImportError>,
-) -> Result<ImportedDiagnosticPreview, ImportError> {
+pub fn preview(input: &[u8], redact: &dyn Fn(&mut Value) -> Result<(), ImportError>) -> Result<ImportedDiagnosticPreview, ImportError> {
     let mut value = bounds::parse(input)?;
     let kind = if value["schema"] == "ferrum.diagnostic_report" {
         ImportedDiagnosticKind::Report
@@ -50,19 +45,12 @@ pub fn preview(
     } else {
         ImportedDiagnosticKind::Finding
     };
-    let reported = if kind == ImportedDiagnosticKind::AlloyCli {
-        &value["report"]
-    } else {
-        &value
-    };
+    let reported = if kind == ImportedDiagnosticKind::AlloyCli { &value["report"] } else { &value };
     schema::validate(reported, kind)?;
     let (observation_count, finding_count) = match kind {
         ImportedDiagnosticKind::Report | ImportedDiagnosticKind::AlloyCli => {
             validate_report(reported)?;
-            (
-                array_len(reported, "observations"),
-                array_len(reported, "findings"),
-            )
+            (array_len(reported, "observations"), array_len(reported, "findings"))
         }
         ImportedDiagnosticKind::Finding => (0, 1),
         ImportedDiagnosticKind::Reference => (0, 0),
@@ -76,8 +64,7 @@ pub fn preview(
         finding_count,
         reported: value,
         warnings: vec![
-            "Read-only offline preview: reported facts and authentication claims are unverified."
-                .into(),
+            "Read-only offline preview: reported facts and authentication claims are unverified.".into(),
             "Supplied findings are conclusions, never evidence for an Anvil diagnosis.".into(),
             "Unknown members are uninterpreted claims. Review free text before sharing.".into(),
         ],
@@ -105,9 +92,7 @@ fn validate_cli(value: &Value) -> Result<(), ImportError> {
     let warnings = object["warnings"].as_array().ok_or(ImportError::Contract)?;
     for warning in warnings {
         let warning = warning.as_object().ok_or(ImportError::Contract)?;
-        if warning.len() != 2
-            || !warning.get("path").is_some_and(Value::is_string)
-            || !warning.get("message").is_some_and(Value::is_string)
+        if warning.len() != 2 || !warning.get("path").is_some_and(Value::is_string) || !warning.get("message").is_some_and(Value::is_string)
         {
             return Err(ImportError::Contract);
         }
@@ -116,10 +101,7 @@ fn validate_cli(value: &Value) -> Result<(), ImportError> {
 }
 
 fn validate_report(report: &Value) -> Result<(), ImportError> {
-    if report
-        .get("generated_at")
-        .is_some_and(|v| !v.as_str().is_some_and(schema::rfc3339))
-    {
+    if report.get("generated_at").is_some_and(|v| !v.as_str().is_some_and(schema::rfc3339)) {
         return Err(ImportError::Semantics);
     }
     let mut ids = BTreeSet::new();
@@ -157,10 +139,7 @@ fn validate_report(report: &Value) -> Result<(), ImportError> {
             }
         }
     }
-    if report["subject"]["trace_id"]
-        .as_str()
-        .is_some_and(|s| s.bytes().all(|b| b == b'0'))
-    {
+    if report["subject"]["trace_id"].as_str().is_some_and(|s| s.bytes().all(|b| b == b'0')) {
         return Err(ImportError::Semantics);
     }
     if let Some(findings) = report["findings"].as_array() {

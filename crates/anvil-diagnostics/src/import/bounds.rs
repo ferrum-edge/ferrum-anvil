@@ -1,6 +1,4 @@
-use super::{
-    ImportError, MAX_ARRAY_ITEMS, MAX_BYTES, MAX_DEPTH, MAX_NODES, MAX_OBJECT_MEMBERS, MAX_STRING_BYTES,
-};
+use super::{ImportError, MAX_ARRAY_ITEMS, MAX_BYTES, MAX_DEPTH, MAX_NODES, MAX_OBJECT_MEMBERS, MAX_STRING_BYTES};
 use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::fmt;
@@ -9,13 +7,9 @@ pub(super) fn parse(input: &[u8]) -> Result<Value, ImportError> {
     preflight(input)?;
     let mut deserializer = serde_json::Deserializer::from_slice(input);
     let mut nodes = 0;
-    let value = Seed(&mut nodes).deserialize(&mut deserializer).map_err(|error| {
-        if error.to_string().contains("import limit") {
-            ImportError::Limit
-        } else {
-            ImportError::Json
-        }
-    })?;
+    let value = Seed(&mut nodes)
+        .deserialize(&mut deserializer)
+        .map_err(|error| if error.to_string().contains("import limit") { ImportError::Limit } else { ImportError::Json })?;
     deserializer.end().map_err(|_| ImportError::Json)?;
     Ok(value)
 }

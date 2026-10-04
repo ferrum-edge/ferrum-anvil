@@ -1,7 +1,4 @@
-use anvil_diagnostics::import::{
-    ImportError, MAX_ARRAY_ITEMS, MAX_BYTES, MAX_DEPTH, MAX_OBJECT_MEMBERS, MAX_STRING_BYTES,
-    preview,
-};
+use anvil_diagnostics::import::{ImportError, MAX_ARRAY_ITEMS, MAX_BYTES, MAX_DEPTH, MAX_OBJECT_MEMBERS, MAX_STRING_BYTES, preview};
 use anvil_domain::diagnostic_import::{ImportedDiagnosticKind, ImportedDiagnosticTrust};
 use anvil_domain::diagnostics::Confidence;
 use serde_json::{Value, json};
@@ -25,10 +22,7 @@ fn report() -> Value {
 }
 
 fn finding() -> Value {
-    let bytes = std::fs::read(
-        vendor().join("fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json"),
-    )
-    .unwrap();
+    let bytes = std::fs::read(vendor().join("fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json")).unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 
@@ -37,11 +31,7 @@ fn accepts(value: &Value) -> bool {
 }
 
 fn files(path: &Path) -> BTreeSet<PathBuf> {
-    std::fs::read_dir(path)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.is_file())
-        .collect()
+    std::fs::read_dir(path).unwrap().map(|entry| entry.unwrap().path()).filter(|path| path.is_file()).collect()
 }
 
 fn expectation_matches(error: &jsonschema::ValidationError<'_>, path: &str, keyword: &str) -> bool {
@@ -60,62 +50,31 @@ fn expectation_matches(error: &jsonschema::ValidationError<'_>, path: &str, keyw
 
 #[test]
 fn every_canonical_fixture_passes_the_real_parser_and_independent_schema_gate() {
-    let expectations: Value = serde_json::from_slice(
-        &std::fs::read(vendor().join("fixtures/invalid-expectations.json")).unwrap(),
-    )
-    .unwrap();
+    let expectations: Value = serde_json::from_slice(&std::fs::read(vendor().join("fixtures/invalid-expectations.json")).unwrap()).unwrap();
     let mut tested = BTreeSet::new();
-    for (contract, expected_valid, expected_invalid) in [
-        ("diagnostic-report", 8, 4),
-        ("diagnostic-finding", 2, 3),
-        ("diagnostic-ref", 4, 6),
-    ] {
-        let schema: Value = serde_json::from_slice(
-            &std::fs::read(vendor().join(format!("schemas/{contract}/v1.schema.json"))).unwrap(),
-        )
-        .unwrap();
-        let validator = jsonschema::options()
-            .should_validate_formats(true)
-            .build(&schema)
-            .unwrap();
+    for (contract, expected_valid, expected_invalid) in
+        [("diagnostic-report", 8, 4), ("diagnostic-finding", 2, 3), ("diagnostic-ref", 4, 6)]
+    {
+        let schema: Value =
+            serde_json::from_slice(&std::fs::read(vendor().join(format!("schemas/{contract}/v1.schema.json"))).unwrap()).unwrap();
+        let validator = jsonschema::options().should_validate_formats(true).build(&schema).unwrap();
         for (group, expected_count) in [("valid", expected_valid), ("invalid", expected_invalid)] {
             let fixtures = files(&vendor().join(format!("fixtures/{contract}/{group}")));
-            assert_eq!(
-                fixtures.len(),
-                expected_count,
-                "fixture presence: {contract}/{group}"
-            );
+            assert_eq!(fixtures.len(), expected_count, "fixture presence: {contract}/{group}");
             for path in fixtures {
                 let bytes = std::fs::read(&path).unwrap();
                 let value: Value = serde_json::from_slice(&bytes).unwrap();
                 let result = preview(&bytes, &|_| Ok(()));
-                assert_eq!(
-                    result.is_ok(),
-                    group == "valid",
-                    "{}: {result:?}",
-                    path.display()
-                );
-                assert_eq!(
-                    validator.is_valid(&value),
-                    group == "valid",
-                    "{}",
-                    path.display()
-                );
+                assert_eq!(result.is_ok(), group == "valid", "{}: {result:?}", path.display());
+                assert_eq!(validator.is_valid(&value), group == "valid", "{}", path.display());
                 if group == "invalid" {
-                    let name = format!(
-                        "{contract}/invalid/{}",
-                        path.file_name().unwrap().to_str().unwrap()
-                    );
+                    let name = format!("{contract}/invalid/{}", path.file_name().unwrap().to_str().unwrap());
                     let expected = &expectations[&name];
                     assert!(expected.is_object(), "missing invalid expectation: {name}");
                     let errors: Vec<_> = validator.iter_errors(&value).collect();
                     assert_eq!(errors.len(), 1, "canonical single failure: {name}");
                     assert!(
-                        expectation_matches(
-                            &errors[0],
-                            expected["instance_path"].as_str().unwrap(),
-                            expected["keyword"].as_str().unwrap(),
-                        ),
+                        expectation_matches(&errors[0], expected["instance_path"].as_str().unwrap(), expected["keyword"].as_str().unwrap(),),
                         "canonical failure location/keyword changed: {name}"
                     );
                     if let Some(top) = expected["top_keyword"].as_str() {
@@ -126,31 +85,14 @@ fn every_canonical_fixture_passes_the_real_parser_and_independent_schema_gate() 
             }
         }
     }
-    let expected: BTreeSet<_> = expectations
-        .as_object()
-        .unwrap()
-        .keys()
-        .filter(|name| name.starts_with("diagnostic-"))
-        .cloned()
-        .collect();
-    assert_eq!(
-        tested,
-        expected,
-        "all diagnostic invalid expectations must be exercised"
-    );
+    let expected: BTreeSet<_> = expectations.as_object().unwrap().keys().filter(|name| name.starts_with("diagnostic-")).cloned().collect();
+    assert_eq!(tested, expected, "all diagnostic invalid expectations must be exercised");
 }
 
 #[test]
 fn known_fields_reject_null_without_losing_schema_permitted_null_or_unknown_members() {
     let mut value = report();
-    for field in [
-        "report_id",
-        "generated_at",
-        "subject",
-        "observations",
-        "findings",
-        "extensions",
-    ] {
+    for field in ["report_id", "generated_at", "subject", "observations", "findings", "extensions"] {
         value[field] = Value::Null;
         assert!(!accepts(&value), "accepted null {field}");
         value.as_object_mut().unwrap().remove(field);
@@ -198,9 +140,7 @@ fn strict_attribute_values_and_collection_limits_are_enforced() {
     assert!(!accepts(&value));
     value["observations"][0]["attributes"] = json!({"unknown": null});
     assert!(!accepts(&value));
-    let attributes: serde_json::Map<String, Value> = (0..33)
-        .map(|index| (format!("key{index}"), json!("value")))
-        .collect();
+    let attributes: serde_json::Map<String, Value> = (0..33).map(|index| (format!("key{index}"), json!("value"))).collect();
     value["observations"][0]["attributes"] = json!(attributes);
     assert!(!accepts(&value));
     value["observations"] = json!(vec![observation; MAX_ARRAY_ITEMS + 1]);
@@ -252,12 +192,7 @@ fn lexical_and_decoded_bounds_apply_before_redaction_or_presentation() {
     };
     for bytes in [
         vec![b' '; MAX_BYTES + 1],
-        format!(
-            "{}0{}",
-            "[".repeat(MAX_DEPTH + 1),
-            "]".repeat(MAX_DEPTH + 1)
-        )
-        .into_bytes(),
+        format!("{}0{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1)).into_bytes(),
         vec![0xff],
         br#"{"schema":null,"schema": "ferrum.diagnostic_report"}"#.to_vec(),
         br#"{"schema":null,"\u0073chema":"ferrum.diagnostic_report"}"#.to_vec(),
@@ -266,20 +201,11 @@ fn lexical_and_decoded_bounds_apply_before_redaction_or_presentation() {
     }
     let mut value = report();
     value["extensions"] = json!({"note": "é".repeat(MAX_STRING_BYTES / 2 + 1)});
-    assert_eq!(
-        preview(value.to_string().as_bytes(), &redact).unwrap_err(),
-        ImportError::Limit
-    );
+    assert_eq!(preview(value.to_string().as_bytes(), &redact).unwrap_err(), ImportError::Limit);
     value["extensions"] = json!({"note": "é".repeat(MAX_STRING_BYTES / 2)});
     assert!(preview(value.to_string().as_bytes(), &redact).is_ok());
-    assert_eq!(
-        calls.get(),
-        1,
-        "invalid input never reaches redaction/presentation"
-    );
-    let object: serde_json::Map<String, Value> = (0..=MAX_OBJECT_MEMBERS)
-        .map(|index| (format!("key{index}"), json!(index)))
-        .collect();
+    assert_eq!(calls.get(), 1, "invalid input never reaches redaction/presentation");
+    let object: serde_json::Map<String, Value> = (0..=MAX_OBJECT_MEMBERS).map(|index| (format!("key{index}"), json!(index))).collect();
     value["extensions"] = json!(object);
     assert!(!accepts(&value));
     let oversized = format!("{{\"schema\":\"{}\"}}", "\\u0061".repeat(MAX_STRING_BYTES + 1));
@@ -320,10 +246,7 @@ fn aggregate_depth_and_unicode_caps_include_unknown_extensions() {
     value["extensions"]["text"] = json!("🦀".repeat(MAX_STRING_BYTES / 4 + 1));
     assert!(!accepts(&value));
     value["extensions"] = json!({"wide": vec![vec![0; 5000]; 41]});
-    assert_eq!(
-        preview(value.to_string().as_bytes(), &|_| Ok(())).unwrap_err(),
-        ImportError::Limit
-    );
+    assert_eq!(preview(value.to_string().as_bytes(), &|_| Ok(())).unwrap_err(), ImportError::Limit);
     assert!(preview(br#"{"x":"\ud800"}"#, &|_| Ok(())).is_err());
     assert!(preview(b"{} trailing", &|_| Ok(())).is_err());
 }
@@ -358,10 +281,7 @@ fn immutable_real_alloy_exporter_golden_preserves_every_reported_fact() {
         let fields: Vec<_> = line.split_whitespace().collect();
         if let ["sha256", expected, file] = fields.as_slice() {
             let bytes = std::fs::read(root.join(file)).unwrap();
-            let hash = Sha256::digest(bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
+            let hash = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
             assert_eq!(hash, *expected, "Alloy immutable fixture changed: {file}");
             pinned.insert(root.join(file));
         }
@@ -371,21 +291,12 @@ fn immutable_real_alloy_exporter_golden_preserves_every_reported_fact() {
     assert_eq!(pinned, actual, "no unpinned producer fixtures");
     assert_eq!(pinned.len(), 3);
 
-    let alloy_schema: Value = serde_json::from_slice(
-        &std::fs::read(root.join("diagnostic-report.v1.schema.json")).unwrap(),
-    )
-    .unwrap();
-    let mut canonical: Value = serde_json::from_slice(
-        &std::fs::read(vendor().join("schemas/diagnostic-report/v1.schema.json")).unwrap(),
-    )
-    .unwrap();
+    let alloy_schema: Value = serde_json::from_slice(&std::fs::read(root.join("diagnostic-report.v1.schema.json")).unwrap()).unwrap();
+    let mut canonical: Value =
+        serde_json::from_slice(&std::fs::read(vendor().join("schemas/diagnostic-report/v1.schema.json")).unwrap()).unwrap();
     canonical.as_object_mut().unwrap().remove("x-contract");
     canonical["$id"] = alloy_schema["$id"].clone();
-    assert_eq!(
-        canonical,
-        alloy_schema,
-        "exact producer/shared schema parity"
-    );
+    assert_eq!(canonical, alloy_schema, "exact producer/shared schema parity");
 
     let bytes = std::fs::read(root.join("diagnosis-edge-0.9.10.json")).unwrap();
     let golden: Value = serde_json::from_slice(&bytes).unwrap();
@@ -394,14 +305,8 @@ fn immutable_real_alloy_exporter_golden_preserves_every_reported_fact() {
     assert_eq!(result.confidence, Confidence::Unknown);
     assert_eq!(result.finding_count, 2);
     assert!(result.observation_count > 0);
-    assert_eq!(
-        golden["findings"][0]["code"],
-        "alloy.service.operation_dominates"
-    );
-    assert_eq!(
-        golden["findings"][0]["evidence"][0]["source"],
-        "service_telemetry"
-    );
+    assert_eq!(golden["findings"][0]["code"], "alloy.service.operation_dominates");
+    assert_eq!(golden["findings"][0]["evidence"][0]["source"], "service_telemetry");
 
     // The immutable CLI serializes the same report inside this exact stdout
     // envelope. The report bytes above are real hosted exporter output; this

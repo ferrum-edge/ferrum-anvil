@@ -3,7 +3,7 @@ import {
   DIAGNOSTIC_MAX_BYTES,
   diagnosticImportPreview,
   type ImportedDiagnosticPreview,
-} from "./diagnosticImport";
+} from "./diagnosticImportSource";
 
 export function DiagnosticImport() {
   const [text, setText] = useState("");

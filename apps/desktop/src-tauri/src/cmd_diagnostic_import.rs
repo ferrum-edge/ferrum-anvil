@@ -7,9 +7,7 @@ use anvil_engine::redact::{Redactor, is_credential_name};
 use serde_json::Value;
 
 #[tauri::command]
-pub fn diagnostic_import_preview(
-    input: DiagnosticImportInput,
-) -> Result<ImportedDiagnosticPreview, String> {
+pub fn diagnostic_import_preview(input: DiagnosticImportInput) -> Result<ImportedDiagnosticPreview, String> {
     preview(input.text.as_bytes(), &redact).map_err(|error| error.to_string())
 }
 
@@ -21,19 +19,12 @@ fn sensitive(name: &str) -> bool {
     is_credential_name(name, &[]) || name.to_ascii_lowercase().contains("cookie")
 }
 
-fn collect(
-    value: &Value,
-    hidden: bool,
-    secrets: &mut Vec<String>,
-    bytes: &mut usize,
-) -> Result<(), ImportError> {
+fn collect(value: &Value, hidden: bool, secrets: &mut Vec<String>, bytes: &mut usize) -> Result<(), ImportError> {
     match value {
         Value::String(text) => {
             let credential = hidden
                 || text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----")
-                || text.split_whitespace().any(|word| {
-                    word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic")
-                });
+                || text.split_whitespace().any(|word| word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic"));
             if credential && !text.is_empty() {
                 *bytes += text.len();
                 if secrets.len() == MAX_CREDENTIALS || *bytes > MAX_CREDENTIAL_BYTES {
@@ -60,16 +51,9 @@ fn collect(
             }
         }
         Value::Object(object) => {
-            let pair = ["key", "name", "header"]
-                .iter()
-                .any(|key| object.get(*key).and_then(Value::as_str).is_some_and(sensitive));
+            let pair = ["key", "name", "header"].iter().any(|key| object.get(*key).and_then(Value::as_str).is_some_and(sensitive));
             for (key, value) in object {
-                collect(
-                    value,
-                    hidden || sensitive(key) || pair && key == "value",
-                    secrets,
-                    bytes,
-                )?;
+                collect(value, hidden || sensitive(key) || pair && key == "value", secrets, bytes)?;
             }
         }
         _ => {}
@@ -101,9 +85,7 @@ fn scrub(value: &mut Value, hidden: bool, redactor: &Redactor) {
             }
         }
         Value::Object(object) => {
-            let pair = ["key", "name", "header"]
-                .iter()
-                .any(|key| object.get(*key).and_then(Value::as_str).is_some_and(sensitive));
+            let pair = ["key", "name", "header"].iter().any(|key| object.get(*key).and_then(Value::as_str).is_some_and(sensitive));
             let original = std::mem::take(object);
             for (key, mut value) in original {
                 // Keep booleans such as authenticated:true as original claims.
@@ -123,9 +105,7 @@ mod tests {
     use anvil_domain::diagnostics::Confidence;
     use serde_json::json;
 
-    const REPORT: &str = include_str!(
-        "../../../../contracts/ferrum-contracts/fixtures/diagnostic-report/valid/forged-verified-claim.json"
-    );
+    const REPORT: &str = include_str!("../../../../contracts/ferrum-contracts/fixtures/diagnostic-report/valid/forged-verified-claim.json");
 
     #[test]
     fn ipc_returns_unverified_claims_and_redacts_credentials_everywhere() {
@@ -140,23 +120,13 @@ mod tests {
             "key": "header.x-api-key",
             "value": "api-secret",
         });
-        let result = diagnostic_import_preview(DiagnosticImportInput {
-            text: report.to_string(),
-        })
-        .unwrap();
+        let result = diagnostic_import_preview(DiagnosticImportInput { text: report.to_string() }).unwrap();
         assert_eq!(result.trust, ImportedDiagnosticTrust::Unverified);
         assert_eq!(result.confidence, Confidence::Unknown);
         assert_eq!(result.reported["authenticated"], true);
         assert_eq!(result.reported["collection"]["verification"], "verified");
         let text = result.reported.to_string();
-        for secret in [
-            "credential-12345",
-            "secret-12345",
-            "user:pass",
-            "hidden",
-            "cookie-secret",
-            "api-secret",
-        ] {
+        for secret in ["credential-12345", "secret-12345", "user:pass", "hidden", "cookie-secret", "api-secret"] {
             assert!(!text.contains(secret), "credential leaked");
         }
         assert!(text.contains(REDACTED));
@@ -164,11 +134,9 @@ mod tests {
 
     #[test]
     fn ipc_rejects_hostile_input_without_echoing_it() {
-        for text in [
-            "secret-input-not-json".to_string(),
-            REPORT.replace("1.0", "2.0"),
-            " ".repeat(anvil_diagnostics::import::MAX_BYTES + 1),
-        ] {
+        for text in
+            ["secret-input-not-json".to_string(), REPORT.replace("1.0", "2.0"), " ".repeat(anvil_diagnostics::import::MAX_BYTES + 1)]
+        {
             let error = diagnostic_import_preview(DiagnosticImportInput { text }).unwrap_err();
             assert!(!error.contains("secret-input"));
         }
@@ -178,12 +146,7 @@ mod tests {
     fn ipc_credential_work_is_bounded() {
         let mut report: Value = serde_json::from_str(REPORT).unwrap();
         report["extensions"] = json!({"passwords": vec!["secret"; MAX_CREDENTIALS + 1]});
-        assert!(
-            diagnostic_import_preview(DiagnosticImportInput {
-                text: report.to_string(),
-            })
-            .is_err()
-        );
+        assert!(diagnostic_import_preview(DiagnosticImportInput { text: report.to_string() }).is_err());
     }
 
     #[test]
@@ -207,32 +170,24 @@ mod tests {
 
     #[test]
     fn every_canonical_fixture_crosses_the_production_command_boundary() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../contracts/ferrum-contracts/fixtures");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../contracts/ferrum-contracts/fixtures");
         let mut count = 0;
         for contract in ["diagnostic-report", "diagnostic-finding", "diagnostic-ref"] {
             for group in ["valid", "invalid"] {
                 for entry in std::fs::read_dir(root.join(contract).join(group)).unwrap() {
                     let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
-                    let input: DiagnosticImportInput =
-                        serde_json::from_value(json!({"text": text})).unwrap();
+                    let input: DiagnosticImportInput = serde_json::from_value(json!({"text": text})).unwrap();
                     assert_eq!(diagnostic_import_preview(input).is_ok(), group == "valid");
                     count += 1;
                 }
             }
         }
-        assert_eq!(
-            count,
-            27,
-            "all canonical diagnostic fixtures through IPC DTO and command"
-        );
+        assert_eq!(count, 27, "all canonical diagnostic fixtures through IPC DTO and command");
     }
 
     #[test]
     fn real_hosted_producer_golden_crosses_the_ipc_boundary() {
-        let text = include_str!(
-            "../../../../crates/anvil-diagnostics/tests/fixtures/alloy/diagnosis-edge-0.9.10.json"
-        );
+        let text = include_str!("../../../../crates/anvil-diagnostics/tests/fixtures/alloy/diagnosis-edge-0.9.10.json");
         let input: DiagnosticImportInput = serde_json::from_value(json!({"text": text})).unwrap();
         let result = diagnostic_import_preview(input).unwrap();
         assert_eq!(result.finding_count, 2);

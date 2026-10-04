@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
-import type { ImportedDiagnosticPreview } from "./diagnosticImport";
+import type { ImportedDiagnosticPreview } from "./diagnosticImportSource";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn(), save:
 
 import { DiagnosticImport } from "./DiagnosticImport";
 import { ImportDialog } from "./Dialogs";
-import { DIAGNOSTIC_MAX_BYTES } from "./diagnosticImport";
+import { DIAGNOSTIC_MAX_BYTES } from "./diagnosticImportSource";
 
 const report = JSON.stringify({
   schema: "ferrum.diagnostic_report",
