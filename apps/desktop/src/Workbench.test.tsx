@@ -155,7 +155,44 @@ function sessionView(text: string): ExecutionView {
   return {
     record: {
       id: "00000000-0000-7000-8000-000000000001",
-      prepared: { method: "GET", url: "wss://s1.test/", headers: [] },
+      schema_version: 1,
+      adapter_version: "test",
+      catalog_version: "test",
+      started_at: now,
+      finished_at: now,
+      prepared: {
+        protocol: "web_socket",
+        method: "GET",
+        url: "wss://s1.test/",
+        headers: [],
+        body_bytes: 0,
+        auth_label: "none",
+        tls_verification_enabled: true,
+        settings: {
+          http_version: "auto",
+          timeouts: {},
+          redirects: { follow: false, max: 0, forward_credentials_cross_origin: false },
+          retries: { max_retries: 0, backoff_ms: 0, only_safe: true },
+          ip_preference: "system",
+          resolver: { mode: "system" },
+          dns_overrides: [],
+          limits: {
+            max_response_bytes: 1_048_576,
+            capture_bytes: 1_048_576,
+            max_decoded_bytes: 4_194_304,
+            max_response_header_bytes: 65_536,
+            max_request_body_bytes: 1_048_576,
+          },
+          decompress: true,
+          cookies: true,
+          keepalive: true,
+          infer_content_type: true,
+          early_data: { enabled: false },
+          sources: [],
+        },
+        inferred: [],
+        omitted_secrets: [],
+      },
       attempts: [],
       outcome: {
         transport: "completed",
@@ -167,6 +204,7 @@ function sessionView(text: string): ExecutionView {
         summary: "Session completed",
       },
       assertion_results: [],
+      extracted: [],
       findings: [],
     },
     body: {
@@ -178,7 +216,7 @@ function sessionView(text: string): ExecutionView {
       shown_bytes: text.length,
       captured_bytes: text.length,
     },
-  } as ExecutionView;
+  };
 }
 
 afterEach(() => {
