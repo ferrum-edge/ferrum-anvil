@@ -1,7 +1,8 @@
 # Retained file and export handles — DRAFT
 
-Owner decision: **root**. This branch is a review candidate, not an approved
-compatibility change or a qualified fix. Do not close the advisory or claim a
+Owner decision: **the repository owner, requested by root after qualification**.
+This branch is a review candidate, not an approved compatibility change or a
+qualified released fix. Do not close the advisory or claim a
 patched release from this work. The accepted publication, revocation, dialog
 and retirement defects have concrete source changes below; **all-platform
 hosted qualification is still required**. macOS uses descriptor cloning rather
@@ -16,6 +17,42 @@ reports an ancestor rename followed by symlink/junction replacement between
 canonicalization and a fresh pathname open/create. The advisory API was read in this round. It scopes the finding to reported
 revision `b7aca6f46988dacdaec97f4d2a0af0f8fe238d7e`; neither that sealed snapshot
 nor this static inspection establishes affected released binaries.
+
+## Qualified source and pending owner decision
+
+Root reviewed the entire 4,768-line diff at
+`b58d3f62954bef0451f631c67bfc23914a93d13d`, including the later native
+publication, revocation and descriptor-budget repairs. Fresh independent
+security/concurrency reviews covered the production changes; the final repair
+applied only the hosted formatter's literal edits.
+
+At that exact source, all 15 check runs from GitHub Actions (application 15368)
+passed. [CI run 37209369566](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37209369566)
+passed Rust checks and tests on Linux, macOS and Windows, frontend checks,
+supply-chain/licensing, secret scanning and contract/catalog checks.
+[Desktop E2E](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37209369523)
+passed on all three systems, and [Lab](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37209369522)
+passed on Linux and macOS.
+
+The separate [native macOS policy job](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37209367487/job/111457212589)
+passed all six tests, including real inherited-ACL access checks, real APFS
+Ignore Ownership refusal before staging, mode/ACL mutation refusal and the
+observed owned-APFS positive. It recorded source SHA `b58d3f6`, ejected its
+owned `disk5` image and reported `cleanup_status=0`. The ordinary macOS
+suite's ignored private-image test is covered by this dedicated run. The
+Windows Rust job passed actual rooted native publication identity/security
+and collision tests, junction barriers and the negative unprotected controls.
+
+These results qualify this source as a review candidate; they do not establish
+unchanged released behavior or a patched binary. The owner must explicitly
+approve the narrower filesystem support, no-overwrite exports, session-bound
+linked-file selections, descriptor limits and named plaintext staging retention.
+No such approval has been received. This documentation follow-up requires fresh
+hosted CI on its own head before a final owner decision or merge.
+
+Historical failed-run descriptions below explain the repairs. Their pending
+qualification statements describe those earlier heads, not the successful
+`b58d3f6` evidence recorded here.
 
 ## Implemented candidate
 
@@ -73,7 +110,7 @@ its new pathname or the replacement junction/symlink is not authorized. Windows
 may refuse that ancestor rename while the directory chain is retained. Status
 uses the opened object's metadata without reading data bytes.
 
-**Root must approve or replace this policy before integration.** Restart and
+**The owner must approve or replace this policy before integration.** Restart and
 lock now require reselection even for legitimate existing bindings, and a
 separately opened CLI process cannot use a desktop's retained handles. The
 positive restart/CLI behavior of the released path-only contract is not
@@ -123,7 +160,7 @@ Therefore this draft refuses **every occupied destination**, including the
 legitimate existing file. Publication itself also refuses an occupied name,
 including one planted after the precheck. No destination ownership inference is
 used to authorize an overwrite. This intentionally changes existing-file export
-behavior and the old symlink-replacement positive; root must decide the contract.
+behavior and the old symlink-replacement positive; the owner must decide the contract.
 
 Publication never resolves a checked temporary name again:
 

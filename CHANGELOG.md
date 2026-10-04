@@ -5,16 +5,19 @@
 ### Fixed
 
 - Draft remediation for GHSA-6hc8-xjvq-478g retains native file and directory
-  handles for linked reads and export creation. Linked bindings require native
-  reselection after restart/lock and leaf replacement; exports refuse occupied
-  destination names. This candidate is **not qualified for release**: dependency
-  all-platform hosted validation and replacement/persistence owner decisions
-  remain pending. Publication now uses owned Linux descriptors, macOS native
-  descriptor cloning, and Windows native handle rename with no successful extra
-  output link. Linked chooser epochs, replacement revocation, committed binding
-  retirement and retained-descriptor budgets are fenced. macOS clone support
-  and retained staging data still require owner qualification. The real hosted
-  lockfile is preserved. See `docs/security/file-handle-safety.md`.
+  handles for linked reads and export creation. Linked files require native
+  reselection after restart, lock or atomic replacement; CLI path-only bindings
+  cannot reconstruct desktop selections. Exports refuse occupied names.
+  Linux publishes an owned unnamed descriptor, Windows renames its owned handle,
+  and macOS clones the descriptor on ownership-enforcing local APFS only.
+  macOS keeps uncertain named staging data, including plaintext export contents.
+  Chooser epochs, committed binding retirement, revocation and 512-descriptor
+  retention budgets are fenced. Root and independent reviews and all 15 hosted
+  checks passed at `b58d3f6`, including all three operating systems and six
+  dedicated macOS policy tests with completed image cleanup. The genuine hosted
+  lockfile remains pinned. These compatibility and retention choices remain
+  **owner unapproved**; no patched release is claimed. See
+  `docs/security/file-handle-safety.md`.
 
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
