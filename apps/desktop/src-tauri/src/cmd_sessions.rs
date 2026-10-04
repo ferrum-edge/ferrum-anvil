@@ -12,9 +12,25 @@ use anvil_transport::recorder::EventCtx;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
-pub type SessionSlot = Arc<tokio::sync::Mutex<Option<SessionHandle>>>;
+pub type SessionSlot = Arc<OpenSession>;
+
+pub struct OpenSession {
+    pub session: tokio::sync::Mutex<Option<SessionHandle>>,
+    /// Interrupts a send waiting on the bounded command queue BEFORE any
+    /// canceler tries to take `session`. It cannot be trapped by that wait.
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+impl OpenSession {
+    pub async fn abort(&self) {
+        self.cancel.cancel();
+        if let Some(session) = self.session.lock().await.as_ref() {
+            session.cancel();
+        }
+    }
+}
 
 const CANCELED_BEFORE_OPEN: &str = "the session was canceled before it opened";
 
@@ -26,8 +42,13 @@ pub struct SessionEnded {
 }
 
 /// Open a session. Returns the execution id used by message events.
-#[tauri::command]
-pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<String> {
+pub(crate) async fn session_open(
+    handle: AppHandle,
+    fence: crate::state::PayloadFence,
+    input: SendInput,
+    execution_id: String,
+) -> R<String> {
+    let st = handle.state::<DesktopState>();
     let exec_id = id(&execution_id)?;
     // Registered first, so `session_cancel` (and locking) can stop an open that
     // has not finished yet: the tab that started it may already be gone. Every
@@ -39,7 +60,8 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
     if st.sessions.lock().contains_key(&execution_id) {
         return Err(format!("attempt {execution_id} is already running"));
     }
-    let app = st.app()?;
+    st.check_payload(&fence)?;
+    let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
@@ -56,32 +78,36 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
         built => built.map_err(e)?,
     };
     let h2 = handle.clone();
-    let owner = app.clone();
+    let owner = fence.clone();
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
-        // Only to the window of the profile the session was opened under.
-        if h2.state::<DesktopState>().is_current(&owner) {
+        let _ = h2.state::<DesktopState>().try_deliver_payload(&owner, || {
             let _ = h2.emit("execution-event", &ev);
-        }
+        });
     });
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let publish = |session| {
-        let slot: SessionSlot = Arc::new(tokio::sync::Mutex::new(Some(session)));
-        st.sessions.lock().insert(execution_id.clone(), (app.clone(), slot.clone()));
+        let slot = Arc::new(OpenSession {
+            session: tokio::sync::Mutex::new(Some(session)),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        });
+        st.sessions.lock().insert(execution_id.clone(), (fence.clone(), slot.clone()));
         slot
     };
     let Some((slot, canceled)) = pending.open(open, publish).await else {
         return Err(CANCELED_BEFORE_OPEN.into());
     };
-    if canceled && let Some(s) = slot.lock().await.as_ref() {
-        s.cancel();
+    if canceled {
+        slot.abort().await;
     }
     // Watch for the end (peer close, local close, cancel, lock, another
     // profile opening) and publish the record.
     let key = execution_id.clone();
+    let watch_handle = handle.clone();
     tauri::async_runtime::spawn(async move {
+        let handle = watch_handle;
         loop {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let finished = match slot.lock().await.as_ref() {
+            let finished = match slot.session.lock().await.as_ref() {
                 Some(s) => s.is_finished(),
                 None => true,
             };
@@ -89,7 +115,7 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
                 break;
             }
         }
-        let taken = slot.lock().await.take();
+        let taken = slot.session.lock().await.take();
         let st = handle.state::<DesktopState>();
         st.sessions.lock().remove(&key);
         let ev = match taken {
@@ -99,25 +125,40 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
                 // one open now; refused while that profile is locked.
                 let (out, recorded) = app.record_off_runtime(out).await;
                 let recorded = recorded.map_err(e);
-                if st.is_current(&app) {
-                    let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
-                    let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
-                    let view = ExecutionView { body, record: out.record };
-                    SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
-                } else {
-                    // Another profile is open: its window shows nothing of this one.
-                    SessionEnded {
-                        execution_id: key.clone(),
-                        view: None,
-                        error: Some("the profile the session was opened in was closed".into()),
-                    }
-                }
+                let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
+                let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
+                let view = ExecutionView { body, record: out.record };
+                SessionEnded { execution_id: key.clone(), view: Some(view), error: recorded.err() }
             }
             None => SessionEnded { execution_id: key.clone(), view: None, error: Some("the session was already finished".into()) },
         };
-        let _ = handle.emit("session-ended", ev);
+        // History finalization stays outside the delivery gate. Both the
+        // view and any payload-bearing recording error are dropped together.
+        tauri::async_runtime::spawn_blocking(move || {
+            let st = handle.state::<DesktopState>();
+            emit_ended(st.inner(), &fence, ev, |ev| {
+                let _ = handle.emit("session-ended", ev);
+            });
+        });
     });
     Ok(execution_id)
+}
+
+/// A refused final payload still retires the UI's session with scalar status.
+fn emit_ended(
+    st: &DesktopState,
+    fence: &crate::state::PayloadFence,
+    ev: SessionEnded,
+    emit: impl Fn(SessionEnded),
+) {
+    let execution_id = ev.execution_id.clone();
+    if st.deliver_payload(fence, || emit(ev)).is_err() {
+        emit(SessionEnded {
+            execution_id,
+            view: None,
+            error: Some("LOCKED".into()),
+        });
+    }
 }
 
 async fn with_session<F>(st: &DesktopState, execution_id: &str, f: F) -> R<()>
@@ -128,34 +169,155 @@ where
     let closed = || "the session is no longer open".to_string();
     let (owner, slot) = st.sessions.lock().get(execution_id).cloned().ok_or_else(closed)?;
     // A session of a profile that is no longer open is not driven from another.
-    if !st.is_current(&owner) {
-        return Err(closed());
-    }
-    let guard = slot.lock().await;
+    st.check_payload(&owner).map_err(|_| closed())?;
+    let guard = until_canceled(&slot.cancel, slot.session.lock()).await?;
     match guard.as_ref() {
-        Some(s) => f(s).await,
+        Some(s) => until_canceled(&slot.cancel, f(s)).await?,
         None => Err(closed()),
     }
 }
 
-#[tauri::command]
-pub async fn session_send(st: State<'_, DesktopState>, execution_id: String, command: SessionCommand) -> R<()> {
-    with_session(&st, &execution_id, |s| Box::pin(async move { s.send(command).await.map_err(|x| x.to_string()) })).await
+async fn until_canceled<T>(
+    cancel: &tokio_util::sync::CancellationToken,
+    work: impl Future<Output = T>,
+) -> R<T> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(crate::commands::CANCELED.into()),
+        out = work => Ok(out),
+    }
+}
+
+pub(crate) async fn session_send(
+    st: &DesktopState,
+    execution_id: String,
+    command: SessionCommand,
+) -> R<()> {
+    with_session(st, &execution_id, |s| {
+        Box::pin(async move { s.send(command).await.map_err(|x| x.to_string()) })
+    })
+    .await
 }
 
 /// Abort without a graceful close handshake. An open still connecting is
 /// abandoned: `session_open` then fails and no session is left behind.
-#[tauri::command]
-pub async fn session_cancel(st: State<'_, DesktopState>, execution_id: String) -> R<()> {
+pub(crate) async fn session_cancel(st: &DesktopState, execution_id: String) -> R<()> {
     // Checked before the open sessions: an open moves from one to the other.
     if cancel_pending(&st.running, &id(&execution_id)?) {
         return Ok(());
     }
-    with_session(&st, &execution_id, |s| {
-        Box::pin(async move {
-            s.cancel();
-            Ok(())
-        })
-    })
-    .await
+    let closed = || "the session is no longer open".to_string();
+    let (owner, slot) = st.sessions.lock().get(&execution_id).cloned().ok_or_else(closed)?;
+    st.check_payload(&owner).map_err(|_| closed())?;
+    slot.abort().await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::tests::payload_view;
+    use crate::state::tests::{PASSPHRASE, TempRoot, create};
+    use anvil_app::profiles::{ProfileManager, Unlock};
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_queue_wait_and_releases_the_session_mutex() {
+        let slot = Arc::new(OpenSession {
+            session: tokio::sync::Mutex::new(None),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        });
+        let (waiting_tx, waiting_rx) = oneshot::channel();
+        let sender = async {
+            let _guard = slot.session.lock().await;
+            let queue_wait = async {
+                waiting_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            };
+            assert_eq!(until_canceled(&slot.cancel, queue_wait).await, Err("CANCELED".into()));
+        };
+        let canceler = async {
+            waiting_rx.await.unwrap();
+            // The actual abort signals before trying to acquire the mutex.
+            slot.abort().await;
+            assert!(slot.session.try_lock().is_ok());
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(sender, canceler);
+        }).await.expect("cancellation must release the slot");
+    }
+
+    #[tokio::test]
+    async fn paused_session_finalization_never_returns_payload_across_a_fence_change() {
+        for transition in ["lock", "lock-unlock", "profile", "unchanged"] {
+            let root = TempRoot::new();
+            let st = DesktopState::new(root.0.clone());
+            let (app, dir) = create(&st, "session");
+            let (other, _) = create(&st, "other");
+            st.set_app_since(app, st.epoch()).unwrap();
+            let fence = st.admit_payload().unwrap();
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let finalizing = async {
+                let view = payload_view();
+                let output = anvil_engine::ExecutionOutput {
+                    record: view.record,
+                    body: b"payload-canary".to_vec().into(),
+                    decoded_body: None,
+                    extracted: vec![],
+                    session_facts: None,
+                };
+                // Barrier at the watcher's finish/history boundary; a lock
+                // can make recording fail, but must never authorize a view.
+                ready_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                let (output, recorded) = fence.app.record_off_runtime(output).await;
+                if transition == "lock" {
+                    assert!(matches!(recorded, Err(AppError::Locked)));
+                }
+                let ended = SessionEnded {
+                    execution_id: output.record.id.to_string(),
+                    view: Some(ExecutionView {
+                        record: output.record,
+                        body: body_view(&output.body, None, None),
+                    }),
+                    error: Some("payload-canary recording error".into()),
+                };
+                let received = parking_lot::Mutex::new(Vec::new());
+                emit_ended(&st, &fence, ended, |ev| received.lock().push(ev));
+                let received = received.into_inner();
+                assert_eq!(received.len(), 1);
+                if transition == "unchanged" {
+                    assert_eq!(
+                        received[0].view.as_ref().unwrap().body.text.as_deref(),
+                        Some("payload-canary"),
+                    );
+                } else {
+                    assert!(received[0].view.is_none(), "{transition}");
+                    assert_eq!(received[0].error.as_deref(), Some("LOCKED"));
+                }
+            };
+            let locking = async {
+                ready_rx.await.unwrap();
+                match transition {
+                    "lock" => st.lock(),
+                    "lock-unlock" => {
+                        st.lock();
+                        let (_, key) = ProfileManager::unlock(
+                            &dir,
+                            Unlock::Passphrase(PASSPHRASE),
+                        ).unwrap();
+                        st.unlock_since(&fence.app, key, st.epoch()).unwrap();
+                    }
+                    "profile" => st.set_app_since(other, st.epoch()).unwrap(),
+                    "unchanged" => {}
+                    _ => unreachable!(),
+                }
+                release_tx.send(()).unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(finalizing, locking);
+            }).await.expect("session finalization must settle");
+        }
+    }
 }

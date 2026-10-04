@@ -63,7 +63,7 @@ describe("file grants", () => {
         ["import_preview", { grant, passphrase: null, conflictPolicy: "duplicate" }],
         ["import_apply", { grant, passphrase: null, conflictPolicy: "duplicate" }],
         ["dataset_add", { workspaceId, grant, name: "d", sensitiveColumns: [] }],
-        ["spec_preview", { input: { kind: "file", grant }, options: IMPORT_OPTIONS }],
+        ["spec_preview", { input: { kind: "file", grant }, options: IMPORT_OPTIONS, target: { kind: "new_workspace" } }],
       ];
       for (const [cmd, args] of calls) expectRefused(`${cmd} ${grant}`, await invoke(cmd, args), UNKNOWN);
     }
@@ -77,7 +77,7 @@ describe("file grants", () => {
       ["attachment_add", { path: source, mediaType: null }],
       ["import_preview", { path: source, passphrase: null, conflictPolicy: "duplicate" }],
       ["dataset_add", { workspaceId, path: source, name: "d", sensitiveColumns: [] }],
-      ["spec_preview", { input: { kind: "path", path: source }, options: IMPORT_OPTIONS }],
+      ["spec_preview", { input: { kind: "path", path: source }, options: IMPORT_OPTIONS, target: { kind: "new_workspace" } }],
     ];
     for (const [cmd, args] of calls) expectRefused(cmd, await invoke(cmd, args));
   });

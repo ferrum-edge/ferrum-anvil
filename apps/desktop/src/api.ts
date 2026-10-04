@@ -477,7 +477,55 @@ export interface SpecImportReport {
   required_variables: { name: string; secret: boolean; reason: string; pointers: string[] }[];
   counts: { operations_found: number; requests: number; folders: number; environments: number; skipped_operations: number; warnings: number };
 }
+/** Native byte/plan digests, scoped to the desktop's admitted review context. */
+export interface SpecApproval {
+  binding: { source_sha256: string; plan_sha256: string };
+  scope: string;
+}
+/** Explicit conflict/removal choices for the plan returned by native reimport. */
+export interface ReimportDecisions {
+  overwrite: string[];
+  delete: string[];
+  overwrite_scope: string[];
+  delete_scope: string[];
+}
+export interface ReimportChange {
+  existing_id: string;
+  operation_key: string;
+  user_edited: boolean;
+  changed_fields: string[];
+  upstream_fields: string[];
+  conflicting_fields: string[];
+  fresh: RequestDefinition;
+}
+export interface SpecScopeChange {
+  key: string;
+  label: string;
+  user_edited: boolean;
+  whole_environment: boolean;
+  fresh?: unknown;
+}
+export interface SpecReimportReview {
+  approval: SpecApproval;
+  plan: {
+    import_id: string;
+    added: RequestDefinition[];
+    added_folders: Folder[];
+    updated: ReimportChange[];
+    conflicts: ReimportChange[];
+    preserved_edits: string[];
+    unchanged: string[];
+    removed: { existing_id: string; operation_key: string; user_edited: boolean }[];
+    unlinked: string[];
+    scope_updated: SpecScopeChange[];
+    scope_conflicts: SpecScopeChange[];
+    scope_preserved_edits: string[];
+    scope_removed: SpecScopeChange[];
+  };
+}
 export interface SpecPreview {
+  binding: SpecApproval["binding"];
+  approval: SpecApproval;
   detected: { kind: string; dialect: string; syntax: string; declared_version?: string | null; note?: string | null };
   title?: string | null;
   report: SpecImportReport;
@@ -793,8 +841,18 @@ export const api = {
   sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
   sessionCancel: (executionId: string) => call<void>("session_cancel", { executionId }),
 
-  specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
-  specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
+  specPreview: (input: SpecInput, options: ImportOptions, target: SpecTarget) =>
+    call<SpecPreview>("spec_preview", { input, options, target }),
+  specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget, approval: SpecApproval) =>
+    call<SpecImported>("spec_import", { input, options, target, approval }),
+  specReimportPlan: (importId: string, input: SpecInput) =>
+    call<SpecReimportReview>("spec_reimport_plan", { importId, input }),
+  specReimportApply: (
+    importId: string,
+    input: SpecInput,
+    decisions: ReimportDecisions,
+    approval: SpecApproval,
+  ) => call<number>("spec_reimport_apply", { importId, input, decisions, approval }),
   specSources: (workspaceId: string) => call<SpecSourceRecord[]>("spec_sources", { workspaceId }),
 
   standards: () => call<StandardsView>("standards_view"),

@@ -1,8 +1,16 @@
 // OpenAPI / WSDL / Postman / Insomnia / cURL / HAR import: pick or paste,
 // preview what will be created and what was not representable, then import.
 // Nothing imported is sent or run.
-import { useState } from "react";
-import { api, DEFAULT_IMPORT_OPTIONS, type ImportOptions, type SpecImported, type SpecInput, type SpecPreview } from "./api";
+import { useEffect, useRef, useState } from "react";
+import {
+  api,
+  DEFAULT_IMPORT_OPTIONS,
+  type ImportOptions,
+  type SpecImported,
+  type SpecInput,
+  type SpecPreview,
+  type SpecTarget,
+} from "./api";
 import { humanize } from "./ui";
 import { Icon } from "./icons";
 
@@ -15,16 +23,30 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
   const [preview, setPreview] = useState<SpecPreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const revision = useRef(0);
+  const invalidate = () => {
+    revision.current += 1;
+    setPreview(null);
+  };
+  useEffect(() => {
+    invalidate();
+  }, [props.workspaceId]);
+  const destination = (): SpecTarget =>
+    target === "current" && props.workspaceId
+      ? { kind: "workspace", workspace_id: props.workspaceId }
+      : { kind: "new_workspace" };
 
   const effectiveInput = (): SpecInput | null => (paste.trim() ? { kind: "text", text: paste, name: "pasted.txt" } : input);
 
   const doPreview = async () => {
     const i = effectiveInput();
     if (!i) return;
+    const seen = revision.current;
     setBusy(true);
     setErr(null);
     try {
-      setPreview(await api.specPreview(i, opts));
+      const reviewed = await api.specPreview(i, opts, destination());
+      if (revision.current === seen) setPreview(reviewed);
     } catch (e) {
       setPreview(null);
       setErr(String((e as Error).message));
@@ -35,13 +57,14 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
 
   const doImport = async () => {
     const i = effectiveInput();
-    if (!i) return;
+    if (!i || !preview) return;
     setBusy(true);
     setErr(null);
     try {
-      const r = await api.specImport(i, opts, target === "current" && props.workspaceId ? { kind: "workspace", workspace_id: props.workspaceId } : { kind: "new_workspace" });
+      const r = await api.specImport(i, opts, destination(), preview.approval);
       props.onImported(r);
     } catch (e) {
+      invalidate();
       setErr(String((e as Error).message));
     } finally {
       setBusy(false);
@@ -50,7 +73,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
 
   const setOpt = (patch: Partial<ImportOptions>) => {
     setOpts({ ...opts, ...patch });
-    setPreview(null);
+    invalidate();
   };
 
   return (
@@ -69,7 +92,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
                 setInput({ kind: "file", grant: f.token });
                 setFileName(f.file_name);
                 setPaste("");
-                setPreview(null);
+                invalidate();
               }
             } catch (e) {
               setErr(String((e as Error).message));
@@ -92,7 +115,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
           placeholder="curl -X POST https://api.example.com/v1/orders -H 'Content-Type: application/json' -d '{…}'"
           onChange={(e) => {
             setPaste(e.target.value);
-            setPreview(null);
+            invalidate();
           }}
         />
       </label>
@@ -127,11 +150,28 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
       {opts.include_credentials && <div className="warn-box">Literal credentials will be stored in requests. Prefer moving them into the vault after import.</div>}
       <div className="row import-actions">
         <label className="check">
-          <input type="radio" name="spec-target" checked={target === "new"} onChange={() => setTarget("new")} />
+          <input
+            type="radio"
+            name="spec-target"
+            checked={target === "new"}
+            onChange={() => {
+              setTarget("new");
+              invalidate();
+            }}
+          />
           New workspace
         </label>
         <label className="check">
-          <input type="radio" name="spec-target" disabled={!props.workspaceId} checked={target === "current"} onChange={() => setTarget("current")} />
+          <input
+            type="radio"
+            name="spec-target"
+            disabled={!props.workspaceId}
+            checked={target === "current"}
+            onChange={() => {
+              setTarget("current");
+              invalidate();
+            }}
+          />
           Into “{props.workspaceName ?? "current workspace"}” (new folder)
         </label>
         <span className="spacer" />

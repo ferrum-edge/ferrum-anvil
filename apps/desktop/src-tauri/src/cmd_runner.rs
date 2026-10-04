@@ -67,14 +67,14 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
     // Registered before the app is read (see `DesktopState::lock`). The run's
     // task owns the entry; an early return below retires it.
     let pending = PendingEntry::register(&st.running, run_id)?;
-    let app = st.app()?;
+    let fence = st.admit_payload()?;
+    let app = fence.app.clone();
     let h2 = handle.clone();
-    let owner = app.clone();
+    let owner = fence.clone();
     let sink: anvil_runner::RunEventSink = Arc::new(move |ev: RunEvent| {
-        // Only to the window of the profile the run started under.
-        if h2.state::<DesktopState>().is_current(&owner) {
+        let _ = h2.state::<DesktopState>().try_deliver_payload(&owner, || {
             let _ = h2.emit("run-event", &ev);
-        }
+        });
     });
     let settings = RunSettings {
         environment: input.environment_id.as_deref().map(id).transpose()?,
@@ -103,14 +103,20 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
         };
         drop(pending);
         let ev = match res {
-            // Another profile is open: its window shows nothing of this one.
-            _ if !handle.state::<DesktopState>().is_current(&app) => {
-                RunFinished { run_id: run_id.to_string(), error: Some("the profile the run was started in was closed".into()) }
-            }
             Ok(r) => RunFinished { run_id: r.run_id.to_string(), error: None },
             Err(err) => RunFinished { run_id: run_id.to_string(), error: Some(e(err)) },
         };
-        let _ = handle.emit("run-finished", ev);
+        tauri::async_runtime::spawn_blocking(move || {
+            let st = handle.state::<DesktopState>();
+            if st.deliver_payload(&fence, || {
+                let _ = handle.emit("run-finished", ev);
+            }).is_err() {
+                let _ = handle.emit("run-finished", RunFinished {
+                    run_id: run_id.to_string(),
+                    error: Some("LOCKED".into()),
+                });
+            }
+        });
     });
     Ok(key)
 }

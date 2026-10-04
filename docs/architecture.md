@@ -62,6 +62,37 @@ CLI (`anvil`) = same anvil-app services without a webview.
   changed while it ran; writes that return no data use `blocking_unchecked`,
   so a committed write is not reported as `LOCKED`.
 
+- **Payload enqueue shares the lock boundary.** Sends, interactive sessions,
+  collection-run events, effective-request previews and MCP discovery capture
+  `state::PayloadFence`: the admitted unlocked `Arc<App>` and lock epoch.
+  `payload_gate` excludes payload serialization/enqueue while lock bumps the
+  epoch, revokes grants and drops the key, or while a profile is published.
+  An old fence remains invalid after unlock, even for the same profile.
+  Transport callbacks use `try_deliver_payload` and drop on contention rather
+  than blocking engine cache cleanup. Final views and detailed errors use
+  `deliver_payload` only after work/history finalization; no async wait holds
+  the gate. The native execution/session commands use an explicit Tauri IPC
+  responder under this gate, preserving their existing UI argument/result
+  types. A check followed by a generated async command return would leave
+  reply enqueue outside the boundary.
+- **Session cancellation cannot wait behind its own send.** Each open slot
+  has an independent cancellation token. Lock signals it before acquiring
+  the slot, interrupting both a slot wait and a bounded command-queue send.
+  The engine abort then acquires the released slot. The existing cancellation
+  grace, watcher polling, bounded transcripts and history policy remain in
+  force. A suppressed session finalization still sends its execution id,
+  `view: null` and scalar `LOCKED` status; run completion may send its id and
+  scalar status too. Load progress metrics/report holding keep their existing
+  scalar/redacted reporting policy.
+
+The boundary is native enqueue, before the actual lock operation can finish.
+It cannot retract a payload already queued to the webview before that boundary.
+No renderer predicate supplies the security fence. Gate acquisition precedes
+profile/key/grant access; finalizers complete engine/history work before taking
+it. Engine callbacks only try the gate, so a cache owner cannot block waiting
+for a lock operation that is clearing that cache. The existing PEM grant claim
+and revocation mutex/transaction ordering is unchanged.
+
 ### Store work
 
 Each profile has one SQLite connection, and a long transaction (an import, a

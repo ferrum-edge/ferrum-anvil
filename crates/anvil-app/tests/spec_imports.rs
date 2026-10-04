@@ -1315,3 +1315,51 @@ fn a_reimported_record_from_before_folder_and_request_units_asks_before_changing
     assert!(url.ends_with("/users/read"), "declined: the folder is kept: {url}");
     assert!(!matches!(auth, AuthConfig::ApiKey { .. }), "{auth:?}");
 }
+
+#[test]
+fn reviewed_import_verifies_the_snapshot_and_does_not_reopen_its_source() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let path = root.path().join("source.txt");
+    std::fs::write(&path, CURL).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let opts = ImportOptions::default();
+    let binding = app.spec_preview(&bytes, &opts).unwrap().binding;
+    assert_eq!(app.spec_preview(&bytes, &opts).unwrap().binding, binding);
+    // Mutate the on-disk inode after the native read. Apply owns `bytes`, and
+    // stores exactly that snapshot, without a digest-then-reread interval.
+    std::fs::write(&path, b"curl https://unreviewed.invalid").unwrap();
+    let done = app.spec_import_reviewed(
+        &bytes,
+        "source.txt",
+        &opts,
+        SpecTarget::NewWorkspace,
+        &binding,
+    ).unwrap();
+    assert_eq!(app.spec_original(&done.import_id).unwrap(), bytes);
+    let before = app.backup_contents().unwrap();
+    let changed = std::fs::read(&path).unwrap();
+    assert!(app.spec_import_reviewed(
+        &changed,
+        "source.txt",
+        &opts,
+        SpecTarget::NewWorkspace,
+        &binding,
+    ).is_err());
+    assert_eq!(app.backup_contents().unwrap(), before);
+}
+
+#[test]
+fn reviewed_plan_changes_when_source_body_fields_named_like_metadata_change() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let opts = ImportOptions::default();
+    let bytes = br#"curl https://example.invalid
+        -H 'Content-Type: application/json' -d '{"created_at":"reviewed"}'"#;
+    let changed = br#"curl https://example.invalid
+        -H 'Content-Type: application/json' -d '{"created_at":"unreviewed"}'"#;
+    let binding = app.spec_preview(bytes, &opts).unwrap().binding;
+    let other = app.spec_preview(changed, &opts).unwrap().binding;
+    assert_ne!(binding.source_sha256, other.source_sha256);
+    assert_ne!(binding.plan_sha256, other.plan_sha256);
+}

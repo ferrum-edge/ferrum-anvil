@@ -2,14 +2,14 @@
 //! refuses while locked; secrets never cross into the webview except where
 //! the user explicitly typed them (they are stored and only references return).
 
-use crate::state::{DesktopState, ImportGate, PendingEntry, cancel_pending};
+use crate::state::{DesktopState, ImportGate, PayloadFence, PendingEntry, cancel_pending};
 use anvil_app::cleanup::StorageCleanupRecord;
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::Unlock;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
-use anvil_domain::events::ExecutionEvent;
+use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::request::RequestSpec;
@@ -541,12 +541,159 @@ pub fn body_view(raw: &[u8], decoded: Option<&[u8]>, content_type: Option<&str>)
     }
 }
 
-#[tauri::command]
-pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) -> R<anvil_engine::preview::EffectiveRequest> {
-    // Taken before the app is read: a preview built across a lock or a
-    // profile switch is not returned (as in `blocking`).
-    let seen = st.epoch();
-    let app = st.app()?;
+/// These payload replies bypass the generated async responder: its enqueue
+/// happens after the command returns and cannot share our lock boundary.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendArgs {
+    input: SendInput,
+    execution_id: String,
+}
+
+#[derive(Deserialize)]
+struct PreviewArgs {
+    input: SendInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpArgs {
+    input: McpDiscoverInput,
+    execution_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionArgs {
+    execution_id: String,
+    command: SessionCommand,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelSessionArgs {
+    execution_id: String,
+}
+
+pub(crate) fn with_execution_commands(
+    other: impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        if matches!(
+            invoke.message.command(),
+            "send_request"
+                | "effective_request"
+                | "mcp_discover_tools"
+                | "session_open"
+                | "session_send"
+                | "session_cancel"
+        ) {
+            execution_command(invoke);
+            true
+        } else {
+            other(invoke)
+        }
+    }
+}
+
+pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
+    match invoke.message.command() {
+        "send_request" => payload_reply(invoke, |handle, fence, args: SendArgs| async move {
+            send_request(handle, fence, args.input, args.execution_id).await
+        }),
+        "effective_request" => payload_reply(invoke, |_, fence, args: PreviewArgs| async move {
+            effective_request(fence, args.input).await
+        }),
+        "mcp_discover_tools" => payload_reply(invoke, |handle, fence, args: McpArgs| async move {
+            mcp_discover_tools(handle, fence, args.input, args.execution_id).await
+        }),
+        "session_open" => payload_reply(invoke, |handle, fence, args: SendArgs| async move {
+            crate::cmd_sessions::session_open(handle, fence, args.input, args.execution_id).await
+        }),
+        "session_send" => payload_reply(invoke, |handle, _, args: SessionArgs| async move {
+            crate::cmd_sessions::session_send(
+                &handle.state::<DesktopState>(),
+                args.execution_id,
+                args.command,
+            ).await
+        }),
+        "session_cancel" => payload_reply(invoke, |handle, _, args: CancelSessionArgs| async move {
+            crate::cmd_sessions::session_cancel(
+                &handle.state::<DesktopState>(),
+                args.execution_id,
+            ).await
+        }),
+        _ => invoke.resolver.reject("unknown execution command"),
+    }
+}
+
+fn payload_reply<A, T, F, Fut>(invoke: tauri::ipc::Invoke, work: F)
+where
+    A: serde::de::DeserializeOwned + Send + 'static,
+    T: Serialize + Send + 'static,
+    F: FnOnce(AppHandle, PayloadFence, A) -> Fut + Send + 'static,
+    Fut: Future<Output = R<T>> + Send + 'static,
+{
+    let args = match invoke.message.payload() {
+        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value::<A>(value.clone()),
+        _ => {
+            invoke.resolver.reject("expected JSON execution arguments");
+            return;
+        }
+    };
+    let args = match args {
+        Ok(args) => args,
+        Err(err) => {
+            invoke.resolver.reject(err.to_string());
+            return;
+        }
+    };
+    let handle = invoke.message.webview().app_handle().clone();
+    let fence = match handle.state::<DesktopState>().admit_payload() {
+        Ok(fence) => fence,
+        Err(err) => {
+            invoke.resolver.reject(err);
+            return;
+        }
+    };
+    let resolver = invoke.resolver;
+    tauri::async_runtime::spawn(async move {
+        let out = work(handle.clone(), fence.clone(), args).await;
+        // Serialization AND the real IPC responder run under the boundary.
+        // No payload or detailed error escapes in a future's return value.
+        // A spec commit can hold the synchronous gate while writing to the
+        // store. Wait for final delivery on a blocking worker, never on an
+        // async runtime thread that a session finalizer might need.
+        tauri::async_runtime::spawn_blocking(move || {
+            reply_payload(&handle.state::<DesktopState>(), &fence, out, |out| {
+                resolver.respond(out.map_err(Into::into));
+            });
+        });
+    });
+}
+
+/// `reply` serializes and enqueues synchronously. A stale result's detailed
+/// error is payload too, so only the scalar LOCKED code may be returned.
+fn reply_payload<T>(
+    st: &DesktopState,
+    fence: &PayloadFence,
+    out: R<T>,
+    reply: impl FnOnce(R<T>),
+) {
+    let mut reply = Some(reply);
+    let mut out = Some(out);
+    if st.deliver_payload(fence, || {
+        reply.take().expect("one reply")(out.take().expect("one result"));
+    }).is_err() {
+        reply.expect("undelivered reply")(Err("LOCKED".into()));
+    }
+}
+
+async fn effective_request(
+    fence: PayloadFence,
+    input: SendInput,
+) -> R<anvil_engine::preview::EffectiveRequest> {
+    let app = fence.app;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
@@ -554,31 +701,30 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
     let builder = app.clone();
     let ctx = anvil_app::off_runtime(move || builder.build_context(rid, &ws, input.spec, &opts)).await.map_err(e)?;
     let preview = app.engine.preview(&ctx).map_err(|f| format!("{:?}: {}", f.kind, f.message))?;
-    if st.epoch() != seen {
-        return Err("LOCKED".into());
-    }
     Ok(preview)
 }
 
-#[tauri::command]
-pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<ExecutionView> {
+async fn send_request(
+    handle: AppHandle,
+    fence: PayloadFence,
+    input: SendInput,
+    execution_id: String,
+) -> R<ExecutionView> {
+    let st = handle.state::<DesktopState>();
     let exec_id = id(&execution_id)?;
-    // Registered before the app is read, so a lock from now on either refuses
-    // `app()` or cancels this token. Retired when dropped, also if the send
-    // fails early or panics.
+    // Register, then validate the admission again: a lock before registration
+    // refuses the fence, and one after validation cancels the registered token.
+    // Retired when dropped, also if the send fails early or panics.
     let pending = crate::state::PendingEntry::register(&st.running, exec_id)?;
-    let app = st.app()?;
+    st.check_payload(&fence)?;
+    let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
     let h2 = handle.clone();
-    let owner = app.clone();
+    let owner = fence.clone();
     let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
-        // Only to the window of the profile the send started under.
-        if !h2.state::<DesktopState>().is_current(&owner) {
-            return;
-        }
         if matches!(ev, ExecutionEvent::BodyProgress { .. }) {
             let mut l = last_progress.lock();
             if l.elapsed() < std::time::Duration::from_millis(100) {
@@ -586,7 +732,9 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
             }
             *l = std::time::Instant::now();
         }
-        let _ = h2.emit("execution-event", &ev);
+        let _ = h2.state::<DesktopState>().try_deliver_payload(&owner, || {
+            let _ = h2.emit("execution-event", &ev);
+        });
     });
     let events = EventCtx { execution_id: exec_id, sink: Some(sink) };
     let opts = SendOptions {
@@ -621,14 +769,16 @@ pub struct McpDiscoverInput {
 /// request per listed tool beside it. Canceled like a send (by
 /// `cancel_execution` with `execution_id`, or a lock); the list is recorded
 /// in history like a send.
-#[tauri::command]
-pub async fn mcp_discover_tools(
-    st: State<'_, DesktopState>,
+async fn mcp_discover_tools(
+    handle: AppHandle,
+    fence: PayloadFence,
     input: McpDiscoverInput,
     execution_id: String,
 ) -> R<anvil_app::mcp::McpDiscovered> {
+    let st = handle.state::<DesktopState>();
     let pending = PendingEntry::register(&st.running, id(&execution_id)?)?;
-    let app = st.app()?;
+    st.check_payload(&fence)?;
+    let app = fence.app;
     let ws = id(&input.workspace_id)?;
     let rid = id(&input.request_id)?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
@@ -1070,12 +1220,79 @@ fn ingest_pkcs12(st: &DesktopState, grant: &str, workspace_id: &str, label: &str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::state::Running;
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    pub(crate) fn payload_view() -> ExecutionView {
+        let record = serde_json::from_value(serde_json::json!({
+            "id": Id::new(), "schema_version": anvil_domain::SCHEMA_VERSION,
+            "adapter_version": "test", "catalog_version": "test",
+            "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:00Z",
+            "prepared": {
+                "protocol": "http", "method": "GET", "url": "https://payload-canary.invalid",
+                "headers": [], "body_bytes": 0, "auth_label": "none",
+                "tls_verification_enabled": true,
+                "settings": anvil_domain::settings::EffectiveSettings::default(),
+                "inferred": [], "omitted_secrets": []
+            },
+            "attempts": [], "assertion_results": [], "extracted": [], "findings": [],
+            "outcome": {
+                "transport": "completed", "application": "success", "assertions": "not_run",
+                "protocol_status": { "protocol": "none" }, "dispatch": "sent",
+                "warnings": [], "summary": "payload-canary"
+            }
+        })).unwrap();
+        ExecutionView { record, body: body_view(b"payload-canary", None, None) }
+    }
+
+    #[test]
+    fn paused_execution_reply_drops_view_and_detailed_error_after_lock() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, _) = create(&st, "reply");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let fence = st.admit_payload().unwrap();
+        for out in [Ok(payload_view()), Err("payload-canary error".into())] {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let worker_st = &st;
+                let worker_fence = &fence;
+                let worker = scope.spawn(move || {
+                    ready_tx.send(()).unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    let result = parking_lot::Mutex::new(None);
+                    reply_payload(worker_st, worker_fence, out, |out| {
+                        *result.lock() = Some(serde_json::to_value(out).unwrap());
+                    });
+                    result.into_inner().unwrap()
+                });
+                ready_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                st.lock();
+                release_tx.send(()).unwrap();
+                let reply = worker.join().unwrap();
+                assert_eq!(reply, serde_json::json!({ "Err": "LOCKED" }));
+            });
+        }
+    }
+
+    #[test]
+    fn unchanged_unlocked_execution_reply_delivers_the_full_view() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, _) = create(&st, "reply");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let fence = st.admit_payload().unwrap();
+        let received = parking_lot::Mutex::new(None);
+        reply_payload(&st, &fence, Ok(payload_view()), |out| {
+            *received.lock() = Some(out.unwrap().body.text);
+        });
+        assert_eq!(received.into_inner(), Some(Some("payload-canary".into())));
+    }
 
     #[test]
     fn private_key_ingestion_paused_before_write_is_abandoned_after_lock_and_reunlock() {

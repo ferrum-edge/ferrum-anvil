@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- Desktop session and execution payloads are admitted under an unlocked
+  profile and lock epoch, with event/reply enqueue coordinated with lock and
+  profile publication. Late transcripts, final bodies and detailed errors
+  are dropped after lock, lock/unlock or profile switch; cancellation can
+  interrupt a session send waiting on its bounded command queue
+  (GHSA-mg45-vx3j-wmq8).
+- Native spec import/reimport approvals bind exact source bytes and the
+  canonical reviewed graph/plan to the desktop instance, profile, epoch,
+  source grant and destination. Apply verifies an owned native snapshot and
+  persists that same snapshot; same-inode edits and stale-plan approvals
+  are refused before writes (GHSA-3793-f3j3-mjpr).
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
   the filesystem. Missing tools, unsupported formats, malformed metadata,

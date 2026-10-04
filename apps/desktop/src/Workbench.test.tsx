@@ -629,6 +629,11 @@ describe("imports refresh the selected workspace and its open tabs", () => {
           ),
         ],
         spec_preview: () => ({
+          binding: { source_sha256: "source", plan_sha256: "plan" },
+          approval: {
+            binding: { source_sha256: "source", plan_sha256: "plan" },
+            scope: "native-scope",
+          },
           detected: { kind: "openapi", dialect: "openapi", syntax: "json" },
           report: emptySpecReport,
           folders: 1,
@@ -675,6 +680,11 @@ describe("imports refresh the selected workspace and its open tabs", () => {
     async () => {
       backend({
         spec_preview: () => ({
+          binding: { source_sha256: "source", plan_sha256: "plan" },
+          approval: {
+            binding: { source_sha256: "source", plan_sha256: "plan" },
+            scope: "native-scope",
+          },
           detected: { kind: "openapi", dialect: "openapi", syntax: "json" },
           report: emptySpecReport,
           folders: 1,

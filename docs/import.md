@@ -87,6 +87,57 @@ same or another workspace, therefore creates an independent copy and never
 moves or overwrites an earlier import's requests. An import that would still
 overwrite a stored object is refused.
 
+### Native review/apply contract
+
+The desktop requires review binding for both pasted and file sources:
+
+| Command | Required input | Result |
+| --- | --- | --- |
+| `spec_preview` | `input`, `options`, `target` | Existing preview fields plus `binding` and `approval` |
+| `spec_import` | Same `input`, `options`, `target`, and returned `approval` | `SpecImported` |
+| `spec_reimport_plan` | `importId`, `input` | `{ plan, approval }` |
+| `spec_reimport_apply` | Same `importId`, `input`, `decisions`, returned `approval` | Applied count |
+
+`approval` is `{ binding: { source_sha256, plan_sha256 }, scope }`.
+`decisions` keeps the reimport overwrite/delete request ids and scope keys.
+A missing binding fails IPC decoding. The renderer passes the native approval
+unchanged; it never establishes the digest from a renderer assertion alone.
+The source digest covers every input byte, including whitespace. The plan
+hash covers the canonical parsed graph and all import options; reimport also
+covers the current source record, requests, scoped configuration, generated
+baseline and complete proposed plan. Only generated object timestamps are
+normalized; stored metadata and similarly named fields in request bodies
+remain bound. New import ids use a fresh independent namespace when persisted,
+as before; review uses the deterministic namespace for a comparable graph.
+
+The scope digest binds the native desktop process instance, profile id,
+lock epoch, grant token (or pasted source name), operation and destination
+workspace/import id. Lock, lock/unlock, profile switch, desktop restart,
+choosing another grant or changing the destination invalidates old approval.
+Existing grant expiry and revocation still apply. The UI invalidates its
+preview after source/options/destination changes and ignores a late preview
+for an earlier edit; apply refusal requires another preview.
+
+Apply reads the grant once into an owned bounded byte buffer, recomputes and
+checks native source/plan digests, and prepares the parsed graph from that
+buffer. New import parses the same buffer into its fresh id namespace;
+reimport persists the same parsed result it verified. There is no further
+file read between digest verification and mutation. Source I/O and parsing
+run outside the desktop delivery gate. The final scope/fence check and commit
+run synchronously on the blocking worker under that gate, so a lock/profile
+switch either wins before writes or follows the committed transaction.
+Reimport's transaction still rechecks the entire stored baseline, including
+full provenance, before writing.
+
+There is no retained preview cache, opaque token pool or approval-byte store
+to expire or evict. Approvals are stateless: an unchanged new import can be
+repeated within the same valid scope, creating another independent copy as
+before. Reimport approval becomes stale when its bound stored baseline is
+changed by an apply or a user edit. Trusted byte-owning CLI/internal services
+continue to use `App::spec_import`/`App::spec_reimport_apply`; native IPC uses
+only the reviewed preparation/apply APIs. No format, normalization, resource
+limit, grant-purpose or destination transaction policy changes here.
+
 The import is atomic. A restore checkpoint is taken first; then the new
 workspace or root folder, the original bytes (a stored attachment), folders,
 requests, environments and the source record are written in one
