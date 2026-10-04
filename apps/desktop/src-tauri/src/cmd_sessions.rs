@@ -196,15 +196,9 @@ pub(crate) async fn session_open(
         built => built.map_err(e)?,
     };
     let h2 = handle.clone();
-    let sink = session_sink(
-        handle.clone(),
-        fence.clone(),
-        execution_id.clone(),
-        slot.clone(),
-        move |ev| {
-            let _ = h2.emit("execution-event", ev);
-        },
-    );
+    let sink = session_sink(handle.clone(), fence.clone(), execution_id.clone(), slot.clone(), move |ev| {
+        let _ = h2.emit("execution-event", ev);
+    });
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let Some((session, canceled)) = pending.open(open, |session| session).await else {
         return Err(CANCELED_BEFORE_OPEN.into());
@@ -539,21 +533,15 @@ mod tests {
         let log = received.clone();
         let state = st.clone();
         let (message_tx, mut message_rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = session_sink(
-            st.clone(),
-            fence.clone(),
-            execution_id.clone(),
-            slot.clone(),
-            move |packet| {
-                assert!(state.sessions.try_lock().is_none(), "enqueue must exclude registration");
-                let message = matches!(&packet.event, ExecutionEvent::Message { .. });
-                let value = serde_json::to_value(packet).unwrap();
-                log.lock().push(value.clone());
-                if message {
-                    message_tx.send(value).unwrap();
-                }
-            },
-        );
+        let sink = session_sink(st.clone(), fence.clone(), execution_id.clone(), slot.clone(), move |packet| {
+            assert!(state.sessions.try_lock().is_none(), "enqueue must exclude registration");
+            let message = matches!(&packet.event, ExecutionEvent::Message { .. });
+            let value = serde_json::to_value(packet).unwrap();
+            log.lock().push(value.clone());
+            if message {
+                message_tx.send(value).unwrap();
+            }
+        });
         let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("tcp://{}", peer.local_addr().unwrap());
         let mut spec = RequestSpec::http("GET", &url);
@@ -601,13 +589,9 @@ mod tests {
         sink(ExecutionEvent::BodyProgress { execution_id: id(&execution_id).unwrap(), bytes: 999 });
         assert_eq!(received.lock().len(), count, "retired callbacks cannot enqueue under the same epoch");
         let log = received.clone();
-        let fresh = session_sink(
-            st.clone(),
-            fence,
-            execution_id.clone(),
-            replacement.slot.clone(),
-            move |packet| log.lock().push(serde_json::to_value(packet).unwrap()),
-        );
+        let fresh = session_sink(st.clone(), fence, execution_id.clone(), replacement.slot.clone(), move |packet| {
+            log.lock().push(serde_json::to_value(packet).unwrap())
+        });
         fresh(ExecutionEvent::BodyProgress { execution_id: id(&execution_id).unwrap(), bytes: 64 });
         {
             let received = received.lock();
