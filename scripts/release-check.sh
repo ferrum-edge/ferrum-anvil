@@ -9,7 +9,8 @@
 # archive, or a directory. Installers/archives are unpacked and every
 # executable image inside (ELF, Mach-O, PE: programs and shared libraries) is
 # scanned. Type 2 AppImages require trusted python3 and unsquashfs tools on
-# PATH; inspection reads their ELF/SquashFS bytes without executing the image.
+# PATH (unsquashfs >= 4.5.1); inspection reads their ELF/SquashFS bytes without
+# executing the image.
 #
 # Checks
 #   1. graph    `cargo tree` for anvil-desktop with the release feature set
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
     --runtime-probe) probe=1; shift ;;
     --probe-seconds) probe_seconds="${2:-20}"; shift 2 ;;
     --report) report="${2:-}"; shift 2 ;;
+    --) shift; artifacts+=("$@"); break ;;
     -h|--help) usage ;;
     -*) echo "unknown option $1" >&2; usage ;;
     *) artifacts+=("$1"); shift ;;
@@ -94,7 +96,18 @@ json_items=()
 say() { printf '%s\n' "$*"; }
 fail() { say "FAIL  $*"; failures=$((failures + 1)); }
 bad_input() { say "ERROR $*"; inconclusive=$((inconclusive + 1)); }
-json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+json_str() {
+  local value="$1" char i LC_ALL=C
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      \\) printf '%s' '\\' ;;
+      '"') printf '%s' '\"' ;;
+      [[:cntrl:]]) printf '\\u%04x' "'$char" ;;
+      *) printf '%s' "$char" ;;
+    esac
+  done
+}
 
 # ------------------------------------------------------------ 1. graph
 graph_result="skipped"
@@ -199,10 +212,70 @@ except (OSError, ValueError, struct.error) as error:
 PY
 }
 
+# 4.5.1 fixes extraction outside the destination (CVE-2021-41072).
+# https://github.com/plougher/squashfs-tools/blob/master/CHANGES.md
+# Require a release version banner from the trusted tool; never infer a version
+# from extraction success or accept an unknown/pre-release version.
+appimage_extractor_version() {
+  local banner rc=0
+  # 4.5.1's parse_options exits 1 when -version has no filesystem argument.
+  # https://github.com/plougher/squashfs-tools/blob/4.5.1/squashfs-tools/unsquashfs.c
+  banner="$(LC_ALL=C unsquashfs -version 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0|1) ;;
+    *) echo "trusted unsquashfs >= 4.5.1 required: version query failed" >&2; return 1 ;;
+  esac
+  python3 -I - "$banner" <<'PY'
+import re
+import sys
+
+lines = sys.argv[1].splitlines()
+number = r"(0|[1-9][0-9]{0,3})"
+match = re.fullmatch(
+    rf"unsquashfs version {number}\.{number}(?:\.{number})? \([^()]+\)",
+    lines[0] if lines else "",
+)
+if match is None or tuple(int(part or 0) for part in match.groups()) < (4, 5, 1):
+    print("trusted unsquashfs >= 4.5.1 required: unsupported or unparseable version", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# find -P never follows extracted links. Also reject escaping links, including
+# AppRun, before a file test or an explicit probe could follow one onto the host.
+appimage_tree_safe() {
+  python3 -I - "$1" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+try:
+    root = Path(sys.argv[1]).resolve(strict=True)
+
+    def walk_error(error):
+        raise error
+
+    for directory, directories, files in os.walk(root, followlinks=False, onerror=walk_error):
+        for name in directories + files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                target = path.resolve()
+                if os.path.commonpath((root, target)) != str(root):
+                    raise ValueError("symlink escapes the extraction directory")
+    if not (root / "AppRun").is_file():
+        raise ValueError("AppImage has no AppRun")
+except (OSError, RuntimeError, ValueError) as error:
+    print(f"AppImage extraction: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Unpack an artifact into $2 (a directory); print nothing on success.
 unpack() {
-  local a out="$2"
-  a="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" # absolute: some branches cd
+  local a="$1" out="$2"
+  # Prefix relative arguments without command substitution, which would strip
+  # trailing newlines from directory names. Absolute paths cannot become options.
+  case "$a" in /*) ;; *) a="$PWD/$a" ;; esac
   mkdir -p "$out"
   case "$a" in
     *.dmg)
@@ -235,11 +308,12 @@ unpack() {
     *.AppImage)
       command -v python3 >/dev/null || { echo "trusted python3 required for $a" >&2; return 1; }
       command -v unsquashfs >/dev/null || { echo "trusted unsquashfs (squashfs-tools) required for $a" >&2; return 1; }
+      appimage_extractor_version || return 1
       local offset
       offset="$(appimage_offset "$a")" || return 1
       unsquashfs -no-progress -no-xattrs -strict-errors -d "$out/squashfs-root" \
         -o "$offset" "$a" >/dev/null || return 1
-      [ -f "$out/squashfs-root/AppRun" ] || { echo "AppImage has no AppRun: $a" >&2; return 1; } ;;
+      appimage_tree_safe "$out/squashfs-root" || return 1 ;;
     *.msi)
       command -v powershell >/dev/null || command -v pwsh >/dev/null || { echo "Windows msiexec required for $a" >&2; return 1; }
       local ps; ps="$(command -v pwsh || command -v powershell)"
@@ -298,8 +372,12 @@ runtime_probe() { # $1 = executable, $2 = optional directory whose leftover proc
   wait "$pid" 2>/dev/null || true
   # A launcher that did not exec the app leaves it running from $tree (the probe's own unpack directory).
   if [ -n "$tree" ] && command -v pkill >/dev/null; then pkill -KILL -f -- "$tree/" 2>/dev/null || true; fi
-  local profiles=0
-  if [ -d "$data/profiles" ]; then profiles="$(find "$data/profiles" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"; fi
+  local profiles=0 profile
+  if [ -d "$data/profiles" ]; then
+    while IFS= read -r -d '' profile; do
+      profiles=$((profiles + 1))
+    done < <(find -P "$data/profiles" -mindepth 1 -maxdepth 1 -print0)
+  fi
   if [ -n "$served" ]; then
     say "FAIL  probe: WebDriver endpoint answered HTTP $served on 127.0.0.1:$port"; return 1
   fi
@@ -318,24 +396,26 @@ idx=0
 for a in ${artifacts[@]+"${artifacts[@]}"}; do
   idx=$((idx + 1))
   say "== artifact: $a"
-  if [ ! -e "$a" ]; then bad_input "$a does not exist"; continue; fi
+  path="$a"
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+  if [ ! -e "$path" ]; then bad_input "$a does not exist"; continue; fi
   dir="$work/a$idx"
   files=()
   # Installers that are themselves executables (NSIS, and an AppImage, whose
   # ELF runtime carries the app in a squashfs payload) are unpacked instead.
-  if [ -f "$a" ] && is_exe "$a" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe|*.AppImage) false ;; *) true ;; esac; then
-    files=("$a")
+  if [ -f "$path" ] && is_exe "$path" && case "$a" in *-setup.exe|*_setup.exe|*.nsis.exe|*.AppImage) false ;; *) true ;; esac; then
+    files=("$path")
   else
-    if [ -d "$a" ]; then
-      dir="$a" # a directory or an .app bundle: scan in place
+    if [ -d "$path" ]; then
+      dir="$path" # a directory or an .app bundle: scan in place
     else
-      rc=0; unpack "$a" "$dir" || rc=$?
+      rc=0; unpack "$path" "$dir" || rc=$?
       if [ "$rc" = 2 ]; then bad_input "$a: unsupported artifact type"; continue; fi
       if [ "$rc" != 0 ]; then bad_input "$a: could not unpack"; continue; fi
     fi
-    while IFS= read -r f; do
+    while IFS= read -r -d '' f; do
       if is_exe "$f"; then files+=("$f"); fi
-    done < <(find "$dir" -type f 2>/dev/null)
+    done < <(find -P "$dir" -type f -print0 2>/dev/null)
   fi
   if [ ${#files[@]} -eq 0 ]; then bad_input "$a: no executable images found"; continue; fi
 

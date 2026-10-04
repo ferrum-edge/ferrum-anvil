@@ -8,12 +8,14 @@ offset/extraction request. SquashFS payloads are real compressed filesystems.
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import struct
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,10 +23,32 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CHECKER = ROOT / "scripts/release-check.sh"
 
 
+def require_github_hosted():
+    if (os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
+        raise RuntimeError(
+            "release checker fixtures require GITHUB_ACTIONS=true and "
+            "RUNNER_ENVIRONMENT=github-hosted"
+        )
+
+
+def hosted_subprocess(command, **kwargs):
+    require_github_hosted()
+    return subprocess.run(command, **kwargs)
+
+
 def run(command, **kwargs):
-    return subprocess.run(
+    return hosted_subprocess(
         command, check=True, capture_output=True, text=True, timeout=30, **kwargs
     )
+
+
+def squashfs_payload(appdir, squashfs):
+    run([
+        "mksquashfs", str(appdir), str(squashfs), "-noappend", "-no-xattrs",
+        "-all-root", "-processors", "1", "-comp", "gzip",
+    ])
+    return squashfs.read_bytes()
 
 
 def data_runtime(elf_class=2, endian="<", machine=62, section_last=False):
@@ -69,6 +93,7 @@ def data_runtime(elf_class=2, endian="<", machine=62, section_last=False):
 class ReleaseCheckAppImage(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        require_github_hosted()
         for tool in ("gcc", "mksquashfs", "unsquashfs", "python3", "curl"):
             if shutil.which(tool) is None:
                 raise RuntimeError(f"hosted fixture dependency missing: {tool}")
@@ -83,7 +108,10 @@ class ReleaseCheckAppImage(unittest.TestCase):
         cls.native_runtime = bytearray(runtime.read_bytes())
         cls.native_runtime[8:11] = b"AI\x02"
         cls.payloads = {}
-        for kind in ("clean", "forbidden", "foreign", "no-executables", "no-apprun"):
+        for kind in (
+            "clean", "forbidden", "forbidden-newline-file", "forbidden-newline-dir",
+            "clean-newline", "foreign", "no-executables", "no-apprun",
+        ):
             appdir = cls.fixture_root / kind
             (appdir / "usr/bin").mkdir(parents=True)
             if kind != "no-apprun":
@@ -106,15 +134,19 @@ class ReleaseCheckAppImage(unittest.TestCase):
             else:
                 shutil.copyfile(desktop, executable)
             executable.chmod(0o755)
-            if kind == "forbidden":
-                (appdir / "usr/lib").mkdir()
-                (appdir / "usr/lib/libhooks.so").write_bytes(b"\x7fELF\0/wdio/eval\0")
+            libraries = {
+                "forbidden": "usr/lib/libhooks.so",
+                "forbidden-newline-file": "usr/lib/libhooks\n.so",
+                "forbidden-newline-dir": "usr/\n/libhooks.so",
+                "clean-newline": "usr/lib/clean\n.so",
+            }
+            if kind in libraries:
+                library = appdir / libraries[kind]
+                library.parent.mkdir(parents=True)
+                marker = b"ANVIL_DATA_DIR" if kind == "clean-newline" else b"/wdio/eval"
+                library.write_bytes(b"\x7fELF\0" + marker + b"\0")
             squashfs = cls.fixture_root / f"{kind}.squashfs"
-            run([
-                "mksquashfs", str(appdir), str(squashfs), "-noappend", "-no-xattrs",
-                "-all-root", "-processors", "1", "-comp", "gzip",
-            ])
-            cls.payloads[kind] = squashfs.read_bytes()
+            cls.payloads[kind] = squashfs_payload(appdir, squashfs)
 
     def setUp(self):
         self.case_temp = tempfile.TemporaryDirectory(prefix="release-check-case-")
@@ -143,8 +175,9 @@ class ReleaseCheckAppImage(unittest.TestCase):
     def check(self, image, expected, *options, env=None, cwd=None):
         report = self.case_root / "report.json"
         report.unlink(missing_ok=True)
-        before = image.read_bytes(), stat.S_IMODE(image.stat().st_mode)
-        result = subprocess.run(
+        image_path = image if image.is_absolute() else (cwd or self.case_root) / image
+        before = image_path.read_bytes(), stat.S_IMODE(image_path.stat().st_mode)
+        result = hosted_subprocess(
             ["/bin/bash", str(CHECKER), "--no-graph", "--report", str(report),
              *options, str(image)],
             env=self.env if env is None else env,
@@ -154,7 +187,7 @@ class ReleaseCheckAppImage(unittest.TestCase):
         output = result.stdout + result.stderr
         # Check this first so an execution regression is explicit even if exit/status fails.
         self.assertFalse(self.runtime_sentinel.exists(), output)
-        self.assertEqual(before, (image.read_bytes(), stat.S_IMODE(image.stat().st_mode)))
+        self.assertEqual(before, (image_path.read_bytes(), stat.S_IMODE(image_path.stat().st_mode)))
         self.assertEqual(result.returncode, expected, output)
         evidence = json.loads(report.read_text())
         self.assertEqual(evidence["graph"], "skipped")
@@ -207,6 +240,95 @@ class ReleaseCheckAppImage(unittest.TestCase):
         self.assertIn("/wdio/eval", evidence["artifacts"][0]["hits"])
         self.assert_no_payload_execution()
 
+    def test_newline_filenames_and_directories_cannot_hide_hook_images(self):
+        for payload in ("forbidden-newline-file", "forbidden-newline-dir"):
+            with self.subTest(payload=payload):
+                evidence, output = self.check(self.image(payload=payload), 1)
+                self.assertIn("contains test-only strings", output)
+                self.assertEqual(evidence["artifacts"][0]["executables"], 2)
+                self.assertIn("/wdio/eval", evidence["artifacts"][0]["hits"])
+                self.assert_no_payload_execution()
+
+    def test_clean_newline_filename_is_scanned(self):
+        evidence, _ = self.check(self.image(payload="clean-newline"), 0)
+        self.assertEqual(evidence["artifacts"][0]["executables"], 2)
+        self.assert_no_payload_execution()
+
+    def test_newline_directory_cannot_redirect_a_scan_to_a_host_path(self):
+        host = self.case_root / "host-hooks.so"
+        host.write_bytes(b"\x7fELF\0ANVIL_DATA_DIR\0/wdio/eval\0")
+        before = host.read_bytes()
+        # Positive control: this outside file really is an image with hook strings.
+        evidence, _ = self.check(host, 1)
+        self.assertIn("/wdio/eval", evidence["artifacts"][0]["hits"])
+        appdir = self.case_root / "newline-host-path"
+        shutil.copytree(self.fixture_root / "clean", appdir)
+        # A newline-delimited find reader would turn the suffix into /tmp/...
+        # and scan the outside hook image instead of this clean inside image.
+        inside = appdir / "\n" / str(host).lstrip("/")
+        inside.parent.mkdir(parents=True)
+        inside.write_bytes(b"\x7fELF\0ANVIL_DATA_DIR\0")
+        payload = squashfs_payload(appdir, self.case_root / "newline-host.squashfs")
+        image = self.image()
+        image.write_bytes(self.native_runtime + payload)
+        evidence, _ = self.check(image, 0)
+        self.assertEqual(evidence["artifacts"][0]["executables"], 2)
+        self.assertEqual(host.read_bytes(), before)
+        self.assert_no_payload_execution()
+
+    def test_newline_artifact_paths_and_option_like_names_are_preserved(self):
+        directory = self.case_root / "-images\n"
+        directory.mkdir()
+        image = self.image().rename(directory / '-untrusted"\\\t\nimage.AppImage')
+        for argument, cwd in (
+            (image, self.case_root),
+            (image.relative_to(self.case_root), self.case_root),
+            (Path(image.name), directory),
+        ):
+            with self.subTest(argument=str(argument)):
+                evidence, _ = self.check(argument, 0, "--", cwd=cwd)
+                self.assertEqual(evidence["artifacts"][0]["artifact"], str(argument))
+                self.assertEqual(evidence["artifacts"][0]["executables"], 1)
+                self.assert_no_payload_execution()
+
+    def test_extracted_symlinks_must_stay_in_the_appimage_tree(self):
+        host = self.case_root / "outside.so"
+        host.write_bytes((self.fixture_root / "desktop").read_bytes() + b"\0/wdio/eval\0")
+        host.chmod(0o755)
+        before = host.read_bytes()
+        for kind in ("apprun", "file", "directory", "relative"):
+            with self.subTest(kind=kind):
+                appdir = self.case_root / f"symlink-{kind}"
+                shutil.copytree(self.fixture_root / "clean", appdir)
+                if kind == "apprun":
+                    (appdir / "AppRun").unlink()
+                    (appdir / "AppRun").symlink_to(host)
+                elif kind == "directory":
+                    (appdir / "outside").symlink_to(self.case_root, target_is_directory=True)
+                else:
+                    target = host if kind == "file" else "../../../../outside.so"
+                    (appdir / "usr/bin/outside.so").symlink_to(target)
+                payload = squashfs_payload(appdir, self.case_root / f"symlink-{kind}.squashfs")
+                image = self.image()
+                image.write_bytes(self.native_runtime + payload)
+                for options in ((), ("--runtime-probe", "--probe-seconds", "1")):
+                    _, output = self.check(image, 2, *options)
+                    self.assertIn("symlink escapes the extraction directory", output)
+                    self.assertEqual(host.read_bytes(), before)
+                    self.assert_no_payload_execution()
+
+    def test_contained_apprun_symlink_remains_supported(self):
+        appdir = self.case_root / "contained-link"
+        shutil.copytree(self.fixture_root / "clean", appdir)
+        (appdir / "AppRun").rename(appdir / "usr/bin/launcher")
+        (appdir / "AppRun").symlink_to("usr/bin/launcher")
+        payload = squashfs_payload(appdir, self.case_root / "contained-link.squashfs")
+        image = self.image()
+        image.write_bytes(self.native_runtime + payload)
+        evidence, _ = self.check(image, 0)
+        self.assertEqual(evidence["artifacts"][0]["executables"], 1)
+        self.assert_no_payload_execution()
+
     def test_foreign_payload_and_empty_scan_fail_closed(self):
         for payload, message in (
             ("foreign", "no Anvil marker string"),
@@ -247,6 +369,56 @@ class ReleaseCheckAppImage(unittest.TestCase):
             with self.subTest(tool=tool):
                 _, output = self.check(self.image(), 2, env=self.restricted_path(tool))
                 self.assertIn(f"trusted {tool}", output)
+                self.assert_no_payload_execution()
+
+    def extractor_path(self, banner, status=0):
+        path = self.case_root / "extractor-tool"
+        path.mkdir(exist_ok=True)
+        extractor = path / "unsquashfs"
+        trusted = shutil.which("unsquashfs")
+        self.assertIsNotNone(trusted)
+        extractor.write_text(
+            '#!/bin/sh\n'
+            'if [ "$#" -eq 1 ] && [ "$1" = "-version" ]; then\n'
+            f'  printf "%s\\n" {shlex.quote(banner)}\n'
+            f'  exit {status}\n'
+            'fi\n'
+            'printf "extraction attempted\\n" > "$RELEASE_CHECK_EXTRACTOR_SENTINEL"\n'
+            f'exec {shlex.quote(trusted)} "$@"\n'
+        )
+        extractor.chmod(0o755)
+        return {
+            **self.env,
+            "PATH": str(path) + os.pathsep + os.environ["PATH"],
+            "RELEASE_CHECK_EXTRACTOR_SENTINEL": str(self.case_root / "extractor-ran"),
+        }
+
+    def test_old_missing_and_unparseable_extractor_versions_fail_before_extraction(self):
+        for banner, status in (
+            ("unsquashfs version 4.4 (2019/08/29)", 0),
+            ("unsquashfs version 4.5 (2021/07/22)", 1),
+            ("unsquashfs version 4.5.0 (2021/07/22)", 0),
+            ("", 0), ("", 1), ("unrecognised version", 0),
+            ("unsquashfs version 4.5.1-git (2022/03/17)", 0),
+            ("unsquashfs version 4.5.1.2 (2022/03/17)", 0),
+            ("unsquashfs version 4.5.1", 0),
+            ("unsquashfs version 4.5.1 (2022/03/17)", 2),
+        ):
+            with self.subTest(banner=banner, status=status):
+                env = self.extractor_path(banner, status)
+                _, output = self.check(self.image(), 2, env=env)
+                self.assertIn("trusted unsquashfs >= 4.5.1 required", output)
+                self.assertFalse(Path(env["RELEASE_CHECK_EXTRACTOR_SENTINEL"]).exists())
+                self.assert_no_payload_execution()
+
+    def test_supported_extractor_version_banners_allow_real_extraction(self):
+        for version, status in (("4.5.1", 1), ("4.5.1", 0), ("4.6", 1), ("4.6.1", 0)):
+            with self.subTest(version=version, status=status):
+                env = self.extractor_path(f"unsquashfs version {version} (2022/03/17)", status)
+                sentinel = Path(env["RELEASE_CHECK_EXTRACTOR_SENTINEL"])
+                sentinel.unlink(missing_ok=True)
+                self.check(self.image(), 0, env=env)
+                self.assertTrue(sentinel.exists())
                 self.assert_no_payload_execution()
 
     def test_offset_reader_ignores_untrusted_python_modules(self):
@@ -344,5 +516,29 @@ class ReleaseCheckAppImage(unittest.TestCase):
         self.assertTrue(self.desktop_sentinel.exists())
 
 
+class HostedFixturePolicy(unittest.TestCase):
+    def test_non_hosted_environments_cannot_start_fixture_subprocesses(self):
+        for actions, runner in (
+            (None, None), ("true", None), (None, "github-hosted"),
+            ("false", "github-hosted"), ("true", "self-hosted"),
+        ):
+            with self.subTest(actions=actions, runner=runner):
+                env = {}
+                if actions is not None:
+                    env["GITHUB_ACTIONS"] = actions
+                if runner is not None:
+                    env["RUNNER_ENVIRONMENT"] = runner
+                with patch.dict(os.environ, env, clear=True), patch("subprocess.run") as process:
+                    for operation in (
+                        ReleaseCheckAppImage.setUpClass,
+                        lambda: run(["gcc", "fixture.c"]),
+                        lambda: hosted_subprocess(["untrusted.AppImage", "--appimage-extract"]),
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "require GITHUB_ACTIONS=true"):
+                            operation()
+                    process.assert_not_called()
+
+
 if __name__ == "__main__":
+    require_github_hosted()
     unittest.main(verbosity=2)
