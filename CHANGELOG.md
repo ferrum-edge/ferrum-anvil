@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- Draft remediation for GHSA-6hc8-xjvq-478g retains native file and directory
+  handles for linked reads and export creation. Linked bindings require native
+  reselection after restart/lock and leaf replacement; exports refuse occupied
+  destination names. This candidate is **not qualified for release**: dependency
+  lock generation, all-platform hosted validation, replacement/persistence owner
+  decisions, and a stronger publish primitive remain pending. Windows currently
+  uses no-clobber hard-link publication and preserves its partial source file.
+  See `docs/security/file-handle-safety.md` for the concrete draft and blockers.
+
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
   the filesystem. Missing tools, unsupported formats, malformed metadata,

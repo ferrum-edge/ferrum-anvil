@@ -34,12 +34,17 @@ hex.workspace = true
 zeroize.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
+# Published, statically inspected handle-relative filesystem primitives.
+# Lock resolution is performed only by the dedicated GitHub-hosted workflow.
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
 
 [target.'cfg(unix)'.dependencies]
 # Open flags for chosen and linked files (O_NONBLOCK, O_NOCTTY, O_NOFOLLOW):
 # a FIFO or device swapped in never blocks the open, and a link swapped in is
 # not followed. The tests also make FIFOs with it.
 libc.workspace = true
+rustix = { version = "=1.1.5", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true

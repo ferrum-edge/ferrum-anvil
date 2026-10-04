@@ -38,6 +38,12 @@ fn partial_files(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+fn assert_partial_policy(dir: &Path, publications: usize) {
+    // The draft Windows no-clobber hard-link fallback deliberately preserves
+    // its source name. POSIX no-replace rename consumes the source name.
+    assert_eq!(partial_files(dir).len(), if cfg!(windows) { publications } else { 0 });
+}
+
 fn vault(root: &Path) -> (App, Id) {
     let profiles = ProfileManager::new(root);
     let (profile, key, _) = profiles.create_passphrase("PEM", "test passphrase", anvil_storage::KdfParams::testing()).unwrap();
@@ -368,15 +374,15 @@ fn reads_are_bounded_per_purpose() {
 }
 
 #[test]
-fn a_write_replaces_the_chosen_destination_and_spends_the_grant() {
+fn a_write_publishes_an_unused_destination_and_spends_the_grant() {
     let dir = tempfile::tempdir().unwrap();
-    let dest = file(dir.path(), "backup.anvil", b"old");
+    let dest = dir.path().join("backup.anvil");
     let grants = FileGrants::default();
     let g = grants.grant_write(FilePurpose::BundleExport, &dest).unwrap();
     assert_eq!(g.file_name, "backup.anvil");
     assert_eq!(grants.write(&g.token, FilePurpose::BundleExport, b"new bundle").unwrap(), 10);
     assert_eq!(std::fs::read(&dest).unwrap(), b"new bundle");
-    assert!(partial_files(dir.path()).is_empty());
+    assert_partial_policy(dir.path(), 1);
     assert_eq!(grants.write(&g.token, FilePurpose::BundleExport, b"again").unwrap_err(), GrantError::Unknown);
     assert_eq!(std::fs::read(&dest).unwrap(), b"new bundle");
 
@@ -399,7 +405,7 @@ fn a_failed_write_keeps_the_grant_for_a_retry() {
     std::fs::remove_dir(&dest).unwrap();
     grants.write(&g.token, FilePurpose::RunReportExport, b"<junit/>").unwrap();
     assert_eq!(std::fs::read(&dest).unwrap(), b"<junit/>");
-    assert!(partial_files(dir.path()).is_empty());
+    assert_partial_policy(dir.path(), 1);
 }
 
 #[test]
@@ -533,7 +539,7 @@ mod unix {
     }
 
     #[test]
-    fn a_folder_swapped_for_a_link_after_the_choice_is_refused() {
+    fn an_ancestor_swap_keeps_grants_in_the_original_selected_directory() {
         let root = tempfile::tempdir().unwrap();
         let chosen = root.path().join("chosen");
         let elsewhere = root.path().join("elsewhere");
@@ -547,32 +553,31 @@ mod unix {
         let w = grants.grant_write(FilePurpose::BundleExport, &dest).unwrap();
         std::fs::rename(&chosen, root.path().join("moved")).unwrap();
         symlink(&elsewhere, &chosen).unwrap();
-        assert_eq!(grants.read(&r.token, FilePurpose::SpecSource).unwrap_err(), GrantError::Changed);
-        assert_eq!(grants.write(&w.token, FilePurpose::BundleExport, b"bundle").unwrap_err(), GrantError::Changed);
+        assert_eq!(grants.read(&r.token, FilePurpose::SpecSource).unwrap().bytes, b"{}");
+        grants.write(&w.token, FilePurpose::BundleExport, b"bundle").unwrap();
+        assert_eq!(std::fs::read(root.path().join("moved/out.anvil")).unwrap(), b"bundle");
         assert!(!elsewhere.join("out.anvil").exists());
         assert!(partial_files(&elsewhere).is_empty());
     }
 
     #[test]
-    fn a_write_replaces_a_link_at_the_destination_instead_of_following_it() {
+    fn the_draft_write_policy_preserves_a_link_at_the_destination() {
         let dir = tempfile::tempdir().unwrap();
         let victim = file(dir.path(), "victim", b"untouched");
         let dest = dir.path().join("report.json");
         symlink(&victim, &dest).unwrap();
         let grants = FileGrants::default();
         let g = grants.grant_write(FilePurpose::LoadReportExport, &dest).unwrap();
-        grants.write(&g.token, FilePurpose::LoadReportExport, b"{\"report\":1}").unwrap();
+        assert!(matches!(grants.write(&g.token, FilePurpose::LoadReportExport, b"{\"report\":1}"), Err(GrantError::Invalid(_))));
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
-        assert!(!std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read(&dest).unwrap(), b"{\"report\":1}");
+        assert!(std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
     }
 
     #[test]
     fn an_exported_bundle_is_readable_only_by_its_owner() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let dest = file(dir.path(), "backup.anvil", b"old");
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let dest = dir.path().join("backup.anvil");
         let grants = FileGrants::default();
         let g = grants.grant_write(FilePurpose::BundleExport, &dest).unwrap();
         grants.write(&g.token, FilePurpose::BundleExport, b"bundle").unwrap();

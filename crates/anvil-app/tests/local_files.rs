@@ -610,10 +610,11 @@ fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() 
     std::fs::create_dir(&path).unwrap();
     let status = app.linked_file_status(request(&r)).unwrap();
     assert_eq!(status[0].state, LinkedFileState::Invalid);
-    assert!(status[0].problem.as_deref().unwrap().contains("no longer leads to a regular file"), "{status:?}");
+    assert!(status[0].problem.as_deref().unwrap().contains("no longer leads to the chosen regular file"), "{status:?}");
     std::fs::remove_dir(&path).unwrap();
 
-    // A folder on the path replaced by a link leads somewhere else.
+    // Renaming an ancestor cannot redirect a retained selection. The original
+    // directory remains authorized in this session, including its metadata.
     #[cfg(unix)]
     {
         let dir = canonical(files.path()).join("dir");
@@ -628,9 +629,9 @@ fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() 
         std::fs::rename(&dir, &elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
         let status = app.linked_file_status(referrer).unwrap();
-        assert_eq!(status[0].state, LinkedFileState::Invalid);
-        assert!(status[0].problem.as_deref().unwrap().contains("resolves to a different location than the one chosen"), "{status:?}");
-        assert!(app.run_dataset(&d).is_err());
+        assert_eq!(status[0].state, LinkedFileState::Bound);
+        assert!(status[0].problem.is_none());
+        assert!(app.run_dataset(&d).is_ok());
     }
 
     // Locked: nothing is reported.

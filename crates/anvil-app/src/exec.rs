@@ -124,6 +124,7 @@ pub struct StoreAttachments {
     /// Linked files chosen on this device (see `anvil_app::linked_files`);
     /// any other linked file is refused, never read.
     pub linked: Vec<String>,
+    pub(crate) linked_handles: std::collections::HashMap<String, Arc<crate::file_handles::SelectedFile>>,
 }
 
 impl AttachmentResolver for StoreAttachments {
@@ -135,7 +136,13 @@ impl AttachmentResolver for StoreAttachments {
                 .map(|b| Bytes::from(b.clone()))
                 .ok_or_else(|| format!("attachment '{file_name}' is missing from this workspace")),
             AttachmentRef::LinkedFile { path } if self.linked.contains(path) => {
-                read_bound_file(path, FilePurpose::Attachment.max_read_bytes(), "file").map(Bytes::from).map_err(|e| e.to_string())
+                if self.app_store.is_locked() {
+                    return Err(AppError::Locked.to_string());
+                }
+                let selected = self.linked_handles.get(path).ok_or_else(|| {
+                    "the linked local file needs a fresh native selection in this session; choose it again".to_string()
+                })?;
+                read_bound_file(selected, FilePurpose::Attachment.max_read_bytes(), "file").map(Bytes::from).map_err(|e| e.to_string())
             }
             AttachmentRef::LinkedFile { path } => Err(format!("the linked local file '{path}' was not chosen on this device")),
         }
@@ -232,6 +239,7 @@ impl App {
         }
         let referrer = req.as_ref().map(|r| LinkedFileReferrer::Request { id: r.meta.id });
         let linked = self.bound_linked_files(referrer, &spec)?;
+        let linked_handles = self.linked_handles_for(referrer, &linked)?;
         let chain = self.folder_chain(ws_id, req.as_ref().and_then(|r| r.folder_id))?;
         // The innermost import root; unless the user opened it to the
         // workspace, nothing outside it resolves under it.
@@ -319,7 +327,7 @@ impl App {
             integrations: self.integrations(ws_id)?,
             // Replaced below, once the context has passed its checks.
             secrets: Arc::new(StoreSecrets { store: self.store.clone(), workspace: *ws_id }),
-            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
+            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked, linked_handles }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
             seed: opts.seed,

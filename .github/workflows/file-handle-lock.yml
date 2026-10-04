@@ -1,0 +1,53 @@
+# One-off contractor lock resolution. No project build scripts, tests, secrets,
+# caches, model tools, or repository write permission. Root applies the artifact.
+name: File handle dependency lock (draft)
+
+on:
+  push:
+    branches: [fix/retained-file-and-export-handles]
+    paths:
+      - crates/anvil-app/Cargo.toml
+      - .github/workflows/file-handle-lock.yml
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install the declared MSRV toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          cargo +1.90.0 --version
+      - name: Resolve the real lock without executing project code
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          cargo +1.90.0 update --workspace
+          git diff --exit-code -- ':(exclude)Cargo.lock'
+          mkdir -p lock-artifact
+          cp Cargo.lock lock-artifact/Cargo.lock
+          sha256sum lock-artifact/Cargo.lock > lock-artifact/SHA256SUMS
+          {
+            printf 'source_sha=%s\nrun_id=%s\nrun_attempt=%s\n' "$SOURCE_SHA" "$RUN_ID" "$RUN_ATTEMPT"
+            rustc +1.90.0 --version
+            cargo +1.90.0 --version
+            printf 'command=cargo +1.90.0 update --workspace\n'
+          } > lock-artifact/PROVENANCE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: file-handle-lock-${{ github.sha }}
+          path: lock-artifact/
+          if-no-files-found: error
+          retention-days: 7

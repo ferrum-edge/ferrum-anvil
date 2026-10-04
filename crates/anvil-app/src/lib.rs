@@ -8,6 +8,7 @@ pub mod device_identity;
 pub mod drift;
 pub mod exec;
 pub mod file_grants;
+mod file_handles;
 pub mod identity;
 pub mod linked_files;
 pub mod load;
@@ -80,6 +81,9 @@ pub struct App {
     /// user bound it in the native dialog (see [`App::confine_token_files`]).
     /// Shared with every [`App::shared`] handle.
     confined_token_files: Arc<AtomicBool>,
+    /// Native linked-file selections in this opened session. Persisted path
+    /// records alone cannot reconstruct the original open object after restart.
+    linked_file_handles: Arc<parking_lot::Mutex<file_handles::LinkedSelections>>,
     /// Load runs by workspace, for a lock or a workspace delete to stop.
     load_runs: Arc<load::LoadRuns>,
 }
@@ -89,7 +93,15 @@ impl App {
         let store = Arc::new(Store::open(&dir, key)?);
         let confined_token_files = Arc::new(AtomicBool::new(false));
         let load_runs = Arc::default();
-        let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files, load_runs };
+        let app = App {
+            header,
+            dir,
+            store,
+            engine: Arc::new(Engine::new()),
+            confined_token_files,
+            linked_file_handles: Arc::default(),
+            load_runs,
+        };
         app.ensure_settings()?;
         app.pin_attachment_blobs()?;
         app.clean_up_storage_on_open();
@@ -106,6 +118,7 @@ impl App {
             store: self.store.clone(),
             engine: self.engine.clone(),
             confined_token_files: self.confined_token_files.clone(),
+            linked_file_handles: self.linked_file_handles.clone(),
             load_runs: self.load_runs.clone(),
         }
     }
@@ -119,6 +132,8 @@ impl App {
     /// active runs must be canceled by the caller (policy: stop runs on lock).
     pub fn lock(&self) {
         self.store.lock();
+        let selections = self.linked_file_handles.lock().revoke();
+        drop(selections);
         self.engine.clear_sensitive_state();
         self.stop_load_runs();
     }

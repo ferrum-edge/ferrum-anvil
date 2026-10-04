@@ -6,37 +6,40 @@
 //! accept only such a token, so the renderer reaches exactly the files the
 //! user chose for that purpose in this session, and nothing else.
 //!
-//! - A read grant pins the canonical path (and the file's identity)
-//!   at selection time; if the file or a folder on its path is replaced
-//!   afterwards, the read is refused.
+//! - A read grant retains the selected directory and original file. Reads
+//!   reopen the leaf relative to that directory and compare the descriptor's
+//!   identity. In-place edits are visible; replacing the leaf is refused.
 //! - Certificate reads return only validated certificate blocks. A private
 //!   key selection belongs to its issuing vault, is consumed once and keeps
 //!   its revocation generation fenced through the vault commit. Only a
 //!   secret reference returns, never bytes to the renderer.
-//! - A write grant pins the canonical folder and the chosen file name. Data
+//! - A write grant retains the selected folder and the chosen file name. Data
 //!   goes to a newly created temporary file in that folder (never through an
-//!   existing file or link) that is then renamed over the chosen name. A
-//!   successful write spends the grant.
+//!   existing file or link) that is published without replacing an occupied
+//!   name. A successful write spends the grant. See the draft compatibility
+//!   decisions in docs/security/file-handle-safety.md.
 //! - Grants expire, are bounded in number and are all revoked on lock and
 //!   when the desktop opens another profile. A choice that was still in
 //!   progress then grants nothing.
 //!
 //! A JWT-SVID token file (`jwt_svid_file`) is different: it is re-read at
 //! every send, so the choice is kept as a persistent binding in the vault
-//! (`anvil_app::token_files`) rather than as a session grant. So is a linked
-//! local file a saved request or dataset names (`linked_file`, or
+//! (`anvil_app::token_files`) rather than as a session grant. A linked
+//! local file has a persistent referrer record plus a session handle in this
+//! draft (`linked_file`, or
 //! `linked_file_relocate` to repoint it to a new location,
 //! `anvil_app::linked_files`).
 
+use crate::file_handles::{SelectedDirectory, SelectedFile, file_id, no_reparse, open_regular_at};
 use anvil_domain::Id;
 use anvil_domain::secret::SecretRef;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -192,32 +195,10 @@ fn io(err: std::io::Error) -> GrantError {
     GrantError::Io(err.to_string())
 }
 
-/// Identifies the file a path named when it was chosen, so a replacement
-/// under the same name is noticed: device and inode on Unix, volume serial
-/// number and file index on Windows.
-type FileId = (u64, u64);
-
-#[cfg(unix)]
-fn file_id(_file: &File, meta: &Metadata) -> std::io::Result<FileId> {
-    use std::os::unix::fs::MetadataExt;
-    Ok((meta.dev(), meta.ino()))
-}
-
-#[cfg(windows)]
-fn file_id(file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
-    let info = winapi_util::file::information(file)?;
-    Ok((info.volume_serial_number(), info.file_index()))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn file_id(_file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
-    Ok((0, 0))
-}
-
 #[derive(Debug, Clone)]
 enum Target {
-    Read { path: PathBuf, id: FileId },
-    Write { dir: PathBuf, name: OsString },
+    Read(Arc<SelectedFile>),
+    Write { dir: Arc<SelectedDirectory>, name: OsString },
 }
 
 /// The profile and data key that the private-key chooser was shown for.
@@ -340,13 +321,11 @@ impl FileGrants {
         if !picked.is_absolute() {
             return Err(GrantError::Invalid("the chosen file has no absolute path".into()));
         }
-        let path = std::fs::canonicalize(picked).map_err(io)?;
-        let Some((file, meta)) = open_regular(&path).map_err(io)? else {
-            return Err(GrantError::Invalid("not a regular file".into()));
-        };
-        let id = file_id(&file, &meta).map_err(io)?;
-        let file_name = display_name(path.file_name());
-        self.insert(purpose, Target::Read { id, path }, file_name, generation, vault)
+        let selected = SelectedFile::choose(picked).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::InvalidInput { GrantError::Invalid(err.to_string()) } else { io(err) }
+        })?;
+        let file_name = display_name(selected.path.file_name());
+        self.insert(purpose, Target::Read(Arc::new(selected)), file_name, generation, vault)
     }
 
     /// Record a destination the user picked in the native save dialog for
@@ -363,16 +342,17 @@ impl FileGrants {
         if !picked.is_absolute() {
             return Err(GrantError::Invalid("the chosen destination has no absolute path".into()));
         }
-        let (Some(parent), Some(name)) = (picked.parent(), picked.file_name()) else {
+        let (Some(parent), Some(_)) = (picked.parent(), picked.file_name()) else {
             return Err(GrantError::Invalid("choose a file name, not a folder".into()));
         };
-        let dir = std::fs::canonicalize(parent).map_err(io)?;
-        if !std::fs::metadata(&dir).map_err(io)?.is_dir() {
-            return Err(GrantError::Invalid("the destination folder is not a folder".into()));
-        }
-        refuse_directory(&dir.join(name))?;
-        let file_name = display_name(Some(name));
-        self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation, None)
+        let canonical = std::fs::canonicalize(parent).map_err(io)?;
+        #[cfg(test)]
+        crate::file_handles::test_checkpoint("write_choose_canonical");
+        let dir = Arc::new(SelectedDirectory::open(&canonical).map_err(io)?);
+        let name = SelectedDirectory::leaf(picked).map_err(io)?;
+        refuse_directory(&dir, &name)?;
+        let file_name = display_name(Some(&name));
+        self.insert(purpose, Target::Write { dir, name }, file_name, generation, None)
     }
 
     /// Read the file behind a readable grant issued for `purpose`. The grant
@@ -407,20 +387,12 @@ impl FileGrants {
     }
 
     fn read_file(&self, entry: Entry, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
-        let Target::Read { path, id } = entry.target else {
+        let Target::Read(selected) = entry.target else {
             return Err(GrantError::WrongPurpose);
         };
-        // A folder on the path (or the file itself) swapped for a link now
-        // resolves somewhere else.
-        if std::fs::canonicalize(&path).map_err(io)? != path {
-            return Err(GrantError::Changed);
-        }
-        let Some((file, meta)) = open_regular(&path).map_err(io)? else {
+        let Some((file, meta)) = selected.open().map_err(|_| GrantError::Changed)? else {
             return Err(GrantError::Changed);
         };
-        if file_id(&file, &meta).map_err(io)? != id {
-            return Err(GrantError::Changed);
-        }
         let max = purpose.max_read_bytes();
         if meta.len() > max {
             return Err(GrantError::TooLarge(size_label(max)));
@@ -449,25 +421,31 @@ impl FileGrants {
         let result = write_target(&entry.target, bytes, purpose.owner_only());
         if result.is_err() {
             let mut g = self.state.lock();
-            if g.generation == generation {
-                self.admit(&mut g, token.to_owned(), entry);
-            }
+            let retired = if g.generation == generation { self.admit(&mut g, token.to_owned(), entry) } else { Vec::new() };
+            drop(g);
+            drop(retired);
         }
         result.map(|()| bytes.len())
     }
 
     /// Drop every grant (on lock); choices still in progress grant nothing.
     pub fn revoke_all(&self) {
-        let mut g = self.state.lock();
-        g.entries.clear();
-        g.generation = g.generation.wrapping_add(1);
+        let entries = {
+            let mut g = self.state.lock();
+            g.generation = g.generation.wrapping_add(1);
+            std::mem::take(&mut g.entries)
+        };
+        drop(entries);
     }
 
     /// Outstanding, unexpired grants.
     pub fn len(&self) -> usize {
         let mut g = self.state.lock();
-        self.prune(&mut g.entries);
-        g.entries.len()
+        let retired = self.prune(&mut g.entries);
+        let len = g.entries.len();
+        drop(g);
+        drop(retired);
+        len
     }
 
     pub fn is_empty(&self) -> bool {
@@ -489,45 +467,60 @@ impl FileGrants {
             return Err(GrantError::Revoked);
         }
         let entry = Entry { purpose, vault, target, file_name: file_name.clone(), issued: Instant::now(), seq };
-        self.admit(&mut g, token.clone(), entry);
+        let retired = self.admit(&mut g, token.clone(), entry);
+        drop(g);
+        drop(retired);
         Ok(FileGrant { token, file_name, path: None })
     }
 
     /// Add a grant, dropping the oldest ones beyond `MAX_GRANTS`.
-    fn admit(&self, g: &mut State, token: String, entry: Entry) {
-        self.prune(&mut g.entries);
-        g.entries.insert(token, entry);
+    fn admit(&self, g: &mut State, token: String, entry: Entry) -> Vec<Entry> {
+        let mut retired = self.prune(&mut g.entries);
+        retired.extend(g.entries.insert(token, entry));
         while g.entries.len() > MAX_GRANTS {
             let Some(oldest) = g.entries.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
-            g.entries.remove(&oldest);
+            retired.extend(g.entries.remove(&oldest));
         }
+        retired
     }
 
-    fn prune(&self, entries: &mut HashMap<String, Entry>) {
-        entries.retain(|_, e| e.issued.elapsed() < self.ttl);
+    // Return retired handles so callers close them after releasing the mutex.
+    fn prune(&self, entries: &mut HashMap<String, Entry>) -> Vec<Entry> {
+        entries.extract_if(|_, e| e.issued.elapsed() >= self.ttl).map(|(_, entry)| entry).collect()
     }
 
     fn lookup(&self, token: &str, purpose: FilePurpose) -> Result<Entry, GrantError> {
         let mut g = self.state.lock();
-        self.prune(&mut g.entries);
-        let entry = g.entries.get(token).cloned().ok_or(GrantError::Unknown)?;
-        if entry.purpose != purpose {
-            // Presenting a grant to the wrong command revokes it.
-            g.entries.remove(token);
-            return Err(GrantError::WrongPurpose);
-        }
-        Ok(entry)
+        let mut retired = self.prune(&mut g.entries);
+        let result = match g.entries.get(token) {
+            None => Err(GrantError::Unknown),
+            Some(entry) if entry.purpose == purpose => Ok(entry.clone()),
+            Some(_) => {
+                // Presenting a grant to the wrong command revokes it.
+                retired.extend(g.entries.remove(token));
+                Err(GrantError::WrongPurpose)
+            }
+        };
+        drop(g);
+        drop(retired);
+        result
     }
 
     /// Remove a grant for use, with the generation it was taken in.
     fn take(&self, token: &str, purpose: FilePurpose) -> Result<(Entry, u64), GrantError> {
         let mut g = self.state.lock();
-        self.prune(&mut g.entries);
-        let entry = g.entries.remove(token).ok_or(GrantError::Unknown)?;
-        if entry.purpose != purpose {
-            return Err(GrantError::WrongPurpose);
-        }
-        Ok((entry, g.generation))
+        let mut retired = self.prune(&mut g.entries);
+        let result = match g.entries.remove(token) {
+            None => Err(GrantError::Unknown),
+            Some(entry) if entry.purpose == purpose => Ok((entry, g.generation)),
+            Some(entry) => {
+                retired.push(entry);
+                Err(GrantError::WrongPurpose)
+            }
+        };
+        drop(g);
+        drop(retired);
+        result
     }
 }
 
@@ -571,76 +564,86 @@ fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
     Ok(pem)
 }
 
-/// Open `path` for reading if it is a regular file; `None` when it is not, a
-/// link included. Callers canonicalize `path` just before, so a link at its
-/// last component was swapped in since. A FIFO or device found at the path
-/// never blocks the open, even one swapped in just before it: on Unix the file
-/// is opened non-blocking (which does not change how a regular file reads),
-/// never as a controlling terminal and without following a link swapped in
-/// for the last component, and the opened handle is checked. The path is
-/// checked first as a cheap filter; elsewhere that check is also what keeps a
-/// folder out, as one cannot be opened there.
-pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
-    if !std::fs::symlink_metadata(path)?.is_file() {
-        return Ok(None);
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    // The check that counts is on the opened handle, not on the path.
-    let meta = file.metadata()?;
-    Ok(meta.is_file().then_some((file, meta)))
-}
-
+/// Publish only to an unoccupied leaf. A regular-file/owner check followed by
+/// replacing rename cannot exclude a raced replacement on POSIX. This draft
+/// refuses overwrites rather than unlinking a different object.
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+    use cap_std::fs::OpenOptions;
+
     let Target::Write { dir, name } = target else {
         return Err(GrantError::WrongPurpose);
     };
-    // The folder itself (or one above it) swapped for a link now resolves
-    // somewhere else.
-    if std::fs::canonicalize(dir).map_err(io)? != *dir {
-        return Err(GrantError::Changed);
-    }
-    let dest = dir.join(name);
-    refuse_directory(&dest)?;
-    // A fresh, exclusively created file: an existing file or link under the
-    // temporary name is never opened or followed.
-    let tmp = dir.join(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    // Renaming replaces the destination entry itself; a link there is
-    // replaced, not followed.
-    match write_new(&tmp, bytes, owner_only).and_then(|()| std::fs::rename(&tmp, &dest)) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(io(err))
-        }
-    }
-}
-
-fn write_new(path: &Path, bytes: &[u8], owner_only: bool) -> std::io::Result<()> {
+    #[cfg(test)]
+    crate::file_handles::test_checkpoint("write_selected");
+    refuse_occupied(dir, name)?;
+    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create_new(true).follow(FollowSymlinks::No);
     #[cfg(unix)]
     if owner_only {
-        use std::os::unix::fs::OpenOptionsExt;
+        use cap_std::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     #[cfg(not(unix))]
     let _ = owner_only;
-    let mut f = options.open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
+    let mut file = dir.dir().open_with(&tmp, &options).map_err(io)?.into_std();
+    let meta = file.metadata().map_err(io)?;
+    if !meta.is_file() || !no_reparse(&meta) {
+        return Err(GrantError::Changed);
+    }
+    let id = file_id(&file, &meta).map_err(io)?;
+    // Never remove a temporary pathname on failure: its name may already
+    // belong to somebody else. Leaking our partial is preferable to unlinking
+    // a foreign replacement. The same rule applies after publication.
+    file.write_all(bytes).map_err(io)?;
+    file.sync_all().map_err(io)?;
+    #[cfg(test)]
+    crate::file_handles::test_checkpoint("write_synced");
+    let Some((check, meta)) = open_regular_at(dir.dir(), &tmp).map_err(io)? else {
+        return Err(GrantError::Changed);
+    };
+    if file_id(&check, &meta).map_err(io)? != id {
+        return Err(GrantError::Changed);
+    }
+    #[cfg(test)]
+    crate::file_handles::test_checkpoint("write_verified");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    rustix::fs::renameat_with(dir.dir(), &tmp, dir.dir(), name, rustix::fs::RenameFlags::NOREPLACE).map_err(|err| io(err.into()))?;
+    #[cfg(windows)]
+    {
+        // cap-std 4.0.3 has no no-replace rename on Windows. Hard-link
+        // publication never removes an occupied destination. The partial is
+        // deliberately retained. This is an explicit qualification blocker,
+        // not a claim of handle-relative atomic rename on Windows.
+        dir.dir().hard_link(&tmp, dir.dir(), name).map_err(io)?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    return Err(GrantError::Invalid("export publication is unsupported on this platform".into()));
+    let Some((published, meta)) = open_regular_at(dir.dir(), name).map_err(io)? else {
+        return Err(GrantError::Changed);
+    };
+    if file_id(&published, &meta).map_err(io)? != id {
+        return Err(GrantError::Changed);
+    }
+    Ok(())
 }
 
-fn refuse_directory(dest: &Path) -> Result<(), GrantError> {
-    match std::fs::symlink_metadata(dest) {
-        Ok(m) if m.is_dir() => Err(GrantError::Invalid("the destination is a folder".into())),
-        _ => Ok(()),
+fn refuse_directory(dir: &SelectedDirectory, name: &std::ffi::OsStr) -> Result<(), GrantError> {
+    match dir.dir().symlink_metadata(name) {
+        Ok(meta) if meta.is_dir() => Err(GrantError::Invalid("the destination is a folder".into())),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(io(err)),
+    }
+}
+
+fn refuse_occupied(dir: &SelectedDirectory, name: &std::ffi::OsStr) -> Result<(), GrantError> {
+    refuse_directory(dir, name)?;
+    match dir.dir().symlink_metadata(name) {
+        Ok(_) => Err(GrantError::Invalid("the destination already exists; choose an unused file name".into())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(io(err)),
     }
 }
 
@@ -651,21 +654,4 @@ fn display_name(name: Option<&std::ffi::OsStr>) -> String {
 fn size_label(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     if bytes.is_multiple_of(GIB) { format!("{} GiB", bytes / GIB) } else { format!("{} MiB", bytes >> 20) }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::open_regular;
-
-    #[test]
-    fn a_link_at_the_last_component_is_not_followed() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("rows.csv");
-        std::fs::write(&target, "id\n1\n").unwrap();
-        let (_, meta) = open_regular(&target).unwrap().unwrap();
-        assert_eq!(meta.len(), 5);
-        let link = dir.path().join("link.csv");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert!(open_regular(&link).unwrap().is_none());
-    }
 }

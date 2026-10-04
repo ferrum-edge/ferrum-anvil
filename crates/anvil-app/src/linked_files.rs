@@ -11,9 +11,11 @@
 //! binding made for one request or dataset never lets another one read the
 //! file, and a bundle import drops the bindings of every request and dataset
 //! it writes. Bindings are device-specific: they are not exported, and an
-//! import cannot create one. The CLI cannot bind a linked file (it has no
-//! dialog), but it reads one the desktop bound when it sends that saved
-//! request or uses that dataset from the same profile.
+//! import cannot create one. This draft also requires a retained native
+//! selection in the current opened session. Restart or lock requires choosing
+//! the file again. The CLI has no chooser and cannot reconstruct that handle
+//! from a persisted path. This compatibility decision needs owner approval;
+//! see docs/security/file-handle-safety.md before integrating this draft.
 //!
 //! A reference whose file lives at another path on this device (often one
 //! imported from another machine) is repointed the same way: the user picks
@@ -29,6 +31,7 @@
 //! bound for that referrer, and only at their metadata: it never reads a
 //! file, and never touches a path that was not chosen.
 
+use crate::file_handles::SelectedFile;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
@@ -37,8 +40,10 @@ use anvil_storage::StoreTx;
 use anvil_storage::store::kind;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 /// What names a linked file: a saved request (its body or gRPC schema) or a
 /// dataset.
@@ -79,16 +84,15 @@ pub struct LinkedFileBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkedFileState {
-    /// Chosen on this device for the referrer, and still a regular file at
-    /// the path it was chosen at. The size limit is not checked here: it
+    /// Chosen in this session for the referrer, with the same regular file
+    /// in the retained directory. The size limit is not checked here: it
     /// depends on what reads the file, and is enforced when it is read.
     Bound,
     /// Not chosen on this device for the referrer, so it is refused. The
     /// path is not looked at.
     Unbound,
-    /// Chosen for the referrer, but no longer usable as chosen: the file was
-    /// moved or deleted, it was replaced by something other than a regular
-    /// file, or its path now resolves to another location.
+    /// A binding exists, but needs reselection in this session, or its leaf
+    /// was moved, deleted or replaced. Ancestor renames cannot redirect it.
     Invalid,
 }
 
@@ -108,7 +112,10 @@ impl App {
     /// `referrer`, which must name that file. Only the desktop's
     /// `file_choose` calls this, with the dialog's result.
     pub fn bind_linked_file(&self, referrer: LinkedFileReferrer, picked: &Path) -> Result<LinkedFileBinding> {
-        let path = crate::token_files::chosen_path(picked, "linked file")?;
+        let generation = self.linked_file_handles.lock().generation;
+        let canonical = crate::token_files::chosen_path(picked, "linked file")?;
+        let selected = Arc::new(SelectedFile::open_canonical(canonical.into())?);
+        let path = linked_path(&selected)?;
         if !self.named_linked_files(referrer)?.contains(&path) {
             return Err(AppError::Invalid(format!(
                 "the chosen file '{path}' is not the linked file this {} names; attach the file instead",
@@ -116,10 +123,12 @@ impl App {
             )));
         }
         if let Some(b) = self.linked_file_bindings()?.into_iter().find(|b| b.referrer == referrer && b.path == path) {
+            self.remember_linked_selection(&b, selected, generation)?;
             return Ok(b);
         }
         let b = LinkedFileBinding { id: Id::new(), referrer, path, bound_at: Utc::now() };
         self.store.put(kind::LINKED_FILE, &b.id, None, None, 0.0, &b)?;
+        self.remember_linked_selection(&b, selected, generation)?;
         Ok(b)
     }
 
@@ -141,9 +150,12 @@ impl App {
         if !self.named_linked_files(referrer)?.iter().any(|p| p == old_path) {
             return Err(not_named(old_path, referrer));
         }
-        let path = crate::token_files::chosen_path(picked, "linked file")?;
+        let generation = self.linked_file_handles.lock().generation;
+        let canonical = crate::token_files::chosen_path(picked, "linked file")?;
+        let selected = Arc::new(SelectedFile::open_canonical(canonical.into())?);
+        let path = linked_path(&selected)?;
         let fresh = LinkedFileBinding { id: Id::new(), referrer, path: path.clone(), bound_at: Utc::now() };
-        self.store.atomically(|s| {
+        let binding = self.store.atomically(|s| {
             // The request or dataset may have changed since the check above.
             if let Err(e) = repoint_in(s, referrer, old_path, &path)? {
                 return Ok(Err(e));
@@ -161,7 +173,40 @@ impl App {
             }
             s.put(kind::LINKED_FILE, &fresh.id, None, None, 0.0, &fresh)?;
             Ok(Ok(fresh))
-        })?
+        })??;
+        self.remember_linked_selection(&binding, selected, generation)?;
+        Ok(binding)
+    }
+
+    fn remember_linked_selection(&self, binding: &LinkedFileBinding, selected: Arc<SelectedFile>, generation: u64) -> Result<()> {
+        let previous = {
+            let mut state = self.linked_file_handles.lock();
+            if state.generation != generation {
+                return Err(AppError::Locked);
+            }
+            state.handles.insert(binding.id, selected)
+        };
+        if let Some(previous) = previous {
+            previous.revoke();
+        }
+        Ok(())
+    }
+
+    /// Snapshot only selections whose binding still belongs to this referrer.
+    /// No filesystem I/O or callback runs under the selection mutex.
+    pub(crate) fn linked_handles_for(
+        &self,
+        referrer: Option<LinkedFileReferrer>,
+        paths: &[String],
+    ) -> Result<HashMap<String, Arc<SelectedFile>>> {
+        let Some(referrer) = referrer else { return Ok(HashMap::new()) };
+        let bound = self.linked_file_bindings()?;
+        let state = self.linked_file_handles.lock();
+        Ok(bound
+            .iter()
+            .filter(|b| b.referrer == referrer && paths.contains(&b.path))
+            .filter_map(|b| state.handles.get(&b.id).map(|selected| (b.path.clone(), selected.clone())))
+            .collect())
     }
 
     pub fn linked_file_bindings(&self) -> Result<Vec<LinkedFileBinding>> {
@@ -177,8 +222,10 @@ impl App {
         let bound = self.linked_file_bindings()?;
         let mut status = Vec::new();
         for path in self.named_linked_files(referrer)? {
-            let chosen = bound.iter().any(|b| b.referrer == referrer && b.path == path);
-            let problem = if chosen { bound_file_problem(&path) } else { None };
+            let binding = bound.iter().find(|b| b.referrer == referrer && b.path == path);
+            let chosen = binding.is_some();
+            let selected = binding.and_then(|b| self.linked_file_handles.lock().handles.get(&b.id).cloned());
+            let problem = if chosen { bound_file_problem(selected.as_deref()) } else { None };
             let state = match (chosen, &problem) {
                 (false, _) => LinkedFileState::Unbound,
                 (true, None) => LinkedFileState::Bound,
@@ -225,8 +272,12 @@ impl App {
     /// Read the linked file of a dataset, refusing it unless it was chosen
     /// on this device for that dataset.
     pub(crate) fn read_linked_dataset(&self, id: Id, path: &str, max: u64) -> Result<Vec<u8>> {
-        refuse_unbound(&self.linked_file_bindings()?, LinkedFileReferrer::Dataset { id }, path)?;
-        read_bound_file(path, max, "dataset")
+        let referrer = LinkedFileReferrer::Dataset { id };
+        let bound = self.linked_file_bindings()?;
+        refuse_unbound(&bound, referrer, path)?;
+        let binding = bound.iter().find(|b| b.referrer == referrer && b.path == path).expect("checked binding");
+        let selected = self.linked_file_handles.lock().handles.get(&binding.id).cloned().ok_or_else(reselect)?;
+        read_bound_file(&selected, max, "dataset")
     }
 }
 
@@ -318,52 +369,46 @@ fn unbound(path: &str, noun: &str) -> AppError {
     ))
 }
 
-/// Why a bound linked file whose path no longer resolves to itself cannot be
-/// used. Which change caused it is not known.
-const RESOLVES_ELSEWHERE: &str = concat!(
-    "the path resolves to a different location than the one chosen (the file or a folder on its path may have been replaced by a link, ",
-    "or a folder on its path renamed or remapped)"
-);
+fn linked_path(selected: &SelectedFile) -> Result<String> {
+    let path = selected.path.to_str().ok_or_else(|| AppError::Invalid("the linked file's path is not valid UTF-8".into()))?;
+    if path.contains("{{") {
+        return Err(AppError::Invalid("the linked file's path contains '{{', which Anvil reads as a variable".into()));
+    }
+    Ok(path.to_owned())
+}
 
-/// Why a bound linked file can no longer be read as chosen, if it cannot:
-/// the same path and regular-file checks as [`read_bound_file`], from
-/// metadata alone. No data is read and nothing is opened for reading, so a
-/// FIFO never blocks (on Windows, resolving the path opens a handle with no
-/// access rights). The size limit is not checked: it depends on what reads
-/// the file, and is enforced when it is read.
-fn bound_file_problem(path: &str) -> Option<String> {
-    match std::fs::canonicalize(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("the file is no longer at this path".into()),
-        Err(e) => Some(format!("the file cannot be reached ({e})")),
-        Ok(canonical) if canonical.to_str() != Some(path) => Some(RESOLVES_ELSEWHERE.into()),
-        Ok(_) => match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => None,
-            Ok(_) => Some("the path no longer leads to a regular file".into()),
-            Err(e) => Some(format!("the file cannot be reached ({e})")),
-        },
+fn reselect() -> AppError {
+    AppError::Invalid("the linked local file needs a fresh native selection in this session; choose it again".into())
+}
+
+/// Inspect the actual opened object, without reading bytes. A persisted path
+/// alone is insufficient after restart/lock; it never creates new authority.
+fn bound_file_problem(selected: Option<&SelectedFile>) -> Option<String> {
+    let Some(selected) = selected else { return Some(reselect().to_string()) };
+    match selected.open() {
+        Ok(Some(_)) => None,
+        Ok(None) => Some("the path no longer leads to the chosen regular file; choose it again".into()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some("the file is no longer at this path".into()),
+        Err(err) => Some(format!("the file cannot be reached ({err}); choose it again")),
     }
 }
 
-/// Read a bound linked file, bounded to `max` bytes. Only a regular file is
-/// read (a FIFO or device never blocks the open, see
-/// [`crate::file_grants::open_regular`]), and only while its path still
-/// resolves to itself, so a file or folder on the path replaced by a link is
-/// refused.
-pub(crate) fn read_bound_file(path: &str, max: u64, what: &str) -> Result<Vec<u8>> {
+/// Read through the retained native selection, bounded even during growth.
+/// Ancestor names are never resolved here. The reopened leaf's descriptor is
+/// compared with the still-open original before its bytes are read.
+pub(crate) fn read_bound_file(selected: &SelectedFile, max: u64, what: &str) -> Result<Vec<u8>> {
     let too_large = || AppError::Invalid(format!("the linked {what} is larger than {} MiB", max >> 20));
-    let not_regular = || AppError::Invalid(format!("the linked {what} is not a regular file"));
-    if std::fs::canonicalize(path)?.to_str() != Some(path) {
-        return Err(AppError::Invalid(format!("the linked {what} changed after it was chosen; choose it again")));
-    }
-    let Some((file, meta)) = crate::file_grants::open_regular(Path::new(path))? else {
+    let not_regular = || AppError::Invalid(format!("the linked {what} is not a regular file or was replaced; choose it again"));
+    #[cfg(test)]
+    crate::file_handles::test_checkpoint("linked_read_selected");
+    let Some((file, meta)) = selected.open()? else {
         return Err(not_regular());
     };
     if meta.len() > max {
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes)?;
-    // Bounded even if the file grows while it is read.
+    file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max {
         return Err(too_large());
     }
