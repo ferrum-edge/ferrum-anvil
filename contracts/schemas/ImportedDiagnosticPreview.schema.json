@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ImportedDiagnosticPreview",
+  "description": "`reported_json` preserves producer claims, after credential redaction. Its confidence,\nverification, trust and authenticated fields never determine Anvil's assessment.\nRust serializes the JSON text so native IPC never rounds producer integers in JavaScript.\nThis DTO is ephemeral IPC and is not persisted.",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "$ref": "#/$defs/ImportedDiagnosticKind"
+    },
+    "trust": {
+      "$ref": "#/$defs/ImportedDiagnosticTrust"
+    },
+    "confidence": {
+      "$ref": "#/$defs/Confidence"
+    },
+    "observation_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "finding_count": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "reported_json": {
+      "type": "string"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "kind",
+    "trust",
+    "confidence",
+    "observation_count",
+    "finding_count",
+    "reported_json",
+    "warnings"
+  ],
+  "$defs": {
+    "ImportedDiagnosticKind": {
+      "type": "string",
+      "enum": [
+        "report",
+        "alloy_cli",
+        "finding",
+        "reference"
+      ]
+    },
+    "ImportedDiagnosticTrust": {
+      "type": "string",
+      "enum": [
+        "unverified"
+      ]
+    },
+    "Confidence": {
+      "description": "Qualitative confidence. Anvil never invents probability percentages.\n`Unknown` is a correct answer when evidence is insufficient.",
+      "type": "string",
+      "enum": [
+        "conflicting_evidence",
+        "unknown",
+        "likely",
+        "confirmed"
+      ]
+    }
+  }
+}

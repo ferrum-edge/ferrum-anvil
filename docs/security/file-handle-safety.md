@@ -11,7 +11,9 @@ needs owner attention before integration. This round additionally restricts
 macOS export destinations to audited local APFS mounts with ownership enabled.
 That is a proposed filesystem compatibility change, **not owner approved**.
 
-The assigned source base is `4254ea84c101bdc9231a4c6f455421e22468d0ec`.
+The original candidate source base is `4254ea84c101bdc9231a4c6f455421e22468d0ec`.
+This integration is a normal merge of `main` at
+`07f7182b3aa6c244140b7ec3edab5a1668318c96`.
 [GHSA-6hc8-xjvq-478g](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-6hc8-xjvq-478g)
 reports an ancestor rename followed by symlink/junction replacement between
 canonicalization and a fresh pathname open/create. The advisory API was read in this round. It scopes the finding to reported
@@ -53,6 +55,19 @@ hosted CI on its own head before a final owner decision or merge.
 Historical failed-run descriptions below explain the repairs. Their pending
 qualification statements describe those earlier heads, not the successful
 `b58d3f6` evidence recorded here.
+
+The main integration preserves the retained ancestor handles, exclusive native
+publication, chooser/revocation fences, 512-descriptor budget, APFS policy and
+plaintext staging guards and regressions. It also preserves main's stateless
+diagnostic importer and E2E environment flags, canonical Edge 0.9.11 contracts,
+all six supported catalogs and release-asset locks, and approved Cargo/npm and
+CI action updates. Both sets of changelog entries remain Unreleased; released
+sections are unchanged. The prior hosted results qualify their recorded source
+heads only. Root owns whole-integration parity review, a fresh read-only security
+integration review and all exact-head hosted gates, including desktop E2E and
+native macOS policy qualification. The already-requested filesystem, plaintext,
+descriptor and linked-file policy decisions and physical/native owner acceptance
+remain pending; this merge grants no owner approval or patched-release status.
 
 ## Implemented candidate
 
@@ -489,12 +504,14 @@ its downloaded archive hash matches the existing Cargo.lock checksum
 `891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d`.
 
 Root already applied the genuine hosted artifact in commit
-`b0e563049f021db8a17eff7f5c9c983ed1c81f72` (110 additions). This round preserves
-that complete lock graph and every existing pin without changes. The current
-lock SHA-256 is `f13b887c98c44bfbad98c823c9b3db39353e0f692df7274bcd0d34b1a7de8b49`.
-No dependency is added by this round, and no local resolver or hand-built lock
-is used. The dedicated hosted workflow remains available for real dependency
-changes; it has no repository write permission or persisted credentials.
+`b0e563049f021db8a17eff7f5c9c983ed1c81f72` (110 additions). The pre-integration
+candidate lock SHA-256 is `f13b887c98c44bfbad98c823c9b3db39353e0f692df7274bcd0d34b1a7de8b49`.
+The normal main merge retains that complete native-handle dependency graph and
+main's approved Cargo updates, with the corresponding license inventory changes.
+The integrated lock SHA-256 is `cc37f914363fb369dd7630b86529a4723b9b3bdf7e8a303b1a9ab44d6b9e0ada`.
+No local resolver or hand-built lock is used. The dedicated hosted workflow
+remains available for real dependency changes; it has no repository write
+permission or persisted credentials.
 
 ## Hosted proof plan and current evidence
 
