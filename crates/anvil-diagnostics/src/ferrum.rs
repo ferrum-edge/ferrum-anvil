@@ -18,9 +18,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// The compatibility id new integration profiles default to: the newest
-/// audited release.
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.10";
+/// The source-audited candidate new profiles default to. Live v0.9.11
+/// compatibility awaits hosted Anvil gates.
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.11";
+
+const EDGE_0_9_11: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json");
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
@@ -29,6 +31,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.8", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.8/outcomes.json")),
     ("ferrum-edge-0.9.9", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.9/outcomes.json")),
     ("ferrum-edge-0.9.10", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.10/outcomes.json")),
+    ("ferrum-edge-0.9.11", EDGE_0_9_11),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -497,13 +500,23 @@ mod tests {
     #[test]
     fn every_embedded_catalog_loads_under_its_own_id_with_all_public_tokens() {
         let ids: Vec<&str> = compatibility_ids().collect();
-        assert_eq!(ids, ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7", "ferrum-edge-0.9.8", "ferrum-edge-0.9.9", "ferrum-edge-0.9.10"]);
+        assert_eq!(
+            ids,
+            [
+                "ferrum-edge-0.9.5",
+                "ferrum-edge-0.9.7",
+                "ferrum-edge-0.9.8",
+                "ferrum-edge-0.9.9",
+                "ferrum-edge-0.9.10",
+                "ferrum-edge-0.9.11",
+            ]
+        );
         for id in ids {
             let c = catalog_for(id).expect("embedded");
             assert_eq!(c.compatibility_id, id);
             assert_eq!(format!("ferrum-edge-{}", c.release_tag.trim_start_matches('v')), id, "release tag matches the id");
             assert_eq!(c.source_sha.len(), 40, "{id}: full source sha");
-            let knows_request_timeout = matches!(id, "ferrum-edge-0.9.8" | "ferrum-edge-0.9.9" | "ferrum-edge-0.9.10");
+            let knows_request_timeout = !matches!(id, "ferrum-edge-0.9.5" | "ferrum-edge-0.9.7");
             let expected_tokens: Vec<&str> =
                 TOKENS.iter().copied().filter(|token| knows_request_timeout || *token != "request_timeout").collect();
             for t in expected_tokens {
@@ -514,15 +527,15 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.10");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.11");
     }
 
     /// `request_timeout` joined the closed vocabulary in 0.9.8 (0.9.9 and
-    /// 0.9.10 keep it); the older catalogs do not know it, so it is not part
-    /// of the shared vocabulary.
+    /// 0.9.10 and 0.9.11 keep it); the older catalogs do not know it, so it
+    /// is not part of the shared vocabulary.
     #[test]
     fn request_timeout_is_a_token_of_the_0_9_8_and_later_catalogs_only() {
-        for id in ["ferrum-edge-0.9.8", "ferrum-edge-0.9.9", "ferrum-edge-0.9.10"] {
+        for id in compatibility_ids().skip(2) {
             assert!(catalog_for(id).expect("embedded").is_known_token("request_timeout"), "{id}");
         }
         for id in ["ferrum-edge-0.9.5", "ferrum-edge-0.9.7"] {
@@ -550,8 +563,8 @@ mod tests {
 
     /// The `ai_prompt_shield` MCP refusals new in 0.9.10 (a non-UTF-8 request
     /// charset, an unparseable body that may carry a tool call) match from
-    /// their public body in the 0.9.10 catalog only. The content-encoding
-    /// message existed at 0.9.9 and matches both that catalog and 0.9.10's.
+    /// their public body from 0.9.10 onward, including 0.9.11. The
+    /// content-encoding message existed at 0.9.9 and matches all three.
     #[test]
     fn outcomes_new_in_0_9_10_match_only_their_own_catalog() {
         for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
@@ -559,8 +572,11 @@ mod tests {
             let bf = body_facts(Some("application/json"), text.as_bytes());
             let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None };
             let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-            let newest = catalog_for("ferrum-edge-0.9.10").unwrap();
-            assert_eq!(ids(newest), ["plugin.ai_prompt_shield.mcp_body_uninspectable"], "{reason}");
+            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11"] {
+                let catalog = catalog_for(id).unwrap();
+                let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
+                assert_eq!(ids(catalog), expected, "{id}: {reason}");
+            }
             assert!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()).is_empty(), "{reason}");
         }
 
@@ -568,7 +584,10 @@ mod tests {
         let bf = body_facts(Some("application/json"), text.as_bytes());
         let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(catalog_for("ferrum-edge-0.9.10").unwrap()), ["plugin.ai_prompt_shield.mcp_body_uninspectable"]);
+        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11"] {
+            let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
+            assert_eq!(ids(catalog_for(id).unwrap()), expected);
+        }
         assert_eq!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()), ["plugin.ai_prompt_shield.mcp_body_uninspectable"]);
         assert!(ids(catalog_for("ferrum-edge-0.9.8").unwrap()).is_empty());
     }
