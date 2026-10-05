@@ -2,28 +2,43 @@
 
 Anvil vendors the Ferrum Edge contracts it consumes under
 [`contracts/ferrum-contracts`](../contracts/ferrum-contracts). The current pin
-is recorded in `contracts/ferrum-contracts/PIN`: tag
-`contracts-edge-0.9.9-r2`, commit `591c73a3f965fdab440c3a76b2707accdf491ba5` (Ferrum Edge
-v0.9.9). The tag also covers Ferrum Edge v0.9.10, the lab's default pin:
-v0.9.10 changed no contract source, so `ferrum-contracts` maps it to the same
-tag. That tag marks `X-Ferrum-Diagnostic-Ref` released in v0.9.9 and
-publishes `schemas/diagnostic-ref/v1.schema.json` with its fixtures under
-`contracts/ferrum-contracts`. Anvil reads the header and lookup record (see
-[diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)).
-The additive r2 pin preserves every previously vendored hash from
-`25c4e9e00033d7941a1dd0ab733fa74e735546ae` and adds the diagnostic-report v1
-schema, its twelve report fixtures and the full canonical negative-expectations
-manifest. Read-only diagnostic import consumes these files without granting trust
-to the reported claims; see
-[shared-diagnostics-import.md](architecture/shared-diagnostics-import.md).
+is recorded in `contracts/ferrum-contracts/PIN`: published tag
+`contracts-edge-0.9.11`, commit `390edbd5b2485af0988e02f7827fde778d76ae0a`,
+targeting immutable Edge v0.9.11 (`c764084b3b51c3f7ffde268c039688d35e49c553`).
+Publication is verified by [canonical PR #13](https://github.com/ferrum-edge/ferrum-contracts/pull/13)
+and the [tag release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11).
+The lab and new-profile default now select the separately source-audited
+v0.9.11 candidate, pending hosted Anvil qualification. Earlier catalogs and locks
+remain supported; v0.9.9/v0.9.10 retain their historical mapping to
+`contracts-edge-0.9.9` (or its additive r2 revision).
 
-The offline `anvil-diagnostics` test suite checks every vendored file against
-its pinned SHA-256, compares the local gateway vocabulary, header list and
-DiagnosticFinding schema with the vendor copy (the vocabulary against the
-catalog of every Edge release the tag covers; the lab's default pin must be one
-of them), compares Anvil's diagnostic reference reader with the pinned
-`diagnostic-ref` schema's vocabularies, and validates the shared schema
-fixtures (the `diagnostic-ref` ones also through Anvil's reader).
+Every existing adopted canonical path is copied byte-exact from the new tag.
+The refreshed Edge vocabularies retain all eight tokens, 19 classes, the three
+reader headers and their first availability (diagnostic-ref remains v0.9.9).
+The diagnostic-report metadata records EXISTING/implemented shared v1 and the
+accepted unchanged wire freeze at qualified Alloy owner
+`81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`. Owner availability remains unreleased.
+Historical PROPOSED descriptions and preparation-time publication wording inside
+immutable vendor files remain exact; current publication facts are documented here.
+Wire constraints, fixtures, bounds and open-enum/unknown-member semantics do not change.
+The full negative manifest adds other scopes while preserving every original
+precise diagnostic failure path/keyword/top-keyword. Those scopes do not add import formats.
+
+Read-only import keeps supplied claims unverified with unknown Anvil confidence;
+it performs no apply, persistence, network fetch, Edge lookup, trust/confirmed escalation
+or timing attribution. The existing real Alloy exporter golden and source/PIN stay
+historical Edge 0.9.10 evidence at owner `0c260f5379939ff46d681666bfbcd65b8518b08d`.
+See [shared-diagnostics-import.md](architecture/shared-diagnostics-import.md) and
+[the Edge delta audit](audit/gateway-0.9.11-delta.md).
+
+Hosted `anvil-diagnostics` gates check every vendor byte against PIN, exact adopted
+file presence, token/class/header parity with the 0.9.9/0.9.10/0.9.11 catalogs,
+the current owner source identity, local DiagnosticFinding schema parity and
+strict diagnostic-ref reader vocabularies. All original fixtures and negative
+expectations remain exercised by the independent schema gate and real parser;
+Alloy report parity removes only `$id`/`x-contract`, including description parity.
+The lab default must be covered by the pin and its catalog source must match its
+release lock. Parsing checks do not establish live gateway compatibility.
 
 ## Bumping the pin
 

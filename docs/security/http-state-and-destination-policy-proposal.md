@@ -5,8 +5,9 @@ profile and security tradeoffs. It must not be merged, activated, represented as
 approved release profile, or used to close the advisories until root completes its
 review and fresh exact-head hosted qualification of the current-main merge
 commit, and then obtains the owner's explicit decision. Root and independent
-security/concurrency reviews of the prior candidate are complete; review and
-hosted qualification of this merge head remain pending.
+security/concurrency reviews and hosted checks of the prior candidate and
+diagnostic-import merge are complete; review and hosted qualification of this
+refreshed merge head remain pending.
 Candidate preparation was authorized; adopting these defaults was not.
 
 The candidate now implements the core, App preflight, target-API sign-in/status
@@ -104,13 +105,14 @@ domain/path matching, Max-Age precedence, same-tuple update/expiry and removal
 semantics. Its insertion marks an expired replacement expired rather than
 physically removing it; this implementation instead stores parsed cookies in the
 bounded flat collection and removes expired tuples. Downloaded crate SHA-256s
-matched Cargo.lock:
+matched the applicable Cargo.lock; the QUIC archive was rechecked for this
+current-main merge:
 
 ```text
 cookie_store 0.22.1 15b2c103cf610ec6cae3da84a766285b42fd16aad564758459e6ecf128c75206
 cookie 0.18.2       1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87
 psl 2.1.238        2e6aa2cd4e8e062e78ac5d7df6206e2f8e39b624f658efd6f34f9aa1928ac5da
-quinn-proto 0.11.18 a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc
+quinn-proto 0.11.19 0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe
 ```
 
 Jar reads and writes still linearize under `CookieJars`' existing shared mutex.
@@ -195,11 +197,13 @@ pinned answer; another execution's private connection or an older answer cannot
 serve a newly public-authorized attempt. The next attempt resolves again and is
 checked again, including internal redispatch after an unsent pooled request.
 Host/SNI/certificate identity remain the original target host, not the pinned IP.
-Static review of locked quinn-proto 0.11.18 found that client connections reject
-peer migration (`ConnectionSide::remote_may_migrate` is false for clients); the
-server preferred-address handling retains a CID without dialing that address.
-The transport does not initiate server-address migration. This dependency
-behavior must be rechecked on a QUIC dependency upgrade.
+Static reinspection of checksum-verified quinn-proto 0.11.19 retained the prior
+0.11.18 finding: client connections reject peer migration
+(`ConnectionSide::remote_may_migrate` is false for clients), and server
+preferred-address handling retains a CID without dialing that address. The
+transport does not initiate server-address migration. This focused dependency
+inspection is not runtime qualification or a whole upstream audit; the behavior
+must be rechecked on a subsequent QUIC dependency upgrade.
 
 The guard's DNS operation participates in cancellation and the attempt's existing
 total and DNS deadlines. Actual validation is recorded as a DNS phase; the
@@ -332,8 +336,8 @@ assertions and adds an accepting-loopback control. No timeout increase, skip or
 policy bypass was added. The subsequent code-head hosted qualification below
 includes these repairs.
 
-`CHANGELOG.md` now records this candidate under Unreleased. The owner decision
-and a fresh hosted pass on the final documentation commit remain required.
+`CHANGELOG.md` records this candidate under Unreleased. The owner decision and
+fresh review and hosted qualification of the current merge head remain required.
 
 The draft remains owner-unapproved. Root owns further qualification and the
 explicit adoption decision; the implementation and code-head evidence establish
@@ -383,28 +387,71 @@ Owner approval of cookie eviction/omission, issuer restrictions, address classes
 and proxy redirect compatibility remains required. None of the three advisories
 is closed by this qualification record.
 
-### Current-main integration — pending qualification
+### Prior diagnostic-import integration — recorded qualification
 
-This normal merge refreshes PR #308 from the qualified prior head
+The normal merge at `598743269f0596e1618392e1f5fa54aadb3cd0e9` refreshed PR #308
+from the qualified prior head
 `0311bc9fc270067a5fe2bf1ad188a969f60c1039` with main
 `c19c0a6abba896bfec972b3e083179c55ef8e38c`, which includes diagnostic-import
-PR #312. Those are the first and second parents of this merge. The prior
-successful exact-head evidence above does not qualify the merge head containing
-this update. Root owns fresh exact-head review and hosted CI; the supported HTTP
-profile decision remains pending and the PR remains a draft.
+PR #312. Those are that merge's first and second parents. Its sole conflict was
+the adjacent Added entries in `CHANGELOG.md`; both entries and released sections
+were retained. All 32 HTTP candidate source/test paths remained byte-identical
+to the qualified `0311bc9` head, and importer files matched that main.
 
-The sole merge conflict was the adjacent Added entries in `CHANGELOG.md`.
-Both the HTTP candidate and main's diagnostic-import entry remain under
-`[Unreleased]`; released sections are unchanged. No integration logic repair was
-needed. HTTP candidate source and regression assertions remain unchanged from
-the prior head, including bounded cookies/PSL handling, canonical HTTPS or
-literal-loopback OAuth boundaries, pinned redirect destinations, proxy redirect
-refusal and recorded-lookup/native-ordering proof. Intentional initial
-private/loopback destinations and original proxy trust retain the same limits.
+The PR record reports root's integration review and fresh independent
+security/integration review 18 with no findings. All 14 check-runs on exact head
+`598743269f0596e1618392e1f5fa54aadb3cd0e9` completed successfully:
 
-Main's diagnostic importer, contracts, tests and documentation are retained
-unchanged. Its dedicated text-only IPC command remains stateless; imported JSON
-does not gain request, vault, persistence, lookup or identity authority. Existing
+- [CI 37226288621](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37226288621).
+- [Desktop E2E 37226288612](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37226288612).
+- [Lab 37226288579](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37226288579).
+
+These are historical results for that exact head. They do not qualify the
+current-main refresh below or establish owner approval or a patched release.
+
+### Current-main integration — pending qualification
+
+This normal merge refreshes PR #308 from
+`598743269f0596e1618392e1f5fa54aadb3cd0e9` with main
+`07f7182b3aa6c244140b7ec3edab5a1668318c96`. Those are this merge's first and
+second parents. Main adds published contract/catalog adoption in PR #313 and
+approved action/npm/Cargo updates in PRs #314–#316. Root owns fresh read-only
+security/integration review and all exact-head hosted gates, including native
+E2E, for this merge. No earlier candidate or main result qualifies this head.
+The supported HTTP profile decision remains pending and the PR remains a draft.
+
+The sole conflict was again the adjacent Added entries in `CHANGELOG.md`. The
+HTTP candidate, diagnostic-import and Edge 0.9.11 entries remain under
+`[Unreleased]`; released sections are byte-identical to both parents. No source,
+test or lockfile conflict needed a repair. All 32 HTTP candidate source/test
+paths remain byte-identical to both the prior `5987432` and qualified `0311bc9`
+heads, including bounded cookies/PSL handling, canonical HTTPS or literal-loopback
+OAuth boundaries, pinned redirect destinations, proxy redirect refusal, strict
+no-webview-I/O guards and recorded-lookup/native-ordering proof. Intentional
+initial private/loopback destinations and original proxy trust retain the same
+limits. Existing unit and native E2E assertions are preserved.
+
+Main's stateless diagnostic importer, environment flags, strict negative
+controls, canonical `contracts-edge-0.9.11` pin, six supported catalogs and
+release-asset locks are retained byte-identical to main. The historical Alloy
+exporter golden and source pins remain unchanged. The dedicated text-only IPC
+command stays stateless; imported JSON gains no request, destination, vault,
+credential, identity, persistence, lookup or network authority. Edge catalog
+descriptions of plugins do not adopt Anvil's separate pending plugin/IPC proposal.
+
+Cargo and npm lock graphs, manifests, exact-version `THIRD_PARTY_LICENSES.md`
+inventory and CI action pins match main without local generation. The adopted
+Rust locks are dns-lookup 4.0.2; jsonschema, jsonschema-regex, jsonschema-value
+and referencing 0.58.5; quinn-proto 0.11.19; and tokio-rustls 0.26.6. Desktop
+development dependencies retain Vite 8.3.2 and Vitest 5.0.3 with main's complete
+transitive graph. The install action remains pinned to
+`83ac0ad63c0167e6f06796fab0fce28db1bf3db0` (v2.87.22). Static equality and the
+focused QUIC inspection above do not establish runtime compatibility of the
+combined tree; fresh hosted gates remain required.
+
+Local work on this refresh was static inspection, published-crate integrity and
+source inspection, text editing and Git diff/parity checks only. No project code,
+generator, formatter, build, test, hook or workflow dispatch was run. Existing
 owner questions and physical packaged-platform, process RSS and native consent
-limitations remain. No supported policy is adopted, advisory closed or patched
-released version claimed by this integration.
+limitations remain. No supported policy is adopted, advisory closed, new native
+acceptance established or patched released version claimed by this integration.

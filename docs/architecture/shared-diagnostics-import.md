@@ -17,13 +17,20 @@ backend path parameters are involved.
 
 ## Contract and producer pins
 
-The coherent additive pin is `contracts-edge-0.9.9-r2`, full commit
-`591c73a3f965fdab440c3a76b2707accdf491ba5`. Every vendored byte is covered by
-`contracts/ferrum-contracts/PIN`. All previously vendored files retain their
-hashes from `25c4e9e00033d7941a1dd0ab733fa74e735546ae`; the report schema, all
-12 report fixtures and the full canonical invalid-expectations manifest are
-additions. Existing file-presence scans, catalog parity and reference-reader
-qualification remain in place.
+The published canonical pin is `contracts-edge-0.9.11`, full commit
+`390edbd5b2485af0988e02f7827fde778d76ae0a`. Every previously adopted path is
+vendored byte-exact and covered by `contracts/ferrum-contracts/PIN`. Token/class/
+header parity, reference-reader qualification and all original precise negative
+expectations remain strict. The expanded manifest's other scopes do not add imports.
+
+The tag records EXISTING/implemented shared v1: root accepted the unchanged freeze
+at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e` after owner/consumer
+qualification. Wire fields, bounds, fixtures and reader behavior stay unchanged.
+Owner descriptions still include historical PROPOSED wording; those paired bytes
+must remain exact after removing only `$id`/`x-contract`. Preparation-time pending
+publication text in immutable metadata is historical; actual canonical publication
+is verified in [the adoption record](../ferrum-contracts.md). Owner crate availability
+remains unreleased, and the new Anvil head still needs hosted gates.
 
 Alloy is unreleased (`publish = false`). The producer inspected is immutable
 commit `0c260f5379939ff46d681666bfbcd65b8518b08d`. Tests pin its exact CLI
@@ -153,12 +160,16 @@ no-effect cases also passed. Root separately verified the downloaded producer
 archive and its GitHub source identity, every golden/source digest and the
 canonical contract pins. This is native fixture and producer evidence; final
 landing still requires all fresh hosted checks for the final documentation head.
-The cross-repository qualification below remains PROPOSED.
+This is historical native/producer evidence. Root subsequently accepted the unchanged
+shared v1 freeze, recorded in the published contracts-edge-0.9.11 pin; fresh hosted
+qualification of this adoption head remains pending.
 
 Local validation is static only; formatting, compile, lint and execution gates
 belong to GitHub-hosted CI.
 
 This implements Anvil's consumer portion of
 [ferrum-alloy#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
-That issue remains open for Nexus consumption and cross-repository qualification.
-The shared-contract qualification remains **PROPOSED** pending that evidence.
+The accepted unchanged shared v1 freeze is EXISTING/implemented in canonical metadata.
+This does not claim new producer bytes, Nexus completion or Anvil native acceptance:
+root owns downstream issue state and exact-head hosted qualification. The real golden
+above remains the same historical Edge 0.9.10 export.

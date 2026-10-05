@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
   "vocabulary": "gateway-errors",
   "version": 1,
-  "edge_release": "v0.9.9",
+  "edge_release": "v0.9.11",
   "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the eight coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.9",
-      "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+      "ref": "v0.9.11",
+      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
       "path": "src/retry.rs",
       "symbols": [
         "ErrorClass",
@@ -26,8 +26,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.9",
-      "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+      "ref": "v0.9.11",
+      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
       "path": "docs/error_classification.md",
       "sections": [
         "Canonical taxonomy (ErrorClass)",
