@@ -1,7 +1,11 @@
 # Failure lab: `streams` and `cpdp` profiles
 
+The v0.9.11 default is a reviewed source candidate pending hosted Anvil gates.
+Results and observations below remain historical; see
+[the 0.9.11 source delta](../audit/gateway-0.9.11-delta.md).
+
 These two profiles run Anvil's shared engine against a **real, pinned Ferrum Edge release
-binary** (v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`), with no gateway mocks. Every
+binary** (v0.9.11 candidate default, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`), with no gateway mocks. Every
 scenario passes on both releases with the same expectations; observations recorded below as
 "0.9.5" were re-observed on 0.9.7.
 

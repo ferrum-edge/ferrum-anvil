@@ -224,7 +224,7 @@ the modified file under MPL-2.0.
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 | https://github.com/yaahc/displaydoc |
 | dlopen2 | 0.8.2 | MIT | https://github.com/OpenByteDev/dlopen2 |
 | dlopen2_derive | 0.4.3 | MIT | https://github.com/OpenByteDev/dlopen2 |
-| dns-lookup | 4.0.1 | MIT OR Apache-2.0 | https://github.com/keeperofdakeys/dns-lookup/ |
+| dns-lookup | 4.0.2 | MIT OR Apache-2.0 | https://github.com/keeperofdakeys/dns-lookup/ |
 | document-features | 0.2.12 | MIT OR Apache-2.0 | https://github.com/slint-ui/document-features |
 | dom_query | 0.27.0 | MIT | https://github.com/niklak/dom_query |
 | dpi | 0.1.2 | Apache-2.0 AND MIT | https://github.com/rust-windowing/winit |
@@ -368,9 +368,9 @@ the modified file under MPL-2.0.
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
 | json-patch | 3.0.1 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
 | jsonptr | 0.6.3 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
-| jsonschema | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-regex | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-value | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema | 0.58.5 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.58.5 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.58.5 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | https://github.com/pyfisch/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
@@ -508,7 +508,7 @@ the modified file under MPL-2.0.
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
 | quinn | 0.11.12 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
-| quinn-proto | 0.11.18 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
+| quinn-proto | 0.11.19 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
 | quinn-udp | 0.5.15 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
 | rand | 0.8.8 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
@@ -525,7 +525,7 @@ the modified file under MPL-2.0.
 | rcgen | 0.14.10 | MIT OR Apache-2.0 | https://github.com/rustls/rcgen |
 | ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
-| referencing | 0.58.3 | MIT | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.58.5 | MIT | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
@@ -654,7 +654,7 @@ the modified file under MPL-2.0.
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
 | tokio | 1.53.1 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-macros | 2.7.2 | MIT | https://github.com/tokio-rs/tokio |
-| tokio-rustls | 0.26.5 | MIT OR Apache-2.0 | https://github.com/rustls/tokio-rustls |
+| tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | https://github.com/rustls/tokio-rustls |
 | tokio-tungstenite | 0.30.0 | MIT | https://github.com/snapview/tokio-tungstenite |
 | tokio-util | 0.7.19 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |

@@ -6,6 +6,14 @@ CLI, the collection runner and the load worker all use that core. The
 webview never performs network I/O, never sees a vault key, and renders only
 redacted results.
 
+Shared diagnostic preview uses the published `contracts-edge-0.9.11` pin and the
+accepted unchanged shared v1 freeze. It remains a stateless read-only boundary:
+producer claims are unverified with unknown confidence, with no storage, network,
+apply, trusted escalation or timing attribution. See
+[shared diagnostic import](architecture/shared-diagnostics-import.md).
+Gateway catalogs/default selection include the separate source-audited Edge 0.9.11
+candidate, pending hosted gates; all historical catalogs/locks remain available.
+
 ## Process and trust boundaries
 
 ```text

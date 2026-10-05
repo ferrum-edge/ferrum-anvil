@@ -7,6 +7,62 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+const ORIGINAL_DIAGNOSTIC_EXPECTATIONS: &str = r#"{
+  "diagnostic-finding/invalid/alloy-only-evidence-source.json": {
+    "instance_path": "/evidence/0/source",
+    "keyword": "oneOf",
+    "top_keyword": "oneOf"
+  },
+  "diagnostic-finding/invalid/missing-does-not-prove.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "diagnostic-finding/invalid/probability-confidence.json": {
+    "instance_path": "/confidence",
+    "keyword": "enum"
+  },
+  "diagnostic-ref/invalid/created-at-not-rfc3339.json": {
+    "instance_path": "/created_at",
+    "keyword": "format"
+  },
+  "diagnostic-ref/invalid/detail-missing-backend-dispatch.json": {
+    "instance_path": "/detail",
+    "keyword": "required"
+  },
+  "diagnostic-ref/invalid/granular-class-as-token.json": {
+    "instance_path": "/gateway_error",
+    "keyword": "enum"
+  },
+  "diagnostic-ref/invalid/malformed-ref.json": {
+    "instance_path": "/ref",
+    "keyword": "pattern"
+  },
+  "diagnostic-ref/invalid/uppercase-replica-id.json": {
+    "instance_path": "/replica_id",
+    "keyword": "pattern"
+  },
+  "diagnostic-ref/invalid/unknown-schema-version.json": {
+    "instance_path": "/schema_version",
+    "keyword": "enum"
+  },
+  "diagnostic-report/invalid/finding-missing-owner.json": {
+    "instance_path": "/findings/0",
+    "keyword": "required"
+  },
+  "diagnostic-report/invalid/missing-collection.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "diagnostic-report/invalid/unsupported-major.json": {
+    "instance_path": "/schema_version",
+    "keyword": "pattern"
+  },
+  "diagnostic-report/invalid/uppercase-span-id.json": {
+    "instance_path": "/observations/0/span/span_id",
+    "keyword": "pattern"
+  }
+}"#;
+
 fn vendor() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/ferrum-contracts")
 }
@@ -55,6 +111,12 @@ fn expectation_matches(error: &jsonschema::ValidationError<'_>, path: &str, keyw
 #[test]
 fn every_canonical_fixture_passes_the_real_parser_and_independent_schema_gate() {
     let expectations: Value = serde_json::from_slice(&std::fs::read(vendor().join("fixtures/invalid-expectations.json")).unwrap()).unwrap();
+    // New canonical scopes must not loosen the original diagnostic failures.
+    let original: Value = serde_json::from_str(ORIGINAL_DIAGNOSTIC_EXPECTATIONS).unwrap();
+    for (name, expected) in original.as_object().unwrap() {
+        let actual = &expectations[name];
+        assert_eq!(actual, expected, "original negative expectation: {name}");
+    }
     let mut tested = BTreeSet::new();
     for (contract, expected_valid, expected_invalid) in
         [("diagnostic-report", 8, 4), ("diagnostic-finding", 2, 3), ("diagnostic-ref", 4, 6)]

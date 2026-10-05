@@ -88,7 +88,8 @@ cargo test --workspace --exclude anvil-desktop
 The full CI command list is in [docs/ci.md](docs/ci.md#reproducing-locally).
 
 The failure lab runs real, pinned Ferrum Edge releases on loopback
-(default v0.9.10, see `lab/gateway/RELEASE.lock`):
+(v0.9.11 candidate default, pending hosted Anvil gates; earlier releases retained,
+see `lab/gateway/RELEASE.lock` and [source audit](docs/audit/gateway-0.9.11-delta.md)):
 
 ```bash
 lab/scripts/fetch-gateway.sh                      # download + verify the pinned gateway
@@ -125,10 +126,12 @@ publishes shared vocabularies, JSON schemas and fixtures.
 Anvil consumes gateway vocabularies and headers, the DiagnosticFinding schema
 and fixtures, the diagnostic-ref v1 schema and fixtures, and the diagnostic-report
 v1 schema and its shared import fixtures. These files are pinned to
-`contracts-edge-0.9.9-r2` in
+`contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`) in
 [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and vendored
 under [`contracts/ferrum-contracts`](contracts/ferrum-contracts).
-See [docs/ferrum-contracts.md](docs/ferrum-contracts.md) for the detailed pin and update process.
+The published pin records the accepted unchanged shared v1 freeze; diagnostic
+preview remains read-only, unverified and unknown. See
+[docs/ferrum-contracts.md](docs/ferrum-contracts.md) for the pin and update process.
 Shared contract changes belong in ferrum-contracts first, then are re-vendored here; they are never edited locally.
 
 ## License

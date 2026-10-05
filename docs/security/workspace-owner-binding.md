@@ -237,3 +237,15 @@ invariant. The proposed format needs an additional replay-after-reuse
 regression that requires rejection through the production store. The
 candidate remains a partial remediation pending the owner decision and a
 review of fresh hosted results for the integrated branch.
+
+The 2026-10-04 normal merge integrates main
+`07f7182b3aa6c244140b7ec3edab5a1668318c96` into candidate
+`dc1080899a066855963ea70237fa2f906e305e30`. Owner-binding source and tests
+remain unchanged; main's published contracts, six supported Edge catalogs,
+0.9.11 release assets, stateless diagnostic importer, dependency locks,
+licenses and CI action pins are preserved. Both changelog entries remain in
+Unreleased and released history is unchanged. Root's fresh independent
+integration review and all fresh GitHub-hosted CI gates are pending; earlier
+hosted results do not qualify this integration. The schema-3 revision/history
+owner decision remains pending. No migration, legacy adoption, native-device
+acceptance, advisory closure or released patch is claimed.
