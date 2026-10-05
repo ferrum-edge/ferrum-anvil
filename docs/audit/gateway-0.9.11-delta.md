@@ -1,4 +1,4 @@
-# Ferrum Edge 0.9.10 → 0.9.11: source delta and adoption candidate
+# Ferrum Edge 0.9.10 → 0.9.11: source delta and hosted qualification
 
 | Item | Immutable identity / status |
 |---|---|
@@ -6,14 +6,17 @@
 | Audited target | `v0.9.11`, `c764084b3b51c3f7ffde268c039688d35e49c553` |
 | Contracts | Published `contracts-edge-0.9.11`, `390edbd5b2485af0988e02f7827fde778d76ae0a` |
 | Catalog | [`ferrum-edge-0.9.11/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json), 553 carried outcome IDs with the delta below |
-| Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.11.lock`; reviewed candidate pending hosted Anvil gates |
+| Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.11.lock`; hosted source qualification recorded below |
+| Qualified Anvil source | [`28876cc6623fdba01289b450fe12c7c16649b655`](https://github.com/ferrum-edge/ferrum-anvil/commit/28876cc6623fdba01289b450fe12c7c16649b655), [PR #313](https://github.com/ferrum-edge/ferrum-anvil/pull/313) |
+| Documentation record | Subsequent documentation-only commit; root's whole-record review and fresh exact-head hosted CI remain pending |
 | Audit date | 2026-10-04 |
 
 The [immutable comparison][compare] changes 105 files under `src/` (11,369 insertions,
 2,060 deletions), plus dependency/vendor, test and documentation changes. This is a separate
 source delta audit on top of the [0.9.10 inventory](gateway-0.9.10-delta.md), not a new
-comprehensive inventory or a claim of live Anvil compatibility. The historical 0.9.5, 0.9.7,
-0.9.8, 0.9.9 and 0.9.10 catalogs and release locks remain available and unchanged.
+comprehensive inventory. Hosted Anvil qualification is limited to the exact source and coverage
+recorded below. The historical 0.9.5, 0.9.7, 0.9.8, 0.9.9 and 0.9.10 catalogs and release locks
+remain available and unchanged.
 
 ## Method and limits
 
@@ -32,11 +35,13 @@ plugins are reconciled below. The catalog records no new outcome IDs or new diag
 Admin conditional operations, config admission errors and dependency behavior are described
 at their actual scope rather than fabricated as new proxy diagnostic outcomes.
 
-Only static diff inspection and `git diff --check` qualify this Anvil change locally.
-Unit schema/parser/catalog checks are future hosted gates and cannot establish live gateway
-compatibility. No new lab pass/skip count, native acceptance result or performance measurement
-is claimed. Root must qualify the exact pushed Anvil head with hosted CI, native E2E and
-real pinned-binary lab evidence before accepting the candidate.
+Local validation uses static inspection and `git diff --check` only; no project tooling runs
+locally. Completed hosted CI, Desktop E2E and real pinned-binary lab evidence below qualify
+Anvil source `28876cc6623fdba01289b450fe12c7c16649b655`. Unit schema/parser/catalog checks
+alone cannot establish live gateway compatibility. The subsequent documentation record still
+requires root's whole-record review and fresh hosted CI at its own exact pushed head; the source
+runs are not results for that later commit. No physical-device native acceptance or broader
+performance measurement is claimed.
 
 ## Marker, error class and header decisions
 
@@ -129,7 +134,8 @@ stream resets, so HTTP 200/HEADERS cannot be reported as complete success. Zero 
 [Hyper's small-window change][hyper-pipe] progresses with any positive capacity rather than
 waiting for 1 KiB. [h2's automatic framing budget][h2-budget] follows target receive-window
 changes while preserving configured budgets and outstanding charges. Existing outcome IDs
-and completion/uncertainty assertions remain appropriate; live effects await hosted evidence.
+and completion/uncertainty assertions remain appropriate. Hosted profile coverage is recorded
+below; it does not establish broader small-window/write or performance acceptance.
 
 ## Plugin/auth and remaining source scope
 
@@ -185,7 +191,7 @@ GitHub API digests and published checksum assets. In particular Windows is
 The lock files record all other exact byte digests without guessed naming.
 
 Hosted lab still fetches real release binaries and verifies the selected lock before execution.
-The PR matrix uses the candidate default; nightly retains all six releases, with 0.9.10 as an
+The PR matrix uses the 0.9.11 default; nightly retains all six releases, with 0.9.10 as an
 explicit historical selector. Existing loopback profiles, resource counts and configuration key
 allowlists are unchanged. UP-018 now asserts each release's exact HTTP/1.1 ceiling signal:
 0.9.5/7/8/9/10 retain 503/`backend_error`/`{"error":"Backend connection limit exceeded"}` and
@@ -210,14 +216,159 @@ identified a blanket confidence assertion that rejected valid untrusted marker o
 The controls now distinguish observation from attribution without changing diagnosis behavior.
 All formatter edits from that head's hosted Linux diff have been applied to the three Rust files.
 
-The new source key/field audit does not replace hosted gateway config validation. Root must
-qualify the repaired exact head, especially direct-H1 reuse/framing, gRPC cancellation,
-small-window/write bounds, SSE quality, live G01 and the full `admission` profile. The green
-[initial Lab run](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37243246063) selected
-only `core`; it supplies no UP-018 qualification. Fresh all-profile hosted qualification and
-Rust/native gates remain pending, with no invented pass. This adoption grants no Anvil release/tag,
-available-now status or native signing/OAuth acceptance; human identity/signing gates remain open.
-The six separate safety proposals #306–#311 are outside this worktree's assignment.
+Qualification succeeded after those source/control/formatter repairs. The earlier failures
+were not treated as flakes or rerun into acceptance. The green
+[initial Lab run 37243246063](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37243246063)
+selected only `core`; it supplies no UP-018 qualification.
+
+## Exact-source hosted qualification
+
+Root's static qualification covered all 80 original PR files, all catalog projections, the
+33 canonical file byte hashes and the complete c74fcc3/28876cc repair diffs. The fresh third
+read-only review reported `NO_FINDINGS`. Hosted evidence below belongs to Anvil source
+`28876cc6623fdba01289b450fe12c7c16649b655`; each run completed successfully at attempt 1.
+
+| Hosted run | Applicable coverage / result |
+|---|---|
+| [CI 37245583522](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583522) | All applicable gates successful: Rust on ubuntu-24.04, macos-15 and windows-2025; frontend; contract/catalog drift; supply chain/licensing; secrets; release checker on ubuntu-22.04 and ubuntu-24.04 |
+| [Desktop E2E 37245583544](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583544) | Successful on ubuntu-24.04, macos-15 and windows-2025 |
+| [PR Lab 37245583561](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583561) | Successful on ubuntu-24.04 and macos-15; `core` only, no UP-018 qualification |
+| [Manual Lab 37245804710, attempt 1](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/attempts/1) | Root's actual `workflow_dispatch` with `profile=all`, `release=v0.9.11`, trusted and untrusted passes; both OS jobs successful |
+
+The manual lab fetched and verified the published pinned Edge v0.9.11 binaries and ran all
+14 profiles. Its completed job logs record these totals, including the predefined skips:
+
+| Manual lab job | Passed | Failed | Skipped | `admission` passed / failed / skipped | UP-018 |
+|---|---|---|---|---|---|
+| [Ubuntu 111563355759](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/job/111563355759) | 554 | 0 | 21 | 8 / 0 / 2 | Trusted and untrusted passed |
+| [macOS 111563356038](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/job/111563356038) | 558 | 0 | 19 | 8 / 0 / 2 | Trusted and untrusted passed |
+
+These are successful job conclusions with skipped cases, not a claim that every case passed.
+Ubuntu skipped AUTH-030 and AUTH-031 because `xmllint` was unavailable; macOS passed each
+case in both trusted and untrusted mode. The other 19 predefined skips are common to both jobs.
+The exact logged reasons are retained below, with line wrapping only and identical reasons
+grouped by case ID. No skip was added or widened to obtain qualification.
+
+```text
+GW-014-GEO (Ubuntu and macOS):
+  geo_restriction needs a readable MaxMind country .mmdb: `ferrum-edge validate` rejects a missing
+  db_path ('not accessible before open'), no database is vendored in the repo and the lab may not
+  download one, so neither the country-deny nor the database-unavailable path is reachable with
+  Ferrum Edge 0.9.11 file mode here.
+
+GW-005 (Ubuntu and macOS):
+  Needs a real CP + DP pair (a file-mode gateway never installs the DP freshness fence,
+  src/modes/data_plane.rs:44); it is owned by the cpdp profile (ports 187xx/197xx), not this
+  file-mode admission instance.
+
+UP-018-H2 (Ubuntu and macOS):
+  Not reachable with a single-destination lab on Ferrum Edge 0.9.11: the direct-H2 pool multiplexes,
+  so a maxConnections=1 ceiling is never re-dialled. Observed live on 0.9.5: with
+  SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one
+  connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool
+  reuse the draining connection (502 connection_failure, operator error_class connection_pool_error
+  = pool cancellation, not the ceiling). The pooled-lane public signal (502 connection_failure
+  "Backend unavailable") is covered by the contract test
+  up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family
+  (crates/anvil-diagnostics/tests/upstream_setup_contract.rs).
+
+TLS-003 (Ubuntu and macOS):
+  infeasible on Ferrum Edge 0.9.11: the gateway refuses to start with an expired frontend
+  certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security
+  validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in
+  <redacted scalar> has expired), so no client can observe one from it. Expired-certificate handling
+  is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests.
+
+TLS-004 (Ubuntu and macOS):
+  infeasible on Ferrum Edge 0.9.11: the gateway refuses to start with a not-yet-valid frontend
+  certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security
+  validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in
+  <redacted scalar> is not yet valid). Client-side not-yet-valid classification is covered by
+  anvil-transport tests.
+
+TLS-010 (Ubuntu and macOS):
+  infeasible against the real gateway: the Ferrum Edge 0.9.11 frontend always answers a ClientHello
+  (its handshake timeout only closes clients that stall). A client-leg stall needs a non-gateway
+  fault fixture; UP-007 covers the stall on the gateway-to-backend leg.
+
+TLS-011 (Ubuntu and macOS):
+  infeasible against the real gateway: Ferrum Edge 0.9.11 ends every frontend handshake refusal with
+  a TLS alert; a bare reset needs a client-leg fault fixture that would not be the gateway.
+
+TLS-012 (Ubuntu and macOS):
+  infeasible against the real gateway: every Ferrum Edge 0.9.11 TLS listener (HTTPS and TCP+TLS
+  share one rustls ServerConfig) offers h2, http/1.1 and acme-tls/1 (src/tls/mod.rs), and every
+  Anvil HTTP-family policy offers h2 and/or http/1.1, so there is never an ALPN gap to observe.
+
+TLS-017 (Ubuntu and macOS):
+  out of this profile: needs a forward-proxy fixture in front of the gateway; the gateway plays no
+  part in the proxy CONNECT leg.
+
+TLS-018 (Ubuntu and macOS):
+  out of this profile: the gateway only relays a backend redirect; the certificate-boundary decision
+  is Anvil's redirect policy, covered by engine tests.
+
+AUTH-030, AUTH-031 (Ubuntu):
+  xmllint (libxml2 Exclusive XML Canonicalization, the audited canonicalizer the lab signer needs)
+  is not installed on this host; Anvil itself never signs XML
+
+AUTH-011, AUTH-012, AUTH-013, AUTH-014 (Ubuntu and macOS):
+  client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE,
+  refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests
+  (tests/api_oauth.rs), not a live-gateway scenario
+
+AUTH-025.nonce (Ubuntu and macOS):
+  infeasible on Ferrum Edge 0.9.11: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge
+  (audit §5.4, re-checked in the 0.9.7 to 0.9.10 source); AUTH-025 covers the replay half live
+
+MESH-016 (Ubuntu and macOS):
+  infeasible on a loopback-only host without Kubernetes: Ferrum Edge 0.9.11's Ambient inbound relay
+  guard categorically refuses loopback destinations (docs/mesh.md "Inbound Relay Destination Guard";
+  src/modes/mesh/config.rs inbound_relay_destination_decision) and admits only a non-loopback
+  accepted pod address or node-agent-enrolled pod IPs; the lab binds 127.0.0.1 only and has no node
+  agent. MESH-010/011 verify the Ambient guard live; MESH-008 drives the same transparent CONNECT
+  relay to a workload on the Sidecar inbound listener.
+
+MESH-017 (Ubuntu and macOS):
+  not reachable without a control plane: the post-plugin re-check runs only after a before_proxy
+  route override (mesh_route_dispatch from a VirtualService) moved the effective destination, and
+  the localized file source carries no VirtualService (gateway plugin_configs are rejected in mesh
+  file mode). MESH-009/010/011 verify the relay-synthesis refusal of Ferrum Edge 0.9.11 live
+  (src/proxy/mod.rs build_inbound_hbone_relay_proxy: a generic 404 {"error":"Not Found"} on 0.9.5
+  and 0.9.7, the same documented 403 hbone_relay_destination_denied from 0.9.8). The 403 refusal
+  contract is covered by the HBONE fixture tests (crates/anvil-engine/tests/mesh_hbone.rs).
+
+MESH-029 (Ubuntu and macOS):
+  infeasible on a loopback-only host without Kubernetes, for the reason MESH-016 states: the Ambient
+  relay guard refuses loopback authorities (MESH-028), and the datagram relay also drops loopback
+  DNS answers for a declared name (MESH-024; src/proxy/hbone_proxy.rs
+  screen_ordinary_inbound_hbone_relay_dns_candidates); a positive Ambient UDP relay needs a
+  non-loopback pod address or a node-agent-enrolled pod. MESH-018 drives the same datagram relay on
+  the Sidecar inbound listener.
+
+MESH-030 (Ubuntu and macOS):
+  not in this profile: the EgressGateway relays a udp-marked CONNECT only to MESH_EXTERNAL
+  ServiceEntry UDP destinations with FERRUM_MESH_EGRESS_STREAM_ENABLED (src/proxy/mod.rs
+  mesh_egress_udp_destination_dial_endpoint) and caps them at FERRUM_UDP_MAX_SESSIONS (503
+  {"error":"UDP egress relay session capacity exhausted"}); that needs a fourth,
+  EgressGateway-topology instance with a ServiceEntry, which the mesh profile does not run. The 503
+  refusal shape is covered by the HBONE fixture tests (crates/anvil-engine/tests/mesh_hbone_udp.rs).
+```
+
+The source key/field audit and the hosted profile results retain their separate scopes.
+They do not establish comprehensive acceptance of every changed Edge path, including direct-H1
+reuse/framing, gRPC cancellation, small-window/write bounds or SSE quality beyond the scenarios
+actually exercised. This record changes only documentation: all source, catalog, contract PIN,
+release lock, golden, test and workflow bytes stay at the qualified source; historical catalogs,
+locks and the Alloy exporter golden/PIN remain unchanged.
+
+Root must review this whole documentation record and run fresh hosted CI at the new exact
+pushed head. The successful source runs above do not qualify that documentation commit.
+This adoption grants no Anvil release/tag, available-now status, platform signing, OAuth,
+physical-device native acceptance, provider-account or broader performance acceptance.
+Published unsigned `anvil-v0.1.1` preview assets remain unchanged; human identity/signing gates
+remain open. Other owners' pending proposals are not adopted, and the six separate safety
+proposals #306–#311 remain outside this worktree's assignment.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/ee040d5e3281fde424aa65f5b18004852c5b53b0...c764084b3b51c3f7ffde268c039688d35e49c553
 [changelog]: https://github.com/ferrum-edge/ferrum-edge/blob/c764084b3b51c3f7ffde268c039688d35e49c553/CHANGELOG.md

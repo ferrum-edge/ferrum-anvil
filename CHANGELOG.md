@@ -12,8 +12,23 @@
   gateway token/outcome attribution; all other public Ferrum findings stay at most likely.
   Apply the hosted Linux formatter diff to the changed Rust files.
   Correct the new catalog's shipping panic citations and retained reqwest condition.
-  Fresh hosted Rust and all-profile lab qualification remains pending; no native acceptance
-  or release claim is added.
+  Record hosted qualification of source `28876cc6623fdba01289b450fe12c7c16649b655` with
+  [CI run 37245583522](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583522)
+  (all applicable gates successful) and
+  [Desktop E2E run 37245583544](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583544)
+  (Ubuntu, macOS and Windows successful). The
+  [PR Lab run 37245583561](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583561)
+  passed `core` only. Root's actual manual `all` / `v0.9.11`
+  [Lab run 37245804710, attempt 1](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/attempts/1)
+  succeeded: Ubuntu 554 passed / 0 failed / 21 predefined skips; macOS 558 / 0 / 19.
+  Trusted and untrusted UP-018 passed on both; `admission` was 8 / 0 / 2 on each.
+  The audit retains exact skip reasons in `docs/audit/gateway-0.9.11-delta.md`. These results qualify
+  that source; root's whole-record review and fresh exact-head hosted CI for this subsequent
+  documentation commit remain pending. No Anvil release/tag, platform signing, OAuth,
+  physical-device native acceptance, provider-account or broader performance acceptance is
+  claimed. Published unsigned `anvil-v0.1.1` remains unchanged; other owners' pending proposals
+  are not adopted. This record changes no source, historical catalog, PIN, lock, golden,
+  test or workflow bytes.
 - Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
   Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
   the filesystem. Missing tools, unsupported formats, malformed metadata,
@@ -28,10 +43,11 @@
   diagnostic negative expectations, reader vocabularies and producer description parity.
   Read-only preview stays unverified/unknown; the real historical Alloy golden is unchanged.
 - Add the separately source-audited Edge v0.9.11 catalog and actual release-asset locks
-  at `c764084b3b51c3f7ffde268c039688d35e49c553`, selected as the candidate lab/new-profile
-  default pending hosted Anvil gates. Preserve 0.9.5/7/8/9/10 catalogs, locks and nightly
-  coverage. Record lifetime/cancellation, timeout, H1 headers/pooling and plugin deltas
-  in `docs/audit/gateway-0.9.11-delta.md`; no new lab/native acceptance or release claim.
+  at `c764084b3b51c3f7ffde268c039688d35e49c553`, selected as the lab/new-profile
+  default qualified at source `28876cc` by the hosted runs above. Preserve 0.9.5/7/8/9/10
+  catalogs, locks and nightly coverage. Record lifetime/cancellation, timeout, H1 headers/pooling
+  and plugin deltas in `docs/audit/gateway-0.9.11-delta.md`, including the source qualification
+  and its limits.
 - Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
   finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
   input and a stateless IPC parser preserve redacted producer facts as unverified
