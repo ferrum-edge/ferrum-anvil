@@ -8,18 +8,27 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-alloy",
-    "shared_status": "PROPOSED as a shared Ferrum contract; Anvil import is not tested (ferrum-alloy#27).",
+    "shared_status": "EXISTING shared v1 in the contracts-edge-0.9.11 release candidate. Root accepted the unchanged wire freeze after qualified owner/consumer review (ferrum-alloy#27); canonical tag/publication remains pending.",
     "wire_version": "ferrum.diagnostic_report 1.x",
     "upstream_id": "tag:ferrumedge.com,2026:alloy/schema/diagnostic-report/1",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-alloy",
         "ref": "main",
-        "commit": "fa471ccb79a444aee04661880af2385596d9da45",
+        "commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e",
         "path": "contracts/diagnostics/diagnostic-report.v1.schema.json",
-        "note": "Copied verbatim; $id was replaced (the original is kept in x-contract.upstream_id) and x-contract was added. Alloy keeps it in sync with its Rust enums through crates/ferrum-alloy-diagnostics/tests/schema_parity.rs."
+        "note": "Copied verbatim; $id was replaced (the original is kept in x-contract.upstream_id) and x-contract was added. Alloy keeps it in sync with its Rust enums through crates/ferrum-alloy-diagnostics/tests/schema_parity.rs.",
+        "availability": "unreleased"
       }
-    ]
+    ],
+    "coordinated_release": {
+      "contracts_tag": "contracts-edge-0.9.11",
+      "state": "shared v1 freeze accepted by root; canonical tag/publication pending",
+      "qualified_owner_commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e",
+      "owner_main_push_run": "https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37238543236",
+      "decision": "Root accepted the unchanged shared v1 wire contracts on 2026-10-04 after reviewed owner/consumer qualification. This records the authorized canonical metadata decision, not a prior separate human approval or Alloy crate publishing approval. Alloy remains unpublished.",
+      "adoption": "Existing consumer pins and historical r2 bytes are unchanged. After canonical tag publication, update owner/consumer pins, checksums and local annotations together with full hosted parity."
+    }
   },
   "type": "object",
   "required": [

@@ -1,7 +1,11 @@
 # Failure lab: `h3x` profile (SSE over HTTP/3, CONNECT-UDP, DTLS in the tunnel)
 
+The v0.9.11 default is a reviewed source candidate pending hosted Anvil gates.
+Results and observations below remain historical; see
+[the 0.9.11 source delta](../audit/gateway-0.9.11-delta.md).
+
 This profile runs Anvil's shared engine against the **real, pinned Ferrum Edge release
-binary** (v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`). It exercises HTTP/3 extensions
+binary** (v0.9.11 candidate default, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`). It exercises HTTP/3 extensions
 through the gateway's QUIC listener:
 
 - **Server-sent events over HTTP/3.** The event stream is parsed from the HTTP/3 request
