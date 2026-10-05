@@ -94,14 +94,23 @@ The subsequent documentation head
 and [Lab](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956118)
 successfully. These results and reviews qualify those preceding exact heads.
 
-The current candidate integrates main
-`c19c0a6abba896bfec972b3e083179c55ef8e38c` (diagnostic-import PR #312) into
-that documentation head. The native IPC registration retains the execution
+The preceding candidate `32c092244d9c38d186375d61bf24363d46a98c73` integrated
+main `c19c0a6abba896bfec972b3e083179c55ef8e38c` (diagnostic-import PR #312)
+into that documentation head. The native IPC registration retains the execution
 command wrapper and adds the stateless `diagnostic_import_preview` command to
 its generated fallback handler. Imported diagnostic JSON grants no request,
 vault, identity, persistence, private-file or network authority. The candidate's
 session attempt binding, payload epoch fences and checked spec approval order
 are unchanged.
+
+The current candidate merges main
+`07f7182b3aa6c244140b7ec3edab5a1668318c96`, retaining its published Edge 0.9.11
+contracts and catalog, environment flags, release locks, dependency lockgraphs,
+license manifest and CI action pins. The stateless diagnostic importer and the
+candidate's execution wrapper, session attempt binding, payload epoch fences,
+sealed IPC authorization and checked spec approval order remain intact. Both
+main's adoption records and this proposal remain under Unreleased; released
+changelog history is unchanged.
 
 This integration has static inspection and diff checks only. Fresh hosted CI
 and root review of the new exact head remain pending; the preceding green

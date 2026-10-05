@@ -155,5 +155,69 @@
   "vocabulary-provisioned-by/invalid/wrong-label-key.json": {
     "instance_path": "/label/key",
     "keyword": "const"
+  },
+  "admin-conditional-snapshot/invalid/missing-consumer-map.json": {
+    "instance_path": "/row_etags",
+    "keyword": "required"
+  },
+  "admin-conditional-snapshot/invalid/token-with-line-break.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-conditional-snapshot/invalid/unknown-row-map.json": {
+    "instance_path": "/row_etags",
+    "keyword": "additionalProperties"
+  },
+  "admin-conditional-snapshot/invalid/unquoted-row-tag.json": {
+    "instance_path": "/row_etags/proxies/proxy-id",
+    "keyword": "pattern"
+  },
+  "admin-conditional-snapshot/invalid/weak-namespace-tag.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "backend-egress-policy/invalid/allow-overlay-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/invalid/false-public-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/invalid/leaked-cidr-field.json": {
+    "instance_path": "",
+    "keyword": "additionalProperties"
+  },
+  "backend-egress-policy/invalid/mode-class-mismatch.json": {
+    "instance_path": "/mode_allowed_ip_classes",
+    "keyword": "const"
+  },
+  "backend-egress-policy/invalid/unknown-classification.json": {
+    "instance_path": "/ip_classification",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/invalid/unknown-enforcement-scope.json": {
+    "instance_path": "/enforcement_scope",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/invalid/unknown-mode.json": {
+    "instance_path": "/mode",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/invalid/unknown-version.json": {
+    "instance_path": "/schema_version",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/invalid/wrong-evaluation-stage.json": {
+    "instance_path": "/evaluation_order/0",
+    "keyword": "const"
+  },
+  "vocabulary-backend-egress-policy/invalid/short-commit.json": {
+    "instance_path": "/provenance/0/commit",
+    "keyword": "pattern"
+  },
+  "vocabulary-backend-egress-policy/invalid/unknown-mode.json": {
+    "instance_path": "/modes/0",
+    "keyword": "enum"
   }
 }
