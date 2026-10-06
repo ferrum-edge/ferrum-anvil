@@ -709,13 +709,20 @@ impl App {
     /// entry is marked as added by a user: no automatic cleanup (such as a
     /// reimport releasing the source file it replaces) releases it, only
     /// deleting or replacing an item that held it, once nothing references
-    /// it any more.
+    /// it any more. A file larger than one bundle entry
+    /// ([`anvil_portability::bundle::MAX_ENTRY_BYTES`], 128 MiB) is refused:
+    /// it could be sent, but its workspace could never be exported.
     pub fn put_attachment(
         &self,
         file_name: &str,
         bytes: &[u8],
         media_type: Option<String>,
     ) -> Result<anvil_domain::request::AttachmentRef> {
+        let (size, max) = (bytes.len() as u64, anvil_portability::bundle::MAX_ENTRY_BYTES);
+        if size > max {
+            let why = format!("'{file_name}' is {size} bytes; an attached file can be at most {max} bytes (128 MiB)");
+            return Err(AppError::Invalid(format!("{why}, the most a bundle can carry. Link the file instead; nothing was attached.")));
+        }
         Ok(self.store.atomically(|s| store_attachment_in(s, file_name, bytes, media_type, true))?)
     }
 

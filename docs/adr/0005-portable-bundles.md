@@ -31,21 +31,30 @@
     reading objects, the vault, attachments or history. Each subsequent
     entry is hashed while reading and verified before use; every digest is
     verified before an opened bundle is returned.
-  - **Budgets:** at most 20,000 entries, 512 MiB per entry and 1 GiB total
-    inflated bytes, including manifest and checksums. Metadata uses the
-    same per-entry budget. The compression-ratio check preserves the
-    existing integer quotient: inflated bytes / max(compressed bytes, 1)
-    must be at most 200. The remaining aggregate is charged before each
-    allocation. Reads stop at the smaller of the entry and remaining
-    budgets plus one sentinel byte, and also probe the declared size plus
-    one; actual sizes must equal declarations. Attachments move directly
-    into the opened graph without a second retained copy.
-    These are byte/work limits, not a resident-memory guarantee: valid
-    untrusted bundles can still retain close to 1 GiB, with additional
-    archive, parser, ciphertext/plaintext, input-buffer and KDF overhead.
-    Large mandatory metadata remains supported too. Reducing these
-    budgets or changing the in-memory opened-bundle contract needs an
-    owner decision; see the [resource-policy proposal](../security/bundle-resource-policy-proposal.md).
+  - **Budgets:** at most 20,000 entries, 128 MiB per entry and 256 MiB
+    total inflated bytes, including manifest and checksums, and 4 Mi
+    (4,194,304) JSON values across every JSON entry. Metadata uses the same
+    per-entry budget. The compression-ratio check preserves the existing
+    integer quotient: inflated bytes / max(compressed bytes, 1) must be at
+    most 200. Before `zip` indexes the central directory, the raw
+    end-of-central-directory records are checked: none may be ZIP64, and
+    the last must declare at most 20,000 entries in a directory that fits
+    before it. Before each entry is allocated, its declared size must fit
+    both the per-entry budget and the remaining total (a reservation check
+    that charges nothing). Every byte actually inflated is then charged
+    against the one remaining total, with no refunds, metadata whose
+    buffer is later dropped included. Reads stop at the declared size plus
+    one sentinel byte, so actual sizes must equal declarations. Each JSON
+    entry's values (strings, keys, containers and bare scalars) are counted
+    from its text, without parsing, and charged against the JSON budget
+    before it is parsed. Attachments move directly into the opened graph
+    without a second retained copy. Exports count exact serialized lengths
+    and JSON values against the same budgets and are refused, never split,
+    when over them. Files over 128 MiB are refused when they are attached.
+    These bound inflated, retained and parsed data, not the whole process:
+    the input file, ciphertext/plaintext copies and key derivation add to
+    it. The owner delegate adopted these budgets on 2026-10-06, replacing
+    1 GiB/512 MiB; see the [resource policy](../security/bundle-resource-policy.md).
   - **Conflicts:** merge, replace or duplicate (duplicate remaps ids and
     labels name clashes).
   - **Atomicity:** a checkpoint is taken first and the import runs as one

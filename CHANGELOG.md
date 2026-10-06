@@ -235,11 +235,10 @@
   checksum, format, schema and vault metadata before expanding payloads.
   Charge the remaining aggregate budget before allocating each entry,
   verify actual ZIP sizes against declarations, and hash attachments during
-  reading without retaining a second copy. The supported 1 GiB total,
-  512 MiB per-entry, 200 compression-ratio and 20,000-entry limits are
-  unchanged. Valid large bundles and large metadata can still consume
-  substantial memory; this addresses the validation-order and accounting
-  part of GHSA-jqq4-v58m-6fcw, not the remaining resource-policy decision.
+  reading without retaining a second copy. This fix kept the 1 GiB total and
+  512 MiB per-entry limits; the bundle resource policy under Security has
+  since lowered them to 256 MiB and 128 MiB. It addressed the
+  validation-order and accounting part of GHSA-jqq4-v58m-6fcw.
 - Load preflight: iteration variables, dataset columns, values extracted by
   earlier chain steps and dynamic helpers in the path, query, method, headers
   or body of a fixed origin no longer stop a plan (#288). The preflight judges
@@ -300,6 +299,35 @@
 
 ### Security
 
+- Portable bundles (GHSA-jqq4-v58m-6fcw): an untrusted bundle can no longer
+  make preview or import exhaust memory. The owner-delegate policy of
+  2026-10-06 ([bundle resource policy](docs/security/bundle-resource-policy.md))
+  sets these limits for import and export:
+  - 256 MiB total and 128 MiB per entry, down from 1 GiB and 512 MiB. The
+    manifest, checksum list, objects, history, attachments and sealed vault
+    share the per-entry limit.
+  - 4,194,304 JSON values across every JSON entry, counted from the text
+    before anything is parsed. A bundle of about 1 MiB could otherwise
+    expand to about 5 GiB of parsed JSON.
+  - The ZIP end record's entry count and directory size are checked before
+    the directory is indexed, and ZIP64 archives are refused.
+
+  Every limit is inclusive: one byte, value or entry over is refused. An
+  export over any limit is refused in preview and write, naming the entry,
+  and is never split. A file over 128 MiB is now refused when it is attached.
+  An export that holds such a file attached earlier fails, naming the file
+  and the request or dataset that holds it. So does an export whose attached
+  file is a ZIP64 archive that would carry its end records into the bundle,
+  which import would refuse.
+
+  **Migration:** bundles exported by 0.1.x that are over 256 MiB, have an
+  entry over 128 MiB, or hold more than 4 Mi JSON values no longer import.
+  The error reads "archive exceeds safety limits" and names the entry. To
+  move such a workspace, open it in the Anvil that exported it and export
+  again in smaller parts:
+  - one workspace per bundle;
+  - without history;
+  - with large files linked rather than attached.
 - Desktop: session, send and collection-run payloads (live messages, final
   responses and detailed errors) from work started before a lock or profile
   switch are no longer delivered after it, even once the profile is unlocked
