@@ -165,3 +165,34 @@ describe("unlock passphrase", () => {
     expect(note.textContent).toMatch(/retries removing it at each unlock until it is gone/);
   });
 });
+
+describe("storage", () => {
+  it("reads nothing until asked, and removes a revision that does not decode only on a second click", async () => {
+    let revisions = [{ id: "rev-1", updated_at: 0 }];
+    backend({
+      app_status: () => status("passphrase"),
+      storage_cleanup_last: () => ({
+        ran_at: "2026-01-01T00:00:00Z",
+        result: { orphaned_revisions: 0, released_attachments: 0, undecodable: [{ kind: "revision", id: "rev-1" }] },
+      }),
+      storage_undecodable_revisions: () => revisions,
+      storage_revision_remove: () => {
+        revisions = [];
+        return { checkpoint: "before-removing-revision.db" };
+      },
+    });
+    render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
+    const check = await screen.findByRole("button", { name: "Check storage" });
+    // Finding them decrypts every revision: not each time Settings opens.
+    expect(invoke).not.toHaveBeenCalledWith("storage_undecodable_revisions", undefined);
+    fireEvent.click(check);
+    expect(await screen.findByText(/1 stored revision\(s\) do not decode/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove revision rev-1" }));
+    expect(invoke).not.toHaveBeenCalledWith("storage_revision_remove", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Confirm removing revision rev-1" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("storage_revision_remove", { revisionId: "rev-1" }));
+    expect(await screen.findByText("Removed revision rev-1. The checkpoint before-removing-revision.db keeps it.")).toBeTruthy();
+    expect(screen.getByText("No stored revision fails to decode.")).toBeTruthy();
+  });
+});

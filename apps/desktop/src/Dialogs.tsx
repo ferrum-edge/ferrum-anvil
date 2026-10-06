@@ -2,7 +2,18 @@
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
 import { DiagnosticImport } from "./DiagnosticImport";
-import { api, type ExportPreview, type FileGrant, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
+import {
+  api,
+  type ExportPreview,
+  type FileGrant,
+  type ImportReport,
+  type ProviderInfo,
+  type SpecImported,
+  type StorageCleanup,
+  type StorageCleanupRecord,
+  type SystemInfo,
+  type UndecodableRevision,
+} from "./api";
 import type {
   AppSettings,
   ClientIdentity,
@@ -1324,6 +1335,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
           </button>
         </div>
       </section>
+      <StorageSection />
       <section className="settings-section">
         <h3>Privacy and sign-in</h3>
         <label className="lbl">
@@ -1351,6 +1363,100 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
       {notice && <div className="ok-box">{notice}</div>}
       {err && <div className="bad-box">{err}</div>}
     </Modal>
+  );
+}
+
+const cleanupSummary = (r: StorageCleanup) =>
+  `removed ${r.orphaned_revisions} revision(s) of deleted requests and released ${r.released_attachments} stored file(s)` +
+  (r.undecodable.length ? `; ${r.undecodable.length} stored object(s) did not decode, so nothing else was released` : "");
+
+/**
+ * The storage cleanup: its last pass, and the stored revisions that do not
+ * decode. Each such revision could name any stored file, so while one is left
+ * no stored file is released, and deleting its request or workspace keeps it;
+ * it can be removed here (a checkpoint of the profile keeps it). Read only when
+ * asked: finding them decrypts every revision.
+ */
+function StorageSection() {
+  const [found, setFound] = useState<{ last: StorageCleanupRecord | null; revisions: UndecodableRevision[] } | null>(null);
+  // The revision whose removal awaits its second click.
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const run = async (work: () => Promise<string | null>) => {
+    setBusy(true);
+    setErr(null);
+    setNotice(null);
+    try {
+      const done = await work();
+      const [last, revisions] = await Promise.all([api.storageCleanupLast(), api.undecodableRevisions()]);
+      setFound({ last, revisions });
+      setNotice(done);
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+      setRemoving(null);
+    }
+  };
+  const remove = (id: string) =>
+    run(async () => {
+      const done = await api.removeUndecodableRevision(id);
+      return `Removed revision ${id}. The checkpoint ${done.checkpoint} keeps it.`;
+    });
+  return (
+    <section className="settings-section">
+      <h3>Storage</h3>
+      <p className="hint">
+        Opening a profile cleans up its storage at most once a day: revisions of deleted requests go, and so do stored files nothing saved uses any
+        more. A stored revision that does not decode could use any stored file, so while one is left, nothing is released.
+      </p>
+      <div className="fields">
+        <button className="btn" disabled={busy} onClick={() => void run(async () => null)}>
+          <Icon name="search" size={14} />
+          Check storage
+        </button>
+        <button className="btn" disabled={busy} onClick={() => void run(async () => `This cleanup ${cleanupSummary(await api.storageCleanupNow())}.`)}>
+          Clean up now
+        </button>
+      </div>
+      {found && (
+        <p className="hint">
+          {found.last ? `The last cleanup (${new Date(found.last.ran_at).toLocaleString()}) ${cleanupSummary(found.last.result)}.` : "No cleanup has run yet."}
+        </p>
+      )}
+      {found && found.revisions.length === 0 && <div className="ok-box">No stored revision fails to decode.</div>}
+      {found && found.revisions.length > 0 && (
+        <div className="warn-box">
+          {found.revisions.length} stored revision(s) do not decode: nothing can read them, and while one is left no stored file is released. Removing
+          one takes a checkpoint of the profile first, which keeps it.
+          <ul>
+            {found.revisions.map((r) => (
+              <li key={r.id}>
+                <span className="mono">{r.id}</span> · written {new Date(r.updated_at).toLocaleString()}{" "}
+                {removing === r.id ? (
+                  <>
+                    <button className="btn small danger" aria-label={`Confirm removing revision ${r.id}`} disabled={busy} onClick={() => void remove(r.id)}>
+                      Remove
+                    </button>
+                    <button className="btn small" disabled={busy} onClick={() => setRemoving(null)}>
+                      Keep
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn small ghost" aria-label={`Remove revision ${r.id}`} disabled={busy} onClick={() => setRemoving(r.id)}>
+                    Remove…
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {notice && <div className="ok-box">{notice}</div>}
+      {err && <div className="bad-box">{err}</div>}
+    </section>
   );
 }
 

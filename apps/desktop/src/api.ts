@@ -401,6 +401,14 @@ export interface StorageCleanupRecord {
     undecodable: { kind: string; id: string }[];
   };
 }
+/** What one storage cleanup pass did (`anvil_app::cleanup::StorageCleanup`). */
+export type StorageCleanup = StorageCleanupRecord["result"];
+/** A stored revision whose own sealed payload does not decode (`anvil_app::cleanup::UndecodableRevision`). */
+export interface UndecodableRevision {
+  id: string;
+  /** When its row was last written, in milliseconds since the Unix epoch. */
+  updated_at: number;
+}
 export interface LoadReportSummary {
   run_id: string;
   plan_id: string;
@@ -689,6 +697,12 @@ export const api = {
   saveSettings: (settings: AppSettings) => call<void>("settings_save", { settings }),
   /** The last storage cleanup (at most once a day when the profile opens); null before the first. */
   storageCleanupLast: () => call<StorageCleanupRecord | null>("storage_cleanup_last"),
+  /** Run a storage cleanup pass now and keep it as the last one. */
+  storageCleanupNow: () => call<StorageCleanup>("storage_cleanup_now"),
+  /** Stored revisions that do not decode: each keeps every stored file until it is removed. */
+  undecodableRevisions: () => call<UndecodableRevision[]>("storage_undecodable_revisions"),
+  /** Remove a stored revision that does not decode; a checkpoint of the profile keeps it (its file name is returned). */
+  removeUndecodableRevision: (revisionId: string) => call<{ checkpoint: string }>("storage_revision_remove", { revisionId }),
 
   effective: (input: SendInput) => call<EffectiveRequest>("effective_request", { input }),
   send: (input: SendInput, executionId: string) => call<ExecutionView>("send_request", { input, executionId }),

@@ -3,10 +3,11 @@
 //! those attached and never saved past the grace period and those only
 //! orphaned revisions name. A file a user attached within the grace period,
 //! which a draft may hold, and a file any saved item of any workspace
-//! references are never released.
+//! references are never released. A revision that does not decode, which
+//! keeps every file, can be removed (a checkpoint keeps it).
 
 use anvil_app::App;
-use anvil_app::cleanup::{ATTACHMENT_GRACE, CLEANUP_INTERVAL, StorageCleanup, UndecodableObject};
+use anvil_app::cleanup::{ATTACHMENT_GRACE, CLEANUP_INTERVAL, StorageCleanup, UndecodableObject, UndecodableRevision};
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
@@ -375,4 +376,73 @@ fn a_mark_stamped_by_a_pass_an_undecodable_object_blocked_does_not_make_the_next
     assert_eq!(app.clean_up_storage_if_due().unwrap(), None);
     assert!(since_last_pass(&app) > chrono::Duration::hours(24), "no pass ran");
     assert!(stored(&app, &abandoned) && stored(&app, &legacy));
+}
+
+/// Overwrite the stored payload of `kind` row `id`, as damage would, leaving
+/// its index and write time as they were.
+fn damage(app: &App, kind: &str, id: &Id) {
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    db.execute("UPDATE objects SET payload=x'00' WHERE kind=?1 AND id=?2", rusqlite::params![kind, id.to_string()]).unwrap();
+}
+
+#[test]
+fn a_revision_that_does_not_decode_survives_its_requests_delete_and_can_be_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let gone = app.put_attachment("gone.bin", b"payload of a request whose revision is damaged", None).unwrap();
+    let damaged = app.create_request(&ws, None, "damaged", upload(&gone)).unwrap();
+    let live = app.create_request(&ws, None, "live", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    attached_days_ago(&app, &gone, 31);
+    let revision = damaged.revision_id.unwrap();
+    damage(&app, kind::REVISION, &revision);
+
+    // The delete keeps the revision: it could name any stored file.
+    app.delete_request(&damaged.meta.id).unwrap();
+    assert_eq!(revisions_of(&app, &damaged.meta.id), 1);
+    let done = app.clean_up_storage().unwrap();
+    assert_eq!(done.undecodable, vec![UndecodableObject { kind: kind::REVISION.into(), id: revision.to_string() }]);
+    assert!(stored(&app, &gone), "the damaged revision blocks every release");
+
+    let found = app.undecodable_revisions().unwrap();
+    assert_eq!(found.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec![revision.to_string()]);
+    // A revision that decodes is never removed here.
+    let e = app.remove_undecodable_revision(&live.revision_id.unwrap()).unwrap_err();
+    assert!(e.to_string().contains("decodes"), "{e}");
+    assert_eq!(revisions_of(&app, &live.meta.id), 1);
+
+    let removed = app.remove_undecodable_revision(&revision).unwrap();
+    assert!(app.dir.join("checkpoints").join(&removed.checkpoint).is_file(), "a checkpoint keeps the removed row: {removed:?}");
+    assert_eq!(revisions_of(&app, &damaged.meta.id), 0);
+    assert_eq!(app.undecodable_revisions().unwrap(), Vec::<UndecodableRevision>::new());
+    assert!(app.remove_undecodable_revision(&revision).is_err(), "already removed");
+
+    // Nothing blocks the cleanup any more: the file only it could name goes.
+    let done = app.clean_up_storage().unwrap();
+    assert!(done.undecodable.is_empty(), "{done:?}");
+    assert_eq!(done.released_attachments, 1);
+    assert!(!stored(&app, &gone));
+    assert_eq!(revisions_of(&app, &live.meta.id), 1, "the live request's revision is kept");
+}
+
+#[test]
+fn a_pass_looks_for_orphans_again_only_once_a_revision_or_request_row_changed() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    assert_eq!(app.clean_up_storage().unwrap(), StorageCleanup::default());
+
+    // Damage that leaves every row's index and write time as they were: with
+    // no file to release, a pass reads no revision, so it finds nothing.
+    let revision = r.revision_id.unwrap();
+    damage(&app, kind::REVISION, &revision);
+    assert_eq!(app.clean_up_storage().unwrap(), StorageCleanup::default());
+
+    // Once a request row is gone, every revision is authenticated again.
+    app.store.delete(kind::REQUEST, &r.meta.id).unwrap();
+    let done = app.clean_up_storage().unwrap();
+    assert_eq!(done.undecodable, vec![UndecodableObject { kind: kind::REVISION.into(), id: revision.to_string() }]);
+    assert_eq!(done.orphaned_revisions, 0);
+    assert_eq!(revisions_of(&app, &r.meta.id), 1, "a revision that does not decode is kept");
 }

@@ -1,11 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capabilities: core events/window basics and message/confirm dialogs. No shell, no filesystem plugin, no HTTP plugin, no open or save dialog — file commands take grants from the backend's own native dialogs (file_choose), never a path from the webview.",
+  "description": "Minimal capabilities: core events/window basics only. No shell, no filesystem plugin, no HTTP plugin and no dialog of any kind: file commands take grants from the backend's own native dialogs (file_choose), never a path from the webview, and every native message or confirmation is the backend's own (presence.rs), so the webview cannot show one that looks like it. The webview asks its confirmations inside the window (Confirm.tsx).",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "dialog:allow-message",
-    "dialog:allow-ask"
+    "core:default"
   ]
 }

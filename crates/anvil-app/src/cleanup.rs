@@ -55,6 +55,23 @@ pub struct UndecodableObject {
     pub id: String,
 }
 
+/// A stored revision whose own sealed payload does not decode
+/// ([`App::undecodable_revisions`]). Nothing of its content is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndecodableRevision {
+    pub id: String,
+    /// When its row was last written, in milliseconds since the Unix epoch.
+    pub updated_at: i64,
+}
+
+/// What [`App::remove_undecodable_revision`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedRevision {
+    /// The file name of the checkpoint taken just before the removal (in the
+    /// profile's `checkpoints` folder): the removed row is kept there.
+    pub checkpoint: String,
+}
+
 /// The last cleanup pass that ran on a profile ([`App::last_storage_cleanup`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageCleanupRecord {
@@ -73,6 +90,12 @@ struct KeptPass {
     /// ([`rows_digest_in`]). Until they change, a pass finds the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rows: Option<String>,
+    /// When the pass left no orphaned revision: the digest of the revision
+    /// and request rows it left ([`revision_rows_digest_in`]). Until they
+    /// change, no revision can have lost its request, so a pass decrypts
+    /// none to look for orphans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settled: Option<String>,
 }
 
 /// What a pass decided from one consistent read of the store.
@@ -168,6 +191,63 @@ impl App {
         Ok(self.store.read_consistently(kept_in)?.map(|k| k.record))
     }
 
+    /// The stored revisions whose own sealed payload does not decode, oldest
+    /// write first. Each could name any stored file, so while one is left the
+    /// storage cleanup releases nothing, and deleting its request or
+    /// workspace keeps it. [`App::remove_undecodable_revision`] removes one.
+    pub fn undecodable_revisions(&self) -> Result<Vec<UndecodableRevision>> {
+        let mut found = self.store.read_consistently(|s| {
+            let mut found = Vec::new();
+            for m in s.object_meta(kind::REVISION)? {
+                // A row whose id does not parse cannot be removed by id.
+                let Ok(id) = m.id.parse::<Id>() else { continue };
+                if !revision_decodes_in(s, &id)? {
+                    found.push(UndecodableRevision { id: m.id, updated_at: m.updated_at });
+                }
+            }
+            Ok(found)
+        })?;
+        found.sort_by(|a, b| a.updated_at.cmp(&b.updated_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(found)
+    }
+
+    /// Remove revision `id`, only while its own sealed payload does not
+    /// decode: nothing can read it, and while it is kept the storage cleanup
+    /// releases nothing. A checkpoint of the profile is taken first, so the
+    /// row stays recoverable there; the stored files it may have named are
+    /// then released by a later cleanup once nothing else holds them.
+    pub fn remove_undecodable_revision(&self, id: &Id) -> Result<RemovedRevision> {
+        let row = id.to_string();
+        let check = |s: &StoreRead<'_>| -> anvil_storage::store::Result<()> {
+            if !s.object_meta(kind::REVISION)?.iter().any(|m| m.id == row) {
+                return Err(StoreError::NotFound(format!("revision {row}")));
+            }
+            Ok(())
+        };
+        let decodes = self.store.read_consistently(|s| {
+            check(s)?;
+            revision_decodes_in(s, id)
+        })?;
+        if decodes {
+            return Err(AppError::Invalid(format!("revision {id} decodes; only a revision that does not decode can be removed here")));
+        }
+        let checkpoint = self.store.checkpoint("before-removing-revision")?;
+        let removed = self.store.atomically(|s| {
+            check(&s.as_read())?;
+            // Repaired (a checkpoint restore) since it was checked: kept.
+            if revision_decodes_in(&s.as_read(), id)? {
+                return Ok(false);
+            }
+            s.delete(kind::REVISION, id)
+        })?;
+        if !removed {
+            return Err(AppError::Invalid(format!("revision {id} decodes now; it was kept")));
+        }
+        tracing::warn!(kind = kind::REVISION, %id, "removed a stored revision that does not decode; a checkpoint keeps it");
+        let checkpoint = checkpoint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(RemovedRevision { checkpoint })
+    }
+
     /// [`App::clean_up_storage_if_due`] when a profile opens. A failure does
     /// not stop the profile opening: it is logged, and a later open tries
     /// again.
@@ -175,6 +255,18 @@ impl App {
         if let Err(e) = self.clean_up_storage_if_due() {
             tracing::warn!(error = %e, "storage cleanup did not finish; it runs again when the profile next opens");
         }
+    }
+}
+
+/// Whether revision `id`'s own sealed payload decodes, as the cleanup reads
+/// it to tell orphans (`StoreRead::orphan_revision_attachment_refs_for_retention`):
+/// its request is not consulted, so a revision is not reported for a
+/// damaged request.
+fn revision_decodes_in(s: &StoreRead<'_>, id: &Id) -> anvil_storage::store::Result<bool> {
+    match s.orphan_revision_attachment_refs_for_retention(id) {
+        Ok(_) => Ok(true),
+        Err(StoreError::Integrity | StoreError::Serde(_)) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -193,7 +285,14 @@ fn plan_in(s: &StoreRead<'_>, cutoff: i64) -> anvil_storage::store::Result<Plan>
     // By id, and their row ids for the reference scan to skip.
     let (mut orphans, mut orphan_rows) = (Vec::new(), HashSet::new());
     let mut undecodable = Vec::new();
-    for m in s.object_meta(kind::REVISION)? {
+    // Every revision was authenticated by a pass since which no revision or
+    // request row was added, removed or written: none is orphaned now.
+    let settled = match kept_in(s)?.and_then(|k| k.settled) {
+        Some(digest) => digest == revision_rows_digest_in(s)?,
+        None => false,
+    };
+    let revisions = if settled { Vec::new() } else { s.object_meta(kind::REVISION)? };
+    for m in revisions {
         // Only the sealed request ID decides orphanhood. Plaintext indexes
         // cannot supply historical ownership, even if they name a live row.
         let refs = match m.id.parse::<Id>() {
@@ -248,7 +347,7 @@ fn apply_in(s: &StoreTx<'_>, plan: Plan) -> anvil_storage::store::Result<Storage
         done.undecodable = plan.undecodable;
         // What was stamped changed the rows the digest covers.
         let rows = if stamped { rows_digest_in(&s.as_read())? } else { plan.rows };
-        keep_in(s, &done, Some(rows))?;
+        keep_in(s, &done, Some(rows), None)?;
         return Ok(done);
     }
     for id in &plan.orphans {
@@ -266,13 +365,15 @@ fn apply_in(s: &StoreTx<'_>, plan: Plan) -> anvil_storage::store::Result<Storage
         let held = AttachmentIndex { user: false, attached_at: None, ..e };
         s.put(kind::IMPORT_SOURCE, &attachment_index_id(&held.attachment), None, None, 0.0, &held)?;
     }
-    keep_in(s, &done, None)?;
+    // The orphans are gone: until a revision or request row changes, none is.
+    let settled = revision_rows_digest_in(&s.as_read())?;
+    keep_in(s, &done, None, Some(settled))?;
     Ok(done)
 }
 
 /// Keep `done` as the last pass, run now.
-fn keep_in(s: &StoreTx<'_>, done: &StorageCleanup, rows: Option<String>) -> anvil_storage::store::Result<()> {
-    let kept = KeptPass { record: StorageCleanupRecord { ran_at: Utc::now(), result: done.clone() }, rows };
+fn keep_in(s: &StoreTx<'_>, done: &StorageCleanup, rows: Option<String>, settled: Option<String>) -> anvil_storage::store::Result<()> {
+    let kept = KeptPass { record: StorageCleanupRecord { ran_at: Utc::now(), result: done.clone() }, rows, settled };
     s.put_note(LAST_PASS_NOTE, &serde_json::to_string(&kept)?)
 }
 
@@ -292,6 +393,27 @@ fn rows_digest_in(s: &StoreRead<'_>) -> anvil_storage::store::Result<String> {
         for m in rows {
             digest.update(format!("{k}\0{}\0{}\0{}\n", m.id, m.parent_id.unwrap_or_default(), m.updated_at));
         }
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// A digest of what decides which revisions are orphaned: every revision
+/// row by id, owner, parent and when it was last written, and the id of
+/// every request row. Reads no content. A revision's sealed request never
+/// changes, so while this digest stays the same, no revision gains or loses
+/// its request.
+fn revision_rows_digest_in(s: &StoreRead<'_>) -> anvil_storage::store::Result<String> {
+    let mut digest = Sha256::new();
+    let mut revisions = s.object_meta(kind::REVISION)?;
+    revisions.sort_by(|a, b| a.id.cmp(&b.id));
+    for m in revisions {
+        let (owner, parent) = (m.workspace_id.unwrap_or_default(), m.parent_id.unwrap_or_default());
+        digest.update(format!("{}\0{}\0{owner}\0{parent}\0{}\n", kind::REVISION, m.id, m.updated_at));
+    }
+    let mut requests: Vec<String> = s.object_meta(kind::REQUEST)?.into_iter().map(|m| m.id).collect();
+    requests.sort();
+    for id in requests {
+        digest.update(format!("{}\0{id}\n", kind::REQUEST));
     }
     Ok(hex::encode(digest.finalize()))
 }

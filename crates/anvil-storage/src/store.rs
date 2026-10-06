@@ -31,7 +31,8 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
@@ -227,77 +228,95 @@ struct ObjectIdentity {
     parent: Option<Id>,
 }
 
-fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
+/// A payload as its identity check decoded it: the whole object, of its
+/// kind's type, when the check needed that type. A read of the same type
+/// takes it ([`typed`]) instead of decoding the payload again.
+type Decoded = Option<Box<dyn Any>>;
+
+/// `decoded` when the identity check already decoded the payload as `T`;
+/// otherwise `json` decoded as `T`.
+fn typed<T: DeserializeOwned + 'static>(decoded: Decoded, json: &[u8]) -> Result<T> {
+    match decoded.map(|d| d.downcast::<T>()) {
+        Some(Ok(v)) => Ok(*v),
+        _ => Ok(serde_json::from_slice(json)?),
+    }
+}
+
+fn object_identity(k: &str, json: &[u8]) -> Result<(ObjectIdentity, Decoded)> {
     use anvil_domain::workspace::*;
 
     fn decode<T: DeserializeOwned>(json: &[u8]) -> Result<T> {
         serde_json::from_slice(json).map_err(|_| StoreError::Integrity)
     }
 
-    let (id, owner, parent) = match k {
+    fn kept<T: 'static>(v: T) -> Decoded {
+        Some(Box::new(v))
+    }
+
+    let ((id, owner, parent), decoded) = match k {
         kind::WORKSPACE => {
             let v: Workspace = decode(json)?;
-            (Some(v.meta.id), None, None)
+            ((Some(v.meta.id), None, None), kept(v))
         }
         kind::FOLDER => {
             let v: Folder = decode(json)?;
-            (Some(v.meta.id), Some(v.workspace_id), v.parent_id)
+            ((Some(v.meta.id), Some(v.workspace_id), v.parent_id), kept(v))
         }
         kind::REQUEST => {
             let v: RequestDefinition = decode(json)?;
-            (Some(v.meta.id), Some(v.workspace_id), v.folder_id)
+            ((Some(v.meta.id), Some(v.workspace_id), v.folder_id), kept(v))
         }
         kind::REVISION => {
             let v: RequestRevision = decode(json)?;
             // This released type has no workspace field. Check the current
             // parent's sealed owner, never its index alone. Historical owner
             // proof needs the format decision in workspace-owner-binding.md.
-            (Some(v.id), None, Some(v.request_id))
+            ((Some(v.id), None, Some(v.request_id)), kept(v))
         }
         kind::ENVIRONMENT => {
             let v: Environment = decode(json)?;
-            (Some(v.meta.id), Some(v.workspace_id), None)
+            ((Some(v.meta.id), Some(v.workspace_id), None), kept(v))
         }
         kind::TLS_PROFILE => {
             let v: anvil_domain::tls::TlsProfile = decode(json)?;
-            (Some(v.id), Some(v.workspace_id), None)
+            ((Some(v.id), Some(v.workspace_id), None), kept(v))
         }
         kind::PROXY_PROFILE => {
             let v: anvil_domain::tls::ProxyProfile = decode(json)?;
-            (Some(v.id), Some(v.workspace_id), None)
+            ((Some(v.id), Some(v.workspace_id), None), kept(v))
         }
         kind::INTEGRATION => {
             let v: anvil_domain::integration::IntegrationProfile = decode(json)?;
-            (Some(v.id), Some(v.workspace_id), None)
+            ((Some(v.id), Some(v.workspace_id), None), kept(v))
         }
         kind::DATASET => {
             let v: Dataset = decode(json)?;
-            (Some(v.meta.id), Some(v.workspace_id), None)
+            ((Some(v.meta.id), Some(v.workspace_id), None), kept(v))
         }
         kind::SCENARIO => {
             let v: Scenario = decode(json)?;
-            (Some(v.meta.id), Some(v.workspace_id), None)
+            ((Some(v.meta.id), Some(v.workspace_id), None), kept(v))
         }
         kind::LOAD_PLAN => {
             let v: anvil_domain::load::LoadPlan = decode(json)?;
-            (Some(v.id), Some(v.workspace_id), None)
+            ((Some(v.id), Some(v.workspace_id), None), kept(v))
         }
         kind::RUN_REPORT => {
             let v: anvil_domain::runner::RunReport = decode(json)?;
-            (Some(v.run_id), Some(v.workspace_id), None)
+            ((Some(v.run_id), Some(v.workspace_id), None), kept(v))
         }
         kind::USER_PROFILE => {
             let v: UserProfile = decode(json)?;
-            (Some(v.meta.id), None, None)
+            ((Some(v.meta.id), None, None), kept(v))
         }
         kind::API_RULESET => {
             let v: anvil_domain::settings::StoredRuleset = decode(json)?;
-            (Some(v.id), None, None)
+            ((Some(v.id), None, None), kept(v))
         }
         kind::APP_SETTINGS => {
-            let _: anvil_domain::settings::AppSettings = decode(json)?;
+            let v: anvil_domain::settings::AppSettings = decode(json)?;
             // Profile-only, with no embedded id. The row id is in the AAD.
-            (None, None, None)
+            ((None, None, None), kept(v))
         }
         kind::SPEC_SOURCE => {
             // App-owned type: project only the sealed identity fields so
@@ -312,7 +331,7 @@ fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
                 workspace_id: Id,
             }
             let v: Record = decode(json)?;
-            (Some(v.source.import_id), Some(v.workspace_id), None)
+            ((Some(v.source.import_id), Some(v.workspace_id), None), None)
         }
         kind::DEVICE_IDENTITY_SEAL => {
             #[derive(Deserialize)]
@@ -320,7 +339,7 @@ fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
                 workspace_id: Id,
             }
             let v: Seal = decode(json)?;
-            (Some(v.workspace_id), Some(v.workspace_id), None)
+            ((Some(v.workspace_id), Some(v.workspace_id), None), None)
         }
         kind::TOKEN_FILE | kind::LINKED_FILE => {
             #[derive(Deserialize)]
@@ -328,7 +347,7 @@ fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
                 id: Id,
             }
             let v: Binding = decode(json)?;
-            (Some(v.id), None, None)
+            ((Some(v.id), None, None), None)
         }
         kind::IMPORT_SOURCE => {
             // Attachment indexes are profile-only and have no embedded id.
@@ -340,15 +359,17 @@ fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
             }
             let v: Index = decode(json)?;
             let _ = (v.attachment, v.blob);
-            (None, None, None)
+            ((None, None, None), None)
         }
         _ => return Err(StoreError::Integrity),
     };
-    Ok(ObjectIdentity { id, owner, parent })
+    Ok((ObjectIdentity { id, owner, parent }, decoded))
 }
 
-fn validate_object(k: &str, id: &str, owner: Option<&str>, parent: Option<&str>, json: &[u8]) -> Result<()> {
-    let identity = object_identity(k, json)?;
+/// Check a payload's sealed identity against its row; returns the payload as
+/// the check decoded it.
+fn validate_object(k: &str, id: &str, owner: Option<&str>, parent: Option<&str>, json: &[u8]) -> Result<Decoded> {
+    let (identity, decoded) = object_identity(k, json)?;
     if identity.id.is_some_and(|sealed| sealed.to_string() != id)
         || identity.parent.map(|p| p.to_string()).as_deref() != parent
         || (k != kind::REVISION && identity.owner.map(|w| w.to_string()).as_deref() != owner)
@@ -356,7 +377,7 @@ fn validate_object(k: &str, id: &str, owner: Option<&str>, parent: Option<&str>,
     {
         return Err(StoreError::Integrity);
     }
-    Ok(())
+    Ok(decoded)
 }
 
 /// Associated data of a vault secret: its id and the workspace that owns it
@@ -723,11 +744,11 @@ impl Store {
         self.atomically(|tx| tx.put(kind, id, workspace_id, parent_id, sort_key, value))
     }
 
-    pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+    pub fn get<T: DeserializeOwned + 'static>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         self.read_consistently(|read| read.get(kind, id))
     }
 
-    pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+    pub fn list<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         self.read_consistently(|read| read.list(kind, workspace_id))
     }
 
@@ -1054,11 +1075,11 @@ impl StoreTx<'_> {
         self.records()?.put(kind, id, workspace_id, parent_id, sort_key, value)
     }
 
-    pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+    pub fn get<T: DeserializeOwned + 'static>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         self.records()?.get(kind, id)
     }
 
-    pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+    pub fn list<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         self.records()?.list(kind, workspace_id)
     }
 
@@ -1174,7 +1195,7 @@ impl StoreRead<'_> {
         Ok(Records { key: self.store.key()?, conn: self.conn })
     }
 
-    pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+    pub fn get<T: DeserializeOwned + 'static>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         self.records()?.get(kind, id)
     }
 
@@ -1194,7 +1215,7 @@ impl StoreRead<'_> {
         self.records()?.orphan_revision_attachment_refs_for_retention(id)
     }
 
-    pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+    pub fn list<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         self.records()?.list(kind, workspace_id)
     }
 
@@ -1273,6 +1294,9 @@ struct Records<'c> {
     conn: &'c Connection,
 }
 
+/// The sealed workspace of each request read so far, by request id.
+type RequestOwners = HashMap<Id, Id>;
+
 struct ObjectRow {
     owner: Option<String>,
     parent: Option<String>,
@@ -1330,7 +1354,7 @@ impl Records<'_> {
         if let Some(existing) = self.object_row(kind, &id_s)? {
             // An altered index must fail before a save can seal its lie into
             // a new payload, even when the submitted owner matches that index.
-            self.open_object(kind, &id_s, &existing)?;
+            self.open_object(kind, &id_s, &existing, &mut RequestOwners::new())?;
             if existing.owner != owner || (kind == kind::REVISION && existing.parent != parent) {
                 return Err(StoreError::Ownership);
             }
@@ -1341,7 +1365,7 @@ impl Records<'_> {
             return Err(StoreError::NotFound("workspace".into()));
         }
         if kind == kind::REVISION {
-            self.validate_revision_owner(owner.as_deref(), parent.as_deref())?;
+            self.validate_revision_owner(owner.as_deref(), parent.as_deref(), &mut RequestOwners::new())?;
         }
         let env = crypto::seal(&self.key, &aad("objects", kind, &id_s), &json);
         self.conn.execute(
@@ -1360,13 +1384,13 @@ impl Records<'_> {
         Ok(())
     }
 
-    fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
+    fn get<T: DeserializeOwned + 'static>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         let id_s = id.to_string();
         match self.object_row(kind, &id_s)? {
             None => Ok(None),
             Some(row) => {
-                let pt = self.open_object(kind, &id_s, &row)?;
-                Ok(Some(serde_json::from_slice(&pt)?))
+                let (pt, decoded) = self.open_object(kind, &id_s, &row, &mut RequestOwners::new())?;
+                Ok(Some(typed(decoded, &pt)?))
             }
         }
     }
@@ -1378,19 +1402,31 @@ impl Records<'_> {
             .optional()?)
     }
 
-    fn open_object(&self, kind: &str, id: &str, row: &ObjectRow) -> Result<Zeroizing<Vec<u8>>> {
+    /// Decrypt and check a row: its plaintext, and the object as the check
+    /// decoded it. A revision's request is read through `owners`.
+    fn open_object(&self, kind: &str, id: &str, row: &ObjectRow, owners: &mut RequestOwners) -> Result<(Zeroizing<Vec<u8>>, Decoded)> {
         let pt = crypto::open(&self.key, &aad("objects", kind, id), &row.payload).map_err(|_| StoreError::Integrity)?;
-        validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
+        let decoded = validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
         if kind == kind::REVISION {
-            self.validate_revision_owner(row.owner.as_deref(), row.parent.as_deref())?;
+            self.validate_revision_owner(row.owner.as_deref(), row.parent.as_deref(), owners)?;
         }
-        Ok(pt)
+        Ok((pt, decoded))
     }
 
-    fn validate_revision_owner(&self, owner: Option<&str>, parent: Option<&str>) -> Result<()> {
+    /// A revision's owner is its request's sealed workspace. Each request is
+    /// read once per `owners`: a list of revisions shares one.
+    fn validate_revision_owner(&self, owner: Option<&str>, parent: Option<&str>, owners: &mut RequestOwners) -> Result<()> {
+        use anvil_domain::workspace::RequestDefinition;
         let request_id: Id = parent.ok_or(StoreError::Integrity)?.parse().map_err(|_| StoreError::Integrity)?;
-        let request = self.get::<anvil_domain::workspace::RequestDefinition>(kind::REQUEST, &request_id)?.ok_or(StoreError::Integrity)?;
-        if Some(request.workspace_id.to_string()).as_deref() != owner {
+        let workspace = match owners.get(&request_id).copied() {
+            Some(workspace) => workspace,
+            None => {
+                let request: RequestDefinition = self.get(kind::REQUEST, &request_id)?.ok_or(StoreError::Integrity)?;
+                owners.insert(request_id, request.workspace_id);
+                request.workspace_id
+            }
+        };
+        if Some(workspace.to_string()).as_deref() != owner {
             return Err(StoreError::Integrity);
         }
         Ok(())
@@ -1417,8 +1453,9 @@ impl Records<'_> {
         Ok(Some(refs))
     }
 
-    fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+    fn list<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         let mut out = Vec::new();
+        let mut owners = RequestOwners::new();
         let query_owner = workspace_id.map(|ws| ws.to_string());
         let rows: Vec<(String, ObjectRow)> = match workspace_id {
             Some(w) => {
@@ -1441,8 +1478,8 @@ impl Records<'_> {
             if query_owner.is_some() && row.owner.as_deref() != query_owner.as_deref() {
                 return Err(StoreError::Integrity);
             }
-            let pt = self.open_object(kind, &id, &row)?;
-            out.push(serde_json::from_slice(&pt)?);
+            let (pt, decoded) = self.open_object(kind, &id, &row, &mut owners)?;
+            out.push(typed(decoded, &pt)?);
         }
         Ok(out)
     }

@@ -23,7 +23,8 @@ vi.mock("@tauri-apps/api/event", () => ({
     return () => set.delete(cb);
   },
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: (...a: unknown[]) => ask(...a), open: vi.fn(), save: vi.fn() }));
+// Confirmations are answered here; ./Confirm.test.tsx covers the in-window prompt itself.
+vi.mock("./Confirm", () => ({ useConfirm: () => ({ confirm: (...a: unknown[]) => ask(...a), prompt: null, open: false }) }));
 
 import type { ExecutionView, NativeExecutionEvent, StreamMessage, TreeNode } from "./api";
 import type { Environment, LoadPlan, RequestDefinition, RequestSpec, TlsProfile, Workspace } from "./generated/contracts";
@@ -827,6 +828,31 @@ describe("session controls", () => {
     expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
     await act(async () => open.resolve(calls("session_open")[0].executionId as string));
     expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+  });
+});
+
+describe("locking", () => {
+  it("forgets a closed tab's session, whose end event a lock keeps from this window", async () => {
+    backend();
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    const { executionId, attemptId } = cancelArgs();
+    connecting.delete(executionId as string);
+    openSessions.add(executionId as string);
+    ask.mockResolvedValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+    await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+
+    // The lock aborted the session in the backend; its end was never delivered.
+    emit("locked", "idle");
+    const historyReads = calls("history_list").length;
+    // An end that still arrives is no attempt of this window's any more.
+    emit("session-ended", { execution_id: executionId, attempt_id: attemptId, view: null, error: null });
+    await act(async () => {});
+    expect(calls("history_list")).toHaveLength(historyReads);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });
 

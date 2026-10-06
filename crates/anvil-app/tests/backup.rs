@@ -1131,3 +1131,52 @@ fn a_restore_declined_once_its_backup_is_open_writes_nothing() {
     assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
     assert!(rep.checkpoint.is_some());
 }
+
+/// An import decides from the start of the chosen file how much of it to
+/// read: a backup whose header cannot be opened, or that came without a
+/// passphrase, is refused before the rest is read, and anything else is read
+/// only up to the largest bundle.
+#[test]
+fn an_import_checks_the_start_of_the_file_before_reading_the_rest() {
+    use anvil_app::file_grants::{FileGrants, FilePurpose, GrantError};
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "import-read");
+    app.create_workspace("W").unwrap();
+    let bytes = app.export_backup_with(PASS, KdfParams::testing()).unwrap().0;
+    let prefix = &bytes[..backup::HEADER_PREFIX_BYTES.min(bytes.len())];
+    let size = bytes.len() as u64;
+    assert_eq!(backup::import_read_limit(prefix, size, Some(PASS)).unwrap(), backup::MAX_BACKUP_BYTES);
+    assert!(matches!(backup::import_read_limit(prefix, size, None), Err(BackupError::PassphraseRequired)));
+    assert!(matches!(backup::import_read_limit(prefix, backup::MAX_BACKUP_BYTES + 1, Some(PASS)), Err(BackupError::TooLarge)));
+    let mut oversized_header = bytes.clone();
+    oversized_header[8..12].copy_from_slice(&5000u32.to_be_bytes());
+    assert!(matches!(backup::import_read_limit(&oversized_header, size, Some(PASS)), Err(BackupError::NotABackup(_))));
+    let bundle_limit = anvil_portability::bundle::MAX_BUNDLE_FILE_BYTES;
+    assert_eq!(backup::import_read_limit(b"PK\x03\x04", 4, None).unwrap(), bundle_limit);
+
+    let read = |name: &str, contents: &[u8], len: Option<u64>, passphrase: Option<&str>| {
+        let path = root.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        if let Some(len) = len {
+            // Sparse: nothing past the start is ever written.
+            std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(len).unwrap();
+        }
+        let grants = FileGrants::default();
+        let g = grants.grant_read(FilePurpose::BundleImport, &path).unwrap();
+        let mut seen = None;
+        let r = grants.read_checked(&g.token, FilePurpose::BundleImport, backup::HEADER_PREFIX_BYTES, |start, size| {
+            seen = Some((start.len(), size));
+            backup::import_read_limit(start, size, passphrase).map_err(|e| e.to_string())
+        });
+        (r, seen)
+    };
+    let (r, seen) = read("backup.anvil", &bytes, None, Some(PASS));
+    assert_eq!(r.unwrap().bytes, bytes);
+    assert_eq!(seen, Some((backup::HEADER_PREFIX_BYTES.min(bytes.len()), size)));
+    let (r, _) = read("locked.anvil", &bytes, None, None);
+    assert_eq!(r.unwrap_err(), GrantError::Invalid(BackupError::PassphraseRequired.to_string()));
+    // A bundle larger than any bundle is refused by its size alone.
+    let (r, seen) = read("huge.zip", b"PK\x03\x04", Some(bundle_limit + 1), None);
+    assert_eq!(r.unwrap_err(), GrantError::TooLarge(format!("{} MiB", bundle_limit >> 20)));
+    assert_eq!(seen, Some((backup::HEADER_PREFIX_BYTES, bundle_limit + 1)), "only the start was read");
+}

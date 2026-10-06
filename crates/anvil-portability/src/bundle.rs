@@ -25,6 +25,10 @@ pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// Metadata, attachments, history and the sealed vault have the same entry budget.
 pub const MAX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_RATIO: u64 = 200;
+/// Largest bundle file opened: the [`MAX_TOTAL_BYTES`] budget, plus room for
+/// zip headers, directory and deflate framing. An import refuses a larger
+/// file before reading it.
+pub const MAX_BUNDLE_FILE_BYTES: u64 = MAX_TOTAL_BYTES + 64 * 1024 * 1024;
 /// Shared import/export budget for the JSON values and object keys of every
 /// JSON entry (manifest, checksum list, objects, history and vault payload).
 /// Parsed JSON costs far more than its text: a two-byte `0,` becomes an
@@ -913,6 +917,9 @@ fn verify_digest(name: &str, digest: &str, checksums: &BTreeMap<String, String>)
 /// shared 256 MiB/128 MiB byte budgets bound what is inflated and retained, and
 /// [`MAX_JSON_NODES`] what parsing adds; neither bounds KDF or process memory.
 pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleError> {
+    if bytes.len() as u64 > MAX_BUNDLE_FILE_BYTES {
+        return Err(BundleError::Limits(format!("the bundle is larger than {MAX_BUNDLE_FILE_BYTES} bytes")));
+    }
     check_end_records(bytes, READ_LIMITS)?;
     let zr = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| BundleError::NotABundle(e.to_string()))?;
     open_archive(bytes, zr, passphrase, READ_LIMITS)
