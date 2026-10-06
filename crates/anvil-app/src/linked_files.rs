@@ -348,7 +348,8 @@ fn bound_file_problem(path: &str) -> Option<String> {
 /// read (a FIFO or device never blocks the open, see
 /// [`crate::file_grants::open_regular`]), and only while its path still
 /// resolves to itself, so a file or folder on the path replaced by a link is
-/// refused.
+/// refused. The file is then reached without following a link at any folder
+/// on its path, so one swapped in after that check is refused too.
 pub(crate) fn read_bound_file(path: &str, max: u64, what: &str) -> Result<Vec<u8>> {
     let too_large = || AppError::Invalid(format!("the linked {what} is larger than {} MiB", max >> 20));
     let not_regular = || AppError::Invalid(format!("the linked {what} is not a regular file"));

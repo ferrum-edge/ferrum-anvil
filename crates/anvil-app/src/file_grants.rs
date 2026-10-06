@@ -8,15 +8,19 @@
 //!
 //! - A read grant pins the canonical path (and the file's identity)
 //!   at selection time; if the file or a folder on its path is replaced
-//!   afterwards, the read is refused.
+//!   afterwards, the read is refused. The file is reached without following
+//!   a link at any folder on its path, so one swapped in while it is being
+//!   opened is refused too (`crate::no_follow`).
 //! - Certificate reads return only validated certificate blocks. A private
 //!   key selection belongs to its issuing vault, is consumed once and keeps
 //!   its revocation generation fenced through the vault commit. Only a
 //!   secret reference returns, never bytes to the renderer.
-//! - A write grant pins the canonical folder and the chosen file name. Data
-//!   goes to a newly created temporary file in that folder (never through an
-//!   existing file or link) that is then renamed over the chosen name. A
-//!   successful write spends the grant.
+//! - A write grant pins the canonical folder (and its identity) and the
+//!   chosen file name. The folder is opened without following a link at any
+//!   folder on its path and must still be the one chosen. Data goes to a
+//!   newly created temporary file in that opened folder (never through an
+//!   existing file or link) that is then renamed over the chosen name within
+//!   it. A successful write spends the grant.
 //! - Grants expire, are bounded in number and are all revoked on lock and
 //!   when the desktop opens another profile. A choice that was still in
 //!   progress then grants nothing.
@@ -28,13 +32,14 @@
 //! `linked_file_relocate` to repoint it to a new location,
 //! `anvil_app::linked_files`).
 
+use crate::no_follow::Dir;
 use anvil_domain::Id;
 use anvil_domain::secret::SecretRef;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::OsString;
-use std::fs::{File, Metadata, OpenOptions};
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, Metadata};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -195,29 +200,29 @@ fn io(err: std::io::Error) -> GrantError {
 /// Identifies the file a path named when it was chosen, so a replacement
 /// under the same name is noticed: device and inode on Unix, volume serial
 /// number and file index on Windows.
-type FileId = (u64, u64);
+pub(crate) type FileId = (u64, u64);
 
 #[cfg(unix)]
-fn file_id(_file: &File, meta: &Metadata) -> std::io::Result<FileId> {
+pub(crate) fn file_id(_file: &File, meta: &Metadata) -> std::io::Result<FileId> {
     use std::os::unix::fs::MetadataExt;
     Ok((meta.dev(), meta.ino()))
 }
 
 #[cfg(windows)]
-fn file_id(file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
+pub(crate) fn file_id(file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
     let info = winapi_util::file::information(file)?;
     Ok((info.volume_serial_number(), info.file_index()))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn file_id(_file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
+pub(crate) fn file_id(_file: &File, _meta: &Metadata) -> std::io::Result<FileId> {
     Ok((0, 0))
 }
 
 #[derive(Debug, Clone)]
 enum Target {
     Read { path: PathBuf, id: FileId },
-    Write { dir: PathBuf, name: OsString },
+    Write { dir: PathBuf, id: FileId, name: OsString },
 }
 
 /// The profile and data key that the private-key chooser was shown for.
@@ -366,13 +371,16 @@ impl FileGrants {
         let (Some(parent), Some(name)) = (picked.parent(), picked.file_name()) else {
             return Err(GrantError::Invalid("choose a file name, not a folder".into()));
         };
+        let not_folder = || GrantError::Invalid("the destination folder is not a folder".into());
         let dir = std::fs::canonicalize(parent).map_err(io)?;
         if !std::fs::metadata(&dir).map_err(io)?.is_dir() {
-            return Err(GrantError::Invalid("the destination folder is not a folder".into()));
+            return Err(not_folder());
         }
+        // The folder chosen, which a write must still find at its path.
+        let id = Dir::open(&dir).map_err(io)?.ok_or_else(not_folder)?.id().map_err(io)?;
         refuse_directory(&dir.join(name))?;
         let file_name = display_name(Some(name));
-        self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation, None)
+        self.insert(purpose, Target::Write { dir, id, name: name.to_owned() }, file_name, generation, None)
     }
 
     /// Read the file behind a readable grant issued for `purpose`. The grant
@@ -571,34 +579,27 @@ fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
     Ok(pem)
 }
 
-/// Open `path` for reading if it is a regular file; `None` when it is not, a
-/// link included. Callers canonicalize `path` just before, so a link at its
-/// last component was swapped in since. A FIFO or device found at the path
-/// never blocks the open, even one swapped in just before it: on Unix the file
-/// is opened non-blocking (which does not change how a regular file reads),
-/// never as a controlling terminal and without following a link swapped in
-/// for the last component, and the opened handle is checked. The path is
-/// checked first as a cheap filter; elsewhere that check is also what keeps a
-/// folder out, as one cannot be opened there.
+/// Open the absolute, canonical `path` for reading if it is a regular file;
+/// `None` when it is not, a link included. Callers canonicalize `path` just
+/// before, so a link at it or at a folder on it was swapped in since: the
+/// path is walked without following one ([`Dir`]). A FIFO or device found at
+/// the path never blocks the open, even one swapped in just before it, and
+/// the opened handle is checked. The path is checked first as a cheap filter.
 pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
     if !std::fs::symlink_metadata(path)?.is_file() {
         return Ok(None);
     }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    // The check that counts is on the opened handle, not on the path.
-    let meta = file.metadata()?;
-    Ok(meta.is_file().then_some((file, meta)))
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(None);
+    };
+    let Some(dir) = Dir::open(parent)? else {
+        return Ok(None);
+    };
+    dir.open_regular(name)
 }
 
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
-    let Target::Write { dir, name } = target else {
+    let Target::Write { dir, id, name } = target else {
         return Err(GrantError::WrongPurpose);
     };
     // The folder itself (or one above it) swapped for a link now resolves
@@ -606,33 +607,38 @@ fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), G
     if std::fs::canonicalize(dir).map_err(io)? != *dir {
         return Err(GrantError::Changed);
     }
-    let dest = dir.join(name);
-    refuse_directory(&dest)?;
+    write_in(dir, *id, name, bytes, owner_only)
+}
+
+/// Replace `name` in the folder at the canonical `dir`, which must still be
+/// the folder `id` chosen, with `bytes`.
+fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
+    // Walked without following a link, so one swapped in for a folder on the
+    // path since the check above is refused. Everything below is done in the
+    // opened folder, so its path is not resolved again.
+    let Some(folder) = Dir::open(dir).map_err(io)? else {
+        return Err(GrantError::Changed);
+    };
+    if folder.id().map_err(io)? != id {
+        return Err(GrantError::Changed);
+    }
+    refuse_directory(&dir.join(name))?;
     // A fresh, exclusively created file: an existing file or link under the
     // temporary name is never opened or followed.
-    let tmp = dir.join(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
+    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
     // Renaming replaces the destination entry itself; a link there is
     // replaced, not followed.
-    match write_new(&tmp, bytes, owner_only).and_then(|()| std::fs::rename(&tmp, &dest)) {
+    match write_new(&folder, &tmp, bytes, owner_only).and_then(|()| folder.rename(&tmp, name)) {
         Ok(()) => Ok(()),
         Err(err) => {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = folder.remove_file(&tmp);
             Err(io(err))
         }
     }
 }
 
-fn write_new(path: &Path, bytes: &[u8], owner_only: bool) -> std::io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    if owner_only {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(not(unix))]
-    let _ = owner_only;
-    let mut f = options.open(path)?;
+fn write_new(folder: &Dir, name: &OsStr, bytes: &[u8], owner_only: bool) -> std::io::Result<()> {
+    let mut f = folder.create_new(name, owner_only)?;
     f.write_all(bytes)?;
     f.sync_all()
 }
@@ -655,17 +661,86 @@ fn size_label(bytes: u64) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::open_regular;
+    use super::{Dir, GrantError, open_regular, write_in};
+    use std::ffi::OsStr;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+
+    /// A temporary folder by its canonical path, as a chosen path is recorded
+    /// (on macOS the temporary folder sits below a link, /var).
+    fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, path)
+    }
 
     #[test]
     fn a_link_at_the_last_component_is_not_followed() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("rows.csv");
+        let (_dir, dir) = canonical_tempdir();
+        let target = dir.join("rows.csv");
         std::fs::write(&target, "id\n1\n").unwrap();
         let (_, meta) = open_regular(&target).unwrap().unwrap();
         assert_eq!(meta.len(), 5);
-        let link = dir.path().join("link.csv");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let link = dir.join("link.csv");
+        symlink(&target, &link).unwrap();
         assert!(open_regular(&link).unwrap().is_none());
+    }
+
+    /// The path was checked to resolve to itself, then a folder on it was
+    /// swapped for a link to a folder with the same layout before the open.
+    #[test]
+    fn a_folder_swapped_for_a_link_after_the_check_is_not_read_through() {
+        let (_dir, root) = canonical_tempdir();
+        let chosen = root.join("chosen");
+        std::fs::create_dir_all(chosen.join("data")).unwrap();
+        let path = chosen.join("data/rows.csv");
+        std::fs::write(&path, "id\n1\n").unwrap();
+        assert_eq!(std::fs::canonicalize(&path).unwrap(), path);
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("data")).unwrap();
+        std::fs::write(elsewhere.join("data/rows.csv"), "secret\n").unwrap();
+        std::fs::rename(&chosen, root.join("moved")).unwrap();
+        symlink(&elsewhere, &chosen).unwrap();
+        assert!(open_regular(&path).unwrap().is_none());
+    }
+
+    /// The folder was checked to resolve to itself, then it (or a folder
+    /// above it) was swapped for a link before the write: nothing is written
+    /// through the link.
+    #[test]
+    fn an_export_folder_swapped_for_a_link_after_the_check_is_not_written_through() {
+        let (_dir, root) = canonical_tempdir();
+        let parent = root.join("parent");
+        let chosen = parent.join("exports");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let id = Dir::open(&chosen).unwrap().unwrap().id().unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("exports")).unwrap();
+        std::fs::rename(&parent, root.join("moved")).unwrap();
+        symlink(&elsewhere, &parent).unwrap();
+        let name = OsStr::new("bundle.anvil");
+        assert_eq!(write_in(&chosen, id, name, b"bundle", true).unwrap_err(), GrantError::Changed);
+        std::fs::remove_file(&parent).unwrap();
+        symlink(elsewhere.join("exports"), &parent).unwrap();
+        assert_eq!(write_in(&parent, id, name, b"bundle", true).unwrap_err(), GrantError::Changed);
+        assert!(std::fs::read_dir(elsewhere.join("exports")).unwrap().next().is_none());
+        assert!(std::fs::read_dir(root.join("moved/exports")).unwrap().next().is_none());
+    }
+
+    /// The folder was replaced by another real folder at the same path: the
+    /// write is refused rather than landing in a folder that was not chosen.
+    #[test]
+    fn an_export_folder_replaced_after_the_choice_is_not_written_to() {
+        let (_dir, root) = canonical_tempdir();
+        let chosen = root.join("exports");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let id = Dir::open(&chosen).unwrap().unwrap().id().unwrap();
+        let name = OsStr::new("report.json");
+        write_in(&chosen, id, name, b"{}", false).unwrap();
+        assert_eq!(std::fs::read(chosen.join("report.json")).unwrap(), b"{}");
+        std::fs::rename(&chosen, root.join("moved")).unwrap();
+        std::fs::create_dir_all(&chosen).unwrap();
+        assert_eq!(write_in(&chosen, id, name, b"{}", false).unwrap_err(), GrantError::Changed);
+        assert!(std::fs::read_dir(&chosen).unwrap().next().is_none());
     }
 }

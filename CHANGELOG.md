@@ -39,6 +39,14 @@
     returns to a non-public zone after a public hop, and original requests to special
     or reserved addresses (including `0.0.0.0`). A load plan whose unit depends on an
     OAuth-deferred vault URL is refused before traffic.
+- Linked-file reads and granted file reads and exports no longer follow a symlinked
+  ancestor directory. The chosen path is walked one folder at a time without following
+  a link (on Unix `openat` with `O_NOFOLLOW | O_DIRECTORY`, then the file is opened,
+  created and renamed relative to the opened folder). On Windows each folder on the
+  path is opened as itself, refused if it is a symbolic link or junction, and held
+  without delete sharing until the operation is done. An export also checks that its
+  folder is still the one chosen. Size limits, grant semantics and error messages are
+  unchanged. On Unix other than Linux, every folder on a chosen path must be listable.
 
 ### Breaking
 
