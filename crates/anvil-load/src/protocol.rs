@@ -132,28 +132,46 @@ pub fn label(kind: LoadUnitKind) -> &'static str {
 /// selected profile is HBONE and its `NO_PROXY` list does not bypass the
 /// target. A URL that does not resolve is never tunneled; every send then
 /// fails on the URL itself.
-fn is_hbone(ctx: &ExecutionContext, protocol: Protocol) -> bool {
-    send_route(ctx, protocol).and_then(|(_, p)| p).is_some_and(|p| p.kind == ProxyKind::Hbone)
+fn is_hbone(id: Option<Id>, ctx: &ExecutionContext, protocol: Protocol) -> Result<bool, Refusal> {
+    // Without a selected HBONE profile the answer does not depend on the URL.
+    let selected = anvil_engine::settings::resolve(&ctx.settings_layers).proxy_profile_id;
+    if !ctx.proxy_profiles.iter().any(|p| Some(p.id) == selected && p.kind == ProxyKind::Hbone) {
+        return Ok(false);
+    }
+    Ok(send_route(id, ctx, protocol)?.and_then(|(_, p)| p).is_some_and(|p| p.kind == ProxyKind::Hbone))
 }
 
-fn uses_dtls(ctx: &ExecutionContext) -> bool {
+fn uses_dtls(id: Option<Id>, ctx: &ExecutionContext) -> Result<bool, Refusal> {
     if ctx.spec.udp.as_ref().is_some_and(|u| u.dtls) {
-        return true;
+        return Ok(true);
     }
     // The scheme may come from a variable; resolve with the context's own layers.
-    let url = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None)
-        .resolve(&ctx.spec.url, "url")
-        .unwrap_or_else(|_| ctx.spec.url.clone());
-    url.trim().to_ascii_lowercase().starts_with("dtls://")
+    let url = send_url(id, ctx)?.unwrap_or_else(|| ctx.spec.url.clone());
+    Ok(url.trim().to_ascii_lowercase().starts_with("dtls://"))
+}
+
+const DEFERRED_URL: &str = "the request URL uses a vault variable that resolves only when the request is sent (after its OAuth token endpoint is validated), so this plan cannot be classified before traffic; use a non-vault variable for the URL";
+
+/// The request URL from a throwaway resolver; `None` when it does not
+/// resolve. A vault variable whose credential resolves only after its OAuth
+/// token endpoint is validated has no value here: a classification that
+/// depends on it is refused rather than judged from a stand-in.
+fn send_url(id: Option<Id>, ctx: &ExecutionContext) -> Result<Option<String>, Refusal> {
+    match anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None).resolve(&ctx.spec.url, "url") {
+        Ok(url) => Ok(Some(url)),
+        Err(failure) if anvil_engine::vars::is_deferred_secret(&failure) => {
+            Err(Refusal { code: RefusalCode::IncompleteRequest, request_id: id, message: DEFERRED_URL.into() })
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 /// The request's resolved target and the proxy profile the engine's
 /// preparation routes it through (`NO_PROXY` applied), from a throwaway
 /// resolver. `None` when the URL does not resolve or parse: every send then
 /// fails on the URL itself.
-fn send_route(ctx: &ExecutionContext, protocol: Protocol) -> Option<(Target, Option<&ProxyProfile>)> {
-    let url = anvil_engine::vars::Resolver::new(ctx.var_layers.clone(), None).resolve(&ctx.spec.url, "url").ok()?;
-    route(ctx, &url, protocol)
+fn send_route(id: Option<Id>, ctx: &ExecutionContext, protocol: Protocol) -> Result<Option<(Target, Option<&ProxyProfile>)>, Refusal> {
+    Ok(send_url(id, ctx)?.and_then(|url| route(ctx, &url, protocol)))
 }
 
 /// The URL schemes the engine sends a request of `protocol` with (the first
@@ -194,7 +212,8 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             "the request enables 0-RTT early data, which load runs do not support (handshakes that share session tickets are serialized and the report does not count early data); turn early data off for the requests of this plan".into(),
         );
     }
-    let hbone_persistent = |protocol: Protocol| mode == ConnectionMode::Persistent && is_hbone(ctx, protocol);
+    let hbone_persistent =
+        |protocol: Protocol| -> Result<bool, Refusal> { Ok(mode == ConnectionMode::Persistent && is_hbone(id, ctx, protocol)?) };
     let hbone_msg = |what: &str| {
         format!(
             "{what} through a mesh HBONE proxy cannot use the persistent connection mode: an HBONE tunnel carries one execution's identity and headers and is never pooled, so every unit would open its own tunnel. Choose the fresh connection mode, which is what would happen"
@@ -202,7 +221,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
     };
     match ctx.spec.protocol {
         Protocol::Http => {
-            if hbone_persistent(Protocol::Http) {
+            if hbone_persistent(Protocol::Http)? {
                 return refuse(RefusalCode::HbonePersistent, hbone_msg("HTTP requests"));
             }
             let application_from_body = matches!(ctx.spec.body, Body::Soap { .. } | Body::GraphQl { .. });
@@ -225,7 +244,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             }
             // The engine's own pre-traffic check, with the inputs its
             // preparation uses: a call it refuses fails every unit.
-            if let Some((target, proxy)) = send_route(ctx, Protocol::Grpc) {
+            if let Some((target, proxy)) = send_route(id, ctx, Protocol::Grpc)? {
                 let version = anvil_engine::settings::resolve(&ctx.settings_layers).http_version;
                 let tls = matches!(target.scheme.as_str(), "grpcs" | "https");
                 let refused = anvil_transport::grpc::unsupported_combination(g.wire, g.mode, false, version, tls, proxy.is_some());
@@ -236,7 +255,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
                     );
                 }
             }
-            if hbone_persistent(Protocol::Grpc) {
+            if hbone_persistent(Protocol::Grpc)? {
                 return refuse(RefusalCode::HbonePersistent, hbone_msg("gRPC calls"));
             }
             Ok(StepUnit::of(kind))
@@ -268,7 +287,7 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             // the selected proxy profile. Either way every exchange opens its
             // own tunnel, counted in the tunnel denominators.
             let masque = ctx.spec.udp.as_ref().is_some_and(|u| u.masque.is_some());
-            if masque && let Some((_, Some(p))) = send_route(ctx, Protocol::Udp) {
+            if masque && let Some((_, Some(p))) = send_route(id, ctx, Protocol::Udp)? {
                 return refuse(
                     RefusalCode::MasqueThroughProxy,
                     format!(
@@ -279,12 +298,12 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             }
             let tunnel = if masque {
                 Some(TunnelKind::ConnectUdp)
-            } else if is_hbone(ctx, Protocol::Udp) {
+            } else if is_hbone(id, ctx, Protocol::Udp)? {
                 Some(TunnelKind::Hbone)
             } else {
                 None
             };
-            let kind = if uses_dtls(ctx) { LoadUnitKind::DtlsExchange } else { LoadUnitKind::UdpExchange };
+            let kind = if uses_dtls(id, ctx)? { LoadUnitKind::DtlsExchange } else { LoadUnitKind::UdpExchange };
             Ok(StepUnit { tunnel, ..StepUnit::of(kind) })
         }
     }
@@ -516,5 +535,23 @@ mod tests {
         assert_eq!(r.code, RefusalCode::McpUnsupported);
         assert!(r.to_string().contains("(LOAD-013 mcp_unsupported)"), "{r}");
         assert_eq!(send_schemes(Protocol::Mcp), ["https", "http"]);
+    }
+
+    /// A vault variable deferred until an OAuth token endpoint is validated
+    /// has no value here: a unit that depends on the URL is refused rather
+    /// than judged from a stand-in, and one that does not is unaffected.
+    #[test]
+    fn a_deferred_vault_url_is_refused_only_where_the_unit_depends_on_it() {
+        use anvil_engine::vars::{DEFERRED_SECRET_VALUE, VarEntry, VarLayer};
+        let target = VarEntry { name: "target".into(), value: DEFERRED_SECRET_VALUE.into(), secret: true };
+        let mut spec = anvil_domain::request::RequestSpec::http("GET", "{{target}}");
+        spec.protocol = Protocol::Udp;
+        let mut ctx = ExecutionContext::standalone(spec);
+        ctx.var_layers.push(VarLayer { label: "workspace".into(), vars: vec![target] });
+        let r = classify(None, &ctx, ConnectionMode::Fresh).unwrap_err();
+        assert_eq!(r.code, RefusalCode::IncompleteRequest);
+        assert!(r.message.contains("vault variable"), "{r}");
+        ctx.spec.protocol = Protocol::Http;
+        assert_eq!(classify(None, &ctx, ConnectionMode::Persistent).unwrap().kind, LoadUnitKind::HttpRequest);
     }
 }

@@ -137,6 +137,146 @@ fn oauth(addr: SocketAddr, grant: OAuthGrant, audience: &str) -> OAuth2Config {
     }
 }
 
+#[tokio::test]
+async fn nonliteral_cleartext_issuers_fail_before_any_token_or_api_request_for_all_grants() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
+        let mut config = oauth(addr, grant, "api-a");
+        config.token_url = format!("http://issuer.test:{}/token", addr.port());
+        config.client_secret = SensitiveValue::template("unused-credential-canary");
+        let mut c = ctx(addr, config);
+        c.settings_layers.push((
+            "test".into(),
+            anvil_domain::settings::SettingsOverrides {
+                dns_overrides: vec![anvil_domain::settings::DnsOverride {
+                    host: "issuer.test".into(),
+                    addresses: vec!["127.0.0.1".into()],
+                }],
+                ..Default::default()
+            },
+        ));
+        let o = send(&Engine::new(), &c).await;
+        assert_eq!(failure_kind(&o), Some(FailureKind::AuthPreparationFailed));
+        assert!(!serde_json::to_string(&o.record).unwrap().contains("unused-credential-canary"));
+    }
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 0);
+    assert!(fx.token_forms.lock().unwrap().is_empty());
+    assert!(fx.api_hits().is_empty());
+}
+
+/// `c` with an HTTP forward proxy profile at `proxy` selected, bypassed for `no_proxy`.
+fn with_proxy(mut c: ExecutionContext, proxy: SocketAddr, no_proxy: &str) -> ExecutionContext {
+    let p = anvil_domain::tls::ProxyProfile {
+        id: anvil_domain::Id::new(),
+        workspace_id: anvil_domain::Id::new(),
+        name: "corp".into(),
+        kind: anvil_domain::tls::ProxyKind::Http,
+        address: proxy.to_string(),
+        username: None,
+        password: None,
+        no_proxy: no_proxy.into(),
+        tls_profile_id: None,
+        hbone: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let selection = anvil_domain::settings::ProxySelection::Profile { id: p.id };
+    c.proxy_profiles.push(p);
+    let overrides = anvil_domain::settings::SettingsOverrides { proxy_profile_id: Some(selection), ..Default::default() };
+    c.settings_layers.push(("test".into(), overrides));
+    c
+}
+
+#[tokio::test]
+async fn literal_loopback_cleartext_issuers_through_a_proxy_fail_before_credentials_or_proxy_traffic() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let proxied = Arc::new(AtomicU64::new(0));
+    let connections = proxied.clone();
+    tokio::spawn(async move {
+        while proxy.accept().await.is_ok() {
+            connections.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    // NO_PROXY entries for another host or another port do not bypass the issuer.
+    let other_port = format!("127.0.0.1:{}", addr.port().wrapping_add(1));
+    for no_proxy in ["", "issuer.example", other_port.as_str()] {
+        for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
+            let mut config = oauth(addr, grant, "api-a");
+            config.client_secret = SensitiveValue::template("unused-credential-canary");
+            let c = with_proxy(ctx(addr, config), proxy_addr, no_proxy);
+            let o = send(&Engine::new(), &c).await;
+            let failure = o.record.attempts.last().and_then(|a| a.failure.clone()).unwrap();
+            assert_eq!(failure.kind, FailureKind::AuthPreparationFailed);
+            assert!(failure.message.contains("direct connection"), "{}", failure.message);
+            assert!(!serde_json::to_string(&o.record).unwrap().contains("unused-credential-canary"));
+            if grant != OAuthGrant::ClientCredentials {
+                assert!(interactive_oauth(&c).err().unwrap().message.contains("direct connection"));
+            }
+        }
+    }
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 0);
+    assert!(fx.api_hits().is_empty());
+    // A NO_PROXY bypass for the literal keeps the token request direct.
+    let c = with_proxy(ctx(addr, oauth(addr, OAuthGrant::ClientCredentials, "api-a")), proxy_addr, "127.0.0.1");
+    assert_eq!(status(&send(&Engine::new(), &c).await), Some(200));
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.api_hits(), ["Bearer late-or-live-1"]);
+    assert_eq!(proxied.load(Ordering::SeqCst), 0, "the proxy received no connection");
+}
+
+#[tokio::test]
+async fn https_issuer_acquisition_still_uses_configured_trust_and_delivers_a_token() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let pki = anvil_fixtures::LabPki::generate();
+    let tls = anvil_fixtures::TlsServerOptions::new(pki.server.chain_with(&pki.ca), pki.server.key.clone());
+    let issuer = anvil_fixtures::http::serve("127.0.0.1:0", Some(tls)).await.unwrap();
+    let (addr, fx) = Fixture::start().await;
+    let mut config = oauth(addr, OAuthGrant::ClientCredentials, "api-a");
+    config.token_url = "{{issuer}}".into();
+    config.client_id = "anvil-client".into();
+    config.client_secret = SensitiveValue::template("{{credential}}");
+    config.client_auth = OAuthClientAuth::BasicHeader;
+    let mut c = ctx(addr, config);
+    let endpoint = format!("https://api.anvil.test:{}/oauth/token", issuer.addr.port());
+    let secrets = preparation_order::deferred_scope(&mut c, &endpoint, Some("data-only"), false);
+    let profile = anvil_domain::tls::TlsProfile {
+        id: anvil_domain::Id::new(),
+        workspace_id: anvil_domain::Id::new(),
+        name: "issuer-trust".into(),
+        verify: true,
+        use_system_roots: false,
+        extra_roots_pem: vec![pki.ca.cert.clone()],
+        client_identity: None,
+        bindings: vec![],
+        min_version: anvil_domain::tls::TlsMinVersion::Tls12,
+        server_name_override: None,
+        server_spiffe: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    c.settings_layers.push((
+        "test".into(),
+        anvil_domain::settings::SettingsOverrides {
+            tls_profile_id: Some(profile.id),
+            dns_overrides: vec![anvil_domain::settings::DnsOverride { host: "api.anvil.test".into(), addresses: vec!["127.0.0.1".into()] }],
+            ..Default::default()
+        },
+    ));
+    c.tls_profiles.push(profile);
+    let o = send(&Engine::new(), &c).await;
+    assert_eq!(status(&o), Some(200));
+    assert_eq!(*issuer.state.oauth_token_requests.lock(), 1);
+    assert_eq!(fx.api_hits(), vec!["Bearer fx-token-1".to_string()]);
+    assert_eq!(secrets.reads.lock().unwrap().len(), 2, "the complete deferred scope is read once");
+    assert!(!serde_json::to_string(&o.record).unwrap().contains("anvil-secret"));
+    issuer.shutdown();
+}
+
 fn ctx(addr: SocketAddr, config: OAuth2Config) -> ExecutionContext {
     let mut spec = RequestSpec::http("GET", &format!("http://{addr}/api"));
     spec.auth = AuthConfig::OAuth2 { config };
@@ -538,4 +678,404 @@ async fn a_sign_in_across_its_workspace_delete_caches_no_token() {
     assert!(matches!(r, Err(anvil_auth::AuthError::Canceled(_))), "{r:?}");
     assert_eq!(fx.token_requests.load(Ordering::SeqCst), 1);
     assert!(engine.tokens.get(target.cache_key()).is_none(), "the redeemed token was cached after the delete");
+}
+
+mod preparation_order {
+    use super::*;
+    use anvil_diagnostics::gateway_detail::{GatewayDetail, LookupOutcome};
+    use anvil_domain::Id;
+    use anvil_domain::integration::DiagnosticDetailAccess;
+    use anvil_domain::secret::SecretRef;
+    #[cfg(any(unix, windows))]
+    use anvil_domain::tls::{ClientIdentity, ServerSpiffeIdentity, TlsProfile};
+    use anvil_engine::context::SecretResolver;
+    use anvil_engine::gateway_detail::lookup_recorded;
+    use anvil_engine::vars::{VarEntry, VarLayer};
+    use std::collections::HashMap;
+
+    const REFERENCE: &str = "fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f";
+    const CREDENTIAL: &str = "anvil-secret";
+    const LOOKUP_FAILURE: &str = "the lookup could not be prepared; check OAuth settings, the vault and active variables";
+
+    pub(super) struct DeferredSecrets {
+        variables: HashMap<(usize, usize), SecretRef>,
+        values: HashMap<Id, String>,
+        pub(super) reads: Mutex<Vec<Id>>,
+    }
+
+    impl SecretResolver for DeferredSecrets {
+        fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+            self.variables.get(&(layer, variable)).cloned()
+        }
+
+        fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
+            self.reads.lock().unwrap().push(reference.id);
+            let missing = || format!("missing source-reference-canary {} {}", reference.id, reference.label);
+            self.values.get(&reference.id).cloned().map(Zeroizing::new).ok_or_else(missing)
+        }
+    }
+
+    pub(super) fn deferred_scope(c: &mut ExecutionContext, issuer: &str, unused: Option<&str>, shadowed: bool) -> Arc<DeferredSecrets> {
+        let missing = SecretRef { id: Id::new(), label: "unused-vault-label-canary".into() };
+        let credential = SecretRef { id: Id::new(), label: "credential-vault-label-canary".into() };
+        let mut values = HashMap::from([(credential.id, CREDENTIAL.into())]);
+        if let Some(value) = unused {
+            values.insert(missing.id, value.into());
+        }
+        let secrets = Arc::new(DeferredSecrets {
+            variables: HashMap::from([((0, 0), missing), ((0, 1), credential)]),
+            values,
+            reads: Mutex::new(vec![]),
+        });
+        c.var_layers = vec![VarLayer {
+            label: "workspace".into(),
+            vars: vec![
+                VarEntry { name: "unused-vault-name-canary".into(), value: String::new(), secret: true },
+                VarEntry { name: "credential".into(), value: String::new(), secret: true },
+                VarEntry { name: "issuer".into(), value: issuer.into(), secret: false },
+                VarEntry { name: "data".into(), value: "{{unexpanded-data-only}}".into(), secret: false },
+            ],
+        }];
+        if shadowed {
+            c.var_layers.push(VarLayer {
+                label: "run".into(),
+                vars: vec![VarEntry { name: "unused-vault-name-canary".into(), value: "winning-data".into(), secret: false }],
+            });
+        }
+        c.secrets = secrets.clone();
+        secrets
+    }
+
+    fn deferred_oauth(addr: SocketAddr) -> OAuth2Config {
+        let mut config = oauth(addr, OAuthGrant::ClientCredentials, "api-a");
+        config.token_url = "{{issuer}}".into();
+        config.client_secret = SensitiveValue::template("{{credential}}");
+        config
+    }
+
+    fn private(text: &str, secrets: &DeferredSecrets) {
+        assert!(!text.contains("canary") && !text.contains(CREDENTIAL), "private source or value exposed: {text}");
+        for reference in secrets.variables.values() {
+            assert!(!text.contains(&reference.id.to_string()) && !text.contains(&reference.label), "source reference exposed: {text}");
+        }
+    }
+
+    async fn recorded_response(engine: &Engine, api: &anvil_fixtures::http::Fixture) -> ExecutionOutput {
+        let url = api.url(&format!("/status/502?header=X-Ferrum-Diagnostic-Ref:{REFERENCE}"));
+        send(engine, &ExecutionContext::standalone(RequestSpec::http("GET", &url))).await
+    }
+
+    #[tokio::test]
+    async fn recorded_lookup_validates_effective_issuer_before_vault_aliases_or_admin_requests() {
+        anvil_transport::init();
+        anvil_fixtures::init();
+        let api = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let admin = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let (addr, issuer) = Fixture::start().await;
+        let engine = Engine::new();
+        let cancel = CancellationToken::new();
+        let recorded = recorded_response(&engine, &api).await;
+        let response = recorded.record.response.as_ref().unwrap();
+        let attempt = recorded.record.attempts.last().unwrap();
+        let access =
+            DiagnosticDetailAccess { base_url: admin.url(""), credential: SensitiveValue::template("{{credential}}"), namespace: None };
+        for endpoint in [
+            "http://issuer.example.test/token?source-reference-canary",
+            "http://localhost/token",
+            "{{missing-issuer-canary}}",
+            "{{issuer}}",
+            "ftp://127.0.0.1/token",
+        ] {
+            let mut c = ctx(addr, deferred_oauth(addr));
+            let secrets = deferred_scope(&mut c, endpoint, None, true);
+            // The inherited mixed profile is effective even though the saved
+            // request itself has no OAuth profile. Its credential aliases the lookup.
+            c.spec.auth = AuthConfig::Inherit;
+            let auth = AuthConfig::Multi {
+                profiles: vec![
+                    AuthConfig::Basic { username: "client".into(), password: SensitiveValue::template("{{credential}}") },
+                    AuthConfig::OAuth2 { config: deferred_oauth(addr) },
+                ],
+            };
+            c.auth_layers = vec![("workspace".into(), auth), ("request".into(), AuthConfig::Inherit)];
+            let pending = lookup_recorded(&engine, &c, &access, response, attempt, &cancel);
+            let detail = pending.await;
+            match &detail {
+                GatewayDetail::Looked { reference, channel_authenticated: false, outcome: LookupOutcome::Failed { reason }, .. } => {
+                    assert_eq!(reference, REFERENCE);
+                    assert_eq!(reason, LOOKUP_FAILURE);
+                }
+                other => panic!("{other:?}"),
+            }
+            private(&format!("{detail:?}"), &secrets);
+            assert!(secrets.reads.lock().unwrap().is_empty(), "issuer refusal must precede every vault read");
+        }
+        assert_eq!(admin.log.count_requests(), 0, "no recorded lookup reached the admin listener");
+        assert_eq!(api.log.count_requests(), 1, "only the original recorded response was requested");
+        assert_eq!(issuer.token_requests.load(Ordering::SeqCst), 0);
+        assert!(issuer.api_hits().is_empty());
+        api.shutdown();
+        admin.shutdown();
+    }
+
+    #[tokio::test]
+    async fn recorded_lookup_freezes_scope_and_sanitizes_scope_and_direct_credential_failures() {
+        anvil_transport::init();
+        anvil_fixtures::init();
+        let api = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let admin = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let (addr, issuer) = Fixture::start().await;
+        let engine = Engine::new();
+        let cancel = CancellationToken::new();
+        let recorded = recorded_response(&engine, &api).await;
+        let response = recorded.record.response.as_ref().unwrap();
+        let attempt = recorded.record.attempts.last().unwrap();
+        let mut access =
+            DiagnosticDetailAccess { base_url: admin.url(""), credential: SensitiveValue::template("{{credential}}"), namespace: None };
+        for endpoint in [format!("http://{addr}/token"), "https://issuer.example.test/token".into()] {
+            let mut c = ctx(addr, deferred_oauth(addr));
+            let secrets = deferred_scope(&mut c, &endpoint, Some("{{$counter}}-{{unexpanded-data-only}}"), false);
+            let pending = lookup_recorded(&engine, &c, &access, response, attempt, &cancel);
+            let detail = pending.await;
+            assert!(matches!(&detail, GatewayDetail::Looked { outcome: LookupOutcome::NotFound { .. }, .. }), "{detail:?}");
+            assert_eq!(secrets.reads.lock().unwrap().len(), 2, "unused data and the credential are frozen once");
+            private(&format!("{detail:?}"), &secrets);
+        }
+        assert_eq!(admin.log.count_requests(), 2);
+        let headers = admin.log.last_request_headers().unwrap();
+        assert!(headers.iter().any(|(name, value)| name.eq_ignore_ascii_case("authorization") && value == &format!("Bearer {CREDENTIAL}")));
+
+        let mut c = ctx(addr, deferred_oauth(addr));
+        let secrets = deferred_scope(&mut c, &format!("http://{addr}/token"), None, true);
+        let pending = lookup_recorded(&engine, &c, &access, response, attempt, &cancel);
+        let detail = pending.await;
+        assert!(matches!(&detail, GatewayDetail::Looked { outcome: LookupOutcome::Failed { reason }, .. } if reason == LOOKUP_FAILURE));
+        assert_eq!(secrets.reads.lock().unwrap().as_slice(), &[secrets.variables[&(0, 0)].id]);
+        private(&format!("{detail:?}"), &secrets);
+
+        let secrets = deferred_scope(&mut c, &format!("http://{addr}/token"), Some("data-only"), false);
+        access.credential = SensitiveValue::Secret { secret: SecretRef { id: Id::new(), label: "direct-vault-label-canary".into() } };
+        let pending = lookup_recorded(&engine, &c, &access, response, attempt, &cancel);
+        let detail = pending.await;
+        match &detail {
+            GatewayDetail::Looked { outcome: LookupOutcome::Failed { reason }, .. } => {
+                assert_eq!(reason, "the lookup credential could not be resolved; check the vault and active variables");
+            }
+            other => panic!("{other:?}"),
+        }
+        private(&format!("{detail:?}"), &secrets);
+        assert_eq!(admin.log.count_requests(), 2, "neither failure sends a lookup request");
+        assert_eq!(issuer.token_requests.load(Ordering::SeqCst), 0, "recorded lookups do not acquire an OAuth token");
+        assert!(issuer.api_hits().is_empty());
+        api.shutdown();
+        admin.shutdown();
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn workload_fixture() -> anvil_fixtures::workload_api::Fixture {
+        // UUIDv7 starts with a timestamp, so use its random suffix for concurrent fixture names.
+        let id = Id::new().to_string().replace('-', "");
+        let name = format!("av-scope-{}", &id[12..]);
+        #[cfg(unix)]
+        let fixture = {
+            let path = std::env::temp_dir().join(format!("{name}.sock"));
+            anvil_fixtures::workload_api::serve(&path).await.unwrap()
+        };
+        #[cfg(windows)]
+        let fixture = anvil_fixtures::workload_api::serve_named_pipe(&name).await.unwrap();
+        fixture
+    }
+
+    #[cfg(any(unix, windows))]
+    fn workload_profile(endpoint: &str) -> TlsProfile {
+        let expected_server_spiffe_id = Some(anvil_fixtures::workload_api::SERVER_ID.into());
+        TlsProfile {
+            id: Id::new(),
+            workspace_id: Id::new(),
+            name: "scope ordering identity".into(),
+            verify: true,
+            use_system_roots: false,
+            extra_roots_pem: vec![],
+            client_identity: Some(ClientIdentity::WorkloadApi { endpoint: endpoint.into(), spiffe_id: None, trust_bundle: true }),
+            bindings: vec![],
+            min_version: Default::default(),
+            server_name_override: None,
+            server_spiffe: Some(ServerSpiffeIdentity { expected_server_spiffe_id, trust_domain: None }),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    fn select_workload(c: &mut ExecutionContext, endpoint: &str) {
+        let profile = workload_profile(endpoint);
+        let settings = anvil_domain::settings::SettingsOverrides { tls_profile_id: Some(profile.id), ..Default::default() };
+        c.settings_layers.push(("run".into(), settings));
+        c.tls_profiles.push(profile);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn missing_unused_or_shadowed_scope_stops_native_identity_and_every_session_before_effects() {
+        use anvil_domain::request::*;
+        anvil_transport::init();
+        anvil_fixtures::init();
+        let workload = workload_fixture().await;
+        let (addr, issuer) = Fixture::start().await;
+        let engine = Engine::new();
+        for protocol in [Protocol::Http, Protocol::Mcp, Protocol::WebSocket, Protocol::Grpc, Protocol::Sse, Protocol::Tcp, Protocol::Udp] {
+            for shadowed in [false, true] {
+                let mut c = ctx(addr, deferred_oauth(addr));
+                c.spec.protocol = protocol;
+                let scheme = match protocol {
+                    Protocol::WebSocket => "wss",
+                    Protocol::Grpc => "grpcs",
+                    Protocol::Tcp => "tls",
+                    Protocol::Udp => "dtls",
+                    _ => "https",
+                };
+                c.spec.url = format!("{scheme}://{addr}/api");
+                c.spec.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 1_000, last_event_id: None, reconnect: false });
+                c.spec.grpc = Some(GrpcSpec {
+                    service: "anvil.lab.v1.Echo".into(),
+                    method: "Unary".into(),
+                    mode: GrpcMode::Unary,
+                    schema: GrpcSchemaSource::Reflection,
+                    messages: vec!["{}".into()],
+                    metadata: vec![],
+                    deadline_ms: None,
+                    plaintext: false,
+                    wire: GrpcWire::Grpc,
+                });
+                c.spec.mcp = Some(serde_json::from_str(r#"{"operation":{"kind":"tools_call","name":"fx.echo"}}"#).unwrap());
+                let secrets = deferred_scope(&mut c, &format!("http://{addr}/token"), None, shadowed);
+                // A direct client secret must not be read when any scope entry fails.
+                if let AuthConfig::OAuth2 { config } = &mut c.auth_layers[0].1 {
+                    config.client_secret = SensitiveValue::Secret { secret: secrets.variables[&(0, 1)].clone() };
+                }
+                select_workload(&mut c, &workload.uri());
+                let out = send(&engine, &c).await;
+                assert_eq!(failure_kind(&out), Some(FailureKind::AuthPreparationFailed), "{protocol:?}");
+                assert_eq!(out.record.outcome.dispatch, DispatchState::NotDispatched);
+                assert!(out.record.prepared.workload_api.as_ref().is_none_or(|e| e.calls.is_empty()));
+                private(&serde_json::to_string(&out.record).unwrap(), &secrets);
+                assert_eq!(secrets.reads.lock().unwrap().as_slice(), &[secrets.variables[&(0, 0)].id]);
+                if !matches!(protocol, Protocol::Http | Protocol::Mcp) {
+                    let handle = engine.open_session(c, EventCtx::none()).await;
+                    assert!(matches!(handle.close().await, Err(anvil_engine::SessionError::Closed)), "no command queue was opened");
+                    let out = handle.finish().await;
+                    assert_eq!(failure_kind(&out), Some(FailureKind::AuthPreparationFailed));
+                    assert_eq!(out.record.outcome.dispatch, DispatchState::NotDispatched);
+                    assert!(out.record.prepared.workload_api.as_ref().is_none_or(|e| e.calls.is_empty()));
+                    private(&serde_json::to_string(&out.record).unwrap(), &secrets);
+                    assert_eq!(secrets.reads.lock().unwrap().as_slice(), &[secrets.variables[&(0, 0)].id, secrets.variables[&(0, 0)].id]);
+                }
+                assert_eq!(workload.issued_x509(), 0, "no Workload API identity was fetched");
+                assert!(workload.log.entries().is_empty(), "no native identity RPC occurred");
+                assert!(engine.workload.is_empty(), "no native identity material was cached");
+                assert_eq!(issuer.token_requests.load(Ordering::SeqCst), 0);
+                assert!(issuer.api_hits().is_empty(), "no transport or reflection request was sent");
+                assert_eq!(engine.http.pool.stats().connections, 0);
+            }
+        }
+        workload.shutdown();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn eligible_templated_loopback_issuer_and_complete_scope_allow_native_identity_preparation() {
+        use anvil_domain::request::{KeyValue, Protocol, SseSpec, WsBootstrap, WsMessage, WsSpec};
+        anvil_transport::init();
+        anvil_fixtures::init();
+        let workload = workload_fixture().await;
+        let server = workload.server_svid(anvil_fixtures::workload_api::SERVER_ID);
+        let mut tls = anvil_fixtures::TlsServerOptions::new(server.cert, server.key);
+        tls.client_auth = anvil_fixtures::ClientAuth::Required { ca_pem: workload.ca_pem.clone() };
+        let api = anvil_fixtures::http::serve("127.0.0.1:0", Some(tls)).await.unwrap();
+        let (addr, issuer) = Fixture::start().await;
+        let engine = Engine::new();
+        let mut c = ctx(addr, deferred_oauth(addr));
+        c.spec.url = api.url("/echo");
+        c.spec.headers.push(KeyValue::new("X-Counter", "{{$counter}}"));
+        let secrets = deferred_scope(&mut c, &format!("http://{addr}/token"), Some("{{$counter}}-{{unexpanded-data-only}}"), false);
+        select_workload(&mut c, &workload.uri());
+        for _ in 0..2 {
+            let out = send(&engine, &c).await;
+            assert_eq!(status(&out), Some(200), "{:?}", out.record.attempts);
+            private(&serde_json::to_string(&out.record).unwrap(), &secrets);
+        }
+        for protocol in [Protocol::Sse, Protocol::WebSocket] {
+            let mut session = c.clone();
+            session.spec.protocol = protocol;
+            session.spec.url =
+                if protocol == Protocol::Sse { api.url("/sse?count=1") } else { format!("wss://{}/ws?close_after=1", api.addr) };
+            session.spec.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 3_000, last_event_id: None, reconnect: false });
+            session.spec.websocket = Some(WsSpec {
+                bootstrap: WsBootstrap::Http1Upgrade,
+                subprotocols: vec![],
+                messages: vec![WsMessage::Text { text: "hello".into() }],
+                expect_messages: 1,
+                max_message_bytes: 1024,
+                idle_close_ms: 3_000,
+                permessage_deflate: Default::default(),
+            });
+            let out = send(&engine, &session).await;
+            assert_eq!(failure_kind(&out), None, "{protocol:?}: {:?}", out.record.attempts);
+            assert_eq!(status(&out), Some(if protocol == Protocol::Sse { 200 } else { 101 }));
+            private(&serde_json::to_string(&out.record).unwrap(), &secrets);
+        }
+        assert_eq!(workload.issued_x509(), 1, "the eligible request fetches once and then uses the cache");
+        assert_eq!(engine.workload.len(), (1, 0, 0));
+        assert_eq!(secrets.reads.lock().unwrap().len(), 8, "each execution freezes both vault variables once");
+        assert_eq!(issuer.token_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(api.log.count_requests(), 4);
+        for entry in api.log.entries() {
+            if let anvil_fixtures::GroundTruth::RequestReceived { headers, .. } = entry.event {
+                assert!(headers.iter().any(|(name, value)| name.eq_ignore_ascii_case("x-counter") && value == "1"));
+            }
+        }
+        assert!(issuer.token_forms.lock().unwrap()[0].contains("client_secret=anvil-secret"));
+        workload.shutdown();
+        api.shutdown();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn missing_scope_stops_mixed_jwt_svid_fetches_and_bundle_cache_before_credentials() {
+        use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
+        anvil_transport::init();
+        anvil_fixtures::init();
+        let workload = workload_fixture().await;
+        let (addr, issuer) = Fixture::start().await;
+        let engine = Engine::new();
+        let mut c = ctx(addr, deferred_oauth(addr));
+        let secrets = deferred_scope(&mut c, &format!("http://{addr}/token"), None, false);
+        c.auth_layers[0].1 = AuthConfig::Multi {
+            profiles: vec![
+                AuthConfig::JwtSvid {
+                    config: JwtSvidConfig {
+                        source: JwtSvidSource::WorkloadApi,
+                        audiences: vec!["spiffe://anvil.test/gateway".into()],
+                        endpoint: workload.uri(),
+                        spiffe_id: None,
+                        verify_with_bundles: true,
+                        send_despite_failed_checks: false,
+                        header_name: "X-JWT-SVID".into(),
+                        prefix: "Bearer".into(),
+                    },
+                },
+                AuthConfig::OAuth2 { config: deferred_oauth(addr) },
+            ],
+        };
+        let out = send(&engine, &c).await;
+        assert_eq!(failure_kind(&out), Some(FailureKind::AuthPreparationFailed));
+        assert_eq!(out.record.outcome.dispatch, DispatchState::NotDispatched);
+        assert!(workload.log.entries().is_empty(), "neither JWT-SVID nor JWT-bundle RPCs ran");
+        assert_eq!(engine.workload.len(), (0, 0, 0));
+        assert_eq!(secrets.reads.lock().unwrap().as_slice(), &[secrets.variables[&(0, 0)].id]);
+        assert_eq!(issuer.token_requests.load(Ordering::SeqCst), 0);
+        assert!(issuer.api_hits().is_empty());
+        private(&serde_json::to_string(&out.record).unwrap(), &secrets);
+        workload.shutdown();
+    }
 }

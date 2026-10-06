@@ -131,7 +131,45 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
           <VariablesEditor vars={vars} onChange={(v) => patch({ variables: v })} workspaceId={props.workspaceId} />
         </>
       )}
-      {tab === "settings" && <SettingsOverridesEditor value={settings} onChange={(s) => patch({ settings: s })} profiles={props.profiles} />}
+      {tab === "settings" && (
+        <>
+          <div className="hint" role="note" aria-label="HTTP policy">
+            <p>
+              HTTP policy. These limits also apply to inherited settings; see
+              docs/security/http-state-and-destination-policy.md.
+            </p>
+            <p>
+              Cookies: 4 KiB per incoming Set-Cookie value, 8 KiB per retained cookie, 180 cookies /
+              128 KiB per registrable site and 3,000 cookies / 2 MiB per workspace; the least
+              recently used cookies are evicted first. All outgoing Cookie fields together, including
+              configured credentials even when the cookie jar is off, are capped at 8 KiB. Unknown
+              suffixes use host-only cookies. Eviction or omission can end sessions or change load
+              results.
+            </p>
+            <p>
+              Each request is pinned to the addresses its name resolved to. A redirect may go to a
+              public address, or stay within the network zones the original request resolved to
+              (loopback, private, link-local, shared or fake-IP), until one hop is public; after
+              that, redirects stay public. A fake-IP redirect must return to the original host,
+              because the client cannot verify where it goes. Intentional private originals keep
+              working, including names that resolve across several such zones. This is an
+              address-class boundary, not authorization for a particular server.
+            </p>
+            <p>
+              Redirects through HTTP, HTTPS CONNECT, SOCKS5 or HBONE proxies are refused, including
+              same-host redirects. Explicit original proxied requests remain supported; client DNS
+              overrides do not prove a proxy's destination. OAuth token URLs require HTTPS, or
+              literal-loopback HTTP on a direct connection; localhost and DNS overrides do not
+              qualify.
+            </p>
+          </div>
+          <SettingsOverridesEditor
+            value={settings}
+            onChange={(s) => patch({ settings: s })}
+            profiles={props.profiles}
+          />
+        </>
+      )}
       {tab === "scope" && importRoot && <ImportRootScope folder={importRoot} busy={scopeBusy} error={scopeErr} onSet={(allow) => void setWorkspaceScope(importRoot, allow)} />}
       {tab === "about" && (
         <div className="form">

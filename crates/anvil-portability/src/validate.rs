@@ -463,6 +463,29 @@ pub fn uncarried_attachments(g: &PortableGraph) -> Result<Vec<UncarriedAttachmen
     Ok(out)
 }
 
+/// Describe the stored file `sha` for an error message: `the file 'name' of
+/// request 'Upload'` (or of a dataset), else `the stored file <sha>`.
+pub fn stored_file_holder(g: &PortableGraph, sha: &str) -> String {
+    let requests = g.requests.iter().map(|r| ("request", &r.name, serde_json::to_value(r)));
+    let datasets = g.datasets.iter().map(|d| ("dataset", &d.name, serde_json::to_value(d)));
+    requests
+        .chain(datasets)
+        .find_map(|(what, name, value)| Some(format!("the file '{}' of {what} '{name}'", stored_file_name(&value.ok()?, sha)?)))
+        .unwrap_or_else(|| format!("the stored file {sha}"))
+}
+
+// The name of the stored file `sha` anywhere in a serialized request or dataset.
+fn stored_file_name(value: &serde_json::Value, sha: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Object(o) if o.get("sha256").and_then(|s| s.as_str()) == Some(sha) => {
+            o.get("file_name").and_then(|f| f.as_str()).map(str::to_string)
+        }
+        serde_json::Value::Object(o) => o.values().find_map(|v| stored_file_name(v, sha)),
+        serde_json::Value::Array(a) => a.iter().find_map(|v| stored_file_name(v, sha)),
+        _ => None,
+    }
+}
+
 /// The content hash of every stored attachment `v` names, wherever it sits
 /// (binary bodies, multipart parts, gRPC schema files).
 fn stored_hashes(v: &serde_json::Value, out: &mut Vec<String>) {

@@ -13,6 +13,7 @@ pub mod certs;
 pub mod connector;
 pub mod datagram;
 pub mod decode;
+pub mod destination;
 pub mod dns;
 pub mod dtls;
 pub mod early_tls;

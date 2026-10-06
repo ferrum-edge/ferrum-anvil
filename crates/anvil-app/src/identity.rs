@@ -279,6 +279,9 @@ impl App {
     }
 
     /// Whether a token is cached for the OAuth profile in effect (metadata only).
+    /// Invalid token endpoints return the same configuration refusal as sign-in,
+    /// before credential expansion; callers must surface it instead of reporting
+    /// an ordinary signed-out status. HTTP requires a literal loopback address.
     pub fn oauth_token_status(
         &self,
         request_id: Option<Id>,
@@ -287,7 +290,9 @@ impl App {
         opts: &SendOptions,
     ) -> Result<Option<TokenSummary>> {
         let ctx = self.build_context(request_id, ws, draft, opts)?;
-        Ok(anvil_identity::api_oauth::token_status(&self.engine, &ctx)?)
+        let target = anvil_engine::oauth_http::interactive_oauth(&ctx)
+            .map_err(|failure| anvil_identity::FlowError::Configuration(failure.message))?;
+        Ok(anvil_engine::oauth_http::token_status(&self.engine, &target))
     }
 
     /// Forget the cached token for the OAuth profile in effect.

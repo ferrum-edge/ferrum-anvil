@@ -72,8 +72,12 @@ fn resolve_auth(
 ) -> Result<ResolvedAuth, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
     let sens = |v: &anvil_domain::secret::SensitiveValue, field: &str| -> Result<Zeroizing<String>, TransportFailure> {
-        let (raw, _) = resolve_sensitive(v, ctx.secrets.as_ref()).map_err(|e| fail(format!("{field}: {e}")))?;
-        let resolved = r.resolve(&raw, field)?;
+        let (raw, _) = resolve_sensitive(v, ctx.secrets.as_ref())
+            .map_err(|_| fail(format!("could not resolve {field}; check the vault and active variables")))?;
+        let resolved = r.resolve(&raw, field).map_err(|mut failure| {
+            failure.message = format!("could not resolve {field}; check the vault and active variables");
+            failure
+        })?;
         Ok(Zeroizing::new(resolved))
     };
     Ok(match auth {
@@ -219,17 +223,31 @@ pub(crate) fn prepared_from_profile(
         if binding_matches(&p.bindings, &bind) {
             s.client_identity = Some(match id {
                 anvil_domain::tls::ClientIdentity::Pem { cert_chain_pem, private_key_pem } => {
-                    let (key, _) = resolve_sensitive(private_key_pem, ctx.secrets.as_ref()).map_err(|e| {
-                        TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e)
-                            .with_field("tls.client_identity.private_key")
+                    let (key, _) = resolve_sensitive(private_key_pem, ctx.secrets.as_ref()).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::ClientIdentityInvalid,
+                            "could not resolve the TLS private key; check the vault",
+                        )
+                        .with_field("tls.client_identity.private_key")
                     })?;
                     ClientIdentityMaterial { cert_chain_pem: cert_chain_pem.clone(), private_key_pem: key }
                 }
                 anvil_domain::tls::ClientIdentity::Pkcs12 { bundle_b64, password } => {
-                    let (b, _) = resolve_sensitive(bundle_b64, ctx.secrets.as_ref())
-                        .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e))?;
-                    let (pw, _) = resolve_sensitive(password, ctx.secrets.as_ref())
-                        .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::ClientIdentityInvalid, e))?;
+                    let (b, _) = resolve_sensitive(bundle_b64, ctx.secrets.as_ref()).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::ClientIdentityInvalid,
+                            "could not resolve the TLS identity bundle; check the vault",
+                        )
+                    })?;
+                    let (pw, _) = resolve_sensitive(password, ctx.secrets.as_ref()).map_err(|_| {
+                        TransportFailure::new(
+                            Phase::Prepare,
+                            FailureKind::ClientIdentityInvalid,
+                            "could not resolve the TLS identity password; check the vault",
+                        )
+                    })?;
                     crate::pkcs12::to_pem(&b, &pw)?
                 }
                 anvil_domain::tls::ClientIdentity::WorkloadApi { .. } => unreachable!("handled above"),
@@ -342,7 +360,8 @@ pub(crate) fn proxy_for(
     let (host, port) = anvil_transport::net::parse_proxy_address(&p.address)?;
     let credentials = match (&p.username, &p.password) {
         (Some(u), Some(pw)) => {
-            let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref()).map_err(|e| proxy_invalid(e, "proxy.password"))?;
+            let (v, _) = resolve_sensitive(pw, ctx.secrets.as_ref())
+                .map_err(|_| proxy_invalid("could not resolve the proxy password; check the vault", "proxy.password"))?;
             Some((u.clone(), v))
         }
         (Some(u), None) => Some((u.clone(), Zeroizing::new(String::new()))),
@@ -447,6 +466,7 @@ pub(crate) fn prepare_all_at(
     r: &Resolver,
     allowed: &[&str],
 ) -> Result<Prepared, TransportFailure> {
+    crate::oauth_http::validate_oauth_endpoint(ctx, r)?;
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let http = prepare::prepare_http_with_redaction_names(
         &ctx.spec,
@@ -608,7 +628,9 @@ fn cookie_name(pair: &str) -> &str {
 /// configured cookie of the same name. Returns a note for each stored cookie
 /// that cannot be sent (its value is not a valid header value).
 pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target, headers: &mut Vec<(String, String)>) -> Vec<String> {
-    let Some(stored) = engine.cookie_header(isolation, target) else { return vec![] };
+    let limit = crate::cookies::MAX_COOKIE_HEADER_BYTES;
+    let (mut notes, mut bytes) = cookie_header_budget(headers);
+    let Some(stored) = engine.cookie_header(isolation, target) else { return notes };
     let sent: Vec<String> = headers
         .iter()
         .filter(|(n, _)| n.eq_ignore_ascii_case("cookie"))
@@ -616,8 +638,7 @@ pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target,
         .map(|p| cookie_name(p).to_string())
         .filter(|n| !n.is_empty())
         .collect();
-    let mut notes = vec![];
-    let mut added = vec![];
+    let mut added = String::new();
     for pair in stored.split(';').map(str::trim).filter(|p| !p.is_empty()) {
         let name = cookie_name(pair);
         if sent.iter().any(|s| s == name) {
@@ -627,18 +648,53 @@ pub(crate) fn add_jar_cookies(engine: &Engine, isolation: &str, target: &Target,
             notes.push(format!("stored cookie '{name}' not sent: its value is not a valid header value"));
             continue;
         }
-        added.push(pair);
+        let size = pair.len() + if bytes == 0 { 0 } else { 2 };
+        if bytes + size > limit {
+            notes.push("a stored cookie exceeds the 8 KiB request cookie budget".into());
+            continue;
+        }
+        if !added.is_empty() {
+            added.push_str("; ");
+        }
+        added.push_str(pair);
+        bytes += size;
     }
     if added.is_empty() {
         return notes;
     }
-    let added = added.join("; ");
     match headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("cookie")) {
         Some((_, v)) if v.trim().is_empty() => *v = added,
-        Some((_, v)) => *v = format!("{v}; {added}"),
+        Some((_, v)) => {
+            // Both allocations are independently bounded by the checked size.
+            v.push_str("; ");
+            v.push_str(&added);
+        }
         None => headers.push(("Cookie".into(), added)),
     }
     notes
+}
+
+/// The independent output ceiling also applies when automatic cookies are off.
+pub(crate) fn cookie_header_budget(headers: &mut Vec<(String, String)>) -> (Vec<String>, usize) {
+    let limit = crate::cookies::MAX_COOKIE_HEADER_BYTES;
+    let mut notes = vec![];
+    let mut bytes = 0;
+    // Cap all final Cookie fields together, including explicitly configured
+    // credentials, before adding jar state or allocating a combined value.
+    headers.retain(|(name, value)| {
+        if !name.eq_ignore_ascii_case("cookie") {
+            return true;
+        }
+        let added = value.len() + if bytes == 0 { 0 } else { 2 };
+        if bytes + added > limit {
+            notes.push("a Cookie header exceeds the 8 KiB request cookie budget".into());
+            false
+        } else {
+            bytes += added;
+            true
+        }
+    });
+    (notes, bytes)
 }
 
 /// Whether a request body holds a resolved secret value byte for byte (at
@@ -745,7 +801,10 @@ pub(crate) async fn execute_viewing(
     // a delete of its workspace is not kept: its prepared TLS material, its
     // cookies, its connections and its session tickets.
     let epoch = engine.epoch_for(ctx);
-    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+    if let Err(failure) = crate::oauth_http::validate_oauth_endpoint(ctx, &resolver) {
+        return record::local_failure_with(ctx, &resolver, started_at, failure, None);
+    }
     // SPIFFE Workload API identities and JWT-SVIDs, before anything is sent.
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
@@ -792,6 +851,7 @@ pub(crate) async fn execute_viewing(
         tls_profile: prep.tls_profile_name.clone(),
         proxy: prep.proxy.clone(),
     };
+    let destination = anvil_transport::destination::DestinationPolicy::default();
     let original_origin = current.target.origin();
     // The hop behind `last`: its origin decides the Ferrum attribution of the
     // final response, and the record's TLS and proxy summary describe it.
@@ -848,11 +908,14 @@ pub(crate) async fn execute_viewing(
         }
         // Cookies from the workspace jar (never across workspaces), after
         // the request's own cookies, which win over a stored one.
-        if prep.settings.cookies {
-            for n in add_jar_cookies(engine, &ctx.isolation, &current.target, &mut headers) {
-                if !prep.inferred.contains(&n) {
-                    prep.inferred.push(n);
-                }
+        let cookie_notes = if prep.settings.cookies {
+            add_jar_cookies(engine, &ctx.isolation, &current.target, &mut headers)
+        } else {
+            cookie_header_budget(&mut headers).0
+        };
+        for n in cookie_notes {
+            if !prep.inferred.contains(&n) {
+                prep.inferred.push(n);
             }
         }
         let header_pairs = match wire_headers(&headers) {
@@ -939,11 +1002,17 @@ pub(crate) async fn execute_viewing(
         }
         let (outs, closed_under) = match version {
             HttpVersionPolicy::Http3Only | HttpVersionPolicy::Http3WithFallback => {
-                let e = engine.h3.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
+                let e = engine
+                    .h3
+                    .execute_attempt_guarded(&plan, index, reason.clone(), &events, &cancel, Some((&destination, redirects > 0)))
+                    .await;
                 (e.outputs, e.resend_on_new_connection)
             }
             _ => {
-                let e = engine.http.execute_attempt(&plan, index, reason.clone(), &events, &cancel).await;
+                let e = engine
+                    .http
+                    .execute_attempt_guarded(&plan, index, reason.clone(), &events, &cancel, Some((&destination, redirects > 0)))
+                    .await;
                 // The TCP fallback gets the transport's resend of a request
                 // that never left, not the engine's: its next attempt would
                 // go out over HTTP/3 again.

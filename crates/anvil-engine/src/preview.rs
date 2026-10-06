@@ -109,7 +109,7 @@ impl Engine {
             return crate::mcp::preview(self, ctx);
         }
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
-        let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+        let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
         let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;
         let mut inferred = prep.inferred.clone();
         let shape = match ctx.spec.protocol {

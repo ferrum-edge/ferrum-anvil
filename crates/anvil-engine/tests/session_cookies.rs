@@ -9,7 +9,7 @@
 //! ground truth shows what the server received.
 
 use anvil_domain::Id;
-use anvil_domain::auth::{AuthConfig, KeyLocation};
+use anvil_domain::auth::{AuthConfig, JwtAlgorithm, JwtClaims, KeyLocation};
 use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::Direction;
 use anvil_domain::request::*;
@@ -203,6 +203,153 @@ async fn an_http_login_cookie_is_sent_on_the_sse_handshake() {
     assert_eq!(cookie_on(&f, "/echo").as_deref(), Some("sid=audit-only-session"));
     ok(&e, &sse(&f.url("/sse?count=1&interval=1"))).await;
     assert_eq!(cookie_on(&f, "/sse").as_deref(), Some("sid=audit-only-session"));
+}
+
+#[tokio::test]
+async fn cumulative_cookie_eviction_and_output_cap_apply_to_redirect_and_session_handshakes() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    // Fill the site count budget through actual HTTP responses, then add one
+    // more through a real SSE handshake using the same bounded jar.
+    for i in 0..180 {
+        ok(&e, &get(&f.url(&format!("/set-cookie?name=c{i}&value=v")))).await;
+    }
+    let s = ok(&e, &sse(&f.url("/sse?count=1&interval=1&set_cookie=session%3Dfrom-handshake"))).await;
+    assert_eq!(s.record.response.as_ref().unwrap().status, 200);
+    let to = url::form_urlencoded::byte_serialize(f.url("/echo").as_bytes()).collect::<String>();
+    let o = ok(&e, &get(&f.url(&format!("/redirect?status=307&to={to}")))).await;
+    assert_eq!(o.record.attempts.len(), 2);
+    let cookie = cookie_on(&f, "/echo").unwrap();
+    assert_eq!(cookie.split("; ").count(), 180);
+    assert!(!cookie.split("; ").any(|p| p == "c0=v"), "creation order breaks equal LRU ties");
+    assert!(cookie.contains("session=from-handshake"));
+    // Large values exercise the independent header cap on HTTP and SSE, while
+    // response state is still larger than one permitted output header.
+    for i in 0..4 {
+        let path = format!("/set-cookie?name=large{i}&value={}", "v".repeat(3000));
+        ok(&e, &get(&f.url(&path))).await;
+    }
+    ok(&e, &get(&f.url("/echo"))).await;
+    assert!(cookie_on(&f, "/echo").unwrap().len() <= 8192);
+    ok(&e, &sse(&f.url("/sse?count=1&interval=1"))).await;
+    assert!(cookie_on(&f, "/sse").unwrap().len() <= 8192);
+    assert!(!serde_json::to_string(&o.record).unwrap().contains("from-handshake"), "request cookies stay redacted",);
+}
+
+fn jwt_cookie(size: usize) -> AuthConfig {
+    AuthConfig::Jwt {
+        algorithm: JwtAlgorithm::HS256,
+        signing_key: SensitiveValue::template("audit-only-cookie-signing-key"),
+        claims: JwtClaims {
+            expires_in_secs: Some(60),
+            extra_json: serde_json::json!({ "padding": "x".repeat(size) }).to_string(),
+            ..Default::default()
+        },
+        kid: None,
+        header_name: "Cookie".into(),
+        prefix: String::new(),
+    }
+}
+
+const BUDGET_NOTE: &str = "a Cookie header exceeds the 8 KiB request cookie budget";
+
+fn assert_cookie_budget(o: &ExecutionOutput, headers: &[(String, String)], oversized: bool) {
+    let values: Vec<&str> =
+        headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("cookie")).map(|(_, value)| value.as_str()).collect();
+    let bytes = values.iter().map(|value| value.len()).sum::<usize>() + values.len().saturating_sub(1) * 2;
+    assert!(bytes <= 8192, "aggregate Cookie output exceeded its ceiling");
+    assert_eq!(values.is_empty(), oversized, "Cookie omission differs from the budget");
+    assert_eq!(o.record.prepared.inferred.iter().any(|note| note == BUDGET_NOTE), oversized);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains("audit-only-cookie-signing-key"));
+    for value in values {
+        assert!(!record.contains(value), "wire credential appeared in the record");
+    }
+}
+
+#[tokio::test]
+async fn jwt_cookie_output_is_bounded_on_http_and_sse_reconnection_with_jars_on_or_off() {
+    init();
+    for cookies in [true, false] {
+        for size in [128, 7 * 1024] {
+            let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+            let e = Engine::new();
+            let oversized = size > 1024;
+            let configure = |mut c: ExecutionContext| {
+                c.auth_layers = vec![("request".into(), jwt_cookie(size))];
+                if cookies { c } else { cookies_off(c) }
+            };
+            let o = ok(&e, &configure(get(&f.url("/echo")))).await;
+            let headers = f.log.last_request_headers().unwrap();
+            assert_cookie_budget(&o, &headers, oversized);
+
+            // The fixture truncates the first stream after an event. Waiting
+            // over a second before truncation changes JWT iat/exp on reconnect,
+            // so the signer must not restore its initially withheld Cookie.
+            let mut c = sse(&f.url("/sse?count=1&interval=1100&abort=1"));
+            c.spec.sse.as_mut().unwrap().reconnect = true;
+            c.spec.sse.as_mut().unwrap().max_events = 2;
+            let o = ok(&e, &configure(c)).await;
+            assert_eq!(o.record.attempts.len(), 2);
+            assert!(matches!(o.record.attempts[1].reason, anvil_domain::execution::AttemptReason::Retry { .. }));
+            let requests: Vec<Vec<(String, String)>> = f
+                .log
+                .entries()
+                .into_iter()
+                .filter_map(|entry| match entry.event {
+                    GroundTruth::RequestReceived { path, headers, .. } if path.starts_with("/sse") => Some(headers),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(requests.len(), 2, "both SSE sends reached the wire");
+            for headers in &requests {
+                assert_cookie_budget(&o, headers, oversized);
+            }
+            assert!(requests[1].iter().any(|(name, value)| name.eq_ignore_ascii_case("last-event-id") && value == "0"));
+            if !oversized {
+                let cookie =
+                    |headers: &[(String, String)]| headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("cookie")).unwrap().1.clone();
+                assert!(cookie(&requests[0]) != cookie(&requests[1]), "time claims changed");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reflected_grpc_resigning_cannot_restore_an_initially_withheld_cookie() {
+    init();
+    for size in [128, 7 * 1024] {
+        let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+        let g = gate::tcp(f.addr, 0).await.unwrap();
+        let mut c = grpc(&format!("grpc://{}", g.addr.unwrap()), None);
+        c.spec.grpc.as_mut().unwrap().schema = GrpcSchemaSource::Reflection;
+        c.auth_layers = vec![("request".into(), jwt_cookie(size))];
+        let task = tokio::spawn(async move { run(&Engine::new(), &c).await });
+        tokio::time::timeout(Duration::from_secs(10), g.held()).await.unwrap();
+        // The reflection request was signed before connecting. The actual
+        // call is signed after this gate, with changed JWT time claims.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        g.release();
+        let o = task.await.unwrap();
+        assert!(o.record.response.is_some(), "the reflected call completed");
+        let mut reflections = 0;
+        let mut calls = 0;
+        for entry in f.log.entries() {
+            if let GroundTruth::RequestReceived { path, headers, .. } = entry.event {
+                if path.contains("ServerReflectionInfo") {
+                    reflections += 1;
+                } else if path.starts_with(GRPC_PATH) {
+                    calls += 1;
+                } else {
+                    continue;
+                }
+                assert_cookie_budget(&o, &headers, size > 1024);
+            }
+        }
+        assert!(reflections > 0, "reflection reached the wire");
+        assert_eq!(calls, 1, "the signed call reached the wire");
+    }
 }
 
 #[tokio::test]

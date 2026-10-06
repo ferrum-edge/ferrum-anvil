@@ -110,7 +110,14 @@ type ResignedSlot = Arc<parking_lot::Mutex<Option<Resigned>>>;
 /// The secrets requests signed in the transport were signed with (a token
 /// minted for each signature), whether or not the record keeps the request:
 /// a server can echo a reflection request's credential in its refusal.
-type SignedSecrets = Arc<parking_lot::Mutex<Vec<String>>>;
+/// Generic cookie omission reasons share this per-session state too.
+type SignedSecrets = Arc<parking_lot::Mutex<TransportSigning>>;
+
+#[derive(Default)]
+struct TransportSigning {
+    secrets: Vec<String>,
+    notes: Vec<String>,
+}
 
 /// The redactor of a live transcript that can learn secrets once the session
 /// is planned: those a gRPC call signed once server reflection resolved its
@@ -183,6 +190,11 @@ fn jar_cookies(
     headers: &mut Vec<(String, String)>,
 ) -> Option<SessionCookies> {
     if !b.prep.settings.cookies {
+        for n in http_exec::cookie_header_budget(headers).0 {
+            if !b.inferred.contains(&n) {
+                b.inferred.push(n);
+            }
+        }
         return None;
     }
     let target = http_target(target);
@@ -393,9 +405,20 @@ fn sign_in_transport(
                 live.add_secret(s);
             }
         }
-        signed.lock().extend(applied.secrets);
         let mut headers = sent.clone();
         set_headers(&mut headers, applied.set_headers.into_iter().filter(|h| !first.contains(h)).collect());
+        // A changed token can restore a Cookie field withheld during preparation.
+        // Recheck the aggregate after every signing, including reflection sends.
+        let notes = http_exec::cookie_header_budget(&mut headers).0;
+        {
+            let mut signed = signed.lock();
+            signed.secrets.extend(applied.secrets);
+            for note in notes {
+                if !signed.notes.contains(&note) {
+                    signed.notes.push(note);
+                }
+            }
+        }
         let wire = header_pairs(&headers)?;
         if let Some(slot) = &slot {
             *slot.lock() = Some(Resigned { headers, body: body.clone(), facts: applied.facts });
@@ -1601,7 +1624,8 @@ async fn prepare_masque(
         host_from_authority: false,
         path_only: false,
     };
-    let Authorized { headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    let Authorized { mut headers, query, facts, .. } = apply_auth(engine, ctx, &mut b.prep, &mut b.redactor, &connect, cancel).await?;
+    b.inferred.extend(http_exec::cookie_header_budget(&mut headers).0);
     let t = Target { query, ..connect.target };
     let connect_url = t.url();
     let display_url = b.redactor.url(&connect_url);
@@ -1841,7 +1865,7 @@ async fn run_prepared(
     // each reflection request, each send of an event stream): any of them
     // can be echoed in the response, notes or findings.
     if let Some(signed) = &prep.signed_secrets {
-        for s in signed.lock().iter() {
+        for s in &signed.lock().secrets {
             redactor.add_secret(s);
         }
     }
@@ -1879,6 +1903,13 @@ async fn run_prepared(
         }
     }
     let mut inferred = prep.inferred;
+    if let Some(signed) = &prep.signed_secrets {
+        for note in &signed.lock().notes {
+            if !inferred.contains(note) {
+                inferred.push(note.clone());
+            }
+        }
+    }
     if skipped_secret_cookie_name && !inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE) {
         inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
     }
@@ -1934,7 +1965,10 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     // TLS material prepared after a lock or a workspace delete is not cached,
     // and handshake cookies received after either are not kept.
     let epoch = engine.epoch_for(ctx);
-    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+    if let Err(failure) = crate::oauth_http::validate_oauth_endpoint(ctx, &resolver) {
+        return record::local_failure_with(ctx, &resolver, started_at, failure, None);
+    }
     // Canceling the execution abandons a Workload API call in flight.
     let (materialized, workload) = crate::workload::prepare(engine, ctx, &resolver, &cancel).await;
     let materialized = match materialized {
@@ -2116,10 +2150,14 @@ impl Engine {
         let epoch = self.epoch_for(&ctx);
         let protocol = ctx.spec.protocol;
         let execution_id = events.execution_id;
-        let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+        let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
         let cancel = CancellationToken::new();
         let fallback = Box::new(ctx.clone());
-        let (materialized, workload) = crate::workload::prepare(self, &ctx, &resolver, &cancel).await;
+        let (materialized, workload) = if let Err(failure) = crate::oauth_http::validate_oauth_endpoint(&ctx, &resolver) {
+            (Err(failure), Default::default())
+        } else {
+            crate::workload::prepare(self, &ctx, &resolver, &cancel).await
+        };
         let (ctx, prepared, workload) = match materialized {
             Ok(m) => {
                 let ctx = m.unwrap_or(ctx);
@@ -2200,7 +2238,7 @@ mod tests {
         assert!(e.message.contains("other query parameters"), "{}", e.message);
         assert!(!e.message.contains("k2"), "the message never holds the value: {}", e.message);
         assert!(slot.lock().is_none(), "a refused send is not recorded");
-        assert!(signed.lock().is_empty());
+        assert!(signed.lock().secrets.is_empty());
 
         // The query it was prepared with is signed again as before.
         let prepared = [("key".to_string(), "k2".to_string())];

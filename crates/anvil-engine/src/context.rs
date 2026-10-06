@@ -18,6 +18,12 @@ use zeroize::Zeroizing;
 
 pub trait SecretResolver: Send + Sync {
     fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String>;
+
+    /// A vault variable retained by the context builder until endpoint validation.
+    /// Indices identify the original layers and entries; later run layers still win.
+    fn variable_secret(&self, _layer: usize, _variable: usize) -> Option<SecretRef> {
+        None
+    }
 }
 
 pub trait AttachmentResolver: Send + Sync {

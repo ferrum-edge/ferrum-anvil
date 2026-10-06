@@ -113,6 +113,7 @@ cargo run -p anvil-lab -- up core                 # keep a lab up for manual tes
 | Storage and recovery | [docs/storage-and-recovery.md](docs/storage-and-recovery.md) |
 | Architecture | [docs/architecture.md](docs/architecture.md) |
 | Security model | [docs/threat-model.md](docs/threat-model.md) |
+| Cookie, redirect and OAuth token policy | [docs/security/http-state-and-destination-policy.md](docs/security/http-state-and-destination-policy.md) |
 | Failure lab | [docs/lab/](docs/lab/) |
 | CI and releases | [docs/ci.md](docs/ci.md), [docs/release.md](docs/release.md) |
 | What's built and what's open | [docs/completion-report.md](docs/completion-report.md) |
