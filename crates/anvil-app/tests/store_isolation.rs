@@ -24,6 +24,9 @@ fn failed_transaction_does_not_roll_back_a_concurrent_workspace_save() {
     let mut renamed = app.workspace(&ws.meta.id).unwrap();
     renamed.name = "new name".into();
     let doomed = Id::new();
+    let mut doomed_workspace = ws.clone();
+    doomed_workspace.meta.id = doomed;
+    doomed_workspace.name = "doomed".into();
 
     // Caller A: a transaction that writes, then fails.
     let (began, began_rx) = mpsc::channel();
@@ -32,7 +35,7 @@ fn failed_transaction_does_not_roll_back_a_concurrent_workspace_save() {
     let a = thread::spawn(move || {
         let mut saved_inside = false;
         let r: Result<(), StoreError> = store.atomically(|tx| {
-            tx.put(kind::WORKSPACE, &doomed, None, None, 0.0, &serde_json::json!({"name": "doomed"}))?;
+            tx.put(kind::WORKSPACE, &doomed, None, None, 0.0, &doomed_workspace)?;
             began.send(()).unwrap();
             saved_inside = saved_rx.recv_timeout(Duration::from_millis(500)).is_ok();
             Err(StoreError::NotFound("injected failure".into()))

@@ -12,6 +12,8 @@ mod cmd_standards;
 mod cmd_update;
 mod commands;
 mod draft_authority;
+#[cfg(test)]
+mod payload_tests;
 mod presence;
 mod state;
 
@@ -132,7 +134,7 @@ pub fn run() {
                 window.state::<DesktopState>().presence.saw_user();
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(commands::with_execution_commands(tauri::generate_handler![
             cmd_diagnostic_import::diagnostic_import_preview,
             commands::app_status,
             commands::profiles_list,
@@ -177,10 +179,7 @@ pub fn run() {
             commands::settings_get,
             commands::settings_save,
             commands::storage_cleanup_last,
-            commands::effective_request,
-            commands::send_request,
             commands::cancel_execution,
-            commands::mcp_discover_tools,
             commands::history_list,
             commands::history_get,
             commands::history_clear,
@@ -232,9 +231,6 @@ pub fn run() {
             cmd_identity::oauth_token_status,
             cmd_identity::oauth_sign_out,
             cmd_identity::login_providers,
-            cmd_sessions::session_open,
-            cmd_sessions::session_send,
-            cmd_sessions::session_cancel,
             cmd_specs::spec_preview,
             cmd_specs::spec_import,
             cmd_specs::spec_sources,
@@ -260,7 +256,7 @@ pub fn run() {
             cmd_update::update_install,
             cmd_update::update_restart,
             cmd_update::update_open_release_page,
-        ])
+        ]))
         .run(tauri::generate_context!())
         .expect("error while running Ferrum Anvil");
 }

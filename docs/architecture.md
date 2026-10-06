@@ -70,6 +70,63 @@ CLI (`anvil`) = same anvil-app services without a webview.
   changed while it ran; writes that return no data use `blocking_unchecked`,
   so a committed write is not reported as `LOCKED`.
 
+- **Payload enqueue shares the lock boundary.** Sends, interactive sessions,
+  collection-run events, effective-request previews, MCP discovery and spec
+  import/reimport commits capture a `state::PayloadFence`: the admitted
+  unlocked `Arc<App>` and lock epoch. Each callback, reply or commit
+  validates its fence and enqueues under shared access to `payload_gate`, so
+  they run beside each other. Lock and profile publication bump the epoch
+  under exclusive access, and unlock also takes it. An enqueue therefore
+  either finishes before a lock or is refused after it, and an old fence
+  stays invalid after unlock, even for the same profile. Lock releases the
+  gate before dropping the key and clearing engine caches; a callback that
+  fires during that cleanup sees the closed gate and returns before touching
+  the app, and a separate transition mutex keeps unlock or publication from
+  overtaking cleanup. The send, session, effective-request and MCP discovery
+  commands reply through an explicit Tauri IPC responder under the gate, and
+  final views and detailed errors are delivered with `deliver_payload` after
+  work and history finalization; no async wait holds the gate. Other
+  commands that run through `commands::blocking` (history reads and spec
+  previews, for example) check the epoch when their work finishes, but their
+  reply is enqueued later by Tauri's generated responder, so a lock in that
+  short interval can still be followed by the reply to work that completed
+  while unlocked.
+- **Session controls own an admitted attempt.** `session_open`,
+  `session_send` and `session_cancel` take an `attemptId` (a UUID, not the
+  nil UUID) besides the `executionId`. An open registers a pending slot
+  holding its attempt and cancellation token under its admission, then fills
+  that slot with the engine handle. Send and cancel resolve the slot at IPC
+  admission only if both the execution id and the attempt match, and recheck
+  that exact slot at each synchronous effect. Because an execution id can be
+  reused once its slot retires, the attempt is what keeps a late command
+  from an old console from driving a newer session with the same execution
+  id. That holds when each open uses a fresh attempt: the native side
+  rejects the nil UUID but does not track earlier attempts, so freshness is
+  the caller's responsibility. The bundled Workbench generates a new random
+  UUID for every open. Missing or malformed identity fails before any engine
+  work, and a finalizer removes only its own slot.
+- **Session completion owns an attempt.** After engine and history
+  finalization, completion checks its exact slot and holds the session
+  registry through enqueue, so a replacement registered under the same
+  execution id suppresses both the full completion and the scalar `LOCKED`
+  fallback. A retired, unreplaced attempt still completes normally,
+  including the scalar packet after a lock or profile switch. Interactive
+  `execution-event` packets and every `session-ended` packet carry
+  `attempt_id` beside `execution_id`; Workbench matches both before showing
+  messages, retiring controls or showing a result. Manual-send events and the
+  domain and CLI event shapes are unchanged.
+- **Session cancellation cannot wait behind its own send.** Each slot has its
+  own cancellation token. Cancellation signals it under the gate before
+  waiting for the slot, which interrupts a send blocked on the bounded
+  engine command queue; lock signals every slot it retires the same way.
+  Each poll of that queue send rechecks the admission and slot under shared
+  access, and releases the gate before waiting.
+
+The boundary is native enqueue. A payload already queued to the webview
+before a lock or a replacement cannot be retracted; Workbench's attempt
+checks keep such a late packet from retiring or replacing a newer attempt,
+but do not erase a view it already showed for the old one.
+
 ### Store work
 
 Each profile has one SQLite connection, and a long transaction (an import, a

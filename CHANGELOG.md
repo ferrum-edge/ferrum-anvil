@@ -2,8 +2,38 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- Desktop IPC: `session_open`, `session_send` and `session_cancel` require an
+  `attemptId` (a fresh, non-nil UUID for each open) alongside `executionId`,
+  and SEND/CANCEL must pass the `attemptId` of the open they control.
+  Interactive-session `execution-event` and `session-ended` packets carry the
+  matching `attempt_id`. Calls without it are rejected before any work starts.
+  OPEN still returns the execution-id string; session command bodies and the
+  domain and CLI event shapes are unchanged. The bundled Workbench already
+  does this. See the
+  [upgrade guide](docs/upgrade-guide.md#interactive-session-attempts).
+- Desktop IPC: spec import and reimport apply only what was reviewed.
+  `spec_preview` requires `target` and returns an `approval`, which
+  `spec_import` now requires. `spec_reimport_plan` returns `{ plan, approval }`
+  instead of a bare plan, and `spec_reimport_apply` takes the overwrite/delete
+  choices as `decisions` (previously `approval`) plus that `approval`. The
+  bundled import dialog already does this; the CLI is unchanged. See the
+  [upgrade guide](docs/upgrade-guide.md#spec-import-review-approvals).
+
 ### Fixed
 
+- Storage: validate sealed object IDs, workspace owners and parents against
+  row metadata, and reject existing-owner changes in transactional saves.
+  Folder/request moves retain their relationship checks. Request revisions
+  carry no sealed workspace owner, so revision ownership still relies on the
+  current parent request and needs an explicit format/migration decision; this
+  is a partial GHSA-fmx8-p5wc-hm8p remediation. User-visible changes: full
+  backups exclude authentic orphan revisions (listed in the manifest); saving
+  a request with a changed workspace now errors; creating or saving a folder
+  refuses a foreign parent; spec reimport now deletes the removed requests'
+  revisions and releases their attachments; undecodable revisions are kept and
+  block attachment cleanup. See `docs/security/workspace-owner-binding.md`.
 - Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
   assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
   UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
@@ -232,6 +262,15 @@
 
 ### Security
 
+- Desktop: session, send and collection-run payloads (live messages, final
+  responses and detailed errors) from work started before a lock or profile
+  switch are no longer delivered after it, even once the profile is unlocked
+  again. Cancelling a session also interrupts a send waiting on its command
+  queue (GHSA-mg45-vx3j-wmq8).
+- Desktop: a spec import or reimport applies exactly the source bytes and
+  plan that were reviewed, for the same profile session and destination. A
+  source that changed after review, or a stale review, is refused before
+  anything is written (GHSA-3793-f3j3-mjpr).
 - Desktop: replacing the profile passphrase, converting a keychain profile to
   a passphrase, lifting a workspace's device-identity seal, opening an
   imported collection to its workspace and weakening the lock policy (a

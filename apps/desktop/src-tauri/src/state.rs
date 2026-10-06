@@ -67,6 +67,40 @@ impl<T> PendingReports<T> {
     }
 }
 
+/// Admission of renderer payload work. Identity alone survives lock/unlock;
+/// this epoch never does. Only `DesktopState` can create an admission.
+#[derive(Clone)]
+pub struct PayloadFence {
+    pub app: Arc<App>,
+    epoch: u64,
+}
+
+impl PayloadFence {
+    pub fn same_owner(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.app, &other.app)
+    }
+}
+
+/// Production callback/reply state access; tests use the same sinks with an
+/// owned state, without constructing a native window.
+pub(crate) trait PayloadState: Clone + Send + Sync + 'static {
+    fn with_state<T>(&self, f: impl FnOnce(&DesktopState) -> T) -> T;
+}
+
+impl PayloadState for tauri::AppHandle {
+    fn with_state<T>(&self, f: impl FnOnce(&DesktopState) -> T) -> T {
+        use tauri::Manager;
+        f(&self.state::<DesktopState>())
+    }
+}
+
+#[cfg(test)]
+impl PayloadState for Arc<DesktopState> {
+    fn with_state<T>(&self, f: impl FnOnce(&DesktopState) -> T) -> T {
+        f(self)
+    }
+}
+
 pub struct DesktopState {
     pub profiles: ProfileManager,
     pub app: RwLock<Option<Arc<App>>>,
@@ -76,6 +110,15 @@ pub struct DesktopState {
     /// unlock never outlives a lock that landed meanwhile, and a read's result
     /// is not returned once one has.
     lock_epoch: AtomicU64,
+    /// Shared delivery/commit access against exclusive epoch transitions.
+    /// False while key/cache cleanup runs: callbacks refuse before app access.
+    /// Never held across an await or engine cleanup.
+    payload_gate: RwLock<bool>,
+    /// Serializes full lock, unlock and publication operations, including
+    /// cleanup outside the delivery gate. Callbacks never acquire this mutex.
+    transition: Mutex<()>,
+    /// Distinguishes stateless spec approvals from earlier desktop processes.
+    pub(crate) review_session: Id,
     /// Running executions (for cancel and lock-time stop).
     pub running: Arc<Running>,
     /// Bundle imports and previews started with an attempt id (for
@@ -96,9 +139,9 @@ pub struct DesktopState {
     /// (stop-on-lock, or another profile opened), by the vault they belong to;
     /// saved when that profile is next unlocked. Reports are already redacted.
     pub pending_load_reports: PendingReports<LoadReport>,
-    /// Open interactive sessions by execution id, with the profile each was
-    /// opened under.
-    pub sessions: Mutex<HashMap<String, (Arc<App>, crate::cmd_sessions::SessionSlot)>>,
+    /// Pending/open interactive slots by execution id, with their admission.
+    /// Transitions retire them; finalizers remove only their exact slot.
+    pub sessions: Mutex<HashMap<String, (PayloadFence, crate::cmd_sessions::SessionSlot)>>,
     /// Files the user chose in native dialogs this session; file commands
     /// accept only these grants, never a path from the webview. Shared with
     /// the worker threads that read a chosen file.
@@ -117,6 +160,9 @@ impl DesktopState {
             profiles: ProfileManager::new(root),
             app: RwLock::new(None),
             lock_epoch: AtomicU64::new(0),
+            payload_gate: RwLock::new(false),
+            transition: Mutex::new(()),
+            review_session: Id::new(),
             running: Arc::new(Mutex::new(HashMap::new())),
             imports: Arc::new(Mutex::new(HashMap::new())),
             sign_ins: Arc::new(Mutex::new(HashMap::new())),
@@ -160,59 +206,53 @@ impl DesktopState {
 
     fn set_app_since_with(&self, app: App, seen: u64, published: impl FnOnce(&Arc<App>)) -> Result<(), String> {
         app.confine_token_files();
-        let swapped = {
-            let mut g = self.app.write();
-            // A lock bumps the epoch before it reads the app, so one that
-            // bumps after this exchange waits for the guard and locks `app`.
-            match self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => {
-                    // Revoke while publication is still excluded by `app`'s
-                    // write guard. No caller can obtain the new profile with
-                    // grants (or claims) from the one it replaces.
-                    self.file_grants.revoke_all();
-                    let app = Arc::new(app);
-                    let previous = g.replace(app.clone());
-                    published(&app);
-                    Ok(previous)
-                }
-                Err(_) => Err(app),
-            }
-        };
-        let previous = match swapped {
-            Ok(previous) => previous,
-            // Never published, so locked once the guard is released: a lock
-            // or a status read does not wait for it.
-            Err(rejected) => {
-                rejected.lock();
-                return Err("LOCKED".into());
-            }
-        };
-        // An execution registers before it asks for the app, so one that got
-        // the previous profile registered before the swap and is stopped
-        // below; one registered after the stop gets this profile.
+        let _transition = self.transition.lock();
+        let mut delivery = self.payload_gate.write();
+        if self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            drop(delivery);
+            app.lock();
+            return Err("LOCKED".into());
+        }
+        *delivery = false;
+        let mut current = self.app.write();
+        // Revoke before publishing, with chooser/app readers excluded.
+        self.file_grants.revoke_all();
+        let app = Arc::new(app);
+        let previous = current.replace(app.clone());
+        published(&app);
+        // A cache owner may call a delivery sink while App::lock waits for
+        // that cache. Release the gate first; its closed flag makes that
+        // callback refuse without waiting for the app write guard.
+        drop(delivery);
         if let Some(previous) = previous {
             previous.lock();
         }
         self.stop_work();
+        drop(current);
+        *self.payload_gate.write() = true;
         Ok(())
     }
 
-    /// Unlock `app`, the open profile opened again, with `key`, unless a lock
-    /// or another profile switch landed since the epoch `seen` was taken: then
-    /// it stays locked and the error is `LOCKED`.
+    /// Unlock only the still-published app at `seen`. Cleanup and unlock are
+    /// serialized, so no unlock can reopen the key while lock clears caches.
     pub fn unlock_since(&self, app: &App, key: anvil_storage::Key, seen: u64) -> Result<(), String> {
-        // `app` is already published, so the epoch is checked by the gate,
-        // under the write lock of the store's key and before the key is set:
-        // no other thread can use `app` unlocked until it has passed. A lock
-        // (and a profile switch) bumps the epoch before it locks the app,
-        // which takes that write lock, so either the gate sees the bump and
-        // the key is never set, or the key is set first and that lock
-        // clears it.
-        app.unlock_if(key, || self.epoch() == seen).map_err(crate::commands::e)
+        let _transition = self.transition.lock();
+        let mut delivery = self.payload_gate.write();
+        let current = self.app.read();
+        if self.epoch() != seen || !current.as_ref().is_some_and(|a| std::ptr::eq(a.as_ref(), app)) {
+            return Err("LOCKED".into());
+        }
+        let out = app.unlock_if(key, || self.epoch() == seen).map_err(crate::commands::e);
+        *delivery = !app.is_locked();
+        out
     }
 
     /// The unlocked app, or an error the UI renders as the lock screen.
     pub fn app(&self) -> Result<Arc<App>, String> {
+        let delivery = self.payload_gate.read();
+        if !*delivery {
+            return Err(if self.app.try_read().is_some_and(|g| g.is_none()) { "NO_PROFILE" } else { "LOCKED" }.into());
+        }
         let g = self.app.read();
         match g.as_ref() {
             Some(a) if !a.is_locked() => {
@@ -227,6 +267,55 @@ impl DesktopState {
     /// Whether `app` is still the open profile (unlocked or not).
     pub fn is_current(&self, app: &Arc<App>) -> bool {
         self.app.read().as_ref().is_some_and(|a| Arc::ptr_eq(a, app))
+    }
+
+    /// Capture the unlocked profile/epoch under shared delivery access.
+    /// No synchronous guard survives into async work.
+    pub fn admit_payload(&self) -> Result<PayloadFence, String> {
+        let delivery = self.payload_gate.read();
+        if !*delivery {
+            return Err("LOCKED".into());
+        }
+        let current = self.app.read();
+        let app = current.as_ref().filter(|a| !a.is_locked()).ok_or("LOCKED")?.clone();
+        self.touch();
+        Ok(PayloadFence { app, epoch: self.epoch() })
+    }
+
+    /// A preflight check only; sinks and synchronous control effects still
+    /// validate under the delivery gate at their actual enqueue/effect.
+    pub fn check_payload(&self, fence: &PayloadFence) -> Result<(), String> {
+        self.deliver_payload(fence, || ())
+    }
+
+    /// Validate and synchronously enqueue/commit with shared access. Other
+    /// replies, spec commits and callbacks can deliver concurrently; only
+    /// lock/unlock/publication take exclusive access. `deliver` must not
+    /// await, reenter the gate, acquire the transition mutex or clear caches.
+    pub fn deliver_payload<T>(&self, fence: &PayloadFence, deliver: impl FnOnce() -> T) -> Result<T, String> {
+        let delivery = self.payload_gate.read();
+        // Test these before app access: App::lock may hold the app write
+        // guard while waiting for an engine cache owned by this callback.
+        if !*delivery || self.epoch() != fence.epoch {
+            return Err("LOCKED".into());
+        }
+        let current = self.app.read();
+        if !current.as_ref().is_some_and(|a| Arc::ptr_eq(a, &fence.app)) || fence.app.is_locked() {
+            return Err("LOCKED".into());
+        }
+        Ok(deliver())
+    }
+
+    /// Tests only: wait until a transition has claimed the gate's writer bit.
+    /// parking_lot sets it before waiting for readers to leave, so a caller
+    /// still holding shared access knows that transition is blocked on it.
+    #[cfg(test)]
+    pub(crate) fn await_gate_writer(&self, bound: std::time::Duration) {
+        let deadline = Instant::now() + bound;
+        while !self.payload_gate.is_locked_exclusive() {
+            assert!(Instant::now() < deadline, "no transition reached the delivery gate");
+            std::thread::yield_now();
+        }
     }
 
     /// Hold a load report of `vault` that could not be saved because that
@@ -256,20 +345,25 @@ impl DesktopState {
     /// Lock: stop active runs (policy: stop runs on lock), drop keys,
     /// cached credentials/connections and file-dialog grants.
     pub fn lock(&self) {
-        // First, so an unlock or a read still running off the lock sees it.
+        self.lock_with(|| {});
+    }
+
+    fn lock_with(&self, after_fence: impl FnOnce()) {
+        let _transition = self.transition.lock();
+        let mut delivery = self.payload_gate.write();
+        // An enqueue completes before this boundary or fails afterwards,
+        // including after unlock. No new admission during key/cache cleanup.
         self.lock_epoch.fetch_add(1, Ordering::SeqCst);
-        {
-            // Exclude new chooser/app readers until both revocation and the
-            // key drop finish; none can issue a grant in between them.
-            let app = self.app.write();
-            self.file_grants.revoke_all();
-            if let Some(a) = app.as_ref() {
-                a.lock();
-            }
+        *delivery = false;
+        let app = self.app.write();
+        self.file_grants.revoke_all();
+        drop(delivery);
+        // Never clear engine caches with the delivery gate held. Callbacks
+        // see the closed flag and return before trying the app write guard.
+        after_fence();
+        if let Some(a) = app.as_ref() {
+            a.lock();
         }
-        // The app locks before the drain below. An execution registers before
-        // it asks for the app, so one registered after the drain is refused by
-        // `app()`, and one registered before it is canceled here.
         self.stop_work();
     }
 
@@ -287,12 +381,13 @@ impl DesktopState {
             lock.cancel();
         }
         // Interactive sessions are aborted; their watcher records the result.
-        let open: Vec<_> = self.sessions.lock().values().map(|(_, slot)| slot.clone()).collect();
+        let open: Vec<_> = self.sessions.lock().drain().map(|(_, (_, slot))| slot).collect();
         for slot in open {
+            // Interrupt the queue/slot wait synchronously. The engine abort
+            // then obtains the slot without waiting for a blocked send.
+            slot.cancel.cancel();
             tauri::async_runtime::spawn(async move {
-                if let Some(s) = slot.lock().await.as_ref() {
-                    s.cancel();
-                }
+                slot.abort().await;
             });
         }
     }
@@ -594,6 +689,138 @@ pub(crate) mod tests {
     fn reopen(dir: &std::path::Path) -> App {
         let (header, key) = ProfileManager::unlock(dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
         App::open(dir.to_path_buf(), header, key).unwrap()
+    }
+
+    #[test]
+    fn production_callback_refuses_during_cleanup_without_waiting_for_the_app_guard() {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (app, _) = create(&st, "cleanup");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let fence = st.admit_payload().unwrap();
+        let sink = crate::commands::execution_sink(st.clone(), fence.clone(), false, |_| panic!("cleanup payload"));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let locking_st = st.clone();
+        let locking = std::thread::spawn(move || {
+            locking_st.lock_with(|| {
+                // The real transition still owns app.write here. A cache
+                // owner calling its sink must refuse before app.read, and
+                // App::lock must not hold the delivery gate while waiting.
+                assert!(locking_st.app.try_read().is_none());
+                sink(anvil_domain::events::ExecutionEvent::Finished { execution_id: Id::new() });
+                assert!(locking_st.admit_payload().is_err());
+            });
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("callback must not deadlock cleanup");
+        locking.join().unwrap();
+        assert!(fence.app.is_locked());
+    }
+
+    #[test]
+    fn shared_payload_enqueue_excludes_the_actual_lock() {
+        use std::sync::mpsc;
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, _) = create(&st, "delivery");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let fence = st.admit_payload().unwrap();
+        let log = Mutex::new(Vec::new());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (locking_tx, locking_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let emit_st = &st;
+            let emit_fence = &fence;
+            let emit_log = &log;
+            let delivery = scope.spawn(move || {
+                emit_st
+                    .deliver_payload(emit_fence, || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                        emit_log.lock().push("payload");
+                    })
+                    .unwrap();
+            });
+            entered_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            assert_eq!(st.deliver_payload(&fence, || "live event").unwrap(), "live event");
+            let lock_st = &st;
+            let lock_log = &log;
+            let locking = scope.spawn(move || {
+                lock_st.lock();
+                lock_log.lock().push("locked");
+                locking_tx.send(()).unwrap();
+            });
+            // The actual lock is now inside lock() and blocked on the gate
+            // that this paused delivery still holds; it cannot have advanced.
+            st.await_gate_writer(std::time::Duration::from_secs(10));
+            assert_eq!(st.epoch(), fence.epoch);
+            assert!(locking_rx.try_recv().is_err());
+            assert!(log.lock().is_empty());
+            release_tx.send(()).unwrap();
+            delivery.join().unwrap();
+            locking.join().unwrap();
+        });
+        assert_eq!(*log.lock(), ["payload", "locked"]);
+        assert!(fence.app.is_locked());
+        assert!(st.deliver_payload(&fence, || panic!("late event")).is_err());
+        assert!(st.deliver_payload(&fence, || panic!("late reply")).is_err());
+    }
+
+    #[test]
+    fn paused_event_and_final_payloads_are_fenced_by_lock_unlock_and_profile_switch() {
+        use anvil_domain::events::ExecutionEvent;
+        use std::sync::mpsc;
+        for transition in ["lock", "lock-unlock", "profile", "unchanged"] {
+            let root = TempRoot::new();
+            let st = DesktopState::new(root.0.clone());
+            let (app, dir) = create(&st, "A");
+            let (other, _) = create(&st, "B");
+            st.set_app_since(app, st.epoch()).unwrap();
+            let fence = st.admit_payload().unwrap();
+            let old_app = fence.app.clone();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let worker_st = &st;
+                let worker_fence = &fence;
+                let worker = scope.spawn(move || {
+                    let event = ExecutionEvent::Started {
+                        execution_id: Id::new(),
+                        method: "GET".into(),
+                        url: "https://payload-canary.invalid".into(),
+                    };
+                    let view = crate::commands::tests::payload_view();
+                    ready_tx.send(()).unwrap();
+                    release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    let event = worker_st.deliver_payload(worker_fence, || event);
+                    let final_view = worker_st.deliver_payload(worker_fence, || view);
+                    (event, final_view)
+                });
+                ready_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                match transition {
+                    "lock" => st.lock(),
+                    "lock-unlock" => {
+                        st.lock();
+                        let (_, key) = ProfileManager::unlock(&dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
+                        st.unlock_since(&old_app, key, st.epoch()).unwrap();
+                        assert!(st.is_current(&old_app));
+                        assert!(!old_app.is_locked());
+                    }
+                    "profile" => st.set_app_since(other, st.epoch()).unwrap(),
+                    "unchanged" => {}
+                    _ => unreachable!(),
+                }
+                release_tx.send(()).unwrap();
+                let (event, final_view) = worker.join().unwrap();
+                assert_eq!(event.is_ok(), transition == "unchanged", "{transition}");
+                assert_eq!(final_view.is_ok(), transition == "unchanged", "{transition}");
+            });
+            if transition == "lock-unlock" {
+                let fresh = st.admit_payload().unwrap();
+                assert!(st.deliver_payload(&fresh, || "fresh").is_ok());
+            }
+        }
     }
 
     #[tokio::test]

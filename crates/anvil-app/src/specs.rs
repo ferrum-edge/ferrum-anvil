@@ -3,7 +3,7 @@
 //! previews, persists with provenance, and plans reimports. Nothing imported
 //! is ever sent or run as part of importing.
 
-use crate::workspace::{put_attachment_in, release_attachment_in, spec_hash};
+use crate::workspace::{delete_requests_in, put_attachment_in, release_attachment_in, spec_hash};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -15,10 +15,11 @@ use anvil_import::{
 };
 use anvil_storage::store::{StoreRead, kind};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Where an import lands.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpecTarget {
     /// A new workspace named after the source.
@@ -29,6 +30,7 @@ pub enum SpecTarget {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SpecPreview {
+    pub binding: SpecBinding,
     pub detected: Detected,
     pub title: Option<String>,
     pub report: ImportReport,
@@ -37,6 +39,91 @@ pub struct SpecPreview {
     pub environments: usize,
     /// Up to 200 `METHOD name` lines for a quick look.
     pub sample: Vec<String>,
+}
+
+/// Native-computed binding to exact source bytes and the canonical reviewed
+/// graph/plan. Supplied digests are compared with native computations, never
+/// used as evidence of what a mutable file contains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecBinding {
+    pub source_sha256: String,
+    pub plan_sha256: String,
+}
+
+impl SpecBinding {
+    /// Bind this review to a caller's native context (profile, lock epoch,
+    /// file grant, destination). The desktop adds its process instance too.
+    pub fn scoped_digest(&self, context: &impl Serialize) -> Result<String> {
+        review_digest(&("anvil-spec-review/v1", self, context))
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpecReimportReview {
+    pub binding: SpecBinding,
+    pub plan: ReimportPlan,
+}
+
+const REVIEW_CHANGED: &str = "the source or plan changed since review; preview it again";
+
+fn review_digest(value: &impl Serialize) -> Result<String> {
+    let mut value = serde_json::to_value(value)?;
+    value.sort_all_objects();
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&value)?)))
+}
+
+/// Normalize only generated metadata, never similarly named source fields
+/// inside request bodies. Stored metadata remains part of reimport approval.
+fn canonical_result(mut result: ImportResult) -> ImportResult {
+    let epoch = chrono::DateTime::UNIX_EPOCH;
+    let normalize = |meta: &mut Meta| {
+        meta.created_at = epoch;
+        meta.updated_at = epoch;
+    };
+    normalize(&mut result.workspace.meta);
+    for folder in &mut result.folders {
+        normalize(&mut folder.meta);
+    }
+    for request in &mut result.requests {
+        normalize(&mut request.meta);
+    }
+    for environment in &mut result.environments {
+        normalize(&mut environment.meta);
+    }
+    result.source.imported_at = epoch;
+    result
+}
+
+fn import_review(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult> {
+    // A new import ignores a caller's id namespace, as spec_import does.
+    let opts = ImportOptions { id_namespace: None, ..opts.clone() };
+    run(bytes, &opts)
+}
+
+fn import_binding(result: &ImportResult) -> Result<SpecBinding> {
+    Ok(SpecBinding { source_sha256: result.source.sha256.clone(), plan_sha256: review_digest(&canonical_result(result.clone()))? })
+}
+
+fn reviewed_import_result(bytes: &[u8], opts: &ImportOptions, binding: &SpecBinding) -> Result<ImportResult> {
+    if &import_binding(&import_review(bytes, opts)?)? != binding {
+        return Err(AppError::Invalid(REVIEW_CHANGED.into()));
+    }
+    // Independent persisted ids, as before; both parses use this same slice.
+    let opts = ImportOptions { id_namespace: Some(Id::new()), ..opts.clone() };
+    run(bytes, &opts)
+}
+
+impl Reimport {
+    fn binding(&self) -> Result<SpecBinding> {
+        let result = canonical_result(self.result.clone());
+        let fresh = generated_scope(&result, self.rec.root_folder_id.is_some());
+        let scope = ScopeDiff { current: &self.current, generated: self.generated.as_ref(), fresh: &fresh };
+        let plan = anvil_import::reimport_diff(&self.previous, &result, scope);
+        Ok(SpecBinding {
+            source_sha256: result.source.sha256.clone(),
+            plan_sha256: review_digest(&(&self.rec, &self.previous, &self.current, &self.generated, &result, &plan))?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,7 +138,7 @@ pub struct SpecImported {
 /// Stored provenance: the source description plus where it was imported.
 /// A reimport refreshes it: `source`, `original_sha256` and `file_name` then
 /// describe the version it applied.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpecSourceRecord {
     pub source: ImportedSource,
     pub workspace_id: Id,
@@ -93,6 +180,21 @@ struct Reimport {
     plan: ReimportPlan,
 }
 
+/// An owned, verified source and parsed graph, held only by the applying
+/// worker. Not a retained preview/token and never deserialized from IPC.
+pub struct PreparedSpecImport {
+    bytes: Vec<u8>,
+    file_name: String,
+    target: SpecTarget,
+    result: ImportResult,
+}
+
+pub struct PreparedSpecReimport {
+    bytes: Vec<u8>,
+    file_name: String,
+    reimport: Reimport,
+}
+
 /// What a reimport compares with, as [`stored`] reads it.
 #[derive(PartialEq)]
 struct Stored {
@@ -113,9 +215,11 @@ impl App {
 
     pub fn spec_preview(&self, bytes: &[u8], opts: &ImportOptions) -> Result<SpecPreview> {
         let detected = anvil_import::detect(bytes);
-        let r = run(bytes, opts)?;
+        let r = import_review(bytes, opts)?;
+        let binding = import_binding(&r)?;
         let sample = r.requests.iter().take(200).map(|q| format!("{} {}", q.spec.method, q.name)).collect();
         Ok(SpecPreview {
+            binding,
             detected,
             title: r.source.title.clone(),
             folders: r.folders.len(),
@@ -124,6 +228,30 @@ impl App {
             sample,
             report: r.report,
         })
+    }
+
+    /// Desktop review/apply path. Verify the review against this owned byte
+    /// buffer and options before any checkpoint or mutation; the import then
+    /// parses the SAME buffer in a fresh, independent namespace. Trusted
+    /// byte-owning callers (CLI/internal services) use spec_import.
+    ///
+    /// Prepare outside the desktop delivery gate; source I/O and parsing
+    /// cannot delay its lock boundary. The final worker owns this snapshot.
+    pub fn prepare_spec_import_reviewed(
+        &self,
+        bytes: Vec<u8>,
+        file_name: String,
+        opts: &ImportOptions,
+        target: SpecTarget,
+        binding: &SpecBinding,
+    ) -> Result<PreparedSpecImport> {
+        let result = reviewed_import_result(&bytes, opts, binding)?;
+        Ok(PreparedSpecImport { bytes, file_name, target, result })
+    }
+
+    pub fn apply_prepared_spec_import(&self, prepared: PreparedSpecImport) -> Result<SpecImported> {
+        let PreparedSpecImport { bytes, file_name, target, result } = prepared;
+        self.persist_import(&bytes, &file_name, target, result)
     }
 
     /// Persist an import as one operation. A restore checkpoint is taken
@@ -142,7 +270,11 @@ impl App {
     /// requests (with an import link for reimport diffs); nothing is sent.
     pub fn spec_import(&self, bytes: &[u8], file_name: &str, opts: &ImportOptions, target: SpecTarget) -> Result<SpecImported> {
         let opts = ImportOptions { id_namespace: Some(Id::new()), ..opts.clone() };
-        let mut r = run(bytes, &opts)?;
+        let r = run(bytes, &opts)?;
+        self.persist_import(bytes, file_name, target, r)
+    }
+
+    fn persist_import(&self, bytes: &[u8], file_name: &str, target: SpecTarget, mut r: ImportResult) -> Result<SpecImported> {
         let root = match &target {
             SpecTarget::NewWorkspace => None,
             SpecTarget::Workspace { workspace_id } => {
@@ -299,6 +431,36 @@ impl App {
         Ok(self.reimport(import_id, bytes)?.plan)
     }
 
+    /// A review bound to the exact bytes, current stored baseline and full
+    /// canonical plan, including every conflict's freshly generated content.
+    pub fn spec_reimport_review(&self, import_id: &Id, bytes: &[u8]) -> Result<SpecReimportReview> {
+        let r = self.reimport(import_id, bytes)?;
+        Ok(SpecReimportReview { binding: r.binding()?, plan: r.plan })
+    }
+
+    /// Check the supplied review; the prepared reimport is later persisted
+    /// as the very same parsed result and bytes. No source reread or second
+    /// plan is allowed between verification and mutation. The transaction
+    /// still checks the stored baseline.
+    pub fn prepare_spec_reimport_reviewed(
+        &self,
+        import_id: &Id,
+        bytes: Vec<u8>,
+        file_name: String,
+        binding: &SpecBinding,
+    ) -> Result<PreparedSpecReimport> {
+        let reimport = self.reimport(import_id, &bytes)?;
+        if &reimport.binding()? != binding {
+            return Err(AppError::Invalid(REVIEW_CHANGED.into()));
+        }
+        Ok(PreparedSpecReimport { bytes, file_name, reimport })
+    }
+
+    pub fn apply_prepared_spec_reimport(&self, prepared: PreparedSpecReimport, approval: &ReimportApproval) -> Result<usize> {
+        let PreparedSpecReimport { bytes, file_name, reimport } = prepared;
+        self.apply_reimport(reimport, &bytes, &file_name, approval)
+    }
+
     /// Apply a reimport of `bytes`, read from `file_name`. User edits
     /// (renames included) are overwritten and removed operations,
     /// variables and environments deleted only when listed in `approval`.
@@ -371,7 +533,7 @@ impl App {
             // transaction; a change made since would be overwritten.
             let unchanged = Stored { requests: previous.clone(), scope: current.clone() };
             let source = s.get::<SpecSourceRecord>(kind::SPEC_SOURCE, &rec.source.import_id)?;
-            if source.is_none()
+            if source.as_ref() != Some(&rec)
                 || valid_root(&s.as_read(), &rec)? != RootStatus::Valid
                 || stored(&s.as_read(), &rec, &ids)?.ok() != Some(unchanged)
             {
@@ -432,9 +594,8 @@ impl App {
                 }
                 s.put(kind::REQUEST, &q.meta.id, Some(&q.workspace_id), q.folder_id.as_ref(), q.sort_key, &q)?;
             }
-            for id in &deleted {
-                s.delete(kind::REQUEST, id)?;
-            }
+            let removed: Vec<RequestDefinition> = previous.iter().filter(|q| deleted.contains(&q.meta.id)).cloned().collect();
+            delete_requests_in(s, &removed)?;
             for e in &environments {
                 s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, e)?;
             }
