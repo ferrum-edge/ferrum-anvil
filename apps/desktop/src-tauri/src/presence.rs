@@ -326,8 +326,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::testing::Answer;
+    use super::*;
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
     use anvil_app::device_identity::DeviceIdentitySeal;
     use anvil_app::profiles::{ProfileManager, Unlock};

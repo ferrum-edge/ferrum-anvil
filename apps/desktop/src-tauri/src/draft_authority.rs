@@ -52,12 +52,8 @@ pub(crate) fn carries_vault_authority(ctx: &ExecutionContext) -> bool {
         return true;
     }
     let integration = settings.integration_profile_id.and_then(|id| ctx.integrations.iter().find(|i| i.id == id));
-    let parts = [
-        serde_json::to_value(&ctx.spec),
-        serde_json::to_value(&tls),
-        serde_json::to_value(proxy),
-        serde_json::to_value(integration),
-    ];
+    let parts =
+        [serde_json::to_value(&ctx.spec), serde_json::to_value(&tls), serde_json::to_value(proxy), serde_json::to_value(integration)];
     // A part that does not serialize is taken to carry one.
     parts.iter().any(|p| match p {
         Ok(v) => names_a_secret(v),
