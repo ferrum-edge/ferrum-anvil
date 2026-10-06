@@ -1,0 +1,40 @@
+name: Trusted AppImage extractor
+description: Build and verify the pinned unsquashfs extractor on a GitHub-hosted runner
+runs:
+  using: composite
+  steps:
+    - name: Build pinned unsquashfs
+      shell: bash
+      env:
+        SQUASHFS_TOOLS_VERSION: 4.7.5
+        SQUASHFS_TOOLS_RELEASE_DATE: 2026/03/01
+        SQUASHFS_TOOLS_SHA256: 547b7b7f4d2e44bf91b6fc554664850c69563701deab9fd9cd7e21f694c88ea6
+      run: |
+        if [ "${GITHUB_ACTIONS:-}" != "true" ] || [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
+          echo "::error::Extractor provisioning requires a GitHub-hosted runner"
+          exit 1
+        fi
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends build-essential ca-certificates curl \
+          liblz4-dev liblzma-dev liblzo2-dev libzstd-dev zlib1g-dev
+        extractor_source="$(mktemp -d "$RUNNER_TEMP/anvil-squashfs-tools.XXXXXX")"
+        curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
+          --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
+          --output "$extractor_source/source.tar.gz" \
+          "https://github.com/plougher/squashfs-tools/releases/download/$SQUASHFS_TOOLS_VERSION/squashfs-tools-$SQUASHFS_TOOLS_VERSION.tar.gz"
+        echo "$SQUASHFS_TOOLS_SHA256  $extractor_source/source.tar.gz" | sha256sum --check --strict -
+        tar -xzf "$extractor_source/source.tar.gz" -C "$extractor_source" --no-same-owner
+        extractor_build="$extractor_source/squashfs-tools-$SQUASHFS_TOOLS_VERSION/squashfs-tools"
+        make -C "$extractor_build" -j2 unsquashfs LZMA_XZ_SUPPORT=1
+        mkdir "$extractor_source/bin"
+        install -m 0755 "$extractor_build/unsquashfs" "$extractor_source/bin/unsquashfs"
+        version_status=0
+        banner="$(LC_ALL=C "$extractor_source/bin/unsquashfs" -version)" || version_status=$?
+        expected="unsquashfs version $SQUASHFS_TOOLS_VERSION ($SQUASHFS_TOOLS_RELEASE_DATE)"
+        # Upstream -version exits 1 without an input filesystem; other errors fail closed.
+        if [ "$version_status" -gt 1 ] || [ "${banner%%$'\n'*}" != "$expected" ]; then
+          echo "::error::Unexpected pinned unsquashfs version banner/status"
+          exit 1
+        fi
+        printf '%s\n' "$banner"
+        echo "$extractor_source/bin" >> "$GITHUB_PATH"

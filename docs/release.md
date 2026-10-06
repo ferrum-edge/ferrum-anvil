@@ -13,14 +13,16 @@ website are manual owner steps, taken only after the
    commit.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
    Or run the workflow manually **from the tag** (Run workflow → *Use workflow
-   from* → Tags → `anvil-v0.1.0`), optionally with the same tag as input. A
-   run from a tag is a full, signed release even with the input empty.
+   from* → Tags → `anvil-v0.1.0`). Set `dry_run` to `false` and optionally pass
+   the same tag as input for a full release. Manual dispatch defaults to
+   `dry_run: true`, including when started from a tag.
    Preflight refuses an input that is not the tag the run started from, a tag
    that does not exist, or a checkout whose commit is not the tag's; build and
    publish then check out that exact commit (never a branch or tag name, which
-   a same-named branch could shadow). A manual run from a branch without a tag
-   input is a **dry run**: everything is built and checked and the evidence is
-   uploaded to the run, but nothing is signed and no release is created.
+   a same-named branch could shadow). A dry run builds and checks everything,
+   then uploads evidence to the workflow run for inspection. It does not sign
+   artifacts, create a GitHub release, or publish release assets. Setting
+   `dry_run: false` requires running from a valid release tag.
 4. Review the draft (checklist below), then publish it by hand.
 
 ## What the workflow does
