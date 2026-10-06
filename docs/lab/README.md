@@ -5,9 +5,9 @@ The failure lab (`crates/anvil-lab`) runs failure-matrix scenarios through Anvil
 gateway response is mocked. Each scenario checks Anvil's conclusion against independent ground
 truth (fixture logs, the gateway's operator log, admin endpoints) that the engine never sees.
 
-The selected default is the source-audited **v0.9.11 candidate**
-(`lab/gateway/RELEASE.lock`, also `lab/gateway/releases/v0.9.11.lock`), pending
-hosted Anvil gates; no new lab counts are claimed. See
+The selected default is the source-audited **v0.9.11 release**
+(`lab/gateway/RELEASE.lock`, also `lab/gateway/releases/v0.9.11.lock`), with
+hosted Anvil qualification recorded; no new lab counts are claimed. See
 [the source delta audit](../audit/gateway-0.9.11-delta.md).
 Retained supported releases: **v0.9.10** (`lab/gateway/releases/v0.9.10.lock`), **v0.9.9**
 (`lab/gateway/releases/v0.9.9.lock`), **v0.9.8** (`lab/gateway/releases/v0.9.8.lock`), **v0.9.7**

@@ -168,6 +168,19 @@ pub fn release_at_least(min: &str) -> bool {
     release_order(&current_lock().release) >= release_order(min)
 }
 
+/// The release named by the default pin (`lab/gateway/RELEASE.lock`), the
+/// repository's pinned Edge release. A lab check whose public signal the pin
+/// itself qualifies ([`DEFAULT_LOCK`], recorded in
+/// `docs/audit/gateway-0.9.11-delta.md`) keys on this instead of a version
+/// literal, so moving the pin moves the check with it.
+pub fn pinned_release() -> &'static str {
+    static PINNED: OnceLock<String> = OnceLock::new();
+    PINNED.get_or_init(|| {
+        let text = std::fs::read_to_string(repo_root().join(DEFAULT_LOCK)).unwrap_or_default();
+        parse_lock(&text, DEFAULT_LOCK).expect("reading the default gateway lock").release
+    })
+}
+
 fn release_order(tag: &str) -> Vec<u64> {
     tag.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
@@ -468,6 +481,12 @@ mod tests {
         let file = format!("{RELEASES_DIR}/{}.lock", default.release);
         let copy = std::fs::read_to_string(repo_root().join(&file)).unwrap_or_else(|_| panic!("{file} missing"));
         assert_eq!(body(&text), body(&copy), "{DEFAULT_LOCK} and {file} disagree");
+    }
+
+    /// The pin-derived release reads the default lock, not the selected one.
+    #[test]
+    fn pinned_release_is_the_default_lock_release() {
+        assert_eq!(pinned_release(), lock_at(DEFAULT_LOCK).release);
     }
 
     /// Every supported release has a well-formed lock and an embedded

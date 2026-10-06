@@ -8,7 +8,7 @@ targeting immutable Edge v0.9.11 (`c764084b3b51c3f7ffde268c039688d35e49c553`).
 Publication is verified by [canonical PR #13](https://github.com/ferrum-edge/ferrum-contracts/pull/13)
 and the [tag release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11).
 The lab and new-profile default now select the separately source-audited
-v0.9.11 candidate, pending hosted Anvil qualification. Earlier catalogs and locks
+v0.9.11, with hosted Anvil qualification recorded. Earlier catalogs and locks
 remain supported; v0.9.9/v0.9.10 retain their historical mapping to
 `contracts-edge-0.9.9` (or its additive r2 revision).
 

@@ -6,7 +6,7 @@
     "source_sha": "c764084b3b51c3f7ffde268c039688d35e49c553"
   },
   "generated_on": "2026-10-04",
-  "method": "Source delta audit against immutable v0.9.10 and v0.9.11 trees; carried citations remapped through identical source text, changed paths inspected for observable semantics. Reviewed candidate pending hosted Anvil gates; no live 0.9.11 lab evidence and no completeness claim. See docs/audit/gateway-0.9.11-delta.md.",
+  "method": "Source delta audit against immutable v0.9.10 and v0.9.11 trees; carried citations remapped through identical source text, changed paths inspected for observable semantics. Source-audited candidate; hosted Anvil qualification recorded for the exact source; no completeness claim. See docs/audit/gateway-0.9.11-delta.md.",
   "public_tokens": [
     "connection_failure",
     "backend_timeout",
@@ -1428,7 +1428,7 @@
     ]
   },
   "matrix_seed_reconciliation": {
-    "source": "Historical seed coverage from the v0.9.5..v0.9.10 audits, carried with the v0.9.11 source delta recorded in docs/audit/gateway-0.9.11-delta.md; hosted scenario counts pending.",
+    "source": "Historical seed coverage from the v0.9.5..v0.9.10 audits, carried with the v0.9.11 source delta recorded in docs/audit/gateway-0.9.11-delta.md; hosted scenario counts recorded there.",
     "notes": {
       "dns_lookup_error/UP-001": "public body is path-dependent: reqwest preflight 'Backend DNS resolution failed' vs pools 'Backend unavailable'",
       "tls_error/UP-004,UP-006": "backend mTLS on the reqwest HTTP/1 pool surfaces as connection_pool_error (connection_failure) or connection_reset (backend_error), not tls_error",
@@ -3155,7 +3155,7 @@
       "fixture_ids": [
         "UP-018"
       ],
-      "notes": "Same condition on direct-H2/H3/gRPC pools surfaces as 502 'Backend unavailable' + connection_failure (upstream.connection_limit.pooled). WebSocket upgrade path uses the same 503 body (src/proxy/mod.rs:15546). No Content-Type header on the HTTP/1.1 / HTTP/2 backend-response path: the gateway builds this body with an empty header map (lab-observed over HTTP/1.1 on 0.9.5 and 0.9.7: UP-018; the v0.9.5 audit had recorded application/json). The HTTP/3 writer was not lab-checked. v0.9.11: eligible direct-H1 dispatch now uses the pooled typed backend_connection_limit classifier; reqwest remains for ineligible bodies and retry attempts. v0.9.11: this distinct refusal remains on retained reqwest/retry lanes; eligible first-attempt HTTP/1.1 uses the direct Hyper pool and the coarse 502 connection_failure outcome upstream.connection_limit.pooled. UP-018 asserts this exact reqwest signal on 0.9.5/7/8/9/10 and the exact coarse direct-H1 signal on 0.9.11; fresh all-profile hosted qualification remains pending."
+      "notes": "Same condition on direct-H2/H3/gRPC pools surfaces as 502 'Backend unavailable' + connection_failure (upstream.connection_limit.pooled). WebSocket upgrade path uses the same 503 body (src/proxy/mod.rs:15546). No Content-Type header on the HTTP/1.1 / HTTP/2 backend-response path: the gateway builds this body with an empty header map (lab-observed over HTTP/1.1 on 0.9.5 and 0.9.7: UP-018; the v0.9.5 audit had recorded application/json). The HTTP/3 writer was not lab-checked. v0.9.11: eligible direct-H1 dispatch now uses the pooled typed backend_connection_limit classifier; reqwest remains for ineligible bodies and retry attempts. v0.9.11: this distinct refusal remains on retained reqwest/retry lanes; eligible first-attempt HTTP/1.1 uses the direct Hyper pool and the coarse 502 connection_failure outcome upstream.connection_limit.pooled. UP-018 asserts this exact reqwest signal on 0.9.5/7/8/9/10 and the exact coarse direct-H1 signal on 0.9.11; all-profile hosted qualification is recorded in docs/audit/gateway-0.9.11-delta.md."
     },
     {
       "id": "upstream.h1_pending_limit.reqwest",
@@ -29748,10 +29748,10 @@
     }
   ],
   "qualification": {
-    "state": "reviewed_candidate_pending_hosted_anvil_gates",
-    "live_0_9_11_evidence": false,
+    "state": "reviewed_candidate_qualified",
+    "live_0_9_11_evidence": true,
     "baseline": "ferrum-edge-0.9.10",
-    "scope": "Carried observable inventory with source delta notes; not a comprehensive inventory of new admin endpoints or a live compatibility claim."
+    "scope": "Carried observable inventory with source delta notes; not a comprehensive inventory of new admin endpoints. Hosted Anvil qualification is recorded in docs/audit/gateway-0.9.11-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1827) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state."
 }

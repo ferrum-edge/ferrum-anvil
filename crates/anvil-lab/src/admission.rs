@@ -323,13 +323,15 @@ async fn hold_and_probe(
 /// UP-018 (HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
 /// mesh_external destination; the only connection is held by a slow
 /// request, so the next request needs a second socket and is refused.
-/// 0.9.11 uses direct H1 for this bodyless GET; earlier releases use reqwest.
+/// The pinned release uses direct H1 for this bodyless GET; earlier releases
+/// use reqwest.
 fn up018(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let m = &env.mesh;
         let log = &m.backend.log;
-        let direct_h1 = crate::gateway::current_lock().release == "v0.9.11";
+        let pinned = crate::gateway::pinned_release();
+        let direct_h1 = crate::gateway::current_lock().release == pinned;
         let (status, marker, body, token, class) = if direct_h1 {
             (502, "connection_failure", r#"{"error":"Backend unavailable"}"#, "ferrum.token.connection_failure", "backend_connection_limit")
         } else {

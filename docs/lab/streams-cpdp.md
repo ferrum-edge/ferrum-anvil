@@ -1,6 +1,6 @@
 # Failure lab: `streams` and `cpdp` profiles
 
-The v0.9.11 default is a reviewed source candidate pending hosted Anvil gates.
+The v0.9.11 default is a source-audited release with hosted Anvil qualification recorded.
 Results and observations below remain historical; see
 [the 0.9.11 source delta](../audit/gateway-0.9.11-delta.md).
 

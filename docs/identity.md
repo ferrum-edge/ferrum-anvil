@@ -390,3 +390,49 @@ a gateway's backend identity (#3). The protocol details are in
 - **Probe.** *Test the Workload API* in the editors and `anvil workload probe`
   show what the endpoint issues to Anvil (and, when refused, the uid it
   attested) without keeping a key or showing a token.
+
+## 9. Client certificates (mTLS): PEM files
+
+A TLS profile can present a client certificate for mTLS (identity #2). The
+desktop's TLS profile editor offers three sources: a **PEM certificate chain +
+PEM private key**, a **PKCS#12** bundle (`.p12` / `.pfx`), or a **SPIFFE
+Workload API X.509-SVID** (section 8). The private key is held only in the
+workspace vault (when a workspace is open) and never returned to the webview;
+the key is matched against the certificate before anything is sent, and a
+mismatch fails locally with `local.client_identity_key_mismatch`.
+
+The desktop's **certificate picker** ("Load certificate file…") is
+purpose-bound: it returns only complete, validated X.509 certificate blocks and
+refuses private-key blocks, keys relabelled as certificates, and **files that
+combine a certificate and a private key in one PEM**. The separate "Load
+private key file into the vault" picker is the only way to add a key, and it
+consumes the grant once into the vault. A combined PEM is therefore refused;
+split it into a certificate file and a key file first.
+
+### Splitting a combined PEM
+
+Given one `combined.pem` holding a certificate chain and a private key (in
+either order), extract the first certificate and the private key with OpenSSL:
+
+```sh
+openssl x509 -in combined.pem -out cert.pem    # first certificate
+openssl pkey -in combined.pem -out key.pem     # private key (any key type)
+```
+
+`openssl pkey` reads the first private-key block and prompts for its passphrase
+when the key is encrypted. To load a whole chain rather than only the first
+certificate, extract every certificate block:
+
+```sh
+openssl crl2pkcs7 -nocrl -certfile combined.pem | openssl pkcs7 -print_certs -out chain.pem
+```
+
+For a PKCS#12 source instead, export the two files with:
+
+```sh
+openssl pkcs12 -in bundle.p12 -clcerts -nokeys -out cert.pem
+openssl pkcs12 -in bundle.p12 -nocerts -nodes -out key.pem
+```
+
+Then load the certificate (`cert.pem` or `chain.pem`) with "Load certificate
+file…" and the key (`key.pem`) with "Load private key file into the vault".
