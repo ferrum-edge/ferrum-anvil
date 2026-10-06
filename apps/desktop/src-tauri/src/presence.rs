@@ -58,12 +58,19 @@ pub(crate) const RECOVERY_REAUTH_TTL: Duration = Duration::from_secs(10 * 60);
 const SHOWN_NAME_CHARS: usize = 64;
 
 /// Characters that change how the text around them is shown without
-/// showing themselves: bidirectional marks, embeddings, overrides and
-/// isolates, zero-width characters, fillers, variation selectors and tags.
-const INVISIBLE: [(char, char); 14] = [
+/// showing themselves: every format character (general category Cf), such
+/// as bidirectional marks, embeddings, overrides and isolates, zero-width
+/// characters, prepended number signs and interlinear annotations, and
+/// also fillers, variation selectors and tags.
+const INVISIBLE: [(char, char); 25] = [
     ('\u{00AD}', '\u{00AD}'),
     ('\u{034F}', '\u{034F}'),
+    ('\u{0600}', '\u{0605}'),
     ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
     ('\u{115F}', '\u{1160}'),
     ('\u{17B4}', '\u{17B5}'),
     ('\u{180B}', '\u{180F}'),
@@ -74,18 +81,62 @@ const INVISIBLE: [(char, char); 14] = [
     ('\u{FE00}', '\u{FE0F}'),
     ('\u{FEFF}', '\u{FEFF}'),
     ('\u{FFA0}', '\u{FFA0}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
     ('\u{E0000}', '\u{E0FFF}'),
 ];
 
+/// Combining marks (Mn and Me) that stack on any letter: the combining
+/// diacritical blocks, enclosing marks and the Hebrew and Arabic points.
+/// A run of them can draw over the dialog's lines above and below.
+const COMBINING: [(char, char); 20] = [
+    ('\u{0300}', '\u{036F}'),
+    ('\u{0483}', '\u{0489}'),
+    ('\u{0591}', '\u{05BD}'),
+    ('\u{05BF}', '\u{05BF}'),
+    ('\u{05C1}', '\u{05C2}'),
+    ('\u{05C4}', '\u{05C5}'),
+    ('\u{05C7}', '\u{05C7}'),
+    ('\u{0610}', '\u{061A}'),
+    ('\u{064B}', '\u{065F}'),
+    ('\u{0670}', '\u{0670}'),
+    ('\u{06D6}', '\u{06DC}'),
+    ('\u{06DF}', '\u{06E4}'),
+    ('\u{06E7}', '\u{06E8}'),
+    ('\u{06EA}', '\u{06ED}'),
+    ('\u{1AB0}', '\u{1AFF}'),
+    ('\u{1DC0}', '\u{1DFF}'),
+    ('\u{20D0}', '\u{20FF}'),
+    ('\u{A670}', '\u{A672}'),
+    ('\u{A674}', '\u{A67D}'),
+    ('\u{FE20}', '\u{FE2F}'),
+];
+
+/// The most [`COMBINING`] marks a native dialog shows in a row.
+const STACKED_MARKS: usize = 2;
+
+fn within(table: &[(char, char)], c: char) -> bool {
+    table.iter().any(|(lo, hi)| (*lo..=*hi).contains(&c))
+}
+
 /// `name`, which the webview chose, as a native dialog shows it: without
-/// control or invisible formatting characters, with whitespace (line breaks
-/// too) collapsed to single spaces, and cut to [`SHOWN_NAME_CHARS`]
-/// characters. It cannot add lines to the dialog, reorder the backend's
-/// text around it or push that text out of view.
+/// control or format characters, with at most [`STACKED_MARKS`] combining
+/// marks in a row, with whitespace (line breaks too) collapsed to single
+/// spaces, and cut to [`SHOWN_NAME_CHARS`] characters. It cannot add lines to the dialog, reorder the backend's
+/// text around it, draw over it or push it out of view.
 pub(crate) fn shown(name: &str) -> String {
+    let mut marks = 0;
     let visible: String = name
         .chars()
-        .filter(|c| !INVISIBLE.iter().any(|(lo, hi)| (*lo..=*hi).contains(c)))
+        .filter(|c| !within(&INVISIBLE, *c))
+        .filter(|c| {
+            marks = if within(&COMBINING, *c) { marks + 1 } else { 0 };
+            marks <= STACKED_MARKS
+        })
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let mut out = visible.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -733,6 +784,17 @@ mod tests {
         assert_eq!(long.chars().count(), SHOWN_NAME_CHARS);
         assert!(long.ends_with('…'));
         assert_eq!(shown("Payments"), "Payments");
+    }
+
+    #[test]
+    fn a_name_is_shown_without_format_characters_or_stacked_marks() {
+        assert_eq!(shown("a\u{FFF9}b\u{FFFA}c\u{FFFB}"), "abc");
+        assert_eq!(shown("\u{0600}\u{0605}1\u{06DD}2\u{070F}3\u{110BD}4\u{1D173}\u{13430}"), "1234");
+        assert_eq!(shown("Z\u{0336}\u{0301}\u{20DD}\u{1DC0}\u{0489}\u{0315}a"), "Z\u{0336}\u{0301}a");
+        // A run split by an invisible character is still one run.
+        assert_eq!(shown("e\u{0301}\u{200B}\u{0302}\u{0303}"), "e\u{0301}\u{0302}");
+        // Two marks on each letter, as in decomposed Vietnamese, stay.
+        assert_eq!(shown("e\u{0323}\u{0302}e\u{0323}\u{0302}"), "e\u{0323}\u{0302}e\u{0323}\u{0302}");
     }
 
     #[tokio::test]

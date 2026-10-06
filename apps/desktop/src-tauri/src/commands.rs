@@ -18,7 +18,7 @@ use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SecretRef;
-use anvil_domain::settings::{AppSettings, SettingsOverrides};
+use anvil_domain::settings::AppSettings;
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::{Environment, Folder, RequestDefinition, Workspace};
 use anvil_portability::ExportMode;
@@ -521,7 +521,18 @@ pub struct SendInput {
     pub spec: Option<RequestSpec>,
     pub environment_id: Option<String>,
     pub send_anyway: bool,
-    pub run_override: Option<SettingsOverrides>,
+}
+
+impl SendInput {
+    /// The options a desktop send runs with. The webview never supplies a
+    /// per-send settings layer (`SendOptions::run_override`): that layer would
+    /// sit in both the draft and the saved baseline `crate::draft_authority`
+    /// compares, so it could change the connection settings unconfirmed. A
+    /// `run_override` field in the payload is ignored.
+    pub(crate) fn options(&self, record_history: bool) -> R<SendOptions> {
+        let environment = self.environment_id.as_deref().map(id).transpose()?;
+        Ok(SendOptions { environment, send_anyway: self.send_anyway, record_history, ..Default::default() })
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -835,8 +846,7 @@ async fn effective_request(fence: PayloadFence, input: SendInput) -> R<anvil_eng
     let app = fence.app;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
-    let env = input.environment_id.as_deref().map(id).transpose()?;
-    let opts = SendOptions { environment: env, run_override: input.run_override, send_anyway: input.send_anyway, ..Default::default() };
+    let opts = input.options(false)?;
     let builder = app.clone();
     let ctx = anvil_app::off_runtime(move || builder.build_context(rid, &ws, input.spec, &opts)).await.map_err(e)?;
     let preview = app.engine.preview(&ctx).map_err(|f| format!("{:?}: {}", f.kind, f.message))?;
@@ -857,19 +867,12 @@ async fn send_request(handle: AppHandle, fence: PayloadFence, window: Window, in
     let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
-    let env = input.environment_id.as_deref().map(id).transpose()?;
+    let opts = input.options(true)?;
     let h2 = handle.clone();
     let sink = execution_sink(handle.clone(), fence.clone(), true, move |ev| {
         let _ = h2.emit("execution-event", ev);
     });
     let events = EventCtx { execution_id: exec_id, sink: Some(sink) };
-    let opts = SendOptions {
-        environment: env,
-        run_override: input.run_override,
-        send_anyway: input.send_anyway,
-        record_history: true,
-        ..Default::default()
-    };
     let res = match input.spec {
         None => app.send(rid, &ws, None, opts, events, pending.token().clone()).await.map_err(e),
         Some(draft) => {
@@ -1425,6 +1428,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_desktop_send_input_never_carries_a_run_override() {
+        // A per-send settings layer from the webview would sit in the draft
+        // and in its saved baseline alike, so the IPC drops it.
+        let input = serde_json::json!({
+            "workspace_id": Id::new(), "request_id": Id::new(), "spec": null,
+            "environment_id": null, "send_anyway": false,
+            "run_override": {
+                "dns_overrides": [{ "host": "api.example.com", "addresses": ["203.0.113.7"] }],
+                "tls_profile_id": Id::new()
+            }
+        });
+        let send = serde_json::json!({ "input": input, "executionId": Id::new() });
+        let open = serde_json::json!({ "input": input, "executionId": Id::new(), "attemptId": Id::new() });
+        let preview = serde_json::json!({ "input": input });
+        let inputs = [
+            serde_json::from_value::<SendArgs>(send).unwrap().input,
+            serde_json::from_value::<OpenSessionArgs>(open).unwrap().input,
+            serde_json::from_value::<PreviewArgs>(preview).unwrap().input,
+        ];
+        for input in inputs {
+            for record_history in [false, true] {
+                let opts = input.options(record_history).unwrap();
+                assert!(opts.run_override.is_none(), "a webview run override reached the send");
+                assert_eq!(opts.record_history, record_history);
+            }
+        }
+    }
+
+    #[test]
     fn missing_and_empty_session_attempts_have_no_production_gate_effects() {
         let root = TempRoot::new();
         let st = Arc::new(DesktopState::new(root.0.clone()));
@@ -1434,7 +1466,7 @@ pub(crate) mod tests {
         let input = serde_json::json!({
             "workspace_id": Id::new(), "request_id": null,
             "spec": RequestSpec::http("GET", "tcp://127.0.0.1:1"),
-            "environment_id": null, "send_anyway": false, "run_override": null
+            "environment_id": null, "send_anyway": false
         });
         let command = SessionCommand::SendText { text: "must not reach engine".into() };
         for locked in [false, true] {
@@ -1485,7 +1517,7 @@ pub(crate) mod tests {
         let payload = serde_json::json!({
             "input": {
                 "workspace_id": Id::new(), "request_id": null, "spec": null,
-                "environment_id": null, "send_anyway": false, "run_override": null
+                "environment_id": null, "send_anyway": false
             },
             "executionId": execution_id, "attemptId": attempt_id
         });
@@ -1528,7 +1560,7 @@ pub(crate) mod tests {
         let input = serde_json::json!({
             "workspace_id": Id::new(), "request_id": null,
             "spec": RequestSpec::http("GET", "tcp://127.0.0.1:1"),
-            "environment_id": null, "send_anyway": false, "run_override": null
+            "environment_id": null, "send_anyway": false
         });
         let command = SessionCommand::SendText { text: "matching attempt".into() };
         let open = serde_json::json!({ "input": input, "executionId": execution_id, "attemptId": attempt_id });

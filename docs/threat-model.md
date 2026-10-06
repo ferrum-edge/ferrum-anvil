@@ -544,8 +544,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   the desktop crate). A full-backup restore never weakens the lock policy
   itself: it keeps the stored one and the desktop offers the backup's in
   the same dialog. Names the webview chose appear in these dialogs on one
-  line, without control or invisible formatting characters, and cut to 64
-  characters, so they cannot add lines or reorder the backend's text. No IPC
+  line, without control or format characters (Unicode Cf, such as bidi
+  controls and interlinear annotations), with at most two combining marks
+  in a row, and cut to 64 characters, so they cannot add lines, reorder the
+  backend's text or draw over it. No IPC
   argument stands in for the answer, each answer authorizes one change under
   the lock epoch it was asked in, and a lock-policy change is saved only
   over the policy it was asked against. The passphrase change right after
@@ -567,7 +569,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   resolution draws it again, and never matches. Otherwise the user confirms
   natively, for that one send, session or sign-in of that context: the
   dialog names the destination first, then the workspace and what differs
-  from the saved request.
+  from the saved request. The desktop's send, preview and session commands
+  take no per-send settings override (the CLI's `run_override` has no IPC
+  counterpart), so a draft and its saved request get their connection
+  settings from stored state alone.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that
@@ -656,9 +661,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session. An unlocked
   webview can also reopen a keychain profile after a lock without a
   credential.
-- A saved request's destination and auth are written by the webview, and a
-  draft is compared with its saved request: a compromised, unlocked webview
-  that saves a request first is not asked about where it then sends it. A
+- A saved request's destination and auth, and the environments, folders,
+  workspace settings and TLS and proxy profiles it uses, are written by the
+  webview, and a draft is compared with that stored state: a compromised,
+  unlocked webview that saves a request (or what it uses) first and then
+  sends it, as a draft or as saved, is not asked about where it goes. A
   draft that carries no vault-backed authority can reach any destination,
   including loopback and private services, as Anvil is meant to; outbound
   destination policy is separate. The native confirmation shows the

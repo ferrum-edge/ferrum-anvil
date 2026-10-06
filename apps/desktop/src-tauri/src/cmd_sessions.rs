@@ -6,7 +6,6 @@ use crate::commands::{ExecutionView, R, SendInput, body_view, e, execution_sink,
 use crate::presence::NativePresence;
 use crate::state::{DesktopState, PayloadFence, PayloadState, PendingEntry};
 use anvil_app::AppError;
-use anvil_app::exec::SendOptions;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_engine::sessions::SessionHandle;
 use anvil_transport::recorder::EventCtx;
@@ -189,14 +188,7 @@ pub(crate) async fn session_open(
     let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
-    let env = input.environment_id.as_deref().map(id).transpose()?;
-    let opts = SendOptions {
-        environment: env,
-        run_override: input.run_override,
-        send_anyway: input.send_anyway,
-        record_history: true,
-        ..Default::default()
-    };
+    let opts = input.options(true)?;
     let draft = input.spec.is_some();
     // Built on a blocking thread; a cancel meanwhile ends the open at once.
     let ctx = match app.build_context_off_runtime(rid, ws, input.spec, opts.clone(), pending.token()).await {

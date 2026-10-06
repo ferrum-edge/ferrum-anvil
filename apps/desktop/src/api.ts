@@ -333,7 +333,6 @@ export interface SendInput {
   spec?: RequestSpec | null;
   environment_id?: string | null;
   send_anyway: boolean;
-  run_override?: SettingsOverrides | null;
 }
 
 // ------------------------------------------------------------------ load

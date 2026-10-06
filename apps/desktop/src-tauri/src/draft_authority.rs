@@ -194,6 +194,7 @@ impl Binding {
 /// A name the webview chose goes through [`shown`]; `None` is "none".
 struct Facts {
     destination: String,
+    masque: String,
     dns: Option<String>,
     proxy: Option<String>,
     tls: Option<String>,
@@ -208,6 +209,7 @@ impl Facts {
         let off = |verify: bool| if verify { "" } else { ", certificate verification off" };
         Facts {
             destination: destination(ctx),
+            masque: masque_proxy(ctx),
             dns: dns_overrides(&settings),
             proxy: proxy.map(|p| format!("“{}” ({} proxy {})", shown(&p.name), proxy_kind(p.kind), shown(&p.address))),
             tls: tls.map(|p| format!("“{}”{}", shown(&p.name), off(p.verify))),
@@ -223,7 +225,22 @@ fn destination(ctx: &ExecutionContext) -> String {
     let Some(target) = url_target(ctx, &r) else {
         return format!("{UNKNOWN} (it changes from one send to the next, or does not resolve)");
     };
-    let origin = origin_of(&target);
+    unless_secret(&r, origin_of(&target))
+}
+
+/// The MASQUE proxy origin of `ctx` as a dialog names it; never one a
+/// secret value reaches.
+fn masque_proxy(ctx: &ExecutionContext) -> String {
+    let r = fixed_resolver(ctx);
+    match masque_route(ctx, &r) {
+        None => UNKNOWN.into(),
+        Some(None) => "none".into(),
+        Some(Some((origin, _))) => unless_secret(&r, origin),
+    }
+}
+
+/// `origin`, unless a secret value `r` substituted reaches it.
+fn unless_secret(r: &Resolver, origin: String) -> String {
     if r.used_secrets.lock().iter().any(|s| !s.is_empty() && origin.contains(&s.to_ascii_lowercase())) {
         return "an address built from a secret value".into();
     }
@@ -272,12 +289,9 @@ fn said(part: &Option<String>) -> &str {
     part.as_deref().unwrap_or("none")
 }
 
-fn masque_label(route: &Option<Option<(String, String)>>) -> &str {
-    match route {
-        None => UNKNOWN,
-        Some(None) => "none",
-        Some(Some((origin, _))) => origin.as_str(),
-    }
+/// The MASQUE proxy origin `b` tunnels through (see [`masque_route`]).
+fn masque_origin(b: &Binding) -> Option<Option<&str>> {
+    b.masque.as_ref().map(|route| route.as_ref().map(|(origin, _)| origin.as_str()))
 }
 
 /// The connection settings of `s` besides its DNS overrides, proxy and TLS
@@ -299,8 +313,8 @@ fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts)
         out.push("Host header: names another server than the saved request".into());
     }
     if draft.masque.is_none() || draft.masque != saved.masque {
-        let (now, was) = (masque_label(&draft.masque), masque_label(&saved.masque));
-        out.push(if now == was {
+        let (now, was) = (&facts.masque, &saved_facts.masque);
+        out.push(if draft.masque.is_some() && masque_origin(draft) == masque_origin(saved) {
             format!("MASQUE proxy: {now}, with another routing template")
         } else {
             format!("MASQUE proxy: {now} (saved: {was})")
@@ -342,7 +356,7 @@ fn alone(draft: &Binding, facts: &Facts) -> Vec<String> {
         out.push(format!("Host header: {UNKNOWN}"));
     }
     if draft.masque != Some(None) {
-        out.push(format!("MASQUE proxy: {}", masque_label(&draft.masque)));
+        out.push(format!("MASQUE proxy: {}", facts.masque));
     }
     let set = [("DNS overrides", &facts.dns), ("Proxy", &facts.proxy), ("TLS profile", &facts.tls)];
     out.extend(set.iter().filter_map(|(what, part)| part.as_ref().map(|p| format!("{what}: {p}"))));
@@ -367,7 +381,8 @@ fn prompt(workspace: &str, destination: &str, saved: bool, lines: &[String]) -> 
 /// Refuse the draft context `draft` unless what it carries from the vault
 /// goes where its saved request `request_id` would send it, or the user
 /// confirms it natively. `opts` are the options it was built with; the
-/// saved request is built with the same ones to compare.
+/// saved request is built with the same ones to compare. On the desktop they
+/// carry no per-send settings layer (see `SendInput::options`).
 pub(crate) async fn authorize(
     st: &DesktopState,
     presence: &impl Presence,
@@ -442,7 +457,7 @@ mod tests {
     use crate::presence::NOT_CONFIRMED;
     use crate::presence::testing::Answer;
     use crate::state::tests::{TempRoot, create};
-    use anvil_domain::request::KeyValue;
+    use anvil_domain::request::{KeyValue, MasqueSpec, UdpSpec};
     use anvil_domain::secret::{SecretRef, SensitiveValue};
     use anvil_domain::settings::DnsOverride;
     use anvil_domain::workspace::Variable;
@@ -664,6 +679,35 @@ mod tests {
         assert_eq!(asked.lines().filter(|l| l.starts_with("Destination:")).count(), 1, "{asked}");
         assert!(asked.contains("“Payments Destination: https://shop.example:443 xxx"), "{asked}");
         assert!(!asked.contains('\u{202E}') && !asked.contains(&"x".repeat(100)), "{asked}");
+    }
+
+    #[tokio::test]
+    async fn a_masque_proxy_built_from_a_secret_value_is_not_named() {
+        let f = fixture();
+        let mut w = f.app.workspace(&f.ws).unwrap();
+        let value = SensitiveValue::Secret { secret: f.secret.clone() };
+        w.variables.push(Variable { name: "relay".into(), value, secret: true, enabled: true, description: String::new() });
+        f.app.save_workspace(w).unwrap();
+        let mut draft = RequestSpec::http("GET", "udp://shop.example:4433");
+        draft.protocol = Protocol::Udp;
+        draft.auth = AuthConfig::None;
+        draft.udp = Some(UdpSpec {
+            dtls: false,
+            datagrams: vec![],
+            response_window_ms: 500,
+            max_datagrams: 10,
+            proxy_protocol: None,
+            masque: Some(MasqueSpec {
+                proxy_url: "https://{{relay}}:443".into(),
+                uri_template: "/.well-known/masque/udp/{target_host}/{target_port}/".into(),
+                datagrams: Default::default(),
+            }),
+        });
+        let no = Answer::no();
+        assert_eq!(f.authorized(&no, None, draft).await, Err(NOT_CONFIRMED.to_string()));
+        let asked = no.asked.lock()[0].clone();
+        assert!(asked.contains("\n• MASQUE proxy: an address built from a secret value"), "{asked}");
+        assert!(!asked.contains("vault-canary-token"), "{asked}");
     }
 
     #[tokio::test]

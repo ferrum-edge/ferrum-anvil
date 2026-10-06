@@ -347,8 +347,8 @@
   lock policy when the backup's is weaker, and the desktop then offers the
   backup's in the same kind of dialog. Saving a folder no longer moves it.
   Names from the webview (profile, workspace, folder, request) appear in
-  these dialogs on one line, without control or invisible formatting
-  characters, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
+  these dialogs on one line, without control or format characters, with at
+  most two combining marks in a row, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
   webview argument stands in for the answer, each answer covers one change,
   and a lock while the dialog is open refuses it. Strengthening changes are
   not asked about, and the passphrase change right after a recovery-key
@@ -370,7 +370,12 @@
   destination first, then the workspace and what differs from the saved
   request (destination, Host, DNS overrides, proxy, TLS profile and
   verification, auth kind and placement). An OAuth sign-in runs exactly the
-  context that was checked. Secrets are still
+  context that was checked. The desktop's send, preview and session
+  commands no longer take a per-send settings override (`run_override`,
+  which the desktop UI never set; the CLI keeps its own), so connection
+  settings come only from stored state. A compromised webview that saves a
+  request, environment or profile first can still send it without a
+  dialog. Secrets are still
   resolved only in the backend and never returned to the webview. Drafts
   that carry no vault-backed authority are unchanged (GHSA-g7h5-cxqf-jggg).
 - Desktop development dependencies: an npm override moves WebdriverIO's
