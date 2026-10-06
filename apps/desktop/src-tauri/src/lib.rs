@@ -11,6 +11,8 @@ mod cmd_specs;
 mod cmd_standards;
 mod cmd_update;
 mod commands;
+mod draft_authority;
+mod presence;
 mod state;
 
 pub use cmd_load::LOAD_WORKER_FLAG;
@@ -114,8 +116,7 @@ pub fn run() {
                     if !unlocked {
                         continue;
                     }
-                    let idle = st.last_activity.lock().elapsed();
-                    let idle_hit = idle_minutes > 0 && idle > Duration::from_secs(idle_minutes as u64 * 60);
+                    let idle_hit = st.idle_lock_due(idle_minutes);
                     if idle_hit || (suspended && lock_on_sleep) {
                         st.lock();
                         let _ = handle.emit("locked", if idle_hit { "idle" } else { "suspend" });
@@ -123,6 +124,13 @@ pub fn run() {
                 }
             });
             Ok(())
+        })
+        // The OS reports focus to the backend directly: a native sign of the
+        // user for the idle lock, which the webview's reports are not.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                window.state::<DesktopState>().presence.saw_user();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             cmd_diagnostic_import::diagnostic_import_preview,

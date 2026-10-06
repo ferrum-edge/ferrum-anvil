@@ -1,7 +1,11 @@
 //! IPC commands. Every data command goes through `DesktopState::app()`, which
 //! refuses while locked; secrets never cross into the webview except where
 //! the user explicitly typed them (they are stored and only references return).
+//! A change that weakens how the profile is protected goes ahead only once
+//! the user confirmed it in a native dialog (`crate::presence`), and a draft
+//! uses the vault only where its saved request would (`crate::draft_authority`).
 
+use crate::presence::NativePresence;
 use crate::state::{DesktopState, ImportGate, PendingEntry, cancel_pending};
 use anvil_app::cleanup::StorageCleanupRecord;
 use anvil_app::exec::{SendOptions, refuse_linked_files};
@@ -23,7 +27,7 @@ use anvil_storage::{KdfParams, StoreError};
 use anvil_transport::recorder::EventCtx;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) type R<T> = Result<T, String>;
@@ -142,6 +146,7 @@ pub async fn profile_create(handle: AppHandle, name: String, passphrase: Option<
         let app = App::open(summary.dir.clone(), header, key).map_err(e)?;
         if st.set_app_since(app, seen).is_ok() {
             st.touch();
+            st.presence.saw_user();
         }
         Ok(Created { profile_id: summary.profile_id, recovery_key: recovery })
     })
@@ -163,17 +168,26 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
         let (header, key) = anvil_app::profiles::ProfileManager::unlock(&p.dir, how).map_err(e)?;
         // Not held across the unlock: a lock waits on no store work of this one.
         let open = st.app.read().clone();
-        if let Some(a) = open
+        // The lock epoch the profile is now open in: unlocking the open
+        // profile keeps the epoch, publishing another one moves it on by one.
+        let epoch = if let Some(a) = open
             && a.header.profile_id == header.profile_id
         {
             st.unlock_since(&a, key, seen)?;
-            st.touch();
-            st.flush_pending_reports();
-            return Ok(());
-        }
-        let app = App::open(p.dir, header, key).map_err(e)?;
-        st.set_app_since(app, seen)?;
+            seen
+        } else {
+            let app = App::open(p.dir, header, key).map_err(e)?;
+            st.set_app_since(app, seen)?;
+            seen + 1
+        };
         st.touch();
+        st.presence.saw_user();
+        // The recovery key was proved to the backend just now: the passphrase
+        // change the lock screen asks for next needs no further confirmation,
+        // unless a lock lands first.
+        if passphrase.is_none() && recovery_key.is_some() {
+            st.presence.recovery_unlocked(epoch);
+        }
         st.flush_pending_reports();
         Ok(())
     })
@@ -181,11 +195,14 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
 }
 
 /// Re-wrap the data key under a new passphrase (the app must be unlocked;
-/// passphrase profiles only). Its outcome is reported even after a lock that
-/// landed meanwhile: it says which passphrase opens the profile now.
+/// passphrase profiles only), once the user confirmed it in a native dialog
+/// or just unlocked with the recovery key (see `crate::presence`); otherwise
+/// [`crate::presence::NOT_CONFIRMED`]. Its outcome is reported even after a
+/// lock that landed during the key derivation: it says which passphrase
+/// opens the profile now.
 #[tauri::command]
-pub async fn profile_change_passphrase(handle: AppHandle, new_passphrase: String) -> R<()> {
-    blocking_unchecked(&handle, move |st| st.app()?.change_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)).await
+pub async fn profile_change_passphrase(st: State<'_, DesktopState>, window: Window, new_passphrase: String) -> R<()> {
+    crate::presence::change_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await
 }
 
 #[derive(Serialize)]
@@ -198,18 +215,16 @@ pub struct Converted {
 }
 
 /// Protect an OS-keychain profile with a passphrase instead (the app must be
-/// unlocked). Afterwards the keychain no longer opens it. The outcome is
-/// returned even after a lock that landed meanwhile, but the UI has then
-/// switched to the lock screen and drops it: the new recovery key is never
-/// shown and is lost, which exposes nothing, and the new passphrase still
-/// opens the profile.
+/// unlocked), once the user confirmed it in a native dialog (see
+/// `crate::presence`). Afterwards the keychain no longer opens it. The
+/// outcome is returned even after a lock that landed during the key
+/// derivation, but the UI has then switched to the lock screen and drops it:
+/// the new recovery key is never shown and is lost, which exposes nothing,
+/// and the new passphrase still opens the profile.
 #[tauri::command]
-pub async fn profile_convert_to_passphrase(handle: AppHandle, new_passphrase: String) -> R<Converted> {
-    blocking_unchecked(&handle, move |st| {
-        let c = st.app()?.convert_to_passphrase(&new_passphrase, KdfParams::interactive()).map_err(e)?;
-        Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
-    })
-    .await
+pub async fn profile_convert_to_passphrase(st: State<'_, DesktopState>, window: Window, new_passphrase: String) -> R<Converted> {
+    let c = crate::presence::convert_to_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await?;
+    Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
 }
 
 #[tauri::command]
@@ -218,6 +233,8 @@ pub fn app_lock(st: State<'_, DesktopState>, app: AppHandle) {
     let _ = app.emit("locked", ());
 }
 
+/// The webview reports user activity. It postpones the idle lock only within
+/// a bound of the last native sign of the user (see `crate::presence`).
 #[tauri::command]
 pub fn touch(st: State<'_, DesktopState>) {
     st.touch();
@@ -279,11 +296,11 @@ pub fn workspace_device_identity_sealed(st: State<'_, DesktopState>, workspace_i
 }
 
 /// The user's explicit choice on this device to let the workspace's requests
-/// use this device's workload identity (JWT-SVID or X.509-SVID) again.
-/// Returns whether it was sealed.
+/// use this device's workload identity (JWT-SVID or X.509-SVID) again, made
+/// in a native dialog (see `crate::presence`). Returns whether it was sealed.
 #[tauri::command]
-pub fn workspace_allow_device_identity(st: State<'_, DesktopState>, workspace_id: String) -> R<bool> {
-    st.app()?.allow_device_identity(&id(&workspace_id)?).map_err(e)
+pub async fn workspace_allow_device_identity(st: State<'_, DesktopState>, window: Window, workspace_id: String) -> R<bool> {
+    crate::presence::allow_device_identity(&st, &NativePresence(window), id(&workspace_id)?).await
 }
 
 #[tauri::command]
@@ -309,10 +326,11 @@ pub fn folder_save(st: State<'_, DesktopState>, folder: Folder) -> R<Folder> {
 
 /// The user's explicit choice to let an imported collection's requests also
 /// resolve the workspace's variables, active environment and auth, and this
-/// device's workload identity (see `App::build_context`).
+/// device's workload identity (see `App::build_context`), made in a native
+/// dialog (see `crate::presence`). Isolating it again is not asked about.
 #[tauri::command]
-pub fn folder_set_workspace_scope(st: State<'_, DesktopState>, folder_id: String, allow: bool) -> R<Folder> {
-    st.app()?.set_import_root_workspace_scope(&id(&folder_id)?, allow).map_err(e)
+pub async fn folder_set_workspace_scope(st: State<'_, DesktopState>, window: Window, folder_id: String, allow: bool) -> R<Folder> {
+    crate::presence::set_workspace_scope(&st, &NativePresence(window), id(&folder_id)?, allow).await
 }
 
 #[tauri::command]
@@ -455,10 +473,12 @@ pub fn settings_get(st: State<'_, DesktopState>) -> R<AppSettings> {
 }
 
 /// API standards change only through their own commands (`cmd_standards`),
-/// so a settings dialog opened earlier never undoes them.
+/// so a settings dialog opened earlier never undoes them. A weaker lock
+/// policy is saved only once the user confirmed it in a native dialog (see
+/// `crate::presence`).
 #[tauri::command]
-pub fn settings_save(st: State<'_, DesktopState>, settings: AppSettings) -> R<()> {
-    st.app()?.save_settings_keeping_standards(&settings).map_err(e)
+pub async fn settings_save(st: State<'_, DesktopState>, window: Window, settings: AppSettings) -> R<()> {
+    crate::presence::save_settings(&st, &NativePresence(window), settings).await
 }
 
 /// The last storage cleanup of the open profile (`None` before the first):
@@ -475,6 +495,9 @@ pub fn storage_cleanup_last(st: State<'_, DesktopState>) -> R<Option<StorageClea
 pub struct SendInput {
     pub workspace_id: String,
     pub request_id: Option<String>,
+    /// An unsaved draft of `request_id` (or of a request not saved yet). It
+    /// uses the workspace's vault only where `request_id` would, or once the
+    /// user confirmed it natively (see `crate::draft_authority`).
     pub spec: Option<RequestSpec>,
     pub environment_id: Option<String>,
     pub send_anyway: bool,
@@ -561,7 +584,13 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
 }
 
 #[tauri::command]
-pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<ExecutionView> {
+pub async fn send_request(
+    st: State<'_, DesktopState>,
+    handle: AppHandle,
+    window: Window,
+    input: SendInput,
+    execution_id: String,
+) -> R<ExecutionView> {
     let exec_id = id(&execution_id)?;
     // Registered before the app is read, so a lock from now on either refuses
     // `app()` or cancels this token. Retired when dropped, also if the send
@@ -596,9 +625,15 @@ pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input:
         record_history: true,
         ..Default::default()
     };
-    let res = app.send(rid, &ws, input.spec, opts, events, pending.token().clone()).await;
+    let res = match input.spec {
+        None => app.send(rid, &ws, None, opts, events, pending.token().clone()).await.map_err(e),
+        Some(draft) => {
+            let presence = NativePresence(window);
+            crate::draft_authority::send_draft(&st, &presence, &app, rid, ws, draft, opts, events, pending.token()).await
+        }
+    };
     drop(pending);
-    let out = res.map_err(e)?;
+    let out = res?;
     let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
     let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
     Ok(ExecutionView { record: out.record, body })

@@ -3,6 +3,7 @@
 //! ends its record is stored in history like any other execution.
 
 use crate::commands::{ExecutionView, R, SendInput, body_view, e, id};
+use crate::presence::NativePresence;
 use crate::state::{DesktopState, PendingEntry, cancel_pending};
 use anvil_app::AppError;
 use anvil_app::exec::SendOptions;
@@ -12,7 +13,7 @@ use anvil_transport::recorder::EventCtx;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 pub type SessionSlot = Arc<tokio::sync::Mutex<Option<SessionHandle>>>;
 
@@ -25,9 +26,17 @@ pub struct SessionEnded {
     pub error: Option<String>,
 }
 
-/// Open a session. Returns the execution id used by message events.
+/// Open a session. Returns the execution id used by message events. A draft
+/// in `input` uses the workspace's vault only where its saved request would,
+/// or once the user confirmed it natively (see `crate::draft_authority`).
 #[tauri::command]
-pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<String> {
+pub async fn session_open(
+    st: State<'_, DesktopState>,
+    handle: AppHandle,
+    window: Window,
+    input: SendInput,
+    execution_id: String,
+) -> R<String> {
     let exec_id = id(&execution_id)?;
     // Registered first, so `session_cancel` (and locking) can stop an open that
     // has not finished yet: the tab that started it may already be gone. Every
@@ -50,11 +59,18 @@ pub async fn session_open(st: State<'_, DesktopState>, handle: AppHandle, input:
         record_history: true,
         ..Default::default()
     };
+    let draft = input.spec.is_some();
     // Built on a blocking thread; a cancel meanwhile ends the open at once.
-    let ctx = match app.build_context_off_runtime(rid, ws, input.spec, opts, pending.token()).await {
+    let ctx = match app.build_context_off_runtime(rid, ws, input.spec, opts.clone(), pending.token()).await {
         Err(AppError::Canceled) => return Err(CANCELED_BEFORE_OPEN.into()),
         built => built.map_err(e)?,
     };
+    if draft {
+        crate::draft_authority::authorize(&st, &NativePresence(window), &app, rid, ws, &ctx, &opts).await?;
+        if pending.token().is_cancelled() {
+            return Err(CANCELED_BEFORE_OPEN.into());
+        }
+    }
     let h2 = handle.clone();
     let owner = app.clone();
     let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {

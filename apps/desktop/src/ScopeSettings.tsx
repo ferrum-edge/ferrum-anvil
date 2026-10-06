@@ -2,7 +2,6 @@
 // inherit these (request → folders → workspace → app defaults); the Effective
 // request tab shows which layer each value came from.
 import { useEffect, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { api, ApiError } from "./api";
 import type { AuthConfig, Folder, SettingsOverrides, Variable, Workspace } from "./generated/contracts";
 import { AuthEditor } from "./AuthEditor";
@@ -24,23 +23,21 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
     if (props.target.kind === "folder") api.getFolder(props.target.id).then(setFolder);
     else api.deviceIdentitySealed(props.target.workspace.id).then(setSealed, () => setSealed(false));
   }, []);
+  // The backend asks the user in its own native dialog before it lifts the
+  // seal; declining there leaves the workspace sealed.
   const allowDeviceIdentity = async (w: Workspace) => {
-    const ok = await ask(
-      `Let requests in “${w.name}” use this device's workload identity (JWT-SVID or X.509-SVID) and its gateway profiles' diagnostic reference lookups? Only do this if you trust what was imported or restored into it (your own backup, for example).`,
-      { title: "Allow this device's workload identity", kind: "warning", okLabel: "Allow" },
-    );
-    if (!ok) return;
     setErr(null);
     try {
       await api.allowDeviceIdentity(w.id);
       setSealed(false);
     } catch (e) {
-      setErr(String((e as Error).message));
+      if (!(e instanceof ApiError && e.notConfirmed)) setErr(String((e as Error).message));
     }
   };
   // Opening an import root to its workspace is a device-local choice made
-  // only here (or by `folder_set_workspace_scope`); saving the folder keeps
-  // the stored value whatever this dialog holds.
+  // only here (or by `folder_set_workspace_scope`), and confirmed in the
+  // backend's own native dialog; saving the folder keeps the stored value
+  // whatever this dialog holds.
   const [scopeBusy, setScopeBusy] = useState(false);
   const [scopeErr, setScopeErr] = useState<string | null>(null);
   const setWorkspaceScope = async (f: Folder, allow: boolean) => {
@@ -48,17 +45,11 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
     setScopeBusy(true);
     setScopeErr(null);
     try {
-      if (allow) {
-        const ok = await ask(
-          `Open “${f.name}” to this workspace on this device? Its requests will also use the workspace's variables, active environment and auth, variables of folders above it, values extracted and dataset rows from the rest of a run, and this device's workload identity (JWT-SVID or X.509-SVID) and TLS client identities. Only do this if you trust what was imported.`,
-          { title: "Open imported collection to the workspace", kind: "warning", okLabel: "Open to workspace" },
-        );
-        if (!ok) return;
-      }
       const saved = await api.setFolderWorkspaceScope(f.id, allow);
       // Keep unsaved edits in the other tabs; only the scope flag changed.
       setFolder((cur) => (cur ? { ...cur, use_workspace_scope: saved.use_workspace_scope ?? false } : cur));
     } catch (e) {
+      if (e instanceof ApiError && e.notConfirmed) return;
       setScopeErr(e instanceof ApiError && e.locked ? "The profile is locked. Unlock it and try again." : String((e as Error).message));
     } finally {
       setScopeBusy(false);

@@ -232,6 +232,28 @@
 
 ### Security
 
+- Desktop: replacing the profile passphrase, converting a keychain profile to
+  a passphrase, lifting a workspace's device-identity seal, opening an
+  imported collection to its workspace and weakening the lock policy (a
+  longer or no idle timeout, no lock on sleep, no clipboard clearing) now go
+  ahead only once the user confirms them in a native dialog that the backend
+  shows itself. Declining refuses the change with `NOT_CONFIRMED`; no
+  webview argument stands in for the answer, each answer covers one change,
+  and a lock while the dialog is open refuses it. Strengthening changes are
+  not asked about, and the passphrase change right after a recovery-key
+  unlock needs no extra confirmation. The webview's activity reports now
+  postpone the idle lock only within four hours (or the idle timeout, if
+  longer) of the last native sign of the user: an unlock, a native
+  confirmation or the window gaining focus (GHSA-hrwp-5q93-w52f).
+- Desktop: a request draft sent from the webview (send, interactive session
+  or OAuth sign-in) that carries vault-backed authority (auth in effect,
+  vault references, secret variables or a TLS client identity) uses it only
+  where its saved request would: the same destination origin, auth and
+  connection settings, worked out in the backend. Otherwise, and for a
+  draft without a saved request, the user must confirm the workspace and
+  destination in a native dialog for that one use. Secrets are still
+  resolved only in the backend and never returned to the webview. Drafts
+  that carry no vault-backed authority are unchanged (GHSA-g7h5-cxqf-jggg).
 - Desktop development dependencies: an npm override moves WebdriverIO's
   `@puppeteer/browsers` from 2.13.2 to 3.2.3, which drops `extract-zip`
   2.0.1 (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv; no patched release) and
