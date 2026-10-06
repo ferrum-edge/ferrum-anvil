@@ -711,6 +711,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_saved_request_must_keep_its_masque_route_to_use_vault_credentials() {
+        let f = fixture();
+        let mut saved = RequestSpec::http("GET", "udp://shop.example:4433");
+        saved.protocol = Protocol::Udp;
+        saved.auth = bearer(&f.secret);
+        saved.udp = Some(UdpSpec {
+            dtls: false,
+            datagrams: vec![],
+            response_window_ms: 500,
+            max_datagrams: 10,
+            proxy_protocol: None,
+            masque: Some(MasqueSpec {
+                proxy_url: "https://relay.example:443".into(),
+                uri_template: "/.well-known/masque/udp/{target_host}/{target_port}/".into(),
+                datagrams: Default::default(),
+            }),
+        });
+        let request = f.app.create_request(&f.ws, None, "saved", saved.clone()).unwrap();
+        let no = Answer::no();
+        assert_eq!(f.authorized(&no, Some(request.meta.id), saved.clone()).await, Ok(()));
+        assert_eq!(no.times(), 0);
+
+        saved.udp.as_mut().unwrap().masque.as_mut().unwrap().uri_template =
+            "/.well-known/masque/udp/{target_host}/{target_port}/changed/".into();
+        let no = Answer::no();
+        assert_eq!(f.authorized(&no, Some(request.meta.id), saved).await, Err(NOT_CONFIRMED.to_string()));
+        assert_eq!(no.times(), 1);
+        assert!(no.asked.lock()[0].contains("MASQUE proxy: https://relay.example:443, with another routing template"));
+    }
+
+    #[tokio::test]
     async fn a_draft_without_vault_authority_is_not_asked_even_for_a_local_service() {
         let f = fixture();
         let unasked = Answer::no();

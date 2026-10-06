@@ -45,6 +45,7 @@ parking_lot.workspace = true
 chrono.workspace = true
 zeroize.workspace = true
 base64.workspace = true
+unicode-general-category = "1.1.0"
 
 [features]
 # Test-only: embedded WebDriver for native E2E. Never enabled in release builds

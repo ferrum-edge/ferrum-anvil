@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Window;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// What a command returns when the user declined, or closed, the native
 /// confirmation it asked. A code, like `LOCKED` and `CANCELED`: the UI words it.
@@ -90,33 +91,13 @@ const INVISIBLE: [(char, char); 25] = [
     ('\u{E0000}', '\u{E0FFF}'),
 ];
 
-/// Combining marks (Mn and Me) that stack on any letter: the combining
-/// diacritical blocks, enclosing marks and the Hebrew and Arabic points.
+/// Combining marks (Mn and Me) that stack on any letter.
 /// A run of them can draw over the dialog's lines above and below.
-const COMBINING: [(char, char); 20] = [
-    ('\u{0300}', '\u{036F}'),
-    ('\u{0483}', '\u{0489}'),
-    ('\u{0591}', '\u{05BD}'),
-    ('\u{05BF}', '\u{05BF}'),
-    ('\u{05C1}', '\u{05C2}'),
-    ('\u{05C4}', '\u{05C5}'),
-    ('\u{05C7}', '\u{05C7}'),
-    ('\u{0610}', '\u{061A}'),
-    ('\u{064B}', '\u{065F}'),
-    ('\u{0670}', '\u{0670}'),
-    ('\u{06D6}', '\u{06DC}'),
-    ('\u{06DF}', '\u{06E4}'),
-    ('\u{06E7}', '\u{06E8}'),
-    ('\u{06EA}', '\u{06ED}'),
-    ('\u{1AB0}', '\u{1AFF}'),
-    ('\u{1DC0}', '\u{1DFF}'),
-    ('\u{20D0}', '\u{20FF}'),
-    ('\u{A670}', '\u{A672}'),
-    ('\u{A674}', '\u{A67D}'),
-    ('\u{FE20}', '\u{FE2F}'),
-];
+fn is_combining_mark(c: char) -> bool {
+    matches!(get_general_category(c), GeneralCategory::NonspacingMark | GeneralCategory::EnclosingMark)
+}
 
-/// The most [`COMBINING`] marks a native dialog shows in a row.
+/// The most Unicode Mn and Me marks a native dialog shows in a row.
 const STACKED_MARKS: usize = 2;
 
 fn within(table: &[(char, char)], c: char) -> bool {
@@ -134,7 +115,7 @@ pub(crate) fn shown(name: &str) -> String {
         .chars()
         .filter(|c| !within(&INVISIBLE, *c))
         .filter(|c| {
-            marks = if within(&COMBINING, *c) { marks + 1 } else { 0 };
+            marks = if is_combining_mark(*c) { marks + 1 } else { 0 };
             marks <= STACKED_MARKS
         })
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -357,13 +338,19 @@ pub(crate) async fn move_request(
     sort_key: f64,
 ) -> R<RequestDefinition> {
     let app = st.app()?;
-    let root = match app.move_request_keeping_isolation(&request, folder, sort_key, None).map_err(e)? {
+    let owner = app.clone();
+    let moved = anvil_app::off_runtime(move || owner.move_request_keeping_isolation(&request, folder, sort_key, None)).await.map_err(e)?;
+    let root = match moved {
         Move::Moved(r) => return Ok(r),
         Move::LeavesImport(root) => root,
     };
     let what = format!("the request “{}”", shown(&app.request(&request).map_err(e)?.name));
     let seen = confirm(st, presence, leaving_import(what, &root)).await?;
-    match fenced(st, seen)?.move_request_keeping_isolation(&request, folder, sort_key, Some(root.meta.id)).map_err(e)? {
+    let app = fenced(st, seen)?;
+    let moved = anvil_app::off_runtime(move || app.move_request_keeping_isolation(&request, folder, sort_key, Some(root.meta.id)))
+        .await
+        .map_err(e)?;
+    match moved {
         Move::Moved(r) => Ok(r),
         Move::LeavesImport(_) => Err(MOVED_MEANWHILE.into()),
     }
@@ -374,13 +361,19 @@ pub(crate) async fn move_request(
 /// imported collection not open to its workspace.
 pub(crate) async fn move_folder(st: &DesktopState, presence: &impl Presence, folder: Id, parent: Option<Id>, sort_key: f64) -> R<Folder> {
     let app = st.app()?;
-    let root = match app.move_folder_keeping_isolation(&folder, parent, sort_key, None).map_err(e)? {
+    let owner = app.clone();
+    let moved = anvil_app::off_runtime(move || owner.move_folder_keeping_isolation(&folder, parent, sort_key, None)).await.map_err(e)?;
+    let root = match moved {
         Move::Moved(f) => return Ok(f),
         Move::LeavesImport(root) => root,
     };
     let what = format!("the folder “{}” and everything in it", shown(&app.folder(&folder).map_err(e)?.name));
     let seen = confirm(st, presence, leaving_import(what, &root)).await?;
-    match fenced(st, seen)?.move_folder_keeping_isolation(&folder, parent, sort_key, Some(root.meta.id)).map_err(e)? {
+    let app = fenced(st, seen)?;
+    let moved = anvil_app::off_runtime(move || app.move_folder_keeping_isolation(&folder, parent, sort_key, Some(root.meta.id)))
+        .await
+        .map_err(e)?;
+    match moved {
         Move::Moved(f) => Ok(f),
         Move::LeavesImport(_) => Err(MOVED_MEANWHILE.into()),
     }
@@ -795,6 +788,13 @@ mod tests {
         assert_eq!(shown("e\u{0301}\u{200B}\u{0302}\u{0303}"), "e\u{0301}\u{0302}");
         // Two marks on each letter, as in decomposed Vietnamese, stay.
         assert_eq!(shown("e\u{0323}\u{0302}e\u{0323}\u{0302}"), "e\u{0323}\u{0302}e\u{0323}\u{0302}");
+    }
+
+    #[test]
+    fn all_unicode_nonspacing_and_enclosing_marks_count_toward_the_cap() {
+        assert_eq!(shown("a\u{1CD0}\u{0E48}\u{0301}\u{0302}b"), "a\u{1CD0}\u{0E48}b");
+        // Listed and previously unlisted marks remain one run until a non-mark.
+        assert_eq!(shown("x\u{0301}\u{0E48}\u{0302}\u{1CD0}y"), "x\u{0301}\u{0E48}y");
     }
 
     #[tokio::test]

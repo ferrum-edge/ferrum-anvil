@@ -4,13 +4,12 @@
 use crate::commands::{CANCELED, R, SendInput, e, id};
 use crate::presence::NativePresence;
 use crate::state::{DesktopState, PendingEntry, cancel_pending};
-use anvil_app::exec::SendOptions;
 use anvil_identity::{FlowEvent, FlowOptions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State, Window};
 
-fn opts(input: &SendInput) -> R<SendOptions> {
-    Ok(SendOptions { environment: input.environment_id.as_deref().map(id).transpose()?, ..Default::default() })
+fn opts(input: &SendInput) -> R<anvil_app::exec::SendOptions> {
+    input.options(false)
 }
 
 /// Only http(s) URLs are handed to the OS opener.
