@@ -247,6 +247,7 @@ describe("file grants in the renderer", () => {
         importers[file] = m[1].split(",").map((s) => s.trim()).filter(Boolean);
       }
     }
-    expect(importers).toEqual({ "./Workbench.tsx": ["ask"], "./ScopeSettings.tsx": ["ask"] });
+    // Confirmations that guard a security change are asked by the backend's own native dialog.
+    expect(importers).toEqual({ "./Workbench.tsx": ["ask"] });
   });
 });

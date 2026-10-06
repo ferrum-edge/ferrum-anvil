@@ -21,3 +21,9 @@ a7b38263c579e088c5fe03efd2f18aba50453414:crates/anvil-contract/tests/drift.rs:jw
 # feature/mcp-request-kind. The value is fake; the next commit switches it to
 # the allowlisted tok-SENSITIVE- canary prefix. CI scans full history.
 d64da595172a550838586dfbb1c291ccaaa88879:crates/anvil-engine/tests/mcp.rs:generic-api-key:224
+# Exact-fingerprint ignore for a fake test URL (`https://<host>:8443/v1/charges`)
+# in apps/desktop/src-tauri/src/draft_authority.rs, first pushed in commit 4f83130f
+# on branch fix/renderer-authority-trusted-presence. It holds no credential; the
+# next commit renames the host so the generic rule no longer matches. CI scans full
+# history, hence this fingerprint.
+4f83130f8c24acd410c36a764a734c7069d9a8e7:apps/desktop/src-tauri/src/draft_authority.rs:generic-api-key:275

