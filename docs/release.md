@@ -13,14 +13,16 @@ website are manual owner steps, taken only after the
    commit.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
    Or run the workflow manually **from the tag** (Run workflow → *Use workflow
-   from* → Tags → `anvil-v0.1.0`), optionally with the same tag as input. A
-   run from a tag is a full, signed release even with the input empty.
+   from* → Tags → `anvil-v0.1.0`). Set `dry_run` to `false` and optionally pass
+   the same tag as input for a full release. Manual dispatch defaults to
+   `dry_run: true`, including when started from a tag.
    Preflight refuses an input that is not the tag the run started from, a tag
    that does not exist, or a checkout whose commit is not the tag's; build and
    publish then check out that exact commit (never a branch or tag name, which
-   a same-named branch could shadow). A manual run from a branch without a tag
-   input is a **dry run**: everything is built and checked and the evidence is
-   uploaded to the run, but nothing is signed and no release is created.
+   a same-named branch could shadow). A dry run builds and checks everything,
+   then uploads evidence to the workflow run for inspection. It does not sign
+   artifacts, create a GitHub release, or publish release assets. Setting
+   `dry_run: false` requires running from a valid release tag.
 4. Review the draft (checklist below), then publish it by hand.
 
 ## What the workflow does
@@ -74,7 +76,8 @@ Each build job:
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
 runs for the release commit, `latest.json` (only with signed updater
 artifacts), `SHA256SUMS`, `release-evidence.json` and an uploaded evidence
-bundle. For a tag only, it then runs
+bundle. For a non-dry-run tag only, a separate `release` job (the only job with
+`contents: write`) downloads that bundle and runs
 `gh release create --draft --verify-tag`.
 
 ### Release evidence
@@ -164,9 +167,10 @@ is `1:4.5-3build1`, whose upstream 4.5 banner is below the checker's 4.5.1
 security floor. The CI fixture jobs on both Ubuntu versions, release preflight,
 and the Linux release build therefore compile only `unsquashfs` from the
 [upstream 4.7.5 release archive](https://github.com/plougher/squashfs-tools/releases/tag/4.7.5).
-The repository recipes in `.github/workflows/ci.yml` and `.github/workflows/release.yml`
-require a GitHub-hosted runner, fetch the exact release asset over HTTPS, and
-verify SHA-256 before unpacking or building:
+The single composite action `.github/actions/trusted-appimage-extractor/action.yml`
+(used by `ci.yml` and both `release.yml` jobs) requires a GitHub-hosted runner,
+fetches the exact release asset over HTTPS, and verifies SHA-256 before
+unpacking or building:
 
 ```text
 squashfs-tools-4.7.5.tar.gz
@@ -182,7 +186,7 @@ the extractor enables gzip, xz, lzo, lz4, zstd and legacy lzma support. Only the
 resulting `unsquashfs` is installed into a private runner temporary directory,
 its exact version banner is checked, and its directory is prepended to `PATH`
 for later steps. Fixture `mksquashfs` and bundling tools remain distribution-provided.
-Update all three provisioning recipes together when changing this pin. The
+Change the pin only in that action (and the digest shown above). The
 checker still rejects tools below 4.5.1 and unknown banners; provisioning does
 not add an exception for the Ubuntu 4.5 package.
 
@@ -245,7 +249,8 @@ compiled in and the Upgrade button opens the GitHub release page instead.
 
 **Protecting the key.** The build job of a tagged release runs in the GitHub
 environment `release`; a dry run runs in none, and the workflow also withholds
-the key (and the Apple and Windows credentials) from any run without a tag.
+the key (and the Apple and Windows credentials) from any dry run or run without
+a tag.
 The owner must:
 
 - create the `release` environment with required reviewers and a deployment

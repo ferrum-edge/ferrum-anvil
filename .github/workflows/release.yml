@@ -3,9 +3,8 @@
 # report and release evidence, and create a DRAFT GitHub release.
 #
 #   push tag anvil-vX.Y.Z             -> full build + draft release
-#   manual from the tag (input empty
-#     or the same tag)                -> same for an existing tag
-#   manual from a branch, no input    -> dry run: unsigned artifacts + evidence uploaded to the run only
+#   manual from a tag, dry_run=false  -> full build + draft release
+#   manual with dry_run=true          -> unsigned artifacts + evidence uploaded to the run only
 #
 # Signing runs only for a tagged release: its build jobs run in the protected
 # `release` environment, which should hold the owner's credentials (Apple and
@@ -22,8 +21,13 @@ on:
     tags: ["anvil-v*"]
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: "Build and inspect artifacts without creating a GitHub release (default)"
+        required: false
+        type: boolean
+        default: true
       tag:
-        description: "Existing tag to release (anvil-vX.Y.Z); run the workflow from that tag. A run from a tag is a full signed release even when this is empty; a run from a branch with this empty is an unsigned dry run (nothing is published)."
+        description: "Tag to validate for a non-dry-run release (anvil-vX.Y.Z); run the workflow from that tag"
         required: false
         default: ""
 
@@ -60,30 +64,34 @@ jobs:
         id: version
         env:
           INPUT_TAG: ${{ github.event.inputs.tag }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
         run: |
           version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
           app="$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')"
           ui="$(node -p 'require("./apps/desktop/package.json").version')"
           [ "$version" = "$app" ] && [ "$version" = "$ui" ] || { echo "::error::version mismatch: Cargo $version, tauri.conf $app, package.json $ui"; exit 1; }
-          tag=""
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          source_tag=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then source_tag="${GITHUB_REF_NAME}"; fi
           if [ -n "$INPUT_TAG" ]; then
-            # A manual release runs from the tag itself ("Use workflow from: <tag>"),
-            # never from a branch, and a branch named like a tag is not a tag.
             if [ "$GITHUB_REF" != "refs/tags/$INPUT_TAG" ]; then
               echo "::error::run the workflow from the tag itself (Use workflow from: $INPUT_TAG); it runs from $GITHUB_REF"; exit 1
             fi
-            tag="$INPUT_TAG"
+            source_tag="$INPUT_TAG"
           fi
-          if [ -n "$tag" ] && ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "::error::refs/tags/$tag does not exist"; exit 1
+          if [ -n "$source_tag" ] && ! git rev-parse -q --verify "refs/tags/$source_tag" >/dev/null; then
+            echo "::error::refs/tags/$source_tag does not exist"; exit 1
           fi
-          if [ -n "$tag" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$tag^{commit}")" ]; then
-            echo "::error::HEAD $(git rev-parse HEAD) is not the commit of $tag"; exit 1
+          if [ -n "$source_tag" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$source_tag^{commit}")" ]; then
+            echo "::error::HEAD $(git rev-parse HEAD) is not the commit of $source_tag"; exit 1
           fi
-          if [ -n "$tag" ] && [ "$tag" != "anvil-v$version" ]; then
-            echo "::error::tag $tag does not match workspace version $version (expected anvil-v$version)"; exit 1
+          if [ -n "$source_tag" ] && [ "$source_tag" != "anvil-v$version" ]; then
+            echo "::error::tag $source_tag does not match workspace version $version (expected anvil-v$version)"; exit 1
           fi
+          if [ "$DRY_RUN" != "true" ] && [ -z "$source_tag" ]; then
+            echo "::error::a non-dry-run release must start from a tag"; exit 1
+          fi
+          tag="$source_tag"
+          if [ "$DRY_RUN" = "true" ]; then tag=""; fi
           {
             echo "version=$version"
             echo "tag=$tag"
@@ -113,43 +121,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends gcc python3 squashfs-tools
-      # Keep this source pin and recipe aligned in ci.yml and both release.yml jobs.
-      # Primary provenance and upstream security notes: docs/release.md.
       - name: Trusted AppImage extractor (pinned source, hosted build only)
-        shell: bash
-        env:
-          SQUASHFS_TOOLS_VERSION: 4.7.5
-          SQUASHFS_TOOLS_RELEASE_DATE: 2026/03/01
-          SQUASHFS_TOOLS_SHA256: 547b7b7f4d2e44bf91b6fc554664850c69563701deab9fd9cd7e21f694c88ea6
-        run: |
-          if [ "${GITHUB_ACTIONS:-}" != "true" ] || [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
-            echo "::error::Extractor provisioning requires a GitHub-hosted runner"
-            exit 1
-          fi
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential ca-certificates curl \
-            liblz4-dev liblzma-dev liblzo2-dev libzstd-dev zlib1g-dev
-          extractor_source="$(mktemp -d "$RUNNER_TEMP/anvil-squashfs-tools.XXXXXX")"
-          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
-            --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
-            --output "$extractor_source/source.tar.gz" \
-            "https://github.com/plougher/squashfs-tools/releases/download/$SQUASHFS_TOOLS_VERSION/squashfs-tools-$SQUASHFS_TOOLS_VERSION.tar.gz"
-          echo "$SQUASHFS_TOOLS_SHA256  $extractor_source/source.tar.gz" | sha256sum --check --strict -
-          tar -xzf "$extractor_source/source.tar.gz" -C "$extractor_source" --no-same-owner
-          extractor_build="$extractor_source/squashfs-tools-$SQUASHFS_TOOLS_VERSION/squashfs-tools"
-          make -C "$extractor_build" -j2 unsquashfs LZMA_XZ_SUPPORT=1
-          mkdir "$extractor_source/bin"
-          install -m 0755 "$extractor_build/unsquashfs" "$extractor_source/bin/unsquashfs"
-          version_status=0
-          banner="$(LC_ALL=C "$extractor_source/bin/unsquashfs" -version)" || version_status=$?
-          expected="unsquashfs version $SQUASHFS_TOOLS_VERSION ($SQUASHFS_TOOLS_RELEASE_DATE)"
-          # Upstream -version exits 1 without an input filesystem; other errors fail closed.
-          if [ "$version_status" -gt 1 ] || [ "${banner%%$'\n'*}" != "$expected" ]; then
-            echo "::error::Unexpected pinned unsquashfs version banner/status"
-            exit 1
-          fi
-          printf '%s\n' "$banner"
-          echo "$extractor_source/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/trusted-appimage-extractor
       - name: AppImage inspection and explicit runtime-probe regressions
         run: python3 -I scripts/tests/test_release_check.py
       - name: Diagnostic catalog drift
@@ -208,44 +181,9 @@ jobs:
       - name: Bundling and inspection tools (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y --no-install-recommends libfuse2 rpm2cpio cpio libarchive-tools python3 squashfs-tools
-      # Keep this source pin and recipe aligned in ci.yml and both release.yml jobs.
-      # Primary provenance and upstream security notes: docs/release.md.
       - name: Trusted AppImage extractor (pinned source, hosted build only)
+        uses: ./.github/actions/trusted-appimage-extractor
         if: runner.os == 'Linux'
-        shell: bash
-        env:
-          SQUASHFS_TOOLS_VERSION: 4.7.5
-          SQUASHFS_TOOLS_RELEASE_DATE: 2026/03/01
-          SQUASHFS_TOOLS_SHA256: 547b7b7f4d2e44bf91b6fc554664850c69563701deab9fd9cd7e21f694c88ea6
-        run: |
-          if [ "${GITHUB_ACTIONS:-}" != "true" ] || [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
-            echo "::error::Extractor provisioning requires a GitHub-hosted runner"
-            exit 1
-          fi
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential ca-certificates curl \
-            liblz4-dev liblzma-dev liblzo2-dev libzstd-dev zlib1g-dev
-          extractor_source="$(mktemp -d "$RUNNER_TEMP/anvil-squashfs-tools.XXXXXX")"
-          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
-            --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
-            --output "$extractor_source/source.tar.gz" \
-            "https://github.com/plougher/squashfs-tools/releases/download/$SQUASHFS_TOOLS_VERSION/squashfs-tools-$SQUASHFS_TOOLS_VERSION.tar.gz"
-          echo "$SQUASHFS_TOOLS_SHA256  $extractor_source/source.tar.gz" | sha256sum --check --strict -
-          tar -xzf "$extractor_source/source.tar.gz" -C "$extractor_source" --no-same-owner
-          extractor_build="$extractor_source/squashfs-tools-$SQUASHFS_TOOLS_VERSION/squashfs-tools"
-          make -C "$extractor_build" -j2 unsquashfs LZMA_XZ_SUPPORT=1
-          mkdir "$extractor_source/bin"
-          install -m 0755 "$extractor_build/unsquashfs" "$extractor_source/bin/unsquashfs"
-          version_status=0
-          banner="$(LC_ALL=C "$extractor_source/bin/unsquashfs" -version)" || version_status=$?
-          expected="unsquashfs version $SQUASHFS_TOOLS_VERSION ($SQUASHFS_TOOLS_RELEASE_DATE)"
-          # Upstream -version exits 1 without an input filesystem; other errors fail closed.
-          if [ "$version_status" -gt 1 ] || [ "${banner%%$'\n'*}" != "$expected" ]; then
-            echo "::error::Unexpected pinned unsquashfs version banner/status"
-            exit 1
-          fi
-          printf '%s\n' "$banner"
-          echo "$extractor_source/bin" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-cyclonedx@0.5.9
@@ -492,12 +430,12 @@ jobs:
           retention-days: 30
 
   publish:
-    name: Evidence & draft release
+    name: Assemble release evidence
     needs: [preflight, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write # create the draft release
+      contents: read
       actions: read # list the CI/E2E/lab runs for this commit
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -554,8 +492,27 @@ jobs:
           name: release-evidence-${{ needs.preflight.outputs.version }}
           path: upload/
           retention-days: 90
+
+  release:
+    name: Create draft release
+    if: needs.preflight.outputs.tag != ''
+    needs: [preflight, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-evidence-${{ needs.preflight.outputs.version }}
+          path: upload/
+      - name: Verify evidence bundle
+        run: (cd upload && sha256sum -c SHA256SUMS)
       - name: Create draft release
-        if: needs.preflight.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
