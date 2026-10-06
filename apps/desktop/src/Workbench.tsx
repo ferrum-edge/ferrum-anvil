@@ -1,8 +1,8 @@
 // Main workspace window: collection tree + history, open request tabs, and
 // the request/response split.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
-import { api, onExecutionEvent, onSessionEnded, type ExecutionView, type HistoryItem, type StreamMessage, type TreeNode } from "./api";
+import { api, onExecutionEvent, onLocked, onSessionEnded, type ExecutionView, type HistoryItem, type StreamMessage, type TreeNode } from "./api";
+import { useConfirm } from "./Confirm";
 import { SessionConsole } from "./SessionConsole";
 import { ScopeSettingsDialog } from "./ScopeSettings";
 import mark from "./assets/ferrum-anvil-mark.png";
@@ -95,6 +95,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [profiles, setProfiles] = useState<Profiles>({ tls: [], proxy: [], integrations: [] });
   const [dialog, setDialog] = useState<Dialog>(null);
   const launchUpdate = useLaunchUpdate();
+  // Confirmations are asked in the window itself (see ./Confirm).
+  const { confirm: ask, prompt: confirmPrompt, open: asking } = useConfirm();
   const [toast, setToast] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [catalog, setCatalog] = useState("");
@@ -246,9 +248,24 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       if (e.error) setToast(`Session ended: ${e.error}`);
       void loadHistoryRef.current?.();
     });
+    // A lock aborts every session in the backend, and an end event cannot
+    // reach this window once it has landed: forget the end-event owners
+    // tracked here, so one whose end never arrives (a closed tab's included)
+    // is not kept. A profile switch locks first, and mounts a new Workbench.
+    // stopped, opening and earlyAborts stay: each belongs to a connect or an
+    // abort still in flight, which removes its own entry (and re-cancels an
+    // open aborted early once it resolves, even after this unmounts).
+    const forget = () => {
+      sessionAttempts.current.clear();
+      detachedAttempts.current.clear();
+    };
+    const locked = onLocked(forget);
+    window.addEventListener("anvil-locked", forget);
     return () => {
       void un.then((f) => f());
       void ended.then((f) => f());
+      void locked.then((f) => f());
+      window.removeEventListener("anvil-locked", forget);
     };
   }, []);
 
@@ -629,6 +646,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // ------------------------------------------------------------- shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A confirmation is showing: its keys (Escape) are its own.
+      if (asking) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === "Enter") {
         e.preventDefault();
@@ -1204,6 +1223,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         {dialog === "update" && launchUpdate && <UpdateDialog check={launchUpdate} onClose={() => setDialog(null)} />}
         <UpdatePrompt check={launchUpdate} onUpgrade={() => setDialog("update")} />
         <Toast message={toast} onClose={() => setToast(null)} />
+        {confirmPrompt}
       </div>
     </SidebarContext.Provider>
   );

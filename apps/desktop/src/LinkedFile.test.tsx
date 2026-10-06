@@ -16,7 +16,6 @@ import { vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn(), ask: vi.fn() }));
 
 import type { LinkedFileReferrer, LinkedFileStatus } from "./api";
 import type { Dataset, LoadPlan, RequestSpec } from "./generated/contracts";

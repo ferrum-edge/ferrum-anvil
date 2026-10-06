@@ -7,7 +7,7 @@
 
 use crate::presence::NativePresence;
 use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, PendingEntry, cancel_pending};
-use anvil_app::cleanup::StorageCleanupRecord;
+use anvil_app::cleanup::{RemovedRevisions, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::Unlock;
@@ -507,6 +507,32 @@ pub async fn settings_save(st: State<'_, DesktopState>, window: Window, settings
 #[tauri::command]
 pub fn storage_cleanup_last(st: State<'_, DesktopState>) -> R<Option<StorageCleanupRecord>> {
     st.app()?.last_storage_cleanup().map_err(e)
+}
+
+/// Run a storage cleanup pass now, whenever the last one ran (see
+/// `App::clean_up_storage`), and keep it as the last one.
+#[tauri::command]
+pub async fn storage_cleanup_now(handle: AppHandle) -> R<StorageCleanup> {
+    blocking(&handle, |st| st.app()?.clean_up_storage().map_err(e)).await
+}
+
+/// The stored revisions whose own sealed payload does not decode, by id,
+/// write time and cause only. Each keeps every stored file until it is
+/// removed with `storage_revisions_remove` (a damaged one only).
+#[tauri::command]
+pub async fn storage_undecodable_revisions(handle: AppHandle) -> R<Vec<UndecodableRevision>> {
+    blocking(&handle, |st| st.app()?.undecodable_revisions().map_err(e)).await
+}
+
+/// Remove damaged stored revisions, which nothing can read, once the user
+/// confirmed it natively, behind one checkpoint of the profile that keeps
+/// them (see `App::remove_undecodable_revisions`). A revision that decodes,
+/// or that a newer Anvil may have written, is refused, so nothing readable
+/// is removed here. Declined: [`crate::presence::NOT_CONFIRMED`].
+#[tauri::command]
+pub async fn storage_revisions_remove(st: State<'_, DesktopState>, window: Window, revision_ids: Vec<String>) -> R<RemovedRevisions> {
+    let revisions = revision_ids.iter().map(String::as_str).map(id).collect::<R<Vec<_>>>()?;
+    crate::presence::remove_damaged_revisions(&st, &NativePresence(window), revisions).await
 }
 
 // ------------------------------------------------------------------ execution
@@ -1109,10 +1135,15 @@ pub async fn export_to_path(
     st.file_grants.write(&grant, FilePurpose::BundleExport, &bytes).map_err(|x| x.to_string())
 }
 
-/// The bundle the user picked in the native open dialog (purpose
-/// `bundle_import`).
-fn read_bundle(grants: &FileGrants, grant: &str) -> R<Vec<u8>> {
-    Ok(grants.read(grant, FilePurpose::BundleImport).map_err(|x| x.to_string())?.bytes)
+/// The bundle or full backup the user picked in the native open dialog
+/// (purpose `bundle_import`). Its start is checked before the rest is read
+/// (see [`anvil_app::backup::import_read_limit`]): a backup whose header
+/// cannot be opened, or that came with no passphrase, is refused unread, and
+/// anything else is read only up to the largest bundle.
+fn read_bundle(grants: &FileGrants, grant: &str, passphrase: Option<&str>) -> R<Vec<u8>> {
+    let prefix = anvil_app::backup::HEADER_PREFIX_BYTES;
+    let limit = |start: &[u8], size: u64| anvil_app::backup::import_read_limit(start, size, passphrase).map_err(|x| x.to_string());
+    Ok(grants.read_checked(grant, FilePurpose::BundleImport, prefix, limit).map_err(|x| x.to_string())?.bytes)
 }
 
 /// Register `attempt` so `import_cancel`, or a lock, can reach the import.
@@ -1217,7 +1248,7 @@ pub async fn import_preview(
     let grants = st.file_grants.clone();
     // A preview writes nothing, so it needs no gate.
     let report = import_work(worker, pending, None, move || {
-        let bytes = read_bundle(&grants, &grant)?;
+        let bytes = read_bundle(&grants, &grant, passphrase.as_deref())?;
         if anvil_app::backup::is_backup(&bytes) {
             // A full backup restores every item under its own id, so "copies" is
             // previewed as Merge; the report's policy tells the dialog to switch.
@@ -1267,7 +1298,7 @@ pub async fn import_apply(
     let gate = Arc::new(ImportGate::default());
     let worker_gate = gate.clone();
     let mut report = import_work(worker, pending, Some(&*gate), move || {
-        let bytes = read_bundle(&grants, &grant)?;
+        let bytes = read_bundle(&grants, &grant, passphrase.as_deref())?;
         let proceed = || writes_may_begin(&handle.state::<DesktopState>(), seen, &worker_gate);
         apply(&app, &bytes, passphrase.as_deref(), policy, &approval, &proceed)
     })

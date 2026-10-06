@@ -286,6 +286,62 @@ pub fn is_backup(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
+/// How many bytes at the start of a full backup always hold its signature,
+/// header length and header ([`import_read_limit`] needs no more).
+pub const HEADER_PREFIX_BYTES: usize = MAGIC.len() + 4 + MAX_HEADER_BYTES;
+
+/// The most an import reads of a chosen file of `size` bytes, decided from
+/// its first bytes (`prefix`: [`HEADER_PREFIX_BYTES`] of them, or the whole
+/// file when it is shorter) before the rest is read or anything decrypted.
+/// A full backup's header is checked as [`open`] checks it (format, cipher,
+/// key-derivation costs and salt, then that a passphrase was given), and the
+/// backup may be [`MAX_BACKUP_BYTES`]. Anything else is read as a bundle,
+/// which may be [`anvil_portability::bundle::MAX_BUNDLE_FILE_BYTES`].
+pub fn import_read_limit(prefix: &[u8], size: u64, passphrase: Option<&str>) -> std::result::Result<u64, BackupError> {
+    if !is_backup(prefix) {
+        return Ok(anvil_portability::bundle::MAX_BUNDLE_FILE_BYTES);
+    }
+    if size > MAX_BACKUP_BYTES {
+        return Err(BackupError::TooLarge);
+    }
+    open_header(prefix)?;
+    passphrase.ok_or(BackupError::PassphraseRequired)?;
+    Ok(MAX_BACKUP_BYTES)
+}
+
+/// Read and check the header at the start of `bytes` (a full backup, or at
+/// least its first [`HEADER_PREFIX_BYTES`]): its format, cipher,
+/// key-derivation costs and salt. Returns it with the salt and where it ends.
+fn open_header(bytes: &[u8]) -> std::result::Result<(Header, Vec<u8>, usize), BackupError> {
+    let truncated = || BackupError::NotABackup("the file is truncated".into());
+    let rest =
+        bytes.strip_prefix(MAGIC.as_slice()).ok_or_else(|| BackupError::NotABackup("the full-backup signature is missing".into()))?;
+    let len = rest.get(..4).ok_or_else(truncated)?;
+    let len = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
+    if len > MAX_HEADER_BYTES {
+        return Err(BackupError::NotABackup(format!("the header is {len} bytes (at most {MAX_HEADER_BYTES})")));
+    }
+    let header_end = MAGIC.len() + 4 + len;
+    let header_bytes = bytes.get(MAGIC.len() + 4..header_end).ok_or_else(truncated)?;
+    let header: Header = serde_json::from_slice(header_bytes).map_err(|e| BackupError::NotABackup(format!("header: {e}")))?;
+    if header.format != FORMAT {
+        return Err(BackupError::NotABackup(format!("unknown format '{}'", header.format)));
+    }
+    if header.format_version > FORMAT_VERSION {
+        return Err(BackupError::FutureFormat { found: header.format_version, supported: FORMAT_VERSION });
+    }
+    if header.format_version != FORMAT_VERSION {
+        return Err(BackupError::NotABackup(format!("unknown format version {}", header.format_version)));
+    }
+    if header.cipher != CIPHER {
+        return Err(BackupError::NotABackup(format!("unsupported cipher '{}'", header.cipher)));
+    }
+    check_kdf(&header.kdf)?;
+    let salt = B64.decode(&header.salt_b64).map_err(|_| BackupError::NotABackup("the salt is not base64".into()))?;
+    crypto::check_salt(&salt).map_err(BackupError::UnsupportedKdf)?;
+    Ok((header, salt, header_end))
+}
+
 /// Refuse Argon2id costs outside the bundle-vault bounds. A backup's costs
 /// are read before anything can be authenticated, so they are checked before
 /// any derivation runs.
@@ -350,32 +406,7 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
     if bytes.len() as u64 > MAX_BACKUP_BYTES {
         return Err(BackupError::TooLarge);
     }
-    let truncated = || BackupError::NotABackup("the file is truncated".into());
-    let rest =
-        bytes.strip_prefix(MAGIC.as_slice()).ok_or_else(|| BackupError::NotABackup("the full-backup signature is missing".into()))?;
-    let len = rest.get(..4).ok_or_else(truncated)?;
-    let len = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
-    if len > MAX_HEADER_BYTES {
-        return Err(BackupError::NotABackup(format!("the header is {len} bytes (at most {MAX_HEADER_BYTES})")));
-    }
-    let header_end = MAGIC.len() + 4 + len;
-    let header_bytes = bytes.get(MAGIC.len() + 4..header_end).ok_or_else(truncated)?;
-    let header: Header = serde_json::from_slice(header_bytes).map_err(|e| BackupError::NotABackup(format!("header: {e}")))?;
-    if header.format != FORMAT {
-        return Err(BackupError::NotABackup(format!("unknown format '{}'", header.format)));
-    }
-    if header.format_version > FORMAT_VERSION {
-        return Err(BackupError::FutureFormat { found: header.format_version, supported: FORMAT_VERSION });
-    }
-    if header.format_version != FORMAT_VERSION {
-        return Err(BackupError::NotABackup(format!("unknown format version {}", header.format_version)));
-    }
-    if header.cipher != CIPHER {
-        return Err(BackupError::NotABackup(format!("unsupported cipher '{}'", header.cipher)));
-    }
-    check_kdf(&header.kdf)?;
-    let salt = B64.decode(&header.salt_b64).map_err(|_| BackupError::NotABackup("the salt is not base64".into()))?;
-    crypto::check_salt(&salt).map_err(BackupError::UnsupportedKdf)?;
+    let (header, salt, header_end) = open_header(bytes)?;
     let passphrase = passphrase.ok_or(BackupError::PassphraseRequired)?;
     let (aad, envelope) = bytes.split_at(header_end);
     let key = crypto::derive(passphrase.as_bytes(), &salt, &header.kdf).map_err(|e| BackupError::UnsupportedKdf(e.to_string()))?;

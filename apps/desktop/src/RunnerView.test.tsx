@@ -23,7 +23,6 @@ vi.mock("@tauri-apps/api/event", () => ({
     return () => set.delete(cb);
   },
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn(), save: vi.fn() }));
 
 import type { RunEvent, Scenario, TreeNode } from "./api";
 import { RunnerView } from "./RunnerView";

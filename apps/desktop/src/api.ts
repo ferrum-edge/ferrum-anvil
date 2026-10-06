@@ -401,6 +401,25 @@ export interface StorageCleanupRecord {
     undecodable: { kind: string; id: string }[];
   };
 }
+/** What one storage cleanup pass did (`anvil_app::cleanup::StorageCleanup`). */
+export type StorageCleanup = StorageCleanupRecord["result"];
+/** A stored revision whose own sealed payload does not decode (`anvil_app::cleanup::UndecodableRevision`). */
+export interface UndecodableRevision {
+  id: string;
+  /** When its row was last written, in milliseconds since the Unix epoch. */
+  updated_at: number;
+  /**
+   * `damaged`: it does not decrypt, so nothing can read it, and it can be removed.
+   * `unknown_format`: it decrypts but this version cannot read it (a newer Anvil may have written it), so it is kept.
+   */
+  cause: "damaged" | "unknown_format";
+}
+/** What removing damaged revisions did (`anvil_app::cleanup::RemovedRevisions`). */
+export interface RemovedRevisions {
+  removed: string[];
+  /** The file name of the one checkpoint taken first, which keeps them. */
+  checkpoint: string;
+}
 export interface LoadReportSummary {
   run_id: string;
   plan_id: string;
@@ -689,6 +708,15 @@ export const api = {
   saveSettings: (settings: AppSettings) => call<void>("settings_save", { settings }),
   /** The last storage cleanup (at most once a day when the profile opens); null before the first. */
   storageCleanupLast: () => call<StorageCleanupRecord | null>("storage_cleanup_last"),
+  /** Run a storage cleanup pass now and keep it as the last one. */
+  storageCleanupNow: () => call<StorageCleanup>("storage_cleanup_now"),
+  /** Stored revisions that do not decode: each keeps every stored file until it is removed. */
+  undecodableRevisions: () => call<UndecodableRevision[]>("storage_undecodable_revisions"),
+  /**
+   * Remove damaged stored revisions once the user confirms it in the backend's native dialog
+   * (NOT_CONFIRMED otherwise); one checkpoint of the profile keeps them (its file name is returned).
+   */
+  removeDamagedRevisions: (revisionIds: string[]) => call<RemovedRevisions>("storage_revisions_remove", { revisionIds }),
 
   effective: (input: SendInput) => call<EffectiveRequest>("effective_request", { input }),
   send: (input: SendInput, executionId: string) => call<ExecutionView>("send_request", { input, executionId }),

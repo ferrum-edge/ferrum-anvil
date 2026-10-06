@@ -10,7 +10,6 @@ import { vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn(), save: vi.fn() }));
 
 import type { DriftReport, ExecutionView } from "./api";
 import { DriftPage } from "./DriftView";

@@ -25,6 +25,42 @@
   - **BREAKING:** earlier builds refuse a schema 3 database, and a full backup made from one,
     as newer. Portable bundles still import into earlier builds. Close earlier builds before
     upgrading.
+- The desktop webview no longer holds the dialog plugin's `allow-message` and `allow-ask`
+  permissions, so it cannot open a native dialog that looks like the backend's own
+  confirmations. Its confirmations (closing a tab with live work or unsaved edits, sending an
+  invalid body, deleting, relocating a linked file over unsaved edits) are drawn inside the
+  window, and the desktop UI no longer depends on the `@tauri-apps/plugin-dialog` npm package
+  (#319).
+
+### Added
+
+- Settings → Storage shows the last storage cleanup on request, runs one now, and lists
+  stored revisions whose own payload does not decode. Such a revision survives its request's
+  or workspace's delete and blocks every cleanup release. A damaged one (it decrypts under
+  neither the schema 3 nor the schema 1 revision seal) can now be removed, alone or all
+  together, once the user confirms it in the backend's native dialog, behind one checkpoint of
+  the profile that keeps them; one that decrypts under either seal but that this version cannot
+  read (a newer Anvil may have written it) is kept (`App::undecodable_revisions`,
+  `App::remove_undecodable_revisions`; desktop `storage_undecodable_revisions`,
+  `storage_revisions_remove`, `storage_cleanup_now`) (#319).
+
+### Changed
+
+- Importing a bundle or full backup checks the start of the chosen file before reading the
+  rest: a backup whose header cannot be opened, or chosen without a passphrase, is refused
+  unread, and anything else is read only up to the largest bundle (the 256 MiB budget plus
+  64 MiB of zip framing, `MAX_BUNDLE_FILE_BYTES`, also enforced by `bundle::open`) instead of
+  2 GiB (#319).
+- Stored objects are decoded once per read instead of twice (the identity check's decode is
+  reused), and a list of revisions reads each revision's request once (#319).
+- The storage cleanup decrypts no revision to look for orphans while no revision or request row
+  has been added, removed or written since a pass that left none (#319).
+
+### Fixed
+
+- The workbench forgets the session attempts whose end it waits for when the profile locks, so
+  a closed tab's session whose end event the lock kept from the window is not kept for the rest
+  of the session. An open aborted while still pending is still cancelled once it resolves (#319).
 
 ## [0.1.2] - 2026-10-06
 

@@ -393,6 +393,24 @@ impl FileGrants {
         self.read_file(self.lookup(token, purpose)?, purpose)
     }
 
+    /// [`FileGrants::read`], deciding from the start of the file how much of
+    /// it may be read before the rest is: `limit` gets its first `prefix`
+    /// bytes (all of them when the file is shorter) and its size, and
+    /// returns the largest size accepted for this file, or why it is refused.
+    /// The purpose's own limit still applies.
+    pub fn read_checked(
+        &self,
+        token: &str,
+        purpose: FilePurpose,
+        prefix: usize,
+        limit: impl FnOnce(&[u8], u64) -> Result<u64, String>,
+    ) -> Result<ReadFile, GrantError> {
+        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
+            return Err(GrantError::WrongPurpose);
+        }
+        self.read_file_checked(self.lookup(token, purpose)?, purpose, prefix, limit)
+    }
+
     /// Consume a private-key selection and store it in the workspace vault.
     /// The purpose and disposition are fixed here, not supplied by a renderer.
     /// A failed ingestion also spends the grant; a retry needs a fresh choice.
@@ -415,6 +433,16 @@ impl FileGrants {
     }
 
     fn read_file(&self, entry: Entry, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
+        self.read_file_checked(entry, purpose, 0, |_, _| Ok(u64::MAX))
+    }
+
+    fn read_file_checked(
+        &self,
+        entry: Entry,
+        purpose: FilePurpose,
+        prefix: usize,
+        limit: impl FnOnce(&[u8], u64) -> Result<u64, String>,
+    ) -> Result<ReadFile, GrantError> {
         let Target::Read { path, id } = entry.target else {
             return Err(GrantError::WrongPurpose);
         };
@@ -429,13 +457,20 @@ impl FileGrants {
         if file_id(&file, &meta).map_err(io)? != id {
             return Err(GrantError::Changed);
         }
-        let max = purpose.max_read_bytes();
+        let mut max = purpose.max_read_bytes();
         if meta.len() > max {
             return Err(GrantError::TooLarge(size_label(max)));
         }
-        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        let mut bytes = Vec::new();
+        // The start first: what it says can refuse the file before the rest is read.
+        (&file).take(prefix as u64).read_to_end(&mut bytes).map_err(io)?;
+        max = max.min(limit(&bytes, meta.len()).map_err(GrantError::Invalid)?);
+        if meta.len() > max {
+            return Err(GrantError::TooLarge(size_label(max)));
+        }
+        bytes.reserve(meta.len().saturating_sub(bytes.len() as u64) as usize);
         // Bounded even if the file grows while it is read.
-        file.take(max + 1).read_to_end(&mut bytes).map_err(io)?;
+        file.take((max + 1).saturating_sub(bytes.len() as u64)).read_to_end(&mut bytes).map_err(io)?;
         if bytes.len() as u64 > max {
             return Err(GrantError::TooLarge(size_label(max)));
         }

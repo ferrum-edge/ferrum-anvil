@@ -9,7 +9,6 @@ import type { AuthConfig, TlsProfile } from "./generated/contracts";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn(), ask: vi.fn() }));
 
 import { api } from "./api";
 import { TlsForm } from "./Dialogs";
@@ -231,15 +230,15 @@ describe("file grants in the renderer", () => {
     expect(native).not.toContain("store_as_secret");
   });
 
-  it("does not let the webview open a file dialog or the filesystem", () => {
+  it("does not let the webview open any dialog or the filesystem", () => {
     const perms = capabilities.permissions as string[];
-    expect(perms).not.toContain("dialog:allow-save");
-    expect(perms).not.toContain("dialog:allow-open");
-    expect(perms).not.toContain("dialog:default");
+    // Not even a message or ask dialog: one could look like the backend's own
+    // native confirmations, which guard security changes.
+    expect(perms.filter((p) => p.startsWith("dialog:"))).toEqual([]);
     expect(perms.filter((p) => p.startsWith("fs:"))).toEqual([]);
   });
 
-  it("uses the dialog plugin only for confirmations", () => {
+  it("never uses the dialog plugin from the webview", () => {
     const sources = import.meta.glob(["./*.tsx", "./*.ts", "!./*.test.tsx", "!./*.test.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
     const importers: Record<string, string[]> = {};
     for (const [file, text] of Object.entries(sources)) {
@@ -247,7 +246,8 @@ describe("file grants in the renderer", () => {
         importers[file] = m[1].split(",").map((s) => s.trim()).filter(Boolean);
       }
     }
-    // Confirmations that guard a security change are asked by the backend's own native dialog.
-    expect(importers).toEqual({ "./Workbench.tsx": ["ask"] });
+    // Confirmations that guard a security change are asked by the backend's own
+    // native dialog; every other one inside the window (./Confirm.tsx).
+    expect(importers).toEqual({});
   });
 });

@@ -12,10 +12,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import type { Folder, Workspace } from "./generated/contracts";
 
 const invoke = vi.fn();
-const ask = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: (...a: unknown[]) => ask(...a), open: vi.fn(), save: vi.fn() }));
 
 import { ScopeSettingsDialog } from "./ScopeSettings";
 
@@ -26,7 +24,6 @@ const BANNER = /A bundle import or backup restore wrote into this workspace/;
 afterEach(() => {
   cleanup();
   invoke.mockReset();
-  ask.mockReset();
 });
 
 // `confirmed` stands in for the user's answer in the backend's native dialog.
@@ -68,9 +65,8 @@ test("a sealed workspace says so and is allowed only once the user confirms in t
 
   fireEvent.click(screen.getByRole("button", { name: "Allow on this device" }));
   await waitFor(() => expect(screen.queryByText(BANNER)).toBeNull());
+  // The renderer passes no answer of its own: only the workspace.
   expect(calls("workspace_allow_device_identity")).toEqual([{ workspaceId: ws.id }, { workspaceId: ws.id }]);
-  // The renderer never asks, nor passes an answer of its own.
-  expect(ask).not.toHaveBeenCalled();
 });
 
 test("a workspace that is not sealed shows no seal", async () => {
@@ -198,14 +194,13 @@ test("an import root is isolated by default and opens only once the user confirm
 
   fireEvent.click(screen.getByRole("button", OPEN_BUTTON));
   await screen.findByText(OPENED);
+  // The renderer passes no answer of its own: only the folder and the choice.
   expect(calls("folder_set_workspace_scope")).toEqual([
     { folderId: root.id, allow: true },
     { folderId: root.id, allow: true },
   ]);
   expect(screen.getByText("Also used, because it is opened")).toBeTruthy();
   expect(screen.getByRole("button", ISOLATE_BUTTON)).toBeTruthy();
-  // The renderer never asks, nor passes an answer of its own.
-  expect(ask).not.toHaveBeenCalled();
 });
 
 test("an opened import root is isolated again without a confirmation", async () => {
@@ -215,7 +210,6 @@ test("an opened import root is isolated again without a confirmation", async () 
   expect(screen.getByText(OPENED)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", ISOLATE_BUTTON));
   await screen.findByText(ISOLATED);
-  expect(ask).not.toHaveBeenCalled();
   expect(calls("folder_set_workspace_scope")).toEqual([{ folderId: root.id, allow: false }]);
 });
 
