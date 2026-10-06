@@ -236,16 +236,18 @@ fn an_actual_callback_enqueue_completes_before_lock_and_cannot_be_retracted() {
     });
     let emitting = std::thread::spawn(move || sink(message()));
     entered_rx.recv_timeout(BOUND).unwrap();
+    let admitted = st.epoch();
     let locking_st = st.clone();
-    let (locking_tx, locking_rx) = mpsc::channel();
     let (locked_tx, locked_rx) = mpsc::channel();
     let locking = std::thread::spawn(move || {
-        locking_tx.send(()).unwrap();
         locking_st.lock();
         locked_tx.send(()).unwrap();
     });
-    locking_rx.recv_timeout(BOUND).unwrap();
+    // The actual lock is blocked on the gate the paused enqueue still holds.
+    st.await_gate_writer(BOUND);
+    assert_eq!(st.epoch(), admitted);
     assert!(locked_rx.try_recv().is_err());
+    assert!(received.lock().is_empty());
     release_tx.send(()).unwrap();
     emitting.join().unwrap();
     locked_rx.recv_timeout(BOUND).unwrap();

@@ -691,7 +691,8 @@ fn dispatch_payload_command<S, A, C, T, F, Fut>(
     Fut: Future<Output = R<T>> + Send + 'static,
 {
     let args = match payload {
-        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value::<A>(value.clone()),
+        // Borrowed: request bodies can be large, and are never cloned here.
+        tauri::ipc::InvokeBody::Json(value) => A::deserialize(value),
         _ => {
             reply(R::<T>::Err("expected JSON execution arguments".into()).into());
             return;

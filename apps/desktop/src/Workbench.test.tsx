@@ -777,7 +777,10 @@ describe("session controls", () => {
     expect(screen.getByRole("button", { name: "Abort" })).toBeTruthy();
     expect(screen.queryByText("old completion body")).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
-    expect(calls("history_list")).toHaveLength(historyReads);
+    // A closed tab's own completion refreshes history without touching the
+    // replacement; a remounted Workbench never knew the old attempt.
+    const detached = transition === "same epoch" ? 1 : 0;
+    await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + detached));
     expect(openSessions.has(executionId)).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Ping" }));
     await waitFor(() =>
@@ -799,7 +802,7 @@ describe("session controls", () => {
     } else {
       expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
     }
-    await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + 1));
+    await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + detached + 1));
   });
 
   it("retires a matching completion delivered before its open reply or tab render", async () => {

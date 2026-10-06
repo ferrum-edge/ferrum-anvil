@@ -1,31 +1,37 @@
 # Upgrade guide
 
-## Unreleased desktop session IPC proposal
+## Unreleased
 
-**This compatibility break is a concrete, unapproved candidate in PR #307.**
-It changes the released id-only interactive desktop IPC. Root must complete
-whole-change review, obtain fresh independent review and verify all hosted CI,
-then ask the owner to explicitly approve the break before merging or releasing
-the candidate. This guide describes the candidate, not an activated release.
+This release changes two groups of desktop IPC commands. Both changes only
+affect code that calls the desktop's Tauri commands directly: the bundled
+Workbench and import dialog already use the new shapes, and the `anvil` CLI,
+its output and the domain event shapes are unchanged. Calls in the old shapes
+fail to decode and do nothing.
 
-The candidate requires `attemptId` for `session_open`, `session_send` and
-`session_cancel`. An OPEN without it is no longer accepted: native code does
-not generate a hidden attempt. Missing or non-string identity fails JSON
-decoding before admission, context building or engine work. OPEN validates the
-UUID before registration; SEND/CANCEL require the exact string registered by
-OPEN and reject an identity that does not own the current slot. Profile/epoch
-and exact-slot checks continue to apply after admission.
+### Interactive session attempts
 
-An execution id can be reused once its slot retires, while the old renderer
-console can remain visible until history finalization and completion delivery.
-The attempt identifies which open that console owns. A SEND from it must not
-control the replacement, even if the invocation first reaches native admission
-after replacement. This does not depend on Tauri invocation reordering.
+`session_open`, `session_send` and `session_cancel` now require an
+`attemptId` alongside the `executionId`.
 
-Direct callers must generate a fresh UUID attempt for each OPEN, retain both
-identities, and pass the same `attemptId` string to every SEND and CANCEL for
-that open. A reconnect uses a new attempt even when reusing an `executionId`.
-For example, with an existing `SendInput` named `input`:
+| Command | Before | After |
+| --- | --- | --- |
+| `session_open` | `{ input, executionId }` | `{ input, executionId, attemptId }` |
+| `session_send` | `{ executionId, command }` | `{ executionId, attemptId, command }` |
+| `session_cancel` | `{ executionId }` | `{ executionId, attemptId }` |
+
+- `attemptId` is a UUID string. Generate a fresh one for every OPEN, including
+  a reconnect that reuses an `executionId`. The nil UUID is rejected.
+- Pass the same `attemptId` string to every SEND and CANCEL for that open.
+  A SEND or CANCEL whose attempt does not own the current session for its
+  `executionId` is refused with "the session is no longer open".
+- Keep the attempt that belongs to the console or callback that issues a
+  command. Do not look up a newer attempt by execution id: the attempt is
+  what stops a late command from an old console from controlling a newer
+  session that reuses its execution id. The native side does not remember
+  earlier attempts, so this only holds if each OPEN uses a fresh one.
+- OPEN still returns the execution-id string. Session command bodies are
+  unchanged; for example close is `{ command: "close", code: 1000, reason: "" }`
+  and TCP half-close is `{ command: "half_close" }`.
 
 ```ts
 import { invoke } from "@tauri-apps/api/core";
@@ -35,7 +41,7 @@ const attemptId = crypto.randomUUID();
 const identity = { executionId, attemptId };
 
 const openedId = await invoke<string>("session_open", { input, ...identity });
-// openedId remains executionId; it is not an attempt identity or an object.
+// openedId is still executionId.
 await invoke<void>("session_send", {
   ...identity,
   command: { command: "send_text", text: "hello" },
@@ -43,82 +49,59 @@ await invoke<void>("session_send", {
 await invoke<void>("session_cancel", identity);
 ```
 
-Every SEND command, including `close`, `half_close`, `ping` and binary sends,
-uses that same identity. Command bodies and protocol support are unchanged;
-for example TCP half-close uses `{ command: "half_close" }`, and close uses
-`{ command: "close", code: 1000, reason: "" }`. Keep the attempt that belongs
-to the originating console/callback; do not substitute a newer attempt found
-by execution id when an old action runs.
+Interactive-session `execution-event` packets and `session-ended` packets
+now carry `attempt_id` beside `execution_id`:
 
-The bundled Workbench already passes an explicit attempt to OPEN and CANCEL;
-the candidate also passes it through the SEND callback and desktop API. No
-manual migration is needed for that bundled renderer. Direct IPC integrations
-must update all three calls together. OPEN's return remains a string; no
-string-to-object return migration is proposed.
+```ts
+// session-ended, before
+{ execution_id: string; view?: ExecutionView | null; error?: string | null }
+// session-ended, after
+{ execution_id: string; attempt_id: string; view?: ExecutionView | null; error?: string | null }
+```
 
-Desktop interactive `execution-event` envelopes and `session-ended` packets
-carry snake-case `attempt_id` alongside `execution_id`. Match both identities
-before displaying messages or retiring an attempt. Manual-send events, domain
-and CLI event shapes, and non-interactive RPC arguments are unchanged by this
-proposal; it requires no shared generated-schema change.
+Match both ids before showing a session's messages or retiring its controls.
+Manual-send `execution-event` packets have no `attempt_id` and are unchanged.
 
+### Spec import review approvals
 
-### Qualification of the code candidate
+An import or reimport now applies only the source and plan that were
+reviewed. The review commands return an `approval`, and the apply commands
+require it back unchanged:
 
-Root reviewed the complete change and every repair delta at code head
-`3a804efaea7d7431dd1c2fba65e86a4251f16b84`. Fresh independent security and
-concurrency reviews, including the final full-queue cancellation proof review,
-reported no remaining findings. All 14 check runs came from GitHub Actions and
-completed successfully; all seven required branch checks passed. The hosted
-[CI](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210166266),
-[Desktop E2E](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210166268)
-and [Lab](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37210166272)
-workflows all completed successfully on that exact code head.
+```ts
+type SpecApproval = {
+  binding: { source_sha256: string; plan_sha256: string };
+  scope: string;
+};
+```
 
-Linux and macOS ran 68 desktop library tests, including the production decoder's
-missing/empty attempt rejection before effects, the valid-attempt control,
-stale native SEND/CANCEL admission, an actual 256-entry engine queue interrupted
-by both cancellation and lock, late callback/reply fences, same-inode source
-changes, and lock/unlock between approval verification and native writes.
-Windows ran the workspace Rust checks and the compiled desktop E2E suite; this
-is not a claim that the desktop library unit tests ran on Windows. The real
-Tauri/webview E2E suites passed all 10 spec files on each of Linux, macOS and
-Windows, including the migrated native file-grant session invocation and locked
-backend rejection. The E2E binaries were also correctly refused by the release
-checker because they contain deliberate test hooks. They are not release assets.
+| Command | Before | After |
+| --- | --- | --- |
+| `spec_preview` | `{ input, options }` returns the preview | `{ input, options, target }` returns the preview plus `binding` and `approval` |
+| `spec_import` | `{ input, options, target }` | `{ input, options, target, approval }` |
+| `spec_reimport_plan` | `{ importId, input }` returns the plan | `{ importId, input }` returns `{ plan, approval }` |
+| `spec_reimport_apply` | `{ importId, input, approval: ReimportApproval }` | `{ importId, input, decisions: ReimportApproval, approval: SpecApproval }` |
 
-The subsequent documentation head
-`2724afb186ebf6d982ca9a197c813989b2640e1d` also completed hosted
-[CI](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956183),
-[Desktop E2E](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956185)
-and [Lab](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37211956118)
-successfully. These results and reviews qualify those preceding exact heads.
+- `spec_preview` needs the destination (`target`) up front, because the
+  approval is bound to it. Pass the same `input`, `options` and `target` to
+  `spec_import`.
+- In `spec_reimport_apply`, the overwrite/delete choices
+  (`{ overwrite, delete, overwrite_scope, delete_scope }`) moved from
+  `approval` to `decisions`; `approval` is now the `SpecApproval` returned by
+  `spec_reimport_plan`.
+- An approval stops being valid when the source bytes, the options, the
+  destination, the source file grant or the stored import change, and when
+  the profile locks, unlocks or switches, or the desktop restarts. Apply then
+  fails without writing anything; preview or plan again.
 
-The preceding candidate `32c092244d9c38d186375d61bf24363d46a98c73` integrated
-main `c19c0a6abba896bfec972b3e083179c55ef8e38c` (diagnostic-import PR #312)
-into that documentation head. The native IPC registration retains the execution
-command wrapper and adds the stateless `diagnostic_import_preview` command to
-its generated fallback handler. Imported diagnostic JSON grants no request,
-vault, identity, persistence, private-file or network authority. The candidate's
-session attempt binding, payload epoch fences and checked spec approval order
-are unchanged.
+```ts
+const target = { kind: "new_workspace" };
+const preview = await invoke("spec_preview", { input, options, target });
+await invoke("spec_import", { input, options, target, approval: preview.approval });
 
-The current candidate merges main
-`07f7182b3aa6c244140b7ec3edab5a1668318c96`, retaining its published Edge 0.9.11
-contracts and catalog, environment flags, release locks, dependency lockgraphs,
-license manifest and CI action pins. The stateless diagnostic importer and the
-candidate's execution wrapper, session attempt binding, payload epoch fences,
-sealed IPC authorization and checked spec approval order remain intact. Both
-main's adoption records and this proposal remain under Unreleased; released
-changelog history is unchanged.
+const { plan, approval } = await invoke("spec_reimport_plan", { importId, input });
+const decisions = { overwrite: [], delete: [], overwrite_scope: [], delete_scope: [] };
+await invoke("spec_reimport_apply", { importId, input, decisions, approval });
+```
 
-This integration has static inspection and diff checks only. Fresh hosted CI
-and root review of the new exact head remain pending; the preceding green
-results do not qualify it. Owner decisions on the UUID command/event migration
-and supported vault/spec behavior also remain pending. Approval of the migration
-would adopt the explicit attempt identity for all three released IPC calls and
-the matching desktop interactive event envelopes. Keeping the released id-only
-contract requires a different stale-invocation design. No approval, supported
-policy adoption or published patched release is inferred from this integration
-or passing CI. Neither GHSA-mg45-vx3j-wmq8 nor GHSA-3793-f3j3-mjpr is closed by
-this candidate qualification.
+See [Imports](import.md#native-reviewapply-contract) for the full contract.

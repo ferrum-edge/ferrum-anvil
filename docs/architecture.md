@@ -71,99 +71,61 @@ CLI (`anvil`) = same anvil-app services without a webview.
   so a committed write is not reported as `LOCKED`.
 
 - **Payload enqueue shares the lock boundary.** Sends, interactive sessions,
-  collection-run events, effective-request previews and MCP discovery capture
-  `state::PayloadFence`: the admitted unlocked `Arc<App>` and lock epoch.
-  `payload_gate` gives serialization/enqueue and spec commits shared access;
-  lock/unlock/profile publication use exclusive access. Unlocked callbacks
-  therefore retain session messages and the runner's start/end/failure events
-  while another reply or spec commit is running. Lock closes admission and
-  advances the epoch under exclusive access, then releases the gate before
-  dropping the key and clearing engine caches. A callback during cleanup
-  refuses before app/key access. A separate transition mutex prevents unlock
-  or publication from overtaking cleanup. An old fence remains invalid after
-  unlock, even for the same profile. Final views and detailed errors use
-  `deliver_payload` after work/history finalization; no async wait holds the
-  gate. The native execution/session commands use an explicit Tauri IPC
-  responder under this gate. A check followed by a generated async command
-  return would leave reply enqueue outside the boundary.
-- **Session controls own an admitted slot.** A pending open publishes its
-  slot and cancellation token under its admission, then fills the same slot
-  with the engine handle. Send/cancel IPC captures that exact slot and the
-  invocation profile/epoch before scheduling. Both `session_send` and
-  `session_cancel` require the originating `attemptId` and compare it before
-  capturing a slot. A command from an old console cannot capture a replacement
-  even if it first reaches native admission after the old slot has retired,
-  within the same epoch and before the old completion reaches the renderer.
-  This guarantee does not assume Tauri invocation reordering. Missing attempt
-  identity fails JSON decoding before admission or engine work.
-  The control checks its admitted state under shared delivery access at each
-  synchronous effect. A stale control cannot drive a new pending or live slot
-  with a reused renderer execution id, even within the same epoch. A finalizer
-  removes only its own slot.
-- **Session completion owns an attempt.** After engine/history finalization,
-  completion checks the exact native slot and holds the session registry mutex
-  through enqueue. A replacement already registered under the same execution
-  id suppresses both the full completion and the scalar `LOCKED` fallback.
-  Retired, unreplaced attempts still complete normally, including scalar
-  retirement after lock or a profile transition. `session_open` requires
-  a renderer `attemptId`, independent of `executionId`, and echoes it as
-  `attempt_id` in every `session-ended` packet. Workbench matches both before
-  retiring controls, showing a view/error or refreshing history. The open
-  result remains the execution-id string. An id-only OPEN is rejected before
-  context/engine work; there is no generated hidden attempt fallback. Direct
-  callers must generate a fresh UUID attempt and pass that same string to
-  OPEN/SEND/CANCEL, as the bundled Workbench does. This is a concrete,
-  **unapproved breaking compatibility proposal** for the released id-only
-  desktop IPC, not an approved release contract. Root whole-change review,
-  fresh independent review and all hosted CI must pass before root asks the
-  owner to approve the break; the candidate must not be merged or released
-  before that approval. See the [upgrade guide](upgrade-guide.md).
-  Pointer-checked cleanup and recording into the originally admitted profile
-  are unchanged.
-- **Session cancellation cannot wait behind its own send.** Each pending/open
-  slot has an independent cancellation token. Cancellation signals it under
-  the gate before awaiting the slot, interrupting both a slot wait and a
-  bounded command-queue send. Lock retires and signals the old slots during
-  cleanup. The engine abort then acquires the released slot. Each poll of the
-  real engine queue send checks the admission/slot and enqueues under shared
-  access; a pending poll releases the synchronous gate before waiting. The
-  existing cancellation grace, watcher polling, bounded transcripts and
-  history policy remain in force. An unreplaced session finalization refused
-  by the payload fence still sends its execution id and attempt id,
-  `view: null` and scalar `LOCKED`
-  status; run completion may send its id and scalar status too. Load progress
-  metrics/report holding keep their existing scalar/redacted reporting policy.
+  collection-run events, effective-request previews, MCP discovery and spec
+  import/reimport commits capture a `state::PayloadFence`: the admitted
+  unlocked `Arc<App>` and lock epoch. Each callback, reply or commit
+  validates its fence and enqueues under shared access to `payload_gate`, so
+  they run beside each other. Lock and profile publication bump the epoch
+  under exclusive access, and unlock also takes it. An enqueue therefore
+  either finishes before a lock or is refused after it, and an old fence
+  stays invalid after unlock, even for the same profile. Lock releases the
+  gate before dropping the key and clearing engine caches; a callback that
+  fires during that cleanup sees the closed gate and returns before touching
+  the app, and a separate transition mutex keeps unlock or publication from
+  overtaking cleanup. The send, session, effective-request and MCP discovery
+  commands reply through an explicit Tauri IPC responder under the gate, and
+  final views and detailed errors are delivered with `deliver_payload` after
+  work and history finalization; no async wait holds the gate. Other
+  commands that run through `commands::blocking` (history reads and spec
+  previews, for example) check the epoch when their work finishes, but their
+  reply is enqueued later by Tauri's generated responder, so a lock in that
+  short interval can still be followed by the reply to work that completed
+  while unlocked.
+- **Session controls own an admitted attempt.** `session_open`,
+  `session_send` and `session_cancel` take an `attemptId` (a UUID, not the
+  nil UUID) besides the `executionId`. An open registers a pending slot
+  holding its attempt and cancellation token under its admission, then fills
+  that slot with the engine handle. Send and cancel resolve the slot at IPC
+  admission only if both the execution id and the attempt match, and recheck
+  that exact slot at each synchronous effect. Because an execution id can be
+  reused once its slot retires, the attempt is what keeps a late command
+  from an old console from driving a newer session with the same execution
+  id. That holds when each open uses a fresh attempt: the native side
+  rejects the nil UUID but does not track earlier attempts, so freshness is
+  the caller's responsibility. The bundled Workbench generates a new random
+  UUID for every open. Missing or malformed identity fails before any engine
+  work, and a finalizer removes only its own slot.
+- **Session completion owns an attempt.** After engine and history
+  finalization, completion checks its exact slot and holds the session
+  registry through enqueue, so a replacement registered under the same
+  execution id suppresses both the full completion and the scalar `LOCKED`
+  fallback. A retired, unreplaced attempt still completes normally,
+  including the scalar packet after a lock or profile switch. Interactive
+  `execution-event` packets and every `session-ended` packet carry
+  `attempt_id` beside `execution_id`; Workbench matches both before showing
+  messages, retiring controls or showing a result. Manual-send events and the
+  domain and CLI event shapes are unchanged.
+- **Session cancellation cannot wait behind its own send.** Each slot has its
+  own cancellation token. Cancellation signals it under the gate before
+  waiting for the slot, which interrupts a send blocked on the bounded
+  engine command queue; lock signals every slot it retires the same way.
+  Each poll of that queue send rechecks the admission and slot under shared
+  access, and releases the gate before waiting.
 
-The boundary is native enqueue, before the actual lock operation can finish.
-It cannot retract a payload already queued to the webview before that boundary.
-The session completion generation prevents an old full or scalar packet from
-being newly enqueued after a replacement owns the slot. A packet enqueued
-before replacement registration or lock/profile teardown can still be delivered
-afterward; Workbench's attempt identity checks prevent that packet from
-retiring or replacing the newer attempt's state. They do not erase a view
-already displayed for the old attempt before teardown.
-
-For the desktop only, interactive-session `execution-event` packets wrap the
-domain event with an `attempt_id`; Workbench shows session messages only when
-the attempt matches, while attempt-tagged progress is excluded from the manual
-progress display. Manual-send events remain raw domain events, and the domain
-and CLI event shapes are unchanged. Workbench's console callback carries its
-own execution and attempt UUIDs through the desktop API for every command,
-including text, close and half-close. Ordinary connections still generate fresh
-execution UUIDs. Native tests pause old invocations before admission and replace
-their execution id with pending/live attempts across same-epoch retirement,
-lock/unlock and profile publication. Matching controls, including controls
-admitted while pending, exercise the real engine queue and TCP bytes, write FIN,
-continued reads and local close. Completion tests call the production
-finish/history and completion sinks with real engine handles. The renderer
-fake also retains the old console while another tab opens the replacement;
-its substituted backend and delayed-event receivers do not prove end-to-end
-Tauri/webview transport ordering. No renderer predicate supplies the security
-fence. Gate acquisition precedes profile/key/grant access; finalizers complete
-engine/history work before taking it. Cache cleanup runs with admission closed and without the
-delivery gate; callbacks reject before acquiring the app guard, so a cache
-owner cannot wait for the lock operation that is clearing that cache. The
-existing PEM grant claim and revocation mutex/transaction ordering is unchanged.
+The boundary is native enqueue. A payload already queued to the webview
+before a lock or a replacement cannot be retracted; Workbench's attempt
+checks keep such a late packet from retiring or replacing a newer attempt,
+but do not erase a view it already showed for the old one.
 
 ### Store work
 

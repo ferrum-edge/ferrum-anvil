@@ -230,22 +230,11 @@ impl App {
         })
     }
 
-    /// Desktop review/apply path. Verify the review against this immutable
-    /// byte slice and options before any checkpoint or mutation. The normal
-    /// import then parses the SAME slice in a fresh, independent namespace.
-    /// Trusted byte-owning callers (CLI/internal services) use spec_import.
-    pub fn spec_import_reviewed(
-        &self,
-        bytes: &[u8],
-        file_name: &str,
-        opts: &ImportOptions,
-        target: SpecTarget,
-        binding: &SpecBinding,
-    ) -> Result<SpecImported> {
-        let result = reviewed_import_result(bytes, opts, binding)?;
-        self.persist_import(bytes, file_name, target, result)
-    }
-
+    /// Desktop review/apply path. Verify the review against this owned byte
+    /// buffer and options before any checkpoint or mutation; the import then
+    /// parses the SAME buffer in a fresh, independent namespace. Trusted
+    /// byte-owning callers (CLI/internal services) use spec_import.
+    ///
     /// Prepare outside the desktop delivery gate; source I/O and parsing
     /// cannot delay its lock boundary. The final worker owns this snapshot.
     pub fn prepare_spec_import_reviewed(
@@ -449,24 +438,10 @@ impl App {
         Ok(SpecReimportReview { binding: r.binding()?, plan: r.plan })
     }
 
-    /// Check the supplied review and persist the very same parsed result and
-    /// bytes. No source reread or second plan is allowed between verification
-    /// and mutation. The transaction still checks the stored baseline.
-    pub fn spec_reimport_apply_reviewed(
-        &self,
-        import_id: &Id,
-        bytes: &[u8],
-        file_name: &str,
-        approval: &ReimportApproval,
-        binding: &SpecBinding,
-    ) -> Result<usize> {
-        let r = self.reimport(import_id, bytes)?;
-        if &r.binding()? != binding {
-            return Err(AppError::Invalid(REVIEW_CHANGED.into()));
-        }
-        self.apply_reimport(r, bytes, file_name, approval)
-    }
-
+    /// Check the supplied review; the prepared reimport is later persisted
+    /// as the very same parsed result and bytes. No source reread or second
+    /// plan is allowed between verification and mutation. The transaction
+    /// still checks the stored baseline.
     pub fn prepare_spec_reimport_reviewed(
         &self,
         import_id: &Id,

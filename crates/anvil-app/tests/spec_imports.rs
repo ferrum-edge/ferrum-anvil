@@ -1329,11 +1329,13 @@ fn reviewed_import_verifies_the_snapshot_and_does_not_reopen_its_source() {
     // Mutate the on-disk inode after the native read. Apply owns `bytes`, and
     // stores exactly that snapshot, without a digest-then-reread interval.
     std::fs::write(&path, b"curl https://unreviewed.invalid").unwrap();
-    let done = app.spec_import_reviewed(&bytes, "source.txt", &opts, SpecTarget::NewWorkspace, &binding).unwrap();
+    let name = "source.txt".to_string();
+    let prepared = app.prepare_spec_import_reviewed(bytes.clone(), name.clone(), &opts, SpecTarget::NewWorkspace, &binding).unwrap();
+    let done = app.apply_prepared_spec_import(prepared).unwrap();
     assert_eq!(app.spec_original(&done.import_id).unwrap(), bytes);
     let before = app.backup_contents().unwrap();
     let changed = std::fs::read(&path).unwrap();
-    assert!(app.spec_import_reviewed(&changed, "source.txt", &opts, SpecTarget::NewWorkspace, &binding,).is_err());
+    assert!(app.prepare_spec_import_reviewed(changed, name, &opts, SpecTarget::NewWorkspace, &binding).is_err());
     assert_eq!(app.backup_contents().unwrap(), before);
 }
 

@@ -2,41 +2,27 @@
 
 ## [Unreleased]
 
-### Breaking (unapproved proposal)
+### Breaking
 
-- Interactive desktop RPC: `session_open`, `session_send` and `session_cancel`
-  require an explicit UUID `attemptId` in addition to `executionId`. Direct
-  callers must generate a fresh attempt for each OPEN and pass that same string
-  to every SEND/CANCEL for it. Missing identity fails before engine work;
-  stale SEND/CANCEL cannot capture a replacement with the same execution id.
-  The candidate rejects released id-only OPEN/SEND/CANCEL calls and removes
-  OPEN's hidden native attempt fallback. OPEN still returns the execution-id
-  string, and session command bodies and domain/CLI event shapes are unchanged.
-  The bundled Workbench supplies the identity. See the
-  [upgrade guide](docs/upgrade-guide.md). This compatibility break is not owner
-  approved: root whole-change review, fresh independent review and all hosted
-  CI must pass before root asks the owner to approve it. Do not merge or release
-  the candidate before that approval.
-  Code head `3a804efaea7d7431dd1c2fba65e86a4251f16b84` passed root and fresh
-  independent review and all 14 hosted checks across CI, Desktop E2E and Lab.
-  The [upgrade guide](docs/upgrade-guide.md#qualification-of-the-code-candidate)
-  records the exact platform evidence and remaining human owner decision.
-  That evidence predates the integration of current main's diagnostic importer;
-  the integrated candidate still needs fresh hosted CI and root review.
+- Desktop IPC: `session_open`, `session_send` and `session_cancel` require an
+  `attemptId` (a fresh, non-nil UUID for each open) alongside `executionId`,
+  and SEND/CANCEL must pass the `attemptId` of the open they control.
+  Interactive-session `execution-event` and `session-ended` packets carry the
+  matching `attempt_id`. Calls without it are rejected before any work starts.
+  OPEN still returns the execution-id string; session command bodies and the
+  domain and CLI event shapes are unchanged. The bundled Workbench already
+  does this. See the
+  [upgrade guide](docs/upgrade-guide.md#interactive-session-attempts).
+- Desktop IPC: spec import and reimport apply only what was reviewed.
+  `spec_preview` requires `target` and returns an `approval`, which
+  `spec_import` now requires. `spec_reimport_plan` returns `{ plan, approval }`
+  instead of a bare plan, and `spec_reimport_apply` takes the overwrite/delete
+  choices as `decisions` (previously `approval`) plus that `approval`. The
+  bundled import dialog already does this; the CLI is unchanged. See the
+  [upgrade guide](docs/upgrade-guide.md#spec-import-review-approvals).
 
 ### Fixed
 
-- Desktop session and execution payloads are admitted under an unlocked
-  profile and lock epoch, with event/reply enqueue coordinated with lock and
-  profile publication. Late transcripts, final bodies and detailed errors
-  are dropped after lock, lock/unlock or profile switch; cancellation can
-  interrupt a session send waiting on its bounded command queue
-  (GHSA-mg45-vx3j-wmq8).
-- Native spec import/reimport approvals bind exact source bytes and the
-  canonical reviewed graph/plan to the desktop instance, profile, epoch,
-  source grant and destination. Apply verifies an owned native snapshot and
-  persists that same snapshot; same-inode edits and stale-plan approvals
-  are refused before writes (GHSA-3793-f3j3-mjpr).
 - Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
   assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
   UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
@@ -265,6 +251,15 @@
 
 ### Security
 
+- Desktop: session, send and collection-run payloads (live messages, final
+  responses and detailed errors) from work started before a lock or profile
+  switch are no longer delivered after it, even once the profile is unlocked
+  again. Cancelling a session also interrupts a send waiting on its command
+  queue (GHSA-mg45-vx3j-wmq8).
+- Desktop: a spec import or reimport applies exactly the source bytes and
+  plan that were reviewed, for the same profile session and destination. A
+  source that changed after review, or a stale review, is refused before
+  anything is written (GHSA-3793-f3j3-mjpr).
 - Desktop development dependencies: an npm override moves WebdriverIO's
   `@puppeteer/browsers` from 2.13.2 to 3.2.3, which drops `extract-zip`
   2.0.1 (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv; no patched release) and

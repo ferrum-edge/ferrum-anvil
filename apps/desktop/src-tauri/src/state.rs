@@ -296,6 +296,18 @@ impl DesktopState {
         Ok(deliver())
     }
 
+    /// Tests only: wait until a transition has claimed the gate's writer bit.
+    /// parking_lot sets it before waiting for readers to leave, so a caller
+    /// still holding shared access knows that transition is blocked on it.
+    #[cfg(test)]
+    pub(crate) fn await_gate_writer(&self, bound: std::time::Duration) {
+        let deadline = Instant::now() + bound;
+        while !self.payload_gate.is_locked_exclusive() {
+            assert!(Instant::now() < deadline, "no transition reached the delivery gate");
+            std::thread::yield_now();
+        }
+    }
+
     /// Hold a load report of `vault` that could not be saved because that
     /// profile is locked, and save it now if the profile is open again.
     pub fn hold_report(&self, vault: VaultId, report: LoadReport) {
@@ -725,13 +737,16 @@ pub(crate) mod tests {
             let lock_st = &st;
             let lock_log = &log;
             let locking = scope.spawn(move || {
-                locking_tx.send(()).unwrap();
                 lock_st.lock();
                 lock_log.lock().push("locked");
+                locking_tx.send(()).unwrap();
             });
-            locking_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            // The actual lock is now inside lock() and blocked on the gate
+            // that this paused delivery still holds; it cannot have advanced.
+            st.await_gate_writer(std::time::Duration::from_secs(10));
             assert_eq!(st.epoch(), fence.epoch);
-            assert!(st.payload_gate.try_write().is_none());
+            assert!(locking_rx.try_recv().is_err());
+            assert!(log.lock().is_empty());
             release_tx.send(()).unwrap();
             delivery.join().unwrap();
             locking.join().unwrap();

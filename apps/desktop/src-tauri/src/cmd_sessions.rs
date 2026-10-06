@@ -58,6 +58,8 @@ fn remove_slot(st: &DesktopState, execution_id: &str, slot: &SessionSlot) {
     }
 }
 
+const NIL_ATTEMPT: &str = "attemptId must be a fresh UUID, not the nil UUID";
+
 fn register_session<'a>(
     st: &'a DesktopState,
     fence: &PayloadFence,
@@ -65,7 +67,11 @@ fn register_session<'a>(
     attempt_id: &str,
 ) -> R<(PendingEntry, SessionRegistration<'a>)> {
     let exec_id = id(execution_id)?;
-    id(attempt_id)?;
+    // Freshness is the caller's obligation (Workbench uses a new random UUID
+    // per OPEN); the nil UUID is a fixed value and never a fresh attempt.
+    if id(attempt_id)?.is_nil() {
+        return Err(NIL_ATTEMPT.into());
+    }
     st.deliver_payload(fence, || {
         let mut sessions = st.sessions.lock();
         if sessions.contains_key(execution_id) {
@@ -406,6 +412,20 @@ mod tests {
         if let Some(session) = session {
             tokio::time::timeout(BOUND, session.finish()).await.expect("engine cancellation must finish");
         }
+    }
+
+    #[test]
+    fn nil_attempt_is_rejected_before_registration() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (app, _) = create(&st, "nil");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let fence = st.admit_payload().unwrap();
+        let execution_id = Id::new().to_string();
+        let rejected = register_session(&st, &fence, &execution_id, &Id::nil().to_string());
+        assert_eq!(rejected.err(), Some(NIL_ATTEMPT.to_string()));
+        assert!(st.sessions.lock().is_empty());
+        assert!(register_session(&st, &fence, &execution_id, &Id::new().to_string()).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

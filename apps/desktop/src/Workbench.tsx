@@ -131,6 +131,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // commits the tab update. Key by attempt so a rejected duplicate execution
   // id never displaces the running attempt's completion owner.
   const sessionAttempts = useRef(new Map<string, string>());
+  // Attempts whose tab closed while they ran: their completion has no tab to
+  // update, but still refreshes history and forgets the attempt's stop.
+  const detachedAttempts = useRef(new Map<string, string>());
 
   const notify = (m: string) => setToast(m);
   const fail = (e: unknown) => setToast(String((e as Error).message ?? e));
@@ -226,6 +229,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     const ended = onSessionEnded((e) => {
       const matches = (t: OpenTab) =>
         t.session?.execId === e.execution_id && t.session.attemptId === e.attempt_id;
+      if (detachedAttempts.current.get(e.attempt_id) === e.execution_id) {
+        detachedAttempts.current.delete(e.attempt_id);
+        stopped.current.delete(e.attempt_id);
+        void loadHistoryRef.current?.();
+        return;
+      }
       // Native enqueue can precede replacement while webview delivery follows
       // it. Only this renderer attempt may retire controls or show its result.
       if (sessionAttempts.current.get(e.attempt_id) !== e.execution_id) return;
@@ -479,6 +488,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       );
     } catch (e) {
       sessionAttempts.current.delete(attemptId);
+      detachedAttempts.current.delete(attemptId);
       opening.current.delete(attemptId);
       earlyAborts.current.delete(attemptId);
       // Only this open's session: the tab may hold a newer one by now.
@@ -548,6 +558,13 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     }
   };
 
+  // A closing tab's session keeps its completion owner, without the tab.
+  const detachSession = (session: OpenTab["session"]) => {
+    if (session && sessionAttempts.current.delete(session.attemptId)) {
+      detachedAttempts.current.set(session.attemptId, session.execId);
+    }
+  };
+
   const closeTab = async (id: string) => {
     const t = tabsRef.current.find((x) => x.req.id === id);
     if (!t) return;
@@ -568,7 +585,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     }
     const cur = tabsRef.current.find((x) => x.req.id === id);
     if (cur && !(await stopWork(cur))) return;
-    if (cur?.session) sessionAttempts.current.delete(cur.session.attemptId);
+    detachSession(cur?.session);
     setTabs((ts) => ts.filter((x) => x.req.id !== id));
     setActive((a) => (a === id ? (tabsRef.current.find((x) => x.req.id !== id && x.wsId === t.wsId)?.req.id ?? null) : a));
   };
@@ -589,9 +606,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       if (results.includes(false)) return;
       if (n.kind === "folder") await api.deleteFolder(n.id);
       else await api.deleteRequest(n.id);
-      for (const t of gone) {
-        if (t.session) sessionAttempts.current.delete(t.session.attemptId);
-      }
+      for (const t of gone) detachSession(t.session);
       setTabs((ts) => ts.filter((t) => !ids.has(t.req.id)));
       setActive((a) => (a && ids.has(a) ? null : a));
       await loadTree();
