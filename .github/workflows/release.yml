@@ -299,6 +299,11 @@ jobs:
 
       - name: Build CLI
         shell: bash
+        env:
+          # Same floor as the desktop bundle (minimumSystemVersion 11.0): linked-file
+          # reads rely on O_NOFOLLOW_ANY, which older macOS kernels lack. rustc reads
+          # this only for Apple targets.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --locked --release -p anvil-cli --target "$TARGET"
 
       - name: Collect artifacts

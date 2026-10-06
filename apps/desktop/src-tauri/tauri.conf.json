@@ -48,6 +48,9 @@
       "../../../LICENSE": "licenses/LICENSE",
       "../../../LICENSE-COMMERCIAL.md": "licenses/LICENSE-COMMERCIAL.md",
       "../../../THIRD_PARTY_LICENSES.md": "licenses/THIRD_PARTY_LICENSES.md"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
     }
   },
   "plugins": {
