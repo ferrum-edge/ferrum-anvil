@@ -267,7 +267,9 @@
   export over any limit is refused in preview and write, naming the entry,
   and is never split. A file over 128 MiB is now refused when it is attached.
   An export that holds such a file attached earlier fails, naming the file
-  and the request or dataset that holds it.
+  and the request or dataset that holds it. So does an export whose attached
+  file is a ZIP64 archive that would carry its end records into the bundle,
+  which import would refuse.
 
   **Migration:** bundles exported by 0.1.x that are over 256 MiB, have an
   entry over 128 MiB, or hold more than 4 Mi JSON values no longer import.

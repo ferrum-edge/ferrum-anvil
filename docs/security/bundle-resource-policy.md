@@ -88,11 +88,24 @@ Without a value budget, a share-safe bundle of about 1 MiB could expand to about
 - A history entry of `0` lines did the same, as did, about 8 to 12 times over,
   manifests and checksum lists made of empty strings.
 
-Counting values from the text keeps parsing proportional to the byte budget:
+Counting values from the text keeps parsing proportional to the byte budget,
+though not small:
 
-- **Retained:** at most 4 Mi values × 80 bytes, about 320 MiB, beside the
-  256 MiB byte budget.
-- **Transient:** briefly about twice that, while the largest array grows.
+- **Parsed:** at most 4 Mi values × 80 bytes, about 320 MiB, beside the
+  256 MiB byte budget. While the largest array grows it briefly takes up to
+  about twice that.
+- **Typed:** the parsed objects are then converted into typed records, while
+  the parsed tree is consumed. A typed record can cost far more than the
+  values that describe it: a minimal request revision of about 13 values
+  becomes a full request with every default setting, an estimated 1 to
+  2.5 KB. A bundle that spends the whole budget on such records (about
+  320,000 of them) could reach an estimated 0.6 to 1 GiB of typed objects,
+  plus growth while their list fills.
+- **Worst case:** so the parse and conversion of `objects.json` may peak at
+  up to about 1 GiB, beside the inflated bytes and, for an encrypted bundle,
+  key derivation. These are estimates from struct sizes, not measurements:
+  no hosted case builds this shape yet. Real exports, at about 17 bytes per
+  value (below), stay far from it.
 
 The check is lexical and runs before any parse, so typed parses (the manifest,
 checksums and vault payload) are covered as well as `Value` trees.
@@ -122,7 +135,12 @@ or tens of thousands of requests, before history.
 - Entries above the ratio rule are rewritten as Stored, so a highly compressible
   valid export still opens.
 - The finished archive is checked against the import preflight before its bytes
-  are returned.
+  are returned, including the end-record check. An attached file that is itself
+  a ZIP64 archive can carry its ZIP64 end records into the bundle unchanged
+  (an attachment over the ratio rule is stored, and deflate keeps incompressible
+  data as it is). Import refuses any bundle holding one, so export refuses it
+  too, naming the file and the request or dataset that holds it. Re-create that
+  archive without ZIP64, or link it instead of attaching it.
 - Limit errors name entries and budgets, never secret values.
 
 ## Attachments
@@ -237,6 +255,10 @@ measurements of released desktop binaries or of a corpus of real exports.
   That indexing is bounded by the file.
 - **Transient growth.** Peak memory is above the retained figures while arrays
   grow, and it includes the allocator's own overhead.
+- **Typed conversion.** The value budget bounds the parsed tree, not the typed
+  records built from it. For records that are small as JSON but large as typed
+  structs, conversion may take an estimated 0.6 to 1 GiB (see "Why a JSON
+  value budget"). It is bounded by the value budget, but not measured.
 - **Concurrency.** The desktop app runs one import preview or apply at a time,
   so previews do not multiply these costs. Export previews work on local data
   only.

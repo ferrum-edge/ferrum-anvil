@@ -29,7 +29,9 @@ pub const MAX_RATIO: u64 = 200;
 /// JSON entry (manifest, checksum list, objects, history and vault payload).
 /// Parsed JSON costs far more than its text: a two-byte `0,` becomes an
 /// 80-byte `serde_json::Value`. Entries are counted without parsing, before
-/// serde allocates anything, so parsing retains at most about 320 MiB.
+/// serde allocates anything, so the parsed tree is at most about 320 MiB.
+/// Converting it into typed objects can cost more: an estimated 1 GiB at most,
+/// for minimal request revisions (see docs/security/bundle-resource-policy.md).
 pub const MAX_JSON_NODES: u64 = 4 * 1024 * 1024;
 const FORMAT: &str = "anvil-bundle";
 const MANIFEST_ENTRY: &str = "manifest.json";
@@ -345,7 +347,13 @@ impl NodeCounter {
 fn charge_nodes(name: &str, nodes: u64, remaining: &mut u64, limits: ReadLimits) -> Result<(), BundleError> {
     let Some(left) = remaining.checked_sub(nodes) else {
         let max = limits.nodes;
-        return Err(BundleError::Limits(format!("entry '{name}' exceeds the {max}-value JSON budget ({nodes} values)")));
+        if nodes > max {
+            return Err(BundleError::Limits(format!("entry '{name}' exceeds the {max}-value JSON budget ({nodes} values)")));
+        }
+        // Earlier entries spent the budget this one would need.
+        let used = max.saturating_sub(*remaining);
+        let why = format!("entry '{name}' ({nodes} values) would take the bundle's JSON values over the {max}-value budget");
+        return Err(BundleError::Limits(format!("{why}; earlier entries already used {used}")));
     };
     *remaining = left;
     Ok(())
@@ -578,6 +586,13 @@ fn write_prepared(
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(&bytes))?;
     preflight(&mut archive, &bytes, limits)?;
+    // Import checks every end record before zip reads the directory, and an
+    // attachment stored as it is (or deflated to raw blocks) keeps any end
+    // record it holds. Refuse here what import would, rather than write a
+    // bundle that cannot be imported.
+    if let Some((at, error)) = end_record_problem(&bytes, limits) {
+        return Err(export_end_record_error(graph, &mut archive, at, error));
+    }
     drop(archive);
     let preview = ExportPreview {
         manifest,
@@ -690,6 +705,11 @@ const MAX_DIRECTORY_HEADER_BYTES: u64 = 46 + 255 + 4096;
 // it, and only ZIP64 declares more than 65,535 entries), and the last one must
 // declare at most `limits.entries` entries in a directory that fits before it.
 fn check_end_records(bytes: &[u8], limits: ReadLimits) -> Result<(), BundleError> {
+    end_record_problem(bytes, limits).map_or(Ok(()), |(_, error)| Err(error))
+}
+
+// The last end record in `bytes` that import refuses, with its offset.
+fn end_record_problem(bytes: &[u8], limits: ReadLimits) -> Option<(usize, BundleError)> {
     let mut last = true;
     let mut end = bytes.len();
     while let Some(at) = bytes[..end].windows(4).rposition(|w| w == b"PK\x05\x06") {
@@ -704,17 +724,36 @@ fn check_end_records(bytes: &[u8], limits: ReadLimits) -> Result<(), BundleError
         let (on_disk, entries, size, offset) = (u16_at(8), u16_at(10), u32_at(12), u32_at(16));
         let zip64 = entries == 0xFFFF || size == 0xFFFF_FFFF || offset == 0xFFFF_FFFF;
         if zip64 && at >= 20 && bytes[at - 20..].starts_with(b"PK\x06\x07") {
-            return Err(BundleError::Limits("ZIP64 archives are not supported".into()));
+            return Some((at, BundleError::Limits("ZIP64 archives are not supported".into())));
         }
         if std::mem::take(&mut last) {
             let declared = on_disk.max(entries);
             if declared > limits.entries as u64 || size > at as u64 || size > declared * MAX_DIRECTORY_HEADER_BYTES {
                 let what = format!("{declared} entries in a {size}-byte central directory (max {} entries)", limits.entries);
-                return Err(BundleError::Limits(what));
+                return Some((at, BundleError::Limits(what)));
             }
         }
     }
-    Ok(())
+    None
+}
+
+// Name the attachment whose bytes hold the end record at `at` that import
+// refuses: the entry starting last at or before it. Any other entry was
+// written by the exporter, so its error is returned unchanged.
+fn export_end_record_error<R: Read + Seek>(
+    graph: &PortableGraph,
+    archive: &mut zip::ZipArchive<R>,
+    at: usize,
+    error: BundleError,
+) -> BundleError {
+    let holder = (0..archive.len())
+        .filter_map(|index| archive.by_index_raw(index).ok().map(|f| (f.header_start(), f.name().to_string())))
+        .filter(|(start, _)| *start <= at as u64)
+        .max_by_key(|(start, _)| *start);
+    let Some(sha) = holder.as_ref().and_then(|(_, name)| name.strip_prefix("attachments/")) else { return error };
+    let holder = crate::validate::stored_file_holder(graph, sha);
+    let why = format!("{holder} contains a ZIP64 end-of-central-directory record, which bundle import refuses");
+    BundleError::Limits(format!("{why}; re-create that archive without ZIP64, or link the file instead of attaching it, then export again"))
 }
 
 struct EntryInfo {
@@ -1769,6 +1808,15 @@ mod read_tests {
         }
         assert_eq!(counter.nodes, 13);
         assert_eq!(json_nodes(b"\"\\\\\" 0"), 2);
+        // An entry within the budget that earlier entries left too little room
+        // for says so, rather than reading as over the budget on its own.
+        let limits = ReadLimits { nodes: 10, ..READ_LIMITS };
+        let mut remaining = 4;
+        let error = charge_nodes("history/records.jsonl", 6, &mut remaining, limits).unwrap_err();
+        assert!(error.to_string().contains("over the 10-value budget; earlier entries already used 6"), "{error}");
+        let error = charge_nodes("history/records.jsonl", 11, &mut remaining, limits).unwrap_err();
+        assert!(error.to_string().contains("exceeds the 10-value JSON budget (11 values)"), "{error}");
+        assert_eq!(remaining, 4);
     }
 
     #[test]
@@ -1835,6 +1883,61 @@ mod read_tests {
         zip64.extend(b"PK\x05\x06\0\0\0\0\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\0");
         zip64.extend(&bytes);
         assert!(matches!(open(&zip64, None), Err(BundleError::Limits(why)) if why.contains("ZIP64")));
+    }
+
+    #[test]
+    fn export_refuses_an_attachment_holding_an_end_record_import_would_refuse() {
+        use anvil_domain::request::AttachmentRef;
+        use anvil_domain::workspace::{Dataset, DatasetFormat, Meta};
+
+        // An archive ending in ZIP64 end records, after enough zeros that the
+        // ratio rule stores it uncompressed: its records reach the bundle as
+        // they are, and import would refuse every bundle holding it.
+        let zip64 = |sentinel: u8| {
+            let mut data = vec![0u8; 1024 * 1024];
+            data.extend(b"PK\x06\x07");
+            data.extend([0u8; 16]);
+            data.extend(b"PK\x05\x06\0\0\0\0");
+            data.extend([sentinel; 12]);
+            data.extend([0u8; 2]);
+            data
+        };
+        let opts = ExportOptions {
+            kind: BundleKind::Workspace,
+            mode: ExportMode::ShareSafely,
+            passphrase: None,
+            include_history: false,
+            kdf: KdfParams::testing(),
+            app_version: "test",
+        };
+        // Without ZIP64 sentinels the nested record is harmless and round-trips.
+        let mut graph = PortableGraph::default();
+        let data = zip64(0);
+        graph.attachments.insert(sha256(&data), data);
+        let (bytes, _) = write(&graph, &opts).unwrap();
+        assert_eq!(open(&bytes, None).unwrap().graph.attachments, graph.attachments);
+        let mut graph = PortableGraph::default();
+        let data = zip64(0xFF);
+        let hash = sha256(&data);
+        let attachment =
+            AttachmentRef::Stored { sha256: hash.clone(), size: data.len() as u64, file_name: "rows.zip".into(), media_type: None };
+        graph.attachments.insert(hash.clone(), data);
+        graph.datasets.push(Dataset {
+            meta: Meta::new(),
+            workspace_id: anvil_domain::Id::new(),
+            name: "Rows".into(),
+            format: DatasetFormat::Csv,
+            attachment,
+            sensitive_columns: Vec::new(),
+        });
+        let error = write(&graph, &opts).unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, BundleError::Limits(_)), "{message}");
+        assert!(message.contains("the file 'rows.zip' of dataset 'Rows' contains a ZIP64 end-of-central-directory record"), "{message}");
+        // Without a request or dataset naming it, the file is named by its hash.
+        graph.datasets.clear();
+        let message = write(&graph, &opts).unwrap_err().to_string();
+        assert!(message.contains(&format!("the stored file {hash} contains a ZIP64")), "{message}");
     }
 
     #[test]

@@ -85,26 +85,8 @@ fn check_attachment_size(g: &PortableGraph, sha: &str, size: u64, max: u64) -> R
     if size <= max {
         return Ok(());
     }
-    let requests = g.requests.iter().map(|r| ("request", &r.name, serde_json::to_value(r)));
-    let datasets = g.datasets.iter().map(|d| ("dataset", &d.name, serde_json::to_value(d)));
-    let holder = requests
-        .chain(datasets)
-        .find_map(|(what, name, value)| Some(format!("the file '{}' of {what} '{name}'", stored_file_name(&value.ok()?, sha)?)))
-        .unwrap_or_else(|| format!("the stored file {sha}"));
-    let why = format!("{holder} is {size} bytes, over the {max}-byte limit for one bundle entry");
+    let why = format!("{} is {size} bytes, over the {max}-byte limit for one bundle entry", validate::stored_file_holder(g, sha));
     Err(AppError::Bundle(bundle::BundleError::Limits(format!("{why}; remove it or attach a smaller file, then export again"))))
-}
-
-// The name of the stored file `sha` anywhere in a serialized request or dataset.
-fn stored_file_name(value: &serde_json::Value, sha: &str) -> Option<String> {
-    match value {
-        serde_json::Value::Object(o) if o.get("sha256").and_then(|s| s.as_str()) == Some(sha) => {
-            o.get("file_name").and_then(|f| f.as_str()).map(str::to_string)
-        }
-        serde_json::Value::Object(o) => o.values().find_map(|v| stored_file_name(v, sha)),
-        serde_json::Value::Array(a) => a.iter().find_map(|v| stored_file_name(v, sha)),
-        _ => None,
-    }
 }
 
 /// SHA-256 (lowercase hex) of an import file, as [`ImportReport::bundle_sha256`].
