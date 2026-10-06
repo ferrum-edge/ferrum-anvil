@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Window;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use unicode_general_category::{get_general_category, GeneralCategory};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 /// What a command returns when the user declined, or closed, the native
 /// confirmation it asked. A code, like `LOCKED` and `CANCELED`: the UI words it.

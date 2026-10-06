@@ -8,9 +8,7 @@ use serde_json::Value;
 
 #[tauri::command]
 pub async fn diagnostic_import_preview(input: DiagnosticImportInput) -> Result<ImportedDiagnosticPreview, String> {
-    tokio::task::spawn_blocking(move || preview_import(&input.text))
-        .await
-        .map_err(|error| error.to_string())?
+    tokio::task::spawn_blocking(move || preview_import(&input.text)).await.map_err(|error| error.to_string())?
 }
 
 fn preview_import(text: &str) -> Result<ImportedDiagnosticPreview, String> {
