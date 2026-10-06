@@ -274,10 +274,8 @@ pub(crate) async fn set_workspace_scope(st: &DesktopState, presence: &impl Prese
         // Isolating, already open, or not an import root (refused there).
         return app.set_import_root_workspace_scope(&folder, allow).map_err(e);
     }
-    let message = format!(
-        "Open “{}” to its workspace on this device? {OPENS}\n\nOnly continue if you trust what was imported.",
-        shown(&f.name)
-    );
+    let message =
+        format!("Open “{}” to its workspace on this device? {OPENS}\n\nOnly continue if you trust what was imported.", shown(&f.name));
     let prompt = Prompt { title: "Open imported collection to the workspace", message, ok: "Open to workspace" };
     let seen = confirm(st, presence, prompt).await?;
     fenced(st, seen)?.set_import_root_workspace_scope(&folder, true).map_err(e)
@@ -685,7 +683,8 @@ mod tests {
         move_request(&st, &unasked, i.request, Some(i.sub), 1.0).await.unwrap();
         move_request(&st, &unasked, i.deep, Some(i.root), 2.0).await.unwrap();
         // Into it, from the workspace.
-        let mine = i.app.create_request(&i.ws, None, "Mine", anvil_domain::request::RequestSpec::http("GET", "https://a.example/")).unwrap();
+        let mine =
+            i.app.create_request(&i.ws, None, "Mine", anvil_domain::request::RequestSpec::http("GET", "https://a.example/")).unwrap();
         move_request(&st, &unasked, mine.meta.id, Some(i.sub), 3.0).await.unwrap();
         // The collection itself, with everything in it, stays isolated wherever it goes.
         let parent = i.app.create_folder(&i.ws, None, "Imports").unwrap().meta.id;

@@ -38,7 +38,7 @@ pub enum Move<T> {
     /// caller did not confirm leaving it. Out of it, a request resolves the
     /// workspace's variables, environment and auth, as opening the root does
     /// ([`App::set_import_root_workspace_scope`]).
-    LeavesImport(Folder),
+    LeavesImport(Box<Folder>),
 }
 
 impl<T> Move<T> {
@@ -271,7 +271,7 @@ impl App {
             if !f.import_root
                 && let Some(root) = leaves_import_in(s, f.parent_id, new_parent)?.filter(|root| !may_leave(root))
             {
-                return Ok(Ok(Move::LeavesImport(root)));
+                return Ok(Ok(Move::LeavesImport(Box::new(root))));
             }
             f.parent_id = new_parent;
             f.sort_key = sort_key;
@@ -534,7 +534,7 @@ impl App {
                 }
             }
             if let Some(root) = leaves_import_in(s, r.folder_id, folder)?.filter(|root| !may_leave(root)) {
-                return Ok(Ok(Move::LeavesImport(root)));
+                return Ok(Ok(Move::LeavesImport(Box::new(root))));
             }
             r.folder_id = folder;
             r.sort_key = sort_key;
