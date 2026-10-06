@@ -11,8 +11,8 @@
 
 use crate::fixtures_admission_mesh::{self as mesh, H1_LANE, H1_PROXY_ID, MeshInstance};
 use crate::fixtures_policy::{
-    AdmissionFixtures, Target, body_text, catalog_ids, catalog_outcome, caveat, codes, enc, header, no_claim, no_scope, op_log_class, request,
-    send, skips,
+    AdmissionFixtures, Target, body_text, catalog_ids, catalog_outcome, caveat, codes, enc, header, no_claim, no_scope, op_log_class,
+    request, send, skips,
 };
 use crate::gateway::Gateway;
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
