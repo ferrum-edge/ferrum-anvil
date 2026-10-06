@@ -308,7 +308,11 @@ impl App {
                     }
                     Err(UrlProblem::PerRun(origin)) => return Err(refuse("OAuth token URL", origin)),
                 };
-                anvil_engine::oauth_http::require_secure_token_endpoint(&proven.probe).map_err(AppError::Invalid)?;
+                // Literal-loopback cleartext only on a direct route, as the
+                // acquisition sink requires (every port for a per-run port).
+                let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+                anvil_engine::oauth_http::require_token_endpoint_route(&proven.probe, ctx, &settings, proven.port_varies)
+                    .map_err(AppError::Invalid)?;
             }
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
@@ -357,9 +361,11 @@ impl App {
                         Err(UrlProblem::PerRun(origin)) => return Err(refuse(label, origin)),
                     };
                     if label == "OAuth token URL" {
-                        // Eligibility is the acquisition sink's literal policy,
-                        // independent of proxy routing or client DNS overrides.
-                        anvil_engine::oauth_http::require_secure_token_endpoint(&proven.probe).map_err(AppError::Invalid)?;
+                        // Eligibility is the acquisition sink's policy: literal
+                        // loopback on a direct route, whatever the DNS overrides.
+                        let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+                        anvil_engine::oauth_http::require_token_endpoint_route(&proven.probe, ctx, &settings, proven.port_varies)
+                            .map_err(AppError::Invalid)?;
                     }
                     let target = anvil_engine::prepare::parse_target(
                         &proven.probe,

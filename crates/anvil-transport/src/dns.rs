@@ -48,6 +48,21 @@ pub fn apply_preference(mut addrs: Vec<SocketAddr>, pref: IpPreference) -> Vec<S
     }
 }
 
+/// The pool-key form of a DNS configuration. Each override's addresses are
+/// sorted and deduplicated, so a stable answer set that a round-robin resolver
+/// returns in rotated order keeps reusing its connections. Dialing still uses
+/// the configured order.
+pub(crate) fn pool_key(cfg: &DnsConfig) -> String {
+    let mut overrides = Vec::new();
+    for o in &cfg.overrides {
+        let mut addresses: Vec<&str> = o.addresses.iter().map(String::as_str).collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        overrides.push((o.host.as_str(), addresses));
+    }
+    format!("{:?}{:?}{:?}", cfg.resolver, overrides, cfg.ip_preference)
+}
+
 /// Fixed addresses used by the connector without contacting a resolver.
 /// `None` means send-time DNS can change the addresses; a preflight must not
 /// treat a one-time lookup as proof of locality.

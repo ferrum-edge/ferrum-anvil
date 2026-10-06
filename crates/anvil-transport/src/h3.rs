@@ -1540,7 +1540,7 @@ impl H3Transport {
         // (and enforces) the limit it was opened with, so a request with a
         // smaller one never reuses a connection that accepts more.
         let (host, fs) = (plan.host.to_ascii_lowercase(), field_section_limit(&plan.limits));
-        let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference,);
+        let dns = crate::dns::pool_key(&plan.dns);
         let key = format!(
             "{}|h3://{host}:{}|{}|fs={fs}|dns:{}",
             plan.isolation,

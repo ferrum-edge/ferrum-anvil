@@ -630,7 +630,7 @@ fn pool_key(plan: &HttpPlan) -> String {
         .map(|p| format!("{:?}:{}:{}:{}", p.kind, p.host, p.port, p.tls.as_ref().map(|t| t.fingerprint.as_str()).unwrap_or("")))
         .unwrap_or_default();
     let tls = plan.tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default();
-    let dns = format!("{:?}{:?}{:?}", plan.dns.resolver, plan.dns.overrides, plan.dns.ip_preference);
+    let dns = crate::dns::pool_key(&plan.dns);
     let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
     format!(
         "{}|{}://{}:{}|{}|{}|{:?}|{}|pp:{}",

@@ -75,19 +75,23 @@ test("a workspace that is not sealed shows no seal", async () => {
   expect(screen.queryByRole("button", { name: "Allow on this device" })).toBeNull();
 });
 
-test("workspace settings explain the draft cookie and destination contract", async () => {
+test("workspace settings explain the cookie and destination policy", async () => {
   backend(false);
   renderWorkspace();
   fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
-  const text = screen.getByRole("note", { name: "Candidate HTTP policy" }).textContent;
-  expect(text).toContain("draft; owner approval pending");
+  const text = screen.getByRole("note", { name: "HTTP policy" }).textContent;
+  expect(text).not.toMatch(/draft|approval pending|candidate/i);
+  expect(text).toContain("docs/security/http-state-and-destination-policy.md");
   expect(text).toContain("180 cookies / 128 KiB");
   expect(text).toContain("3,000 cookies / 2 MiB");
   expect(text).toContain("including configured credentials even when the cookie jar is off");
   expect(text).toContain("Unknown suffixes use host-only cookies");
-  expect(text).toContain("Intentional private originals");
+  expect(text).toContain("Intentional private originals keep working");
+  expect(text).toContain("names that resolve across several such zones");
+  expect(text).toContain("until one hop is public; after that, redirects stay public");
   expect(text).toContain("including same-host redirects");
   expect(text).toContain("Explicit original proxied requests remain supported");
+  expect(text).toContain("literal-loopback HTTP on a direct connection");
   expect(text).toContain("localhost and DNS overrides do not qualify");
 });
 
@@ -146,7 +150,7 @@ test("folder settings show the same inherited HTTP policy without adding a bypas
   folderBackend(root);
   renderFolder();
   fireEvent.click(await screen.findByRole("tab", { name: "Settings" }));
-  expect(screen.getByRole("note", { name: "Candidate HTTP policy" }).textContent).toContain(
+  expect(screen.getByRole("note", { name: "HTTP policy" }).textContent).toContain(
     "These limits also apply to inherited settings",
   );
   expect(screen.queryByRole("checkbox", { name: /bypass.*policy/i })).toBeNull();

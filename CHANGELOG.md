@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Security
+
+- Bound retained HTTP state and authorize resolved destinations (PR #308;
+  GHSA-jq6r-57w6-qp5w, GHSA-8g83-498m-r38r, GHSA-xmww-2phg-v997). The policy is in
+  [docs/security/http-state-and-destination-policy.md](docs/security/http-state-and-destination-policy.md).
+  No released version is claimed patched.
+  - Cookie jars are bounded: 4 KiB per incoming `Set-Cookie` value, 8 KiB per retained
+    cookie, 180 cookies / 128 KiB per registrable site and 3,000 cookies / 2 MiB per
+    workspace. Expired cookies are purged on access, and the least recently used are
+    evicted first. All outgoing `Cookie` fields together are capped at 8 KiB after
+    signing, on every HTTP attempt, SSE reconnection, gRPC reflection call and MASQUE
+    CONNECT.
+  - OAuth token requests for every grant and refresh require HTTPS, or literal-loopback
+    HTTP on a direct connection. The check runs before any credential is resolved, in
+    the engine sink, the App load preflight, the load producer and worker, and browser
+    sign-in/status.
+  - Every direct HTTP attempt resolves once, validates the whole answer and pins it
+    into the dial and the connection pool key. The key sorts the answer, so round-robin
+    DNS keeps connection reuse. The original request is authorized for the network
+    zones of its answer, so Tailscale, mDNS, NAT64 and fake-IP first requests work.
+    Redirects stay within those zones or go wholly public. After any public hop, only
+    public hops follow. Well-known NAT64 addresses are classified by their embedded
+    IPv4.
+  - Vault variables that are deferred until the OAuth endpoint is validated fail
+    closed with a clear error in resolvers that lack the context's secrets, instead of
+    resolving to an empty string.
+  - **BREAKING:** cookie eviction and output omission can end sessions or change load
+    results, and unknown suffixes use host-only cookies.
+  - **BREAKING:** `localhost`, DNS names, loopback DNS overrides and proxied routes no
+    longer qualify for a cleartext OAuth token endpoint. Use HTTPS, or a literal
+    loopback address that the proxy's `NO_PROXY` list bypasses.
+  - **BREAKING:** the following are refused: redirects through any proxy (including
+    same-host redirects), redirect answers that mix public and non-public zones,
+    returns to a non-public zone after a public hop, and original requests to special
+    or reserved addresses (including `0.0.0.0`). A load plan whose unit depends on an
+    OAuth-deferred vault URL is refused before traffic.
+
 ### Fixed
 
 - Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
@@ -38,18 +75,6 @@
 
 ### Added
 
-- Candidate proposal (PR #308; prior head `5987432` passed root/independent review
-  and all 14 hosted checks; current-main merge head review/hosted qualification
-  and owner approval remain pending; no released version is claimed patched):
-  bounds retained HTTP cookies and aggregate request Cookie
-  headers, including after signing and for MASQUE CONNECT; requires HTTPS or a
-  literal loopback token issuer (including mapped IPv6) before credential
-  expansion, with matching App preflight and browser sign-in/status failures;
-  and pins validated DNS answers to the actual dial while restricting direct
-  redirects by address class. Opaque proxy resolution remains unverifiable:
-  original proxied requests remain supported, but redirects through proxy
-  routes are refused. Cookie eviction/omission, issuer restrictions and proxy
-  redirect behavior remain owner-unapproved compatibility changes.
 - Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
   byte-exact, with the accepted unchanged EXISTING shared v1 freeze and strict original
   diagnostic negative expectations, reader vocabularies and producer description parity.

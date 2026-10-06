@@ -7,7 +7,7 @@ use crate::recorder::Recorder;
 use anvil_domain::execution::{FailureKind, Phase, PhaseStatus, TransportFailure};
 use anvil_domain::settings::DnsOverride;
 use parking_lot::Mutex;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -18,18 +18,32 @@ enum Zone {
     Shared,
     LinkLocal,
     Loopback,
+    /// 198.18.0.0/15: the benchmarking range fake-IP TUN proxies answer
+    /// every name with. Never public.
+    Benchmark,
 }
+
+impl Zone {
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+const PUBLIC: u8 = 1 << Zone::Public as u8;
 
 #[derive(Clone, Copy, Default)]
 enum Origin {
     #[default]
     Unresolved,
-    Resolved(Zone),
+    /// The zones of the original answer, and whether any hop so far could
+    /// reach a public address. After a public hop, only public hops follow.
+    Resolved { zones: u8, public_hop: bool },
     OpaqueProxy,
 }
 
 /// One original destination's authority, shared by all of its attempts, TCP
-/// fallback and redirects. A mixed-zone answer grants no authority.
+/// fallback and redirects. The original grants the zones of its whole
+/// resolved answer; a redirect stays within them or is wholly public.
 #[derive(Default)]
 pub struct DestinationPolicy {
     origin: Mutex<Origin>,
@@ -51,11 +65,12 @@ fn zone(ip: IpAddr) -> Option<Zone> {
                 Some(Zone::Private)
             } else if a == 100 && (64..=127).contains(&b) {
                 Some(Zone::Shared)
+            } else if a == 198 && (b == 18 || b == 19) {
+                Some(Zone::Benchmark)
             } else if a == 0
                 || a >= 224
                 || (a == 192 && b == 0 && (c == 0 || c == 2))
                 || (a == 192 && b == 88 && c == 99)
-                || (a == 198 && (b == 18 || b == 19))
                 || (a == 198 && b == 51 && c == 100)
                 || (a == 203 && b == 0 && c == 113)
             {
@@ -69,6 +84,11 @@ fn zone(ip: IpAddr) -> Option<Zone> {
                 return zone(IpAddr::V4(mapped));
             }
             let s = ip.segments();
+            // Well-known NAT64 prefix (64:ff9b::/96): the embedded IPv4.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [.., a, b, c, d] = ip.octets();
+                return zone(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+            }
             if ip.is_loopback() {
                 Some(Zone::Loopback)
             } else if s[0] & 0xffc0 == 0xfe80 {
@@ -93,16 +113,34 @@ fn zone(ip: IpAddr) -> Option<Zone> {
 
 impl DestinationPolicy {
     fn validate(&self, addrs: &[SocketAddr], redirected: bool) -> Result<(), TransportFailure> {
-        let first = addrs.first().and_then(|a| zone(a.ip())).ok_or_else(|| refused("the destination has no permitted unicast address"))?;
-        if addrs.iter().any(|a| zone(a.ip()) != Some(first)) {
-            return Err(refused("the destination resolves to invalid or mixed network zones"));
+        let mut zones = 0;
+        for addr in addrs {
+            zones |= zone(addr.ip()).ok_or_else(|| refused("the destination resolves to an address that is not permitted unicast"))?.bit();
+        }
+        if zones == 0 {
+            return Err(refused("the destination has no permitted unicast address"));
         }
         let mut origin = self.origin.lock();
         match *origin {
-            Origin::Unresolved if !redirected => *origin = Origin::Resolved(first),
-            Origin::Resolved(allowed) if first == allowed || first == Zone::Public => {}
+            // The original grants exactly the zones of its resolved answer.
+            Origin::Unresolved if !redirected => *origin = Origin::Resolved { zones, public_hop: zones & PUBLIC != 0 },
+            // A retry or fallback of the original stays in its zones or public ones.
+            Origin::Resolved { zones: allowed, public_hop } if !redirected && zones & !(allowed | PUBLIC) == 0 => {
+                *origin = Origin::Resolved { zones: allowed, public_hop: public_hop || zones & PUBLIC != 0 };
+            }
+            Origin::Resolved { zones: allowed, public_hop } if redirected => {
+                if zones == PUBLIC {
+                    *origin = Origin::Resolved { zones: allowed, public_hop: true };
+                } else if zones & PUBLIC != 0 {
+                    return Err(refused("the redirect resolves to mixed public and non-public network zones"));
+                } else if public_hop {
+                    return Err(refused("the redirect would return to a non-public network zone after a public hop"));
+                } else if zones & !allowed != 0 {
+                    return Err(refused("the redirect would leave the original destination's approved network zones"));
+                }
+            }
             _ => {
-                return Err(refused("the redirect or retry would leave the original destination's approved network zone"));
+                return Err(refused("the redirect or retry would leave the original destination's approved network zones"));
             }
         }
         Ok(())
@@ -218,7 +256,6 @@ mod tests {
     use anvil_domain::settings::{HttpVersionPolicy, Limits, ResolverMode, Timeouts};
     use anvil_domain::tls::ProxyKind;
     use bytes::Bytes;
-    use std::net::Ipv4Addr;
     use std::sync::Arc;
 
     fn addresses(values: &[&str]) -> Vec<SocketAddr> {
@@ -295,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn original_private_targets_keep_only_their_zone_and_public_authority() {
+    fn original_private_targets_keep_only_their_zones_and_public_authority() {
         for first in ["127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.1.1", "::1", "fc00::1"] {
             let policy = DestinationPolicy::default();
             policy.validate(&addresses(&[first]), false).unwrap();
@@ -307,7 +344,57 @@ mod tests {
         }
         let policy = DestinationPolicy::default();
         assert!(policy.validate(&addresses(&["224.0.0.1"]), false).is_err());
-        assert!(policy.validate(&addresses(&["8.8.8.8", "127.0.0.1"]), false).is_err());
+        assert!(policy.validate(&addresses(&["10.0.0.1", "224.0.0.1"]), false).is_err(), "every address must be permitted");
+        // A mixed public answer is pinned as is, but its chain is public from the start.
+        let policy = DestinationPolicy::default();
+        policy.validate(&addresses(&["8.8.8.8", "127.0.0.1"]), false).unwrap();
+        assert!(policy.validate(&addresses(&["127.0.0.1", "8.8.8.8"]), false).is_ok(), "a retry keeps the answer");
+        assert!(policy.validate(&addresses(&["8.8.8.8", "127.0.0.1"]), true).is_err(), "a redirect cannot mix zones");
+        assert!(policy.validate(&addresses(&["127.0.0.1"]), true).is_err());
+        assert!(policy.validate(&addresses(&["8.8.4.4"]), true).is_ok());
+    }
+
+    #[test]
+    fn mixed_zone_nat64_and_fake_ip_originals_are_authorized_and_bound_redirects() {
+        assert_eq!(zone("64:ff9b::808:808".parse().unwrap()), Some(Zone::Public));
+        assert_eq!(zone("64:ff9b::a00:1".parse().unwrap()), Some(Zone::Private));
+        assert_eq!(zone("64:ff9b::7f00:1".parse().unwrap()), Some(Zone::Loopback));
+        assert_eq!(zone("64:ff9b:1::808:808".parse().unwrap()), None, "only the well-known prefix embeds IPv4");
+        let answers: [&[&str]; 5] = [
+            // Tailscale MagicDNS: a CGNAT IPv4 and a ULA IPv6 address.
+            &["100.101.102.103", "fd7a:115c:a1e0::1"],
+            // mDNS `.local`: a private IPv4 and a link-local IPv6 address.
+            &["192.168.1.20", "fe80::1"],
+            // DNS64/NAT64: an IPv4-only public host behind the well-known prefix.
+            &["64:ff9b::808:808"],
+            &["64:ff9b::a00:1", "10.0.0.1"],
+            // Fake-IP TUN proxies answer every name from 198.18.0.0/15.
+            &["198.18.0.7"],
+        ];
+        for answer in answers {
+            let policy = DestinationPolicy::default();
+            policy.validate(&addresses(answer), false).unwrap();
+            assert!(policy.validate(&addresses(answer), false).is_ok(), "{answer:?}: retries keep the answer");
+            assert!(policy.validate(&addresses(answer), true).is_ok(), "{answer:?}: same-host redirects keep working");
+            assert!(policy.validate(&addresses(&["127.0.0.1"]), true).is_err(), "{answer:?}: no new zone");
+            assert!(policy.validate(&addresses(&["198.51.100.1"]), true).is_err(), "{answer:?}: invalid ranges stay refused");
+        }
+        let policy = DestinationPolicy::default();
+        policy.validate(&addresses(&["100.101.102.103", "fd7a:115c:a1e0::1"]), false).unwrap();
+        assert!(policy.validate(&addresses(&["fd7a:115c:a1e0::2"]), true).is_ok(), "a redirect within the zones");
+        assert!(policy.validate(&addresses(&["192.168.1.1", "100.64.0.1"]), true).is_ok());
+        assert!(policy.validate(&addresses(&["169.254.169.254"]), true).is_err(), "a zone the original lacked");
+    }
+
+    #[test]
+    fn a_public_hop_taints_the_chain_for_every_non_public_zone() {
+        for first in ["127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.1.1", "198.18.0.1", "fd00::1"] {
+            let policy = DestinationPolicy::default();
+            policy.validate(&addresses(&[first]), false).unwrap();
+            policy.validate(&addresses(&["8.8.8.8"]), true).unwrap();
+            assert!(policy.validate(&addresses(&[first]), true).is_err(), "{first}: no bounce back after a public hop");
+            assert!(policy.validate(&addresses(&["1.1.1.1"]), true).is_ok(), "{first}: public hops continue");
+        }
     }
 
     #[tokio::test]
@@ -421,6 +508,53 @@ mod tests {
         }
         assert_eq!(fixture.log.count_requests(), 2);
         task.abort();
+        fixture.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_mixed_zone_answer_is_dialed_and_its_rotations_reuse_the_connection() {
+        crate::init();
+        let fixture = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let transport = HttpTransport::new();
+        let mut p = plan("tailnet.test", fixture.addr.port());
+        let cancel = CancellationToken::new();
+        // One answer set in the rotated orders a round-robin resolver returns;
+        // the reachable loopback address is first, so the dial reaches the fixture.
+        let rotations = [["127.0.0.1", "100.64.0.1", "fd7a:115c:a1e0::1"], ["127.0.0.1", "fd7a:115c:a1e0::1", "100.64.0.1"]];
+        for (i, answer) in rotations.into_iter().enumerate() {
+            p.dns.overrides = vec![DnsOverride { host: p.host.clone(), addresses: answer.into_iter().map(str::to_string).collect() }];
+            let policy = DestinationPolicy::default();
+            let r =
+                transport.execute_attempt_guarded(&p, 0, AttemptReason::Initial, &EventCtx::none(), &cancel, Some((&policy, false))).await;
+            let obs = &r.outputs[0].observation;
+            assert!(obs.failure.is_none(), "{:?}", obs.failure);
+            assert_eq!(obs.connection.as_ref().unwrap().reused, i > 0, "the same address set keeps its pooled connection");
+        }
+        assert_eq!(fixture.log.count_requests(), 2);
+        fixture.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_redirect_through_a_public_hop_cannot_return_to_loopback() {
+        crate::init();
+        let fixture = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let transport = HttpTransport::new();
+        let p = plan("127.0.0.1", fixture.addr.port());
+        let cancel = CancellationToken::new();
+        let policy = DestinationPolicy::default();
+        let r = transport.execute_attempt_guarded(&p, 0, AttemptReason::Initial, &EventCtx::none(), &cancel, Some((&policy, false))).await;
+        assert!(r.outputs[0].observation.failure.is_none());
+        // The loopback origin redirects to a public host (validated only; nothing
+        // public is contacted), which redirects back to the loopback listener.
+        policy.validate(&addresses(&["93.184.216.34"]), true).unwrap();
+        let r = transport
+            .execute_attempt_guarded(&p, 2, AttemptReason::Redirect { status: 302 }, &EventCtx::none(), &cancel, Some((&policy, true)))
+            .await;
+        let obs = &r.outputs[0].observation;
+        assert_eq!(obs.dispatch, DispatchState::NotDispatched);
+        assert!(obs.failure.as_ref().unwrap().message.contains("after a public hop"));
+        assert!(obs.connection.is_none(), "refused before pool checkout or dial");
+        assert_eq!(fixture.log.count_requests(), 1);
         fixture.shutdown();
     }
 

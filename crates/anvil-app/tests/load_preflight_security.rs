@@ -413,6 +413,48 @@ async fn oauth_preflight_rejects_cleartext_names_before_credentials_or_dispatch(
     }
 }
 
+#[tokio::test]
+async fn literal_loopback_cleartext_issuers_through_a_proxy_are_refused_before_credentials_or_traffic() {
+    anvil_transport::init();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Proxied loopback issuer").unwrap().meta.id;
+    let credential = app.set_secret(&ws, "OAuth credential", "vault-canary").unwrap();
+    let api = Recorder::start(false).await;
+    let recorder = Recorder::start(false).await;
+    // NO_PROXY entries for another host or port do not bypass the issuer.
+    for no_proxy in ["", "issuer.example.test", "127.0.0.1:1,[::1]:1"] {
+        let profile = proxy(&app, ws, ProxyKind::Http, &recorder.address.to_string(), no_proxy);
+        for endpoint in [api.url("/token"), format!("http://[::1]:{}/token", api.address.port())] {
+            let mut spec = routed(RequestSpec::http("GET", &api.url("/api")), &profile);
+            spec.auth = oauth(&endpoint);
+            if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+                config.client_secret = SensitiveValue::Secret { secret: credential.clone() };
+            }
+            let p = plan(&app, ws, spec);
+            let error = app.load_preflight(&p).unwrap_err().to_string();
+            assert!(error.contains("direct connection"), "{error}");
+            assert!(!error.contains("vault-canary"));
+            let o = send(&context(&app, &p)).await;
+            assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched);
+            let failure = o.record.attempts.last().unwrap().failure.clone().unwrap();
+            assert_eq!(failure.kind, FailureKind::AuthPreparationFailed);
+            assert!(failure.message.contains("direct connection"), "{}", failure.message);
+            assert!(!serde_json::to_string(&o.record).unwrap().contains("vault-canary"));
+        }
+    }
+    assert!(api.requests().is_empty());
+    assert!(recorder.requests().is_empty(), "the proxy received nothing");
+    // A NO_PROXY bypass keeps the cleartext token request on this machine.
+    let bypass = proxy(&app, ws, ProxyKind::Http, &recorder.address.to_string(), "127.0.0.1");
+    let mut spec = routed(RequestSpec::http("GET", &api.url("/api")), &bypass);
+    spec.auth = oauth(&api.url("/token"));
+    let p = plan(&app, ws, spec);
+    assert!(!warns(&app, &p));
+    assert_eq!(send(&context(&app, &p)).await.record.response.unwrap().status, 200);
+    assert!(recorder.requests().is_empty());
+}
+
 #[test]
 fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_scope() {
     let root = tempfile::tempdir().unwrap();
@@ -461,6 +503,17 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
             }
         }
     }
+    // A literal-loopback cleartext issuer is ineligible through a proxy.
+    let profile = proxy(&app, ws.meta.id, ProxyKind::Http, "127.0.0.1:3128", "");
+    let secret = app.set_secret(&ws.meta.id, "OAuth credential", "original-vault-value").unwrap();
+    let mut spec = routed(RequestSpec::http("GET", "http://127.0.0.1:8080/api"), &profile);
+    spec.auth = oauth("http://127.0.0.1:8080/token");
+    if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+        config.client_secret = SensitiveValue::Secret { secret: secret.clone() };
+    }
+    let ctx = context(&app, &plan(&app, ws.meta.id, spec));
+    app.store.delete_secret(&secret.id).unwrap();
+    assert!(ctx.secrets.resolve(&secret).is_err(), "a proxied cleartext credential was prefetched");
 }
 
 #[tokio::test]

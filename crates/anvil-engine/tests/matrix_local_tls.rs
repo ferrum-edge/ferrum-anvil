@@ -199,6 +199,17 @@ async fn local_010_connect_deadline_does_not_claim_firewall_or_backend() {
 /// A positive backlog avoids Darwin's listen(0) → somaxconn behavior. Hold
 /// every completed connection and require two actual connect timeouts before
 /// handing the listener to the engine. Unsupported saturation fails the test.
+///
+/// Why this is stable on every hosted OS: Linux and macOS drop a SYN while the
+/// backlog is full, so the dial can only time out. Windows refuses it with a
+/// reset instead, but its TCP stack retransmits a refused SYN (Max SYN
+/// Retransmissions, default 2, about 500 ms apart) before reporting
+/// WSAECONNREFUSED, so a refused loopback dial lasts about a second, well past
+/// the 400 ms deadline. A deterministic alternative would need a blackholed
+/// destination, which loopback cannot provide and the destination policy
+/// refuses before dialing. The probes verify that the deadline, not a refusal,
+/// ends the dial, so a runner with non-default retry settings fails here with
+/// the probe error rather than flaking in the engine assertions.
 async fn saturated_loopback_listener() -> (TcpListener, Vec<TcpStream>) {
     let socket = TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();

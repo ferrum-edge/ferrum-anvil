@@ -49,7 +49,8 @@ pub async fn authorize_api(
         Ok(t) => t,
         Err(e) => return Err(failed(observer, e)),
     };
-    if let Err(message) = oauth_http::require_secure_token_endpoint(&t.token_url) {
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    if let Err(message) = oauth_http::require_token_endpoint_route(&t.token_url, ctx, &settings, false) {
         return Err(failed(observer, FlowError::Configuration(message)));
     }
     let generation = oauth_http::sign_in_generation(engine, &t);

@@ -63,15 +63,15 @@ afterEach(() => {
   backend.signOut.mockReset();
 });
 
-test("OAuth guidance explains the draft literal HTTP restriction without a bypass", async () => {
+test("OAuth guidance explains the literal HTTP restriction without a bypass", async () => {
   backend.status.mockResolvedValue(null);
   render(editor());
-  expect(
-    screen.getByText(/Candidate HTTP policy \(draft; owner approval pending\)/).textContent,
-  ).toContain("localhost and other DNS names do not qualify for HTTP");
-  expect(screen.getByText(/IPv4-mapped IPv6 loopback/).textContent).toContain(
-    "every grant and refresh; there is no insecure override",
-  );
+  const hint = screen.getByText(/every grant and refresh need HTTPS/).textContent;
+  expect(hint).toContain("localhost and other DNS names do not qualify for HTTP");
+  expect(hint).toContain("IPv4-mapped loopback also qualifies");
+  expect(hint).toContain("over a direct connection: a selected proxy must bypass that address");
+  expect(hint).toContain("There is no insecure override");
+  expect(hint).not.toMatch(/draft|approval pending/);
   expect(screen.queryByRole("checkbox", { name: /insecure/i })).toBeNull();
   await waitFor(() => expect(backend.status).toHaveBeenCalledWith(input));
 });

@@ -21,6 +21,20 @@ use zeroize::Zeroizing;
 const MAX_DEPTH: usize = 16;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
 
+/// The stand-in value of a vault variable whose credential is resolved only
+/// on use, after an OAuth token endpoint is validated. Only a resolver with
+/// the context's secrets ([`Resolver::with_secrets`]) materializes it; any
+/// other resolver fails closed (see [`is_deferred_secret`]) rather than
+/// substituting an empty or placeholder value.
+pub const DEFERRED_SECRET_VALUE: &str = "\u{0}anvil-deferred-vault-variable\u{0}";
+const DEFERRED_SECRET_FIELD: &str = "variables.deferred";
+
+/// Whether `failure` is a deferred vault variable that a resolver without the
+/// context's secrets could not materialize.
+pub fn is_deferred_secret(failure: &TransportFailure) -> bool {
+    failure.field.as_deref() == Some(DEFERRED_SECRET_FIELD)
+}
+
 #[derive(Debug, Clone)]
 pub struct VarEntry {
     pub name: String,
@@ -242,6 +256,14 @@ impl Resolver {
                     raw
                 }
             }
+            None if entry.value == DEFERRED_SECRET_VALUE => {
+                return Err(TransportFailure::new(
+                    Phase::Prepare,
+                    FailureKind::UnresolvedVariable,
+                    "a vault variable resolves only when the request is sent, after its OAuth token endpoint is validated",
+                )
+                .with_field(DEFERRED_SECRET_FIELD));
+            }
             None => entry.value.clone(),
         };
         Ok(match self.value_transform {
@@ -352,6 +374,21 @@ mod tests {
         let e = r.resolve("{{a}}", "url").unwrap_err();
         assert_eq!(e.kind, FailureKind::VariableCycle);
         assert!(e.message.contains("a → b → a"), "{}", e.message);
+    }
+
+    #[test]
+    fn deferred_vault_variables_fail_closed_without_the_context_secrets() {
+        let r = Resolver::new(
+            vec![layer("workspace", &[("host", DEFERRED_SECRET_VALUE, true), ("url", "https://{{host}}/", false)])],
+            None,
+        );
+        for input in ["{{host}}", "{{url}}"] {
+            let failure = r.resolve(input, "url").unwrap_err();
+            assert!(is_deferred_secret(&failure), "{failure:?}");
+            assert!(!failure.message.contains("anvil-deferred"));
+        }
+        assert!(r.used_secrets.lock().is_empty(), "nothing was substituted");
+        assert!(!is_deferred_secret(&r.resolve("{{missing}}", "url").unwrap_err()));
     }
 
     #[test]

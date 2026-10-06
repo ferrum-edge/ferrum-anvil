@@ -241,10 +241,10 @@ function OAuthFields({ c, onChange, workspaceId }: { c: OAuth2Config; onChange: 
       </label>
       <Text label="Token URL" value={c.token_url} onChange={(token_url) => onChange({ ...c, token_url: token_url ?? "" })} />
       <p className="hint">
-        Candidate HTTP policy (draft; owner approval pending): token acquisition requires HTTPS or
-        literal-loopback HTTP, such as http://127.0.0.1 or http://[::1]. IPv4-mapped IPv6 loopback
-        literals also qualify. localhost and other DNS names do not qualify for HTTP, even with a
-        loopback DNS override. This applies to every grant and refresh; there is no insecure
+        Token requests for every grant and refresh need HTTPS, or HTTP to a literal loopback address
+        such as http://127.0.0.1 or http://[::1] (IPv4-mapped loopback also qualifies) over a direct
+        connection: a selected proxy must bypass that address (NO_PROXY). localhost and other DNS
+        names do not qualify for HTTP, even with a loopback DNS override. There is no insecure
         override.
       </p>
       {c.grant === "authorization_code_pkce" && <Text label="Authorization URL" value={c.authorization_url} onChange={(authorization_url) => onChange({ ...c, authorization_url: authorization_url ?? "" })} />}

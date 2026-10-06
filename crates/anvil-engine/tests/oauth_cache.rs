@@ -165,6 +165,69 @@ async fn nonliteral_cleartext_issuers_fail_before_any_token_or_api_request_for_a
     assert!(fx.api_hits().is_empty());
 }
 
+/// `c` with an HTTP forward proxy profile at `proxy` selected, bypassed for `no_proxy`.
+fn with_proxy(mut c: ExecutionContext, proxy: SocketAddr, no_proxy: &str) -> ExecutionContext {
+    let p = anvil_domain::tls::ProxyProfile {
+        id: anvil_domain::Id::new(),
+        workspace_id: anvil_domain::Id::new(),
+        name: "corp".into(),
+        kind: anvil_domain::tls::ProxyKind::Http,
+        address: proxy.to_string(),
+        username: None,
+        password: None,
+        no_proxy: no_proxy.into(),
+        tls_profile_id: None,
+        hbone: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let selection = anvil_domain::settings::ProxySelection::Profile { id: p.id };
+    c.proxy_profiles.push(p);
+    let overrides = anvil_domain::settings::SettingsOverrides { proxy_profile_id: Some(selection), ..Default::default() };
+    c.settings_layers.push(("test".into(), overrides));
+    c
+}
+
+#[tokio::test]
+async fn literal_loopback_cleartext_issuers_through_a_proxy_fail_before_credentials_or_proxy_traffic() {
+    anvil_transport::init();
+    let (addr, fx) = Fixture::start().await;
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let proxied = Arc::new(AtomicU64::new(0));
+    let connections = proxied.clone();
+    tokio::spawn(async move {
+        while proxy.accept().await.is_ok() {
+            connections.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    // NO_PROXY entries for another host or another port do not bypass the issuer.
+    let other_port = format!("127.0.0.1:{}", addr.port().wrapping_add(1));
+    for no_proxy in ["", "issuer.example", other_port.as_str()] {
+        for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
+            let mut config = oauth(addr, grant, "api-a");
+            config.client_secret = SensitiveValue::template("unused-credential-canary");
+            let c = with_proxy(ctx(addr, config), proxy_addr, no_proxy);
+            let o = send(&Engine::new(), &c).await;
+            let failure = o.record.attempts.last().and_then(|a| a.failure.clone()).unwrap();
+            assert_eq!(failure.kind, FailureKind::AuthPreparationFailed);
+            assert!(failure.message.contains("direct connection"), "{}", failure.message);
+            assert!(!serde_json::to_string(&o.record).unwrap().contains("unused-credential-canary"));
+            if grant != OAuthGrant::ClientCredentials {
+                assert!(interactive_oauth(&c).err().unwrap().message.contains("direct connection"));
+            }
+        }
+    }
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 0);
+    assert!(fx.api_hits().is_empty());
+    // A NO_PROXY bypass for the literal keeps the token request direct.
+    let c = with_proxy(ctx(addr, oauth(addr, OAuthGrant::ClientCredentials, "api-a")), proxy_addr, "127.0.0.1");
+    assert_eq!(status(&send(&Engine::new(), &c).await), Some(200));
+    assert_eq!(fx.token_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.api_hits(), ["Bearer late-or-live-1"]);
+    assert_eq!(proxied.load(Ordering::SeqCst), 0, "the proxy received no connection");
+}
+
 #[tokio::test]
 async fn https_issuer_acquisition_still_uses_configured_trust_and_delivers_a_token() {
     anvil_transport::init();

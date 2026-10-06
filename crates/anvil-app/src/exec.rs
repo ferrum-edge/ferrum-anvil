@@ -14,8 +14,8 @@ use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::{AttachmentResolver, ExecutionContext, SecretResolver};
-use anvil_engine::oauth_http::require_secure_token_endpoint;
-use anvil_engine::vars::{VarEntry, VarLayer};
+use anvil_engine::oauth_http::require_token_endpoint_route;
+use anvil_engine::vars::{DEFERRED_SECRET_VALUE, VarEntry, VarLayer};
 use anvil_storage::Store;
 use anvil_transport::recorder::EventCtx;
 use bytes::Bytes;
@@ -117,7 +117,7 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
     // A credential can also occur in a header, another auth profile or a
     // selected TLS/proxy profile. None of those aliases may prefetch it before
     // the effective OAuth endpoint is eligible.
-    if oauth_needs_deferral(&ctx.effective_auth().1) {
+    if oauth_needs_deferral(ctx, &ctx.effective_auth().1) {
         return Ok(Vec::new());
     }
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
@@ -130,7 +130,7 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
     spec.auth = AuthConfig::None;
     let mut auth = ctx.effective_auth().1;
     let conflicting = auth.oauth_profile().is_err();
-    defer_unvalidated_oauth_secrets(&mut auth, conflicting);
+    defer_unvalidated_oauth_secrets(ctx, &mut auth, conflicting);
     Ok(vec![
         serde_json::to_value(spec)?,
         serde_json::to_value(auth)?,
@@ -140,28 +140,35 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
     ])
 }
 
-fn oauth_needs_deferral(auth: &AuthConfig) -> bool {
+fn oauth_needs_deferral(ctx: &ExecutionContext, auth: &AuthConfig) -> bool {
     match auth.oauth_profile() {
         Err(_) => true,
-        Ok(Some(config)) => config.token_url.contains("{{") || require_secure_token_endpoint(&config.token_url).is_err(),
+        Ok(Some(config)) => !fixed_endpoint_eligible(ctx, &config.token_url),
         Ok(None) => false,
     }
+}
+
+/// A fixed token endpoint the acquisition sink accepts, including its
+/// direct-route rule for literal-loopback cleartext.
+fn fixed_endpoint_eligible(ctx: &ExecutionContext, token_url: &str) -> bool {
+    let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    !token_url.contains("{{") && require_token_endpoint_route(token_url, ctx, &settings, false).is_ok()
 }
 
 /// A fixed endpoint can be checked before freezing its vault credential.
 /// Templated endpoints may depend on a later dataset row or dynamic helper:
 /// their credentials resolve on demand, after the acquisition sink checks
 /// the actual expanded endpoint. No unvalidated OAuth credential is prefetched.
-fn defer_unvalidated_oauth_secrets(auth: &mut AuthConfig, conflicting: bool) {
+fn defer_unvalidated_oauth_secrets(ctx: &ExecutionContext, auth: &mut AuthConfig, conflicting: bool) {
     match auth {
         AuthConfig::OAuth2 { config } => {
-            if conflicting || config.token_url.contains("{{") || require_secure_token_endpoint(&config.token_url).is_err() {
+            if conflicting || !fixed_endpoint_eligible(ctx, &config.token_url) {
                 config.client_secret = SensitiveValue::default();
             }
         }
         AuthConfig::Multi { profiles } => {
             for profile in profiles {
-                defer_unvalidated_oauth_secrets(profile, conflicting);
+                defer_unvalidated_oauth_secrets(ctx, profile, conflicting);
             }
         }
         _ => {}
@@ -220,7 +227,7 @@ fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver, defer: 
                     // value on use; the entry still supplies precedence and
                     // sensitivity metadata without freezing credential bytes.
                     deferred.push((out.len(), secret.clone()));
-                    String::new()
+                    DEFERRED_SECRET_VALUE.to_string()
                 } else {
                     secrets.resolve(secret).map(|z| z.to_string()).map_err(|_| {
                         AppError::Invalid(
@@ -349,7 +356,6 @@ impl App {
         let mut deferred_variables = HashMap::new();
         let effective_auth = auth_layers.iter().rev().find(|(_, auth)| !matches!(auth, AuthConfig::Inherit));
         let defer = effective_auth.is_some_and(|(_, auth)| !matches!(auth.oauth_profile(), Ok(None)));
-        let prefetch_variables = effective_auth.is_none_or(|(_, auth)| !oauth_needs_deferral(auth));
         let mut add_layer = |label: String, vars: &[Variable]| -> Result<()> {
             let (layer, deferred) = layer(label, vars, &secrets, defer)?;
             for (variable, reference) in deferred {
@@ -442,6 +448,7 @@ impl App {
         self.check_device_identity(&ws, &ctx)?;
         self.check_token_files(&ctx.effective_auth().1)?;
         let parts = secret_parts(&ctx)?;
+        let prefetch_variables = !oauth_needs_deferral(&ctx, &ctx.effective_auth().1);
         ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts, deferred_variables, prefetch_variables));
         Ok(ctx)
     }
