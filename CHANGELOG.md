@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-06
+
+Storage and desktop hardening release: request revisions, history records and load reports are
+bound to the workspace that owns them (database schema 3, which earlier builds cannot open), the
+desktop's native dialogs are shown only by the backend, and bundle and backup imports check a
+file before reading all of it. Read the Breaking section below before upgrading.
+
 ### Security
 
 - Request revisions are sealed together with the workspace and request that own them, and are
@@ -11,26 +18,37 @@
   sealed together with the response body it references and is read only with that body. A
   write never replaces a stored history record or load report under another owner. See
   [docs/security/workspace-owner-binding.md](docs/security/workspace-owner-binding.md).
-  - The database schema moves to 3. At the first open or unlock, each existing revision whose
-    request authenticates is sealed again under that request's workspace, and each existing
-    history record that opens under its owner is sealed again with its body, in one
-    transaction. Any other revision or record is left as it was, stays refused as before and is
-    never adopted; the number left is logged. A database whose recorded version was set back is
-    refused.
+  - The database schema moves from 2 to 3. At the first open or unlock (or when a checkpoint
+    from an earlier schema is restored), each existing revision whose request authenticates and
+    belongs to the workspace it is filed under is sealed again under that workspace, and each
+    existing history record that opens under its owner is sealed again with its body, in one
+    transaction with the version bump. Every revision and record that schema 2 could read stays
+    readable. Any other revision or record is left as it was, stays refused as before and is
+    never adopted; the number left is logged and recorded in the database's `meta` table
+    (`revisions_left_at_v3`, `history_left_at_v3`). A database whose recorded version was set
+    back below 3 is refused and the profile stays locked.
   - Before that step, a `before-schema-3` checkpoint of the database is taken in the profile's
-    `checkpoints` folder. See
-    [Going back to an earlier build](docs/storage-and-recovery.md#going-back-to-an-earlier-build).
+    `checkpoints` folder. If it cannot be written (for example, the disk is full), the
+    migration does not run and the profile does not open or unlock until space is freed.
   - A profile-wide read that meets a history record or load report failing these checks names
     its id, so it can be found and deleted.
-  - **BREAKING:** earlier builds refuse a schema 3 database, and a full backup made from one,
-    as newer. Portable bundles still import into earlier builds. Close earlier builds before
-    upgrading.
 - The desktop webview no longer holds the dialog plugin's `allow-message` and `allow-ask`
-  permissions, so it cannot open a native dialog that looks like the backend's own
-  confirmations. Its confirmations (closing a tab with live work or unsaved edits, sending an
-  invalid body, deleting, relocating a linked file over unsaved edits) are drawn inside the
-  window, and the desktop UI no longer depends on the `@tauri-apps/plugin-dialog` npm package
-  (#319).
+  permissions; native dialogs are shown only by the backend. The webview's confirmations
+  (closing a tab with live work or unsaved edits, sending an invalid body, deleting, relocating
+  a linked file over unsaved edits) are drawn inside the window, and the desktop UI no longer
+  depends on the `@tauri-apps/plugin-dialog` npm package (#319).
+
+### Breaking
+
+- Storage: earlier builds (0.1.0 to 0.1.2, database schema 2) refuse a profile database once
+  0.1.3 has opened or unlocked it, and a full backup made by 0.1.3, as written by a newer
+  version. Portable bundles keep their format (2) and object schema, so a bundle exported by
+  0.1.3 still imports into earlier builds. Close every earlier build before upgrading: one that
+  still has the profile open keeps writing revisions and history records the old way, and once
+  the database is at schema 3 those rows are refused until they are deleted. To go back to an
+  earlier build, restore the `before-schema-3` checkpoint as described in
+  [Going back to an earlier build](docs/storage-and-recovery.md#going-back-to-an-earlier-build);
+  everything changed since the upgrade is lost.
 
 ### Added
 

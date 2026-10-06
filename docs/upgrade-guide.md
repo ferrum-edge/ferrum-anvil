@@ -1,6 +1,28 @@
 # Upgrade guide
 
-## Unreleased
+## 0.1.3
+
+### Database schema 3
+
+0.1.3 moves the profile database from schema 2 to schema 3 the first time it
+opens or unlocks a profile. Earlier builds (0.1.0 to 0.1.2) then refuse that
+database, and any full backup made by 0.1.3, as written by a newer version.
+Portable bundles keep their format, so a bundle exported by 0.1.3 still
+imports into an earlier build.
+
+- Close every earlier build before upgrading. One that still has the profile
+  open keeps writing revisions and history records the old way, and 0.1.3
+  refuses those rows until they are deleted.
+- Before migrating, 0.1.3 copies the database into the profile's
+  `checkpoints` folder as `<time>-before-schema-3.db`. If that copy cannot be
+  written (for example, the disk is full), the profile does not open or unlock
+  until space is freed.
+- To go back to an earlier build, restore that checkpoint as described in
+  [Going back to an earlier build](storage-and-recovery.md#going-back-to-an-earlier-build).
+  Everything changed since the upgrade is lost, so export what you need
+  first.
+
+## 0.1.2
 
 This release changes two groups of desktop IPC commands. Both changes only
 affect code that calls the desktop's Tauri commands directly: the bundled
