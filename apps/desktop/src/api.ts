@@ -253,7 +253,6 @@ export class ApiError extends Error {
 export type FilePurpose =
   | "bundle_import"
   | "attachment"
-  | "pem_file"
   | "pkcs12_file"
   | "spec_source"
   | "dataset"
@@ -691,6 +690,12 @@ export const api = {
   /** One file from the native open/save dialog for `purpose`; null when the user cancels. */
   chooseFile: async (purpose: FilePurpose, options: FileDialogOptions = {}): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose, options: { ...options, multiple: false } }))[0] ?? null,
+  /** Choose certificates in the native dialog with a fixed readable purpose. */
+  chooseCertificateFile: async (): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("certificate_file_choose"))[0] ?? null,
+  /** Choose a private key in the native dialog with a fixed one-shot vault purpose. */
+  choosePrivateKeyFile: async (): Promise<FileGrant | null> =>
+    (await call<FileGrant[]>("private_key_file_choose"))[0] ?? null,
   /** Bind, in the native open dialog, the linked local file a saved request or dataset names; null when the user cancels. */
   chooseLinkedFile: async (referrer: LinkedFileReferrer): Promise<FileGrant | null> =>
     (await call<FileGrant[]>("file_choose", { purpose: "linked_file", options: { multiple: false }, referrer }))[0] ?? null,
@@ -817,8 +822,11 @@ export const api = {
   /** Lint again and write JSON or SARIF to a save-dialog grant (purpose `lint_report_export`). */
   exportLintReport: (target: LintTarget, format: "json" | "sarif", artifact: string, grant: string) =>
     call<number>("standards_report_export", { target, format, artifact, grant }),
-  readTextFile: (grant: string, workspaceId: string | null, storeAsSecret: string | null, base64 = false) =>
-    call<{ text?: string | null; secret?: SecretRef | null }>("read_text_file", { grant, workspaceId, storeAsSecret, base64 }),
+  readCertificateFile: (grant: string) => call<string>("read_certificate_file", { grant }),
+  importPrivateKeyFile: (grant: string, workspaceId: string, label: string) =>
+    call<SecretRef>("import_private_key_file", { grant, workspaceId, label }),
+  importPkcs12File: (grant: string, workspaceId: string, label: string) =>
+    call<SecretRef>("import_pkcs12_file", { grant, workspaceId, label }),
 };
 
 export function onExecutionEvent(cb: (e: ExecutionEvent) => void): Promise<UnlistenFn> {

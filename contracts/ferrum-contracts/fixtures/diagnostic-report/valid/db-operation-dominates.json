@@ -1,0 +1,56 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.0",
+  "collection": {
+    "collector": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "version": "0.1.0" },
+    "method": "fixture",
+    "verification": "unverified"
+  },
+  "subject": { "trace_id": "0af7651916cd43dd8448eb211c80319c", "route": "/orders/{id}" },
+  "observations": [
+    {
+      "id": "alloy-server-ttfh",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.server.time_to_headers",
+      "availability": "measured",
+      "value": 240.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000000000000, "end_unix_nano": 1790000000240000000 },
+      "scope": { "leg": "service", "service": "orders-api" },
+      "span": { "trace_id": "0af7651916cd43dd8448eb211c80319c", "span_id": "b7ad6b7169203331", "parent_span_id": "00f067aa0ba902b7" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-db-load",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.operation.duration",
+      "availability": "measured",
+      "value": 200.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000020000000, "end_unix_nano": 1790000000220000000 },
+      "scope": { "leg": "service_to_dependency", "service": "orders-api" },
+      "span": { "trace_id": "0af7651916cd43dd8448eb211c80319c", "span_id": "c1d2e3f405060708", "parent_span_id": "b7ad6b7169203331" },
+      "attributes": { "operation.name": "orders.load", "operation.kind": "db" },
+      "trust": "unverified"
+    },
+    {
+      "id": "alloy-db-audit",
+      "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry", "instance": "orders-1" },
+      "kind": "measurement",
+      "name": "alloy.operation.duration",
+      "availability": "measured",
+      "value": 150.0,
+      "unit": "ms",
+      "clock": "monotonic_local",
+      "interval": { "start_unix_nano": 1790000000030000000, "end_unix_nano": 1790000000180000000 },
+      "scope": { "leg": "service_to_dependency", "service": "orders-api" },
+      "span": { "trace_id": "0af7651916cd43dd8448eb211c80319c", "span_id": "d1d2e3f405060709", "parent_span_id": "b7ad6b7169203331" },
+      "attributes": { "operation.name": "audit.write", "operation.kind": "db" },
+      "trust": "unverified"
+    }
+  ]
+}

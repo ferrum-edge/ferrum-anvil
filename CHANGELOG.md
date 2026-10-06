@@ -2,8 +2,59 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
+  assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
+  UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
+  no-probe/recovery evidence, ambiguous diagnosis, confidence ceilings and lookalikes.
+  Untrusted marker observations are explicitly confirmed with unknown scope, without
+  gateway token/outcome attribution; all other public Ferrum findings stay at most likely.
+  Apply the hosted Linux formatter diff to the changed Rust files.
+  Correct the new catalog's shipping panic citations and retained reqwest condition.
+  Record hosted qualification of source `28876cc6623fdba01289b450fe12c7c16649b655` with
+  [CI run 37245583522](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583522)
+  (all applicable gates successful) and
+  [Desktop E2E run 37245583544](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583544)
+  (Ubuntu, macOS and Windows successful). The
+  [PR Lab run 37245583561](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583561)
+  passed `core` only. Root's actual manual `all` / `v0.9.11`
+  [Lab run 37245804710, attempt 1](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/attempts/1)
+  succeeded: Ubuntu 554 passed / 0 failed / 21 predefined skips; macOS 558 / 0 / 19.
+  Trusted and untrusted UP-018 passed on both; `admission` was 8 / 0 / 2 on each.
+  The audit retains exact skip reasons in `docs/audit/gateway-0.9.11-delta.md`. These results qualify
+  that source; root's whole-record review and fresh exact-head hosted CI for this subsequent
+  documentation commit remain pending. No Anvil release/tag, platform signing, OAuth,
+  physical-device native acceptance, provider-account or broader performance acceptance is
+  claimed. Published unsigned `anvil-v0.1.1` remains unchanged; other owners' pending proposals
+  are not adopted. This record changes no source, historical catalog, PIN, lock, golden,
+  test or workflow bytes.
+- Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
+  Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
+  the filesystem. Missing tools, unsupported formats, malformed metadata,
+  extraction errors or a missing `AppRun` fail closed. The intentional
+  `--runtime-probe` remains a separate explicit opt-in that launches the
+  extracted `AppRun`.
+
 ### Added
 
+- Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
+  byte-exact, with the accepted unchanged EXISTING shared v1 freeze and strict original
+  diagnostic negative expectations, reader vocabularies and producer description parity.
+  Read-only preview stays unverified/unknown; the real historical Alloy golden is unchanged.
+- Add the separately source-audited Edge v0.9.11 catalog and actual release-asset locks
+  at `c764084b3b51c3f7ffde268c039688d35e49c553`, selected as the lab/new-profile
+  default qualified at source `28876cc` by the hosted runs above. Preserve 0.9.5/7/8/9/10
+  catalogs, locks and nightly coverage. Record lifetime/cancellation, timeout, H1 headers/pooling
+  and plugin deltas in `docs/audit/gateway-0.9.11-delta.md`, including the source qualification
+  and its limits.
+- Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
+  finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
+  input and a stateless IPC parser preserve redacted producer facts as unverified
+  claims with unknown Anvil confidence, including forged authentication claims.
+  Pins the additive `contracts-edge-0.9.9-r2` contracts and a real immutable Alloy
+  hosted exporter golden. No requests, persistence, vault access or Edge lookups
+  follow an import (ferrum-edge/ferrum-alloy#27; cross-repo qualification pending).
 - Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
   v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
   It knows the release's new `ai_prompt_shield` MCP refusals: `400`
@@ -108,6 +159,10 @@
 
 ### Fixed
 
+- Desktop security: PEM selection uses purpose-bound native choosers.
+  Certificate reads return validated certificate PEM and refuse key material;
+  private-key grants are consumed once into the workspace vault, returning
+  only a secret reference to the renderer.
 - Portable bundles: validate archive declarations and mandatory manifest,
   checksum, format, schema and vault metadata before expanding payloads.
   Charge the remaining aggregate budget before allocating each entry,
@@ -127,9 +182,11 @@
   proxy URL), a per-run value that reaches the URL's scheme or host is
   refused, naming its source but never its value. A per-run port is allowed
   only after a fixed loopback host. Locality now uses the execution parser
-  and connector's fixed literals/overrides with IP-family filtering; unpinned
-  system/custom DNS names require remote-traffic consent without a preflight
-  lookup, preventing DNS rebinding and blocking resolver shutdown waits.
+  and connector's fixed literals/overrides with IP-family filtering.
+  `localhost` and `*.localhost` count as loopback with the system resolver
+  unless an override is configured, in which case its addresses are checked;
+  custom DNS and other unpinned names still require remote-traffic consent
+  without a preflight lookup, preventing DNS rebinding and resolver waits.
   Proxy-resolved target names remain unproven despite client overrides, and
   proxy addresses use the connector's host spelling. HTTP forward-proxy
   authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
@@ -140,7 +197,8 @@
   the same origin, fixed-address and NO_PROXY checks; external-browser
   authorization names remain unproven. Nested conflicting OAuth profiles
   are refused consistently before acquiring any token, while valid
-  single-OAuth multi-auth remains supported (#295, #296).
+  single-OAuth multi-auth remains supported (#295, #296). Empty optional
+  OAuth authorization URLs are skipped; present values are still checked.
 - Desktop imports: refresh the selected workspace's environments, profiles,
   history and request tree after a spec import or bundle import. Open tabs for
   replaced requests now reload when clean; unsaved drafts and running sends or

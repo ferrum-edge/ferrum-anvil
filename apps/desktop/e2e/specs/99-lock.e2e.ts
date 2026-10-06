@@ -35,8 +35,12 @@ describe("lock", () => {
       ["tree_get", { workspaceId }],
       ["settings_get", {}],
       // No file dialog opens and no file is read while locked.
-      ["file_choose", { purpose: "pem_file", options: null }],
-      ["read_text_file", { grant: `fg-${"0".repeat(32)}`, workspaceId: null, storeAsSecret: null, base64: false }],
+      ["file_choose", { purpose: "attachment", options: null }],
+      ["certificate_file_choose", {}],
+      ["private_key_file_choose", {}],
+      ["read_certificate_file", { grant: `fg-${"0".repeat(32)}` }],
+      ["import_private_key_file", { grant: `fg-${"0".repeat(32)}`, workspaceId, label: "key" }],
+      ["import_pkcs12_file", { grant: `fg-${"0".repeat(32)}`, workspaceId, label: "p12" }],
       ["linked_file_status", { referrer: { kind: "request", id: "00000000-0000-0000-0000-000000000000" } }],
     ] as const) {
       const r = await invoke(cmd, args);

@@ -1,5 +1,6 @@
 //! Ferrum Anvil desktop shell.
 
+mod cmd_diagnostic_import;
 mod cmd_drift;
 mod cmd_files;
 mod cmd_identity;
@@ -124,6 +125,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            cmd_diagnostic_import::diagnostic_import_preview,
             commands::app_status,
             commands::profiles_list,
             commands::profile_create,
@@ -183,8 +185,12 @@ pub fn run() {
             commands::import_apply,
             commands::import_cancel,
             commands::attachment_add,
-            commands::read_text_file,
+            commands::read_certificate_file,
+            commands::import_private_key_file,
+            commands::import_pkcs12_file,
             cmd_files::file_choose,
+            cmd_files::certificate_file_choose,
+            cmd_files::private_key_file_choose,
             cmd_files::token_files_list,
             cmd_files::token_file_remove,
             cmd_files::linked_file_status,

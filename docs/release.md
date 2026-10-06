@@ -28,6 +28,9 @@ website are manual owner steps, taken only after the
 **Preflight** (Ubuntu): the tag must equal `anvil-v<version>` and the three
 version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --check`;
 `scripts/release-check.sh` (dependency graph); the diagnostic catalog drift test.
+The hosted AppImage checker regression suite also runs with distribution-provided
+`gcc`, `python3` and `mksquashfs`, and the checksum-pinned upstream `unsquashfs`
+described below, before any release build.
 
 **Build** (one job per target):
 
@@ -126,14 +129,74 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
    `ANVIL_E2E_PROFILE`, `e2e: create profile failed`, `e2e: unlock failed`,
    `e2e_unlock`). Each artifact must also contain an Anvil marker string, so a
    compressed or foreign file can never pass by accident.
+   For `.AppImage` inputs, only the [Type 2 ELF + SquashFS format](https://github.com/AppImage/AppImageSpec/blob/master/draft.md#type-2-image-format)
+   is supported. Trusted `python3` and `unsquashfs` (`squashfs-tools` 4.5.1 or
+   later) must be installed on a trusted `PATH`; hosted provisioning is described
+   below. Isolated Python reads the 32/64-bit ELF metadata in either byte order
+   and derives the filesystem boundary using the
+   [official runtime's layout](https://github.com/AppImage/type2-runtime/blob/main/src/runtime/runtime.c).
+   `unsquashfs` reads the filesystem as data into `squashfs-root`, with extraction
+   errors treated as fatal. The input is never made executable or invoked to
+   extract contents or discover its offset. Missing tools, unsupported types,
+   malformed metadata, corrupt filesystems and missing `AppRun` fail closed.
+   Every extracted regular file must be readable through EOF. Classification
+   and scanning use the same descriptor, with no symlink traversal; read errors
+   and changes to the extraction tree are fatal even if another file contains
+   a valid Anvil marker. Other artifact scans also reject classification,
+   enumeration and `grep` read errors; a normal no-match result remains valid.
 3. **Runtime probe** (`--runtime-probe`) — the desktop executable is launched
    with `TAURI_WEBDRIVER_PORT=<free port>`, `ANVIL_E2E_PROFILE` and
    `ANVIL_E2E_PASSPHRASE` set and a throw-away `ANVIL_DATA_DIR`. Nothing may
    answer `GET /status` on that port and no profile may appear in the data
-   directory. Only the process the probe started is stopped.
+   directory. AppImages launch the extracted `squashfs-root/AppRun` so bundled
+   WebKit helpers retain their environment; the input image's runtime is never
+   invoked. This option deliberately executes artifact contents: use it only
+   after establishing the artifact's provenance and any required signatures.
+   The probe stops the process it launched and leftover helpers in its own
+   temporary AppImage extraction directory.
 
 Exit status: `0` pass, `1` test hooks found, `2` usage error or an artifact
 that could not be inspected (never reported as a pass).
+
+The Ubuntu 22.04 release build keeps its older glibc baseline. Its distribution
+[`squashfs-tools` package](https://packages.ubuntu.com/jammy/squashfs-tools)
+is `1:4.5-3build1`, whose upstream 4.5 banner is below the checker's 4.5.1
+security floor. The CI fixture jobs on both Ubuntu versions, release preflight,
+and the Linux release build therefore compile only `unsquashfs` from the
+[upstream 4.7.5 release archive](https://github.com/plougher/squashfs-tools/releases/tag/4.7.5).
+The repository recipes in `.github/workflows/ci.yml` and `.github/workflows/release.yml`
+require a GitHub-hosted runner, fetch the exact release asset over HTTPS, and
+verify SHA-256 before unpacking or building:
+
+```text
+squashfs-tools-4.7.5.tar.gz
+547b7b7f4d2e44bf91b6fc554664850c69563701deab9fd9cd7e21f694c88ea6
+```
+
+This digest matches the upstream release asset's GitHub API `digest` field and
+the downloaded archive. The pinned archive's
+[change log](https://github.com/plougher/squashfs-tools/blob/4.7.5/CHANGES.md#451-17-mar-2022-new-manpages-fix-cve-2021-41072-and-miscellaneous-improvements-and-bug-fixes)
+records the 4.5.1 fix for CVE-2021-41072 (writes outside the extraction destination).
+Build dependencies come from the runner's authenticated Ubuntu repositories;
+the extractor enables gzip, xz, lzo, lz4, zstd and legacy lzma support. Only the
+resulting `unsquashfs` is installed into a private runner temporary directory,
+its exact version banner is checked, and its directory is prepended to `PATH`
+for later steps. Fixture `mksquashfs` and bundling tools remain distribution-provided.
+Update all three provisioning recipes together when changing this pin. The
+checker still rejects tools below 4.5.1 and unknown banners; provisioning does
+not add an exception for the Ubuntu 4.5 package.
+
+The CI release-checker jobs (Ubuntu 22.04 and 24.04) and release preflight run
+`scripts/tests/test_release_check.py` against the actual checker. Hosted fixtures
+include a native malicious runtime whose sentinel must never appear, real
+compressed SquashFS payloads, both ELF boundary layouts across architectures,
+forbidden markers in a library, malformed images and missing extraction tools.
+Contained `AppRun` symlinks also pass with a trusted symlinked `TMPDIR`; escaping
+links still fail under both ordinary and aliased temporary directories.
+Separate explicit-probe tests prove that extracted `AppRun` launches only when
+requested, that environment-created profiles fail the probe, and that early
+exit is inconclusive; a listener answering the WebDriver status request also
+fails. These fixture builds and script tests run on hosted CI.
 
 ## Signing and what "unsigned" means
 
@@ -310,8 +373,8 @@ npm run e2e         # wdio run ./wdio.conf.ts
 | `07-tls-untrusted` | HTTPS fixture whose leaf is signed by a throwaway CA → transport `failed`, dispatch `not dispatched`, `client.tls.untrusted_issuer` on the caller's leg; the first remediation never suggests disabling verification (skipped without `openssl`) |
 | `08-load-report` | load plan over a saved request (via real IPC) → Run… keeps Start disabled until the authorization acknowledgement → run through the self-launched worker → `completed` report; the fixture saw exactly 300 requests |
 | `09-offline-no-account` | REL-005: a local profile with no account or provider sends a request to a loopback fixture, reopens it from History and opens a saved load report; the app process and its load worker hold no socket to a non-loopback address for the whole spec (`lsof` / `Get-NetTCPConnection`; the test-only WebDriver listener is excluded) |
-| `10-file-grants` | file commands take only grants from the backend's own native dialog: a file path, a made-up grant and the old `path` arguments are refused by `read_text_file`, `attachment_add`, `import_preview`/`import_apply`, `dataset_add`, `spec_preview` and `export_to_path`; no file content reaches the page and nothing is written; a multi-file save or token-file dialog, a linked-file dialog without its request or dataset, a relocation dialog without its request or dataset or the reference it repoints, a reference to repoint on a dialog for another purpose, and a request or dataset on a dialog for another purpose are refused before anything is shown; `linked_file_status` reports nothing for a request that names no linked file; a spec naming a linked local file is refused by `effective_request`, `send_request`, `session_open`, `oauth_token_status`, `request_create` and `request_save`, and one naming an unbound JWT-SVID token file by the four send-side commands |
-| `99-lock` | Lock button → lock screen; backend refuses `history_list`, `workspaces_list`, `tree_get`, `settings_get`, `file_choose` (no dialog opens), `read_text_file` and `linked_file_status` with `LOCKED` (runs last because the app stays locked) |
+| `10-file-grants` | file commands take only grants from the backend's own native dialog: a file path, a made-up grant and the old `path` arguments are refused by `read_certificate_file`, `import_private_key_file`, `import_pkcs12_file`, `attachment_add`, `import_preview`/`import_apply`, `dataset_add`, `spec_preview` and `export_to_path`; no file content reaches the page and nothing is written; renderer-selected PEM roles on `file_choose`, the legacy `pem_file` purpose and `read_text_file` disposition arguments are refused; a multi-file save or token-file dialog, a linked-file dialog without its request or dataset, a relocation dialog without its request or dataset or the reference it repoints, a reference to repoint on a dialog for another purpose, and a request or dataset on a dialog for another purpose are refused before anything is shown; `linked_file_status` reports nothing for a request that names no linked file; a spec naming a linked local file is refused by `effective_request`, `send_request`, `session_open`, `oauth_token_status`, `request_create` and `request_save`, and one naming an unbound JWT-SVID token file by the four send-side commands |
+| `99-lock` | Lock button → lock screen; backend refuses `history_list`, `workspaces_list`, `tree_get`, `settings_get`, `file_choose` (no dialog opens), `certificate_file_choose`, `private_key_file_choose`, `read_certificate_file`, `import_private_key_file`, `import_pkcs12_file` and `linked_file_status` with `LOCKED` (runs last because the app stays locked) |
 
 `@wdio/tauri-service` expects its companion plugin (`tauri-plugin-wdio`) for
 mocking and window-focus helpers; Anvil does not ship it. The config selects the

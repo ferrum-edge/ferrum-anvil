@@ -1,7 +1,11 @@
 # Failure lab: `proxyproto` profile
 
+The v0.9.11 default is a reviewed source candidate pending hosted Anvil gates.
+Results and observations below remain historical; see
+[the 0.9.11 source delta](../audit/gateway-0.9.11-delta.md).
+
 This profile runs Anvil's shared engine as a **load balancer that speaks the PROXY protocol**
-against the **real, pinned Ferrum Edge release binary** (v0.9.10 by default, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
+against the **real, pinned Ferrum Edge release binary** (v0.9.11 candidate default, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
 `--release`).
 Every stream proxy sets `stream_proxy_protocol: true`: `tcp` and `tcp_tls` listeners require a
 PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners require the

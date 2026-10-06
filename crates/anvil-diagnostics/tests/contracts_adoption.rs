@@ -37,11 +37,10 @@ fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<S
     (missing, extra)
 }
 
-/// The Ferrum Edge releases the pinned tag covers. `contracts-edge-0.9.9` is
-/// cut from Edge v0.9.9, and v0.9.10 changed no contract source, so
-/// ferrum-contracts maps v0.9.10 to the same tag (its docs/versioning.md).
-/// Each release's catalog must agree with the pinned vocabularies.
-const PINNED_RELEASES: [&str; 2] = ["ferrum-edge-0.9.9", "ferrum-edge-0.9.10"];
+/// The published pin targets Edge v0.9.11. The unchanged v1 vocabularies
+/// also match the retained v0.9.9 and v0.9.10 catalogs; their historical
+/// release-to-contract mappings remain contracts-edge-0.9.9(-r2).
+const PINNED_RELEASES: [&str; 3] = ["ferrum-edge-0.9.9", "ferrum-edge-0.9.10", "ferrum-edge-0.9.11"];
 
 /// A catalog of a release the pin covers agrees with the pinned vocabularies:
 /// the same public tokens and error classes, each class with the contract's
@@ -124,8 +123,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
             _ => panic!("malformed PIN line: {line}"),
         }
     }
-    assert_eq!(tag, Some("contracts-edge-0.9.9"));
-    assert_eq!(commit, Some("25c4e9e00033d7941a1dd0ab733fa74e735546ae"));
+    assert_eq!(tag, Some("contracts-edge-0.9.11"));
+    assert_eq!(commit, Some("390edbd5b2485af0988e02f7827fde778d76ae0a"));
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
         "vocabularies/gateway-headers.json",
@@ -146,6 +145,20 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         "fixtures/diagnostic-ref/invalid/malformed-ref.json",
         "fixtures/diagnostic-ref/invalid/unknown-schema-version.json",
         "fixtures/diagnostic-ref/invalid/uppercase-replica-id.json",
+        "schemas/diagnostic-report/v1.schema.json",
+        "fixtures/diagnostic-report/valid/db-operation-after-headers.json",
+        "fixtures/diagnostic-report/valid/db-operation-dominates.json",
+        "fixtures/diagnostic-report/valid/edge-rejected-before-upstream.json",
+        "fixtures/diagnostic-report/valid/forged-verified-claim.json",
+        "fixtures/diagnostic-report/valid/gateway-error-token.json",
+        "fixtures/diagnostic-report/valid/service-exceeds-gateway.json",
+        "fixtures/diagnostic-report/valid/service-span-missing.json",
+        "fixtures/diagnostic-report/valid/unattributed-interval.json",
+        "fixtures/diagnostic-report/invalid/finding-missing-owner.json",
+        "fixtures/diagnostic-report/invalid/missing-collection.json",
+        "fixtures/diagnostic-report/invalid/unsupported-major.json",
+        "fixtures/diagnostic-report/invalid/uppercase-span-id.json",
+        "fixtures/invalid-expectations.json",
     ]
     .into_iter()
     .map(String::from)
@@ -167,6 +180,14 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
+    assert_eq!(errors["edge_release"], "v0.9.11");
+    assert_eq!(headers["edge_release"], "v0.9.11");
+    for vocabulary in [&errors, &headers] {
+        for source in vocabulary["provenance"].as_array().unwrap() {
+            assert_eq!(source["ref"], "v0.9.11");
+            assert_eq!(source["commit"], "c764084b3b51c3f7ffde268c039688d35e49c553");
+        }
+    }
     for compatibility_id in PINNED_RELEASES {
         assert_catalog_matches_pin(&root, compatibility_id, &errors);
     }
@@ -216,6 +237,16 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         ["x-gateway-error", "x-gateway-upstream-status", gateway_detail::REF_HEADER].into_iter().map(String::from).collect();
     let (missing, extra) = differences(&contract_headers, &local_header_names);
     assert!(missing.is_empty() && extra.is_empty(), "gateway diagnostic header drift; missing: {missing:?}; extra: {extra:?}");
+
+    let report = read_json(&vendor.join("schemas/diagnostic-report/v1.schema.json"));
+    assert_eq!(report["x-contract"]["status"], "implemented");
+    let shared_status = report["x-contract"]["shared_status"].as_str().unwrap();
+    assert!(shared_status.starts_with("EXISTING shared v1"));
+    let owner = &report["x-contract"]["coordinated_release"]["qualified_owner_commit"];
+    let owner = owner.as_str().unwrap();
+    assert_eq!(owner, "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e");
+    // Descriptions, wire constraints and historical producer parity stay exact;
+    // diagnostic_import.rs compares everything except $id / x-contract.
 
     let shared_schema = read_json(&vendor.join("schemas/diagnostic-finding/v1.schema.json"));
     let local_schema = read_json(&root.join("contracts/schemas/DiagnosticFinding.schema.json"));

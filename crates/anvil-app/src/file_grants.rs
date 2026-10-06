@@ -9,6 +9,10 @@
 //! - A read grant pins the canonical path (and the file's identity)
 //!   at selection time; if the file or a folder on its path is replaced
 //!   afterwards, the read is refused.
+//! - Certificate reads return only validated certificate blocks. A private
+//!   key selection belongs to its issuing vault, is consumed once and keeps
+//!   its revocation generation fenced through the vault commit. Only a
+//!   secret reference returns, never bytes to the renderer.
 //! - A write grant pins the canonical folder and the chosen file name. Data
 //!   goes to a newly created temporary file in that folder (never through an
 //!   existing file or link) that is then renamed over the chosen name. A
@@ -24,6 +28,8 @@
 //! `linked_file_relocate` to repoint it to a new location,
 //! `anvil_app::linked_files`).
 
+use anvil_domain::Id;
+use anvil_domain::secret::SecretRef;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,6 +39,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 /// How long a selection stays usable.
 pub const GRANT_TTL: Duration = Duration::from_secs(30 * 60);
@@ -48,8 +55,10 @@ pub enum FilePurpose {
     BundleImport,
     /// Read a file into a request as a stored attachment.
     Attachment,
-    /// Read a PEM certificate or key.
-    PemFile,
+    /// Read PEM certificates into the renderer, refusing private keys.
+    PemCertificate,
+    /// Ingest a PEM private key into the vault once; never return its text.
+    PemPrivateKey,
     /// Read a PKCS#12 keystore (carried as base64).
     Pkcs12File,
     /// Read an API spec or collection to import.
@@ -101,7 +110,8 @@ impl FilePurpose {
             | FilePurpose::SpecRevisionExport => Access::Write,
             FilePurpose::BundleImport
             | FilePurpose::Attachment
-            | FilePurpose::PemFile
+            | FilePurpose::PemCertificate
+            | FilePurpose::PemPrivateKey
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset
@@ -122,7 +132,7 @@ impl FilePurpose {
         match self {
             FilePurpose::BundleImport => 2 * 1024 * MIB,
             FilePurpose::Attachment => 256 * MIB,
-            FilePurpose::PemFile | FilePurpose::Pkcs12File => MIB,
+            FilePurpose::PemCertificate | FilePurpose::PemPrivateKey | FilePurpose::Pkcs12File => MIB,
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
             FilePurpose::Ruleset => MIB,
@@ -210,9 +220,27 @@ enum Target {
     Write { dir: PathBuf, name: OsString },
 }
 
+/// The profile and data key that the private-key chooser was shown for.
+/// Reopening the same vault preserves its identity; revocation still fences
+/// every claim from the earlier session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Vault {
+    dir: PathBuf,
+    profile_id: String,
+    key_check: String,
+}
+
+impl Vault {
+    fn of(app: &crate::App) -> Self {
+        Self { dir: app.dir.clone(), profile_id: app.header.profile_id.clone(), key_check: app.header.key_check.clone() }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     purpose: FilePurpose,
+    /// Required for private-key grants; never supplied by the renderer.
+    vault: Option<Vault>,
     target: Target,
     file_name: String,
     issued: Instant,
@@ -223,7 +251,8 @@ struct Entry {
 struct State {
     entries: HashMap<String, Entry>,
     /// Bumped by `revoke_all`. A grant is recorded only while the generation
-    /// its choice started in is still current.
+    /// its choice started in is still current. A private-key claim checks
+    /// this again under the same mutex held through its vault commit.
     generation: u64,
 }
 
@@ -232,6 +261,31 @@ pub struct FileGrants {
     state: Mutex<State>,
     next_seq: AtomicU64,
     ttl: Duration,
+}
+
+/// A spent private-key grant awaiting its vault write. Its bytes stay native
+/// and zeroize on every exit, including abandonment before the write.
+pub struct PrivateKeyImport<'a> {
+    grants: &'a FileGrants,
+    app: &'a crate::App,
+    generation: u64,
+    bytes: Zeroizing<Vec<u8>>,
+}
+
+impl PrivateKeyImport<'_> {
+    /// Write only if the claim has not been revoked and the caller's session
+    /// gate still allows it. The revocation mutex stays held through the
+    /// vault transaction's commit, not just through the generation check.
+    pub fn store(self, workspace: &Id, label: &str, gate: impl FnOnce() -> bool) -> crate::Result<SecretRef> {
+        let text = std::str::from_utf8(&self.bytes).map_err(|_| crate::AppError::Invalid("the file is not UTF-8 text".into()))?;
+        self.app.set_secret_guarded(workspace, label, text, || {
+            let state = self.grants.state.lock();
+            if state.generation != self.generation || !gate() {
+                return None;
+            }
+            Some(state)
+        })
+    }
 }
 
 impl Default for FileGrants {
@@ -246,8 +300,8 @@ impl FileGrants {
     }
 
     /// The current revocation generation. Take it before showing a dialog and
-    /// pass it to `grant_read_at`/`grant_write_at`, so that a lock while the
-    /// dialog was open grants nothing.
+    /// pass it to the corresponding `grant_*_at` issuer, so that a lock while
+    /// the dialog was open grants nothing.
     pub fn generation(&self) -> u64 {
         self.state.lock().generation
     }
@@ -259,6 +313,27 @@ impl FileGrants {
 
     /// `grant_read` for a choice that started in `generation`.
     pub fn grant_read_at(&self, purpose: FilePurpose, picked: &Path, generation: u64) -> Result<FileGrant, GrantError> {
+        if purpose == FilePurpose::PemPrivateKey {
+            return Err(GrantError::WrongPurpose);
+        }
+        self.grant_read_for(purpose, picked, generation, None)
+    }
+
+    /// Record a private-key choice for its issuing vault. The generic read
+    /// issuer cannot create unbound private-key grants.
+    pub fn grant_private_key(&self, app: &crate::App, picked: &Path) -> Result<FileGrant, GrantError> {
+        self.grant_private_key_at(app, picked, self.generation())
+    }
+
+    /// A private-key choice whose dialog started in `generation` for `app`.
+    pub fn grant_private_key_at(&self, app: &crate::App, picked: &Path, generation: u64) -> Result<FileGrant, GrantError> {
+        if app.is_locked() {
+            return Err(GrantError::Revoked);
+        }
+        self.grant_read_for(FilePurpose::PemPrivateKey, picked, generation, Some(Vault::of(app)))
+    }
+
+    fn grant_read_for(&self, purpose: FilePurpose, picked: &Path, generation: u64, vault: Option<Vault>) -> Result<FileGrant, GrantError> {
         if purpose.access() != Access::Read {
             return Err(GrantError::WrongPurpose);
         }
@@ -271,7 +346,7 @@ impl FileGrants {
         };
         let id = file_id(&file, &meta).map_err(io)?;
         let file_name = display_name(path.file_name());
-        self.insert(purpose, Target::Read { id, path }, file_name, generation)
+        self.insert(purpose, Target::Read { id, path }, file_name, generation, vault)
     }
 
     /// Record a destination the user picked in the native save dialog for
@@ -297,17 +372,41 @@ impl FileGrants {
         }
         refuse_directory(&dir.join(name))?;
         let file_name = display_name(Some(name));
-        self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation)
+        self.insert(purpose, Target::Write { dir, name: name.to_owned() }, file_name, generation, None)
     }
 
-    /// Read the file behind a read grant issued for `purpose`. The grant stays
-    /// usable (preview then apply read the same file) until it expires or the
-    /// app locks.
+    /// Read the file behind a readable grant issued for `purpose`. The grant
+    /// stays usable until it expires or the app locks. Private-key grants are
+    /// refused here and served only by one-shot vault ingestion.
     pub fn read(&self, token: &str, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
-        if purpose.access() != Access::Read {
+        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
             return Err(GrantError::WrongPurpose);
         }
-        let entry = self.lookup(token, purpose)?;
+        self.read_file(self.lookup(token, purpose)?, purpose)
+    }
+
+    /// Consume a private-key selection and store it in the workspace vault.
+    /// The purpose and disposition are fixed here, not supplied by a renderer.
+    /// A failed ingestion also spends the grant; a retry needs a fresh choice.
+    pub fn import_private_key(&self, app: &crate::App, token: &str, workspace: &Id, label: &str) -> crate::Result<SecretRef> {
+        self.claim_private_key(app, token)?.store(workspace, label, || true)
+    }
+
+    /// Spend the grant before reading, retaining its issuing vault and claim
+    /// generation through the later atomic write. There is no bytes/text
+    /// accessor on the returned claim.
+    pub fn claim_private_key<'a>(&'a self, app: &'a crate::App, token: &str) -> crate::Result<PrivateKeyImport<'a>> {
+        // Taking the grant under its mutex prevents concurrent ingestion or
+        // reuse, including after a read or vault write fails.
+        let (entry, generation) = self.take(token, FilePurpose::PemPrivateKey).map_err(|err| crate::AppError::Invalid(err.to_string()))?;
+        if entry.vault.as_ref() != Some(&Vault::of(app)) {
+            return Err(crate::AppError::Invalid("the file selection belongs to a different vault; choose the file again".into()));
+        }
+        let file = self.read_file(entry, FilePurpose::PemPrivateKey).map_err(|err| crate::AppError::Invalid(err.to_string()))?;
+        Ok(PrivateKeyImport { grants: self, app, generation, bytes: Zeroizing::new(file.bytes) })
+    }
+
+    fn read_file(&self, entry: Entry, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
         let Target::Read { path, id } = entry.target else {
             return Err(GrantError::WrongPurpose);
         };
@@ -331,6 +430,10 @@ impl FileGrants {
         file.take(max + 1).read_to_end(&mut bytes).map_err(io)?;
         if bytes.len() as u64 > max {
             return Err(GrantError::TooLarge(size_label(max)));
+        }
+        if purpose == FilePurpose::PemCertificate {
+            let selected = Zeroizing::new(bytes);
+            bytes = certificate_pem(&selected)?.into_bytes();
         }
         Ok(ReadFile { bytes, file_name: entry.file_name })
     }
@@ -371,14 +474,21 @@ impl FileGrants {
         self.len() == 0
     }
 
-    fn insert(&self, purpose: FilePurpose, target: Target, file_name: String, generation: u64) -> Result<FileGrant, GrantError> {
+    fn insert(
+        &self,
+        purpose: FilePurpose,
+        target: Target,
+        file_name: String,
+        generation: u64,
+        vault: Option<Vault>,
+    ) -> Result<FileGrant, GrantError> {
         let token = format!("fg-{}", uuid::Uuid::new_v4().simple());
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let mut g = self.state.lock();
         if g.generation != generation {
             return Err(GrantError::Revoked);
         }
-        let entry = Entry { purpose, target, file_name: file_name.clone(), issued: Instant::now(), seq };
+        let entry = Entry { purpose, vault, target, file_name: file_name.clone(), issued: Instant::now(), seq };
         self.admit(&mut g, token.clone(), entry);
         Ok(FileGrant { token, file_name, path: None })
     }
@@ -419,6 +529,46 @@ impl FileGrants {
         }
         Ok((entry, g.generation))
     }
+}
+
+/// Return only complete certificate blocks, never comments or other PEM
+/// material. Validate the DER as certificates too: changing a private key's
+/// PEM label to CERTIFICATE must not make it readable by the renderer.
+fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
+    let invalid = || GrantError::Invalid("choose a certificate-only PEM file; private keys stay in the vault".into());
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    let mut pem = String::new();
+    let mut in_certificate = false;
+    let mut certificates = 0;
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        match line {
+            "-----BEGIN CERTIFICATE-----" if !in_certificate => {
+                in_certificate = true;
+            }
+            "-----END CERTIFICATE-----" if in_certificate => {
+                in_certificate = false;
+                certificates += 1;
+                pem.push_str(line);
+                pem.push('\n');
+                continue;
+            }
+            _ if line.contains("-----BEGIN") || line.contains("-----END") => return Err(invalid()),
+            _ if !in_certificate => continue,
+            _ => {}
+        }
+        pem.push_str(line);
+        pem.push('\n');
+    }
+    if in_certificate || certificates == 0 {
+        return Err(invalid());
+    }
+    // Reuse the transport's certificate DER validation without system roots,
+    // a client identity, or any network access. Do not expose parser errors
+    // that could quote untrusted file contents.
+    let settings = anvil_transport::tls::TlsSettings { extra_roots_pem: vec![pem.clone()], ..Default::default() };
+    anvil_transport::tls::prepare(&settings).map_err(|_| invalid())?;
+    Ok(pem)
 }
 
 /// Open `path` for reading if it is a regular file; `None` when it is not, a

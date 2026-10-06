@@ -30,6 +30,8 @@ pub fn all() -> Vec<(&'static str, serde_json::Value)> {
         ("ExecutionEvent", s::<crate::events::ExecutionEvent>()),
         ("SessionCommand", s::<crate::events::SessionCommand>()),
         ("DiagnosticFinding", s::<crate::diagnostics::DiagnosticFinding>()),
+        ("DiagnosticImportInput", s::<crate::diagnostic_import::DiagnosticImportInput>()),
+        ("ImportedDiagnosticPreview", s::<crate::diagnostic_import::ImportedDiagnosticPreview>()),
         ("LoadPlan", s::<crate::load::LoadPlan>()),
         ("LoadReport", s::<crate::load::LoadReport>()),
         ("RunReport", s::<crate::runner::RunReport>()),

@@ -1,6 +1,7 @@
 // Management dialogs: environments, connection profiles, export/import and
 // app settings. All persistence happens in Rust.
 import { useEffect, useState } from "react";
+import { DiagnosticImport } from "./DiagnosticImport";
 import { api, type ExportPreview, type FileGrant, type ImportReport, type ProviderInfo, type SpecImported, type SystemInfo } from "./api";
 import type {
   AppSettings,
@@ -30,6 +31,7 @@ const now = () => new Date().toISOString();
 /** Ferrum Edge releases with a source-audited catalog in anvil-diagnostics
  * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first. */
 export const FERRUM_COMPATIBILITY = [
+  { id: "ferrum-edge-0.9.11", label: "Ferrum Edge 0.9.11" },
   { id: "ferrum-edge-0.9.10", label: "Ferrum Edge 0.9.10" },
   { id: "ferrum-edge-0.9.9", label: "Ferrum Edge 0.9.9" },
   { id: "ferrum-edge-0.9.8", label: "Ferrum Edge 0.9.8" },
@@ -404,10 +406,10 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
       <button
         className="btn small start"
         onClick={async () => {
-          const file = await api.chooseFile("pem_file");
+          const file = await api.chooseCertificateFile();
           if (!file) return;
-          const r = await api.readTextFile(file.token, p.workspace_id, null);
-          if (r.text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), r.text] });
+          const text = await api.readCertificateFile(file.token);
+          if (text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), text] });
         }}
       >
         <Icon name="file" size={14} />
@@ -512,10 +514,10 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
             <button
               className="btn small start"
               onClick={async () => {
-                const file = await api.chooseFile("pem_file");
+                const file = await api.chooseCertificateFile();
                 if (!file) return;
-                const r = await api.readTextFile(file.token, p.workspace_id, null);
-                if (r.text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: r.text } });
+                const text = await api.readCertificateFile(file.token);
+                if (text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: text } });
               }}
             >
               <Icon name="file" size={14} />
@@ -567,8 +569,12 @@ function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "s
             const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
             if (!file) return;
             // The bundle goes straight into the vault as base64; only a reference returns.
-            const r = await api.readTextFile(file.token, workspaceId, file.file_name || "client.p12", true);
-            if (r.secret) props.onSecret({ kind: "secret", secret: r.secret });
+            const secret = await api.importPkcs12File(
+              file.token,
+              workspaceId,
+              file.file_name || "client.p12",
+            );
+            props.onSecret({ kind: "secret", secret });
           } catch (e) {
             setErr(String((e as Error).message));
           }
@@ -956,7 +962,7 @@ export function ImportDialog(props: {
   workspaceName: string | null;
   onSpecImported: (r: SpecImported) => void;
 }) {
-  const [tab, setTab] = useState<"spec" | "bundle">("spec");
+  const [tab, setTab] = useState<"spec" | "bundle" | "diagnostic">("spec");
   const [file, setFile] = useState<FileGrant | null>(null);
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
@@ -1087,6 +1093,7 @@ export function ImportDialog(props: {
         tabs={[
           { id: "spec" as const, label: "API spec or collection" },
           { id: "bundle" as const, label: "Anvil bundle / backup" },
+          { id: "diagnostic" as const, label: "Diagnostic preview" },
         ]}
         value={tab}
         onChange={(next) => {
@@ -1095,6 +1102,7 @@ export function ImportDialog(props: {
       />
       {tab === "spec" && <SpecImport workspaceId={props.workspaceId} workspaceName={props.workspaceName} onImported={props.onSpecImported} />}
       {tab === "bundle" && bundleBody()}
+      {tab === "diagnostic" && <DiagnosticImport />}
     </Modal>
   );
   function bundleBody() {

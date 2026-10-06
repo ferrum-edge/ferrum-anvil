@@ -520,6 +520,19 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 
 ### Local data and the app
 
+- **PEM selection and renderer compromise (GHSA-865g-q77v-4x3g):** the
+  certificate and private-key native choosers have fixed purposes and titles.
+  The generic chooser cannot issue either kind of PEM grant. Certificate
+  reads return only complete, validated X.509 certificate blocks; private-key
+  blocks, mixed certificate/key files and keys relabelled as certificates are
+  refused, and surrounding comments are never returned. A private-key grant
+  can only be consumed by vault ingestion, atomically and once, including on
+  a failed attempt. The renderer receives a secret reference and has no
+  argument that changes this disposition. PKCS#12 ingestion also returns
+  only a vault reference. Expiry, lock/profile revocation, selection-generation
+  checks and existing file-identity checks still apply. These controls cover
+  a compromised renderer during native selection; they do not establish a
+  stronger filesystem-race boundary or network credential policy.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that
