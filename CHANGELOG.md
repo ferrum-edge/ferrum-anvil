@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-06
+
+Security hardening release covering renderer authority and native confirmations, linked-file and
+export path handling, OAuth HTTPS-only policy, redirect and cookie policy, bundle and spec limits,
+and diagnostic import off the UI thread.
+
 ### Security
 
 - Bound retained HTTP state and authorize resolved destinations (PR #308;
@@ -54,6 +60,95 @@
   other than Linux and macOS, every folder on a chosen path must be one Anvil can list
   (on Windows, open for reading): a path through a folder it may traverse but not list
   is refused.
+
+- Portable bundles (GHSA-jqq4-v58m-6fcw): an untrusted bundle can no longer
+  make preview or import exhaust memory. The owner-delegate policy of
+  2026-10-06 ([bundle resource policy](docs/security/bundle-resource-policy.md))
+  sets these limits for import and export:
+  - 256 MiB total and 128 MiB per entry, down from 1 GiB and 512 MiB. The
+    manifest, checksum list, objects, history, attachments and sealed vault
+    share the per-entry limit.
+  - 4,194,304 JSON values across every JSON entry, counted from the text
+    before anything is parsed. A bundle of about 1 MiB could otherwise
+    expand to about 5 GiB of parsed JSON.
+  - The ZIP end record's entry count and directory size are checked before
+    the directory is indexed, and ZIP64 archives are refused.
+
+  Every limit is inclusive: one byte, value or entry over is refused. An
+  export over any limit is refused in preview and write, naming the entry,
+  and is never split. A file over 128 MiB is now refused when it is attached.
+  An export that holds such a file attached earlier fails, naming the file
+  and the request or dataset that holds it. So does an export whose attached
+  file is a ZIP64 archive that would carry its end records into the bundle,
+  which import would refuse.
+
+  **Migration:** bundles exported by 0.1.x that are over 256 MiB, have an
+  entry over 128 MiB, or hold more than 4 Mi JSON values no longer import.
+  The error reads "archive exceeds safety limits" and names the entry. To
+  move such a workspace, open it in the Anvil that exported it and export
+  again in smaller parts:
+  - one workspace per bundle;
+  - without history;
+  - with large files linked rather than attached.
+- Desktop: session, send and collection-run payloads (live messages, final
+  responses and detailed errors) from work started before a lock or profile
+  switch are no longer delivered after it, even once the profile is unlocked
+  again. Cancelling a session also interrupts a send waiting on its command
+  queue (GHSA-mg45-vx3j-wmq8).
+- Desktop: a spec import or reimport applies exactly the source bytes and
+  plan that were reviewed, for the same profile session and destination. A
+  source that changed after review, or a stale review, is refused before
+  anything is written (GHSA-3793-f3j3-mjpr).
+- Desktop: replacing the profile passphrase, converting a keychain profile to
+  a passphrase, lifting a workspace's device-identity seal, opening an
+  imported collection to its workspace, moving a request or folder out of an
+  imported collection that is not open to its workspace, and weakening the
+  lock policy (a longer or no idle timeout, no lock on sleep, no clipboard
+  clearing) now go ahead only once the user confirms them in a native dialog
+  that the backend shows itself. A full-backup restore keeps the profile's
+  lock policy when the backup's is weaker, and the desktop then offers the
+  backup's in the same kind of dialog. Saving a folder no longer moves it.
+  Names from the webview (profile, workspace, folder, request) appear in
+  these dialogs on one line, without control or format characters, with at
+  most two Unicode Mn/Me combining marks in a row, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
+  webview argument stands in for the answer, each answer covers one change,
+  and a lock while the dialog is open refuses it. Strengthening changes are
+  not asked about, and the passphrase change right after a recovery-key
+  unlock needs no extra confirmation. The webview's activity reports now
+  postpone the idle lock only within four hours (or the idle timeout, if
+  longer) of the last native sign of the user: an unlock, a native
+  confirmation or the window gaining focus (GHSA-hrwp-5q93-w52f).
+- Desktop: a request draft sent from the webview (send, interactive session
+  or OAuth sign-in) that carries vault-backed authority (auth in effect,
+  vault references, secret variables or a TLS client identity) uses it only
+  where its saved request would: the same destination origin, request
+  authority (an explicit Host header included), MASQUE route, auth and
+  connection settings, worked out in the backend from the very context it
+  then executes. A destination, Host or MASQUE route that a per-send value
+  (`{{$randomFrom}}`, `{{$randomInt}}`, `{{$counter}}`, `{{$uuid}}`, a
+  timestamp) reaches is never taken as matching, since each send draws it
+  again. Otherwise, and for a draft without a saved request, the user must
+  confirm it in a native dialog for that one use; the dialog names the
+  destination first, then the workspace and what differs from the saved
+  request (destination, Host, DNS overrides, proxy, TLS profile and
+  verification, auth kind and placement). An OAuth sign-in runs exactly the
+  context that was checked. The desktop's send, preview and session
+  commands no longer take a per-send settings override (`run_override`,
+  which the desktop UI never set; the CLI keeps its own). A draft's
+  request-level connection settings come from the webview and are compared
+  against the saved request; workspace and profile settings apply to both.
+  A compromised webview that saves a
+  request, environment or profile first can still send it without a
+  dialog. Secrets are still
+  resolved only in the backend and never returned to the webview. Drafts
+  that carry no vault-backed authority are unchanged (GHSA-g7h5-cxqf-jggg).
+- Desktop development dependencies: an npm override moves WebdriverIO's
+  `@puppeteer/browsers` from 2.13.2 to 3.2.3, which drops `extract-zip`
+  2.0.1 (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv; no patched release) and
+  its `yauzl` chain, plus 2.x's `proxy-agent`, `tar-fs` and `progress`
+  subtrees, from the lockfile (#232). It is used only by the E2E tooling and
+  is not shipped. `@puppeteer/browsers` 3.x requires Node.js 22.12 or newer,
+  so the desktop app's `engines` floor is now `>=22.12`.
 
 ### Breaking
 
@@ -198,6 +293,7 @@
 
 ### Changed
 
+- Desktop: macOS 11 is now the minimum supported version.
 - Documentation: link Anvil's contract pin to the immutable Ferrum contract
   release and describe the central store, consumed files and re-vendoring rule.
 - Documentation: reconcile the completion report's current-state statements
@@ -318,97 +414,6 @@
   proxy or TLS profiles apart with a short id suffix, and when the difference
   is past the third DNS override it says how many more differ instead of
   falling back to the generic "connection settings differ" line (#319, N4).
-
-### Security
-
-- Portable bundles (GHSA-jqq4-v58m-6fcw): an untrusted bundle can no longer
-  make preview or import exhaust memory. The owner-delegate policy of
-  2026-10-06 ([bundle resource policy](docs/security/bundle-resource-policy.md))
-  sets these limits for import and export:
-  - 256 MiB total and 128 MiB per entry, down from 1 GiB and 512 MiB. The
-    manifest, checksum list, objects, history, attachments and sealed vault
-    share the per-entry limit.
-  - 4,194,304 JSON values across every JSON entry, counted from the text
-    before anything is parsed. A bundle of about 1 MiB could otherwise
-    expand to about 5 GiB of parsed JSON.
-  - The ZIP end record's entry count and directory size are checked before
-    the directory is indexed, and ZIP64 archives are refused.
-
-  Every limit is inclusive: one byte, value or entry over is refused. An
-  export over any limit is refused in preview and write, naming the entry,
-  and is never split. A file over 128 MiB is now refused when it is attached.
-  An export that holds such a file attached earlier fails, naming the file
-  and the request or dataset that holds it. So does an export whose attached
-  file is a ZIP64 archive that would carry its end records into the bundle,
-  which import would refuse.
-
-  **Migration:** bundles exported by 0.1.x that are over 256 MiB, have an
-  entry over 128 MiB, or hold more than 4 Mi JSON values no longer import.
-  The error reads "archive exceeds safety limits" and names the entry. To
-  move such a workspace, open it in the Anvil that exported it and export
-  again in smaller parts:
-  - one workspace per bundle;
-  - without history;
-  - with large files linked rather than attached.
-- Desktop: session, send and collection-run payloads (live messages, final
-  responses and detailed errors) from work started before a lock or profile
-  switch are no longer delivered after it, even once the profile is unlocked
-  again. Cancelling a session also interrupts a send waiting on its command
-  queue (GHSA-mg45-vx3j-wmq8).
-- Desktop: a spec import or reimport applies exactly the source bytes and
-  plan that were reviewed, for the same profile session and destination. A
-  source that changed after review, or a stale review, is refused before
-  anything is written (GHSA-3793-f3j3-mjpr).
-- Desktop: replacing the profile passphrase, converting a keychain profile to
-  a passphrase, lifting a workspace's device-identity seal, opening an
-  imported collection to its workspace, moving a request or folder out of an
-  imported collection that is not open to its workspace, and weakening the
-  lock policy (a longer or no idle timeout, no lock on sleep, no clipboard
-  clearing) now go ahead only once the user confirms them in a native dialog
-  that the backend shows itself. A full-backup restore keeps the profile's
-  lock policy when the backup's is weaker, and the desktop then offers the
-  backup's in the same kind of dialog. Saving a folder no longer moves it.
-  Names from the webview (profile, workspace, folder, request) appear in
-  these dialogs on one line, without control or format characters, with at
-  most two Unicode Mn/Me combining marks in a row, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
-  webview argument stands in for the answer, each answer covers one change,
-  and a lock while the dialog is open refuses it. Strengthening changes are
-  not asked about, and the passphrase change right after a recovery-key
-  unlock needs no extra confirmation. The webview's activity reports now
-  postpone the idle lock only within four hours (or the idle timeout, if
-  longer) of the last native sign of the user: an unlock, a native
-  confirmation or the window gaining focus (GHSA-hrwp-5q93-w52f).
-- Desktop: a request draft sent from the webview (send, interactive session
-  or OAuth sign-in) that carries vault-backed authority (auth in effect,
-  vault references, secret variables or a TLS client identity) uses it only
-  where its saved request would: the same destination origin, request
-  authority (an explicit Host header included), MASQUE route, auth and
-  connection settings, worked out in the backend from the very context it
-  then executes. A destination, Host or MASQUE route that a per-send value
-  (`{{$randomFrom}}`, `{{$randomInt}}`, `{{$counter}}`, `{{$uuid}}`, a
-  timestamp) reaches is never taken as matching, since each send draws it
-  again. Otherwise, and for a draft without a saved request, the user must
-  confirm it in a native dialog for that one use; the dialog names the
-  destination first, then the workspace and what differs from the saved
-  request (destination, Host, DNS overrides, proxy, TLS profile and
-  verification, auth kind and placement). An OAuth sign-in runs exactly the
-  context that was checked. The desktop's send, preview and session
-  commands no longer take a per-send settings override (`run_override`,
-  which the desktop UI never set; the CLI keeps its own). A draft's
-  request-level connection settings come from the webview and are compared
-  against the saved request; workspace and profile settings apply to both.
-  A compromised webview that saves a
-  request, environment or profile first can still send it without a
-  dialog. Secrets are still
-  resolved only in the backend and never returned to the webview. Drafts
-  that carry no vault-backed authority are unchanged (GHSA-g7h5-cxqf-jggg).
-- Desktop development dependencies: an npm override moves WebdriverIO's
-  `@puppeteer/browsers` from 2.13.2 to 3.2.3, which drops `extract-zip`
-  2.0.1 (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv; no patched release) and
-  its `yauzl` chain, plus 2.x's `proxy-agent`, `tar-fs` and `progress`
-  subtrees, from the lockfile (#232). It is used only by the E2E tooling and
-  is not shipped. `@puppeteer/browsers` 3.x requires Node.js 22.12 or newer,
-  so the desktop app's `engines` floor is now `>=22.12`.
 
 ## [0.1.1] - 2026-10-01
 
