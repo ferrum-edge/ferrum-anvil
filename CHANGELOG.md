@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-06
+
+Security hardening release covering renderer authority and native confirmations, linked-file and
+export path handling, OAuth HTTPS-only policy, redirect and cookie policy, bundle and spec limits,
+and diagnostic import off the UI thread.
+
 ### Security
 
 - Bound retained HTTP state and authorize resolved destinations (PR #308;
@@ -54,269 +60,6 @@
   other than Linux and macOS, every folder on a chosen path must be one Anvil can list
   (on Windows, open for reading): a path through a folder it may traverse but not list
   is refused.
-
-### Breaking
-
-- Desktop IPC: `session_open`, `session_send` and `session_cancel` require an
-  `attemptId` (a fresh, non-nil UUID for each open) alongside `executionId`,
-  and SEND/CANCEL must pass the `attemptId` of the open they control.
-  Interactive-session `execution-event` and `session-ended` packets carry the
-  matching `attempt_id`. Calls without it are rejected before any work starts.
-  OPEN still returns the execution-id string; session command bodies and the
-  domain and CLI event shapes are unchanged. The bundled Workbench already
-  does this. See the
-  [upgrade guide](docs/upgrade-guide.md#interactive-session-attempts).
-- Desktop IPC: spec import and reimport apply only what was reviewed.
-  `spec_preview` requires `target` and returns an `approval`, which
-  `spec_import` now requires. `spec_reimport_plan` returns `{ plan, approval }`
-  instead of a bare plan, and `spec_reimport_apply` takes the overwrite/delete
-  choices as `decisions` (previously `approval`) plus that `approval`. The
-  bundled import dialog already does this; the CLI is unchanged. See the
-  [upgrade guide](docs/upgrade-guide.md#spec-import-review-approvals).
-
-### Fixed
-
-- Storage: validate sealed object IDs, workspace owners and parents against
-  row metadata, and reject existing-owner changes in transactional saves.
-  Folder/request moves retain their relationship checks. User-visible
-  changes: full backups exclude authentic orphan revisions (listed in the manifest); saving
-  a request with a changed workspace now errors; creating or saving a folder
-  refuses a foreign parent; spec reimport now deletes the removed requests'
-  revisions and releases their attachments; undecodable revisions are kept and
-  block attachment cleanup. See `docs/security/workspace-owner-binding.md`.
-- Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
-  assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
-  UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
-  no-probe/recovery evidence, ambiguous diagnosis, confidence ceilings and lookalikes.
-  Untrusted marker observations are explicitly confirmed with unknown scope, without
-  gateway token/outcome attribution; all other public Ferrum findings stay at most likely.
-  Apply the hosted Linux formatter diff to the changed Rust files.
-  Correct the new catalog's shipping panic citations and retained reqwest condition.
-  Record hosted qualification of source `28876cc6623fdba01289b450fe12c7c16649b655` with
-  [CI run 37245583522](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583522)
-  (all applicable gates successful) and
-  [Desktop E2E run 37245583544](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583544)
-  (Ubuntu, macOS and Windows successful). The
-  [PR Lab run 37245583561](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583561)
-  passed `core` only. Root's actual manual `all` / `v0.9.11`
-  [Lab run 37245804710, attempt 1](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/attempts/1)
-  succeeded: Ubuntu 554 passed / 0 failed / 21 predefined skips; macOS 558 / 0 / 19.
-  Trusted and untrusted UP-018 passed on both; `admission` was 8 / 0 / 2 on each.
-  The audit retains exact skip reasons in `docs/audit/gateway-0.9.11-delta.md`. These results qualify
-  that source; root's whole-record review and fresh exact-head hosted CI for this subsequent
-  documentation commit remain pending. No Anvil release/tag, platform signing, OAuth,
-  physical-device native acceptance, provider-account or broader performance acceptance is
-  claimed. Published unsigned `anvil-v0.1.1` remains unchanged; other owners' pending proposals
-  are not adopted. This record changes no source, historical catalog, PIN, lock, golden,
-  test or workflow bytes.
-- Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
-  Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
-  the filesystem. Missing tools, unsupported formats, malformed metadata,
-  extraction errors or a missing `AppRun` fail closed. The intentional
-  `--runtime-probe` remains a separate explicit opt-in that launches the
-  extracted `AppRun`.
-
-### Added
-
-- Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
-  byte-exact, with the accepted unchanged EXISTING shared v1 freeze and strict original
-  diagnostic negative expectations, reader vocabularies and producer description parity.
-  Read-only preview stays unverified/unknown; the real historical Alloy golden is unchanged.
-- Add the separately source-audited Edge v0.9.11 catalog and actual release-asset locks
-  at `c764084b3b51c3f7ffde268c039688d35e49c553`, selected as the lab/new-profile
-  default qualified at source `28876cc` by the hosted runs above. Preserve 0.9.5/7/8/9/10
-  catalogs, locks and nightly coverage. Record lifetime/cancellation, timeout, H1 headers/pooling
-  and plugin deltas in `docs/audit/gateway-0.9.11-delta.md`, including the source qualification
-  and its limits.
-- Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
-  finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
-  input and a stateless IPC parser preserve redacted producer facts as unverified
-  claims with unknown Anvil confidence, including forged authentication claims.
-  Pins the additive `contracts-edge-0.9.9-r2` contracts and a real immutable Alloy
-  hosted exporter golden. No requests, persistence, vault access or Edge lookups
-  follow an import (ferrum-edge/ferrum-alloy#27; cross-repo qualification pending).
-- Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
-  v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
-  It knows the release's new `ai_prompt_shield` MCP refusals: `400`
-  `{"error":"MCP request body could not be inspected"}` with message
-  `unsupported_charset` for a non-UTF-8 request charset (GHSA-4f9m-cfqg-fhx9)
-  or `jsonrpc_request_unparseable` for a body it could not parse that may
-  still carry a tool call (GHSA-f2jp-59r9-fp64), and records that
-  `mcp_gateway` answers a non-UTF-8 charset with its JSON-RPC `-32600`.
-  It also records `unsupported_content_encoding`, a refusal Edge has sent
-  since v0.9.9. Issue #282 backfills it into the 0.9.9 catalog as well; the
-  0.9.8 catalog still does not match it. Profiles declaring v0.9.9 match this
-  existing refusal but do not match the two new v0.9.10 refusals.
-- Diagnostics: a `ferrum-edge-0.9.9` compatibility catalog for Ferrum Edge
-  v0.9.9 (553 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
-  It knows the release's new public signals: the `400` refusals of an empty
-  path segment and of a `;` path parameter on a route without
-  `allow_path_parameters` (GHSA-fcqw-793q-wg5x), the `421 Misdirected
-  Request` of a retired Gateway listener, the MCP JSON-RPC refusals
-  `-32014` (request changed after admission) and `-32015`/`-32016`/`-32017`
-  (`rate_limiting` tool-call limits), the `ai_prompt_shield` MCP argument
-  refusals, the WebSocket `permessage-deflate` negotiation `502` and `1007`
-  close, and OpenAPI-bridge tool results whose text names a gateway error.
-  Profiles declaring an older release do not match them.
-- Diagnostics: Ferrum Edge v0.9.9's gateway diagnostic references (G01,
-  #224). A Ferrum gateway profile can configure a diagnostic reference lookup
-  (the admin listener URL, a token held as a vault secret or template, and
-  optionally the gateway's namespace; desktop profile dialog). For a trusted
-  gateway's response that carries `X-Ferrum-Diagnostic-Ref`, Anvil calls
-  `GET /diagnostics/v1/refs/<ref>` as the response arrives and uses the
-  `ferrum.diagnostic_ref.v1` record only when it binds to that response
-  (reference, status, token, protocol, namespace, creation time). The new
-  `ferrum.detail.*` findings cite it as `gateway_detail` evidence and are the
-  only Ferrum findings that can be `confirmed`, and only when the request and
-  the lookup both used verified TLS or a direct loopback connection.
-  Refused (`401`/`403`), unknown or expired (`404`, with any owner-replica
-  hint), rate-limited, malformed and mismatched lookups are reported and keep
-  the public evidence's confidence. The header alone is never trusted, and
-  the token is sent only to the admin listener, redacted, and never logged
-  or recorded. The admin URL must be `https` (always verified, whatever the
-  request's TLS profile bypasses or overrides) or plain `http` to a loopback
-  address literal, or the lookup is refused before sending; it is bounded
-  at 2 s to connect and 5 s in all, retries once when the record has no
-  detail yet, and never follows a redirect. A record must carry every key
-  the schema requires, and one with an error class outside the pinned
-  vocabulary is capped at likely. Bundle imports drop gateway profiles'
-  lookups with a warning, and a full backup restore keeps them paused
-  ("diagnostic lookup paused" on the record) until the restored workspace is
-  allowed on this device, the same seal as the device's workload identity;
-  an imported profile that
-  covers an existing profile's hosts is reported, and a record names the
-  profile used when several match its destination.
-- Failure matrix: TRUST-009 (cross-tenant lookup), TRUST-010 (expired
-  reference) and TRUST-011 (spoofed reference) are no longer blocked: engine
-  tests cover them, and on Ferrum Edge v0.9.9 and later the lab's `core`
-  profile turns references on (`FERRUM_DIAGNOSTIC_REFS=all`), signs
-  `diagnostics:read` tokens with an `ns` claim, and runs them with G01-001
-  and G01-002 against the real gateway (skipped on earlier releases).
-
-### Changed
-
-- Documentation: link Anvil's contract pin to the immutable Ferrum contract
-  release and describe the central store, consumed files and re-vendoring rule.
-- Documentation: reconcile the completion report's current-state statements
-  with `main`: 14 lab profiles including `mcp`, the four supported Edge
-  releases (0.9.5/0.9.7/0.9.8/0.9.9), eight `X-Gateway-Error` tokens from
-  0.9.8, and the published `anvil-v0.1.1` preview assets, checksums and
-  updater signatures against still-missing platform signing (#276).
-- CLI help: `spec-drift --import` now points to the import id printed by
-  `import-spec` (there is no `--json` flag), and `doctor` lists the checks it
-  performs (data dir, system trust store, profiles, engine/catalog) instead of
-  claiming a keychain self-check (#277).
-- Keychain unlock now explains when macOS refuses access to a stored profile key
-  after an app update, and how to allow Ferrum Anvil in Keychain Access and retry.
-- REL-003 records the verified signed in-app update from 0.1.0 to 0.1.1 on
-  macOS arm64, with the release runs and updater key evidence; Windows and Linux
-  remain untested.
-
-- New Ferrum gateway profiles default to `ferrum-edge-0.9.10` (desktop dialog
-  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.10
-  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
-  asset). v0.9.9, v0.9.8, v0.9.7 and v0.9.5 stay supported with `--release`;
-  the nightly lab runs all five. No lab scenario changes: the lab sends no
-  non-UTF-8 charset and configures no `ai_prompt_shield`. The vendored
-  contracts stay at `contracts-edge-0.9.9`, which `ferrum-contracts` maps to
-  Edge v0.9.10 too; the contract drift test now checks the 0.9.9 and 0.9.10
-  catalogs against it. `anvil-lab` lists supported releases in version order
-  (`v0.9.10` after `v0.9.9`).
-- New Ferrum gateway profiles default to `ferrum-edge-0.9.9` (desktop dialog
-  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.9
-  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
-  asset). v0.9.8, v0.9.7 and v0.9.5 stay supported with `--release`; the
-  nightly lab runs all four. On v0.9.9 the lab's AUTH-021 signs a path
-  without `;` and checks that the `;` path is refused with `400`, and
-  MESH-026/027 check that the gateway resets a UDP tunnel that ended on a
-  socket error with `RST_STREAM(CONNECT_ERROR)`.
-- The vendored Ferrum contracts move to `ferrum-contracts`
-  `contracts-edge-0.9.9`, including the `ferrum.diagnostic_ref.v1` schema and
-  fixtures. `X-Ferrum-Diagnostic-Ref` is released in Ferrum Edge v0.9.9: the
-  0.9.9 catalog records it, and the contract drift test counts it among the
-  headers Anvil reads and checks Anvil's lookup reader against the pinned
-  schema.
-
-### Fixed
-
-- Desktop security: PEM selection uses purpose-bound native choosers.
-  Certificate reads return validated certificate PEM and refuse key material;
-  private-key grants are consumed once into the workspace vault, returning
-  only a secret reference to the renderer. A PEM file that combines a
-  certificate and a private key is refused by the certificate picker; split it
-  into a certificate file and a key file first (see
-  [docs/identity.md §9](docs/identity.md#9-client-certificates-mtls-pem-files)).
-- Portable bundles: validate archive declarations and mandatory manifest,
-  checksum, format, schema and vault metadata before expanding payloads.
-  Charge the remaining aggregate budget before allocating each entry,
-  verify actual ZIP sizes against declarations, and hash attachments during
-  reading without retaining a second copy. This fix kept the 1 GiB total and
-  512 MiB per-entry limits; the bundle resource policy under Security has
-  since lowered them to 256 MiB and 128 MiB. It addressed the
-  validation-order and accounting part of GHSA-jqq4-v58m-6fcw.
-- Load preflight: iteration variables, dataset columns, values extracted by
-  earlier chain steps and dynamic helpers in the path, query, method, headers
-  or body of a fixed origin no longer stop a plan (#288). The preflight judges
-  each URL origin, with every per-run value layered above
-  workspace, environment and folder variables as the worker layers it, and a
-  repeated chain step sees what its earlier positions extracted. For HTTP and
-  every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
-  proxy URL), a per-run value that reaches the URL's scheme or host is
-  refused, naming its source but never its value. A per-run port is allowed
-  only after a fixed loopback host. Locality now uses the execution parser
-  and connector's fixed literals/overrides with IP-family filtering.
-  `localhost` and `*.localhost` count as loopback with the system resolver
-  unless an override is configured, in which case its addresses are checked;
-  custom DNS and other unpinned names still require remote-traffic consent
-  without a preflight lookup, preventing DNS rebinding and resolver waits.
-  Proxy-resolved target names remain unproven despite client overrides, and
-  proxy addresses use the connector's host spelling. HTTP forward-proxy
-  authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
-  Host headers; per-run Host values/names require the warning. Session protocols
-  use their actual CONNECT target. MASQUE requires the canonical routing
-  template for local classification; custom or per-run templates require the
-  warning even with loopback target and proxy origins. OAuth token endpoints use
-  the same origin, fixed-address and NO_PROXY checks; external-browser
-  authorization names remain unproven. Nested conflicting OAuth profiles
-  are refused consistently before acquiring any token, while valid
-  single-OAuth multi-auth remains supported (#295, #296). Empty optional
-  OAuth authorization URLs are skipped; present values are still checked.
-- Desktop imports: refresh the selected workspace's environments, profiles,
-  history and request tree after a spec import or bundle import. Open tabs for
-  replaced requests now reload when clean; unsaved drafts and running sends or
-  sessions are preserved safely.
-- Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
-- Diagnostics: cancellation findings now use the local-client scope only when
-  dispatch recorded no request bytes; canceled requests that may have reached
-  the peer use the client-to-peer scope.
-- DTLS over MASQUE: when the tunnel ends while a handshake flight is being
-  written, the failure is now always `DtlsHandshakeFailed` in the
-  `DtlsHandshake` phase, with the write error as its message. It used to be
-  `RequestWriteFailed` or `DtlsHandshakeFailed` depending on which side
-  noticed first (#270).
-- Desktop: the update dialog shows release notes as readable text instead of
-  raw Markdown. GitHub callouts read "Warning: …", emphasis, quote, heading
-  and code markers are dropped, bullets read "•" and links read
-  "text (url)". The notes are still text: nothing is rendered as markup and
-  links are not clickable.
-- The ignored Python `websockets` permessage-deflate interoperability test
-  now runs on `websockets` 14 and 15 as well as 13.x: its fixture
-  feature-detects the negotiated extensions (`.extensions` on 13.x, the new
-  asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
-  version range is documented where the run instructions live (#275).
-- Desktop: switching a request to MCP now saves the default `tools/list`
-  operation, so the editor shows exactly what will be sent and Send no longer
-  refuses a new MCP request for missing settings (#286).
-- Desktop: choosing `.proto files…` as the gRPC schema source now records it as
-  `proto_files`, not a descriptor set, even though the controlled select
-  re-renders while the native dialog is open; the choice is merged into the
-  latest draft rather than one captured before the dialog opened (#287).
-- Desktop: the vault-authority confirmation dialog tells two identically named
-  proxy or TLS profiles apart with a short id suffix, and when the difference
-  is past the third DNS override it says how many more differ instead of
-  falling back to the generic "connection settings differ" line (#319, N4).
-
-### Security
 
 - Portable bundles (GHSA-jqq4-v58m-6fcw): an untrusted bundle can no longer
   make preview or import exhaust memory. The owner-delegate policy of
@@ -403,6 +146,266 @@
   subtrees, from the lockfile (#232). It is used only by the E2E tooling and
   is not shipped. `@puppeteer/browsers` 3.x requires Node.js 22.12 or newer,
   so the desktop app's `engines` floor is now `>=22.12`.
+
+### Breaking
+
+- Desktop IPC: `session_open`, `session_send` and `session_cancel` require an
+  `attemptId` (a fresh, non-nil UUID for each open) alongside `executionId`,
+  and SEND/CANCEL must pass the `attemptId` of the open they control.
+  Interactive-session `execution-event` and `session-ended` packets carry the
+  matching `attempt_id`. Calls without it are rejected before any work starts.
+  OPEN still returns the execution-id string; session command bodies and the
+  domain and CLI event shapes are unchanged. The bundled Workbench already
+  does this. See the
+  [upgrade guide](docs/upgrade-guide.md#interactive-session-attempts).
+- Desktop IPC: spec import and reimport apply only what was reviewed.
+  `spec_preview` requires `target` and returns an `approval`, which
+  `spec_import` now requires. `spec_reimport_plan` returns `{ plan, approval }`
+  instead of a bare plan, and `spec_reimport_apply` takes the overwrite/delete
+  choices as `decisions` (previously `approval`) plus that `approval`. The
+  bundled import dialog already does this; the CLI is unchanged. See the
+  [upgrade guide](docs/upgrade-guide.md#spec-import-review-approvals).
+
+### Fixed
+
+- Storage: validate sealed object IDs, workspace owners and parents against
+  row metadata, and reject existing-owner changes in transactional saves.
+  Folder/request moves retain their relationship checks. User-visible
+  changes: full backups exclude authentic orphan revisions (listed in the manifest); saving
+  a request with a changed workspace now errors; creating or saving a folder
+  refuses a foreign parent; spec reimport now deletes the removed requests'
+  revisions and releases their attachments; undecodable revisions are kept and
+  block attachment cleanup. See `docs/security/workspace-owner-binding.md`.
+- Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
+  assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
+  UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent
+  no-probe/recovery evidence, ambiguous diagnosis, confidence ceilings and lookalikes.
+  Untrusted marker observations are explicitly confirmed with unknown scope, without
+  gateway token/outcome attribution; all other public Ferrum findings stay at most likely.
+  Apply the hosted Linux formatter diff to the changed Rust files.
+  Correct the new catalog's shipping panic citations and retained reqwest condition.
+  Record hosted qualification of source `28876cc6623fdba01289b450fe12c7c16649b655` with
+  [CI run 37245583522](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583522)
+  (all applicable gates successful) and
+  [Desktop E2E run 37245583544](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583544)
+  (Ubuntu, macOS and Windows successful). The
+  [PR Lab run 37245583561](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245583561)
+  passed `core` only. Root's actual manual `all` / `v0.9.11`
+  [Lab run 37245804710, attempt 1](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37245804710/attempts/1)
+  succeeded: Ubuntu 554 passed / 0 failed / 21 predefined skips; macOS 558 / 0 / 19.
+  Trusted and untrusted UP-018 passed on both; `admission` was 8 / 0 / 2 on each.
+  The audit retains exact skip reasons in `docs/audit/gateway-0.9.11-delta.md`. These results qualify
+  that source; root's whole-record review and fresh exact-head hosted CI for this subsequent
+  documentation commit remain pending. No Anvil release/tag, platform signing, OAuth,
+  physical-device native acceptance, provider-account or broader performance acceptance is
+  claimed. Published unsigned `anvil-v0.1.1` remains unchanged; other owners' pending proposals
+  are not adopted. This record changes no source, historical catalog, PIN, lock, golden,
+  test or workflow bytes.
+- Release checks inspect ordinary Type 2 AppImages as data: trusted isolated
+  Python reads and validates ELF metadata, then trusted `unsquashfs` extracts
+  the filesystem. Missing tools, unsupported formats, malformed metadata,
+  extraction errors or a missing `AppRun` fail closed. The intentional
+  `--runtime-probe` remains a separate explicit opt-in that launches the
+  extracted `AppRun`.
+
+- Desktop security: PEM selection uses purpose-bound native choosers.
+  Certificate reads return validated certificate PEM and refuse key material;
+  private-key grants are consumed once into the workspace vault, returning
+  only a secret reference to the renderer. A PEM file that combines a
+  certificate and a private key is refused by the certificate picker; split it
+  into a certificate file and a key file first (see
+  [docs/identity.md §9](docs/identity.md#9-client-certificates-mtls-pem-files)).
+- Portable bundles: validate archive declarations and mandatory manifest,
+  checksum, format, schema and vault metadata before expanding payloads.
+  Charge the remaining aggregate budget before allocating each entry,
+  verify actual ZIP sizes against declarations, and hash attachments during
+  reading without retaining a second copy. This fix kept the 1 GiB total and
+  512 MiB per-entry limits; the bundle resource policy under Security has
+  since lowered them to 256 MiB and 128 MiB. It addressed the
+  validation-order and accounting part of GHSA-jqq4-v58m-6fcw.
+- Load preflight: iteration variables, dataset columns, values extracted by
+  earlier chain steps and dynamic helpers in the path, query, method, headers
+  or body of a fixed origin no longer stop a plan (#288). The preflight judges
+  each URL origin, with every per-run value layered above
+  workspace, environment and folder variables as the worker layers it, and a
+  repeated chain step sees what its earlier positions extracted. For HTTP and
+  every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
+  proxy URL), a per-run value that reaches the URL's scheme or host is
+  refused, naming its source but never its value. A per-run port is allowed
+  only after a fixed loopback host. Locality now uses the execution parser
+  and connector's fixed literals/overrides with IP-family filtering.
+  `localhost` and `*.localhost` count as loopback with the system resolver
+  unless an override is configured, in which case its addresses are checked;
+  custom DNS and other unpinned names still require remote-traffic consent
+  without a preflight lookup, preventing DNS rebinding and resolver waits.
+  Proxy-resolved target names remain unproven despite client overrides, and
+  proxy addresses use the connector's host spelling. HTTP forward-proxy
+  authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
+  Host headers; per-run Host values/names require the warning. Session protocols
+  use their actual CONNECT target. MASQUE requires the canonical routing
+  template for local classification; custom or per-run templates require the
+  warning even with loopback target and proxy origins. OAuth token endpoints use
+  the same origin, fixed-address and NO_PROXY checks; external-browser
+  authorization names remain unproven. Nested conflicting OAuth profiles
+  are refused consistently before acquiring any token, while valid
+  single-OAuth multi-auth remains supported (#295, #296). Empty optional
+  OAuth authorization URLs are skipped; present values are still checked.
+- Desktop imports: refresh the selected workspace's environments, profiles,
+  history and request tree after a spec import or bundle import. Open tabs for
+  replaced requests now reload when clean; unsaved drafts and running sends or
+  sessions are preserved safely.
+- Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
+- Diagnostics: cancellation findings now use the local-client scope only when
+  dispatch recorded no request bytes; canceled requests that may have reached
+  the peer use the client-to-peer scope.
+- DTLS over MASQUE: when the tunnel ends while a handshake flight is being
+  written, the failure is now always `DtlsHandshakeFailed` in the
+  `DtlsHandshake` phase, with the write error as its message. It used to be
+  `RequestWriteFailed` or `DtlsHandshakeFailed` depending on which side
+  noticed first (#270).
+- Desktop: the update dialog shows release notes as readable text instead of
+  raw Markdown. GitHub callouts read "Warning: …", emphasis, quote, heading
+  and code markers are dropped, bullets read "•" and links read
+  "text (url)". The notes are still text: nothing is rendered as markup and
+  links are not clickable.
+- The ignored Python `websockets` permessage-deflate interoperability test
+  now runs on `websockets` 14 and 15 as well as 13.x: its fixture
+  feature-detects the negotiated extensions (`.extensions` on 13.x, the new
+  asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
+  version range is documented where the run instructions live (#275).
+- Desktop: switching a request to MCP now saves the default `tools/list`
+  operation, so the editor shows exactly what will be sent and Send no longer
+  refuses a new MCP request for missing settings (#286).
+- Desktop: choosing `.proto files…` as the gRPC schema source now records it as
+  `proto_files`, not a descriptor set, even though the controlled select
+  re-renders while the native dialog is open; the choice is merged into the
+  latest draft rather than one captured before the dialog opened (#287).
+- Desktop: the vault-authority confirmation dialog tells two identically named
+  proxy or TLS profiles apart with a short id suffix, and when the difference
+  is past the third DNS override it says how many more differ instead of
+  falling back to the generic "connection settings differ" line (#319, N4).
+
+### Added
+
+- Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
+  byte-exact, with the accepted unchanged EXISTING shared v1 freeze and strict original
+  diagnostic negative expectations, reader vocabularies and producer description parity.
+  Read-only preview stays unverified/unknown; the real historical Alloy golden is unchanged.
+- Add the separately source-audited Edge v0.9.11 catalog and actual release-asset locks
+  at `c764084b3b51c3f7ffde268c039688d35e49c553`, selected as the lab/new-profile
+  default qualified at source `28876cc` by the hosted runs above. Preserve 0.9.5/7/8/9/10
+  catalogs, locks and nightly coverage. Record lifetime/cancellation, timeout, H1 headers/pooling
+  and plugin deltas in `docs/audit/gateway-0.9.11-delta.md`, including the source qualification
+  and its limits.
+- Desktop diagnostics: a read-only JSON import preview for shared diagnostic-report,
+  finding and reference v1 contracts, plus Alloy CLI JSON. Bounded browser file/paste
+  input and a stateless IPC parser preserve redacted producer facts as unverified
+  claims with unknown Anvil confidence, including forged authentication claims.
+  Pins the additive `contracts-edge-0.9.9-r2` contracts and a real immutable Alloy
+  hosted exporter golden. No requests, persistence, vault access or Edge lookups
+  follow an import (ferrum-edge/ferrum-alloy#27; cross-repo qualification pending).
+- Diagnostics: a `ferrum-edge-0.9.10` compatibility catalog for Ferrum Edge
+  v0.9.10 (553 source-audited outcomes, `docs/audit/gateway-0.9.10-delta.md`).
+  It knows the release's new `ai_prompt_shield` MCP refusals: `400`
+  `{"error":"MCP request body could not be inspected"}` with message
+  `unsupported_charset` for a non-UTF-8 request charset (GHSA-4f9m-cfqg-fhx9)
+  or `jsonrpc_request_unparseable` for a body it could not parse that may
+  still carry a tool call (GHSA-f2jp-59r9-fp64), and records that
+  `mcp_gateway` answers a non-UTF-8 charset with its JSON-RPC `-32600`.
+  It also records `unsupported_content_encoding`, a refusal Edge has sent
+  since v0.9.9. Issue #282 backfills it into the 0.9.9 catalog as well; the
+  0.9.8 catalog still does not match it. Profiles declaring v0.9.9 match this
+  existing refusal but do not match the two new v0.9.10 refusals.
+- Diagnostics: a `ferrum-edge-0.9.9` compatibility catalog for Ferrum Edge
+  v0.9.9 (553 source-audited outcomes, `docs/audit/gateway-0.9.9-delta.md`).
+  It knows the release's new public signals: the `400` refusals of an empty
+  path segment and of a `;` path parameter on a route without
+  `allow_path_parameters` (GHSA-fcqw-793q-wg5x), the `421 Misdirected
+  Request` of a retired Gateway listener, the MCP JSON-RPC refusals
+  `-32014` (request changed after admission) and `-32015`/`-32016`/`-32017`
+  (`rate_limiting` tool-call limits), the `ai_prompt_shield` MCP argument
+  refusals, the WebSocket `permessage-deflate` negotiation `502` and `1007`
+  close, and OpenAPI-bridge tool results whose text names a gateway error.
+  Profiles declaring an older release do not match them.
+- Diagnostics: Ferrum Edge v0.9.9's gateway diagnostic references (G01,
+  #224). A Ferrum gateway profile can configure a diagnostic reference lookup
+  (the admin listener URL, a token held as a vault secret or template, and
+  optionally the gateway's namespace; desktop profile dialog). For a trusted
+  gateway's response that carries `X-Ferrum-Diagnostic-Ref`, Anvil calls
+  `GET /diagnostics/v1/refs/<ref>` as the response arrives and uses the
+  `ferrum.diagnostic_ref.v1` record only when it binds to that response
+  (reference, status, token, protocol, namespace, creation time). The new
+  `ferrum.detail.*` findings cite it as `gateway_detail` evidence and are the
+  only Ferrum findings that can be `confirmed`, and only when the request and
+  the lookup both used verified TLS or a direct loopback connection.
+  Refused (`401`/`403`), unknown or expired (`404`, with any owner-replica
+  hint), rate-limited, malformed and mismatched lookups are reported and keep
+  the public evidence's confidence. The header alone is never trusted, and
+  the token is sent only to the admin listener, redacted, and never logged
+  or recorded. The admin URL must be `https` (always verified, whatever the
+  request's TLS profile bypasses or overrides) or plain `http` to a loopback
+  address literal, or the lookup is refused before sending; it is bounded
+  at 2 s to connect and 5 s in all, retries once when the record has no
+  detail yet, and never follows a redirect. A record must carry every key
+  the schema requires, and one with an error class outside the pinned
+  vocabulary is capped at likely. Bundle imports drop gateway profiles'
+  lookups with a warning, and a full backup restore keeps them paused
+  ("diagnostic lookup paused" on the record) until the restored workspace is
+  allowed on this device, the same seal as the device's workload identity;
+  an imported profile that
+  covers an existing profile's hosts is reported, and a record names the
+  profile used when several match its destination.
+- Failure matrix: TRUST-009 (cross-tenant lookup), TRUST-010 (expired
+  reference) and TRUST-011 (spoofed reference) are no longer blocked: engine
+  tests cover them, and on Ferrum Edge v0.9.9 and later the lab's `core`
+  profile turns references on (`FERRUM_DIAGNOSTIC_REFS=all`), signs
+  `diagnostics:read` tokens with an `ns` claim, and runs them with G01-001
+  and G01-002 against the real gateway (skipped on earlier releases).
+
+### Changed
+
+- Desktop: macOS 11 is now the minimum supported version.
+- Documentation: link Anvil's contract pin to the immutable Ferrum contract
+  release and describe the central store, consumed files and re-vendoring rule.
+- Documentation: reconcile the completion report's current-state statements
+  with `main`: 14 lab profiles including `mcp`, the four supported Edge
+  releases (0.9.5/0.9.7/0.9.8/0.9.9), eight `X-Gateway-Error` tokens from
+  0.9.8, and the published `anvil-v0.1.1` preview assets, checksums and
+  updater signatures against still-missing platform signing (#276).
+- CLI help: `spec-drift --import` now points to the import id printed by
+  `import-spec` (there is no `--json` flag), and `doctor` lists the checks it
+  performs (data dir, system trust store, profiles, engine/catalog) instead of
+  claiming a keychain self-check (#277).
+- Keychain unlock now explains when macOS refuses access to a stored profile key
+  after an app update, and how to allow Ferrum Anvil in Keychain Access and retry.
+- REL-003 records the verified signed in-app update from 0.1.0 to 0.1.1 on
+  macOS arm64, with the release runs and updater key evidence; Windows and Linux
+  remain untested.
+
+- New Ferrum gateway profiles default to `ferrum-edge-0.9.10` (desktop dialog
+  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.10
+  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
+  asset). v0.9.9, v0.9.8, v0.9.7 and v0.9.5 stay supported with `--release`;
+  the nightly lab runs all five. No lab scenario changes: the lab sends no
+  non-UTF-8 charset and configures no `ai_prompt_shield`. The vendored
+  contracts stay at `contracts-edge-0.9.9`, which `ferrum-contracts` maps to
+  Edge v0.9.10 too; the contract drift test now checks the 0.9.9 and 0.9.10
+  catalogs against it. `anvil-lab` lists supported releases in version order
+  (`v0.9.10` after `v0.9.9`).
+- New Ferrum gateway profiles default to `ferrum-edge-0.9.9` (desktop dialog
+  and CLI), and the failure lab's default pin is Ferrum Edge v0.9.9
+  (`lab/gateway/RELEASE.lock`, the release's published sha256 for every
+  asset). v0.9.8, v0.9.7 and v0.9.5 stay supported with `--release`; the
+  nightly lab runs all four. On v0.9.9 the lab's AUTH-021 signs a path
+  without `;` and checks that the `;` path is refused with `400`, and
+  MESH-026/027 check that the gateway resets a UDP tunnel that ended on a
+  socket error with `RST_STREAM(CONNECT_ERROR)`.
+- The vendored Ferrum contracts move to `ferrum-contracts`
+  `contracts-edge-0.9.9`, including the `ferrum.diagnostic_ref.v1` schema and
+  fixtures. `X-Ferrum-Diagnostic-Ref` is released in Ferrum Edge v0.9.9: the
+  0.9.9 catalog records it, and the contract drift test counts it among the
+  headers Anvil reads and checks Anvil's lookup reader against the pinned
+  schema.
 
 ## [0.1.1] - 2026-10-01
 
