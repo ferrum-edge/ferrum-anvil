@@ -3,16 +3,16 @@
 //! ends its record is stored in history like any other execution.
 
 use crate::commands::{ExecutionView, R, SendInput, body_view, e, execution_sink, id};
+use crate::presence::NativePresence;
 use crate::state::{DesktopState, PayloadFence, PayloadState, PendingEntry};
 use anvil_app::AppError;
-use anvil_app::exec::SendOptions;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_engine::sessions::SessionHandle;
 use anvil_transport::recorder::EventCtx;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Window};
 
 pub type SessionSlot = Arc<OpenSession>;
 
@@ -167,10 +167,14 @@ fn session_sink<S: PayloadState>(
     })
 }
 
-/// Open a session. Returns the execution id used by message events.
+/// Open a session. Returns the execution id used by message events. A draft
+/// in `input` uses the workspace's vault only where its saved request would,
+/// or once the user confirmed it in a native dialog over `window` (see
+/// `crate::draft_authority`).
 pub(crate) async fn session_open(
     handle: AppHandle,
     fence: crate::state::PayloadFence,
+    window: Window,
     input: SendInput,
     execution_id: String,
     attempt_id: String,
@@ -184,19 +188,19 @@ pub(crate) async fn session_open(
     let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
-    let env = input.environment_id.as_deref().map(id).transpose()?;
-    let opts = SendOptions {
-        environment: env,
-        run_override: input.run_override,
-        send_anyway: input.send_anyway,
-        record_history: true,
-        ..Default::default()
-    };
+    let opts = input.options(true)?;
+    let draft = input.spec.is_some();
     // Built on a blocking thread; a cancel meanwhile ends the open at once.
-    let ctx = match app.build_context_off_runtime(rid, ws, input.spec, opts, pending.token()).await {
+    let ctx = match app.build_context_off_runtime(rid, ws, input.spec, opts.clone(), pending.token()).await {
         Err(AppError::Canceled) => return Err(CANCELED_BEFORE_OPEN.into()),
         built => built.map_err(e)?,
     };
+    if draft {
+        crate::draft_authority::authorize(&st, &NativePresence(window), &app, rid, ws, &ctx, &opts).await?;
+        if pending.token().is_cancelled() {
+            return Err(CANCELED_BEFORE_OPEN.into());
+        }
+    }
     let h2 = handle.clone();
     let sink = session_sink(handle.clone(), fence.clone(), execution_id.clone(), slot.clone(), move |ev| {
         let _ = h2.emit("execution-event", ev);

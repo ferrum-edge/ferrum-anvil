@@ -10,7 +10,7 @@ use crate::{App, AppError, Result, settings_id};
 use anvil_contract::{LintOptions, LintReport, RuleInfo, RuleSet, RulesetSummary, Spec};
 use anvil_domain::Id;
 use anvil_domain::settings::{
-    ApiStandards, ApiStandardsSettings, AppSettings, MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS, MAX_STORED_RULESETS_BYTES,
+    ApiStandards, ApiStandardsSettings, AppSettings, LockPolicy, MAX_STORED_RULESET_BYTES, MAX_STORED_RULESETS, MAX_STORED_RULESETS_BYTES,
     RulesetLoadStatus, StoredRuleset, StoredRulesetSummary,
 };
 use anvil_storage::kind;
@@ -261,6 +261,25 @@ impl App {
             tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)
         })?;
         Ok(())
+    }
+
+    /// [`App::save_settings_keeping_standards`], only while the stored lock
+    /// policy is still `lock`, checked in the same transaction: a caller that
+    /// decided against `lock` whether the change weakens the lock policy
+    /// never saves over another one. `Ok(false)`, and nothing saved, if it
+    /// changed meanwhile.
+    pub fn save_settings_if_lock_is(&self, settings: &AppSettings, lock: &LockPolicy) -> Result<bool> {
+        Ok(self.store.atomically(|tx| {
+            let stored: AppSettings = tx.get(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default();
+            if stored.lock != *lock {
+                return Ok(false);
+            }
+            let mut next = settings.clone();
+            next.api_standards =
+                ApiStandardsSettings { include_recommended: stored.api_standards.include_recommended, legacy_rulesets: vec![] };
+            tx.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &next)?;
+            Ok(true)
+        })?)
     }
 
     /// Lint a description with the profile's standards.

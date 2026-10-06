@@ -508,30 +508,8 @@ fn replace_stand_ins(text: &str, with: &str) -> String {
 
 /// Dynamic helpers may produce a loopback-looking value in one preview and
 /// a remote value on a send. Mask them so they cannot authorize an origin.
-/// Tokenized exactly as the resolver tokenizes (`{{`, the first `}}`, the
-/// trimmed expression starting with `$`).
 fn mask_dynamic_expressions(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(open) = rest.find("{{") {
-        output.push_str(&rest[..open]);
-        let after = &rest[open + 2..];
-        let Some(close) = after.find("}}") else {
-            output.push_str(&rest[open..]);
-            return output;
-        };
-        let expression = &after[..close];
-        if expression.trim().starts_with('$') {
-            output.push_str(HELPER_VALUE);
-        } else {
-            output.push_str("{{");
-            output.push_str(expression);
-            output.push_str("}}");
-        }
-        rest = &after[close + 2..];
-    }
-    output.push_str(rest);
-    output
+    anvil_engine::vars::mask_dynamic(input, HELPER_VALUE)
 }
 
 /// A resolver for what a load step sends on every iteration: the step's own

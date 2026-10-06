@@ -246,11 +246,17 @@ export interface WorkloadProbe {
   jwt_svid?: JwtSvidSummary;
 }
 
+/** The user declined (or closed) a confirmation the backend asked in a native dialog. */
+export const NOT_CONFIRMED = "NOT_CONFIRMED";
+
 export class ApiError extends Error {
   readonly locked: boolean;
+  /** Nothing was changed or sent: the user did not confirm it in the backend's native dialog. */
+  readonly notConfirmed: boolean;
   constructor(message: string) {
-    super(message);
+    super(message === NOT_CONFIRMED ? "Not done: it was not confirmed in the system dialog." : message);
     this.locked = message === "LOCKED" || message === "NO_PROFILE";
+    this.notConfirmed = message === NOT_CONFIRMED;
   }
 }
 
@@ -327,7 +333,6 @@ export interface SendInput {
   spec?: RequestSpec | null;
   environment_id?: string | null;
   send_anyway: boolean;
-  run_override?: SettingsOverrides | null;
 }
 
 // ------------------------------------------------------------------ load

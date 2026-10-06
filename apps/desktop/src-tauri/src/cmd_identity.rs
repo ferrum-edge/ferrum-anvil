@@ -1,12 +1,13 @@
 //! Target-API OAuth sign-in (system browser + loopback, RFC 8252) and the
 //! app-login provider catalogue. Provider identities are never keys.
 
-use crate::commands::{R, SendInput, e, id};
+use crate::commands::{CANCELED, R, SendInput, e, id};
+use crate::presence::NativePresence;
 use crate::state::{DesktopState, PendingEntry, cancel_pending};
 use anvil_app::exec::SendOptions;
 use anvil_identity::{FlowEvent, FlowOptions};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Window};
 
 fn opts(input: &SendInput) -> R<SendOptions> {
     Ok(SendOptions { environment: input.environment_id.as_deref().map(id).transpose()?, ..Default::default() })
@@ -29,10 +30,14 @@ pub struct SignInEvent {
 
 /// Run the sign-in for the OAuth profile the request uses. Progress is
 /// emitted as `oauth-flow` events; the token itself never leaves the backend.
+/// A draft in `input` uses the workspace's vault only where its saved
+/// request would, or once the user confirmed it natively (see
+/// `crate::draft_authority`).
 #[tauri::command]
 pub async fn oauth_sign_in(
     st: State<'_, DesktopState>,
     handle: AppHandle,
+    window: Window,
     input: SendInput,
     attempt: String,
 ) -> R<anvil_identity::api_oauth::ApiAuthorization> {
@@ -44,13 +49,23 @@ pub async fn oauth_sign_in(
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let o = opts(&input)?;
+    // Built once: the sign-in runs exactly the context a draft was
+    // authorized with, never one built again after the dialog.
+    let draft = input.spec.is_some();
+    let ctx = app.build_context_off_runtime(rid, ws, input.spec, o.clone(), pending.token()).await.map_err(e)?;
+    if draft {
+        crate::draft_authority::authorize(&st, &NativePresence(window), &app, rid, ws, &ctx, &o).await?;
+        if pending.token().is_cancelled() {
+            return Err(CANCELED.into());
+        }
+    }
     let h2 = handle.clone();
     let a2 = attempt.clone();
     let observer = move |event: FlowEvent| {
         let _ = h2.emit("oauth-flow", SignInEvent { attempt: a2.clone(), event });
     };
     let opener = |url: &str| open_in_browser(url);
-    let res = app.oauth_sign_in(rid, &ws, input.spec, &o, &opener, &observer, &FlowOptions::default(), pending.token()).await;
+    let res = app.oauth_sign_in_with(&ctx, &opener, &observer, &FlowOptions::default(), pending.token()).await;
     drop(pending);
     res.map_err(e)
 }

@@ -48,7 +48,7 @@ use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::{LoadPlan, LoadReport};
 use anvil_domain::runner::RunReport;
-use anvil_domain::settings::AppSettings;
+use anvil_domain::settings::{AppSettings, LockPolicy};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, UserProfile, Workspace};
 use anvil_portability::PortableGraph;
@@ -136,6 +136,9 @@ const MERGE_NOTE: &str =
 const KEPT_SETTINGS_NOTE: &str =
     "Replace keeps this profile's app settings: they apply to every workspace here, and some are not in the backup.";
 const REPLACED_SETTINGS_NOTE: &str = "Replace restores the backup's app settings (default request settings such as DNS overrides, resolver, proxy and TLS, and the lock, history and redaction policies): they apply to every workspace here, including ones created later.";
+/// How the note that a restore kept this profile's lock policy, rather than
+/// the backup's weaker one, starts.
+pub const KEPT_LOCK_NOTE: &str = "This profile's lock settings were kept";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
@@ -539,6 +542,11 @@ impl App {
     /// identity in the same transaction (`crate::device_identity`), so
     /// restoring your own backup on a new device means allowing it again for
     /// the workspaces you trust.
+    ///
+    /// Restored app settings never weaken this profile's lock policy: when
+    /// the backup's is weaker, this profile's is kept, and the report says so
+    /// ([`KEPT_LOCK_NOTE`]) and carries the backup's
+    /// ([`ImportReport::withheld_lock`]) for the caller to ask the user about.
     pub fn restore_approved(
         &self,
         bytes: &[u8],
@@ -571,7 +579,7 @@ impl App {
         let checkpoint = self.store.checkpoint("before-restore")?;
         // A refusal returns before anything is written; the transaction then
         // commits no change.
-        let (plan, notes) = self.store.atomically(|s| {
+        let (plan, notes, withheld) = self.store.atomically(|s| {
             // Read inside the transaction, so every check sees exactly what
             // the writes below land on.
             let local = local(&s.as_read(), &d)?;
@@ -620,13 +628,28 @@ impl App {
                     s.delete(kind::API_RULESET, &ruleset.id)?;
                 }
             }
-            write(&Writer { tx: s, existing: &local.items, merge: policy == ConflictPolicy::Merge, keep_settings }, &d)?;
+            // A backup's lock policy never weakens this profile's on its
+            // own: the stored one is kept, and the caller may ask the user.
+            let stored_lock = s.get::<AppSettings>(kind::APP_SETTINGS, &settings_id())?.unwrap_or_default().lock;
+            let withheld = d.graph.app_settings.as_ref().filter(|_| !keep_settings).map(|x| &x.lock);
+            let withheld = withheld.filter(|lock| !stored_lock.weakening(lock).is_empty()).cloned();
+            if let Some(lock) = &withheld {
+                notes.push(format!(
+                    "{KEPT_LOCK_NOTE}: the backup's would {}. Change them in Settings to use the backup's.",
+                    stored_lock.weakening(lock).join(", and ")
+                ));
+            }
+            let keep_lock = withheld.is_some().then_some(&stored_lock);
+            let merge = policy == ConflictPolicy::Merge;
+            write(&Writer { tx: s, existing: &local.items, merge, keep_settings, keep_lock }, &d)?;
             // This device's workload identity stays out of every workspace
             // written here until the user allows it on this device.
             crate::device_identity::seal_in(s, d.graph.workspaces.iter().map(|w| &w.meta.id))?;
-            Ok(Ok((plan, notes)))
+            Ok(Ok((plan, notes, withheld)))
         })??;
-        Ok(report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string()), port::file_sha256(bytes)))
+        let mut out = report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string()), port::file_sha256(bytes));
+        out.withheld_lock = withheld;
+        Ok(out)
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -1278,6 +1301,7 @@ fn report(
         full_backup: true,
         api_standards_count: d.graph.rulesets.len(),
         bundle_sha256,
+        withheld_lock: None,
     }
 }
 
@@ -1288,6 +1312,8 @@ struct Writer<'a, 't> {
     existing: &'a HashSet<(String, String)>,
     merge: bool,
     keep_settings: bool,
+    /// This profile's lock policy, kept over the backup's weaker one.
+    keep_lock: Option<&'a LockPolicy>,
 }
 
 impl Writer<'_, '_> {
@@ -1352,7 +1378,11 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     if let Some(x) = &g.app_settings
         && !w.keep_settings
     {
-        w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, x)?;
+        let mut x = x.clone();
+        if let Some(lock) = w.keep_lock {
+            x.lock = lock.clone();
+        }
+        w.put(kind::APP_SETTINGS, &settings_id(), None, None, 0.0, &x)?;
     }
     let ruleset_sort_keys: HashMap<String, f64> =
         w.tx.object_meta(kind::API_RULESET)?.into_iter().map(|row| (row.id, row.sort_key)).collect();

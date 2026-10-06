@@ -146,7 +146,10 @@ pub struct DesktopState {
     /// accept only these grants, never a path from the webview. Shared with
     /// the worker threads that read a chosen file.
     pub file_grants: Arc<FileGrants>,
+    /// The webview's last activity report (see `crate::presence`).
     pub last_activity: Mutex<Instant>,
+    /// Native signs of the user (see `crate::presence`).
+    pub presence: crate::presence::PresenceState,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
 }
@@ -169,12 +172,19 @@ impl DesktopState {
             pending_load_reports: PendingReports::default(),
             file_grants: Arc::default(),
             last_activity: Mutex::new(Instant::now()),
+            presence: Default::default(),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
         }
     }
 
     pub fn touch(&self) {
         *self.last_activity.lock() = Instant::now();
+    }
+
+    /// Whether the idle lock is due under a timeout of `idle_minutes` (see
+    /// [`crate::presence::idle_lock_due`]).
+    pub fn idle_lock_due(&self, idle_minutes: u32) -> bool {
+        crate::presence::idle_lock_due(idle_minutes, self.last_activity.lock().elapsed(), self.presence.native_idle())
     }
 
     /// The current lock epoch (see the `lock_epoch` field). Taken

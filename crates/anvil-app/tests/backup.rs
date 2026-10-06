@@ -865,6 +865,43 @@ fn replace_keeps_app_settings_while_the_profile_holds_a_workspace_the_backup_doe
 }
 
 #[test]
+fn replace_keeps_this_profiles_lock_policy_over_a_weaker_one_from_the_backup() {
+    let root = tempfile::tempdir().unwrap();
+    let a = small(root.path(), "a");
+    let mut weaker = a.settings().unwrap();
+    weaker.theme = Theme::Light;
+    weaker.lock.idle_minutes = 0;
+    weaker.lock.lock_on_os_lock = false;
+    a.save_settings(&weaker).unwrap();
+    let bytes = export(&a);
+
+    // The rest of the backup's app settings are restored; the lock policy
+    // is kept, and the report hands the backup's to the caller to ask about.
+    let b = new_app(root.path(), "b");
+    let before = b.settings().unwrap().lock;
+    let rep = b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    let restored = b.settings().unwrap();
+    assert_eq!(restored.theme, Theme::Light);
+    assert_eq!(restored.lock, before, "a restore never weakens the lock policy on its own");
+    assert_eq!(rep.withheld_lock, Some(weaker.lock.clone()));
+    let note = rep.warnings.iter().find(|w| w.starts_with(backup::KEPT_LOCK_NOTE)).expect("the report says so");
+    assert!(note.contains("never lock after inactivity") && note.contains("computer sleeps"), "{note}");
+    assert!(serde_json::to_value(&rep).unwrap().get("withheld_lock").is_none(), "never sent to the webview");
+
+    // A lock policy that is no weaker is restored as it is.
+    let mut stronger = a.settings().unwrap();
+    stronger.lock.idle_minutes = 5;
+    stronger.lock.lock_on_os_lock = true;
+    a.save_settings(&stronger).unwrap();
+    let bytes = export(&a);
+    let c = new_app(root.path(), "c");
+    let rep = c.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
+    assert_eq!(c.settings().unwrap().lock, stronger.lock);
+    assert_eq!(rep.withheld_lock, None);
+    assert!(!rep.warnings.iter().any(|w| w.starts_with(backup::KEPT_LOCK_NOTE)), "{:?}", rep.warnings);
+}
+
+#[test]
 fn restore_preserves_a_backup_with_recommended_rules_disabled() {
     let root = tempfile::tempdir().unwrap();
     let source = new_app(root.path(), "source");

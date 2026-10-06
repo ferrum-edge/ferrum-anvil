@@ -29,6 +29,28 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
+/// What a move checked against import isolation did.
+#[derive(Debug)]
+pub enum Move<T> {
+    Moved(T),
+    /// Refused, with nothing written: the move would take what it moves out
+    /// of this import root, which is not open to its workspace, and the
+    /// caller did not confirm leaving it. Out of it, a request resolves the
+    /// workspace's variables, environment and auth, as opening the root does
+    /// ([`App::set_import_root_workspace_scope`]).
+    LeavesImport(Box<Folder>),
+}
+
+impl<T> Move<T> {
+    /// What a move that could leave every import root moved.
+    fn moved(self) -> T {
+        match self {
+            Move::Moved(t) => t,
+            Move::LeavesImport(_) => unreachable!("every import root may be left"),
+        }
+    }
+}
+
 pub fn spec_hash(spec: &RequestSpec) -> String {
     hex::encode(Sha256::digest(serde_json::to_vec(spec).unwrap_or_default()))
 }
@@ -150,9 +172,23 @@ impl App {
     /// open to the workspace, are kept as stored: only a spec import makes
     /// an import root, and only [`App::set_import_root_workspace_scope`]
     /// opens one.
-    pub fn save_folder(&self, mut f: Folder) -> Result<Folder> {
+    pub fn save_folder(&self, f: Folder) -> Result<Folder> {
+        self.save_folder_with(f, false)
+    }
+
+    /// [`App::save_folder`] that keeps a stored folder under its stored
+    /// parent: it moves only through [`App::move_folder_keeping_isolation`],
+    /// which checks what the move takes out of an import root.
+    pub fn save_folder_in_place(&self, f: Folder) -> Result<Folder> {
+        self.save_folder_with(f, true)
+    }
+
+    fn save_folder_with(&self, mut f: Folder, in_place: bool) -> Result<Folder> {
         self.store.atomically(|s| {
             let stored: Option<Folder> = s.get(kind::FOLDER, &f.meta.id)?;
+            if in_place && let Some(stored) = &stored {
+                f.parent_id = stored.parent_id;
+            }
             validate_folder_parent_in(s, &f.workspace_id, f.parent_id)?;
             f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
             f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
@@ -185,6 +221,30 @@ impl App {
     /// Move a folder under a new parent (None = root) at `sort_key`,
     /// refusing moves that would create an ancestry cycle.
     pub fn move_folder(&self, id: &Id, new_parent: Option<Id>, sort_key: f64) -> Result<Folder> {
+        self.move_folder_guarded(id, new_parent, sort_key, |_| true).map(Move::moved)
+    }
+
+    /// [`App::move_folder`], refused with [`Move::LeavesImport`] when it
+    /// would take the folder's contents out of an import root that is not
+    /// open to its workspace, unless that root is `may_leave`. Moving an
+    /// import root itself takes nothing out of it.
+    pub fn move_folder_keeping_isolation(
+        &self,
+        id: &Id,
+        new_parent: Option<Id>,
+        sort_key: f64,
+        may_leave: Option<Id>,
+    ) -> Result<Move<Folder>> {
+        self.move_folder_guarded(id, new_parent, sort_key, |root| Some(root.meta.id) == may_leave)
+    }
+
+    fn move_folder_guarded(
+        &self,
+        id: &Id,
+        new_parent: Option<Id>,
+        sort_key: f64,
+        may_leave: impl Fn(&Folder) -> bool,
+    ) -> Result<Move<Folder>> {
         // Check the ancestry and save in one transaction, so two concurrent
         // moves (a under b and b under a) cannot both pass the check.
         self.store.atomically(|s| {
@@ -208,11 +268,16 @@ impl App {
                     cur = a.parent_id;
                 }
             }
+            if !f.import_root
+                && let Some(root) = leaves_import_in(s, f.parent_id, new_parent)?.filter(|root| !may_leave(root))
+            {
+                return Ok(Ok(Move::LeavesImport(Box::new(root))));
+            }
             f.parent_id = new_parent;
             f.sort_key = sort_key;
             f.meta.updated_at = chrono::Utc::now();
             s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
-            Ok(Ok(f))
+            Ok(Ok(Move::Moved(f)))
         })?
     }
 
@@ -435,6 +500,29 @@ impl App {
     /// write transaction, so a save or a linked-file relocation of it that
     /// lands meanwhile is kept, never replaced by an older copy.
     pub fn move_request(&self, id: &Id, folder: Option<Id>, sort_key: f64) -> Result<RequestDefinition> {
+        self.move_request_guarded(id, folder, sort_key, |_| true).map(Move::moved)
+    }
+
+    /// [`App::move_request`], refused with [`Move::LeavesImport`] when it
+    /// would take the request out of an import root that is not open to its
+    /// workspace, unless that root is `may_leave`.
+    pub fn move_request_keeping_isolation(
+        &self,
+        id: &Id,
+        folder: Option<Id>,
+        sort_key: f64,
+        may_leave: Option<Id>,
+    ) -> Result<Move<RequestDefinition>> {
+        self.move_request_guarded(id, folder, sort_key, |root| Some(root.meta.id) == may_leave)
+    }
+
+    fn move_request_guarded(
+        &self,
+        id: &Id,
+        folder: Option<Id>,
+        sort_key: f64,
+        may_leave: impl Fn(&Folder) -> bool,
+    ) -> Result<Move<RequestDefinition>> {
         self.store.atomically(|s| {
             let Some(mut r) = s.get::<RequestDefinition>(kind::REQUEST, id)? else {
                 return Ok(Err(AppError::NotFound("request".into())));
@@ -445,11 +533,14 @@ impl App {
                     return Ok(Err(AppError::Invalid("cannot move a request to another workspace".into())));
                 }
             }
+            if let Some(root) = leaves_import_in(s, r.folder_id, folder)?.filter(|root| !may_leave(root)) {
+                return Ok(Ok(Move::LeavesImport(Box::new(root))));
+            }
             r.folder_id = folder;
             r.sort_key = sort_key;
             r.meta.updated_at = chrono::Utc::now();
             s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
-            Ok(Ok(r))
+            Ok(Ok(Move::Moved(r)))
         })?
     }
 
@@ -765,6 +856,31 @@ impl App {
 /// Validate placement under the same write lock as a folder create/save.
 /// A concurrent delete cannot leave the new row under a deleted owner or
 /// parent; a foreign parent cannot supply another workspace's inherited scope.
+/// The import root a request in `folder` resolves under when it is not open
+/// to its workspace, as [`App::build_context`] decides it: the innermost
+/// import root of the folder's ancestry, unless the user opened it.
+fn sealed_root_in(s: &StoreTx<'_>, folder: Option<Id>) -> anvil_storage::store::Result<Option<Folder>> {
+    // `seen` stops the walk at a parent cycle (a context is never built there).
+    let mut seen = HashSet::new();
+    let mut cur = folder;
+    while let Some(c) = cur.filter(|c| seen.insert(*c)) {
+        let Some(f) = s.get::<Folder>(kind::FOLDER, &c)? else { return Ok(None) };
+        if f.import_root {
+            return Ok((!f.use_workspace_scope).then_some(f));
+        }
+        cur = f.parent_id;
+    }
+    Ok(None)
+}
+
+/// The import root, not open to its workspace, that a move from under
+/// `from` to under `to` takes what it moves out of, if any.
+fn leaves_import_in(s: &StoreTx<'_>, from: Option<Id>, to: Option<Id>) -> anvil_storage::store::Result<Option<Folder>> {
+    let Some(root) = sealed_root_in(s, from)? else { return Ok(None) };
+    let stays = sealed_root_in(s, to)?.is_some_and(|r| r.meta.id == root.meta.id);
+    Ok((!stays).then_some(root))
+}
+
 fn validate_folder_parent_in(s: &StoreTx<'_>, ws: &Id, parent: Option<Id>) -> anvil_storage::store::Result<()> {
     if s.get::<Workspace>(kind::WORKSPACE, ws)?.is_none() {
         return Err(StoreError::NotFound("workspace".into()));
