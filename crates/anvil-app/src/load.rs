@@ -298,6 +298,22 @@ impl App {
             };
             let (_, auth) = ctx.effective_auth();
             let oauth = auth.oauth_profile().map_err(|message| AppError::Invalid(message.into()))?;
+            if let Some(oauth) = oauth {
+                // Check before resolving the API URL, headers or mixed auth:
+                // those fields may alias a deferred credential variable.
+                let proven = match prove_url(&resolver, &oauth.token_url, "auth.token_url") {
+                    Ok(proven) => proven,
+                    Err(UrlProblem::Unresolved(_)) => {
+                        return Err(AppError::Invalid("could not resolve OAuth token URL; check the vault and active variables".into()));
+                    }
+                    Err(UrlProblem::PerRun(origin)) => return Err(refuse("OAuth token URL", origin)),
+                };
+                // Literal-loopback cleartext only on a direct route, as the
+                // acquisition sink requires (every port for a per-run port).
+                let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+                anvil_engine::oauth_http::require_token_endpoint_route(&proven.probe, ctx, &settings, proven.port_varies)
+                    .map_err(AppError::Invalid)?;
+            }
             let (destination, local) = match ctx.spec.protocol {
                 Protocol::Http => {
                     // Resolve the URL first; a forward proxy also routes by
@@ -339,9 +355,18 @@ impl App {
                 for (label, template) in auth_urls {
                     let proven = match prove_url(&resolver, template, "auth URL") {
                         Ok(proven) => proven,
-                        Err(UrlProblem::Unresolved(message)) => return Err(AppError::Invalid(message)),
+                        Err(UrlProblem::Unresolved(_)) => {
+                            return Err(AppError::Invalid(format!("could not resolve {label}; check the vault and active variables")));
+                        }
                         Err(UrlProblem::PerRun(origin)) => return Err(refuse(label, origin)),
                     };
+                    if label == "OAuth token URL" {
+                        // Eligibility is the acquisition sink's policy: literal
+                        // loopback on a direct route, whatever the DNS overrides.
+                        let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+                        anvil_engine::oauth_http::require_token_endpoint_route(&proven.probe, ctx, &settings, proven.port_varies)
+                            .map_err(AppError::Invalid)?;
+                    }
                     let target = anvil_engine::prepare::parse_target(
                         &proven.probe,
                         anvil_load::protocol::send_schemes(Protocol::Http),
@@ -545,7 +570,7 @@ fn preflight_resolver(ctx: &anvil_engine::ExecutionContext, id: &Id, p: &LoadPla
     if !extracted.is_empty() {
         layers.push(VarLayer { label: "iteration (extracted)".into(), vars: extracted });
     }
-    Resolver::new(layers, None)
+    Resolver::new(layers, None).with_secrets(ctx.secrets.clone()).with_value_transform(mask_dynamic_expressions)
 }
 
 /// The part of a URL's origin a per-run value reaches, and where those values

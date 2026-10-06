@@ -46,6 +46,7 @@ pub struct EngineTokenHttp<'a> {
 
 impl EngineTokenHttp<'_> {
     fn plan(&self, url: &str, form: Vec<(String, String)>, basic: Option<(String, String)>) -> Result<HttpPlan, String> {
+        require_token_endpoint_route(url, self.ctx, self.settings, false)?;
         let mut inferred = vec![];
         let t = prepare::parse_target(url, &["https", "http"], &mut inferred).map_err(|e| e.message)?;
         let body: String = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form.iter()).finish();
@@ -69,6 +70,9 @@ impl EngineTokenHttp<'_> {
         // The token endpoint uses the request's proxy profile (and its
         // NO_PROXY list), exactly like the API request would.
         let proxy = crate::http_exec::proxy_for(self.engine, epoch, self.ctx, self.settings, &t, &mut inferred).map_err(|e| e.message)?;
+        if t.scheme == "http" && proxy.is_some() {
+            return Err(PROXIED_CLEARTEXT.into());
+        }
         Ok(HttpPlan {
             method: http::Method::POST,
             https: t.scheme == "https",
@@ -129,25 +133,321 @@ impl TokenHttp for EngineTokenHttp<'_> {
 /// Resolve an OAuth 2 profile's templates and secret references.
 pub(crate) fn resolve_oauth(config: &OAuth2Config, ctx: &ExecutionContext, r: &Resolver) -> Result<OAuthResolved, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
-    let (raw_secret, _) =
-        resolve_sensitive(&config.client_secret, ctx.secrets.as_ref()).map_err(|e| fail(format!("auth.client_secret: {e}")))?;
+    // Expansion errors may quote variable names obtained from vault values.
+    // Sanitize at their source, before history, flow observers or IPC see them.
+    let resolve = |value: &str, field: &str| {
+        r.resolve(value, field).map_err(|mut failure| {
+            failure.message = format!("could not resolve {field}; check the vault and active variables");
+            failure
+        })
+    };
+    let token_url = resolve_token_endpoint(config, ctx, r)?;
+    let (raw_secret, _) = resolve_sensitive(&config.client_secret, ctx.secrets.as_ref())
+        .map_err(|_| fail("could not resolve auth.client_secret; check the vault and active variables".into()))?;
     // Only interactive grants visit the authorization endpoint.
     let authorization_url = match config.grant {
         OAuthGrant::ClientCredentials => String::new(),
-        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken => r.resolve(&config.authorization_url, "auth.authorization_url")?,
+        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken => resolve(&config.authorization_url, "auth.authorization_url")?,
     };
     Ok(OAuthResolved {
         grant: config.grant,
-        token_url: r.resolve(&config.token_url, "auth.token_url")?,
+        token_url,
         authorization_url,
-        client_id: r.resolve(&config.client_id, "auth.client_id")?,
-        client_secret: Zeroizing::new(r.resolve(&raw_secret, "auth.client_secret")?),
-        scope: r.resolve(&config.scope, "auth.scope")?,
-        audience: r.resolve(&config.audience, "auth.audience")?,
+        client_id: resolve(&config.client_id, "auth.client_id")?,
+        client_secret: Zeroizing::new(resolve(&raw_secret, "auth.client_secret")?),
+        scope: resolve(&config.scope, "auth.scope")?,
+        audience: resolve(&config.audience, "auth.audience")?,
         basic_client_auth: config.client_auth == OAuthClientAuth::BasicHeader,
         token_cache_id: config.token_cache_id,
         refresh_skew_secs: config.refresh_skew_secs as i64,
     })
+}
+
+fn resolve_token_endpoint(config: &OAuth2Config, ctx: &ExecutionContext, r: &Resolver) -> Result<String, TransportFailure> {
+    if let Some((template, endpoint)) = r.oauth_endpoint.lock().as_ref()
+        && template == &config.token_url
+    {
+        return Ok(endpoint.clone());
+    }
+    let endpoint = r.resolve(&config.token_url, "auth.token_url").map_err(|mut failure| {
+        failure.message = "could not resolve auth.token_url; check the vault and active variables".into();
+        failure
+    })?;
+    let settings = crate::settings::resolve(&ctx.settings_layers);
+    require_token_endpoint_route(&endpoint, ctx, &settings, false)
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
+    *r.oauth_endpoint.lock() = Some((config.token_url.clone(), endpoint.clone()));
+    Ok(endpoint)
+}
+
+/// Check the effective endpoint, then freeze the complete deferred variable
+/// scope before request fields, mixed auth credentials or workload identities
+/// are prepared. HTTP and every session entry point use this gate before effects.
+/// Acquisition uses the same endpoint expansion, including dynamic helper state.
+pub fn validate_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(), TransportFailure> {
+    let (_, auth) = ctx.effective_auth();
+    let config = auth
+        .oauth_profile()
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
+    if let Some(config) = config {
+        resolve_token_endpoint(config, ctx, r)?;
+    }
+    r.materialize_variables()
+}
+
+/// A load producer cannot authorize an origin from one sample of a dynamic
+/// helper, dataset cell or extracted value. These markers preserve its origin
+/// proof while allowing per-run paths and literal-loopback ports.
+pub const OAUTH_PER_RUN_VALUE: &str = "anvil-oauth-per-run-value";
+
+pub fn mask_oauth_dynamic(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(open) = rest.find("{{") {
+        output.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            output.push_str(&rest[open..]);
+            return output;
+        };
+        if after[..close].trim().starts_with('$') {
+            output.push_str(OAUTH_PER_RUN_VALUE);
+        } else {
+            output.push_str(&rest[open..open + 2 + close + 2]);
+        }
+        rest = &after[close + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Validate the expanded origin at the producer, before resolving or exporting
+/// any credential. The worker checks the actual endpoint again on acquisition.
+pub fn validate_worker_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(), String> {
+    let (_, auth) = ctx.effective_auth();
+    let Some(config) = auth.oauth_profile().map_err(str::to_string)? else {
+        return Ok(());
+    };
+    let mut endpoint = r
+        .resolve(&mask_oauth_dynamic(&config.token_url), "auth.token_url")
+        .map_err(|_| "could not resolve auth.token_url; check the vault and active variables".to_string())?;
+    let varies = |value: &str| value.contains(OAUTH_PER_RUN_VALUE);
+    let (scheme, rest) = endpoint.split_once("://").unwrap_or(("", endpoint.as_str()));
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    if varies(scheme) {
+        return Err("the OAuth token endpoint scheme depends on per-run values".into());
+    }
+    let port_varies = varies(authority);
+    if port_varies {
+        let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
+        let (host, port) = authority.split_at(host_end.unwrap_or(authority.len()));
+        let Some(port) = port.strip_prefix(':').filter(|_| !varies(host)) else {
+            return Err("the OAuth token endpoint host depends on per-run values".into());
+        };
+        let loopback = url::Url::parse(&format!("http://{host}/")).ok().is_some_and(|url| match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()),
+            _ => false,
+        });
+        if !loopback || !port.replace(OAUTH_PER_RUN_VALUE, "").bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("a per-run OAuth token endpoint port requires a fixed literal-loopback host and digits".into());
+        }
+        let start = endpoint.len() - rest.len() + host.len() + 1;
+        let end = endpoint.len() - rest.len() + authority.len();
+        endpoint.replace_range(start..end, "1");
+    }
+    let settings = crate::settings::resolve(&ctx.settings_layers);
+    require_token_endpoint_route(&endpoint.replace(OAUTH_PER_RUN_VALUE, "1"), ctx, &settings, port_varies)
+}
+
+/// The common acquisition boundary, checked before resolving credentials and
+/// again before constructing transport headers/body. DNS names (including
+/// localhost) cannot opt into cleartext; only a canonical literal loopback can.
+pub fn require_secure_token_endpoint(raw: &str) -> Result<(), String> {
+    let u = url::Url::parse(raw).map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
+    let loopback = match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
+        _ => false,
+    };
+    if u.scheme() == "https" || (u.scheme() == "http" && loopback) {
+        Ok(())
+    } else {
+        Err("the OAuth token endpoint requires HTTPS or literal-loopback HTTP".into())
+    }
+}
+
+const PROXIED_CLEARTEXT: &str =
+    "literal-loopback HTTP for the OAuth token endpoint requires a direct connection; use HTTPS or bypass the proxy for it (NO_PROXY)";
+
+/// [`require_secure_token_endpoint`], and literal-loopback HTTP only on a
+/// direct connection: a proxy would receive the form and Basic credentials in
+/// cleartext and deliver them to its own loopback. Decided from the selected
+/// proxy profile and its NO_PROXY list (for every port when `every_port`),
+/// before any credential is resolved; a selected profile that no longer exists
+/// counts as a proxy.
+pub fn require_token_endpoint_route(
+    raw: &str,
+    ctx: &ExecutionContext,
+    settings: &EffectiveSettings,
+    every_port: bool,
+) -> Result<(), String> {
+    require_secure_token_endpoint(raw)?;
+    let u = url::Url::parse(raw).map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
+    let Some(id) = settings.proxy_profile_id.filter(|_| u.scheme() == "http") else {
+        return Ok(());
+    };
+    let host = match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.to_string(),
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        _ => String::new(),
+    };
+    let port = u.port_or_known_default().unwrap_or(80);
+    let bypassed = ctx.proxy_profiles.iter().find(|p| p.id == id).is_some_and(|p| {
+        if every_port {
+            anvil_transport::net::no_proxy_matches_every_port(&p.no_proxy, &host)
+        } else {
+            anvil_transport::net::no_proxy_matches(&p.no_proxy, &host, port)
+        }
+    });
+    if bypassed { Ok(()) } else { Err(PROXIED_CLEARTEXT.into()) }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use crate::vars::{VarEntry, VarLayer};
+    use anvil_domain::request::RequestSpec;
+    use anvil_domain::secret::SensitiveValue;
+
+    #[test]
+    fn endpoint_policy_requires_https_or_canonical_literal_loopback() {
+        for url in [
+            "https://issuer.example/token",
+            "https://10.0.0.1/token",
+            "http://127.0.0.1/token",
+            "http://127.1/token",
+            "http://[::1]/token",
+            "http://[::ffff:127.0.0.1]/token",
+        ] {
+            assert!(require_secure_token_endpoint(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://issuer.example/token",
+            "http://localhost/token",
+            "http://localhost./token",
+            "http://10.0.0.1/token",
+            "http://[::ffff:10.0.0.1]/token",
+            "http://[::]/token",
+            "ftp://127.0.0.1/token",
+        ] {
+            assert!(require_secure_token_endpoint(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn all_grants_validate_resolved_url_before_resolving_client_credentials() {
+        let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
+        for grant in [OAuthGrant::ClientCredentials, OAuthGrant::RefreshToken, OAuthGrant::AuthorizationCodePkce] {
+            let config = OAuth2Config {
+                grant,
+                token_url: "{{endpoint}}".into(),
+                client_id: "{{client}}".into(),
+                client_secret: SensitiveValue::template("{{credential}}"),
+                authorization_url: String::new(),
+                scope: String::new(),
+                audience: String::new(),
+                client_auth: OAuthClientAuth::RequestBody,
+                token_cache_id: None,
+                refresh_skew_secs: 30,
+            };
+            let resolver = Resolver::new(
+                vec![VarLayer {
+                    label: "test".into(),
+                    vars: vec![
+                        VarEntry { name: "endpoint".into(), value: "http://issuer.example/token".into(), secret: false },
+                        VarEntry { name: "client".into(), value: "unused-client".into(), secret: true },
+                        VarEntry { name: "credential".into(), value: "unused-credential".into(), secret: true },
+                    ],
+                }],
+                None,
+            );
+            let error = resolve_oauth(&config, &ctx, &resolver).err().unwrap();
+            assert_eq!(error.kind, FailureKind::AuthPreparationFailed);
+            assert!(error.message.contains("HTTPS"));
+            assert!(resolver.used_secrets.lock().is_empty());
+            assert_eq!(resolver.used.lock().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn common_transport_rejects_forms_and_basic_auth_without_dispatch() {
+        let engine = Engine::new();
+        let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
+        let settings = EffectiveSettings::default();
+        let http = EngineTokenHttp { engine: &engine, ctx: &ctx, settings: &settings, epoch: engine.sensitive_epoch() };
+        for grant in ["client_credentials", "refresh_token", "authorization_code"] {
+            let result = http
+                .post_form(
+                    "http://localhost/token",
+                    vec![("grant_type".into(), grant.into()), ("code_verifier".into(), "unused-verifier".into())],
+                    Some(("unused-client".into(), "unused-secret".into())),
+                )
+                .await;
+            assert!(result.unwrap_err().contains("HTTPS"));
+        }
+        assert_eq!(engine.http.pool.stats().connections, 0);
+        assert_eq!(engine.tokens.requests.load(std::sync::atomic::Ordering::Relaxed), 0,);
+    }
+
+    #[tokio::test]
+    async fn literal_loopback_cleartext_requires_a_direct_route_before_dispatch() {
+        let mut ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://api.example/"));
+        let profile = anvil_domain::tls::ProxyProfile {
+            id: anvil_domain::Id::new(),
+            workspace_id: anvil_domain::Id::new(),
+            name: "corp".into(),
+            kind: anvil_domain::tls::ProxyKind::Http,
+            address: "proxy.example:3128".into(),
+            username: None,
+            password: None,
+            no_proxy: "localhost,127.0.0.1:8443,[::1]".into(),
+            tls_profile_id: None,
+            hbone: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let id = profile.id;
+        ctx.proxy_profiles.push(profile);
+        let mut settings = EffectiveSettings::default();
+        let route =
+            |url: &str, settings: &EffectiveSettings, every_port: bool| require_token_endpoint_route(url, &ctx, settings, every_port);
+        assert!(route("http://127.0.0.1:8080/token", &settings, false).is_ok(), "no proxy is selected");
+        settings.proxy_profile_id = Some(id);
+        for url in ["http://127.0.0.1:8080/token", "http://127.1/token", "http://[::ffff:127.0.0.1]/token"] {
+            assert!(route(url, &settings, false).unwrap_err().contains("direct connection"), "{url}");
+        }
+        assert!(route("http://localhost/token", &settings, false).unwrap_err().contains("HTTPS"), "names never opt in");
+        assert!(route("https://issuer.example/token", &settings, false).is_ok(), "TLS protects the proxied hop");
+        assert!(route("http://127.0.0.1:8443/token", &settings, false).is_ok(), "NO_PROXY bypasses the proxy");
+        assert!(route("http://127.0.0.1:8443/token", &settings, true).is_err(), "a port entry does not cover per-run ports");
+        assert!(route("http://[::1]:9/token", &settings, true).is_ok());
+        settings.proxy_profile_id = Some(anvil_domain::Id::new());
+        assert!(route("http://[::1]/token", &settings, false).is_err(), "a missing profile counts as a proxy");
+        // The common transport refuses before any connection or dispatch.
+        settings.proxy_profile_id = Some(id);
+        let engine = Engine::new();
+        let http = EngineTokenHttp { engine: &engine, ctx: &ctx, settings: &settings, epoch: engine.sensitive_epoch() };
+        let result = http
+            .post_form(
+                "http://127.0.0.1:8080/token",
+                vec![("grant_type".into(), "client_credentials".into())],
+                Some(("unused-client".into(), "unused-secret".into())),
+            )
+            .await;
+        assert!(result.unwrap_err().contains("direct connection"));
+        assert_eq!(engine.http.pool.stats().connections, 0);
+    }
 }
 
 /// Token-cache key: the workspace isolation plus every setting that decides
@@ -182,6 +482,7 @@ pub(crate) async fn acquire(
     cfg: &OAuthResolved,
     cancel: &CancellationToken,
 ) -> Result<CachedToken, AuthError> {
+    require_token_endpoint_route(&cfg.token_url, ctx, settings, false).map_err(AuthError::Invalid)?;
     let http = EngineTokenHttp { engine, ctx, settings, epoch };
     // Taken before the jar generation is read: a delete advances the jar
     // generation before it clears the workspace's tokens, so either the
@@ -271,10 +572,12 @@ pub fn interactive_oauth(ctx: &ExecutionContext) -> Result<InteractiveOAuth, Tra
     let (scope_label, auth) = ctx.effective_auth();
     let config =
         auth.oauth_profile().map_err(fail)?.ok_or_else(|| fail("the effective auth for this request is not an OAuth 2 profile"))?;
+    let r = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
+    resolve_token_endpoint(config, ctx, &r)?;
+    r.materialize_variables()?;
     if config.grant == OAuthGrant::ClientCredentials {
         return Err(fail("this OAuth profile uses the client-credentials grant, which needs no browser sign-in"));
     }
-    let r = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     // Resolved once: the endpoint the browser visits is the one in the key.
     let resolved = resolve_oauth(config, ctx, &r)?;
     if resolved.authorization_url.trim().is_empty() {
@@ -326,6 +629,7 @@ pub async fn redeem_authorization_code(
     redirect_uri: &str,
     cancel: &CancellationToken,
 ) -> Result<TokenSummary, AuthError> {
+    require_token_endpoint_route(&target.resolved.token_url, ctx, &target.settings, false).map_err(AuthError::Invalid)?;
     // `generation` was taken before this check: a delete that is not seen
     // here clears the workspace's tokens after it, and the store is refused.
     if workspace_deleted_since(engine, engine.epoch_for(ctx), ctx) {

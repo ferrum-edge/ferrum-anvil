@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Security
+
+- Bound retained HTTP state and authorize resolved destinations (PR #308;
+  GHSA-jq6r-57w6-qp5w, GHSA-8g83-498m-r38r, GHSA-xmww-2phg-v997). The policy is in
+  [docs/security/http-state-and-destination-policy.md](docs/security/http-state-and-destination-policy.md).
+  No released version is claimed patched.
+  - Cookie jars are bounded: 4 KiB per incoming `Set-Cookie` value, 8 KiB per retained
+    cookie, 180 cookies / 128 KiB per registrable site and 3,000 cookies / 2 MiB per
+    workspace. Expired cookies are purged on access, and the least recently used are
+    evicted first. All outgoing `Cookie` fields together are capped at 8 KiB after
+    signing, on every HTTP attempt, SSE reconnection, gRPC reflection call and MASQUE
+    CONNECT.
+  - OAuth token requests for every grant and refresh require HTTPS, or literal-loopback
+    HTTP on a direct connection. The check runs before any credential is resolved, in
+    the engine sink, the App load preflight, the load producer and worker, and browser
+    sign-in/status.
+  - Every direct HTTP attempt resolves once, validates the whole answer and pins it
+    into the dial and the connection pool key. The key sorts the answer, so round-robin
+    DNS keeps connection reuse. The original request is authorized for the network
+    zones of its answer, so Tailscale, mDNS, NAT64 and fake-IP first requests work.
+    Redirects stay within those zones or go wholly public. After any public hop, only
+    public hops follow. A fake-IP redirect must return to the original host. Well-known
+    NAT64 addresses are classified by their embedded IPv4; operator-specific NAT64
+    prefixes are treated as public.
+  - Vault variables that are deferred until the OAuth endpoint is validated fail
+    closed with a clear error in resolvers that lack the context's secrets, instead of
+    resolving to an empty string.
+  - **BREAKING:** cookie eviction and output omission can end sessions or change load
+    results, and unknown suffixes use host-only cookies.
+  - **BREAKING:** `localhost`, DNS names, loopback DNS overrides and proxied routes no
+    longer qualify for a cleartext OAuth token endpoint. Use HTTPS, or a literal
+    loopback address that the proxy's `NO_PROXY` list bypasses.
+  - **BREAKING:** the following are refused: redirects through any proxy (including
+    same-host redirects), redirect answers that mix public and non-public zones,
+    returns to a non-public zone after a public hop, and original requests to special
+    or reserved addresses (including `0.0.0.0`). A load plan whose unit depends on an
+    OAuth-deferred vault URL is refused before traffic.
+
 ### Breaking
 
 - Desktop IPC: `session_open`, `session_send` and `session_cancel` require an

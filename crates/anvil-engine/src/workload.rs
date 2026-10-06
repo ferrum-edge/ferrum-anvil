@@ -233,7 +233,7 @@ fn is_tls_scheme(s: &str) -> bool {
 /// throwaway resolver so counters and random helpers of the real
 /// preparation are not advanced.
 fn tls_target(ctx: &ExecutionContext) -> Option<(String, String, u16)> {
-    let r = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let r = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
     let mut inferred = vec![];
     let all = ["https", "http", "wss", "ws", "grpcs", "grpc", "tls", "tcp", "dtls", "udp"];
     let url = r.resolve(&ctx.spec.url, "url").ok()?;

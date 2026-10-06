@@ -116,9 +116,9 @@ impl Lookup<'_> {
 
     /// The lookup credential, without a `Bearer ` prefix the user may have pasted.
     fn credential(&self, access: &DiagnosticDetailAccess) -> Result<Zeroizing<String>, String> {
-        let fail = |e: String| format!("the lookup credential could not be resolved: {e}");
-        let (raw, _) = resolve_sensitive(&access.credential, self.ctx.secrets.as_ref()).map_err(fail)?;
-        let resolved = Zeroizing::new(self.resolver.resolve(&raw, "integration.detail.credential").map_err(|e| fail(e.message))?);
+        let fail = || "the lookup credential could not be resolved; check the vault and active variables".to_string();
+        let (raw, _) = resolve_sensitive(&access.credential, self.ctx.secrets.as_ref()).map_err(|_| fail())?;
+        let resolved = Zeroizing::new(self.resolver.resolve(&raw, "integration.detail.credential").map_err(|_| fail())?);
         let token = resolved.trim();
         let token = token.strip_prefix("Bearer ").or_else(|| token.strip_prefix("bearer ")).unwrap_or(token).trim();
         if token.is_empty() {
@@ -147,6 +147,15 @@ impl Lookup<'_> {
         }
         if let Err(reason) = admin_channel_allowed(&base) {
             return (endpoint, false, failed(reason));
+        }
+        // Recorded lookups enter here without HTTP/session preparation. Apply
+        // the same issuer and complete-scope gate before any credential alias.
+        if crate::oauth_http::validate_oauth_endpoint(self.ctx, self.resolver).is_err() {
+            return (
+                endpoint,
+                false,
+                failed("the lookup could not be prepared; check OAuth settings, the vault and active variables".into()),
+            );
         }
         let token = match self.credential(access) {
             Ok(t) => t,
@@ -315,7 +324,7 @@ pub async fn lookup_recorded(
     attempt: &AttemptObservation,
     cancel: &CancellationToken,
 ) -> GatewayDetail {
-    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
+    let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let mut redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
     let lookup = Lookup { engine, epoch: engine.epoch_for(ctx), ctx, settings: &settings, resolver: &resolver };
