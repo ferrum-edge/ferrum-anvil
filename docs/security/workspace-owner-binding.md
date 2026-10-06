@@ -13,8 +13,8 @@ workspace and request that own them inside the encrypted payload
 ([below](#request-revisions)). Before returning an object, storage compares
 the sealed fields to the actual row metadata, including for
 `serde_json::Value` reads and unscoped lists. Apart from the one-time schema 3
-revision step, no row is resealed, repaired, adopted or assigned an owner at
-open/unlock.
+step for revisions and history records, no row is resealed, repaired, adopted
+or assigned an owner at open/unlock.
 
 | Kind | Authenticated identity checked against the row |
 | --- | --- |
@@ -84,16 +84,40 @@ is refused before the live database is touched.
 
 ## History records and load reports
 
-History records and load reports keep their released AAD (table, kind, ID).
 An execution record seals its workspace and request ID; a load report seals
 its plan's workspace. Every read path compares them with the row's plaintext
 columns and refuses a mismatch: `get_history`, `list_history` and
-`history_entries`, `list_load_reports` and `load_report_entries`. Owner maps
-used by import and restore conflict checks therefore come from the sealed
-owner too. A write must index a record or report under the owner it seals.
-Retention, clearing and workspace deletion still select rows by their
-plaintext columns; an edited column can make such a row be deleted with
-another workspace's, but never read under it.
+`history_entries`, `get_load_report`, `list_load_reports` and
+`load_report_entries`. Owner maps used by import and restore conflict checks
+therefore come from the sealed owner too.
+
+A history record's response body is stored as a separate blob, and the row
+names it in a plaintext `body_blob` column. Schema 3 seals the record under
+the AAD `anvil/v3/history/record/<len>:<id>/body/<len>:<blob id>` (or
+`.../no-body` for a record without one), so the record opens only with the
+body column it was written with. A blob ID is a keyed hash of the blob's
+content and a blob opens only under its own ID, so a record whose body column
+is pointed at another blob, or cleared, is refused instead of returning that
+blob. Load reports keep their released AAD (table, kind, ID).
+
+The schema 3 step seals each existing history record again, once, with the
+body column its row has then, as revisions take their request's owner once.
+Only a record the schema 2 read accepted is sealed: it decrypts under the
+schema 1 AAD and its sealed workspace and request equal its columns. Any other
+record is left byte for byte, counted in `meta.history_left_at_v3`, and stays
+refused until it is deleted. A record that already opens under its schema 3
+AAD in a database whose recorded version is below 3 means the version was set
+back; the step fails without writing, and a checkpoint like that is refused.
+
+A write must index a record or report under the owner it seals. When a row
+with the same ID already exists, the write first authenticates it and fails
+with `Ownership` if it seals another workspace (or, for a history record,
+another request), as an object update does; an existing row that does not
+authenticate fails the write too. A profile-wide listing that meets a record
+or report that fails these checks names its ID in the error, so it can be
+found and deleted. Retention, clearing and workspace deletion still select
+rows by their plaintext columns; an edited column can make such a row be
+deleted with another workspace's, but never read under it.
 
 ## Orphan revisions and retention
 

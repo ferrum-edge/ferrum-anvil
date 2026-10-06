@@ -1,9 +1,12 @@
 //! A request revision is sealed together with the workspace and request that
-//! own it (schema 3). Revisions sealed before that are sealed again once, in
-//! one transaction, when the store is opened or unlocked or a checkpoint is
-//! restored, under the workspace of their authenticated request. A revision
-//! whose request does not authenticate is left exactly as it was and stays
-//! refused: it is never adopted by a workspace.
+//! own it, and a history record together with the response body it references
+//! (schema 3). Rows sealed before that are sealed again once, in one
+//! transaction, when the store is opened or unlocked or a checkpoint is
+//! restored: a revision under the workspace of its authenticated request, a
+//! history record with the body its row references then. A revision whose
+//! request does not authenticate, or a history record that does not open
+//! under its owner, is left exactly as it was and stays refused: it is never
+//! adopted. A checkpoint of the database is taken before it is sealed again.
 
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
@@ -12,7 +15,7 @@ use anvil_storage::{KdfParams, Key, Store, StoreError, crypto, kind, vault};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn db(dir: &Path) -> Connection {
     Connection::open(dir.join(DB_FILE)).unwrap()
@@ -33,13 +36,29 @@ fn set_version(dir: &Path, version: &str) {
     db(dir).execute("UPDATE meta SET value=?1 WHERE key='schema_version'", params![version]).unwrap();
 }
 
+fn meta(dir: &Path, key: &str) -> Option<String> {
+    db(dir).query_row("SELECT value FROM meta WHERE key=?1", params![key], |r| r.get(0)).optional().unwrap()
+}
+
 fn left_at_v3(dir: &Path) -> Option<String> {
-    let sql = "SELECT value FROM meta WHERE key='revisions_left_at_v3'";
-    db(dir).query_row(sql, [], |r| r.get(0)).optional().unwrap()
+    meta(dir, "revisions_left_at_v3")
 }
 
 fn payload(dir: &Path, id: &Id) -> Vec<u8> {
     db(dir).query_row("SELECT payload FROM objects WHERE kind='revision' AND id=?1", params![id.to_string()], |r| r.get(0)).unwrap()
+}
+
+fn history_payload(dir: &Path, id: &Id) -> Vec<u8> {
+    db(dir).query_row("SELECT payload FROM history WHERE id=?1", params![id.to_string()], |r| r.get(0)).unwrap()
+}
+
+/// The checkpoints taken in the profile in `dir`.
+fn checkpoints(dir: &Path) -> Vec<PathBuf> {
+    match std::fs::read_dir(dir.join("checkpoints")) {
+        Ok(entries) => entries.map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "db")).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{e}"),
+    }
 }
 
 // This attacker has no key. Change only the plaintext owner index of a row.
@@ -94,6 +113,14 @@ fn plant_v1(dir: &Path, key: &Key, revision: &Value, owner: Option<Id>, parent: 
     let id = id_of(revision);
     plant_v1_as(dir, key, id, revision, owner, parent);
     id
+}
+
+/// A history row stored as `id`, as schema 2 and earlier sealed it: bound to
+/// its id only, with the indexes and body given.
+fn plant_v1_history(dir: &Path, key: &Key, id: Id, record: &Value, owner: Option<Id>, request: Option<Id>, body: Option<&str>) {
+    let env = crypto::seal(key, format!("anvil/v1/history/record/{id}").as_bytes(), &serde_json::to_vec(record).unwrap());
+    let sql = "INSERT INTO history(id,workspace_id,request_id,started_at,size,body_blob,payload) VALUES(?1,?2,?3,0,0,?4,?5)";
+    db(dir).execute(sql, params![id.to_string(), owner.map(|w| w.to_string()), request.map(|r| r.to_string()), body, env]).unwrap();
 }
 
 fn get(store: &Store, id: &Id) -> Result<Option<Value>, StoreError> {
@@ -311,6 +338,7 @@ fn a_wrong_key_fails_before_the_revision_migration_and_changes_nothing() {
     assert_eq!(stored_version(dir.path()), "2");
     assert_eq!(payload(dir.path(), &id), before);
     assert_eq!(left_at_v3(dir.path()), None);
+    assert!(checkpoints(dir.path()).is_empty(), "no checkpoint is taken with a wrong key");
 }
 
 #[test]
@@ -320,15 +348,22 @@ fn a_schema_3_revision_in_a_database_set_back_to_schema_2_fails_the_migration_an
     let (a, b) = (workspace(&store), workspace(&store));
     let request_a = request(&store, a);
     let request_b = request(&store, b);
+    // A revision from an older copy of the database put back under workspace
+    // `b`'s request, before the genuine one: the step seals it again first,
+    // then fails on the genuine one, so its write is rolled back.
+    let planted = plant_v1(dir.path(), &dek, &revision(request_b, &"4".repeat(64)), Some(b), Some(request_b));
     let value = revision(request_a, &"3".repeat(64));
     let genuine = id_of(&value);
     store.put(kind::REVISION, &genuine, Some(&a), Some(&request_a), 0.0, &value).unwrap();
     store.lock();
-    // The version set back, and a revision from an older copy of the database
-    // put back under workspace `b`'s request.
+    // The version set back.
     set_version(dir.path(), "2");
-    let planted = plant_v1(dir.path(), &dek, &revision(request_b, &"4".repeat(64)), Some(b), Some(request_b));
     let before = (payload(dir.path(), &genuine), payload(dir.path(), &planted));
+    let rowid = |id: &Id| -> i64 {
+        let sql = "SELECT rowid FROM objects WHERE kind='revision' AND id=?1";
+        db(dir.path()).query_row(sql, params![id.to_string()], |r| r.get(0)).unwrap()
+    };
+    assert!(rowid(&planted) < rowid(&genuine), "the legacy row is read first");
 
     assert!(matches!(store.unlock(dek.clone()), Err(StoreError::Integrity)));
     assert!(store.is_locked(), "a failed migration leaves the store locked");
@@ -355,4 +390,146 @@ fn a_checkpoint_set_back_to_schema_2_is_refused_before_the_live_database_is_touc
     assert!(!store.is_locked(), "a refused checkpoint leaves the store unlocked");
     assert_eq!(stored_version(dir.path()), DB_SCHEMA_VERSION.to_string());
     assert_eq!(get(&store, &id).unwrap(), None, "the live database is as it was");
+}
+
+#[test]
+fn opening_binds_schema_2_history_records_to_their_body_once() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    let (a, b) = (workspace(&store), workspace(&store));
+    let request = request(&store, a);
+    let body = store.put_blob(b"response body").unwrap();
+    let other = store.put_blob(b"another body").unwrap();
+    drop(store);
+    set_version(dir.path(), "2");
+    let record = |id: Id| json!({"id": id, "workspace_id": a, "request_id": request, "status": 200});
+    let (with_body, without, corrupt, misfiled) = (Id::new(), Id::new(), Id::new(), Id::new());
+    plant_v1_history(dir.path(), &dek, with_body, &record(with_body), Some(a), Some(request), Some(body.as_str()));
+    plant_v1_history(dir.path(), &dek, without, &record(without), Some(a), Some(request), None);
+    // Left as they were: one that does not decrypt, and one filed under
+    // another workspace than the one it seals.
+    plant_v1_history(dir.path(), &Key::random(), corrupt, &record(corrupt), Some(a), Some(request), None);
+    plant_v1_history(dir.path(), &dek, misfiled, &record(misfiled), Some(b), Some(request), Some(body.as_str()));
+    let legacy = history_payload(dir.path(), &with_body);
+    let left = [corrupt, misfiled];
+    let before: Vec<Vec<u8>> = left.iter().map(|id| history_payload(dir.path(), id)).collect();
+
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    assert_eq!(stored_version(dir.path()), DB_SCHEMA_VERSION.to_string());
+    assert_ne!(history_payload(dir.path(), &with_body), legacy, "the record is sealed again");
+    let (rec, got) = store.get_history::<Value>(&with_body.to_string()).unwrap().unwrap();
+    assert_eq!(rec, record(with_body));
+    assert_eq!(got.unwrap().as_slice(), b"response body");
+    let (rec, got) = store.get_history::<Value>(&without.to_string()).unwrap().unwrap();
+    assert_eq!(rec, record(without));
+    assert!(got.is_none());
+    assert_eq!(meta(dir.path(), "history_left_at_v3").as_deref(), Some("2"));
+    assert_eq!(left.iter().map(|id| history_payload(dir.path(), id)).collect::<Vec<_>>(), before);
+    for id in &left {
+        assert!(matches!(store.get_history::<Value>(&id.to_string()), Err(StoreError::Integrity)), "{id}");
+    }
+
+    // The body is now bound: pointed at another blob, or at none, the record
+    // no longer opens.
+    let set_body = |id: &Id, body: Option<&str>| {
+        db(dir.path()).execute("UPDATE history SET body_blob=?1 WHERE id=?2", params![body, id.to_string()]).unwrap();
+    };
+    for (id, swapped) in [(&with_body, Some(other.as_str())), (&with_body, None), (&without, Some(body.as_str()))] {
+        set_body(id, swapped);
+        assert!(matches!(store.get_history::<Value>(&id.to_string()), Err(StoreError::Integrity)), "{id}");
+    }
+    set_body(&with_body, Some(body.as_str()));
+    set_body(&without, None);
+    drop(store);
+
+    // Run once: opening again leaves every record as it is.
+    let sealed = history_payload(dir.path(), &with_body);
+    let store = Store::open(dir.path(), dek).unwrap();
+    assert_eq!(history_payload(dir.path(), &with_body), sealed);
+    assert_eq!(store.get_history::<Value>(&with_body.to_string()).unwrap().unwrap().0, record(with_body));
+    for id in &left {
+        db(dir.path()).execute("DELETE FROM history WHERE id=?1", params![id.to_string()]).unwrap();
+    }
+    assert_eq!(store.list_history(Some(&a), None, 10).unwrap().len(), 2);
+}
+
+#[test]
+fn a_schema_3_history_record_in_a_database_set_back_to_schema_2_fails_the_migration_and_changes_nothing() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    let ws = workspace(&store);
+    let request = request(&store, ws);
+    // A record from an older copy of the database, read before the genuine
+    // one: the step seals it again first, then fails on the genuine one.
+    let planted = Id::new();
+    let record = |id: Id| json!({"id": id, "workspace_id": ws, "request_id": request, "status": 200});
+    plant_v1_history(dir.path(), &dek, planted, &record(planted), Some(ws), Some(request), None);
+    let genuine = Id::new();
+    store.add_history(&genuine, Some(&ws), Some(&request), 1, &record(genuine), Some(b"body".as_slice())).unwrap();
+    store.lock();
+    set_version(dir.path(), "2");
+    let before = (history_payload(dir.path(), &planted), history_payload(dir.path(), &genuine));
+
+    assert!(matches!(store.unlock(dek.clone()), Err(StoreError::Integrity)));
+    assert!(store.is_locked(), "a failed migration leaves the store locked");
+    assert!(matches!(Store::open(dir.path(), dek), Err(StoreError::Integrity)));
+    assert_eq!(stored_version(dir.path()), "2");
+    assert_eq!((history_payload(dir.path(), &planted), history_payload(dir.path(), &genuine)), before);
+    assert_eq!(meta(dir.path(), "history_left_at_v3"), None);
+}
+
+#[test]
+fn a_checkpoint_with_a_schema_3_history_record_set_back_to_schema_2_is_refused() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek).unwrap();
+    let ws = workspace(&store);
+    let id = Id::new();
+    let record = json!({"id": id, "workspace_id": ws, "status": 200});
+    store.add_history(&id, Some(&ws), None, 1, &record, Some(b"body".as_slice())).unwrap();
+    let checkpoint = store.checkpoint("set-back").unwrap();
+    Connection::open(&checkpoint).unwrap().execute("UPDATE meta SET value='2' WHERE key='schema_version'", []).unwrap();
+    store.clear_history(None).unwrap();
+
+    assert!(matches!(store.restore_checkpoint(&checkpoint), Err(StoreError::Integrity)));
+    assert!(!store.is_locked(), "a refused checkpoint leaves the store unlocked");
+    assert!(store.get_history::<Value>(&id.to_string()).unwrap().is_none(), "the live database is as it was");
+}
+
+#[test]
+fn a_checkpoint_of_the_database_is_taken_before_it_is_sealed_again() {
+    let (dir, dek) = profile();
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    assert!(checkpoints(dir.path()).is_empty(), "a new database needs none");
+    let ws = workspace(&store);
+    let request = request(&store, ws);
+    drop(store);
+    set_version(dir.path(), "2");
+    let value = revision(request, &"6".repeat(64));
+    let id = plant_v1(dir.path(), &dek, &value, Some(ws), Some(request));
+    let legacy = payload(dir.path(), &id);
+
+    let store = Store::open(dir.path(), dek.clone()).unwrap();
+    assert_ne!(payload(dir.path(), &id), legacy);
+    let taken = checkpoints(dir.path());
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert!(taken[0].to_string_lossy().ends_with("-before-schema-3.db"), "{taken:?}");
+    // It is the database as the earlier build left it.
+    {
+        let copy = Connection::open(&taken[0]).unwrap();
+        let version: String = copy.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, "2");
+        let sql = "SELECT payload FROM objects WHERE kind='revision' AND id=?1";
+        let copied: Vec<u8> = copy.query_row(sql, params![id.to_string()], |r| r.get(0)).unwrap();
+        assert_eq!(copied, legacy);
+    }
+
+    // None is taken once the database is at schema 3, nor by restoring that
+    // checkpoint, which is sealed again like an upgrade.
+    store.lock();
+    store.unlock(dek.clone()).unwrap();
+    drop(store);
+    let store = Store::open(dir.path(), dek).unwrap();
+    store.restore_checkpoint(&taken[0]).unwrap();
+    assert_eq!(get(&store, &id).unwrap(), Some(value));
+    assert_eq!(checkpoints(dir.path()), taken);
 }

@@ -50,7 +50,10 @@ sealed payload, and a read refuses a row whose owner column (or, for a
 revision or history record, its request column) differs from the sealed one.
 A request revision seals the workspace and request that owned it when it was
 written, and is read only while that request still belongs to that
-workspace. See [workspace-owner-binding.md](security/workspace-owner-binding.md).
+workspace. A history record is sealed together with the id of the response
+body its row references, so it is read only with that body. A write that
+would replace a stored row under another owner is refused. See
+[workspace-owner-binding.md](security/workspace-owner-binding.md).
 
 **Secrets belong to one workspace.** A request resolves a secret reference
 only when its own workspace owns that secret, whether the reference is in its
@@ -575,7 +578,10 @@ different owner; Merge keeps those.
   workspace and request that own it, under a new AAD (revision id,
   length-prefixed, with a `v3` prefix), so a revision whose owner or request
   column is changed, or that is put back after its request id was reused in
-  another workspace, is refused.
+  another workspace, is refused. It also seals every history record together
+  with the id of the response body its row references (record id and body
+  id, each length-prefixed, with a `v3` prefix), so a record whose body
+  column is changed is refused.
   - The owner comes from the revision's request, never from the revision's
     own columns: a revision is sealed again only when it decrypts, the
     request it seals is its parent column, and that request itself
@@ -593,11 +599,28 @@ different owner; Merge keeps those.
     stored files until then, and a full backup leaves it out, as before.
     Any other one still fails a full backup and holds back the cleanup's
     releases, as it did before, until it is deleted.
-  - A revision that already opens under its schema 3 AAD in a database whose
-    recorded version is below 3 means the version was set back: the step
-    fails, nothing is written, and the profile stays locked.
+  - A history record is sealed again with the body column its row has when
+    the step runs, if it decrypts and the workspace and request it seals are
+    its columns (what a schema 2 read accepted). Any other record is left
+    exactly as it was, stays refused and can be deleted; the number left is
+    logged and recorded in `meta` (`history_left_at_v3`, removed when none
+    is left).
+  - A revision or history record that already opens under its schema 3 AAD
+    in a database whose recorded version is below 3 means the version was
+    set back: the step fails, nothing is written, and the profile stays
+    locked.
+  - The step reads revisions and history records a batch at a time, and
+    authenticates each request once however many revisions it has.
   - Earlier builds refuse a schema 3 database, and a full backup made from
-    one, as newer.
+    one, as newer. See [Going back to an earlier build](#going-back-to-an-earlier-build).
+- Before a step that seals the rows of an existing database again (schema 2
+  and schema 3), the database is copied as it is into the profile's
+  `checkpoints` folder as `<time>-before-schema-<version>.db`, the same kind of
+  checkpoint an import takes. If that copy cannot be written (for example,
+  the disk is full), the migration does not run and the profile does not
+  open or unlock; free space and try again. A new profile has nothing to copy
+  and takes none, and restoring a checkpoint takes none, since the
+  checkpoint is itself the earlier copy.
 - The history table is indexed by the response body each record references,
   so releasing a replaced body and retention find a blob's uses without a
   scan. The index has no schema version of its own: it is created, where
@@ -615,6 +638,10 @@ different owner; Merge keeps those.
   copy; if the copy or the migration fails, the profile is left locked. Every write, sealing or not, checks the
   lock only once it holds the connection, so one that raced a failed restore
   fails as locked instead of writing to the copied database.
+- A profile-wide read of history records or load reports (such as a full
+  backup, or the conflict check of an import or restore) that meets one
+  failing its owner or body check fails with an error that names that
+  record's or report's id, so it can be found and deleted.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`. Unknown future formats are rejected, and
@@ -639,6 +666,23 @@ different owner; Merge keeps those.
   usable for disabling and removing rulesets, but it must be trimmed below
   the limits before a full backup of it can be made (and therefore restored
   elsewhere).
+
+### Going back to an earlier build
+
+- **Close every earlier build before upgrading.** One that already has the
+  profile open and unlocked keeps writing revisions and history records the
+  way it did. Once the newer build has moved the database to schema 3, the
+  rows it wrote are refused until they are deleted.
+- **Portable bundles** (`anvil export`, or Export in the desktop) keep their
+  format and object schema, so a bundle exported by this build imports into
+  an earlier one. A full backup does not: it records the database schema,
+  and earlier builds refuse it as newer.
+- **The `before-schema-<version>` checkpoint** is the database as the earlier
+  build left it. To go back to that build, close every copy of Anvil, keep a
+  copy of the profile directory, then copy the checkpoint over the profile's
+  database file (`anvil.db`) and delete `anvil.db-wal` and `anvil.db-shm` if
+  they are there. Everything changed since the upgrade is lost; export what
+  you need first. The next upgrade migrates the database again.
 
 ## History retention
 

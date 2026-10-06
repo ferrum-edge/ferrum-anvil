@@ -581,10 +581,12 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   column as the owner. A request revision seals the workspace and request
   that owned it when it was written and is read only while that request
   still belongs to that workspace, so an older revision put back after its
-  request id was reused in another workspace is refused. Revisions written
-  before that format are sealed again once, under the workspace of their
-  authenticated request; one whose request cannot be authenticated is left
-  as it was and stays refused. See
+  request id was reused in another workspace is refused. A history record is
+  sealed together with the id of the response body its row names, so a body
+  column pointed at another stored body is refused. Revisions and history
+  records written before that format are sealed again once, a revision under
+  the workspace of its authenticated request; one that cannot be
+  authenticated is left as it was and stays refused. See
   [workspace-owner-binding.md](security/workspace-owner-binding.md).
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
@@ -678,10 +680,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   best-effort.
 - Nothing outside the database records which schema it reached. Someone who
   can write the database file can roll it back, in whole or in part, to an
-  older copy sealed with the same data key; request revisions in a copy from
-  before schema 3 are then sealed again under their request's workspace at
-  the next unlock, as on a first upgrade. Rows still never move between
-  workspaces by editing their columns.
+  older copy sealed with the same data key; request revisions and history
+  records in a copy from before schema 3 are then sealed again at the next
+  unlock, as on a first upgrade. Rows still never move between workspaces by
+  editing their columns.
 - Some text from a peer is still cut before the record's redaction sees
   it: a SPIFFE Workload API `grpc-message` is cut to 300 characters where
   it is received, with no redactor available there, and every
