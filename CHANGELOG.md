@@ -351,7 +351,7 @@
   backup's in the same kind of dialog. Saving a folder no longer moves it.
   Names from the webview (profile, workspace, folder, request) appear in
   these dialogs on one line, without control or format characters, with at
-  most two combining marks in a row, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
+  most two Unicode Mn/Me combining marks in a row, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
   webview argument stands in for the answer, each answer covers one change,
   and a lock while the dialog is open refuses it. Strengthening changes are
   not asked about, and the passphrase change right after a recovery-key
@@ -375,8 +375,10 @@
   verification, auth kind and placement). An OAuth sign-in runs exactly the
   context that was checked. The desktop's send, preview and session
   commands no longer take a per-send settings override (`run_override`,
-  which the desktop UI never set; the CLI keeps its own), so connection
-  settings come only from stored state. A compromised webview that saves a
+  which the desktop UI never set; the CLI keeps its own). A draft's
+  request-level connection settings come from the webview and are compared
+  against the saved request; workspace and profile settings apply to both.
+  A compromised webview that saves a
   request, environment or profile first can still send it without a
   dialog. Secrets are still
   resolved only in the backend and never returned to the webview. Drafts

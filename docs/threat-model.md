@@ -545,7 +545,7 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   itself: it keeps the stored one and the desktop offers the backup's in
   the same dialog. Names the webview chose appear in these dialogs on one
   line, without control or format characters (Unicode Cf, such as bidi
-  controls and interlinear annotations), with at most two combining marks
+  controls and interlinear annotations), with at most two Unicode Mn/Me combining marks
   in a row, and cut to 64 characters, so they cannot add lines, reorder the
   backend's text or draw over it. No IPC
   argument stands in for the answer, each answer authorizes one change under
@@ -571,8 +571,9 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   dialog names the destination first, then the workspace and what differs
   from the saved request. The desktop's send, preview and session commands
   take no per-send settings override (the CLI's `run_override` has no IPC
-  counterpart), so a draft and its saved request get their connection
-  settings from stored state alone.
+  counterpart). A draft's request-level connection settings come from the
+  webview and are compared against the saved request; workspace and profile
+  settings apply to both.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that

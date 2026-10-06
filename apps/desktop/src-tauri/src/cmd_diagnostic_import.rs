@@ -7,8 +7,12 @@ use anvil_engine::redact::{Redactor, is_credential_name};
 use serde_json::Value;
 
 #[tauri::command]
-pub fn diagnostic_import_preview(input: DiagnosticImportInput) -> Result<ImportedDiagnosticPreview, String> {
-    preview(input.text.as_bytes(), &redact).map_err(|error| error.to_string())
+pub async fn diagnostic_import_preview(input: DiagnosticImportInput) -> Result<ImportedDiagnosticPreview, String> {
+    tokio::task::spawn_blocking(move || preview_import(&input.text)).await.map_err(|error| error.to_string())?
+}
+
+fn preview_import(text: &str) -> Result<ImportedDiagnosticPreview, String> {
+    preview(text.as_bytes(), &redact).map_err(|error| error.to_string())
 }
 
 const MAX_CREDENTIALS: usize = 128;
@@ -253,7 +257,7 @@ mod tests {
             "key": "header.x-api-key",
             "value": "api-secret",
         });
-        let result = diagnostic_import_preview(DiagnosticImportInput { text: report.to_string() }).unwrap();
+        let result = preview_import(&report.to_string()).unwrap();
         assert_eq!(result.trust, ImportedDiagnosticTrust::Unverified);
         assert_eq!(result.confidence, Confidence::Unknown);
         let reported: Value = serde_json::from_str(&result.reported_json).unwrap();
@@ -291,7 +295,7 @@ mod tests {
         for text in
             ["secret-input-not-json".to_string(), REPORT.replace("1.0", "2.0"), " ".repeat(anvil_diagnostics::import::MAX_BYTES + 1)]
         {
-            let error = diagnostic_import_preview(DiagnosticImportInput { text }).unwrap_err();
+            let error = preview_import(&text).unwrap_err();
             assert!(!error.contains("secret-input"));
         }
     }
@@ -300,7 +304,7 @@ mod tests {
     fn ipc_credential_work_is_bounded() {
         let mut report: Value = serde_json::from_str(REPORT).unwrap();
         report["extensions"] = json!({"passwords": vec!["secret"; MAX_CREDENTIALS + 1]});
-        assert!(diagnostic_import_preview(DiagnosticImportInput { text: report.to_string() }).is_err());
+        assert!(preview_import(&report.to_string()).is_err());
     }
 
     #[test]
@@ -316,10 +320,10 @@ mod tests {
         let text = "x".repeat(anvil_diagnostics::import::MAX_STRING_BYTES);
         report["extensions"] = json!({"passwords": vec![text.clone(); 32]});
         let input = DiagnosticImportInput { text: report.to_string() };
-        assert!(diagnostic_import_preview(input).is_ok());
+        assert!(preview_import(&input.text).is_ok());
         report["extensions"]["passwords"].as_array_mut().unwrap().push(json!(text));
         let input = DiagnosticImportInput { text: report.to_string() };
-        assert!(diagnostic_import_preview(input).is_err());
+        assert!(preview_import(&input.text).is_err());
 
         let mut credentials = Credentials::default();
         credentials.component("%2525252541").unwrap();
@@ -345,7 +349,7 @@ mod tests {
             "ordinary": "ok ordinary.example /ordinary u p",
         });
         let input = DiagnosticImportInput { text: report.to_string() };
-        let result = diagnostic_import_preview(input).unwrap();
+        let result = preview_import(&input.text).unwrap();
         assert!(!result.reported_json.contains("overlap-token"), "credential leaked");
         // Existing Redactor policy: values shorter than four UTF-8 bytes are
         // masked structurally, but their unrelated free-text echoes can remain.
@@ -357,7 +361,7 @@ mod tests {
         let mut report: Value = serde_json::from_str(REPORT).unwrap();
         report["observations"][0]["attributes"] = json!({"authorization": 42});
         let input = DiagnosticImportInput { text: report.to_string() };
-        let error = diagnostic_import_preview(input).unwrap_err();
+        let error = preview_import(&input.text).unwrap_err();
         assert_eq!(error, ImportError::Contract.to_string());
     }
 
@@ -374,7 +378,7 @@ mod tests {
             assert!(serde_json::from_value::<DiagnosticImportInput>(value).is_err());
         }
         let input: DiagnosticImportInput = serde_json::from_value(json!({"text": REPORT})).unwrap();
-        let result = diagnostic_import_preview(input).unwrap();
+        let result = preview_import(&input.text).unwrap();
         let serialized = serde_json::to_value(result).unwrap();
         assert_eq!(serialized["trust"], "unverified");
         assert_eq!(serialized["confidence"], "unknown");
@@ -391,7 +395,7 @@ mod tests {
                 for entry in std::fs::read_dir(root.join(contract).join(group)).unwrap() {
                     let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
                     let input: DiagnosticImportInput = serde_json::from_value(json!({"text": text})).unwrap();
-                    assert_eq!(diagnostic_import_preview(input).is_ok(), group == "valid");
+                    assert_eq!(preview_import(&input.text).is_ok(), group == "valid");
                     count += 1;
                 }
             }
@@ -403,7 +407,7 @@ mod tests {
     fn real_hosted_producer_golden_crosses_the_ipc_boundary() {
         let text = include_str!("../../../../crates/anvil-diagnostics/tests/fixtures/alloy/diagnosis-edge-0.9.10.json");
         let input: DiagnosticImportInput = serde_json::from_value(json!({"text": text})).unwrap();
-        let result = diagnostic_import_preview(input).unwrap();
+        let result = preview_import(&input.text).unwrap();
         assert_eq!(result.finding_count, 2);
         assert_eq!(result.confidence, Confidence::Unknown);
         assert_eq!(result.trust, ImportedDiagnosticTrust::Unverified);

@@ -344,6 +344,7 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tokio",
  "tokio-util",
+ "unicode-general-category",
  "url",
  "zeroize",
 ]
