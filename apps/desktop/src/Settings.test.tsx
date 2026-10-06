@@ -8,7 +8,6 @@ import { vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn(), save: vi.fn() }));
 
 import { SettingsDialog } from "./Dialogs";
 import type { AppSettings } from "./generated/contracts";
@@ -167,18 +166,29 @@ describe("unlock passphrase", () => {
 });
 
 describe("storage", () => {
-  it("reads nothing until asked, and removes a revision that does not decode only on a second click", async () => {
-    let revisions = [{ id: "rev-1", updated_at: 0 }];
+  it("reads nothing until asked, removes damaged revisions through the backend, and keeps one a newer Anvil may have written", async () => {
+    let revisions = [
+      { id: "rev-1", updated_at: 0, cause: "damaged" },
+      { id: "rev-2", updated_at: 0, cause: "damaged" },
+      { id: "rev-3", updated_at: 0, cause: "unknown_format" },
+    ];
+    let confirmed = false;
     backend({
       app_status: () => status("passphrase"),
       storage_cleanup_last: () => ({
         ran_at: "2026-01-01T00:00:00Z",
-        result: { orphaned_revisions: 0, released_attachments: 0, undecodable: [{ kind: "revision", id: "rev-1" }] },
+        result: { orphaned_revisions: 0, released_attachments: 0, undecodable: revisions.map((r) => ({ kind: "revision", id: r.id })) },
       }),
       storage_undecodable_revisions: () => revisions,
-      storage_revision_remove: () => {
-        revisions = [];
-        return { checkpoint: "before-removing-revision.db" };
+      storage_revisions_remove: (args) => {
+        // The backend asks in its own native dialog; declined the first time.
+        if (!confirmed) {
+          confirmed = true;
+          throw "NOT_CONFIRMED";
+        }
+        const ids = (args as { revisionIds: string[] }).revisionIds;
+        revisions = revisions.filter((r) => !ids.includes(r.id));
+        return { removed: ids, checkpoint: "before-removing-revisions.db" };
       },
     });
     render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -186,13 +196,19 @@ describe("storage", () => {
     // Finding them decrypts every revision: not each time Settings opens.
     expect(invoke).not.toHaveBeenCalledWith("storage_undecodable_revisions", undefined);
     fireEvent.click(check);
-    expect(await screen.findByText(/1 stored revision\(s\) do not decode/)).toBeTruthy();
+    expect(await screen.findByText(/3 stored revision\(s\) do not decode/)).toBeTruthy();
+    // One a newer Anvil may have written offers no removal.
+    expect(screen.queryByRole("button", { name: "Remove revision rev-3" })).toBeNull();
+    expect(screen.getByText(/written by a newer Anvil, or in a format this version cannot read: kept/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Remove revision rev-1" }));
-    expect(invoke).not.toHaveBeenCalledWith("storage_revision_remove", expect.anything());
-    fireEvent.click(screen.getByRole("button", { name: "Confirm removing revision rev-1" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("storage_revision_remove", { revisionId: "rev-1" }));
-    expect(await screen.findByText("Removed revision rev-1. The checkpoint before-removing-revision.db keeps it.")).toBeTruthy();
-    expect(screen.getByText("No stored revision fails to decode.")).toBeTruthy();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("storage_revisions_remove", { revisionIds: ["rev-1"] }));
+    expect(await screen.findByText("Not done: it was not confirmed in the system dialog.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove all 2 damaged…" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("storage_revisions_remove", { revisionIds: ["rev-1", "rev-2"] }));
+    expect(await screen.findByText("Removed 2 damaged revision(s). The checkpoint before-removing-revisions.db keeps them.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Remove revision/ })).toBeNull();
+    expect(screen.getByText(/1 stored revision\(s\) do not decode/)).toBeTruthy();
   });
 });

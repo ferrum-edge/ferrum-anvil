@@ -408,6 +408,17 @@ export interface UndecodableRevision {
   id: string;
   /** When its row was last written, in milliseconds since the Unix epoch. */
   updated_at: number;
+  /**
+   * `damaged`: it does not decrypt, so nothing can read it, and it can be removed.
+   * `unknown_format`: it decrypts but this version cannot read it (a newer Anvil may have written it), so it is kept.
+   */
+  cause: "damaged" | "unknown_format";
+}
+/** What removing damaged revisions did (`anvil_app::cleanup::RemovedRevisions`). */
+export interface RemovedRevisions {
+  removed: string[];
+  /** The file name of the one checkpoint taken first, which keeps them. */
+  checkpoint: string;
 }
 export interface LoadReportSummary {
   run_id: string;
@@ -701,8 +712,11 @@ export const api = {
   storageCleanupNow: () => call<StorageCleanup>("storage_cleanup_now"),
   /** Stored revisions that do not decode: each keeps every stored file until it is removed. */
   undecodableRevisions: () => call<UndecodableRevision[]>("storage_undecodable_revisions"),
-  /** Remove a stored revision that does not decode; a checkpoint of the profile keeps it (its file name is returned). */
-  removeUndecodableRevision: (revisionId: string) => call<{ checkpoint: string }>("storage_revision_remove", { revisionId }),
+  /**
+   * Remove damaged stored revisions once the user confirms it in the backend's native dialog
+   * (NOT_CONFIRMED otherwise); one checkpoint of the profile keeps them (its file name is returned).
+   */
+  removeDamagedRevisions: (revisionIds: string[]) => call<RemovedRevisions>("storage_revisions_remove", { revisionIds }),
 
   effective: (input: SendInput) => call<EffectiveRequest>("effective_request", { input }),
   send: (input: SendInput, executionId: string) => call<ExecutionView>("send_request", { input, executionId }),

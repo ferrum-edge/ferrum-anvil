@@ -33,6 +33,12 @@ const ATTEMPTS: usize = 3;
 /// The store note ([`StoreRead::note`]) that keeps the last pass.
 const LAST_PASS_NOTE: &str = "storage_cleanup";
 
+/// Why a revision that a newer Anvil may have written is not removed.
+const NEWER_FORMAT: &str = "was written by a newer Anvil, or in a format this version cannot read: it is kept for that version";
+
+/// Why a revision that decodes is not removed.
+const DECODES: &str = "decodes; only a damaged revision, which nothing can read, can be removed here";
+
 /// What one cleanup pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageCleanup {
@@ -62,13 +68,30 @@ pub struct UndecodableRevision {
     pub id: String,
     /// When its row was last written, in milliseconds since the Unix epoch.
     pub updated_at: i64,
+    pub cause: Undecodable,
 }
 
-/// What [`App::remove_undecodable_revision`] did.
+/// Why a stored revision does not decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Undecodable {
+    /// Its sealed payload does not authenticate under this profile's key:
+    /// it was damaged, and no version of Anvil can read it. Only such a revision can be removed
+    /// ([`App::remove_undecodable_revisions`]).
+    Damaged,
+    /// Its sealed payload authenticates, so this profile wrote it, but this
+    /// version cannot read what it holds: a newer Anvil may have written it.
+    /// It is kept, for that version to read.
+    UnknownFormat,
+}
+
+/// What [`App::remove_undecodable_revisions`] did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemovedRevision {
-    /// The file name of the checkpoint taken just before the removal (in the
-    /// profile's `checkpoints` folder): the removed row is kept there.
+pub struct RemovedRevisions {
+    /// The ids of the revisions removed.
+    pub removed: Vec<String>,
+    /// The file name of the one checkpoint taken just before the removal (in
+    /// the profile's `checkpoints` folder): the removed rows are kept there.
     pub checkpoint: String,
 }
 
@@ -194,15 +217,16 @@ impl App {
     /// The stored revisions whose own sealed payload does not decode, oldest
     /// write first. Each could name any stored file, so while one is left the
     /// storage cleanup releases nothing, and deleting its request or
-    /// workspace keeps it. [`App::remove_undecodable_revision`] removes one.
+    /// workspace keeps it. [`App::remove_undecodable_revisions`] removes
+    /// the damaged ones.
     pub fn undecodable_revisions(&self) -> Result<Vec<UndecodableRevision>> {
         let mut found = self.store.read_consistently(|s| {
             let mut found = Vec::new();
             for m in s.object_meta(kind::REVISION)? {
                 // A row whose id does not parse cannot be removed by id.
                 let Ok(id) = m.id.parse::<Id>() else { continue };
-                if !revision_decodes_in(s, &id)? {
-                    found.push(UndecodableRevision { id: m.id, updated_at: m.updated_at });
+                if let Some(cause) = revision_undecodable_in(s, &id)? {
+                    found.push(UndecodableRevision { id: m.id, updated_at: m.updated_at, cause });
                 }
             }
             Ok(found)
@@ -211,41 +235,61 @@ impl App {
         Ok(found)
     }
 
-    /// Remove revision `id`, only while its own sealed payload does not
-    /// decode: nothing can read it, and while it is kept the storage cleanup
-    /// releases nothing. A checkpoint of the profile is taken first, so the
-    /// row stays recoverable there; the stored files it may have named are
-    /// then released by a later cleanup once nothing else holds them.
-    pub fn remove_undecodable_revision(&self, id: &Id) -> Result<RemovedRevision> {
-        let row = id.to_string();
-        let check = |s: &StoreRead<'_>| -> anvil_storage::store::Result<()> {
-            if !s.object_meta(kind::REVISION)?.iter().any(|m| m.id == row) {
-                return Err(StoreError::NotFound(format!("revision {row}")));
-            }
-            Ok(())
-        };
-        let decodes = self.store.read_consistently(|s| {
-            check(s)?;
-            revision_decodes_in(s, id)
-        })?;
-        if decodes {
-            return Err(AppError::Invalid(format!("revision {id} decodes; only a revision that does not decode can be removed here")));
+    /// Refuse, unless every revision of `ids` is stored and damaged
+    /// ([`Undecodable::Damaged`]): what [`App::remove_undecodable_revisions`]
+    /// checks first. Lets a caller ask the user only about a removal that
+    /// would go ahead.
+    pub fn check_removable_revisions(&self, ids: &[Id]) -> Result<()> {
+        if ids.is_empty() {
+            return Err(AppError::Invalid("no revision to remove".into()));
         }
-        let checkpoint = self.store.checkpoint("before-removing-revision")?;
+        let refused = self.store.read_consistently(|s| {
+            let stored: HashSet<String> = s.object_meta(kind::REVISION)?.into_iter().map(|m| m.id).collect();
+            for id in ids {
+                if !stored.contains(&id.to_string()) {
+                    return Err(StoreError::NotFound(format!("revision {id}")));
+                }
+                match revision_undecodable_in(s, id)? {
+                    Some(Undecodable::Damaged) => {}
+                    Some(Undecodable::UnknownFormat) => return Ok(Some(format!("revision {id} {NEWER_FORMAT}"))),
+                    None => return Ok(Some(format!("revision {id} {DECODES}"))),
+                }
+            }
+            Ok(None)
+        })?;
+        refused.map_or(Ok(()), |why| Err(AppError::Invalid(why)))
+    }
+
+    /// Remove the revisions `ids`, only while each is damaged: its own sealed
+    /// payload does not authenticate, so nothing can read it, and while it is
+    /// kept the storage cleanup releases nothing. One that decodes, or that
+    /// a newer Anvil may have written ([`Undecodable::UnknownFormat`]), is
+    /// refused, and then none is removed. One checkpoint of the profile is
+    /// taken first, so the rows stay recoverable there; the stored files they
+    /// may have named are then released by a later cleanup once nothing else
+    /// holds them.
+    pub fn remove_undecodable_revisions(&self, ids: &[Id]) -> Result<RemovedRevisions> {
+        self.check_removable_revisions(ids)?;
+        let checkpoint = self.store.checkpoint("before-removing-revisions")?;
         let removed = self.store.atomically(|s| {
-            check(&s.as_read())?;
-            // Repaired (a checkpoint restore) since it was checked: kept.
-            if revision_decodes_in(&s.as_read(), id)? {
-                return Ok(false);
+            let mut removed = Vec::new();
+            for id in ids {
+                // Repaired (a checkpoint restore) or removed since it was
+                // checked: kept, or already gone.
+                if revision_undecodable_in(&s.as_read(), id)? == Some(Undecodable::Damaged) && s.delete(kind::REVISION, id)? {
+                    removed.push(id.to_string());
+                }
             }
-            s.delete(kind::REVISION, id)
+            Ok(removed)
         })?;
-        if !removed {
-            return Err(AppError::Invalid(format!("revision {id} decodes now; it was kept")));
+        if removed.is_empty() {
+            return Err(AppError::Invalid("the revisions changed since they were checked; none was removed".into()));
         }
-        tracing::warn!(kind = kind::REVISION, %id, "removed a stored revision that does not decode; a checkpoint keeps it");
+        for id in &removed {
+            tracing::warn!(kind = kind::REVISION, %id, "removed a damaged stored revision; a checkpoint keeps it");
+        }
         let checkpoint = checkpoint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(RemovedRevision { checkpoint })
+        Ok(RemovedRevisions { removed, checkpoint })
     }
 
     /// [`App::clean_up_storage_if_due`] when a profile opens. A failure does
@@ -258,14 +302,20 @@ impl App {
     }
 }
 
-/// Whether revision `id`'s own sealed payload decodes, as the cleanup reads
-/// it to tell orphans (`StoreRead::orphan_revision_attachment_refs_for_retention`):
-/// its request is not consulted, so a revision is not reported for a
-/// damaged request.
-fn revision_decodes_in(s: &StoreRead<'_>, id: &Id) -> anvil_storage::store::Result<bool> {
+/// Why revision `id`'s own sealed payload does not decode, as the cleanup
+/// reads it to tell orphans (`StoreRead::orphan_revision_attachment_refs_for_retention`),
+/// or `None` when it decodes: its request is not consulted, so a revision is
+/// not reported for a damaged request. Only a payload that fails
+/// authentication is damaged; one that authenticates but is not a revision
+/// this version can read was written by this profile in another format, as
+/// by a newer Anvil.
+fn revision_undecodable_in(s: &StoreRead<'_>, id: &Id) -> anvil_storage::store::Result<Option<Undecodable>> {
     match s.orphan_revision_attachment_refs_for_retention(id) {
-        Ok(_) => Ok(true),
-        Err(StoreError::Integrity | StoreError::Serde(_)) => Ok(false),
+        Ok(_) => Ok(None),
+        Err(StoreError::Integrity | StoreError::Serde(_)) => match s.revision_payload_authenticates(id)? {
+            Some(false) => Ok(Some(Undecodable::Damaged)),
+            _ => Ok(Some(Undecodable::UnknownFormat)),
+        },
         Err(e) => Err(e),
     }
 }

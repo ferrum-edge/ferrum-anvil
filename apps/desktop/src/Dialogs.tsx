@@ -1373,14 +1373,14 @@ const cleanupSummary = (r: StorageCleanup) =>
 /**
  * The storage cleanup: its last pass, and the stored revisions that do not
  * decode. Each such revision could name any stored file, so while one is left
- * no stored file is released, and deleting its request or workspace keeps it;
- * it can be removed here (a checkpoint of the profile keeps it). Read only when
- * asked: finding them decrypts every revision.
+ * no stored file is released, and deleting its request or workspace keeps it.
+ * A damaged one (it does not decrypt) can be removed here, once the user
+ * confirms it in the backend's native dialog; one checkpoint of the profile
+ * keeps the removed rows. One a newer Anvil may have written is kept. Read
+ * only when asked: finding them decrypts every revision.
  */
 function StorageSection() {
   const [found, setFound] = useState<{ last: StorageCleanupRecord | null; revisions: UndecodableRevision[] } | null>(null);
-  // The revision whose removal awaits its second click.
-  const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1397,14 +1397,14 @@ function StorageSection() {
       setErr(String((e as Error).message));
     } finally {
       setBusy(false);
-      setRemoving(null);
     }
   };
-  const remove = (id: string) =>
+  const remove = (ids: string[]) =>
     run(async () => {
-      const done = await api.removeUndecodableRevision(id);
-      return `Removed revision ${id}. The checkpoint ${done.checkpoint} keeps it.`;
+      const done = await api.removeDamagedRevisions(ids);
+      return `Removed ${done.removed.length} damaged revision(s). The checkpoint ${done.checkpoint} keeps them.`;
     });
+  const damaged = found ? found.revisions.filter((r) => r.cause === "damaged") : [];
   return (
     <section className="settings-section">
       <h3>Storage</h3>
@@ -1429,29 +1429,31 @@ function StorageSection() {
       {found && found.revisions.length === 0 && <div className="ok-box">No stored revision fails to decode.</div>}
       {found && found.revisions.length > 0 && (
         <div className="warn-box">
-          {found.revisions.length} stored revision(s) do not decode: nothing can read them, and while one is left no stored file is released. Removing
-          one takes a checkpoint of the profile first, which keeps it.
+          {found.revisions.length} stored revision(s) do not decode, and while one is left no stored file is released. A damaged one does not decrypt,
+          so nothing can read it: removing it takes a checkpoint of the profile first, which keeps it, and you confirm it in a system dialog. One that
+          decrypts but that this version cannot read may have been written by a newer Anvil: it is kept, for that version.
           <ul>
             {found.revisions.map((r) => (
               <li key={r.id}>
-                <span className="mono">{r.id}</span> · written {new Date(r.updated_at).toLocaleString()}{" "}
-                {removing === r.id ? (
+                <span className="mono">{r.id}</span> · written {new Date(r.updated_at).toLocaleString()} ·{" "}
+                {r.cause === "damaged" ? (
                   <>
-                    <button className="btn small danger" aria-label={`Confirm removing revision ${r.id}`} disabled={busy} onClick={() => void remove(r.id)}>
-                      Remove
-                    </button>
-                    <button className="btn small" disabled={busy} onClick={() => setRemoving(null)}>
-                      Keep
+                    damaged{" "}
+                    <button className="btn small ghost" aria-label={`Remove revision ${r.id}`} disabled={busy} onClick={() => void remove([r.id])}>
+                      Remove…
                     </button>
                   </>
                 ) : (
-                  <button className="btn small ghost" aria-label={`Remove revision ${r.id}`} disabled={busy} onClick={() => setRemoving(r.id)}>
-                    Remove…
-                  </button>
+                  "written by a newer Anvil, or in a format this version cannot read: kept"
                 )}
               </li>
             ))}
           </ul>
+          {damaged.length > 1 && (
+            <button className="btn small danger" disabled={busy} onClick={() => void remove(damaged.map((r) => r.id))}>
+              Remove all {damaged.length} damaged…
+            </button>
+          )}
         </div>
       )}
       {notice && <div className="ok-box">{notice}</div>}

@@ -249,12 +249,15 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       void loadHistoryRef.current?.();
     });
     // A lock aborts every session in the backend, and an end event cannot
-    // reach this window once it has landed: forget every attempt tracked
-    // here, so one whose end never arrives (a closed tab's included) is not
-    // kept. A profile switch locks first, and mounts a new Workbench.
+    // reach this window once it has landed: forget the end-event owners
+    // tracked here, so one whose end never arrives (a closed tab's included)
+    // is not kept. A profile switch locks first, and mounts a new Workbench.
+    // stopped, opening and earlyAborts stay: each belongs to a connect or an
+    // abort still in flight, which removes its own entry (and re-cancels an
+    // open aborted early once it resolves, even after this unmounts).
     const forget = () => {
-      for (const attempts of [sessionAttempts, detachedAttempts]) attempts.current.clear();
-      for (const attempts of [stopped, opening, earlyAborts]) attempts.current.clear();
+      sessionAttempts.current.clear();
+      detachedAttempts.current.clear();
     };
     const locked = onLocked(forget);
     window.addEventListener("anvil-locked", forget);
@@ -263,7 +266,6 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       void ended.then((f) => f());
       void locked.then((f) => f());
       window.removeEventListener("anvil-locked", forget);
-      forget();
     };
   }, []);
 

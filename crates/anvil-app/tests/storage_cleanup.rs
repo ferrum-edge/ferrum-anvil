@@ -3,25 +3,31 @@
 //! those attached and never saved past the grace period and those only
 //! orphaned revisions name. A file a user attached within the grace period,
 //! which a draft may hold, and a file any saved item of any workspace
-//! references are never released. A revision that does not decode, which
-//! keeps every file, can be removed (a checkpoint keeps it).
+//! references are never released. A damaged revision that does not decode,
+//! which keeps every file, can be removed (a checkpoint keeps it); one a
+//! newer Anvil may have written is kept.
 
 use anvil_app::App;
-use anvil_app::cleanup::{ATTACHMENT_GRACE, CLEANUP_INTERVAL, StorageCleanup, UndecodableObject, UndecodableRevision};
+use anvil_app::cleanup::{ATTACHMENT_GRACE, CLEANUP_INTERVAL, StorageCleanup, Undecodable, UndecodableObject, UndecodableRevision};
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
 use anvil_domain::workspace::{DatasetFormat, RequestDefinition};
 use anvil_storage::store::DB_FILE;
-use anvil_storage::{KdfParams, kind};
+use anvil_storage::{KdfParams, Key, crypto, kind};
 
 const PASSPHRASE: &str = "correct horse battery";
 
 fn new_app(root: &std::path::Path) -> App {
+    new_app_with_key(root).0
+}
+
+/// [`new_app`], and the key its store seals with.
+fn new_app_with_key(root: &std::path::Path) -> (App, Key) {
     let pm = ProfileManager::new(root);
     let (s, dek, _recovery) = pm.create_passphrase("cleanup", PASSPHRASE, KdfParams::testing()).unwrap();
     let h = anvil_storage::vault::read_header(&s.dir).unwrap();
-    App::open(s.dir, h, dek).unwrap()
+    (App::open(s.dir, h, dek.clone()).unwrap(), dek)
 }
 
 /// Close `app` and open its profile again, as a restart does.
@@ -405,17 +411,23 @@ fn a_revision_that_does_not_decode_survives_its_requests_delete_and_can_be_remov
     assert!(stored(&app, &gone), "the damaged revision blocks every release");
 
     let found = app.undecodable_revisions().unwrap();
-    assert_eq!(found.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec![revision.to_string()]);
-    // A revision that decodes is never removed here.
-    let e = app.remove_undecodable_revision(&live.revision_id.unwrap()).unwrap_err();
+    assert_eq!(found.iter().map(|r| (r.id.clone(), r.cause)).collect::<Vec<_>>(), vec![(revision.to_string(), Undecodable::Damaged)]);
+    // A revision that decodes is never removed here, nor with a damaged one.
+    let kept = live.revision_id.unwrap();
+    let e = app.remove_undecodable_revisions(&[kept]).unwrap_err();
     assert!(e.to_string().contains("decodes"), "{e}");
+    assert!(app.remove_undecodable_revisions(&[revision, kept]).is_err());
+    assert!(app.remove_undecodable_revisions(&[]).is_err());
     assert_eq!(revisions_of(&app, &live.meta.id), 1);
+    assert_eq!(revisions_of(&app, &damaged.meta.id), 1);
+    assert!(!app.dir.join("checkpoints").exists(), "a refused removal takes no checkpoint");
 
-    let removed = app.remove_undecodable_revision(&revision).unwrap();
+    let removed = app.remove_undecodable_revisions(&[revision]).unwrap();
+    assert_eq!(removed.removed, vec![revision.to_string()]);
     assert!(app.dir.join("checkpoints").join(&removed.checkpoint).is_file(), "a checkpoint keeps the removed row: {removed:?}");
     assert_eq!(revisions_of(&app, &damaged.meta.id), 0);
     assert_eq!(app.undecodable_revisions().unwrap(), Vec::<UndecodableRevision>::new());
-    assert!(app.remove_undecodable_revision(&revision).is_err(), "already removed");
+    assert!(app.remove_undecodable_revisions(&[revision]).is_err(), "already removed");
 
     // Nothing blocks the cleanup any more: the file only it could name goes.
     let done = app.clean_up_storage().unwrap();
@@ -445,4 +457,54 @@ fn a_pass_looks_for_orphans_again_only_once_a_revision_or_request_row_changed() 
     assert_eq!(done.undecodable, vec![UndecodableObject { kind: kind::REVISION.into(), id: revision.to_string() }]);
     assert_eq!(done.orphaned_revisions, 0);
     assert_eq!(revisions_of(&app, &r.meta.id), 1, "a revision that does not decode is kept");
+}
+
+#[test]
+fn damaged_revisions_are_removed_together_behind_one_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let revisions: Vec<Id> = (0..3)
+        .map(|n| app.create_request(&ws, None, &format!("r{n}"), RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap())
+        .map(|r| r.revision_id.unwrap())
+        .collect();
+    for revision in &revisions {
+        damage(&app, kind::REVISION, revision);
+    }
+
+    let removed = app.remove_undecodable_revisions(&revisions).unwrap();
+    let mut ids: Vec<String> = revisions.iter().map(Id::to_string).collect();
+    ids.sort();
+    let mut gone = removed.removed.clone();
+    gone.sort();
+    assert_eq!(gone, ids);
+    let taken = std::fs::read_dir(app.dir.join("checkpoints")).unwrap().count();
+    assert_eq!(taken, 1, "one checkpoint keeps every removed row");
+    assert!(app.undecodable_revisions().unwrap().is_empty());
+}
+
+#[test]
+fn a_revision_a_newer_anvil_may_have_written_is_listed_but_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, key) = new_app_with_key(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    let revision = r.revision_id.unwrap();
+
+    // Sealed under the profile's key, so it authenticates, but with a body
+    // kind this version does not know, as a newer Anvil could write.
+    let mut newer = app.store.get::<serde_json::Value>(kind::REVISION, &revision).unwrap().expect("the revision");
+    newer["spec"]["body"] = serde_json::json!({ "type": "from_a_newer_anvil" });
+    let aad = format!("anvil/v1/objects/{}/{revision}", kind::REVISION);
+    let payload = crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&newer).unwrap());
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let sql = "UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3";
+    db.execute(sql, rusqlite::params![payload, kind::REVISION, revision.to_string()]).unwrap();
+
+    let found = app.undecodable_revisions().unwrap();
+    assert_eq!(found.iter().map(|r| (r.id.clone(), r.cause)).collect::<Vec<_>>(), vec![(revision.to_string(), Undecodable::UnknownFormat)]);
+    let e = app.remove_undecodable_revisions(&[revision]).unwrap_err();
+    assert!(e.to_string().contains("newer Anvil"), "{e}");
+    assert_eq!(revisions_of(&app, &r.meta.id), 1, "it is kept for the version that wrote it");
+    assert!(!app.dir.join("checkpoints").exists(), "a refused removal takes no checkpoint");
 }

@@ -6,7 +6,8 @@
 //! itself, and goes ahead only on the user's answer there. So does a move
 //! that takes requests out of an imported collection not open to its
 //! workspace, which opens them as much, and a backup restore's lock policy
-//! when it is weaker than the profile's. No argument the webview passes
+//! when it is weaker than the profile's, and the removal of damaged stored
+//! revisions, which no version of Anvil can read. No argument the webview passes
 //! stands in for that answer, and each answer authorizes only the one
 //! change it was asked for, under the lock epoch it was asked in: a lock or
 //! a profile switch while the dialog is open refuses the change.
@@ -29,6 +30,7 @@ use crate::commands::{R, e};
 use crate::state::DesktopState;
 use anvil_app::App;
 use anvil_app::backup::KEPT_LOCK_NOTE;
+use anvil_app::cleanup::RemovedRevisions;
 use anvil_app::port::ImportReport;
 use anvil_app::workspace::Move;
 use anvil_domain::Id;
@@ -444,6 +446,25 @@ async fn apply_restored_lock(st: &DesktopState, presence: &impl Presence, lock: 
     app.save_settings_if_lock_is(&next, &stored).map_err(e)
 }
 
+/// Remove the damaged stored revisions `ids` of the open profile, once the
+/// user confirmed it natively (see `App::remove_undecodable_revisions`). A
+/// removal that would be refused (one of them decodes, a newer Anvil may
+/// have written it, or it is gone) is refused before the user is asked.
+pub(crate) async fn remove_damaged_revisions(st: &DesktopState, presence: &impl Presence, ids: Vec<Id>) -> R<RemovedRevisions> {
+    let app = st.app()?;
+    let checked = ids.clone();
+    anvil_app::off_runtime(move || app.check_removable_revisions(&checked)).await.map_err(e)?;
+    let message = format!(
+        "Remove {} damaged stored revision(s) of the profile “{}”? They do not decrypt, so nothing can read them, and while one is left no stored file is released. A checkpoint of the profile is taken first and keeps them.\n\nOnly continue if you asked for this yourself.",
+        ids.len(),
+        profile_name(st)?
+    );
+    let prompt = Prompt { title: "Remove damaged revisions", message, ok: "Remove" };
+    let seen = confirm(st, presence, prompt).await?;
+    let app = fenced(st, seen)?;
+    anvil_app::off_runtime(move || app.remove_undecodable_revisions(&ids)).await.map_err(e)
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::{Presence, Prompt};
@@ -612,6 +633,27 @@ mod tests {
         assert_eq!(convert_to_passphrase(&st, &yes, NEW_PASSPHRASE.into(), KdfParams::testing()).await.map(|_| ()), Err("LOCKED".into()));
         assert_eq!(allow_device_identity(&st, &yes, ws).await, Err("LOCKED".to_string()));
         assert_eq!(save_settings(&st, &yes, AppSettings::default()).await, Err("LOCKED".to_string()));
+        assert_eq!(yes.times(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_revision_removal_that_would_be_refused_is_refused_before_asking() {
+        let (_root, st, _dir) = opened();
+        let app = st.app().unwrap();
+        let ws = app.create_workspace("W").unwrap().meta.id;
+        let get = anvil_domain::request::RequestSpec::http("GET", "https://petstore.example/pets");
+        let r = app.create_request(&ws, None, "r", get).unwrap();
+        let revision = r.revision_id.unwrap();
+        let yes = Answer::yes();
+        // It decodes: nothing to ask about, and it is kept.
+        let refused = remove_damaged_revisions(&st, &yes, vec![revision]).await.unwrap_err();
+        assert!(refused.contains("decodes"), "{refused}");
+        assert!(remove_damaged_revisions(&st, &yes, vec![Id::new()]).await.is_err(), "not stored");
+        assert_eq!(yes.times(), 0);
+        assert_eq!(app.store.object_meta(kind::REVISION).unwrap().len(), 1);
+        assert!(!app.dir.join("checkpoints").exists(), "no checkpoint was taken");
+        st.lock();
+        assert_eq!(remove_damaged_revisions(&st, &yes, vec![revision]).await.map(|_| ()), Err("LOCKED".to_string()));
         assert_eq!(yes.times(), 0);
     }
 

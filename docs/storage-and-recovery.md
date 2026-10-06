@@ -740,16 +740,29 @@ now (`storage_cleanup_now`) and lists the revisions that do not decode.
 
 A revision whose own sealed payload does not decode could name any stored
 file. Deleting its request or workspace keeps it, so the record of those
-files is not lost, and while it is left no cleanup releases anything. Nothing
-can read it, so it is never repaired in place: `App::undecodable_revisions`
-lists such revisions (by id and time written; the desktop's
-`storage_undecodable_revisions`, Settings → Storage → Check storage), and
-`App::remove_undecodable_revision` (`storage_revision_remove`, after a second
-click) removes one. A removal first takes a checkpoint of the profile
-(`checkpoints/…-before-removing-revision.db`), which keeps the row for a
-manual restore, and is refused for a revision that decodes, including one
-whose request does not (that request is the object to repair or delete).
-The stored files only it may have named are released by a later cleanup.
+files is not lost, and while it is left no cleanup releases anything.
+`App::undecodable_revisions` lists such revisions by id, time written and
+cause (the desktop's `storage_undecodable_revisions`, Settings → Storage →
+Check storage):
+
+- **Damaged** (`damaged`): the payload does not authenticate under the
+  profile's key, so no version of Anvil can read it, and it is never
+  repaired in place. `App::remove_undecodable_revisions` removes damaged
+  revisions (`storage_revisions_remove`, Remove or Remove all in Settings →
+  Storage, confirmed in the backend's native dialog).
+- **Unknown format** (`unknown_format`): the payload authenticates, so this
+  profile wrote it, but this version cannot parse it, as with a revision a
+  newer Anvil wrote. It is kept: open the profile with that version. A
+  removal that names one is refused.
+
+A removal first takes one checkpoint of the profile for the whole batch
+(`checkpoints/…-before-removing-revisions.db`), which keeps the rows for a
+manual restore, and is refused, before anything is asked or written, for a
+revision that decodes, including one whose request does not (that request
+is the object to repair or delete). Each revision is checked again in the
+write transaction; one repaired meanwhile (by a checkpoint restore) is
+kept. Checkpoints are not pruned automatically. The stored files only the
+removed revisions may have named are released by a later cleanup.
 
 ## Plaintext at rest
 

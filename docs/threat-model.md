@@ -22,7 +22,7 @@ against it).
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing, with XML bounded before it is parsed; gRPC reflection enforces cumulative wire-plus-decoded byte and per-request message limits under its own absolute deadline; no response can call IPC or change settings |
 | Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size, node, string-byte, reference and sample-generation limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
-| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. Changes that weaken the profile's protection, and drafts that would use vault-backed authority elsewhere than their saved request, need a confirmation in the backend's own native dialog (see Local data and the app). File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced; grant reads and exports and linked-file reads walk the chosen path one folder at a time without following a link at any of them, on macOS with a single open that refuses a link at any folder (macOS 11 and later), and an export is refused if its folder was replaced; on Windows and on Unix other than Linux and macOS every folder on the path must be one Anvil can list). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no dialog permission at all (no open, save, message or ask dialog) and no filesystem plugin, so every native dialog is the backend's own; the webview asks its own confirmations inside the window. |
+| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. Changes that weaken the profile's protection, removing damaged stored revisions, and drafts that would use vault-backed authority elsewhere than their saved request, need a confirmation in the backend's own native dialog (see Local data and the app). File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced; grant reads and exports and linked-file reads walk the chosen path one folder at a time without following a link at any of them, on macOS with a single open that refuses a link at any folder (macOS 11 and later), and an export is refused if its folder was replaced; on Windows and on Unix other than Linux and macOS every folder on the path must be one Anvil can list). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no dialog permission at all (no open, save, message or ask dialog) and no filesystem plugin, so every native dialog is the backend's own; the webview asks its own confirmations inside the window. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
 | Worker process | — | Job over stdin (not argv/env); only referenced secrets; killed when the controller drops it and cancels itself when its parent goes away (stdin EOF); no inherited UI state |
@@ -558,6 +558,24 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   idle lock counts the webview's activity reports only within four hours
   (or the idle timeout, if longer) of the last native sign of the user (an
   unlock, a native confirmation, the window gaining focus).
+- **Removing stored revisions that do not decode:** a stored revision whose
+  own sealed payload does not decode keeps every stored file from the
+  storage cleanup, so Settings → Storage can remove one
+  (`storage_revisions_remove`, `App::remove_undecodable_revisions`). Only a
+  damaged revision, whose payload does not authenticate under the profile's
+  key, is removed: no version of Anvil can read it. One that authenticates
+  but does not parse, as a revision a newer Anvil wrote and an older one
+  then opened would not, is refused and kept for that version (a newer
+  database schema is refused when the profile opens). A revision that
+  decodes is refused, and the backend checks each again under the write
+  lock. The removal is asked about in the backend's own native dialog
+  (`crate::presence`), only after the backend checked that it would go
+  ahead, and the answer authorizes that one removal under the lock epoch it
+  was asked in, so a compromised renderer cannot remove anything without
+  the user. One checkpoint of the profile (`checkpoints/…-before-removing-revisions.db`,
+  a `VACUUM INTO` copy that includes the stored files) is taken before the
+  whole batch and keeps the removed rows for a manual restore. Checkpoints
+  are not pruned automatically; each removal the user confirms adds one.
 - **Renderer drafts and vault authority:** a draft from the webview is built
   in the backend like a saved request, and its secrets never cross to the
   webview. When it carries vault-backed authority (auth in effect, vault

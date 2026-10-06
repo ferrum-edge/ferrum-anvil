@@ -8,16 +8,19 @@
   permissions, so it cannot open a native dialog that looks like the backend's own
   confirmations. Its confirmations (closing a tab with live work or unsaved edits, sending an
   invalid body, deleting, relocating a linked file over unsaved edits) are drawn inside the
-  window (#319).
+  window, and the desktop UI no longer depends on the `@tauri-apps/plugin-dialog` npm package
+  (#319).
 
 ### Added
 
 - Settings → Storage shows the last storage cleanup on request, runs one now, and lists
   stored revisions whose own payload does not decode. Such a revision survives its request's
-  or workspace's delete and blocks every cleanup release; it can now be removed (after a
-  second click) once a checkpoint of the profile keeps it (`App::undecodable_revisions`,
-  `App::remove_undecodable_revision`; desktop `storage_undecodable_revisions`,
-  `storage_revision_remove`, `storage_cleanup_now`) (#319).
+  or workspace's delete and blocks every cleanup release. A damaged one (it does not decrypt)
+  can now be removed, alone or all together, once the user confirms it in the backend's native
+  dialog, behind one checkpoint of the profile that keeps them; one that decrypts but that this
+  version cannot read (a newer Anvil may have written it) is kept (`App::undecodable_revisions`,
+  `App::remove_undecodable_revisions`; desktop `storage_undecodable_revisions`,
+  `storage_revisions_remove`, `storage_cleanup_now`) (#319).
 
 ### Changed
 
@@ -33,9 +36,9 @@
 
 ### Fixed
 
-- The workbench forgets the session attempts it tracks when the profile locks, so a closed
-  tab's session whose end event the lock kept from the window is not kept for the rest of the
-  session (#319).
+- The workbench forgets the session attempts whose end it waits for when the profile locks, so
+  a closed tab's session whose end event the lock kept from the window is not kept for the rest
+  of the session. An open aborted while still pending is still cancelled once it resolves (#319).
 
 ## [0.1.2] - 2026-10-06
 

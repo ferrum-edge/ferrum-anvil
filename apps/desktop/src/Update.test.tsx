@@ -15,7 +15,6 @@ vi.mock("@tauri-apps/api/event", () => ({
     return () => listeners.delete(name);
   }),
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn(), save: vi.fn() }));
 
 import { SettingsDialog } from "./Dialogs";
 import { UpdatePanel, UpdatePrompt, resetUpdateState, useLaunchUpdate } from "./Update";

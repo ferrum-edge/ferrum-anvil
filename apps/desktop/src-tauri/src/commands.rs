@@ -7,7 +7,7 @@
 
 use crate::presence::NativePresence;
 use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, PendingEntry, cancel_pending};
-use anvil_app::cleanup::{RemovedRevision, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
+use anvil_app::cleanup::{RemovedRevisions, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::Unlock;
@@ -516,21 +516,23 @@ pub async fn storage_cleanup_now(handle: AppHandle) -> R<StorageCleanup> {
     blocking(&handle, |st| st.app()?.clean_up_storage().map_err(e)).await
 }
 
-/// The stored revisions whose own sealed payload does not decode, by id and
-/// write time only. Each keeps every stored file until it is removed with
-/// `storage_revision_remove`.
+/// The stored revisions whose own sealed payload does not decode, by id,
+/// write time and cause only. Each keeps every stored file until it is
+/// removed with `storage_revisions_remove` (a damaged one only).
 #[tauri::command]
 pub async fn storage_undecodable_revisions(handle: AppHandle) -> R<Vec<UndecodableRevision>> {
     blocking(&handle, |st| st.app()?.undecodable_revisions().map_err(e)).await
 }
 
-/// Remove a stored revision that does not decode, after a checkpoint of the
-/// profile keeps it (see `App::remove_undecodable_revision`). A revision that
-/// decodes is refused, so nothing readable is removed here.
+/// Remove damaged stored revisions, which nothing can read, once the user
+/// confirmed it natively, behind one checkpoint of the profile that keeps
+/// them (see `App::remove_undecodable_revisions`). A revision that decodes,
+/// or that a newer Anvil may have written, is refused, so nothing readable
+/// is removed here. Declined: [`crate::presence::NOT_CONFIRMED`].
 #[tauri::command]
-pub async fn storage_revision_remove(handle: AppHandle, revision_id: String) -> R<RemovedRevision> {
-    let revision = id(&revision_id)?;
-    blocking(&handle, move |st| st.app()?.remove_undecodable_revision(&revision).map_err(e)).await
+pub async fn storage_revisions_remove(st: State<'_, DesktopState>, window: Window, revision_ids: Vec<String>) -> R<RemovedRevisions> {
+    let revisions = revision_ids.iter().map(String::as_str).map(id).collect::<R<Vec<_>>>()?;
+    crate::presence::remove_damaged_revisions(&st, &NativePresence(window), revisions).await
 }
 
 // ------------------------------------------------------------------ execution

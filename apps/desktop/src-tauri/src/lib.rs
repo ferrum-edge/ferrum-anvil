@@ -181,7 +181,7 @@ pub fn run() {
             commands::storage_cleanup_last,
             commands::storage_cleanup_now,
             commands::storage_undecodable_revisions,
-            commands::storage_revision_remove,
+            commands::storage_revisions_remove,
             commands::cancel_execution,
             commands::history_list,
             commands::history_get,

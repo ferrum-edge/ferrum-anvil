@@ -1215,6 +1215,14 @@ impl StoreRead<'_> {
         self.records()?.orphan_revision_attachment_refs_for_retention(id)
     }
 
+    /// Whether stored revision `id`'s sealed payload authenticates under this
+    /// store's key (`None`: no such row), for telling a damaged revision from
+    /// one this version cannot parse. Nothing of its content is returned.
+    #[doc(hidden)]
+    pub fn revision_payload_authenticates(&self, id: &Id) -> Result<Option<bool>> {
+        self.records()?.revision_payload_authenticates(id)
+    }
+
     pub fn list<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         self.records()?.list(kind, workspace_id)
     }
@@ -1430,6 +1438,14 @@ impl Records<'_> {
             return Err(StoreError::Integrity);
         }
         Ok(())
+    }
+
+    fn revision_payload_authenticates(&self, id: &Id) -> Result<Option<bool>> {
+        let id_s = id.to_string();
+        let Some(row) = self.object_row(kind::REVISION, &id_s)? else {
+            return Ok(None);
+        };
+        Ok(Some(crypto::open(&self.key, &aad("objects", kind::REVISION, &id_s), &row.payload).is_ok()))
     }
 
     fn orphan_revision_attachment_refs_for_retention(&self, id: &Id) -> Result<Option<HashSet<String>>> {

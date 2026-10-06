@@ -16,11 +16,11 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-717 Rust crates, 5 npm packages.
+717 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
-| MIT OR Apache-2.0 | 321 |
+| MIT OR Apache-2.0 | 320 |
 | MIT | 154 |
 | Apache-2.0 OR MIT | 112 |
 | MIT/Apache-2.0 | 35 |
@@ -788,12 +788,11 @@ the modified file under MPL-2.0.
 | zvariant_derive | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zvariant_utils | 4.2.0 | MIT | https://github.com/z-galaxy/zbus/ |
 
-## npm packages bundled into the desktop UI (5)
+## npm packages bundled into the desktop UI (4)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
 | @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | https://www.npmjs.com/package/@tauri-apps/api/v/2.11.1 |
-| @tauri-apps/plugin-dialog | 2.7.3 | MIT OR Apache-2.0 | https://www.npmjs.com/package/@tauri-apps/plugin-dialog/v/2.7.3 |
 | react | 19.3.0 | MIT | https://www.npmjs.com/package/react/v/19.3.0 |
 | react-dom | 19.3.0 | MIT | https://www.npmjs.com/package/react-dom/v/19.3.0 |
 | scheduler | 0.28.0 | MIT | https://www.npmjs.com/package/scheduler/v/0.28.0 |
