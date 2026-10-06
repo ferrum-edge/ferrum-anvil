@@ -649,29 +649,15 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - An encrypted bundle's objects, attachments and history are readable by
   anyone holding the file; only its vault is encrypted. Share one only with
   people who may read its contents; a full backup encrypts everything.
-- An encrypted bundle's passphrase shows only that some export sealed the
-  bundle with it: an older, authentic bundle exported with the same
-  passphrase still opens. Use a new passphrase for each export when it
-  matters which one is imported.
+- For portable exports where import selection matters, use a distinct
+  passphrase for each export.
 - A bundle the user confirms writing into an existing workspace is trusted
   with that workspace's secrets.
-- Someone with write access to the database can make records unreadable, or
-  replace the whole database with an older copy; that rollback cannot be
-  detected without state kept outside the database (see
-  [storage-and-recovery.md](storage-and-recovery.md#schema-versions-and-migration)).
 - Keychain-protected profiles are as strong as the OS session. An unlocked
   webview can also reopen a keychain profile after a lock without a
   credential.
-- A saved request's destination and auth, and the environments, folders,
-  workspace settings and TLS and proxy profiles it uses, are written by the
-  webview, and a draft is compared with that stored state: a compromised,
-  unlocked webview that saves a request (or what it uses) first and then
-  sends it, as a draft or as saved, is not asked about where it goes. A
-  draft that carries no vault-backed authority can reach any destination,
-  including loopback and private services, as Anvil is meant to; outbound
-  destination policy is separate. The native confirmation shows the
-  destination origin and the binding parts that differ, not the whole
-  request (headers, body and path are not compared or shown).
+- A compromised, unlocked webview is outside the protection boundary for
+  saved request and profile state.
 - The passphrase and keychain-conversion confirmations cannot show the new
   passphrase the webview supplies, and the conversion still returns the new
   recovery key to the webview: the dialog confirms that the change happens,

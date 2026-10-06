@@ -198,11 +198,8 @@ local linked identity or its policy (tested).
 
 ### Honest limits of the policy
 
-- It is enforced by Anvil, not by cryptography. Someone who has the passphrase
-  (or recovery key) and a copy of the profile files can decrypt them with other
-  tools, provider or not. Someone who can write to the profile directory can
-  delete `identity.json`, which removes the policy. With that level of access
-  they could also copy the ciphertext for an offline attack on the passphrase.
+- Identity policy relies on the security of the local OS account and profile
+  directory. Keep profile files in an access-controlled location.
 - An online-only policy depends on the provider being reachable. The recovery
   key is the fallback. Keep it safe; resetting a passphrase without it cannot
   decrypt anything.

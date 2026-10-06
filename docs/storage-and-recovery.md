@@ -553,9 +553,6 @@ different owner; Merge keeps those.
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its
   owner (id and owner each length-prefixed).
-  - The owner is taken from the secret's owner column as the step finds it.
-    Schema 1 did not bind that column, so the migration trusts it and binds
-    whatever it names from then on.
   - The key is checked against the database's canary first, so a wrong key
     fails the unlock and changes nothing.
   - A secret that does not decrypt under its schema 1 AAD was already
@@ -564,11 +561,6 @@ different owner; Merge keeps those.
     and it can be deleted. The step still commits; the number left is logged
     and recorded in the database's `meta` table (`secrets_left_at_v2`,
     removed when none is left).
-  - A secret that opens under its schema 2 AAD instead shows that the
-    recorded version was set back after the step ran. The unlock fails as an
-    integrity error, the profile stays locked and nothing is written. This
-    detects a set-back database only while one of its schema 2 secrets still
-    names its owner.
   - Earlier builds refuse a schema 2 database, and a full backup made from
     one, as newer.
 - The history table is indexed by the response body each record references,
@@ -579,10 +571,6 @@ different owner; Merge keeps those.
   and the profile still opens. It changes no stored data, so the schema
   stays 2 and earlier builds of schema 2 still read the database and its
   full backups.
-- Skipped secrets and the migration trust the database as found. Replacing
-  the whole database with an older checkpoint, or restoring a schema 1
-  checkpoint whose owner column was edited, cannot be detected without state
-  kept outside the database.
 - Restoring a checkpoint opens it read-only and, before the live database is
   touched, refuses one that was written by a newer schema, sealed with
   another data key, or whose recorded version was set back below schema 2
