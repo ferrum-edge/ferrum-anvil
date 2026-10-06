@@ -30,6 +30,7 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::workspace::LinkedIdentity;
+use anvil_engine::context::ExecutionContext;
 use anvil_engine::oauth_http::TokenSummary;
 use anvil_identity::{ApiAuthorization, BrowserOpener, FlowObserver, FlowOptions, ProviderInfo, VerifiedIdentity};
 use anvil_storage::vault::ProfileHeader;
@@ -252,9 +253,26 @@ impl App {
             return Err(AppError::Locked);
         }
         let ctx = self.build_context_off_runtime(request_id, *ws, draft, opts.clone(), cancel).await?;
-        let auth = anvil_identity::authorize_api(&self.engine, &ctx, opener, observer, flow, cancel).await?;
+        self.oauth_sign_in_with(&ctx, opener, observer, flow, cancel).await
+    }
+
+    /// [`App::oauth_sign_in`] for the context `ctx` exactly as given (built
+    /// by [`App::build_context`]), so a caller that checked it signs in with
+    /// what it checked, never with a context built again later.
+    pub async fn oauth_sign_in_with(
+        &self,
+        ctx: &ExecutionContext,
+        opener: &dyn BrowserOpener,
+        observer: &dyn FlowObserver,
+        flow: &FlowOptions,
+        cancel: &CancellationToken,
+    ) -> Result<ApiAuthorization> {
         if self.is_locked() {
-            let _ = anvil_identity::api_oauth::sign_out(&self.engine, &ctx);
+            return Err(AppError::Locked);
+        }
+        let auth = anvil_identity::authorize_api(&self.engine, ctx, opener, observer, flow, cancel).await?;
+        if self.is_locked() {
+            let _ = anvil_identity::api_oauth::sign_out(&self.engine, ctx);
             return Err(AppError::Locked);
         }
         Ok(auth)

@@ -49,8 +49,11 @@ pub async fn oauth_sign_in(
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let o = opts(&input)?;
-    if let Some(draft) = &input.spec {
-        let ctx = app.build_context_off_runtime(rid, ws, Some(draft.clone()), o.clone(), pending.token()).await.map_err(e)?;
+    // Built once: the sign-in runs exactly the context a draft was
+    // authorized with, never one built again after the dialog.
+    let draft = input.spec.is_some();
+    let ctx = app.build_context_off_runtime(rid, ws, input.spec, o.clone(), pending.token()).await.map_err(e)?;
+    if draft {
         crate::draft_authority::authorize(&st, &NativePresence(window), &app, rid, ws, &ctx, &o).await?;
         if pending.token().is_cancelled() {
             return Err(CANCELED.into());
@@ -62,7 +65,7 @@ pub async fn oauth_sign_in(
         let _ = h2.emit("oauth-flow", SignInEvent { attempt: a2.clone(), event });
     };
     let opener = |url: &str| open_in_browser(url);
-    let res = app.oauth_sign_in(rid, &ws, input.spec, &o, &opener, &observer, &FlowOptions::default(), pending.token()).await;
+    let res = app.oauth_sign_in_with(&ctx, &opener, &observer, &FlowOptions::default(), pending.token()).await;
     drop(pending);
     res.map_err(e)
 }

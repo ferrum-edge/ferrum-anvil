@@ -536,24 +536,38 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - **Renderer authority over protection:** an unlocked webview cannot by
   itself weaken how the profile is protected. Replacing the passphrase,
   converting a keychain profile to a passphrase, lifting a workspace's
-  device-identity seal, opening an import root to its workspace and
-  weakening the lock policy are asked about in a native dialog the backend
-  shows (`crate::presence` in the desktop crate); no IPC argument stands in
-  for the answer, each answer authorizes one change under the lock epoch it
-  was asked in, and a lock-policy change is saved only over the policy it
-  was asked against. The passphrase change right after an unlock with the
-  recovery key uses that unlock as its proof, once. The idle lock counts the
-  webview's activity reports only within four hours (or the idle timeout,
-  if longer) of the last native sign of the user (an unlock, a native
-  confirmation, the window gaining focus).
+  device-identity seal, opening an import root to its workspace, moving a
+  request or folder out of an import root that is not open (which opens it
+  as much; saving a folder keeps its parent, and the move is re-checked
+  against the root the user was asked about) and weakening the lock policy
+  are asked about in a native dialog the backend shows (`crate::presence` in
+  the desktop crate). A full-backup restore never weakens the lock policy
+  itself: it keeps the stored one and the desktop offers the backup's in
+  the same dialog. Names the webview chose appear in these dialogs on one
+  line, without control or invisible formatting characters, and cut to 64
+  characters, so they cannot add lines or reorder the backend's text. No IPC
+  argument stands in for the answer, each answer authorizes one change under
+  the lock epoch it was asked in, and a lock-policy change is saved only
+  over the policy it was asked against. The passphrase change right after
+  an unlock with the recovery key uses that unlock as its proof, once. The
+  idle lock counts the webview's activity reports only within four hours
+  (or the idle timeout, if longer) of the last native sign of the user (an
+  unlock, a native confirmation, the window gaining focus).
 - **Renderer drafts and vault authority:** a draft from the webview is built
   in the backend like a saved request, and its secrets never cross to the
   webview. When it carries vault-backed authority (auth in effect, vault
   references, secret variables, a TLS client identity), it is used only
-  where its saved request would use it: the same destination origin after
-  variables are resolved, the same effective auth and the same effective
-  connection settings. Otherwise the user confirms the workspace and the
-  destination natively for that one send, session or sign-in.
+  where its saved request would use it: the same destination origin and
+  request authority (an explicit Host or `:authority`, or one an API key
+  writes), the same MASQUE route and protocol TLS choices, the same
+  effective auth and the same effective connection settings, worked out
+  from the context that is then executed, as the engine resolves and parses
+  it. Any of these that a per-send dynamic value (`{{$…}}`, directly or
+  through a variable) reaches is unknown before sending, since each
+  resolution draws it again, and never matches. Otherwise the user confirms
+  natively, for that one send, session or sign-in of that context: the
+  dialog names the destination first, then the workspace and what differs
+  from the saved request.
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that
@@ -648,7 +662,12 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   draft that carries no vault-backed authority can reach any destination,
   including loopback and private services, as Anvil is meant to; outbound
   destination policy is separate. The native confirmation shows the
-  destination origin, not the whole request.
+  destination origin and the binding parts that differ, not the whole
+  request (headers, body and path are not compared or shown).
+- The passphrase and keychain-conversion confirmations cannot show the new
+  passphrase the webview supplies, and the conversion still returns the new
+  recovery key to the webview: the dialog confirms that the change happens,
+  not which passphrase it sets.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
 - Some text from a peer is still cut before the record's redaction sees

@@ -353,6 +353,28 @@ impl Default for LockPolicy {
     }
 }
 
+impl LockPolicy {
+    /// How `new` protects the profile less than `self`, in words; empty if
+    /// it does not. A shorter timeout, or any timeout after "never", is
+    /// stronger.
+    pub fn weakening(&self, new: &LockPolicy) -> Vec<String> {
+        let mut out = Vec::new();
+        match (self.idle_minutes, new.idle_minutes) {
+            (0, _) => {}
+            (_, 0) => out.push("never lock after inactivity".to_string()),
+            (was, now) if now > was => out.push(format!("lock after {now} minutes of inactivity instead of {was}")),
+            _ => {}
+        }
+        if self.lock_on_os_lock && !new.lock_on_os_lock {
+            out.push("no longer lock when the computer sleeps".into());
+        }
+        if self.clear_clipboard_on_lock && !new.clear_clipboard_on_lock {
+            out.push("no longer clear the clipboard on lock".into());
+        }
+        out
+    }
+}
+
 /// Portable application settings (included in whole-app backups).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AppSettings {

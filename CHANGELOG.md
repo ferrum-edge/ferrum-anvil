@@ -273,10 +273,16 @@
   anything is written (GHSA-3793-f3j3-mjpr).
 - Desktop: replacing the profile passphrase, converting a keychain profile to
   a passphrase, lifting a workspace's device-identity seal, opening an
-  imported collection to its workspace and weakening the lock policy (a
-  longer or no idle timeout, no lock on sleep, no clipboard clearing) now go
-  ahead only once the user confirms them in a native dialog that the backend
-  shows itself. Declining refuses the change with `NOT_CONFIRMED`; no
+  imported collection to its workspace, moving a request or folder out of an
+  imported collection that is not open to its workspace, and weakening the
+  lock policy (a longer or no idle timeout, no lock on sleep, no clipboard
+  clearing) now go ahead only once the user confirms them in a native dialog
+  that the backend shows itself. A full-backup restore keeps the profile's
+  lock policy when the backup's is weaker, and the desktop then offers the
+  backup's in the same kind of dialog. Saving a folder no longer moves it.
+  Names from the webview (profile, workspace, folder, request) appear in
+  these dialogs on one line, without control or invisible formatting
+  characters, and cut to 64 characters. Declining refuses the change with `NOT_CONFIRMED`; no
   webview argument stands in for the answer, each answer covers one change,
   and a lock while the dialog is open refuses it. Strengthening changes are
   not asked about, and the passphrase change right after a recovery-key
@@ -287,10 +293,18 @@
 - Desktop: a request draft sent from the webview (send, interactive session
   or OAuth sign-in) that carries vault-backed authority (auth in effect,
   vault references, secret variables or a TLS client identity) uses it only
-  where its saved request would: the same destination origin, auth and
-  connection settings, worked out in the backend. Otherwise, and for a
-  draft without a saved request, the user must confirm the workspace and
-  destination in a native dialog for that one use. Secrets are still
+  where its saved request would: the same destination origin, request
+  authority (an explicit Host header included), MASQUE route, auth and
+  connection settings, worked out in the backend from the very context it
+  then executes. A destination, Host or MASQUE route that a per-send value
+  (`{{$randomFrom}}`, `{{$randomInt}}`, `{{$counter}}`, `{{$uuid}}`, a
+  timestamp) reaches is never taken as matching, since each send draws it
+  again. Otherwise, and for a draft without a saved request, the user must
+  confirm it in a native dialog for that one use; the dialog names the
+  destination first, then the workspace and what differs from the saved
+  request (destination, Host, DNS overrides, proxy, TLS profile and
+  verification, auth kind and placement). An OAuth sign-in runs exactly the
+  context that was checked. Secrets are still
   resolved only in the backend and never returned to the webview. Drafts
   that carry no vault-backed authority are unchanged (GHSA-g7h5-cxqf-jggg).
 - Desktop development dependencies: an npm override moves WebdriverIO's

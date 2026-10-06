@@ -3,11 +3,15 @@
 //! command that replaces the unlock credential, lifts a workspace's
 //! device-identity seal, opens an imported collection to its workspace or
 //! weakens the lock policy asks in a native dialog that the backend shows
-//! itself, and goes ahead only on the user's answer there. No argument the
-//! webview passes stands in for that answer, and each answer authorizes only
-//! the one change it was asked for, under the lock epoch it was asked in: a
-//! lock or a profile switch while the dialog is open refuses the change.
-//! Changes that only strengthen protection are not asked about.
+//! itself, and goes ahead only on the user's answer there. So does a move
+//! that takes requests out of an imported collection not open to its
+//! workspace, which opens them as much, and a backup restore's lock policy
+//! when it is weaker than the profile's. No argument the webview passes
+//! stands in for that answer, and each answer authorizes only the one
+//! change it was asked for, under the lock epoch it was asked in: a lock or
+//! a profile switch while the dialog is open refuses the change.
+//! Changes that only strengthen protection are not asked about. A name the
+//! webview chose appears in a dialog only through [`shown`].
 //!
 //! A passphrase change right after an unlock with the recovery key is not
 //! asked about either: that unlock proved the recovery key to the backend.
@@ -24,9 +28,12 @@
 use crate::commands::{R, e};
 use crate::state::DesktopState;
 use anvil_app::App;
+use anvil_app::backup::KEPT_LOCK_NOTE;
+use anvil_app::port::ImportReport;
+use anvil_app::workspace::Move;
 use anvil_domain::Id;
 use anvil_domain::settings::{AppSettings, LockPolicy};
-use anvil_domain::workspace::Folder;
+use anvil_domain::workspace::{Folder, RequestDefinition};
 use anvil_storage::KdfParams;
 use anvil_storage::vault::KeychainConversion;
 use parking_lot::Mutex;
@@ -47,8 +54,50 @@ pub(crate) const RENDERER_ACTIVITY_CEILING: Duration = Duration::from_secs(4 * 6
 /// go ahead without a native confirmation.
 pub(crate) const RECOVERY_REAUTH_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// The most characters of a name a native dialog shows.
+const SHOWN_NAME_CHARS: usize = 64;
+
+/// Characters that change how the text around them is shown without
+/// showing themselves: bidirectional marks, embeddings, overrides and
+/// isolates, zero-width characters, fillers, variation selectors and tags.
+const INVISIBLE: [(char, char); 14] = [
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{034F}', '\u{034F}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{115F}', '\u{1160}'),
+    ('\u{17B4}', '\u{17B5}'),
+    ('\u{180B}', '\u{180F}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{206F}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{FE00}', '\u{FE0F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFA0}', '\u{FFA0}'),
+    ('\u{E0000}', '\u{E0FFF}'),
+];
+
+/// `name`, which the webview chose, as a native dialog shows it: without
+/// control or invisible formatting characters, with whitespace (line breaks
+/// too) collapsed to single spaces, and cut to [`SHOWN_NAME_CHARS`]
+/// characters. It cannot add lines to the dialog, reorder the backend's
+/// text around it or push that text out of view.
+pub(crate) fn shown(name: &str) -> String {
+    let visible: String = name
+        .chars()
+        .filter(|c| !INVISIBLE.iter().any(|(lo, hi)| (*lo..=*hi).contains(c)))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut out = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    if out.chars().count() > SHOWN_NAME_CHARS {
+        out = out.chars().take(SHOWN_NAME_CHARS - 1).collect::<String>() + "…";
+    }
+    if out.is_empty() { "(no name)".into() } else { out }
+}
+
 /// A question the backend asks the user in a native dialog. Its text comes
-/// from the backend, never from the webview.
+/// from the backend, never from the webview: a name the webview chose goes
+/// through [`shown`].
 pub(crate) struct Prompt {
     pub title: &'static str,
     pub message: String,
@@ -160,7 +209,7 @@ pub(crate) fn fenced(st: &DesktopState, seen: u64) -> R<Arc<App>> {
 }
 
 fn profile_name(st: &DesktopState) -> R<String> {
-    Ok(st.app()?.header.display_name.clone())
+    Ok(shown(&st.app()?.header.display_name))
 }
 
 /// Replace the passphrase of the open profile, once the user confirmed it
@@ -209,7 +258,7 @@ pub(crate) async fn allow_device_identity(st: &DesktopState, presence: &impl Pre
     }
     let message = format!(
         "Let requests in the workspace “{}” use this device's workload identity (JWT-SVID or X.509-SVID) and its gateway profiles' diagnostic reference lookups? A bundle import or backup restore wrote into it.\n\nOnly continue if you trust what was imported or restored.",
-        app.workspace(&ws).map_err(e)?.name
+        shown(&app.workspace(&ws).map_err(e)?.name)
     );
     let prompt = Prompt { title: "Allow this device's workload identity", message, ok: "Allow" };
     let seen = confirm(st, presence, prompt).await?;
@@ -226,32 +275,71 @@ pub(crate) async fn set_workspace_scope(st: &DesktopState, presence: &impl Prese
         return app.set_import_root_workspace_scope(&folder, allow).map_err(e);
     }
     let message = format!(
-        "Open “{}” to its workspace on this device? Its requests will also use the workspace's variables, active environment and auth, variables of folders above it, values extracted and dataset rows from the rest of a run, and this device's workload identity (JWT-SVID or X.509-SVID) and TLS client identities.\n\nOnly continue if you trust what was imported.",
-        f.name
+        "Open “{}” to its workspace on this device? {OPENS}\n\nOnly continue if you trust what was imported.",
+        shown(&f.name)
     );
     let prompt = Prompt { title: "Open imported collection to the workspace", message, ok: "Open to workspace" };
     let seen = confirm(st, presence, prompt).await?;
     fenced(st, seen)?.set_import_root_workspace_scope(&folder, true).map_err(e)
 }
 
-/// How `new` protects the profile less than `old`, in words; empty if it
-/// does not.
-pub(crate) fn lock_weakening(old: &LockPolicy, new: &LockPolicy) -> Vec<String> {
-    let mut out = Vec::new();
-    match (old.idle_minutes, new.idle_minutes) {
-        (0, _) => {}
-        (_, 0) => out.push("never lock after inactivity".to_string()),
-        (was, now) if now > was => out.push(format!("lock after {now} minutes of inactivity instead of {was}")),
-        _ => {}
-    }
-    if old.lock_on_os_lock && !new.lock_on_os_lock {
-        out.push("no longer lock when the computer sleeps".into());
-    }
-    if old.clear_clipboard_on_lock && !new.clear_clipboard_on_lock {
-        out.push("no longer clear the clipboard on lock".into());
-    }
-    out
+/// What requests out of an imported collection's isolation use.
+const OPENS: &str = "Its requests will also use the workspace's variables, active environment and auth, variables of folders above it, values extracted and dataset rows from the rest of a run, and this device's workload identity (JWT-SVID or X.509-SVID) and TLS client identities.";
+
+/// The question for a move that takes `what` out of the imported collection
+/// `root`, which is not open to its workspace.
+fn leaving_import(what: String, root: &Folder) -> Prompt {
+    let message = format!(
+        "Move {what} out of the imported collection “{}”? {OPENS}\n\nOnly continue if you made this move yourself and trust what was imported.",
+        shown(&root.name)
+    );
+    Prompt { title: "Move out of imported collection", message, ok: "Move" }
 }
+
+/// Move the request `request` to `folder` at `sort_key`. A move that takes
+/// it out of an imported collection not open to its workspace goes ahead
+/// only once the user confirmed it natively, as opening the collection
+/// does, and only out of the collection the user was asked about.
+pub(crate) async fn move_request(
+    st: &DesktopState,
+    presence: &impl Presence,
+    request: Id,
+    folder: Option<Id>,
+    sort_key: f64,
+) -> R<RequestDefinition> {
+    let app = st.app()?;
+    let root = match app.move_request_keeping_isolation(&request, folder, sort_key, None).map_err(e)? {
+        Move::Moved(r) => return Ok(r),
+        Move::LeavesImport(root) => root,
+    };
+    let what = format!("the request “{}”", shown(&app.request(&request).map_err(e)?.name));
+    let seen = confirm(st, presence, leaving_import(what, &root)).await?;
+    match fenced(st, seen)?.move_request_keeping_isolation(&request, folder, sort_key, Some(root.meta.id)).map_err(e)? {
+        Move::Moved(r) => Ok(r),
+        Move::LeavesImport(_) => Err(MOVED_MEANWHILE.into()),
+    }
+}
+
+/// Move the folder `folder` under `parent` at `sort_key`, asking natively
+/// first as [`move_request`] does when that takes what it holds out of an
+/// imported collection not open to its workspace.
+pub(crate) async fn move_folder(st: &DesktopState, presence: &impl Presence, folder: Id, parent: Option<Id>, sort_key: f64) -> R<Folder> {
+    let app = st.app()?;
+    let root = match app.move_folder_keeping_isolation(&folder, parent, sort_key, None).map_err(e)? {
+        Move::Moved(f) => return Ok(f),
+        Move::LeavesImport(root) => root,
+    };
+    let what = format!("the folder “{}” and everything in it", shown(&app.folder(&folder).map_err(e)?.name));
+    let seen = confirm(st, presence, leaving_import(what, &root)).await?;
+    match fenced(st, seen)?.move_folder_keeping_isolation(&folder, parent, sort_key, Some(root.meta.id)).map_err(e)? {
+        Move::Moved(f) => Ok(f),
+        Move::LeavesImport(_) => Err(MOVED_MEANWHILE.into()),
+    }
+}
+
+/// A confirmed move now leaves another imported collection than the one the
+/// user was asked about.
+const MOVED_MEANWHILE: &str = "the tree changed while you were asked; move it again";
 
 /// Save the settings dialog's settings. A change that weakens the lock
 /// policy is saved only once the user confirmed it natively, and only over
@@ -259,13 +347,13 @@ pub(crate) fn lock_weakening(old: &LockPolicy, new: &LockPolicy) -> Vec<String> 
 pub(crate) async fn save_settings(st: &DesktopState, presence: &impl Presence, settings: AppSettings) -> R<()> {
     let app = st.app()?;
     let stored = app.settings().map_err(e)?.lock;
-    let weaker = lock_weakening(&stored, &settings.lock);
+    let weaker = stored.weakening(&settings.lock);
     let app = if weaker.is_empty() {
         app
     } else {
         let message = format!(
             "Change the lock settings of the profile “{}”? Anvil would {}.\n\nOnly continue if you asked for this change yourself.",
-            app.header.display_name,
+            shown(&app.header.display_name),
             weaker.join(", and ")
         );
         let prompt = Prompt { title: "Weaken the lock settings", message, ok: "Save" };
@@ -276,6 +364,42 @@ pub(crate) async fn save_settings(st: &DesktopState, presence: &impl Presence, s
         return Err("the lock settings changed meanwhile; review them and save again".into());
     }
     Ok(())
+}
+
+/// Offer the lock policy a backup restore withheld from `report` (see
+/// [`ImportReport::withheld_lock`]) because it is weaker than the
+/// profile's. It applies only once the user confirms it natively; declined,
+/// or refused by a lock while the dialog is open, the profile keeps its own,
+/// as the restore left it, and the report says so.
+pub(crate) async fn offer_restored_lock(st: &DesktopState, presence: &impl Presence, report: &mut ImportReport) {
+    let Some(lock) = report.withheld_lock.take() else { return };
+    if let Ok(true) = apply_restored_lock(st, presence, lock).await {
+        report.warnings.retain(|w| !w.starts_with(KEPT_LOCK_NOTE));
+        report.warnings.push("The backup's lock settings apply now, as you confirmed.".into());
+    }
+}
+
+/// Replace the profile's lock policy with `lock`, a restored backup's,
+/// once the user confirmed it natively, and only over the policy the user
+/// was asked against. Whether it was applied.
+async fn apply_restored_lock(st: &DesktopState, presence: &impl Presence, lock: LockPolicy) -> R<bool> {
+    let app = st.app()?;
+    let stored = app.settings().map_err(e)?.lock;
+    let weaker = stored.weakening(&lock);
+    if weaker.is_empty() {
+        return Ok(false);
+    }
+    let message = format!(
+        "Use the lock settings of the restored backup for the profile “{}”? Anvil would {}.\n\nThe restore kept this profile's own lock settings. Only continue if you want the backup's.",
+        shown(&app.header.display_name),
+        weaker.join(", and ")
+    );
+    let prompt = Prompt { title: "Weaken the lock settings", message, ok: "Use the backup's" };
+    let seen = confirm(st, presence, prompt).await?;
+    let app = fenced(st, seen)?;
+    let mut next = app.settings().map_err(e)?;
+    next.lock = lock;
+    app.save_settings_if_lock_is(&next, &stored).map_err(e)
 }
 
 #[cfg(test)]
@@ -499,6 +623,137 @@ mod tests {
         assert_eq!(unasked.times(), 0);
     }
 
+    /// An imported collection's root folder in a new workspace, as a spec or
+    /// collection import leaves it, with a subfolder and a request in each.
+    struct Imported {
+        app: Arc<App>,
+        ws: Id,
+        root: Id,
+        sub: Id,
+        request: Id,
+        deep: Id,
+    }
+
+    fn imported(st: &DesktopState) -> Imported {
+        let app = st.app().unwrap();
+        let ws = app.create_workspace("W").unwrap().meta.id;
+        let mut f = app.create_folder(&ws, None, "Petstore").unwrap();
+        f.import_root = true;
+        app.store.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f).unwrap();
+        let root = f.meta.id;
+        let sub = app.create_folder(&ws, Some(root), "pets").unwrap().meta.id;
+        let get = || anvil_domain::request::RequestSpec::http("GET", "https://petstore.example/pets");
+        let request = app.create_request(&ws, Some(root), "List pets", get()).unwrap().meta.id;
+        let deep = app.create_request(&ws, Some(sub), "Get pet", get()).unwrap().meta.id;
+        Imported { app, ws, root, sub, request, deep }
+    }
+
+    #[tokio::test]
+    async fn moving_a_request_out_of_an_imported_collection_is_refused_unless_confirmed_natively() {
+        let (_root, st, _dir) = opened();
+        let i = imported(&st);
+        let no = Answer::no();
+        assert_eq!(move_request(&st, &no, i.request, None, 1.0).await.map(|_| ()), Err(NOT_CONFIRMED.to_string()));
+        assert_eq!(i.app.request(&i.request).unwrap().folder_id, Some(i.root), "not moved");
+        let asked = no.asked.lock()[0].clone();
+        assert!(asked.contains("“List pets”") && asked.contains("“Petstore”"), "{asked}");
+        let yes = Answer::yes();
+        assert_eq!(move_request(&st, &yes, i.request, None, 1.0).await.unwrap().folder_id, None);
+        assert_eq!(yes.times(), 1);
+    }
+
+    #[tokio::test]
+    async fn moving_a_folder_out_of_an_imported_collection_is_refused_unless_confirmed_natively() {
+        let (_root, st, _dir) = opened();
+        let i = imported(&st);
+        let elsewhere = i.app.create_folder(&i.ws, None, "Mine").unwrap().meta.id;
+        let no = Answer::no();
+        assert_eq!(move_folder(&st, &no, i.sub, Some(elsewhere), 1.0).await.map(|_| ()), Err(NOT_CONFIRMED.to_string()));
+        assert_eq!(i.app.folder(&i.sub).unwrap().parent_id, Some(i.root), "not moved");
+        assert!(no.asked.lock()[0].contains("“pets” and everything in it"));
+        let yes = Answer::yes();
+        assert_eq!(move_folder(&st, &yes, i.sub, Some(elsewhere), 1.0).await.unwrap().parent_id, Some(elsewhere));
+        assert_eq!(yes.times(), 1);
+    }
+
+    #[tokio::test]
+    async fn moves_that_keep_or_strengthen_import_isolation_are_not_asked() {
+        let (_root, st, _dir) = opened();
+        let i = imported(&st);
+        let unasked = Answer::no();
+        // Within the collection.
+        move_request(&st, &unasked, i.request, Some(i.sub), 1.0).await.unwrap();
+        move_request(&st, &unasked, i.deep, Some(i.root), 2.0).await.unwrap();
+        // Into it, from the workspace.
+        let mine = i.app.create_request(&i.ws, None, "Mine", anvil_domain::request::RequestSpec::http("GET", "https://a.example/")).unwrap();
+        move_request(&st, &unasked, mine.meta.id, Some(i.sub), 3.0).await.unwrap();
+        // The collection itself, with everything in it, stays isolated wherever it goes.
+        let parent = i.app.create_folder(&i.ws, None, "Imports").unwrap().meta.id;
+        assert_eq!(move_folder(&st, &unasked, i.root, Some(parent), 1.0).await.unwrap().parent_id, Some(parent));
+        assert_eq!(unasked.times(), 0);
+        // Once the user opened it to the workspace, leaving it opens nothing more.
+        i.app.set_import_root_workspace_scope(&i.root, true).unwrap();
+        assert_eq!(move_request(&st, &unasked, i.request, None, 4.0).await.unwrap().folder_id, None);
+        assert_eq!(unasked.times(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_move_does_not_take_a_request_out_of_another_collection() {
+        let (_root, st, _dir) = opened();
+        let i = imported(&st);
+        let mut other = i.app.create_folder(&i.ws, None, "Other import").unwrap();
+        other.import_root = true;
+        i.app.store.put(kind::FOLDER, &other.meta.id, Some(&i.ws), None, other.sort_key, &other).unwrap();
+        // While the user is asked about leaving "Petstore", the request lands in another collection.
+        let meanwhile = || {
+            i.app.move_request(&i.request, Some(other.meta.id), 1.0).unwrap();
+        };
+        let yes = Answer::with(true, meanwhile);
+        assert_eq!(move_request(&st, &yes, i.request, None, 1.0).await.map(|_| ()), Err(MOVED_MEANWHILE.to_string()));
+        assert_eq!(i.app.request(&i.request).unwrap().folder_id, Some(other.meta.id));
+    }
+
+    #[tokio::test]
+    async fn saving_a_folder_never_moves_it() {
+        let (_root, st, _dir) = opened();
+        let i = imported(&st);
+        let mut sub = i.app.folder(&i.sub).unwrap();
+        sub.parent_id = None;
+        sub.name = "renamed".into();
+        let saved = i.app.save_folder_in_place(sub).unwrap();
+        assert_eq!((saved.parent_id, saved.name.as_str()), (Some(i.root), "renamed"));
+        assert_eq!(i.app.folder(&i.sub).unwrap().parent_id, Some(i.root));
+    }
+
+    #[test]
+    fn a_name_is_shown_on_one_line_without_invisible_characters_and_cut_short() {
+        assert_eq!(shown("  Pay\u{202E}ments\r\n\tteam\u{2028}A  "), "Payments team A");
+        assert_eq!(shown("a\u{200B}b\u{2066}c\u{2069}\u{FEFF}\u{E0041}"), "abc");
+        assert_eq!(shown("\n\u{202E}"), "(no name)");
+        let long = shown(&"é".repeat(100));
+        assert_eq!(long.chars().count(), SHOWN_NAME_CHARS);
+        assert!(long.ends_with('…'));
+        assert_eq!(shown("Payments"), "Payments");
+    }
+
+    #[tokio::test]
+    async fn a_weaker_lock_policy_from_a_restore_applies_only_once_confirmed_natively() {
+        let (_root, st, _dir) = opened();
+        let app = st.app().unwrap();
+        let restored = LockPolicy { idle_minutes: 0, ..LockPolicy::default() };
+        let no = Answer::no();
+        assert_eq!(apply_restored_lock(&st, &no, restored.clone()).await, Err(NOT_CONFIRMED.to_string()));
+        assert_eq!(app.settings().unwrap().lock, LockPolicy::default());
+        assert!(no.asked.lock()[0].contains("never lock after inactivity"));
+        let yes = Answer::yes();
+        assert_eq!(apply_restored_lock(&st, &yes, restored.clone()).await, Ok(true));
+        assert_eq!(app.settings().unwrap().lock, restored);
+        // No longer weaker than the profile's: nothing to ask or apply.
+        let unasked = Answer::no();
+        assert_eq!(apply_restored_lock(&st, &unasked, restored).await, Ok(false));
+        assert_eq!(unasked.times(), 0);
+    }
+
     #[test]
     fn only_a_weaker_lock_policy_counts_as_weakening() {
         let base = LockPolicy::default();
@@ -507,16 +762,16 @@ mod tests {
             f(&mut p);
             p
         };
-        assert!(lock_weakening(&base, &base).is_empty());
-        assert!(lock_weakening(&base, &with(|p| p.idle_minutes = 5)).is_empty(), "a shorter timeout is stronger");
-        assert_eq!(lock_weakening(&base, &with(|p| p.idle_minutes = 0)).len(), 1);
-        assert_eq!(lock_weakening(&base, &with(|p| p.idle_minutes = 60)).len(), 1);
-        assert_eq!(lock_weakening(&base, &with(|p| p.lock_on_os_lock = false)).len(), 1);
-        assert_eq!(lock_weakening(&base, &with(|p| p.clear_clipboard_on_lock = false)).len(), 1);
+        assert!(base.weakening(&base).is_empty());
+        assert!(base.weakening(&with(|p| p.idle_minutes = 5)).is_empty(), "a shorter timeout is stronger");
+        assert_eq!(base.weakening(&with(|p| p.idle_minutes = 0)).len(), 1);
+        assert_eq!(base.weakening(&with(|p| p.idle_minutes = 60)).len(), 1);
+        assert_eq!(base.weakening(&with(|p| p.lock_on_os_lock = false)).len(), 1);
+        assert_eq!(base.weakening(&with(|p| p.clear_clipboard_on_lock = false)).len(), 1);
         // From "never", any timeout is stronger.
         let never = with(|p| p.idle_minutes = 0);
-        assert!(lock_weakening(&never, &with(|p| p.idle_minutes = 600)).is_empty());
-        assert!(lock_weakening(&with(|p| p.lock_on_os_lock = false), &base).is_empty());
+        assert!(never.weakening(&with(|p| p.idle_minutes = 600)).is_empty());
+        assert!(with(|p| p.lock_on_os_lock = false).weakening(&base).is_empty());
     }
 
     #[tokio::test]

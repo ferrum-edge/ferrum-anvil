@@ -39,6 +39,12 @@ pub struct ImportReport {
     /// the preview names it ([`ImportApproval::bundle_sha256`]), so it holds
     /// only for the file that was previewed.
     pub bundle_sha256: String,
+    /// The lock policy of a restored backup that would have weakened this
+    /// profile's: the restore kept this profile's instead
+    /// (see [`crate::backup::KEPT_LOCK_NOTE`]). Never sent to the webview;
+    /// the desktop applies it only once the user confirms it natively.
+    #[serde(skip)]
+    pub withheld_lock: Option<anvil_domain::settings::LockPolicy>,
 }
 
 /// What the user confirmed after reading an import preview.
@@ -297,6 +303,7 @@ impl App {
             full_backup: false,
             api_standards_count: graph.rulesets.len(),
             bundle_sha256,
+            withheld_lock: None,
         })
     }
 
@@ -595,6 +602,7 @@ impl App {
             full_backup: false,
             api_standards_count: g.rulesets.len(),
             bundle_sha256: file_sha256(bytes),
+            withheld_lock: None,
         })
     }
 }

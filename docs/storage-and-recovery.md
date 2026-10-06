@@ -179,9 +179,14 @@ system dialog the backend shows itself (declining changes nothing):
   recovery key;
 - converting a keychain profile to passphrase protection;
 - *Allow on this device* for a workspace sealed by an import or restore;
-- opening an imported collection to its workspace;
+- opening an imported collection to its workspace, or moving a request or
+  folder out of an imported collection that is not open to its workspace
+  (outside it, those requests use the workspace's variables, environment
+  and auth just the same);
 - a weaker lock policy: a longer or no idle timeout, or turning off locking
-  on sleep or clearing the clipboard on lock.
+  on sleep or clearing the clipboard on lock. A full-backup restore keeps
+  this profile's lock policy when the backup's is weaker, says so in its
+  report, and then offers the backup's in the same dialog.
 
 Changes that make the profile safer are not asked about.
 

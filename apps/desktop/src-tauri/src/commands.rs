@@ -319,9 +319,12 @@ pub fn folder_get(st: State<'_, DesktopState>, folder_id: String) -> R<Folder> {
     st.app()?.folder(&id(&folder_id)?).map_err(e)
 }
 
+/// A stored folder stays under its stored parent: it moves only through
+/// `folder_move`, which asks before it takes anything out of an imported
+/// collection.
 #[tauri::command]
 pub fn folder_save(st: State<'_, DesktopState>, folder: Folder) -> R<Folder> {
-    st.app()?.save_folder(folder).map_err(e)
+    st.app()?.save_folder_in_place(folder).map_err(e)
 }
 
 /// The user's explicit choice to let an imported collection's requests also
@@ -333,10 +336,19 @@ pub async fn folder_set_workspace_scope(st: State<'_, DesktopState>, window: Win
     crate::presence::set_workspace_scope(&st, &NativePresence(window), id(&folder_id)?, allow).await
 }
 
+/// A move that takes what the folder holds out of an imported collection not
+/// open to its workspace is made only once confirmed in a native dialog (see
+/// `crate::presence`), as opening the collection is.
 #[tauri::command]
-pub fn folder_move(st: State<'_, DesktopState>, folder_id: String, parent_id: Option<String>, sort_key: f64) -> R<Folder> {
+pub async fn folder_move(
+    st: State<'_, DesktopState>,
+    window: Window,
+    folder_id: String,
+    parent_id: Option<String>,
+    sort_key: f64,
+) -> R<Folder> {
     let parent = parent_id.map(|p| id(&p)).transpose()?;
-    st.app()?.move_folder(&id(&folder_id)?, parent, sort_key).map_err(e)
+    crate::presence::move_folder(&st, &NativePresence(window), id(&folder_id)?, parent, sort_key).await
 }
 
 /// One transaction over the whole subtree, on a blocking thread (see
@@ -375,10 +387,18 @@ pub fn request_save(st: State<'_, DesktopState>, request: RequestDefinition) -> 
     app.save_request(request).map_err(e)
 }
 
+/// Asked natively, as `folder_move` is, when the move takes the request out
+/// of an imported collection not open to its workspace.
 #[tauri::command]
-pub fn request_move(st: State<'_, DesktopState>, request_id: String, folder_id: Option<String>, sort_key: f64) -> R<RequestDefinition> {
+pub async fn request_move(
+    st: State<'_, DesktopState>,
+    window: Window,
+    request_id: String,
+    folder_id: Option<String>,
+    sort_key: f64,
+) -> R<RequestDefinition> {
     let folder = folder_id.map(|p| id(&p)).transpose()?;
-    st.app()?.move_request(&id(&request_id)?, folder, sort_key).map_err(e)
+    crate::presence::move_request(&st, &NativePresence(window), id(&request_id)?, folder, sort_key).await
 }
 
 #[tauri::command]
@@ -1216,9 +1236,12 @@ pub async fn import_preview(
 /// import, and a full-backup restore, can be canceled until its key is
 /// derived and its contents checked. A lock or a profile switch that lands
 /// before then also ends it without writing, with or without an `attempt` id.
+/// A restored lock policy weaker than the profile's applies only once the
+/// user confirms it natively (see `crate::presence::offer_restored_lock`).
 #[tauri::command]
 pub async fn import_apply(
     handle: AppHandle,
+    window: Window,
     st: State<'_, DesktopState>,
     grant: String,
     passphrase: Option<String>,
@@ -1239,13 +1262,15 @@ pub async fn import_apply(
     let grants = st.file_grants.clone();
     let gate = Arc::new(ImportGate::default());
     let worker_gate = gate.clone();
-    import_work(worker, pending, Some(&*gate), move || {
+    let mut report = import_work(worker, pending, Some(&*gate), move || {
         let bytes = read_bundle(&grants, &grant)?;
         let proceed = || writes_may_begin(&handle.state::<DesktopState>(), seen, &worker_gate);
         apply(&app, &bytes, passphrase.as_deref(), policy, &approval, &proceed)
     })
     .await
-    .map_err(|error| import_result_error(&st, seen, error))
+    .map_err(|error| import_result_error(&st, seen, error))?;
+    crate::presence::offer_restored_lock(&st, &NativePresence(window), &mut report).await;
+    Ok(report)
 }
 
 /// Cancel the bundle import, backup restore or preview started with

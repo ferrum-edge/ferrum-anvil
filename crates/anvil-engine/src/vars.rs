@@ -31,6 +31,35 @@ pub struct VarLayer {
     pub vars: Vec<VarEntry>,
 }
 
+/// `input` with each dynamic helper (`{{$…}}`) replaced by `stand_in`, and
+/// every other reference kept. Tokenized exactly as [`Resolver::resolve`]
+/// tokenizes (`{{`, the first `}}`, the trimmed expression starting with
+/// `$`), so a check can resolve what every send resolves without a value
+/// that changes from one resolution to the next.
+pub fn mask_dynamic(input: &str, stand_in: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(open) = rest.find("{{") {
+        output.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            output.push_str(&rest[open..]);
+            return output;
+        };
+        let expression = &after[..close];
+        if expression.trim().starts_with('$') {
+            output.push_str(stand_in);
+        } else {
+            output.push_str("{{");
+            output.push_str(expression);
+            output.push_str("}}");
+        }
+        rest = &after[close + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
 pub struct Resolver {
     layers: Vec<VarLayer>,
     counter: AtomicU64,
