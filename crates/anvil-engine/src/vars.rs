@@ -378,10 +378,8 @@ mod tests {
 
     #[test]
     fn deferred_vault_variables_fail_closed_without_the_context_secrets() {
-        let r = Resolver::new(
-            vec![layer("workspace", &[("host", DEFERRED_SECRET_VALUE, true), ("url", "https://{{host}}/", false)])],
-            None,
-        );
+        let r =
+            Resolver::new(vec![layer("workspace", &[("host", DEFERRED_SECRET_VALUE, true), ("url", "https://{{host}}/", false)])], None);
         for input in ["{{host}}", "{{url}}"] {
             let failure = r.resolve(input, "url").unwrap_err();
             assert!(is_deferred_secret(&failure), "{failure:?}");

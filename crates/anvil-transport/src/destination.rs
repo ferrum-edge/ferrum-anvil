@@ -37,7 +37,10 @@ enum Origin {
     Unresolved,
     /// The zones of the original answer, and whether any hop so far could
     /// reach a public address. After a public hop, only public hops follow.
-    Resolved { zones: u8, public_hop: bool },
+    Resolved {
+        zones: u8,
+        public_hop: bool,
+    },
     OpaqueProxy,
 }
 
