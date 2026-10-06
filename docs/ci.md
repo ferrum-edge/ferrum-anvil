@@ -3,8 +3,9 @@
 Ferrum Anvil runs four GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
-Only the release publish job gets more: `contents: write` (to create a draft
-release) and `actions: read` (to list the test runs for the release commit).
+The release `publish` job gets `actions: read` (to list the test runs for the
+release commit). Only the `release` job, which runs for a tag and not for a dry
+run, gets `contents: write` (to create the draft release).
 
 | Workflow | Trigger | Runs on | What it proves |
 | --- | --- | --- | --- |

@@ -1,5 +1,6 @@
 name: Trusted AppImage extractor
 description: Build and verify the pinned unsquashfs extractor on a GitHub-hosted runner
+# Pin provenance and upstream security notes: docs/release.md (Release check section).
 runs:
   using: composite
   steps:

@@ -501,7 +501,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      actions: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TAG: ${{ needs.preflight.outputs.tag }}
@@ -511,6 +510,8 @@ jobs:
         with:
           name: release-evidence-${{ needs.preflight.outputs.version }}
           path: upload/
+      - name: Verify evidence bundle
+        run: (cd upload && sha256sum -c SHA256SUMS)
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
