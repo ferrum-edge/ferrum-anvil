@@ -23,8 +23,9 @@
     DNS keeps connection reuse. The original request is authorized for the network
     zones of its answer, so Tailscale, mDNS, NAT64 and fake-IP first requests work.
     Redirects stay within those zones or go wholly public. After any public hop, only
-    public hops follow. Well-known NAT64 addresses are classified by their embedded
-    IPv4.
+    public hops follow. A fake-IP redirect must return to the original host. Well-known
+    NAT64 addresses are classified by their embedded IPv4; operator-specific NAT64
+    prefixes are treated as public.
   - Vault variables that are deferred until the OAuth endpoint is validated fail
     closed with a clear error in resolvers that lack the context's secrets, instead of
     resolving to an empty string.

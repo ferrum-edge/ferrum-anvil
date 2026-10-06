@@ -159,9 +159,10 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
               Each request is pinned to the addresses its name resolved to. A redirect may go to a
               public address, or stay within the network zones the original request resolved to
               (loopback, private, link-local, shared or fake-IP), until one hop is public; after
-              that, redirects stay public. Intentional private originals keep working, including
-              names that resolve across several such zones. This is an address-class boundary, not
-              authorization for a particular server.
+              that, redirects stay public. A fake-IP redirect must return to the original host,
+              because the client cannot verify where it goes. Intentional private originals keep
+              working, including names that resolve across several such zones. This is an
+              address-class boundary, not authorization for a particular server.
             </p>
             <p>
               Redirects through HTTP, HTTPS CONNECT, SOCKS5 or HBONE proxies are refused, including

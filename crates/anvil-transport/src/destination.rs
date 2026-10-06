@@ -30,6 +30,7 @@ impl Zone {
 }
 
 const PUBLIC: u8 = 1 << Zone::Public as u8;
+const BENCHMARK: u8 = 1 << Zone::Benchmark as u8;
 
 #[derive(Clone, Copy, Default)]
 enum Origin {
@@ -49,11 +50,18 @@ enum Origin {
 /// resolved answer; a redirect stays within them or is wholly public.
 #[derive(Default)]
 pub struct DestinationPolicy {
-    origin: Mutex<Origin>,
+    /// The authority and the normalized original host it was granted to.
+    origin: Mutex<(Origin, String)>,
 }
 
 fn refused(message: &str) -> TransportFailure {
     TransportFailure::new(Phase::Connect, FailureKind::UnsupportedCombination, message).with_field("settings.redirects")
+}
+
+/// A host as redirects compare it: ASCII case-insensitive, without IPv6
+/// brackets or a trailing root dot.
+fn host_key(host: &str) -> String {
+    host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase()
 }
 
 fn zone(ip: IpAddr) -> Option<Zone> {
@@ -115,7 +123,7 @@ fn zone(ip: IpAddr) -> Option<Zone> {
 }
 
 impl DestinationPolicy {
-    fn validate(&self, addrs: &[SocketAddr], redirected: bool) -> Result<(), TransportFailure> {
+    fn validate(&self, host: &str, addrs: &[SocketAddr], redirected: bool) -> Result<(), TransportFailure> {
         let mut zones = 0;
         for addr in addrs {
             zones |= zone(addr.ip()).ok_or_else(|| refused("the destination resolves to an address that is not permitted unicast"))?.bit();
@@ -123,10 +131,15 @@ impl DestinationPolicy {
         if zones == 0 {
             return Err(refused("the destination has no permitted unicast address"));
         }
-        let mut origin = self.origin.lock();
+        let host = host_key(host);
+        let mut state = self.origin.lock();
+        let (origin, original_host) = &mut *state;
         match *origin {
             // The original grants exactly the zones of its resolved answer.
-            Origin::Unresolved if !redirected => *origin = Origin::Resolved { zones, public_hop: zones & PUBLIC != 0 },
+            Origin::Unresolved if !redirected => {
+                *origin = Origin::Resolved { zones, public_hop: zones & PUBLIC != 0 };
+                *original_host = host;
+            }
             // A retry or fallback of the original stays in its zones or public ones.
             Origin::Resolved { zones: allowed, public_hop } if !redirected && zones & !(allowed | PUBLIC) == 0 => {
                 *origin = Origin::Resolved { zones: allowed, public_hop: public_hop || zones & PUBLIC != 0 };
@@ -140,6 +153,11 @@ impl DestinationPolicy {
                     return Err(refused("the redirect would return to a non-public network zone after a public hop"));
                 } else if zones & !allowed != 0 {
                     return Err(refused("the redirect would leave the original destination's approved network zones"));
+                } else if zones & BENCHMARK != 0 && host != *original_host {
+                    // A fake-IP TUN answers every name from 198.18.0.0/15 and
+                    // resolves the real destination itself, so only the
+                    // original host is verifiably the same destination.
+                    return Err(refused("the redirect would reach another host through the unverifiable fake-IP range"));
                 }
             }
             _ => {
@@ -195,10 +213,10 @@ impl DestinationPolicy {
                     return Err(refused("the proxy request authority is not a permitted unicast address"));
                 }
             }
-            *self.origin.lock() = Origin::OpaqueProxy;
+            self.origin.lock().0 = Origin::OpaqueProxy;
             return Ok(plan.clone());
         }
-        if redirected && matches!(*self.origin.lock(), Origin::OpaqueProxy | Origin::Unresolved) {
+        if redirected && matches!(self.origin.lock().0, Origin::OpaqueProxy | Origin::Unresolved) {
             return Err(refused("the original destination's resolved network zone is unavailable"));
         }
         let idx = rec.start(Phase::Dns);
@@ -228,7 +246,7 @@ impl DestinationPolicy {
                 plan.timeouts.dns_ms.map(Duration::from_millis),
             ) => r,
         }?;
-        self.validate(&resolution.addrs, redirected)?;
+        self.validate(&plan.host, &resolution.addrs, redirected)?;
         rec.finish_with(
             idx,
             PhaseStatus::Completed,
@@ -261,13 +279,15 @@ mod tests {
     use bytes::Bytes;
     use std::sync::Arc;
 
+    const HOST: &str = "origin.test";
+
     fn addresses(values: &[&str]) -> Vec<SocketAddr> {
         values.iter().map(|v| SocketAddr::new(v.parse().unwrap(), 80)).collect()
     }
 
     fn public_origin() -> DestinationPolicy {
         let policy = DestinationPolicy::default();
-        policy.validate(&addresses(&["8.8.8.8"]), false).unwrap();
+        policy.validate(HOST, &addresses(&["8.8.8.8"]), false).unwrap();
         policy
     }
 
@@ -328,33 +348,33 @@ mod tests {
             "3fff::1",
             "2001:4860::5efe:7f00:1",
         ] {
-            assert!(policy.validate(&addresses(&[ip]), true).is_err(), "{ip}");
+            assert!(policy.validate(HOST, &addresses(&[ip]), true).is_err(), "{ip}");
         }
-        assert!(policy.validate(&addresses(&["1.1.1.1", "2606:4700::1111"]), true).is_ok());
-        assert!(policy.validate(&addresses(&["::ffff:1.1.1.1"]), true).is_ok());
+        assert!(policy.validate(HOST, &addresses(&["1.1.1.1", "2606:4700::1111"]), true).is_ok());
+        assert!(policy.validate(HOST, &addresses(&["::ffff:1.1.1.1"]), true).is_ok());
     }
 
     #[test]
     fn original_private_targets_keep_only_their_zones_and_public_authority() {
         for first in ["127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.1.1", "::1", "fc00::1"] {
             let policy = DestinationPolicy::default();
-            policy.validate(&addresses(&[first]), false).unwrap();
-            assert!(policy.validate(&addresses(&[first]), true).is_ok());
-            assert!(policy.validate(&addresses(&["8.8.8.8"]), true).is_ok());
+            policy.validate(HOST, &addresses(&[first]), false).unwrap();
+            assert!(policy.validate(HOST, &addresses(&[first]), true).is_ok());
+            assert!(policy.validate(HOST, &addresses(&["8.8.8.8"]), true).is_ok());
             let other = if zone(first.parse().unwrap()) == Some(Zone::Loopback) { "10.0.0.1" } else { "127.0.0.1" };
-            assert!(policy.validate(&addresses(&[other]), true).is_err());
-            assert!(policy.validate(&addresses(&[other]), false).is_err(), "retries inherit authority",);
+            assert!(policy.validate(HOST, &addresses(&[other]), true).is_err());
+            assert!(policy.validate(HOST, &addresses(&[other]), false).is_err(), "retries inherit authority",);
         }
         let policy = DestinationPolicy::default();
-        assert!(policy.validate(&addresses(&["224.0.0.1"]), false).is_err());
-        assert!(policy.validate(&addresses(&["10.0.0.1", "224.0.0.1"]), false).is_err(), "every address must be permitted");
+        assert!(policy.validate(HOST, &addresses(&["224.0.0.1"]), false).is_err());
+        assert!(policy.validate(HOST, &addresses(&["10.0.0.1", "224.0.0.1"]), false).is_err(), "every address must be permitted");
         // A mixed public answer is pinned as is, but its chain is public from the start.
         let policy = DestinationPolicy::default();
-        policy.validate(&addresses(&["8.8.8.8", "127.0.0.1"]), false).unwrap();
-        assert!(policy.validate(&addresses(&["127.0.0.1", "8.8.8.8"]), false).is_ok(), "a retry keeps the answer");
-        assert!(policy.validate(&addresses(&["8.8.8.8", "127.0.0.1"]), true).is_err(), "a redirect cannot mix zones");
-        assert!(policy.validate(&addresses(&["127.0.0.1"]), true).is_err());
-        assert!(policy.validate(&addresses(&["8.8.4.4"]), true).is_ok());
+        policy.validate(HOST, &addresses(&["8.8.8.8", "127.0.0.1"]), false).unwrap();
+        assert!(policy.validate(HOST, &addresses(&["127.0.0.1", "8.8.8.8"]), false).is_ok(), "a retry keeps the answer");
+        assert!(policy.validate(HOST, &addresses(&["8.8.8.8", "127.0.0.1"]), true).is_err(), "a redirect cannot mix zones");
+        assert!(policy.validate(HOST, &addresses(&["127.0.0.1"]), true).is_err());
+        assert!(policy.validate(HOST, &addresses(&["8.8.4.4"]), true).is_ok());
     }
 
     #[test]
@@ -376,28 +396,66 @@ mod tests {
         ];
         for answer in answers {
             let policy = DestinationPolicy::default();
-            policy.validate(&addresses(answer), false).unwrap();
-            assert!(policy.validate(&addresses(answer), false).is_ok(), "{answer:?}: retries keep the answer");
-            assert!(policy.validate(&addresses(answer), true).is_ok(), "{answer:?}: same-host redirects keep working");
-            assert!(policy.validate(&addresses(&["127.0.0.1"]), true).is_err(), "{answer:?}: no new zone");
-            assert!(policy.validate(&addresses(&["198.51.100.1"]), true).is_err(), "{answer:?}: invalid ranges stay refused");
+            policy.validate(HOST, &addresses(answer), false).unwrap();
+            assert!(policy.validate(HOST, &addresses(answer), false).is_ok(), "{answer:?}: retries keep the answer");
+            assert!(policy.validate(HOST, &addresses(answer), true).is_ok(), "{answer:?}: same-host redirects keep working");
+            assert!(policy.validate(HOST, &addresses(&["127.0.0.1"]), true).is_err(), "{answer:?}: no new zone");
+            assert!(policy.validate(HOST, &addresses(&["198.51.100.1"]), true).is_err(), "{answer:?}: invalid ranges stay refused");
         }
         let policy = DestinationPolicy::default();
-        policy.validate(&addresses(&["100.101.102.103", "fd7a:115c:a1e0::1"]), false).unwrap();
-        assert!(policy.validate(&addresses(&["fd7a:115c:a1e0::2"]), true).is_ok(), "a redirect within the zones");
-        assert!(policy.validate(&addresses(&["192.168.1.1", "100.64.0.1"]), true).is_ok());
-        assert!(policy.validate(&addresses(&["169.254.169.254"]), true).is_err(), "a zone the original lacked");
+        policy.validate(HOST, &addresses(&["100.101.102.103", "fd7a:115c:a1e0::1"]), false).unwrap();
+        assert!(policy.validate(HOST, &addresses(&["fd7a:115c:a1e0::2"]), true).is_ok(), "a redirect within the zones");
+        assert!(policy.validate(HOST, &addresses(&["192.168.1.1", "100.64.0.1"]), true).is_ok());
+        assert!(policy.validate(HOST, &addresses(&["169.254.169.254"]), true).is_err(), "a zone the original lacked");
     }
 
     #[test]
     fn a_public_hop_taints_the_chain_for_every_non_public_zone() {
         for first in ["127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.1.1", "198.18.0.1", "fd00::1"] {
             let policy = DestinationPolicy::default();
-            policy.validate(&addresses(&[first]), false).unwrap();
-            policy.validate(&addresses(&["8.8.8.8"]), true).unwrap();
-            assert!(policy.validate(&addresses(&[first]), true).is_err(), "{first}: no bounce back after a public hop");
-            assert!(policy.validate(&addresses(&["1.1.1.1"]), true).is_ok(), "{first}: public hops continue");
+            policy.validate(HOST, &addresses(&[first]), false).unwrap();
+            policy.validate(HOST, &addresses(&["8.8.8.8"]), true).unwrap();
+            assert!(policy.validate(HOST, &addresses(&[first]), true).is_err(), "{first}: no bounce back after a public hop");
+            assert!(policy.validate(HOST, &addresses(&["1.1.1.1"]), true).is_ok(), "{first}: public hops continue");
         }
+    }
+
+    #[test]
+    fn a_fake_ip_redirect_is_allowed_only_back_to_the_original_host() {
+        let policy = DestinationPolicy::default();
+        policy.validate("API.example.", &addresses(&["198.18.0.5"]), false).unwrap();
+        assert!(policy.validate("api.example", &addresses(&["198.18.0.9"]), true).is_ok(), "the same host, normalized");
+        let error = policy.validate("rebind.attacker.example", &addresses(&["198.18.0.9"]), true).unwrap_err();
+        assert!(error.message.contains("fake-IP"), "{}", error.message);
+        assert!(policy.validate("api.example.", &addresses(&["198.18.0.5"]), true).is_ok(), "a refused hop leaves the origin");
+        // A public original reaches the fake-IP range under no host.
+        let policy = public_origin();
+        for host in [HOST, "rebind.attacker.example"] {
+            assert!(policy.validate(host, &addresses(&["198.18.0.9"]), true).is_err(), "{host}");
+        }
+        // Other zones of a mixed original keep the address-class rule.
+        let policy = DestinationPolicy::default();
+        policy.validate(HOST, &addresses(&["10.0.0.1", "198.18.0.1"]), false).unwrap();
+        assert!(policy.validate("other.test", &addresses(&["10.0.0.2"]), true).is_ok());
+        assert!(policy.validate("other.test", &addresses(&["10.0.0.2", "198.18.0.2"]), true).is_err());
+        assert!(policy.validate(HOST, &addresses(&["10.0.0.2", "198.18.0.2"]), true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn pinning_compares_each_hop_host_for_fake_ip_redirects() {
+        let hop = |host: &str| {
+            let mut p = plan(host, 80);
+            p.dns.overrides.push(DnsOverride { host: host.into(), addresses: vec!["198.18.0.5".into()] });
+            p
+        };
+        let policy = DestinationPolicy::default();
+        let mut rec = Recorder::new(0, EventCtx::none());
+        let cancel = CancellationToken::new();
+        policy.pin(&hop("api.test"), false, &mut rec, None, &cancel).await.unwrap();
+        assert!(policy.pin(&hop("API.test"), true, &mut rec, None, &cancel).await.is_ok());
+        let error = policy.pin(&hop("rebind.test"), true, &mut rec, None, &cancel).await.err().unwrap();
+        assert_eq!(error.kind, FailureKind::UnsupportedCombination);
+        assert!(error.message.contains("fake-IP"), "{}", error.message);
     }
 
     #[tokio::test]
@@ -549,7 +607,7 @@ mod tests {
         assert!(r.outputs[0].observation.failure.is_none());
         // The loopback origin redirects to a public host (validated only; nothing
         // public is contacted), which redirects back to the loopback listener.
-        policy.validate(&addresses(&["93.184.216.34"]), true).unwrap();
+        policy.validate(HOST, &addresses(&["93.184.216.34"]), true).unwrap();
         let r = transport
             .execute_attempt_guarded(&p, 2, AttemptReason::Redirect { status: 302 }, &EventCtx::none(), &cancel, Some((&policy, true)))
             .await;

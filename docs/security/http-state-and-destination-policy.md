@@ -139,15 +139,17 @@ There is no insecure override.
 
 ### Where it is checked
 
-The rule is checked at each of these points, and always before any credential is
-read:
+The rule is checked at each of these points. The first two run before any
+credential is read:
 
 1. Once the token URL's templates are resolved, before the client ID, the client
    secret or any vault reference is resolved. This applies to sends, sessions,
    previews, recorded gateway lookups and the interactive sign-in.
 2. Again at acquisition and at code redemption.
-3. Again in the shared `EngineTokenHttp` sink, before the form or Basic
-   authorization is built. The sink also refuses any HTTP plan that its actual
+3. Again in the shared `EngineTokenHttp` sink, as a final backstop. Its callers
+   have already resolved the form and Basic authorization values, but the sink
+   checks before the form is serialized or anything is sent, so a refused
+   request never sends them. The sink also refuses any HTTP plan that its actual
    proxy selection would route through a proxy.
 
 Errors never quote the endpoint or any credential.
@@ -234,14 +236,17 @@ reduce connection reuse.
 
 - IPv4-mapped IPv6 addresses are classified by their IPv4 address.
 - Addresses under the well-known NAT64 prefix `64:ff9b::/96` are classified by
-  their embedded IPv4 address.
+  their embedded IPv4 address. It is the only NAT64 prefix that is mapped.
+- Operator-specific (network-specific) NAT64 prefixes, including those a CLAT
+  discovers, look like ordinary global unicast. They are classified as public,
+  and their embedded IPv4 address is not checked.
 
 These are refused even for an original request:
 
 - multicast and unspecified addresses (including `0.0.0.0`);
 - IPv4 reserved and documentation ranges;
 - IPv6 reserved, site-local and documentation ranges;
-- local-use NAT64 and other translation prefixes;
+- the local-use NAT64 prefix `64:ff9b:1::/48`;
 - 6to4, Teredo and ISATAP forms.
 
 ### Authority
@@ -271,6 +276,11 @@ original zones, or go to public addresses.
   address. So a public server cannot bounce the chain back to loopback, private,
   link-local, shared or benchmark addresses.
 - A public original never gains any non-public authority.
+- **Fake-IP.** A fake-IP TUN answers every name from `198.18.0.0/15` and
+  resolves the real destination itself, so the client cannot verify where a
+  fake-IP hop goes. A redirect whose answer is in that range is allowed only
+  when its host equals the original request's host (ignoring ASCII case and a
+  trailing dot). A fake-IP redirect to any other host is refused.
 
 | Original answer | Later direct redirect hops |
 |---|---|
@@ -323,8 +333,11 @@ These changes are **breaking**:
   - Redirects that mix public and non-public answers, or that return to a
     non-public zone after a public hop, are refused.
   - Original requests to special or reserved addresses are refused. This
-    includes `0.0.0.0` development targets, documentation ranges and
-    translation prefixes other than the well-known NAT64 prefix.
+    includes `0.0.0.0` development targets, documentation ranges, the
+    local-use NAT64 prefix and 6to4, Teredo and ISATAP forms. Operator-specific
+    NAT64 prefixes are classified as public, not refused.
+  - A redirect into the fake-IP range is refused unless it returns to the
+    original request's host.
 - **Link-local IPv6.** A pinned `fe80::` address carries no interface scope, so
   dual-stack mDNS hosts are reached over their IPv4 address.
 
@@ -351,6 +364,7 @@ Unit and integration tests cover the following:
   - the deferred-vault fail-closed path.
 - **Destinations:**
   - zone classes, including NAT64 and fake-IP;
+  - fake-IP redirects allowed only back to the original host;
   - mixed-zone originals (Tailscale-like and mDNS-like);
   - refusal of mixed public/non-public redirects and of the public bounce back to
     loopback;

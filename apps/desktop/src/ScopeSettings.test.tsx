@@ -89,6 +89,7 @@ test("workspace settings explain the cookie and destination policy", async () =>
   expect(text).toContain("Intentional private originals keep working");
   expect(text).toContain("names that resolve across several such zones");
   expect(text).toContain("until one hop is public; after that, redirects stay public");
+  expect(text).toContain("A fake-IP redirect must return to the original host");
   expect(text).toContain("including same-host redirects");
   expect(text).toContain("Explicit original proxied requests remain supported");
   expect(text).toContain("literal-loopback HTTP on a direct connection");
