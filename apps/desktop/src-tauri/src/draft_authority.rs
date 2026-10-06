@@ -38,7 +38,7 @@ use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::request::{Protocol, RequestSpec};
 use anvil_domain::settings::EffectiveSettings;
-use anvil_domain::tls::ProxyKind;
+use anvil_domain::tls::{ProxyKind, ProxyProfile, TlsProfile};
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::ExecutionContext;
 use anvil_engine::prepare::{Target, parse_target, preflight_authority};
@@ -206,13 +206,12 @@ impl Facts {
         let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
         let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
         let tls = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
-        let off = |verify: bool| if verify { "" } else { ", certificate verification off" };
         Facts {
             destination: destination(ctx),
             masque: masque_proxy(ctx),
             dns: dns_overrides(&settings),
-            proxy: proxy.map(|p| format!("“{}” ({} proxy {})", shown(&p.name), proxy_kind(p.kind), shown(&p.address))),
-            tls: tls.map(|p| format!("“{}”{}", shown(&p.name), off(p.verify))),
+            proxy: proxy.map(proxy_fact),
+            tls: tls.map(tls_fact),
             auth: auth_label(&ctx.effective_auth().1),
         }
     }
@@ -256,6 +255,27 @@ fn proxy_kind(kind: ProxyKind) -> &'static str {
     }
 }
 
+/// A short, non-secret id suffix that tells two identically named profiles
+/// apart in the dialog. It uses the random tail of the UUID (not the v7
+/// timestamp head), so profiles made in the same millisecond still differ.
+fn short_id(id: Id) -> String {
+    let hex: String = id.to_string().chars().filter(char::is_ascii_hexdigit).collect();
+    hex.chars().skip(hex.len().saturating_sub(8)).collect()
+}
+
+/// The proxy profile `p` as a dialog names it. The id suffix distinguishes
+/// profiles that share a name.
+fn proxy_fact(p: &ProxyProfile) -> String {
+    format!("“{}” #{} ({} proxy {})", shown(&p.name), short_id(p.id), proxy_kind(p.kind), shown(&p.address))
+}
+
+/// The TLS profile `p` as a dialog names it. The id suffix distinguishes
+/// profiles that share a name.
+fn tls_fact(p: &TlsProfile) -> String {
+    let off = if p.verify { "" } else { ", certificate verification off" };
+    format!("“{}” #{}{}", shown(&p.name), short_id(p.id), off)
+}
+
 /// The DNS overrides of `settings`, at most three of them named.
 fn dns_overrides(settings: &EffectiveSettings) -> Option<String> {
     let all = &settings.dns_overrides;
@@ -267,6 +287,12 @@ fn dns_overrides(settings: &EffectiveSettings) -> Option<String> {
         named.push(format!("and {} more", all.len() - 3));
     }
     Some(named.join("; "))
+}
+
+/// DNS overrides from the fourth on that `draft` sets differently from
+/// `saved`; the first three are named in full by [`dns_overrides`].
+fn hidden_dns_differences(draft: &EffectiveSettings, saved: &EffectiveSettings) -> usize {
+    draft.dns_overrides.iter().skip(3).zip(saved.dns_overrides.iter().skip(3)).filter(|(a, b)| a != b).count()
 }
 
 /// The kind of `auth`, and where an API key goes, in words.
@@ -322,6 +348,9 @@ fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts)
     }
     if facts.dns != saved_facts.dns {
         out.push(format!("DNS overrides: {} (saved: {})", said(&facts.dns), said(&saved_facts.dns)));
+    } else if draft.settings.dns_overrides != saved.settings.dns_overrides {
+        let n = hidden_dns_differences(&draft.settings, &saved.settings);
+        out.push(format!("DNS overrides: and {n} more DNS overrides differ"));
     }
     if facts.proxy != saved_facts.proxy {
         out.push(format!("Proxy: {} (saved: {})", said(&facts.proxy), said(&saved_facts.proxy)));
@@ -798,5 +827,52 @@ mod tests {
         assert_eq!(origin("https://example.com/{{$uuid}}", Protocol::Http), Some("https://example.com:443".into()));
         let unknown = Binding::of(&ExecutionContext::standalone(RequestSpec::http("GET", "https://{{$uuid}}/")));
         assert!(!unknown.matches(&Binding::of(&ExecutionContext::standalone(RequestSpec::http("GET", "https://{{$uuid}}/")))));
+    }
+
+    /// A standalone context that selects a TLS profile `name`.
+    fn tls_ctx(name: &str) -> ExecutionContext {
+        let mut spec = RequestSpec::http("GET", "https://shop.example/v1");
+        spec.auth = AuthConfig::None;
+        let id = Id::new();
+        spec.settings.tls_profile_id = Some(id);
+        let mut ctx = ExecutionContext::standalone(spec);
+        let profile: TlsProfile = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "workspace_id": Id::new(),
+            "name": name,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        ctx.tls_profiles.push(profile);
+        ctx
+    }
+
+    #[test]
+    fn same_named_tls_profiles_are_told_apart_in_the_dialog() {
+        let (a, b) = (tls_ctx("Corporate"), tls_ctx("Corporate"));
+        let (fa, fb) = (Facts::of(&a), Facts::of(&b));
+        assert_ne!(fa.tls, fb.tls, "the dialog must not show two profiles as the same");
+        assert!(fa.tls.as_deref().unwrap().starts_with("“Corporate” #"), "{:?}", fa.tls);
+        let lines = changes(&Binding::of(&a), &fa, &Binding::of(&b), &fb);
+        let (shown_a, shown_b) = (fa.tls.as_deref().unwrap(), fb.tls.as_deref().unwrap());
+        assert!(lines.iter().any(|l| l.contains(shown_a) && l.contains(shown_b)), "{lines:?}");
+    }
+
+    #[test]
+    fn dns_overrides_past_the_third_are_reported() {
+        let entry = |host: &str, addr: &str| DnsOverride { host: host.into(), addresses: vec![addr.into()] };
+        let mut saved = RequestSpec::http("GET", "https://shop.example/v1");
+        saved.auth = AuthConfig::None;
+        for host in ["a", "b", "c", "d"] {
+            saved.settings.dns_overrides.push(entry(&format!("{host}.example"), "127.0.0.1"));
+        }
+        let mut draft = saved.clone();
+        draft.settings.dns_overrides[3] = entry("d.example", "10.0.0.1");
+        let (cs, cd) = (ExecutionContext::standalone(saved), ExecutionContext::standalone(draft));
+        let (fs, fd) = (Facts::of(&cs), Facts::of(&cd));
+        assert_eq!(fs.dns, fd.dns, "only the hidden fourth differs");
+        let lines = changes(&Binding::of(&cd), &fd, &Binding::of(&cs), &fs);
+        assert!(lines.iter().any(|l| l.contains("and 1 more DNS overrides differ")), "{lines:?}");
     }
 }

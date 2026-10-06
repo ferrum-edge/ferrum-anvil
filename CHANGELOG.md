@@ -299,6 +299,10 @@
   `proto_files`, not a descriptor set, even though the controlled select
   re-renders while the native dialog is open; the choice is merged into the
   latest draft rather than one captured before the dialog opened (#287).
+- Desktop: the vault-authority confirmation dialog tells two identically named
+  proxy or TLS profiles apart with a short id suffix, and when the difference
+  is past the third DNS override it says how many more differ instead of
+  falling back to the generic "connection settings differ" line (#319, N4).
 
 ### Security
 

@@ -76,6 +76,12 @@ pub(crate) async fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String
     crate::fixtures_policy::wait_for_op_log(|| op_lines(env, from, proxy_id)).await
 }
 
+/// Like [`op_log`], but waits for the gateway's `error_class` line (the
+/// ground-truth check's expected record) before returning.
+pub(crate) async fn op_log_class(env: &Env, from: usize, proxy_id: &str, allowed: &[&str]) -> Vec<String> {
+    crate::fixtures_policy::wait_for_op_class(|| op_lines(env, from, proxy_id), proxy_id, allowed).await
+}
+
 async fn recovery(env: &Env, checks: &mut Checks) -> ExecutionOutput {
     let r = send(env, &ctx(env, "GET", "/ok/")).await;
     checks.success(CheckKind::Recovery, &r);
@@ -100,14 +106,15 @@ fn up001(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
         let from = env.gateway.log_lines().len();
         let o = send(env, &ctx(env, "GET", "/up/dns/")).await;
         c.status_in(&o, &[502, 503]);
-        c.operator_class(&op_log(env, from, "up001-dns").await, "up001-dns", &["dns_lookup_error"]);
+        let lines = op_log_class(env, from, "up001-dns", &["dns_lookup_error"]).await;
+        c.operator_class(&lines, "up001-dns", &["dns_lookup_error"]);
         c.token(&o, "ferrum.token.connection_failure", env.trusted);
         c.scope(&o, "ferrum.token.connection_failure", SourceScope::GatewayToUpstream);
         c.max_confidence(&o, "ferrum.token.connection_failure", Confidence::Likely);
         c.absent_prefix(&o, "client.dns");
         c.no_confirmed_claim(&o, "tls");
         let r = recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "up001-dns").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
 }
 
@@ -117,14 +124,15 @@ fn up002(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
         let from = env.gateway.log_lines().len();
         let o = send(env, &ctx(env, "GET", "/up/refused/")).await;
         c.status_in(&o, &[502, 503]);
-        c.operator_class(&op_log(env, from, "up002-refused").await, "up002-refused", &["connection_refused"]);
+        let lines = op_log_class(env, from, "up002-refused", &["connection_refused"]).await;
+        c.operator_class(&lines, "up002-refused", &["connection_refused"]);
         c.token(&o, "ferrum.token.connection_failure", env.trusted);
         c.max_confidence(&o, "ferrum.token.connection_failure", Confidence::Likely);
         c.absent_prefix(&o, "client.connect");
         c.no_confirmed_claim(&o, "tls");
         c.no_confirmed_claim(&o, "dns");
         let r = recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "up002-refused").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
 }
 
@@ -133,17 +141,15 @@ fn up003(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
         let mut c = Checks::new();
         let from = env.gateway.log_lines().len();
         let o = send(env, &ctx(env, "GET", "/up/connect-stall/")).await;
+        let allowed = ["connection_timeout", "connection_refused", "request_error", "connection_pool_error"];
+        let lines = op_log_class(env, from, "up003-connect-stall", &allowed).await;
         c.status_in(&o, &[502, 503, 504]);
-        c.operator_class(
-            &op_log(env, from, "up003-connect-stall").await,
-            "up003-connect-stall",
-            &["connection_timeout", "connection_refused", "request_error", "connection_pool_error"],
-        );
+        c.operator_class(&lines, "up003-connect-stall", &allowed);
         c.token_any(&o, &["ferrum.token.connection_failure", "ferrum.token.backend_timeout"], env.trusted);
         c.no_confirmed_claim(&o, "read");
         c.absent_prefix(&o, "client.");
         let r = recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "up003-connect-stall").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
 }
 
@@ -161,11 +167,9 @@ fn up009(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
             "",
         );
         c.not_success(&o);
-        c.operator_class(
-            &op_log(env, from, "up009-upload-stall").await,
-            "up009-upload-stall",
-            &["read_write_timeout", "connection_reset", "connection_closed", "request_error"],
-        );
+        let allowed = ["read_write_timeout", "connection_reset", "connection_closed", "request_error"];
+        let lines = op_log_class(env, from, "up009-upload-stall", &allowed).await;
+        c.operator_class(&lines, "up009-upload-stall", &allowed);
         c.no_confirmed_claim(&o, "read timeout");
         // The gateway answers 504 while the client is still uploading and then
         // resets the socket; depending on timing the client either reads the
@@ -182,7 +186,7 @@ fn up009(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
             }
         }
         let r = recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "up009-upload-stall").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
 }
 
@@ -192,7 +196,8 @@ fn up010(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
         let from = env.gateway.log_lines().len();
         let o = send(env, &ctx(env, "GET", "/up/header-stall/")).await;
         c.status_in(&o, &[504]);
-        c.operator_class(&op_log(env, from, "up010-header-stall").await, "up010-header-stall", &["read_write_timeout"]);
+        let lines = op_log_class(env, from, "up010-header-stall", &["read_write_timeout"]).await;
+        c.operator_class(&lines, "up010-header-stall", &["read_write_timeout"]);
         c.token(&o, "ferrum.token.backend_timeout", env.trusted);
         c.scope(&o, "ferrum.token.backend_timeout", SourceScope::GatewayToUpstream);
         c.add(
@@ -202,7 +207,7 @@ fn up010(env: &Env) -> Pin<Box<dyn Future<Output = Outcome> + '_>> {
             "",
         );
         let r = recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "up010-header-stall").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
     })
 }
 
