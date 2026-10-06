@@ -31,6 +31,44 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 pub const PROFILE_FILE: &str = "profile.json";
+/// Draft, opt-in format. Older binaries cannot unlock its distinct key wraps.
+pub const IDENTITY_PROFILE_FORMAT: &str = "anvil-profile-identity-v1";
+const IDENTITY_FILE: &str = "identity.json";
+const IDENTITY_PASSPHRASE_LABEL: &[u8] = b"anvil-dek-identity-passphrase-v1";
+const IDENTITY_RECOVERY_LABEL: &[u8] = b"anvil-dek-identity-recovery-v1";
+#[cfg(feature = "os-keychain")]
+const IDENTITY_KEYCHAIN_SECRET_TAG: &[u8] = b"anvil-dek-identity-v1:";
+
+/// Authenticated expectation of the exact binding file, including its format version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityBindingDigest {
+    pub version: u32,
+    pub sha256: String,
+}
+
+/// An authenticated write-ahead journal inside the header. `contents` is the
+/// next identity.json (it contains a sealed binding, never plaintext e-mail).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityBindingPublication {
+    pub binding: Option<IdentityBindingDigest>,
+    pub contents: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityBindingExpectation {
+    pub version: u32,
+    pub binding: Option<IdentityBindingDigest>,
+    pub pending: Option<IdentityBindingPublication>,
+}
+
+impl IdentityBindingExpectation {
+    fn unlinked() -> Self {
+        Self { version: 1, binding: None, pending: None }
+    }
+}
 /// Advisory lock file serialising header writers across processes.
 const LOCK_FILE: &str = "profile.lock";
 /// Service name of the profiles' OS credential store entries.
@@ -54,6 +92,10 @@ const STALE_TEMPORARY_AGE: std::time::Duration = std::time::Duration::from_secs(
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
+    #[error(
+        "draft keychain enrollment is deferred until an explicit binding repair ceremony is approved; use a passphrase profile with a recovery key"
+    )]
+    DraftKeychainEnrollmentDeferred,
     #[error("the passphrase or recovery key is not correct")]
     WrongSecret,
     #[error(
@@ -108,6 +150,10 @@ pub struct ProfileHeader {
     /// earlier builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection_mac: Option<String>,
+    /// Mandatory in the draft identity format; absent in legacy headers.
+    /// Covered by the DEK-derived protection MAC, including the pending journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_binding: Option<IdentityBindingExpectation>,
 }
 
 fn key_check(k: &Key) -> String {
@@ -144,7 +190,36 @@ fn protection_mac_state(dek: &Key, h: &ProfileHeader) -> hmac::Hmac<sha2::Sha256
         m.update(&(part.len() as u64).to_be_bytes());
         m.update(part);
     }
+    if h.format == IDENTITY_PROFILE_FORMAT {
+        let expectation = serde_json::to_vec(&h.identity_binding).expect("identity expectation serializes");
+        for part in [h.format.as_bytes(), expectation.as_slice()] {
+            m.update(&(part.len() as u64).to_be_bytes());
+            m.update(part);
+        }
+    }
     m
+}
+
+fn check_header_format(h: &ProfileHeader) -> Result<(), VaultError> {
+    match (h.format.as_str(), &h.identity_binding) {
+        ("anvil-profile", None) => Ok(()),
+        (IDENTITY_PROFILE_FORMAT, Some(e)) if e.version == 1 && h.protection_mac.is_some() => Ok(()),
+        _ => Err(VaultError::HeaderTampered),
+    }
+}
+
+fn passphrase_label(h: &ProfileHeader) -> &'static [u8] {
+    if h.format == IDENTITY_PROFILE_FORMAT { IDENTITY_PASSPHRASE_LABEL } else { PASSPHRASE_LABEL }
+}
+
+fn recovery_label(h: &ProfileHeader) -> &'static [u8] {
+    if h.format == IDENTITY_PROFILE_FORMAT { IDENTITY_RECOVERY_LABEL } else { RECOVERY_LABEL }
+}
+
+/// Authenticate a header with an already unwrapped profile key.
+pub fn authenticate_header(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+    require_profile_key(h, dek)?;
+    check_protection_mac(h, dek)
 }
 
 /// The protection MAC of `h` under `dek`.
@@ -157,6 +232,7 @@ fn protection_mac(dek: &Key, h: &ProfileHeader) -> String {
 /// Headers written by earlier builds have none until [`upgrade_header`].
 fn check_protection_mac(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
     use hmac::Mac;
+    check_header_format(h)?;
     let Some(mac) = h.protection_mac.as_deref() else {
         return Ok(());
     };
@@ -251,8 +327,137 @@ pub fn read_header(dir: &Path) -> Result<ProfileHeader, VaultError> {
 
 /// Atomically replace the header, under the profile's header lock.
 pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
-    let _lock = lock_header(dir);
+    let _lock = if h.format == IDENTITY_PROFILE_FORMAT { Some(open_locked(dir)?) } else { lock_header(dir) };
     replace_header(dir, h)
+}
+
+/// A required header lock for identity reads and paired publication. Unlike
+/// legacy best-effort writers, these operations fail if locking is unavailable.
+/// Keep it through credential and binding verification; do not nest header writers.
+pub struct IdentityHeaderGuard<'a> {
+    dir: &'a Path,
+    _lock: std::fs::File,
+}
+
+pub fn lock_identity_header(dir: &Path) -> Result<IdentityHeaderGuard<'_>, VaultError> {
+    let lock = open_locked(dir)?;
+    Ok(IdentityHeaderGuard { dir, _lock: lock })
+}
+
+impl IdentityHeaderGuard<'_> {
+    pub fn read(&self) -> Result<ProfileHeader, VaultError> {
+        read_header(self.dir)
+    }
+
+    /// Publish an authenticated intent before touching identity.json. There
+    /// is no multi-file atomicity: a pending header blocks ordinary unlock.
+    pub fn begin_identity_publication(
+        &self,
+        h: &ProfileHeader,
+        dek: &Key,
+        publication: IdentityBindingPublication,
+    ) -> Result<ProfileHeader, VaultError> {
+        let mut next = self.read()?;
+        authenticate_header(&next, dek)?;
+        if next.format != IDENTITY_PROFILE_FORMAT
+            || next.protection_mac != h.protection_mac
+            || next.identity_binding.as_ref().is_some_and(|e| e.pending.is_some())
+        {
+            return Err(VaultError::Header("identity header changed or is not enrolled".into()));
+        }
+        check_publication(&publication)?;
+        // Refuse an unsupported directory sync before publishing intent.
+        identity_cutpoint("pending", "before_preflight")?;
+        sync_dir(self.dir)?;
+        identity_cutpoint("pending", "after_preflight")?;
+        next.identity_binding.as_mut().ok_or(VaultError::HeaderTampered)?.pending = Some(publication);
+        next.protection_mac = Some(protection_mac(dek, &next));
+        self.replace(&next)?;
+        Ok(next)
+    }
+
+    /// Explicitly finish the journal authenticated in the current header.
+    /// Idempotent while pending: the next file is in the journal itself, so
+    /// no attacker-supplied hint or missing file is used to reconstruct it.
+    pub fn finish_identity_publication(&self, dek: &Key) -> Result<ProfileHeader, VaultError> {
+        let mut h = self.read()?;
+        authenticate_header(&h, dek)?;
+        let publication = h
+            .identity_binding
+            .as_ref()
+            .and_then(|e| e.pending.clone())
+            .ok_or_else(|| VaultError::Header("no pending identity publication".into()))?;
+        check_publication(&publication)?;
+        match &publication.contents {
+            Some(contents) => self.replace_file(IDENTITY_FILE, contents.as_bytes())?,
+            None => {
+                identity_cutpoint("unlink", "before_remove")?;
+                match std::fs::remove_file(self.dir.join(IDENTITY_FILE)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                identity_cutpoint("unlink", "after_remove")?;
+                identity_cutpoint("unlink", "before_dir_sync")?;
+                sync_dir(self.dir)?;
+                identity_cutpoint("unlink", "after_dir_sync")?;
+            }
+        }
+        let expectation = h.identity_binding.as_mut().ok_or(VaultError::HeaderTampered)?;
+        expectation.binding = publication.binding;
+        expectation.pending = None;
+        h.protection_mac = Some(protection_mac(dek, &h));
+        self.replace(&h)?;
+        Ok(h)
+    }
+
+    fn replace(&self, h: &ProfileHeader) -> Result<(), VaultError> {
+        let bytes = serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?;
+        let phase = if h.identity_binding.as_ref().is_some_and(|e| e.pending.is_some()) { "pending" } else { "final" };
+        self.replace_file_at(PROFILE_FILE, &bytes, phase)
+    }
+
+    /// Reuse the header writer's exclusive, synced temporary-file primitive.
+    /// Names are fixed internal constants. Rename replaces a destination
+    /// symlink itself; it never writes through that destination.
+    fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<(), VaultError> {
+        self.replace_file_at(name, bytes, "binding")
+    }
+
+    fn replace_file_at(&self, name: &str, bytes: &[u8], phase: &str) -> Result<(), VaultError> {
+        let tmp = self.dir.join(format!("{name}.{}.{}.tmp", std::process::id(), hex::encode(crypto::random_bytes(8)),));
+        let written = write_new_synced_at(&tmp, bytes, Some(phase)).and_then(|()| {
+            identity_cutpoint(phase, "before_rename")?;
+            std::fs::rename(&tmp, self.dir.join(name))?;
+            identity_cutpoint(phase, "after_rename")
+        });
+        if let Err(e) = written {
+            std::fs::remove_file(&tmp).ok();
+            return Err(e.into());
+        }
+        // Strict here: never advance the journal after a failed durability barrier.
+        identity_cutpoint(phase, "before_dir_sync")?;
+        sync_dir(self.dir)?;
+        identity_cutpoint(phase, "after_dir_sync")?;
+        Ok(())
+    }
+}
+
+pub fn identity_binding_digest(bytes: &[u8], version: u32) -> IdentityBindingDigest {
+    use sha2::{Digest, Sha256};
+    IdentityBindingDigest { version, sha256: hex::encode(Sha256::digest(bytes)) }
+}
+
+fn check_publication(p: &IdentityBindingPublication) -> Result<(), VaultError> {
+    match (&p.binding, &p.contents) {
+        (None, None) => Ok(()),
+        (Some(binding), Some(contents))
+            if binding.version == 1 && *binding == identity_binding_digest(contents.as_bytes(), binding.version) =>
+        {
+            Ok(())
+        }
+        _ => Err(VaultError::HeaderTampered),
+    }
 }
 
 /// Take the advisory lock that serialises header writers across processes;
@@ -292,17 +497,30 @@ fn remove_stale_temporaries(dir: &Path) {
 }
 
 fn open_locked(dir: &Path) -> std::io::Result<std::fs::File> {
+    open_locked_for(dir, std::time::Duration::from_secs(5))
+}
+
+fn open_locked_for(dir: &Path, timeout: std::time::Duration) -> std::io::Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
     let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE))?;
-    f.lock()?;
-    Ok(f)
+    let started = std::time::Instant::now();
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(f),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() >= timeout => {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "profile header lock is busy; retry the operation"));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
 }
 
 /// Edit the header on disk under the header lock, so no other writer lands
 /// between the read and the write. `edit` returns whether it changed
 /// anything; the result is the header as it now is on disk.
 fn update_header(dir: &Path, edit: impl FnOnce(&mut ProfileHeader) -> Result<bool, VaultError>) -> Result<ProfileHeader, VaultError> {
-    let _lock = lock_header(dir);
+    let _lock = open_locked(dir)?;
     let mut h = read_header(dir)?;
     if edit(&mut h)? {
         replace_header(dir, &h)?;
@@ -333,10 +551,39 @@ fn replace_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
 
 /// Create `path` (never an existing file), write `bytes` and sync them.
 fn write_new_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_new_synced_at(path, bytes, None)
+}
+
+fn write_new_synced_at(path: &Path, bytes: &[u8], phase: Option<&str>) -> std::io::Result<()> {
     use std::io::Write;
+    let point = |point| phase.map_or(Ok(()), |phase| identity_cutpoint(phase, point));
+    point("before_create")?;
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    point("after_create")?;
     f.write_all(bytes)?;
-    f.sync_all()
+    point("after_write")?;
+    point("before_file_sync")?;
+    f.sync_all()?;
+    point("after_file_sync")
+}
+
+/// Test faults are thread-local and cannot be enabled in a released binary.
+fn identity_cutpoint(_phase: &str, _point: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    IDENTITY_FAULT.with(|fault| {
+        let mut fault = fault.borrow_mut();
+        if fault.as_ref().is_some_and(|(phase, point)| *phase == _phase && *point == _point) {
+            fault.take();
+            return Err(std::io::Error::other("injected identity publication failure"));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static IDENTITY_FAULT: std::cell::RefCell<Option<(&'static str, &'static str)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Flush a directory so a rename inside it survives a power loss.
@@ -379,21 +626,52 @@ fn require_profile_key(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
 
 /// Create a new passphrase-protected profile.
 pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &str, kdf: KdfParams) -> Result<CreatedProfile, VaultError> {
+    create_passphrase_profile_for_format(dir, display_name, passphrase, kdf, false)
+}
+
+/// Create an opt-in draft-format profile; no legacy profile is automatically enrolled.
+pub fn create_passphrase_profile_with_identity_expectation(
+    dir: &Path,
+    display_name: &str,
+    passphrase: &str,
+    kdf: KdfParams,
+) -> Result<CreatedProfile, VaultError> {
+    create_passphrase_profile_for_format(dir, display_name, passphrase, kdf, true)
+}
+
+fn create_passphrase_profile_for_format(
+    dir: &Path,
+    display_name: &str,
+    passphrase: &str,
+    kdf: KdfParams,
+    identity: bool,
+) -> Result<CreatedProfile, VaultError> {
     let dek = Key::random();
     let recovery_raw = crypto::random_bytes(20);
     let recovery = format_recovery_key(&recovery_raw);
     let mut header = ProfileHeader {
-        format: "anvil-profile".into(),
+        format: if identity { IDENTITY_PROFILE_FORMAT } else { "anvil-profile" }.into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         profile_id: uuid::Uuid::now_v7().to_string(),
         display_name: display_name.into(),
         protection: ProtectionMode::Passphrase,
-        passphrase_wrap: Some(wrap_with_passphrase(&dek, passphrase, kdf, PASSPHRASE_LABEL)?),
-        recovery_wrap: Some(wrap_with_passphrase(&dek, &normalize_recovery(&recovery), kdf, RECOVERY_LABEL)?),
+        passphrase_wrap: Some(wrap_with_passphrase(
+            &dek,
+            passphrase,
+            kdf,
+            if identity { IDENTITY_PASSPHRASE_LABEL } else { PASSPHRASE_LABEL },
+        )?),
+        recovery_wrap: Some(wrap_with_passphrase(
+            &dek,
+            &normalize_recovery(&recovery),
+            kdf,
+            if identity { IDENTITY_RECOVERY_LABEL } else { RECOVERY_LABEL },
+        )?),
         keychain_account: None,
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
         protection_mac: None,
+        identity_binding: identity.then(IdentityBindingExpectation::unlinked),
     };
     header.protection_mac = Some(protection_mac(&dek, &header));
     write_header(dir, &header)?;
@@ -401,18 +679,20 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
 }
 
 pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key, VaultError> {
+    check_header_format(h)?;
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.passphrase_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
-    let k = unwrap_with_passphrase(w, passphrase, PASSPHRASE_LABEL)?;
+    let k = unwrap_with_passphrase(w, passphrase, passphrase_label(h))?;
     require_profile_key(h, &k)?;
     check_protection_mac(h, &k)?;
     Ok(k)
 }
 
 pub fn unlock_with_recovery(h: &ProfileHeader, recovery: &str) -> Result<Key, VaultError> {
+    check_header_format(h)?;
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.recovery_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
-    let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), RECOVERY_LABEL)?;
+    let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), recovery_label(h))?;
     require_profile_key(h, &k)?;
     check_protection_mac(h, &k)?;
     Ok(k)
@@ -427,7 +707,7 @@ pub fn unlock_with_recovery(h: &ProfileHeader, recovery: &str) -> Result<Key, Va
 /// Such a header has no MAC to check, so it is trusted as found, except that
 /// a keychain header carrying passphrase or recovery wraps is refused.
 pub fn upgrade_header(dir: &Path, h: &mut ProfileHeader, dek: &Key) -> Result<(), VaultError> {
-    require_profile_key(h, dek)?;
+    authenticate_header(h, dek)?;
     if h.protection_mac.is_some() {
         return Ok(());
     }
@@ -464,7 +744,7 @@ pub fn change_passphrase(dir: &Path, h: &mut ProfileHeader, dek: &Key, new_passp
     require_protection(h, ProtectionMode::Passphrase)?;
     require_profile_key(h, dek)?;
     check_protection_mac(h, dek)?;
-    let wrap = wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?;
+    let wrap = wrap_with_passphrase(dek, new_passphrase, kdf, passphrase_label(h))?;
     *h = rewrite_header(dir, h, dek, ProtectionMode::Passphrase, |next| {
         next.passphrase_wrap = Some(wrap);
         Ok(())
@@ -483,15 +763,18 @@ fn rewrite_header(
     mode: ProtectionMode,
     edit: impl FnOnce(&mut ProfileHeader) -> Result<(), VaultError>,
 ) -> Result<ProfileHeader, VaultError> {
-    let _lock = lock_header(dir);
+    let _lock = open_locked(dir)?;
     let mut next = read_header(dir)?;
-    if next.profile_id != h.profile_id {
-        return Err(VaultError::Header("the profile header on disk belongs to another profile".into()));
+    if next.profile_id != h.profile_id || next.format != h.format {
+        return Err(VaultError::Header("the profile header on disk belongs to another profile or format".into()));
     }
     require_protection(&next, mode)?;
     require_profile_key(&next, dek)?;
     check_unsealed_keychain_header(&next)?;
     check_protection_mac(&next, dek)?;
+    if next.identity_binding.as_ref().is_some_and(|e| e.pending.is_some()) {
+        return Err(VaultError::Header("recover the pending identity publication first".into()));
+    }
     edit(&mut next)?;
     next.protection_mac = Some(protection_mac(dek, &next));
     replace_header(dir, &next)?;
@@ -535,8 +818,8 @@ pub fn convert_keychain_to_passphrase(
     check_protection_mac(h, dek)?;
     upgrade_header(dir, h, dek)?;
     let recovery = Zeroizing::new(format_recovery_key(&crypto::random_bytes(20)));
-    let passphrase_wrap = wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?;
-    let recovery_wrap = wrap_with_passphrase(dek, &normalize_recovery(&recovery), kdf, RECOVERY_LABEL)?;
+    let passphrase_wrap = wrap_with_passphrase(dek, new_passphrase, kdf, passphrase_label(h))?;
+    let recovery_wrap = wrap_with_passphrase(dek, &normalize_recovery(&recovery), kdf, recovery_label(h))?;
     *h = rewrite_header(dir, h, dek, ProtectionMode::OsKeychain, |next| {
         // Tagging an entry refuses it to headers without a MAC, so the
         // header on disk must already have one.
@@ -666,8 +949,14 @@ fn forget_keychain_account(dir: &Path, h: &mut ProfileHeader, account: &str) -> 
 /// The keychain secret stored for `dek`: tagged, see [`KEYCHAIN_SECRET_TAG`].
 #[cfg(feature = "os-keychain")]
 fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
-    let mut secret = Zeroizing::new(Vec::with_capacity(KEYCHAIN_SECRET_TAG.len() + crypto::KEY_LEN));
-    secret.extend_from_slice(KEYCHAIN_SECRET_TAG);
+    keychain_secret_for_format(dek, false)
+}
+
+#[cfg(feature = "os-keychain")]
+fn keychain_secret_for_format(dek: &Key, identity: bool) -> Zeroizing<Vec<u8>> {
+    let tag = if identity { IDENTITY_KEYCHAIN_SECRET_TAG } else { KEYCHAIN_SECRET_TAG };
+    let mut secret = Zeroizing::new(Vec::with_capacity(tag.len() + crypto::KEY_LEN));
+    secret.extend_from_slice(tag);
     secret.extend_from_slice(dek.as_bytes());
     secret
 }
@@ -675,6 +964,9 @@ fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
 /// The key in a keychain secret, and whether the secret is tagged.
 #[cfg(feature = "os-keychain")]
 fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
+    if let Some(key) = secret.strip_prefix(IDENTITY_KEYCHAIN_SECRET_TAG) {
+        return Ok((Key::from_bytes(key)?, true));
+    }
     match secret.strip_prefix(KEYCHAIN_SECRET_TAG) {
         Some(key) => Ok((Key::from_bytes(key)?, true)),
         None => Ok((Key::from_bytes(secret)?, false)),
@@ -738,13 +1030,25 @@ fn keychain_entry(account: &str) -> Result<keyring_core::Entry, VaultError> {
 
 #[cfg(feature = "os-keychain")]
 pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
+    create_keychain_profile_for_format(dir, display_name, false)
+}
+
+#[cfg(feature = "os-keychain")]
+pub fn create_keychain_profile_with_identity_expectation(_dir: &Path, _display_name: &str) -> Result<CreatedProfile, VaultError> {
+    // No filesystem, randomness or OS-store access before this refusal. A
+    // required binding without a recovery wrap could strand its owner.
+    Err(VaultError::DraftKeychainEnrollmentDeferred)
+}
+
+#[cfg(feature = "os-keychain")]
+fn create_keychain_profile_for_format(dir: &Path, display_name: &str, identity: bool) -> Result<CreatedProfile, VaultError> {
     let dek = Key::random();
     let profile_id = uuid::Uuid::now_v7().to_string();
     let account = format!("profile-{profile_id}");
     let entry = keychain_entry(&account)?;
-    entry.set_secret(&keychain_secret(&dek)).map_err(|e| keychain_error(&e))?;
+    entry.set_secret(&keychain_secret_for_format(&dek, identity)).map_err(|e| keychain_error(&e))?;
     let mut header = ProfileHeader {
-        format: "anvil-profile".into(),
+        format: if identity { IDENTITY_PROFILE_FORMAT } else { "anvil-profile" }.into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         profile_id,
         display_name: display_name.into(),
@@ -755,6 +1059,7 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
         protection_mac: None,
+        identity_binding: identity.then(IdentityBindingExpectation::unlinked),
     };
     header.protection_mac = Some(protection_mac(&dek, &header));
     write_header(dir, &header)?;
@@ -768,6 +1073,7 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
 pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     // Checked before the store is touched: a converted profile may still
     // name its old account until that entry is removed.
+    check_header_format(h)?;
     require_protection(h, ProtectionMode::OsKeychain)?;
     check_unsealed_keychain_header(h)?;
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
@@ -777,6 +1083,10 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     // copy saved before the profile was converted.
     if secret.starts_with(KEYCHAIN_RETIRED_TAG) {
         return Err(VaultError::WrongProtection("the OS keychain"));
+    }
+    let identity_tag = secret.starts_with(IDENTITY_KEYCHAIN_SECRET_TAG);
+    if identity_tag != (h.format == IDENTITY_PROFILE_FORMAT) {
+        return Err(VaultError::HeaderTampered);
     }
     let (k, tagged) = parse_keychain_secret(&secret)?;
     require_profile_key(h, &k)?;
@@ -807,6 +1117,224 @@ pub fn delete_keychain_entry(h: &ProfileHeader) -> Result<(), VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_failures_at_every_file_cutpoint_leave_complete_or_pending_state() {
+        let points = [
+            "before_create",
+            "after_create",
+            "after_write",
+            "before_file_sync",
+            "after_file_sync",
+            "before_rename",
+            "after_rename",
+            "before_dir_sync",
+            "after_dir_sync",
+        ];
+        for phase in ["pending", "binding", "final"] {
+            for point in points {
+                let dir = tempfile::tempdir().unwrap();
+                let created =
+                    create_passphrase_profile_with_identity_expectation(dir.path(), "cutpoint", "passphrase", KdfParams::testing())
+                        .unwrap();
+                let guard = lock_identity_header(dir.path()).unwrap();
+                let contents = "sealed fixture bytes".to_string();
+                let digest = identity_binding_digest(contents.as_bytes(), 1);
+                IDENTITY_FAULT.with(|fault| *fault.borrow_mut() = Some((phase, point)));
+                let result = guard
+                    .begin_identity_publication(
+                        &created.header,
+                        &created.dek,
+                        IdentityBindingPublication { binding: Some(digest.clone()), contents: Some(contents.clone()) },
+                    )
+                    .and_then(|_| guard.finish_identity_publication(&created.dek));
+                assert!(result.is_err(), "{phase}/{point}");
+                assert!(IDENTITY_FAULT.with(|fault| fault.borrow().is_none()), "cutpoint must actually run");
+                let current = guard.read().unwrap();
+                authenticate_header(&current, &created.dek).unwrap();
+                let expectation = current.identity_binding.as_ref().unwrap();
+                if expectation.pending.is_some() {
+                    // The old stable state is retained until final publication.
+                    assert!(expectation.binding.is_none());
+                    guard.finish_identity_publication(&created.dek).unwrap();
+                    assert_eq!(std::fs::read_to_string(dir.path().join(IDENTITY_FILE)).unwrap(), contents);
+                } else if expectation.binding.is_some() {
+                    // Rename may have succeeded before the error was reported.
+                    assert_eq!(expectation.binding.as_ref(), Some(&digest));
+                    assert_eq!(std::fs::read_to_string(dir.path().join(IDENTITY_FILE)).unwrap(), contents);
+                } else {
+                    // The intent had not yet replaced the previous header.
+                    assert!(!dir.path().join(IDENTITY_FILE).exists());
+                }
+            }
+        }
+        for point in ["before_preflight", "after_preflight"] {
+            let dir = tempfile::tempdir().unwrap();
+            let created =
+                create_passphrase_profile_with_identity_expectation(dir.path(), "preflight", "passphrase", KdfParams::testing()).unwrap();
+            let guard = lock_identity_header(dir.path()).unwrap();
+            IDENTITY_FAULT.with(|fault| *fault.borrow_mut() = Some(("pending", point)));
+            assert!(
+                guard
+                    .begin_identity_publication(&created.header, &created.dek, IdentityBindingPublication { binding: None, contents: None })
+                    .is_err()
+            );
+            assert!(IDENTITY_FAULT.with(|fault| fault.borrow().is_none()));
+            assert_eq!(guard.read().unwrap().protection_mac, created.header.protection_mac);
+        }
+    }
+
+    #[test]
+    fn unlink_failure_at_each_removal_barrier_keeps_the_authenticated_journal() {
+        for point in ["before_remove", "after_remove", "before_dir_sync", "after_dir_sync"] {
+            let dir = tempfile::tempdir().unwrap();
+            let created =
+                create_passphrase_profile_with_identity_expectation(dir.path(), "unlink", "passphrase", KdfParams::testing()).unwrap();
+            let guard = lock_identity_header(dir.path()).unwrap();
+            guard
+                .begin_identity_publication(&created.header, &created.dek, IdentityBindingPublication { binding: None, contents: None })
+                .unwrap();
+            std::fs::write(dir.path().join(IDENTITY_FILE), b"entry to remove").unwrap();
+            IDENTITY_FAULT.with(|fault| *fault.borrow_mut() = Some(("unlink", point)));
+            assert!(guard.finish_identity_publication(&created.dek).is_err());
+            assert!(IDENTITY_FAULT.with(|fault| fault.borrow().is_none()));
+            let header = guard.read().unwrap();
+            authenticate_header(&header, &created.dek).unwrap();
+            assert!(header.identity_binding.unwrap().pending.is_some());
+            guard.finish_identity_publication(&created.dek).unwrap();
+            assert!(!dir.path().join(IDENTITY_FILE).exists());
+        }
+    }
+
+    #[test]
+    fn an_actual_removal_failure_never_finalizes_the_pending_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let created =
+            create_passphrase_profile_with_identity_expectation(dir.path(), "remove failure", "passphrase", KdfParams::testing()).unwrap();
+        let guard = lock_identity_header(dir.path()).unwrap();
+        guard
+            .begin_identity_publication(&created.header, &created.dek, IdentityBindingPublication { binding: None, contents: None })
+            .unwrap();
+        let binding = dir.path().join(IDENTITY_FILE);
+        std::fs::create_dir(&binding).unwrap();
+        assert!(guard.finish_identity_publication(&created.dek).is_err());
+        assert!(guard.read().unwrap().identity_binding.unwrap().pending.is_some());
+        std::fs::remove_dir(&binding).unwrap();
+        guard.finish_identity_publication(&created.dek).unwrap();
+    }
+
+    #[test]
+    fn a_busy_profile_lock_has_a_bounded_wait_and_can_be_reacquired() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = lock_identity_header(dir.path()).unwrap();
+        let path = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(open_locked_for(&path, Duration::from_millis(100)).err().unwrap().kind()).unwrap();
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), std::io::ErrorKind::TimedOut);
+        worker.join().unwrap();
+        drop(guard);
+        drop(lock_identity_header(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn draft_format_requires_mac_and_expectation_and_refuses_field_stripping_downgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = create_passphrase_profile_with_identity_expectation(dir.path(), "draft", "passphrase", KdfParams::testing()).unwrap();
+        let h = c.header;
+        assert!(unlock_with_passphrase(&h, "passphrase").is_ok());
+        assert!(unlock_with_recovery(&h, c.recovery_key.as_ref().unwrap()).is_ok());
+        for field in 0..3 {
+            let mut edited = h.clone();
+            match field {
+                0 => edited.protection_mac = None,
+                1 => edited.identity_binding = None,
+                2 => edited.identity_binding.as_mut().unwrap().version = 2,
+                _ => unreachable!(),
+            }
+            assert!(matches!(unlock_with_passphrase(&edited, "passphrase"), Err(VaultError::HeaderTampered),));
+            assert!(matches!(unlock_with_recovery(&edited, c.recovery_key.as_ref().unwrap()), Err(VaultError::HeaderTampered),));
+        }
+        let mut downgraded = h.clone();
+        downgraded.format = "anvil-profile".into();
+        downgraded.identity_binding = None;
+        downgraded.protection_mac = None;
+        assert!(matches!(unlock_with_passphrase(&downgraded, "passphrase"), Err(VaultError::WrongSecret),));
+        assert!(matches!(unlock_with_recovery(&downgraded, c.recovery_key.as_ref().unwrap()), Err(VaultError::WrongSecret),));
+
+        let mut changed = h;
+        change_passphrase(dir.path(), &mut changed, &c.dek, "new passphrase", KdfParams::testing()).unwrap();
+        assert!(unlock_with_passphrase(&changed, "new passphrase").is_ok());
+        assert!(unlock_with_recovery(&changed, c.recovery_key.as_ref().unwrap()).is_ok());
+        assert_eq!(changed.identity_binding.as_ref().unwrap().version, 1);
+    }
+
+    #[test]
+    fn identity_publication_serializes_and_refuses_a_stale_authorized_header() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let c = create_passphrase_profile_with_identity_expectation(dir.path(), "draft", "passphrase", KdfParams::testing()).unwrap();
+        let guard = lock_identity_header(dir.path()).unwrap();
+        let pending =
+            guard.begin_identity_publication(&c.header, &c.dek, IdentityBindingPublication { binding: None, contents: None }).unwrap();
+        let path = dir.path().to_path_buf();
+        let stale = c.header;
+        let key = c.dek.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let other = lock_identity_header(&path).unwrap();
+            let result = other.begin_identity_publication(&stale, &key, IdentityBindingPublication { binding: None, contents: None });
+            done_tx.send(result.is_err()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(done_rx.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout),));
+        drop(guard);
+        assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        writer.join().unwrap();
+        assert_eq!(read_header(dir.path()).unwrap().protection_mac, pending.protection_mac);
+        let guard = lock_identity_header(dir.path()).unwrap();
+        guard.finish_identity_publication(&c.dek).unwrap();
+    }
+
+    #[cfg(feature = "os-keychain")]
+    #[test]
+    fn draft_keychain_creation_is_deferred_before_directory_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("must-not-exist");
+        assert!(matches!(
+            create_keychain_profile_with_identity_expectation(&dir, "draft"),
+            Err(VaultError::DraftKeychainEnrollmentDeferred),
+        ));
+        assert!(!dir.exists());
+    }
+
+    #[cfg(feature = "os-keychain")]
+    #[test]
+    fn historical_draft_keychain_tag_and_conversion_remain_supported() {
+        mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        // Reproduce a header/entry from the earlier experimental prototype
+        // through its private fixture seam. The public enrollment API refuses.
+        let c = create_keychain_profile_for_format(dir.path(), "historical draft", true).unwrap();
+        assert!(unlock_with_keychain(&c.header).is_ok());
+        let mut downgraded = c.header.clone();
+        downgraded.format = "anvil-profile".into();
+        downgraded.identity_binding = None;
+        downgraded.protection_mac = None;
+        assert!(matches!(unlock_with_keychain(&downgraded), Err(VaultError::HeaderTampered)));
+        let mut header = c.header;
+        let conversion = convert_keychain_to_passphrase(dir.path(), &mut header, &c.dek, "new passphrase", KdfParams::testing()).unwrap();
+        assert!(unlock_with_passphrase(&header, "new passphrase").is_ok());
+        assert!(unlock_with_recovery(&header, &conversion.recovery_key).is_ok());
+        assert!(header.identity_binding.is_some());
+    }
 
     #[cfg(feature = "os-keychain")]
     #[test]

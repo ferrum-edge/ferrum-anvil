@@ -38,6 +38,14 @@
 
 ### Added
 
+- Opt-in draft identity expectations authenticate the required binding and its
+  publication journal, reject missing or replaced bindings before installation,
+  and fence cooperating profile writers through the checked installation callback.
+  Recovery-key unlock remains available; new draft keychain enrollment is refused
+  before creating profile or OS-store state. Normal creation remains legacy.
+  Legacy link/unlink requires explicit enrollment. Format and caller adoption,
+  physical platform acceptance and whole-profile freshness remain pending owner
+  decisions; see `docs/security/identity-binding-expectation.md`.
 - Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
   byte-exact, with the accepted unchanged EXISTING shared v1 freeze and strict original
   diagnostic negative expectations, reader vocabularies and producer description parity.
