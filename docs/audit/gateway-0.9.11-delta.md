@@ -8,7 +8,7 @@
 | Catalog | [`ferrum-edge-0.9.11/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json), 553 carried outcome IDs with the delta below |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.11.lock`; hosted source qualification recorded below |
 | Qualified Anvil source | [`28876cc6623fdba01289b450fe12c7c16649b655`](https://github.com/ferrum-edge/ferrum-anvil/commit/28876cc6623fdba01289b450fe12c7c16649b655), [PR #313](https://github.com/ferrum-edge/ferrum-anvil/pull/313) |
-| Documentation record | Subsequent documentation-only commit; root's whole-record review and fresh exact-head hosted CI remain pending |
+| Documentation record | Merged with [PR #313](https://github.com/ferrum-edge/ferrum-anvil/pull/313); hosted source qualification recorded below |
 | Audit date | 2026-10-04 |
 
 The [immutable comparison][compare] changes 105 files under `src/` (11,369 insertions,

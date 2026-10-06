@@ -230,7 +230,10 @@
 - Desktop security: PEM selection uses purpose-bound native choosers.
   Certificate reads return validated certificate PEM and refuse key material;
   private-key grants are consumed once into the workspace vault, returning
-  only a secret reference to the renderer.
+  only a secret reference to the renderer. A PEM file that combines a
+  certificate and a private key is refused by the certificate picker; split it
+  into a certificate file and a key file first (see
+  [docs/identity.md §9](docs/identity.md#9-client-certificates-mtls-pem-files)).
 - Portable bundles: validate archive declarations and mandatory manifest,
   checksum, format, schema and vault metadata before expanding payloads.
   Charge the remaining aggregate budget before allocating each entry,

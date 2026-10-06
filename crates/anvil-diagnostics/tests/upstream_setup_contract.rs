@@ -10,7 +10,8 @@
 //! * UP-018 on the pooled lanes (direct H1 in 0.9.11 / H2 / gRPC / H3 / mesh pools), whose
 //!   public signal is the same coarse `connection_failure` family. The
 //!   HTTP/1.1 lane runs in `anvil-lab run admission`: reqwest on the historical
-//!   releases, direct H1 on 0.9.11 (pending hosted qualification).
+//!   releases, direct H1 on 0.9.11 (hosted qualification recorded in
+//!   `docs/audit/gateway-0.9.11-delta.md`).
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
 //! the exact public signal the source-audited catalogs record for each outcome

@@ -88,7 +88,7 @@ cargo test --workspace --exclude anvil-desktop
 The full CI command list is in [docs/ci.md](docs/ci.md#reproducing-locally).
 
 The failure lab runs real, pinned Ferrum Edge releases on loopback
-(v0.9.11 candidate default, pending hosted Anvil gates; earlier releases retained,
+(v0.9.11 default with hosted Anvil qualification recorded; earlier releases retained,
 see `lab/gateway/RELEASE.lock` and [source audit](docs/audit/gateway-0.9.11-delta.md)):
 
 ```bash
