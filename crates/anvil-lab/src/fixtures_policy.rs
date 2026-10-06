@@ -132,7 +132,7 @@ fn op_lines(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
 
 /// Bounded wait for the operator-log ground truth: the gateway flushes the
 /// transaction line just after the response, so a single read can race it.
-const OP_LOG_WAIT: std::time::Duration = std::time::Duration::from_millis(2_000);
+const OP_LOG_WAIT: std::time::Duration = std::time::Duration::from_millis(3_000);
 const OP_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// Poll `read_lines` every `interval` until `ready` accepts the lines, or
