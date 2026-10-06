@@ -222,7 +222,7 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
         let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
         let pre = app.load_preflight(&p).unwrap();
         assert_eq!(pre.destinations, vec![destination.to_string()], "{url}");
-        assert_eq!(leaves_machine(&pre.warnings), url.starts_with("localhost:"), "{url}: {:?}", pre.warnings,);
+        assert!(!leaves_machine(&pre.warnings), "{url}: {:?}", pre.warnings,);
     }
 
     // A dynamic helper in the method is shown as written, not as one draw.
@@ -250,6 +250,74 @@ fn load_preflight_uses_transport_dns_overrides_for_loopback_judgments() {
     app.save_workspace(workspace).unwrap();
     let pre = app.load_preflight(&p).unwrap();
     assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
+}
+
+#[test]
+fn localhost_names_are_local_only_with_system_dns_and_without_overrides() {
+    use anvil_domain::settings::ResolverMode;
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Localhost names").unwrap().meta.id;
+
+    for host in ["localhost", "api.localhost", "api.localhost."] {
+        let req = app
+            .create_request(
+                &ws,
+                None,
+                host,
+                RequestSpec::http("GET", &format!("http://{host}:8080/api")),
+            )
+            .unwrap();
+        let p = app.save_load_plan(plan(ws, req.meta.id)).unwrap();
+        assert!(!leaves_machine(&app.load_preflight(&p).unwrap().warnings), "{host}");
+    }
+
+    let req = app
+        .create_request(
+            &ws,
+            None,
+            "overridden",
+            RequestSpec::http("GET", "http://api.localhost:8080/api"),
+        )
+        .unwrap();
+    let p = app.save_load_plan(plan(ws, req.meta.id)).unwrap();
+    let mut workspace = app.workspace(&ws).unwrap();
+    workspace.settings.dns_overrides.push(DnsOverride {
+        host: "api.localhost".into(),
+        addresses: vec!["198.51.100.7".into()],
+    });
+    app.save_workspace(workspace).unwrap();
+    assert!(
+        leaves_machine(&app.load_preflight(&p).unwrap().warnings),
+        "public localhost override is remote"
+    );
+    let mut workspace = app.workspace(&ws).unwrap();
+    workspace.settings.dns_overrides[0].addresses = vec!["127.0.0.1".into()];
+    app.save_workspace(workspace).unwrap();
+    assert!(
+        !leaves_machine(&app.load_preflight(&p).unwrap().warnings),
+        "loopback localhost override is local"
+    );
+
+    let mut workspace = app.workspace(&ws).unwrap();
+    workspace.settings.dns_overrides.clear();
+    workspace.settings.resolver = Some(ResolverMode::Custom {
+        nameservers: vec!["127.0.0.1:53".into()],
+    });
+    app.save_workspace(workspace).unwrap();
+    let req = app
+        .create_request(
+            &ws,
+            None,
+            "custom DNS",
+            RequestSpec::http("GET", "http://api.localhost:8080/api"),
+        )
+        .unwrap();
+    let p = app.save_load_plan(plan(ws, req.meta.id)).unwrap();
+    assert!(
+        leaves_machine(&app.load_preflight(&p).unwrap().warnings),
+        "custom DNS does not prove locality"
+    );
 }
 
 #[test]
@@ -293,11 +361,39 @@ fn load_preflight_checks_oauth_urls_with_per_run_values() {
             refresh_skew_secs: 30,
         },
     };
-    let req = app.create_request(&ws, None, "Local OAuth", spec).unwrap();
+    let req = app
+        .create_request(&ws, None, "Local OAuth", spec.clone())
+        .unwrap();
     let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
     let pre = app.load_preflight(&p).unwrap();
-    assert!(pre.destinations.iter().any(|d| d.starts_with("OAuth token URL http://127.0.0.1:8080")), "{:?}", pre.destinations);
-    assert!(pre.destinations.iter().any(|d| d.starts_with("OAuth authorization URL http://127.0.0.1:8080")), "{:?}", pre.destinations);
+    assert!(
+        pre.destinations.iter().any(|d| d.starts_with("OAuth token URL http://127.0.0.1:8080")),
+        "{:?}",
+        pre.destinations
+    );
+    assert!(
+        pre.destinations.iter().any(|d| {
+            d.starts_with("OAuth authorization URL http://127.0.0.1:8080")
+        }),
+        "{:?}",
+        pre.destinations
+    );
+    assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
+
+    if let AuthConfig::OAuth2 { config } = &mut spec.auth {
+        config.grant = OAuthGrant::RefreshToken;
+        config.authorization_url.clear();
+    }
+    let req = app
+        .create_request(&ws, None, "Optional authorization URL", spec)
+        .unwrap();
+    let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
+    let pre = app.load_preflight(&p).unwrap();
+    assert!(
+        !pre.destinations.iter().any(|d| d.starts_with("OAuth authorization URL")),
+        "{:?}",
+        pre.destinations
+    );
     assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
 }
 
@@ -708,12 +804,12 @@ fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
     let pre = preflight(udp("udp://127.0.0.1:9", Some("https://{{remote_proxy}}")));
     assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via MASQUE proxy https://proxy.example.test:4433".to_string()]);
     assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
-    // Both fixed loopback literals: no warning. A resolver-backed proxy
-    // name cannot prove locality, even when it is normally localhost.
+    // A target routed through the proxy cannot use its own loopback name as
+    // proof that the proxy reaches this machine.
     let pre = preflight(udp("udp://[::1]:9", Some("https://[::1]:4433")));
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
     let pre = preflight(udp("udp://[::1]:9", Some("https://localhost:4433")));
-    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
 
     // A local target through a remote HBONE proxy profile, whose host merely
     // contains "localhost".
@@ -807,7 +903,7 @@ fn load_preflight_judges_every_proxy_profile_after_no_proxy() {
     assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080 via SOCKS5 proxy 127.0.0.1:1080".to_string()]);
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
     let pre = preflight(http(), &profile(ProxyKind::Socks5, "localhost:1080", ""));
-    assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
+    assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
 
     // A datagram target a remote HBONE profile's NO_PROXY bypasses is sent
     // directly: no "via HBONE proxy" label and no warning.
