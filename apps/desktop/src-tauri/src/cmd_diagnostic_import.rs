@@ -257,7 +257,7 @@ mod tests {
             "key": "header.x-api-key",
             "value": "api-secret",
         });
-        let result = preview_import(report).unwrap();
+        let result = preview_import(&report.to_string()).unwrap();
         assert_eq!(result.trust, ImportedDiagnosticTrust::Unverified);
         assert_eq!(result.confidence, Confidence::Unknown);
         let reported: Value = serde_json::from_str(&result.reported_json).unwrap();
@@ -304,7 +304,7 @@ mod tests {
     fn ipc_credential_work_is_bounded() {
         let mut report: Value = serde_json::from_str(REPORT).unwrap();
         report["extensions"] = json!({"passwords": vec!["secret"; MAX_CREDENTIALS + 1]});
-        assert!(preview_import(report).is_err());
+        assert!(preview_import(&report.to_string()).is_err());
     }
 
     #[test]
