@@ -25,7 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: (...a: unknown[]) => ask(...a), open: vi.fn(), save: vi.fn() }));
 
-import type { TreeNode } from "./api";
+import type { ExecutionView, NativeExecutionEvent, StreamMessage, TreeNode } from "./api";
 import type { Environment, LoadPlan, RequestDefinition, RequestSpec, TlsProfile, Workspace } from "./generated/contracts";
 import { newSpec } from "./RequestEditor";
 import { Workbench } from "./Workbench";
@@ -120,6 +120,10 @@ function backend(overrides: Record<string, (args: Record<string, unknown>) => un
 
 const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1] as Record<string, unknown>);
 const emit = (name: string, payload: unknown) => act(() => handlers.get(name)?.forEach((cb) => cb({ payload })));
+const cancelArgs = (openIndex = 0) => {
+  const { executionId, attemptId } = calls("session_open")[openIndex];
+  return { executionId, attemptId };
+};
 
 async function boot() {
   render(<Workbench onLock={() => {}} profileName="test" />);
@@ -151,11 +155,106 @@ const environment = (id: string, wsId: string, name: string) => ({ id, workspace
 const tlsProfile = (id: string, wsId: string, name: string) => ({ id, workspace_id: wsId, name }) as TlsProfile;
 const historyItem = (id: string, url: string) => ({ id, started_at: 0, method: "GET", url, summary: "200 OK", status: 200 });
 
+function sessionView(text: string): ExecutionView {
+  return {
+    record: {
+      id: "00000000-0000-7000-8000-000000000001",
+      schema_version: 1,
+      adapter_version: "test",
+      catalog_version: "test",
+      started_at: now,
+      finished_at: now,
+      prepared: {
+        protocol: "web_socket",
+        method: "GET",
+        url: "wss://s1.test/",
+        headers: [],
+        body_bytes: 0,
+        auth_label: "none",
+        tls_verification_enabled: true,
+        settings: {
+          http_version: "auto",
+          timeouts: {},
+          redirects: { follow: false, max: 0, forward_credentials_cross_origin: false },
+          retries: { max_retries: 0, backoff_ms: 0, only_safe: true },
+          ip_preference: "system",
+          resolver: { mode: "system" },
+          dns_overrides: [],
+          limits: {
+            max_response_bytes: 1_048_576,
+            capture_bytes: 1_048_576,
+            max_decoded_bytes: 4_194_304,
+            max_response_header_bytes: 65_536,
+            max_request_body_bytes: 1_048_576,
+          },
+          decompress: true,
+          cookies: true,
+          keepalive: true,
+          infer_content_type: true,
+          early_data: { enabled: false },
+          sources: [],
+        },
+        inferred: [],
+        omitted_secrets: [],
+      },
+      attempts: [],
+      response: {
+        status: 101,
+        http_version: "HTTP/1.1",
+        headers: [],
+        trailers: [],
+        trailers_received: false,
+        body: {
+          completeness: "complete",
+          wire_bytes: text.length,
+          captured_bytes: text.length,
+          display_truncated: false,
+          content_type: "text/plain",
+        },
+      },
+      outcome: {
+        transport: "completed",
+        application: "success",
+        assertions: "not_run",
+        protocol_status: { protocol: "none" },
+        dispatch: "sent",
+        warnings: [],
+        summary: "Session completed",
+      },
+      assertion_results: [],
+      extracted: [],
+      findings: [],
+    },
+    body: {
+      text,
+      pretty: null,
+      hex: null,
+      is_binary: false,
+      decoded: false,
+      shown_bytes: text.length,
+      captured_bytes: text.length,
+    },
+  };
+}
+
+function sessionMessage(preview: string): StreamMessage {
+  return {
+    direction: "received",
+    offset_us: 1,
+    kind: "text",
+    size: preview.length,
+    preview,
+    preview_is_hex: false,
+    preview_truncated: false,
+  };
+}
+
 afterEach(() => {
   cleanup();
   invoke.mockReset();
   ask.mockReset();
   handlers.clear();
+  vi.restoreAllMocks();
 });
 
 describe("switching workspaces", () => {
@@ -204,7 +303,7 @@ describe("switching workspaces", () => {
 
     // The session ending while its workspace is hidden still clears it.
     await selectWorkspace("B", "Gamma");
-    emit("session-ended", { execution_id: execId });
+    emit("session-ended", { execution_id: execId, attempt_id: calls("session_open")[0].attemptId });
     await selectWorkspace("A", "Alpha");
     expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
     expect(screen.getByRole("option", { name: /One/ }).textContent).not.toContain("live");
@@ -212,16 +311,319 @@ describe("switching workspaces", () => {
 });
 
 describe("session controls", () => {
+  it.each(["text", "close", "half-close"])(
+    "keeps an old console's %s bound to its attempt after native retirement and ID reuse",
+    async (action) => {
+      const owners = new Map<string, string>();
+      const effects: unknown[] = [];
+      backend({
+        session_open: ({ executionId, attemptId }) => {
+          if (typeof executionId !== "string" || typeof attemptId !== "string") {
+            throw new Error("missing session identity");
+          }
+          if (owners.has(executionId)) throw new Error("duplicate execution ID");
+          owners.set(executionId, attemptId);
+          return executionId;
+        },
+        session_send: ({ executionId, attemptId, command }) => {
+          if (typeof executionId !== "string" || owners.get(executionId) !== attemptId) {
+            throw new Error("the session is no longer open");
+          }
+          effects.push(command);
+          return null;
+        },
+      });
+      requests.s1 = request("s1", "A", "Socket", { protocol: "tcp" });
+      requests.s2 = request("s2", "A", "Peer", { protocol: "tcp" });
+      await boot();
+      await openTab("Socket");
+      const executionId = "00000000-0000-7000-8000-000000000060";
+      const oldAttempt = "00000000-0000-7000-8000-000000000061";
+      const newAttempt = "00000000-0000-7000-8000-000000000062";
+      const ids = vi.spyOn(crypto, "randomUUID");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(oldAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+      await act(async () => {});
+      // Native retires A before history finalization/completion. Its actual
+      // console remains mounted in the tab; no IPC admission reordering is used.
+      owners.delete(executionId);
+      await openTab("Peer");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(newAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+      await act(async () => {});
+      fireEvent.click(openTabs().getByRole("tab", { name: /Socket/ }));
+      const command =
+        action === "text"
+          ? { command: "send_text", text: "console payload" }
+          : action === "close"
+            ? { command: "close", code: 1000, reason: "" }
+            : { command: "half_close" };
+      const send = () => {
+        if (action === "text") {
+          fireEvent.change(screen.getByLabelText("Message"), { target: { value: "console payload" } });
+          fireEvent.click(screen.getByRole("button", { name: "Send" }));
+        } else {
+          const name = action === "close" ? "Close" : "Half-close";
+          fireEvent.click(screen.getByRole("button", { name }));
+        }
+      };
+      send();
+      await screen.findByText("the session is no longer open");
+      expect(calls("session_send")).toEqual([{ executionId, attemptId: oldAttempt, command }]);
+      expect(effects).toEqual([]);
+      expect(owners.get(executionId)).toBe(newAttempt);
+      fireEvent.click(openTabs().getByRole("tab", { name: /Peer/ }));
+      send();
+      await waitFor(() => expect(effects).toEqual([command]));
+      expect(calls("session_send")).toEqual([
+        { executionId, attemptId: oldAttempt, command },
+        { executionId, attemptId: newAttempt, command },
+      ]);
+    },
+  );
+
+  it.each(["full", "scalar"])(
+    "keeps the original %s completion owner after a duplicate open is rejected",
+    async (completion) => {
+      const owners = new Map<string, string>();
+      backend({
+        session_open: ({ executionId, attemptId }) => {
+          if (typeof executionId !== "string" || typeof attemptId !== "string") {
+            throw new Error("missing session identity");
+          }
+          if (owners.has(executionId)) throw `attempt ${executionId} is already running`;
+          owners.set(executionId, attemptId);
+          return executionId;
+        },
+        session_send: () => null,
+      });
+      requests.s2 = request("s2", "A", "Peer", { protocol: "web_socket" });
+      await boot();
+      await openTab("Socket");
+      const executionId = "00000000-0000-7000-8000-000000000020";
+      const original = "00000000-0000-7000-8000-000000000021";
+      const duplicate = "00000000-0000-7000-8000-000000000022";
+      const ids = vi.spyOn(crypto, "randomUUID");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(original);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+      await openTab("Peer");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(duplicate);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect((await screen.findByRole("status")).textContent).toContain("is already running");
+      expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+      expect(owners.get(executionId)).toBe(original);
+      fireEvent.click(openTabs().getByRole("tab", { name: /Socket/ }));
+      expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Ping" }));
+      await waitFor(() =>
+        expect(calls("session_send")).toEqual([{ ...cancelArgs(), command: { command: "ping" } }]),
+      );
+      const historyReads = calls("history_list").length;
+      emit("session-ended", {
+        execution_id: executionId,
+        attempt_id: original,
+        view: completion === "full" ? sessionView("original completion body") : null,
+        error: completion === "full" ? null : "LOCKED",
+      });
+      expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Abort" })).toBeNull();
+      if (completion === "full") {
+        expect(await screen.findByText("original completion body")).toBeTruthy();
+      } else {
+        expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
+      }
+      await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + 1));
+    },
+  );
+
+  it.each(["lock/unlock", "profile switch"])(
+    "binds a delayed open's abort to its old attempt after %s remounts Workbench",
+    async (transition) => {
+      const oldOpen = deferred<string>();
+      const owners = new Map<string, string>();
+      let opens = 0;
+      backend({
+        session_open: ({ executionId, attemptId }) => {
+          if (typeof executionId !== "string" || typeof attemptId !== "string") {
+            throw new Error("missing session identity");
+          }
+          if (++opens === 1) return oldOpen.promise;
+          owners.set(executionId, attemptId);
+          return executionId;
+        },
+        session_cancel: ({ executionId, attemptId }) => {
+          if (typeof executionId !== "string" || owners.get(executionId) !== attemptId) {
+            throw "the session is no longer open";
+          }
+          owners.delete(executionId);
+          return null;
+        },
+        session_send: () => null,
+      });
+      await boot();
+      await openTab("Socket");
+      const executionId = "00000000-0000-7000-8000-000000000030";
+      const oldAttempt = "00000000-0000-7000-8000-000000000031";
+      const newAttempt = "00000000-0000-7000-8000-000000000032";
+      const ids = vi.spyOn(crypto, "randomUUID");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(oldAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+      fireEvent.click(screen.getByRole("button", { name: "Abort" }));
+      await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
+      await act(async () => {});
+      cleanup();
+      render(
+        <Workbench onLock={() => {}} profileName={transition === "lock/unlock" ? "test" : "other"} />,
+      );
+      await screen.findByRole("treeitem", { name: /Alpha/ });
+      await openTab("Socket");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(newAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+      expect(owners.get(executionId)).toBe(newAttempt);
+      await act(async () => oldOpen.resolve(executionId));
+      await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs(), cancelArgs()]));
+      expect(calls("session_cancel")[1]).toEqual({ executionId, attemptId: oldAttempt });
+      expect(owners.get(executionId)).toBe(newAttempt);
+      expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+      expect(screen.queryByRole("status")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Ping" }));
+      await waitFor(() =>
+        expect(calls("session_send")).toEqual([{ ...cancelArgs(1), command: { command: "ping" } }]),
+      );
+      const historyReads = calls("history_list").length;
+      emit("session-ended", {
+        execution_id: executionId,
+        attempt_id: newAttempt,
+        view: sessionView("replacement after remount"),
+      });
+      expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+      expect(await screen.findByText("replacement after remount")).toBeTruthy();
+      await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + 1));
+    },
+  );
+
+  it.each(["same epoch", "lock/unlock", "profile switch"])(
+    "filters queued messages after execution ID reuse across %s",
+    async (transition) => {
+      backend({
+        session_open: ({ executionId }) => executionId,
+        session_cancel: () => null,
+      });
+      await boot();
+      await openTab("Socket");
+      const executionId = "00000000-0000-7000-8000-000000000040";
+      const oldAttempt = "00000000-0000-7000-8000-000000000041";
+      const newAttempt = "00000000-0000-7000-8000-000000000042";
+      const ids = vi.spyOn(crypto, "randomUUID");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(oldAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+      const packet: NativeExecutionEvent = {
+        event: "message",
+        execution_id: executionId,
+        attempt_id: oldAttempt,
+        message: sessionMessage("queued old payload"),
+      };
+      const release = deferred<void>();
+      const delivery = release.promise.then(() => emit("execution-event", packet));
+      if (transition === "same epoch") {
+        ask.mockResolvedValueOnce(true);
+        fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+        await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+      } else {
+        cleanup();
+        render(
+          <Workbench onLock={() => {}} profileName={transition === "lock/unlock" ? "test" : "other"} />,
+        );
+        await screen.findByRole("treeitem", { name: /Alpha/ });
+      }
+      await openTab("Socket");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(newAttempt);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+      await act(async () => {
+        release.resolve(undefined);
+        await delivery;
+      });
+      emit("execution-event", {
+        event: "message",
+        execution_id: executionId,
+        message: sessionMessage("unattributed legacy payload"),
+      } satisfies NativeExecutionEvent);
+      expect(screen.queryByText("queued old payload")).toBeNull();
+      expect(screen.queryByText("unattributed legacy payload")).toBeNull();
+      expect(screen.getByText(/session · 0 messages/)).toBeTruthy();
+      emit("execution-event", {
+        ...packet,
+        attempt_id: newAttempt,
+        message: sessionMessage("fresh payload"),
+      });
+      expect(screen.getByText("fresh payload")).toBeTruthy();
+      expect(screen.getByText(/session · 1 messages/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Abort" })).toBeTruthy();
+    },
+  );
+
+  it.each([false, true])(
+    "drops queued session progress from a reused manual ID (remount=%s)",
+    async (remount) => {
+      backend({ session_open: ({ executionId }) => executionId, session_cancel: () => null });
+      await boot();
+      await openTab("Socket");
+      const executionId = "00000000-0000-7000-8000-000000000050";
+      const attemptId = "00000000-0000-7000-8000-000000000051";
+      const ids = vi.spyOn(crypto, "randomUUID");
+      ids.mockReturnValueOnce(executionId).mockReturnValueOnce(attemptId);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+      const packet: NativeExecutionEvent = {
+        event: "body_progress",
+        execution_id: executionId,
+        attempt_id: attemptId,
+        bytes: 999,
+      };
+      const release = deferred<void>();
+      const delivery = release.promise.then(() => emit("execution-event", packet));
+      if (remount) {
+        cleanup();
+        await boot();
+      } else {
+        ask.mockResolvedValueOnce(true);
+        fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+        await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+      }
+      await openTab("Alpha");
+      ids.mockReturnValueOnce(executionId);
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+      await act(async () => {
+        release.resolve(undefined);
+        await delivery;
+      });
+      expect(screen.queryByText(/received$/)).toBeNull();
+      emit("execution-event", {
+        event: "body_progress",
+        execution_id: executionId,
+        bytes: 64,
+      } satisfies NativeExecutionEvent);
+      expect(screen.getByText("64 B received")).toBeTruthy();
+    },
+  );
+
   it("aborts an open still connecting without reporting it as an error", async () => {
     backend();
     await boot();
     await openTab("Socket");
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(calls("session_open")).toHaveLength(1));
-    const execId = calls("session_open")[0].executionId;
 
     fireEvent.click(screen.getByRole("button", { name: "Abort" }));
-    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
     await waitFor(() => expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy());
     expect(connecting.size).toBe(0);
     expect(screen.queryByRole("status")).toBeNull();
@@ -253,7 +655,7 @@ describe("session controls", () => {
     registered = true;
     openSessions.add(execId);
     await act(async () => open.resolve(execId));
-    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }, { executionId: execId }]));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs(), cancelArgs()]));
     expect(openSessions.size).toBe(0);
     expect(screen.queryByRole("status")).toBeNull();
   });
@@ -283,7 +685,7 @@ describe("session controls", () => {
     await act(async () => open.resolve(execId));
     expect(calls("session_cancel")).toHaveLength(1);
     await act(async () => answerFirstCancel("the session is no longer open"));
-    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }, { executionId: execId }]));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs(), cancelArgs()]));
     expect(openSessions.size).toBe(0);
     expect(screen.queryByRole("status")).toBeNull();
   });
@@ -296,13 +698,135 @@ describe("session controls", () => {
     await waitFor(() => expect(calls("session_open")).toHaveLength(1));
     const first = calls("session_open")[0].executionId as string;
     // The first session is reported over before its open settles; a second one starts.
-    emit("session-ended", { execution_id: first });
+    emit("session-ended", { execution_id: first, attempt_id: calls("session_open")[0].attemptId });
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(calls("session_open")).toHaveLength(2));
 
     await act(async () => connecting.get(first)!("connection refused"));
     expect((await screen.findByRole("status")).textContent).toContain("connection refused");
     expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+  });
+
+  it.each([
+    ["same epoch", "full"],
+    ["same epoch", "scalar"],
+    ["lock/unlock", "full"],
+    ["lock/unlock", "scalar"],
+    ["locked profile switch", "full"],
+    ["locked profile switch", "scalar"],
+  ])("ignores queued %s / %s completion after ID reuse", async (transition, completion) => {
+    backend({
+      session_open: (args) => {
+        openSessions.add(args.executionId as string);
+        return args.executionId;
+      },
+      session_send: () => null,
+    });
+    await boot();
+    await openTab("Socket");
+    const executionId = "00000000-0000-7000-8000-000000000010";
+    const oldAttempt = "00000000-0000-7000-8000-000000000011";
+    const newAttempt = "00000000-0000-7000-8000-000000000012";
+    const ids = vi.spyOn(crypto, "randomUUID");
+    ids.mockReturnValueOnce(executionId).mockReturnValueOnce(oldAttempt);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    expect(calls("session_open")[0]).toMatchObject({ executionId, attemptId: oldAttempt });
+    await act(async () => {});
+
+    // Hold a packet already accepted by native enqueue until after the new
+    // attempt exists. This fake tests renderer delivery, not Tauri transport.
+    const release = deferred<void>();
+    const delivery = release.promise.then(() =>
+      emit("session-ended", {
+        execution_id: executionId,
+        attempt_id: oldAttempt,
+        view: completion === "full" ? sessionView("old completion body") : null,
+        error: completion === "full" ? "old recording error" : "LOCKED",
+      }),
+    );
+    if (transition === "same epoch") {
+      ask.mockResolvedValueOnce(true);
+      fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
+      await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
+    } else {
+      // The lock screen removes Workbench; unlock/profile publication mounts
+      // another one. Native transition fencing is covered by the Rust tests.
+      cleanup();
+      openSessions.clear();
+      render(
+        <Workbench
+          onLock={() => {}}
+          profileName={transition === "lock/unlock" ? "test" : "other"}
+        />,
+      );
+      await screen.findByRole("treeitem", { name: /Alpha/ });
+    }
+    await openTab("Socket");
+    ids.mockReturnValueOnce(executionId).mockReturnValueOnce(newAttempt);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(2));
+    expect(calls("session_open")[1]).toMatchObject({ executionId, attemptId: newAttempt });
+    await act(async () => {});
+    const historyReads = calls("history_list").length;
+    await act(async () => {
+      release.resolve(undefined);
+      await delivery;
+    });
+    expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Abort" })).toBeTruthy();
+    expect(screen.queryByText("old completion body")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    // A closed tab's own completion refreshes history without touching the
+    // replacement; a remounted Workbench never knew the old attempt.
+    const detached = transition === "same epoch" ? 1 : 0;
+    await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + detached));
+    expect(openSessions.has(executionId)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Ping" }));
+    await waitFor(() =>
+      expect(calls("session_send")).toEqual([{ ...cancelArgs(1), command: { command: "ping" } }]),
+    );
+
+    // The matching generation still retires normally, for either packet form.
+    openSessions.delete(executionId);
+    emit("session-ended", {
+      execution_id: executionId,
+      attempt_id: newAttempt,
+      view: completion === "full" ? sessionView("replacement completion body") : null,
+      error: completion === "full" ? null : "LOCKED",
+    });
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Abort" })).toBeNull();
+    if (completion === "full") {
+      expect(await screen.findByText("replacement completion body")).toBeTruthy();
+    } else {
+      expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
+    }
+    await waitFor(() => expect(calls("history_list")).toHaveLength(historyReads + detached + 1));
+  });
+
+  it("retires a matching completion delivered before its open reply or tab render", async () => {
+    const open = deferred<string>();
+    backend({
+      session_open: (args) => {
+        emit("session-ended", {
+          execution_id: args.executionId,
+          attempt_id: args.attemptId,
+          view: null,
+          error: "LOCKED",
+        });
+        return open.promise;
+      },
+    });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Abort" })).toBeNull();
+    expect((await screen.findByRole("status")).textContent).toContain("Session ended: LOCKED");
+    await act(async () => open.resolve(calls("session_open")[0].executionId as string));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
   });
 });
 
@@ -313,7 +837,6 @@ describe("closing a tab with backend work", () => {
     await openTab("Socket");
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(calls("session_open")).toHaveLength(1));
-    const execId = calls("session_open")[0].executionId;
 
     ask.mockResolvedValueOnce(false);
     fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
@@ -324,7 +847,7 @@ describe("closing a tab with backend work", () => {
 
     ask.mockResolvedValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
-    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
     await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
     // The open was still connecting: canceling it leaves no session behind, and
     // its failed open is not reported as an error.
@@ -345,7 +868,7 @@ describe("closing a tab with backend work", () => {
 
     ask.mockResolvedValueOnce(true);
     fireEvent.click(screen.getByRole("button", { name: "Close Socket" }));
-    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
     await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
     expect(openSessions.size).toBe(0);
   });
@@ -400,11 +923,10 @@ describe("closing a tab with backend work", () => {
     await openTab("Socket");
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(calls("session_open")).toHaveLength(1));
-    const execId = calls("session_open")[0].executionId;
 
     ask.mockResolvedValueOnce(true);
     fireEvent.click(within(screen.getByRole("treeitem", { name: /Socket/ })).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(calls("session_cancel")).toEqual([{ executionId: execId }]));
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
     expect(ask.mock.calls[0][0]).toContain("will be stopped");
     await waitFor(() => expect(calls("request_delete")).toEqual([{ requestId: "s1" }]));
     await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Socket/ })).toBeNull());
@@ -629,6 +1151,11 @@ describe("imports refresh the selected workspace and its open tabs", () => {
           ),
         ],
         spec_preview: () => ({
+          binding: { source_sha256: "source", plan_sha256: "plan" },
+          approval: {
+            binding: { source_sha256: "source", plan_sha256: "plan" },
+            scope: "native-scope",
+          },
           detected: { kind: "openapi", dialect: "openapi", syntax: "json" },
           report: emptySpecReport,
           folders: 1,
@@ -675,6 +1202,11 @@ describe("imports refresh the selected workspace and its open tabs", () => {
     async () => {
       backend({
         spec_preview: () => ({
+          binding: { source_sha256: "source", plan_sha256: "plan" },
+          approval: {
+            binding: { source_sha256: "source", plan_sha256: "plan" },
+            scope: "native-scope",
+          },
           detected: { kind: "openapi", dialect: "openapi", syntax: "json" },
           report: emptySpecReport,
           folders: 1,

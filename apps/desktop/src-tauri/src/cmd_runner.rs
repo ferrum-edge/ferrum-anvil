@@ -1,7 +1,7 @@
 //! Collection-runner commands: scenarios, folder runs, reports.
 
 use crate::commands::{R, e, id};
-use crate::state::{DesktopState, PendingEntry, cancel_pending};
+use crate::state::{DesktopState, PayloadFence, PayloadState, PendingEntry, cancel_pending};
 use anvil_app::file_grants::FilePurpose;
 use anvil_app::runner::RunSettings;
 use anvil_domain::Id;
@@ -67,14 +67,11 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
     // Registered before the app is read (see `DesktopState::lock`). The run's
     // task owns the entry; an early return below retires it.
     let pending = PendingEntry::register(&st.running, run_id)?;
-    let app = st.app()?;
+    let fence = st.admit_payload()?;
+    let app = fence.app.clone();
     let h2 = handle.clone();
-    let owner = app.clone();
-    let sink: anvil_runner::RunEventSink = Arc::new(move |ev: RunEvent| {
-        // Only to the window of the profile the run started under.
-        if h2.state::<DesktopState>().is_current(&owner) {
-            let _ = h2.emit("run-event", &ev);
-        }
+    let sink = run_event_sink(handle.clone(), fence.clone(), move |ev| {
+        let _ = h2.emit("run-event", ev);
     });
     let settings = RunSettings {
         environment: input.environment_id.as_deref().map(id).transpose()?,
@@ -103,16 +100,36 @@ pub async fn run_start(st: State<'_, DesktopState>, handle: AppHandle, target: R
         };
         drop(pending);
         let ev = match res {
-            // Another profile is open: its window shows nothing of this one.
-            _ if !handle.state::<DesktopState>().is_current(&app) => {
-                RunFinished { run_id: run_id.to_string(), error: Some("the profile the run was started in was closed".into()) }
-            }
             Ok(r) => RunFinished { run_id: r.run_id.to_string(), error: None },
             Err(err) => RunFinished { run_id: run_id.to_string(), error: Some(e(err)) },
         };
-        let _ = handle.emit("run-finished", ev);
+        tauri::async_runtime::spawn_blocking(move || {
+            let st = handle.state::<DesktopState>();
+            emit_finished(st.inner(), &fence, ev, |ev| {
+                let _ = handle.emit("run-finished", ev);
+            });
+        });
     });
     Ok(key)
+}
+
+pub(crate) fn run_event_sink<S: PayloadState>(
+    source: S,
+    fence: PayloadFence,
+    emit: impl Fn(&RunEvent) + Send + Sync + 'static,
+) -> anvil_runner::RunEventSink {
+    Arc::new(move |ev| {
+        source.with_state(|st| {
+            let _ = st.deliver_payload(&fence, || emit(&ev));
+        });
+    })
+}
+
+pub(crate) fn emit_finished(st: &DesktopState, fence: &PayloadFence, ev: RunFinished, emit: impl Fn(RunFinished)) {
+    let run_id = ev.run_id.clone();
+    if st.deliver_payload(fence, || emit(ev)).is_err() {
+        emit(RunFinished { run_id, error: Some("LOCKED".into()) });
+    }
 }
 
 #[tauri::command]
