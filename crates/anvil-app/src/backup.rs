@@ -638,7 +638,12 @@ impl App {
                 rows.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
                 for m in rows {
                     let id: Id = m.id.parse().map_err(|_| StoreError::Integrity)?;
-                    if *k == kind::REVISION && r.orphan_revision_attachment_refs_for_retention(&id)?.is_some() {
+                    let orphan = if *k == kind::REVISION {
+                        r.orphan_revision_attachment_refs_for_retention(&id).map_err(|e| object_integrity(k, &id, e))?
+                    } else {
+                        None
+                    };
+                    if orphan.is_some() {
                         // No historical owner can be established. Keep the
                         // original row in the profile/checkpoints, without
                         // exposing its spec or assigning a workspace in the
@@ -649,7 +654,11 @@ impl App {
                         ));
                         continue;
                     }
-                    let value: Value = r.get(k, &id)?.ok_or_else(|| StoreError::NotFound(format!("{k} {id}")))?;
+                    let value: Value = match r.get(k, &id) {
+                        Ok(Some(value)) => value,
+                        Ok(None) => return Err(StoreError::NotFound(format!("{k} {id}"))),
+                        Err(e) => return Err(object_integrity(k, &id, e)),
+                    };
                     let (workspace_id, parent_id, sort_key) = (m.workspace_id, m.parent_id, m.sort_key);
                     objects.push(ObjectRow { kind: (*k).to_string(), id: m.id, workspace_id, parent_id, sort_key, value });
                 }
@@ -699,6 +708,16 @@ impl App {
         attachments.sort_by(|a, b| a.sha256.as_str().cmp(b.sha256.as_str()));
         let contents = BackupContents { objects, secrets, attachments, history, load_reports };
         Ok(Snapshot { contents, excluded, token_files, linked_files })
+    }
+}
+
+/// Name the object a full-backup read failed on instead of surfacing the
+/// generic decrypt error, which is misleading for a metadata or owner
+/// mismatch. Only the kind and ID are disclosed, never any secret data.
+fn object_integrity(kind_name: &str, id: &Id, e: StoreError) -> StoreError {
+    match e {
+        StoreError::Integrity => StoreError::ObjectIntegrity { kind: kind_name.to_string(), id: id.to_string() },
+        other => other,
     }
 }
 

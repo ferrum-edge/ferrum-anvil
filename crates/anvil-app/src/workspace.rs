@@ -765,7 +765,7 @@ fn validate_folder_parent_in(s: &StoreTx<'_>, ws: &Id, parent: Option<Id>) -> an
     if let Some(id) = parent {
         let folder: Folder = s.get(kind::FOLDER, &id)?.ok_or_else(|| StoreError::NotFound("folder".into()))?;
         if folder.workspace_id != *ws {
-            return Err(StoreError::Ownership);
+            return Err(StoreError::ForeignFolderParent);
         }
     }
     Ok(())

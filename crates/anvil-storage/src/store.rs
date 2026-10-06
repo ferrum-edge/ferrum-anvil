@@ -61,6 +61,10 @@ pub enum StoreError {
     Integrity,
     #[error("an existing object's workspace or immutable parent cannot be changed")]
     Ownership,
+    #[error("the parent folder belongs to another workspace")]
+    ForeignFolderParent,
+    #[error("stored {kind} {id} failed its ownership or integrity check")]
+    ObjectIntegrity { kind: String, id: String },
     /// A `Store` method was called from inside that store's own
     /// [`Store::atomically`] closure. The closure must use its [`StoreTx`];
     /// nested transactions are not supported.
