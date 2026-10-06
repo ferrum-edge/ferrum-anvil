@@ -130,24 +130,66 @@ fn op_lines(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
     gw.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(10).collect()
 }
 
+/// Bounded wait for the operator-log ground truth: the gateway flushes the
+/// transaction line just after the response, so a single read can race it.
+const OP_LOG_WAIT: std::time::Duration = std::time::Duration::from_millis(3_000);
+const OP_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Poll `read_lines` every `interval` until `ready` accepts the lines, or
+/// `max` elapses. The latest read is returned either way, so a caller's strict
+/// assertion still fails when the expected record never appears.
+async fn poll_op_log(
+    mut read_lines: impl FnMut() -> Vec<String>,
+    mut ready: impl FnMut(&[String]) -> bool,
+    max: std::time::Duration,
+    interval: std::time::Duration,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let lines = read_lines();
+        if ready(&lines) || tokio::time::Instant::now() >= deadline {
+            return lines;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Wait (bounded) for at least one operator-log line for `proxy_id`.
+pub(crate) async fn wait_for_op_log(read_lines: impl FnMut() -> Vec<String>) -> Vec<String> {
+    poll_op_log(read_lines, |lines| !lines.is_empty(), OP_LOG_WAIT, OP_LOG_INTERVAL).await
+}
+
+/// Whether a `proxy_id` transaction line records an `error_class` in `allowed`.
+fn logged_class_matches(lines: &[String], proxy_id: &str, allowed: &[&str]) -> bool {
+    lines
+        .iter()
+        .filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\"")))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("error_class").and_then(|c| c.as_str()).map(str::to_owned))
+        .any(|c| allowed.contains(&c.as_str()))
+}
+
+/// Wait (bounded) until a `proxy_id` transaction line records an `error_class`
+/// in `allowed`. The gateway writes the class as the request finishes, so a
+/// single read after the response can miss a line that appears moments later.
+pub(crate) async fn wait_for_op_class(read_lines: impl FnMut() -> Vec<String>, proxy_id: &str, allowed: &[&str]) -> Vec<String> {
+    poll_op_log(read_lines, |lines| logged_class_matches(lines, proxy_id, allowed), OP_LOG_WAIT, OP_LOG_INTERVAL).await
+}
+
 pub async fn op_log(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
     wait_for_op_log(|| op_lines(gw, from, proxy_id)).await
 }
 
-pub(crate) async fn wait_for_op_log(mut read_lines: impl FnMut() -> Vec<String>) -> Vec<String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let lines = read_lines();
-        if !lines.is_empty() || tokio::time::Instant::now() >= deadline {
-            return lines;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+/// Like [`op_log`], but waits for the gateway's `error_class` line for
+/// `proxy_id` before returning; the consuming assertion stays strict.
+pub async fn op_log_class(gw: &Gateway, from: usize, proxy_id: &str, allowed: &[&str]) -> Vec<String> {
+    wait_for_op_class(|| op_lines(gw, from, proxy_id), proxy_id, allowed).await
 }
 
 #[cfg(test)]
 mod op_log_tests {
-    use super::wait_for_op_log;
+    use super::{poll_op_log, wait_for_op_class, wait_for_op_log};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn waits_until_a_transaction_line_appears() {
@@ -160,6 +202,45 @@ mod op_log_tests {
 
         assert_eq!(reads, 2);
         assert_eq!(lines, vec!["transaction".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn waits_for_the_expected_error_class_record() {
+        let mut reads = 0;
+        let lines = wait_for_op_class(
+            || {
+                reads += 1;
+                match reads {
+                    1 => vec![r#"{"proxy_id":"p","error_class":null}"#.to_owned()],
+                    2 => vec![r#"{"proxy_id":"p","error_class":"read_write_timeout"}"#.to_owned()],
+                    _ => vec![r#"{"proxy_id":"p","error_class":"read_write_timeout"}"#.to_owned()],
+                }
+            },
+            "p",
+            &["read_write_timeout"],
+        )
+        .await;
+
+        assert_eq!(reads, 2, "returned as soon as the class appeared");
+        assert!(lines.iter().any(|l| l.contains("read_write_timeout")));
+    }
+
+    #[tokio::test]
+    async fn a_missing_record_returns_the_last_read() {
+        let mut reads = 0;
+        let lines = poll_op_log(
+            || {
+                reads += 1;
+                vec![r#"{"proxy_id":"p","error_class":null}"#.to_owned()]
+            },
+            |_lines| false,
+            Duration::from_millis(40),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(reads > 1, "polled until the deadline");
+        assert_eq!(lines, vec![r#"{"proxy_id":"p","error_class":null}"#.to_owned()]);
     }
 }
 

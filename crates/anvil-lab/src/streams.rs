@@ -317,6 +317,12 @@ async fn op_log(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
     crate::fixtures_policy::wait_for_op_log(|| transaction_lines(env, from, proxy_id)).await
 }
 
+/// Like [`op_log`], but waits for the gateway's `error_class` line (the
+/// ground-truth check's expected record) before returning.
+async fn op_log_class(env: &Env, from: usize, proxy_id: &str, allowed: &[&str]) -> Vec<String> {
+    crate::fixtures_policy::op_log_class(&env.gateway, from, proxy_id, allowed).await
+}
+
 fn op_from(env: &Env) -> usize {
     env.gateway.log_lines().len()
 }
@@ -1331,13 +1337,10 @@ fn proto014_down(env: &Env) -> Fut<'_> {
             f.map(|f| f.does_not_prove.iter().any(|d| d.contains("Which component"))).unwrap_or(false),
             "",
         );
-        c.operator_class(
-            &op_log_settled(env, from, "proto014-grpc-down", 1).await,
-            "proto014-grpc-down",
-            &["connection_refused", "connection_pool_error", "request_error"],
-        );
+        let ops = op_log_class(env, from, "proto014-grpc-down", &["connection_refused", "connection_pool_error", "request_error"]).await;
+        c.operator_class(&ops, "proto014-grpc-down", &["connection_refused", "connection_pool_error", "request_error"]);
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto014-grpc-down").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 
@@ -1512,9 +1515,10 @@ fn up010_grpc(env: &Env) -> Fut<'_> {
             env.fx.grpc_slow.log.count_requests() > before,
             "",
         );
-        c.operator_class(&op_log_settled(env, from, "proto016-grpc-slow", 1).await, "proto016-grpc-slow", &["read_write_timeout"]);
+        let ops = op_log_class(env, from, "proto016-grpc-slow", &["read_write_timeout"]).await;
+        c.operator_class(&ops, "proto016-grpc-slow", &["read_write_timeout"]);
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "proto016-grpc-slow").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 
@@ -1702,7 +1706,7 @@ fn proto014_h3_down(env: &Env) -> Fut<'_> {
             "",
         );
         c.absent_prefix(&o, "ferrum.token");
-        let ops = op_log_settled(env, from, "proto014-grpc-down", 1).await;
+        let ops = op_log_class(env, from, "proto014-grpc-down", &["connection_refused", "connection_pool_error", "request_error"]).await;
         c.operator_class(&ops, "proto014-grpc-down", &["connection_refused", "connection_pool_error", "request_error"]);
         let r = send(env, &h3_grpc(env, "Unary", GrpcMode::Unary, &[r#"{"message":"ok"}"#], HttpVersionPolicy::Http3Only)).await;
         c.add(
@@ -2145,7 +2149,7 @@ fn grpcweb_down(env: &Env) -> Fut<'_> {
         );
         c.no_confirmed_claim(&o, "refused");
         no_translation_claim(&mut c, &o);
-        let ops = op_log_settled(env, from, "grpcweb-down", 1).await;
+        let ops = op_log_class(env, from, "grpcweb-down", &["connection_refused", "connection_pool_error", "request_error"]).await;
         c.operator_class(&ops, "grpcweb-down", &["connection_refused", "connection_pool_error", "request_error"]);
         let r = send(
             env,
@@ -2166,7 +2170,7 @@ fn grpcweb_down(env: &Env) -> Fut<'_> {
             grpc_status(&r).1 == Some(0) && is_success(&r),
             outcome_line(&r),
         );
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "grpcweb-down").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 
@@ -2545,9 +2549,10 @@ fn up002_tcp(env: &Env) -> Fut<'_> {
         c.not_success(&o);
         c.has(&o, "tcp.closed_without_data");
         c.max_confidence(&o, "tcp.closed_without_data", Confidence::Confirmed);
-        c.operator_class(&op_log_settled(env, from, "tcp-refused", 1).await, "tcp-refused", &["connection_refused"]);
+        let ops = op_log_class(env, from, "tcp-refused", &["connection_refused"]).await;
+        c.operator_class(&ops, "tcp-refused", &["connection_refused"]);
         let r = tcp_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcp-refused").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 
@@ -2573,7 +2578,8 @@ fn up004_tcps(env: &Env) -> Fut<'_> {
             connections(&env.fx.tcps_untrusted.log) > before,
             "",
         );
-        c.operator_class(&op_log_settled(env, from, "tcps-untrusted", 1).await, "tcps-untrusted", &["tls_error"]);
+        let ops = op_log_class(env, from, "tcps-untrusted", &["tls_error"]).await;
+        c.operator_class(&ops, "tcps-untrusted", &["tls_error"]);
         // Recovery: the same shape through the tcps route whose backend the gateway trusts.
         let r = send(env, &tcp_ctx(env, "tls://127.0.0.1:18406", TcpFraming::NewlineDelimited, &["ok"], false, 1)).await;
         c.add(
@@ -2582,7 +2588,7 @@ fn up004_tcps(env: &Env) -> Fut<'_> {
             previews(&r, Direction::Received, "frame") == vec!["ok"],
             outcome_line(&r),
         );
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: op_log(env, from, "tcps-untrusted").await }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 

@@ -70,6 +70,10 @@ impl Env {
     async fn op(&self, from: usize, proxy_id: &str) -> Vec<String> {
         op_log(&self.gateway, from, proxy_id).await
     }
+    /// Like [`op`], but waits for the gateway's `error_class` line.
+    async fn op_class(&self, from: usize, proxy_id: &str, allowed: &[&str]) -> Vec<String> {
+        crate::fixtures_policy::op_log_class(&self.gateway, from, proxy_id, allowed).await
+    }
     /// A backend-authored response through the plain `/ok` route.
     async fn backend(&self, code: u16, body: &str, headers: &[&str]) -> ExecutionOutput {
         let mut path = format!("/ok/status/{code}?body={}", enc(body));
@@ -473,7 +477,7 @@ fn gw009(env: &Env) -> Fut<'_> {
         let before = env.fixtures.json_empty.log.count_requests();
         let o = env.get("/gw/transform-ceiling/status/200?body=%7B%7D").await;
         backend_hits(before, env.fixtures.json_empty.log.count_requests(), 1, "origin served a 2-byte body", &mut c);
-        let mut ops = env.op(from, "gw009-transform-ceiling").await;
+        let mut ops = env.op_class(from, "gw009-transform-ceiling", &["dispatch_policy_rejected"]).await;
         c.operator_class(&ops, "gw009-transform-ceiling", &["dispatch_policy_rejected"]);
         ops.extend(operator_lines(&env.gateway, from, "output exceeds response size policy"));
         c.status_in(&o, &[502]);
@@ -507,7 +511,8 @@ fn gw009(env: &Env) -> Fut<'_> {
         // different (backend_error) token.
         let from2 = env.mark();
         let size = env.get("/gw/response-size/bytes/1024").await;
-        c.operator_class(&env.op(from2, "gw009-response-size").await, "gw009-response-size", &["response_body_too_large"]);
+        let lines = env.op_class(from2, "gw009-response-size", &["response_body_too_large"]).await;
+        c.operator_class(&lines, "gw009-response-size", &["response_body_too_large"]);
         c.add(
             CheckKind::Diagnosis,
             "declared-size ceiling gets no overload claim",
@@ -790,7 +795,7 @@ fn gw019_error(env: &Env) -> Fut<'_> {
         let mut c = Checks::new();
         let from = env.mark();
         let o = env.get("/gw/header-mutation-error/").await;
-        let ops = env.op(from, "gw019-error-spoof").await;
+        let ops = env.op_class(from, "gw019-error-spoof", &["connection_refused"]).await;
         c.operator_class(&ops, "gw019-error-spoof", &["connection_refused"]);
         c.status_in(&o, &[502]);
         c.add(

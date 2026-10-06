@@ -164,7 +164,7 @@ fn g01_001(env: &Env) -> Scenario<'_> {
         let o = core::send(env, &lookup_ctx(env, "GET", "/up/refused/", t.clone())).await;
         c.status_in(&o, &[502, 503]);
         minted(&mut c, &o);
-        let log = core::op_log(env, from, "up002-refused").await;
+        let log = core::op_log_class(env, from, "up002-refused", &["connection_refused"]).await;
         c.operator_class(&log, "up002-refused", &["connection_refused"]);
         if env.trusted {
             confirmed(&mut c, &o, "ferrum.detail.failure");

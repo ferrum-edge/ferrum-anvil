@@ -1013,7 +1013,7 @@ fn up_cert<'a>(env: &'a Env, path: &'static str, proxy: &'static str, which: &'s
         let (before, from) = (fx.log.entries().len(), env.gw.log_lines().len());
         let o = go(env, &up_request(env, path)).await;
         upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure"]);
-        let lines = op_lines(&env.gw, from, proxy);
+        let lines = crate::fixtures_policy::op_log_class(&env.gw, from, proxy, &["tls_error"]).await;
         c.operator_class(&lines, proxy, &["tls_error"]);
         fixture_saw_failed_handshake(&mut c, fx, before);
         let r = up_recovery(env, &mut c).await;
@@ -1042,8 +1042,9 @@ fn mtls_missing<'a>(env: &'a Env, path: &'static str, proxy: &'static str, tls12
         // TLS 1.3 client-certificate rejection on the reqwest pool is reported
         // as either a pre-wire pool cancellation or a post-connect reset.
         upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure", "ferrum.token.backend_error"]);
-        let lines = op_lines(&env.gw, from, proxy);
-        c.operator_class(&lines, proxy, &["connection_pool_error", "connection_reset", "tls_error", "connection_closed", "request_error"]);
+        let allowed = ["connection_pool_error", "connection_reset", "tls_error", "connection_closed", "request_error"];
+        let lines = crate::fixtures_policy::op_log_class(&env.gw, from, proxy, &allowed).await;
+        c.operator_class(&lines, proxy, &allowed);
         fixture_saw_failed_handshake(&mut c, fx, before);
         // Recovery: the gateway presents its own backend identity.
         let r = go(env, &up_request(env, "/up/mtls-ok/echo")).await;
@@ -1079,7 +1080,7 @@ fn up007(env: &Env) -> Fut<'_> {
         let o = go(env, &up_request(env, "/up/tls-stall/")).await;
         upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure"]);
         c.no_confirmed_claim(&o, "timeout");
-        let lines = op_lines(&env.gw, from, "up007-tls-stall");
+        let lines = crate::fixtures_policy::op_log_class(&env.gw, from, "up007-tls-stall", &["connection_timeout"]).await;
         c.operator_class(&lines, "up007-tls-stall", &["connection_timeout"]);
         c.add(CheckKind::GroundTruth, "the stalling backend accepted TCP", env.fx.stall.log.entries().len() > before, "");
         let r = up_recovery(env, &mut c).await;
@@ -1094,7 +1095,7 @@ fn up008(env: &Env) -> Fut<'_> {
         let o = go(env, &up_request(env, "/up/scheme-https-to-plain/")).await;
         upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure"]);
         c.no_confirmed_claim(&o, "expired");
-        let lines = op_lines(&env.gw, from, "up008-https-to-plain");
+        let lines = crate::fixtures_policy::op_log_class(&env.gw, from, "up008-https-to-plain", &["tls_error"]).await;
         c.operator_class(&lines, "up008-https-to-plain", &["tls_error"]);
         c.add(CheckKind::GroundTruth, "the plaintext backend received a connection", env.fx.plain.log.entries().len() > before, "");
         c.add(
@@ -1121,8 +1122,9 @@ fn up008_http_to_tls(env: &Env) -> Fut<'_> {
         let o = go(env, &up_request(env, "/up/scheme-http-to-tls/")).await;
         upstream_setup_failure(&mut c, env, &o, &["ferrum.token.backend_error", "ferrum.token.connection_failure"]);
         c.no_confirmed_claim(&o, "expired");
-        let lines = op_lines(&env.gw, from, "up008-http-to-tls");
-        c.operator_class(&lines, "up008-http-to-tls", &["request_error", "connection_closed", "connection_reset", "protocol_error"]);
+        let allowed = ["request_error", "connection_closed", "connection_reset", "protocol_error"];
+        let lines = crate::fixtures_policy::op_log_class(&env.gw, from, "up008-http-to-tls", &allowed).await;
+        c.operator_class(&lines, "up008-http-to-tls", &allowed);
         fixture_saw_failed_handshake(&mut c, &env.fx.tls_for_plain, before);
         let r = up_recovery(env, &mut c).await;
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
