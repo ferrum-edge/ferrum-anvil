@@ -1239,6 +1239,7 @@ pub async fn import_preview(
 /// A restored lock policy weaker than the profile's applies only once the
 /// user confirms it natively (see `crate::presence::offer_restored_lock`).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri injects handle, window and state as arguments.
 pub async fn import_apply(
     handle: AppHandle,
     window: Window,
