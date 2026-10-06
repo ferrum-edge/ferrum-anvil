@@ -44,6 +44,17 @@ decrypts. Only structural columns needed for listing (ids, kinds, parent ids,
 sort keys, owners, timestamps) are stored in the clear. See
 [Plaintext at rest](#plaintext-at-rest) for the leak test.
 
+Those plaintext owner columns are only an index. Every object, request
+revision, history record and load report also carries its owner inside its
+sealed payload, and a read refuses a row whose owner column (or, for a
+revision or history record, its request column) differs from the sealed one.
+A request revision seals the workspace and request that owned it when it was
+written, and is read only while that request still belongs to that
+workspace. A history record is sealed together with the id of the response
+body its row references, so it is read only with that body. A write that
+would replace a stored row under another owner is refused. See
+[workspace-owner-binding.md](security/workspace-owner-binding.md).
+
 **Secrets belong to one workspace.** A request resolves a secret reference
 only when its own workspace owns that secret, whether the reference is in its
 auth, a variable, an environment or a profile. A reference to any other
@@ -558,7 +569,7 @@ different owner; Merge keeps those.
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION` (currently 2). Migrations run forward at open and at
+  `DB_SCHEMA_VERSION` (currently 3). Migrations run forward at open and at
   unlock, each step in one write transaction with the version bump that
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its
@@ -573,23 +584,74 @@ different owner; Merge keeps those.
     removed when none is left).
   - Earlier builds refuse a schema 2 database, and a full backup made from
     one, as newer.
+- **Database schema 3** seals every request revision together with the
+  workspace and request that own it, under a new AAD (revision id,
+  length-prefixed, with a `v3` prefix), so a revision whose owner or request
+  column is changed, or that is put back after its request id was reused in
+  another workspace, is refused. It also seals every history record together
+  with the id of the response body its row references (record id and body
+  id, each length-prefixed, with a `v3` prefix), so a record whose body
+  column is changed is refused.
+  - The owner comes from the revision's request, never from the revision's
+    own columns: a revision is sealed again only when it decrypts, the
+    request it seals is its parent column, and that request itself
+    authenticates and belongs to the workspace the revision is filed under.
+    These are the checks a schema 2 read already made, so every revision
+    that schema 2 could read stays readable, under the same workspace.
+  - Any other revision (one whose request was deleted, does not decrypt, has
+    an edited owner or belongs to another workspace) is left exactly as it
+    was, under its schema 1 AAD, which no schema 3 read accepts. It is never
+    adopted by a workspace, not even if its request or columns are repaired
+    later. The step still commits; the number left is logged and recorded in
+    `meta` (`revisions_left_at_v3`, removed when none is left). One whose
+    request was deleted is still removed by the
+    [cleanup](#cleanup-when-a-profile-opens), which keeps track of its
+    stored files until then, and a full backup leaves it out, as before.
+    Any other one still fails a full backup and holds back the cleanup's
+    releases, as it did before, until it is deleted.
+  - A history record is sealed again with the body column its row has when
+    the step runs, if it decrypts and the workspace and request it seals are
+    its columns (what a schema 2 read accepted). Any other record is left
+    exactly as it was, stays refused and can be deleted; the number left is
+    logged and recorded in `meta` (`history_left_at_v3`, removed when none
+    is left).
+  - A revision or history record that already opens under its schema 3 AAD
+    in a database whose recorded version is below 3 means the version was
+    set back: the step fails, nothing is written, and the profile stays
+    locked.
+  - The step reads revisions and history records a batch at a time, and
+    authenticates each request once however many revisions it has.
+  - Earlier builds refuse a schema 3 database, and a full backup made from
+    one, as newer. See [Going back to an earlier build](#going-back-to-an-earlier-build).
+- Before a step that seals the rows of an existing database again (schema 2
+  and schema 3), the database is copied as it is into the profile's
+  `checkpoints` folder as `<time>-before-schema-<version>.db`, the same kind of
+  checkpoint an import takes. If that copy cannot be written (for example,
+  the disk is full), the migration does not run and the profile does not
+  open or unlock; free space and try again. A new profile has nothing to copy
+  and takes none, and restoring a checkpoint takes none, since the
+  checkpoint is itself the earlier copy.
 - The history table is indexed by the response body each record references,
   so releasing a replaced body and retention find a blob's uses without a
   scan. The index has no schema version of its own: it is created, where
   missing, each time a profile is opened or unlocked, after the versioned
   steps. This is best effort: if it cannot be created, a warning is logged
-  and the profile still opens. It changes no stored data, so the schema
-  stays 2 and earlier builds of schema 2 still read the database and its
-  full backups.
+  and the profile still opens. It changes no stored data, so it needs no
+  schema step of its own.
 - Restoring a checkpoint opens it read-only and, before the live database is
   touched, refuses one that was written by a newer schema, sealed with
-  another data key, or whose recorded version was set back below schema 2
-  while a vault secret in it opens under its schema 2 AAD (the migration
-  would fail on it). A checkpoint from an older schema is migrated under the
-  same hold of the connection as the copy; if the copy or the migration
-  fails, the profile is left locked. Every write, sealing or not, checks the
+  another data key, or whose recorded version was set back below a step it
+  already ran: below schema 2 while a vault secret in it opens under its
+  schema 2 AAD, or below schema 3 while a request revision in it opens under
+  its schema 3 AAD (the migration would fail on it). A checkpoint from an
+  older schema is migrated under the same hold of the connection as the
+  copy; if the copy or the migration fails, the profile is left locked. Every write, sealing or not, checks the
   lock only once it holds the connection, so one that raced a failed restore
   fails as locked instead of writing to the copied database.
+- A profile-wide read of history records or load reports (such as a full
+  backup, or the conflict check of an import or restore) that meets one
+  failing its owner or body check fails with an error that names that
+  record's or report's id, so it can be found and deleted.
 - A database or bundle written by a **newer** schema is refused with a clear
   message instead of being modified.
 - Bundles carry `format_version`. Unknown future formats are rejected, and
@@ -614,6 +676,23 @@ different owner; Merge keeps those.
   usable for disabling and removing rulesets, but it must be trimmed below
   the limits before a full backup of it can be made (and therefore restored
   elsewhere).
+
+### Going back to an earlier build
+
+- **Close every earlier build before upgrading.** One that already has the
+  profile open and unlocked keeps writing revisions and history records the
+  way it did. Once the newer build has moved the database to schema 3, the
+  rows it wrote are refused until they are deleted.
+- **Portable bundles** (`anvil export`, or Export in the desktop) keep their
+  format and object schema, so a bundle exported by this build imports into
+  an earlier one. A full backup does not: it records the database schema,
+  and earlier builds refuse it as newer.
+- **The `before-schema-<version>` checkpoint** is the database as the earlier
+  build left it. To go back to that build, close every copy of Anvil, keep a
+  copy of the profile directory, then copy the checkpoint over the profile's
+  database file (`anvil.db`) and delete `anvil.db-wal` and `anvil.db-shm` if
+  they are there. Everything changed since the upgrade is lost; export what
+  you need first. The next upgrade migrates the database again.
 
 ## History retention
 
@@ -746,14 +825,22 @@ cause (the desktop's `storage_undecodable_revisions`, Settings → Storage →
 Check storage):
 
 - **Damaged** (`damaged`): the payload does not authenticate under the
-  profile's key, so no version of Anvil can read it, and it is never
-  repaired in place. `App::remove_undecodable_revisions` removes damaged
-  revisions (`storage_revisions_remove`, Remove or Remove all in Settings →
-  Storage, confirmed in the backend's native dialog).
-- **Unknown format** (`unknown_format`): the payload authenticates, so this
-  profile wrote it, but this version cannot parse it, as with a revision a
-  newer Anvil wrote. It is kept: open the profile with that version. A
-  removal that names one is refused.
+  profile's key, neither under the schema 3 revision seal nor under the
+  schema 1 seal that a revision the
+  [schema 3 migration](#schema-versions-and-migration) left keeps, so no
+  version of Anvil can read it, and it is never repaired in place.
+  `App::remove_undecodable_revisions` removes damaged revisions
+  (`storage_revisions_remove`, Remove or Remove all in Settings → Storage,
+  confirmed in the backend's native dialog).
+- **Unknown format** (`unknown_format`): the payload authenticates under
+  either seal, so this profile wrote it, but this version cannot parse it,
+  as with a revision a newer Anvil wrote, whatever its schema 3 envelope
+  holds. It is kept: open the profile with that version. A removal that
+  names one is refused.
+
+A revision the schema 3 migration left that still authenticates and decodes
+under the schema 1 seal is neither: it is not listed, and a removal that
+names it is refused.
 
 A removal first takes one checkpoint of the profile for the whole batch
 (`checkpoints/…-before-removing-revisions.db`), which keeps the rows for a

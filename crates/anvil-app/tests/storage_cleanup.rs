@@ -483,6 +483,38 @@ fn damaged_revisions_are_removed_together_behind_one_checkpoint() {
     assert!(app.undecodable_revisions().unwrap().is_empty());
 }
 
+/// Associated data of revision `id` under the schema 1 seal, which the
+/// schema 3 migration leaves on a revision it does not seal again.
+fn v1_revision_aad(id: &Id) -> Vec<u8> {
+    format!("anvil/v1/objects/{}/{id}", kind::REVISION).into_bytes()
+}
+
+/// Associated data of revision `id` under the schema 3 seal.
+fn v3_revision_aad(id: &Id) -> Vec<u8> {
+    let id = id.to_string();
+    format!("anvil/v3/objects/revision/{}:{id}", id.len()).into_bytes()
+}
+
+/// The stored payload of revision `id`.
+fn revision_payload(app: &App, id: &Id) -> Vec<u8> {
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let sql = "SELECT payload FROM objects WHERE kind=?1 AND id=?2";
+    db.query_row(sql, rusqlite::params![kind::REVISION, id.to_string()], |r| r.get(0)).unwrap()
+}
+
+/// Replace the stored payload of revision `id`, leaving its index and write
+/// time as they were.
+fn set_revision_payload(app: &App, id: &Id, payload: &[u8]) {
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let sql = "UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3";
+    db.execute(sql, rusqlite::params![payload, kind::REVISION, id.to_string()]).unwrap();
+}
+
+/// Each stored revision that does not decode, by id, and why.
+fn causes(app: &App) -> Vec<(String, Undecodable)> {
+    app.undecodable_revisions().unwrap().into_iter().map(|f| (f.id, f.cause)).collect()
+}
+
 #[test]
 fn a_revision_a_newer_anvil_may_have_written_is_listed_but_kept() {
     let root = tempfile::tempdir().unwrap();
@@ -491,20 +523,130 @@ fn a_revision_a_newer_anvil_may_have_written_is_listed_but_kept() {
     let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
     let revision = r.revision_id.unwrap();
 
-    // Sealed under the profile's key, so it authenticates, but with a body
-    // kind this version does not know, as a newer Anvil could write.
+    // Sealed under the profile's key with the schema 1 seal, so it
+    // authenticates, but with a body kind this version does not know.
     let mut newer = app.store.get::<serde_json::Value>(kind::REVISION, &revision).unwrap().expect("the revision");
     newer["spec"]["body"] = serde_json::json!({ "type": "from_a_newer_anvil" });
-    let aad = format!("anvil/v1/objects/{}/{revision}", kind::REVISION);
-    let payload = crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&newer).unwrap());
-    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
-    let sql = "UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3";
-    db.execute(sql, rusqlite::params![payload, kind::REVISION, revision.to_string()]).unwrap();
+    let payload = crypto::seal(&key, &v1_revision_aad(&revision), &serde_json::to_vec(&newer).unwrap());
+    set_revision_payload(&app, &revision, &payload);
 
-    let found = app.undecodable_revisions().unwrap();
-    assert_eq!(found.iter().map(|r| (r.id.clone(), r.cause)).collect::<Vec<_>>(), vec![(revision.to_string(), Undecodable::UnknownFormat)]);
+    assert_eq!(causes(&app), vec![(revision.to_string(), Undecodable::UnknownFormat)]);
     let e = app.remove_undecodable_revisions(&[revision]).unwrap_err();
     assert!(e.to_string().contains("newer Anvil"), "{e}");
     assert_eq!(revisions_of(&app, &r.meta.id), 1, "it is kept for the version that wrote it");
     assert!(!app.dir.join("checkpoints").exists(), "a refused removal takes no checkpoint");
+}
+
+#[test]
+fn a_revision_a_newer_anvil_sealed_under_the_schema_3_seal_is_listed_but_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, key) = new_app_with_key(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    let revision = r.revision_id.unwrap();
+    let written = revision_payload(&app, &revision);
+    assert!(crypto::open(&key, &v3_revision_aad(&revision), &written).is_ok(), "written under the schema 3 seal");
+
+    let mut newer = app.store.get::<serde_json::Value>(kind::REVISION, &revision).unwrap().expect("the revision");
+    newer["spec"]["body"] = serde_json::json!({ "type": "from_a_newer_anvil" });
+    // Both authenticate under the schema 3 seal: this version's envelope
+    // around a revision it cannot parse, and an envelope it does not know.
+    let envelopes = [
+        serde_json::json!({ "workspace_id": ws, "request_id": r.meta.id, "revision": newer }),
+        serde_json::json!({ "format": 4, "sealed": newer }),
+    ];
+    for envelope in envelopes {
+        let payload = crypto::seal(&key, &v3_revision_aad(&revision), &serde_json::to_vec(&envelope).unwrap());
+        set_revision_payload(&app, &revision, &payload);
+        assert_eq!(causes(&app), vec![(revision.to_string(), Undecodable::UnknownFormat)], "{envelope}");
+        let e = app.remove_undecodable_revisions(&[revision]).unwrap_err();
+        assert!(e.to_string().contains("newer Anvil"), "{e}");
+        assert_eq!(revisions_of(&app, &r.meta.id), 1, "it is kept for the version that wrote it");
+    }
+    assert!(!app.dir.join("checkpoints").exists(), "a refused removal takes no checkpoint");
+}
+
+#[test]
+fn a_damaged_revision_under_the_schema_3_seal_is_removed_once_confirmed() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, key) = new_app_with_key(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    let revision = r.revision_id.unwrap();
+    let mut payload = revision_payload(&app, &revision);
+    assert!(crypto::open(&key, &v3_revision_aad(&revision), &payload).is_ok(), "written under the schema 3 seal");
+
+    // One flipped bit: the envelope no longer authenticates under either seal.
+    *payload.last_mut().unwrap() ^= 1;
+    set_revision_payload(&app, &revision, &payload);
+    assert_eq!(causes(&app), vec![(revision.to_string(), Undecodable::Damaged)]);
+
+    // What the desktop runs once the user confirmed it natively.
+    let removed = app.remove_undecodable_revisions(&[revision]).unwrap();
+    assert_eq!(removed.removed, vec![revision.to_string()]);
+    assert!(app.dir.join("checkpoints").join(&removed.checkpoint).is_file(), "a checkpoint keeps the removed row: {removed:?}");
+    assert_eq!(revisions_of(&app, &r.meta.id), 0);
+    assert!(causes(&app).is_empty());
+}
+
+#[test]
+fn revisions_the_schema_3_migration_left_are_removable_only_when_they_do_not_authenticate() {
+    let root = tempfile::tempdir().unwrap();
+    let (app, key) = new_app_with_key(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let elsewhere = app.create_workspace("Elsewhere").unwrap().meta.id;
+    let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
+    let current = r.revision_id.unwrap();
+    let released = app.store.get::<serde_json::Value>(kind::REVISION, &current).unwrap().expect("the revision");
+    let dir = app.dir.clone();
+    drop(app);
+
+    // Put the database back at schema 2, every revision under the schema 1
+    // seal. The migration seals again only a revision whose request
+    // authenticates under its workspace index: it leaves one indexed under
+    // another workspace, one a newer Anvil may have written there, and one
+    // that does not decrypt.
+    let legacy = |id: &Id, revision: &serde_json::Value| {
+        let mut revision = revision.clone();
+        revision["id"] = id.to_string().into();
+        crypto::seal(&key, &v1_revision_aad(id), &serde_json::to_vec(&revision).unwrap())
+    };
+    let (misfiled, damaged, newer) = (Id::new(), Id::new(), Id::new());
+    let mut from_a_newer_anvil = released.clone();
+    from_a_newer_anvil["spec"]["body"] = serde_json::json!({ "type": "from_a_newer_anvil" });
+    let mut broken = legacy(&damaged, &released);
+    *broken.last_mut().unwrap() ^= 1;
+    let db = rusqlite::Connection::open(dir.join(DB_FILE)).unwrap();
+    let sql = "UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3";
+    db.execute(sql, rusqlite::params![legacy(&current, &released), kind::REVISION, current.to_string()]).unwrap();
+    let sql = "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,0,?5,?6)";
+    let planted = [(misfiled, 1, legacy(&misfiled, &released)), (damaged, 2, broken), (newer, 3, legacy(&newer, &from_a_newer_anvil))];
+    for (id, updated_at, payload) in planted {
+        let (id, owner, request) = (id.to_string(), elsewhere.to_string(), r.meta.id.to_string());
+        db.execute(sql, rusqlite::params![kind::REVISION, id, owner, request, updated_at, payload]).unwrap();
+    }
+    db.execute("UPDATE meta SET value='2' WHERE key='schema_version'", []).unwrap();
+    drop(db);
+
+    let (h, dek) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+    let app = App::open(dir, h, dek).unwrap();
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    let left: String = db.query_row("SELECT value FROM meta WHERE key='revisions_left_at_v3'", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, "3");
+    assert!(app.store.get::<serde_json::Value>(kind::REVISION, &current).unwrap().is_some(), "sealed again");
+    assert!(app.store.get::<serde_json::Value>(kind::REVISION, &misfiled).is_err(), "left refused");
+
+    // The one it left that still authenticates and decodes is not damaged,
+    // nor is the one a newer Anvil may have written: both are kept.
+    assert_eq!(causes(&app), vec![(damaged.to_string(), Undecodable::Damaged), (newer.to_string(), Undecodable::UnknownFormat)]);
+    let e = app.remove_undecodable_revisions(&[misfiled]).unwrap_err();
+    assert!(e.to_string().contains("decodes"), "{e}");
+    let e = app.remove_undecodable_revisions(&[newer]).unwrap_err();
+    assert!(e.to_string().contains("newer Anvil"), "{e}");
+    assert!(app.remove_undecodable_revisions(&[damaged, misfiled]).is_err());
+
+    let removed = app.remove_undecodable_revisions(&[damaged]).unwrap();
+    assert_eq!(removed.removed, vec![damaged.to_string()]);
+    assert_eq!(causes(&app), vec![(newer.to_string(), Undecodable::UnknownFormat)]);
+    assert_eq!(revisions_of(&app, &r.meta.id), 3, "the current revision and the two kept are left");
 }

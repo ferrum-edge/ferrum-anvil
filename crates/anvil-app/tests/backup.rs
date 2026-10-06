@@ -1010,11 +1010,12 @@ async fn replace_never_overwrites_records_or_reports_of_another_workspace() {
     let h = &contents.history[0];
     let mut rec: ExecutionRecord = serde_json::from_value(h.record.clone()).unwrap();
     rec.workspace_id = Some(payments.meta.id);
-    b.store.add_history(&rec.id, rec.workspace_id.as_ref(), None, h.started_at, &rec, None).unwrap();
+    b.store.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), h.started_at, &rec, None).unwrap();
     reused.push(("history".to_string(), h.id.clone()));
-    let report = &contents.load_reports[0];
+    let mut report = contents.load_reports[0].clone();
+    report["plan"]["workspace_id"] = json!(payments.meta.id);
     let run_id: Id = serde_json::from_value(report["run_id"].clone()).unwrap();
-    b.store.put_load_report(&run_id, Some(&payments.meta.id), 0, report).unwrap();
+    b.store.put_load_report(&run_id, Some(&payments.meta.id), 0, &report).unwrap();
     reused.push(("load_report".to_string(), run_id.to_string()));
 
     // Each is listed, and Replace is refused before anything is written.

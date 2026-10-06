@@ -563,8 +563,10 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   storage cleanup, so Settings → Storage can remove one
   (`storage_revisions_remove`, `App::remove_undecodable_revisions`). Only a
   damaged revision, whose payload does not authenticate under the profile's
-  key, is removed: no version of Anvil can read it. One that authenticates
-  but does not parse, as a revision a newer Anvil wrote and an older one
+  key (under neither the schema 3 revision seal nor the schema 1 seal a
+  revision the schema 3 migration left keeps), is removed: no version of
+  Anvil can read it. One that authenticates under either seal but does not
+  parse, as a revision a newer Anvil wrote and an older one
   then opened would not, is refused and kept for that version (a newer
   database schema is refused when the profile opens). A revision that
   decodes is refused, and the backend checks each again under the write
@@ -595,6 +597,20 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   counterpart). A draft's request-level connection settings come from the
   webview and are compared against the saved request; workspace and profile
   settings apply to both.
+- **Edited ownership columns in the database file:** the plaintext workspace,
+  parent and request columns only index rows. Every object, request
+  revision, history record and load report seals its owner, and a read
+  refuses a row whose columns disagree with it; a save never adopts an edited
+  column as the owner. A request revision seals the workspace and request
+  that owned it when it was written and is read only while that request
+  still belongs to that workspace, so an older revision put back after its
+  request id was reused in another workspace is refused. A history record is
+  sealed together with the id of the response body its row names, so a body
+  column pointed at another stored body is refused. Revisions and history
+  records written before that format are sealed again once, a revision under
+  the workspace of its authenticated request; one that cannot be
+  authenticated is left as it was and stays refused. See
+  [workspace-owner-binding.md](security/workspace-owner-binding.md).
 - **Secret scope:** a request resolves only secrets its own workspace owns; a
   reference to any other stored secret fails before anything is sent. A saved
   request is prepared only in its own workspace and with folders of that
@@ -685,6 +701,12 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   not which passphrase it sets.
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
+- Nothing outside the database records which schema it reached. Someone who
+  can write the database file can roll it back, in whole or in part, to an
+  older copy sealed with the same data key; request revisions and history
+  records in a copy from before schema 3 are then sealed again at the next
+  unlock, as on a first upgrade. Rows still never move between workspaces by
+  editing their columns.
 - Some text from a peer is still cut before the record's redaction sees
   it: a SPIFFE Workload API `grpc-message` is cut to 300 characters where
   it is received, with no redactor available there, and every
