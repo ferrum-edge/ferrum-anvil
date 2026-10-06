@@ -332,11 +332,7 @@ impl App {
 
             if let Some(oauth) = oauth {
                 let mut auth_urls = vec![("OAuth token URL", oauth.token_url.as_str())];
-                let authorization_url_required =
-                    matches!(
-                        oauth.grant,
-                        OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken
-                    );
+                let authorization_url_required = matches!(oauth.grant, OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken);
                 if authorization_url_required && !oauth.authorization_url.is_empty() {
                     auth_urls.push(("OAuth authorization URL", oauth.authorization_url.as_str()));
                 }
@@ -761,10 +757,7 @@ fn fixed_host_is_loopback(ctx: &anvil_engine::ExecutionContext, host: &str, port
         ip_preference: settings.ip_preference,
     };
     match anvil_transport::dns::fixed_resolution(host, port, &dns) {
-        Some(Ok(resolution)) => {
-            !resolution.addrs.is_empty()
-                && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip()))
-        }
+        Some(Ok(resolution)) => !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())),
         Some(Err(_)) => false,
         None => system_resolver && is_localhost_name(host),
     }
@@ -774,11 +767,7 @@ fn is_localhost_name(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let host = host.strip_suffix('.').unwrap_or(host);
     host.eq_ignore_ascii_case("localhost")
-        || host
-            .rsplit_once('.')
-            .is_some_and(|(suffix, label)| {
-                !suffix.is_empty() && label.eq_ignore_ascii_case("localhost")
-            })
+        || host.rsplit_once('.').is_some_and(|(suffix, label)| !suffix.is_empty() && label.eq_ignore_ascii_case("localhost"))
 }
 
 fn literal_is_loopback(host: &str) -> bool {

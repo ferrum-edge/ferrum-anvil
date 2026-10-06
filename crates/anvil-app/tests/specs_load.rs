@@ -260,64 +260,29 @@ fn localhost_names_are_local_only_with_system_dns_and_without_overrides() {
     let ws = app.create_workspace("Localhost names").unwrap().meta.id;
 
     for host in ["localhost", "api.localhost", "api.localhost."] {
-        let req = app
-            .create_request(
-                &ws,
-                None,
-                host,
-                RequestSpec::http("GET", &format!("http://{host}:8080/api")),
-            )
-            .unwrap();
+        let req = app.create_request(&ws, None, host, RequestSpec::http("GET", &format!("http://{host}:8080/api"))).unwrap();
         let p = app.save_load_plan(plan(ws, req.meta.id)).unwrap();
         assert!(!leaves_machine(&app.load_preflight(&p).unwrap().warnings), "{host}");
     }
 
-    let req = app
-        .create_request(
-            &ws,
-            None,
-            "overridden",
-            RequestSpec::http("GET", "http://api.localhost:8080/api"),
-        )
-        .unwrap();
+    let req = app.create_request(&ws, None, "overridden", RequestSpec::http("GET", "http://api.localhost:8080/api")).unwrap();
     let p = app.save_load_plan(plan(ws, req.meta.id)).unwrap();
     let mut workspace = app.workspace(&ws).unwrap();
-    workspace.settings.dns_overrides.push(DnsOverride {
-        host: "api.localhost".into(),
-        addresses: vec!["198.51.100.7".into()],
-    });
+    workspace.settings.dns_overrides.push(DnsOverride { host: "api.localhost".into(), addresses: vec!["198.51.100.7".into()] });
     app.save_workspace(workspace).unwrap();
-    assert!(
-        leaves_machine(&app.load_preflight(&p).unwrap().warnings),
-        "public localhost override is remote"
-    );
+    assert!(leaves_machine(&app.load_preflight(&p).unwrap().warnings), "public localhost override is remote");
     let mut workspace = app.workspace(&ws).unwrap();
     workspace.settings.dns_overrides[0].addresses = vec!["127.0.0.1".into()];
     app.save_workspace(workspace).unwrap();
-    assert!(
-        !leaves_machine(&app.load_preflight(&p).unwrap().warnings),
-        "loopback localhost override is local"
-    );
+    assert!(!leaves_machine(&app.load_preflight(&p).unwrap().warnings), "loopback localhost override is local");
 
     let mut workspace = app.workspace(&ws).unwrap();
     workspace.settings.dns_overrides.clear();
-    workspace.settings.resolver = Some(ResolverMode::Custom {
-        nameservers: vec!["127.0.0.1:53".into()],
-    });
+    workspace.settings.resolver = Some(ResolverMode::Custom { nameservers: vec!["127.0.0.1:53".into()] });
     app.save_workspace(workspace).unwrap();
-    let req = app
-        .create_request(
-            &ws,
-            None,
-            "custom DNS",
-            RequestSpec::http("GET", "http://api.localhost:8080/api"),
-        )
-        .unwrap();
+    let req = app.create_request(&ws, None, "custom DNS", RequestSpec::http("GET", "http://api.localhost:8080/api")).unwrap();
     let p = app.save_load_plan(plan(ws, req.meta.id)).unwrap();
-    assert!(
-        leaves_machine(&app.load_preflight(&p).unwrap().warnings),
-        "custom DNS does not prove locality"
-    );
+    assert!(leaves_machine(&app.load_preflight(&p).unwrap().warnings), "custom DNS does not prove locality");
 }
 
 #[test]
@@ -361,39 +326,21 @@ fn load_preflight_checks_oauth_urls_with_per_run_values() {
             refresh_skew_secs: 30,
         },
     };
-    let req = app
-        .create_request(&ws, None, "Local OAuth", spec.clone())
-        .unwrap();
+    let req = app.create_request(&ws, None, "Local OAuth", spec.clone()).unwrap();
     let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
     let pre = app.load_preflight(&p).unwrap();
-    assert!(
-        pre.destinations.iter().any(|d| d.starts_with("OAuth token URL http://127.0.0.1:8080")),
-        "{:?}",
-        pre.destinations
-    );
-    assert!(
-        pre.destinations.iter().any(|d| {
-            d.starts_with("OAuth authorization URL http://127.0.0.1:8080")
-        }),
-        "{:?}",
-        pre.destinations
-    );
+    assert!(pre.destinations.iter().any(|d| d.starts_with("OAuth token URL http://127.0.0.1:8080")), "{:?}", pre.destinations);
+    assert!(pre.destinations.iter().any(|d| { d.starts_with("OAuth authorization URL http://127.0.0.1:8080") }), "{:?}", pre.destinations);
     assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
 
     if let AuthConfig::OAuth2 { config } = &mut spec.auth {
         config.grant = OAuthGrant::RefreshToken;
         config.authorization_url.clear();
     }
-    let req = app
-        .create_request(&ws, None, "Optional authorization URL", spec)
-        .unwrap();
+    let req = app.create_request(&ws, None, "Optional authorization URL", spec).unwrap();
     let p = app.save_load_plan(chain_plan(ws, env, vec![req.meta.id], Some(dataset))).unwrap();
     let pre = app.load_preflight(&p).unwrap();
-    assert!(
-        !pre.destinations.iter().any(|d| d.starts_with("OAuth authorization URL")),
-        "{:?}",
-        pre.destinations
-    );
+    assert!(!pre.destinations.iter().any(|d| d.starts_with("OAuth authorization URL")), "{:?}", pre.destinations);
     assert!(!leaves_machine(&pre.warnings), "{:?}", pre.warnings);
 }
 
