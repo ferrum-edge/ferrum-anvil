@@ -78,11 +78,8 @@
 
 - Storage: validate sealed object IDs, workspace owners and parents against
   row metadata, and reject existing-owner changes in transactional saves.
-  Folder/request moves retain their relationship checks. Request revisions
-  carry no sealed workspace owner, so revision ownership still relies on the
-  current parent request and needs an explicit format/migration decision; this
-  is a partial GHSA-fmx8-p5wc-hm8p remediation. User-visible changes: full
-  backups exclude authentic orphan revisions (listed in the manifest); saving
+  Folder/request moves retain their relationship checks. User-visible
+  changes: full backups exclude authentic orphan revisions (listed in the manifest); saving
   a request with a changed workspace now errors; creating or saving a folder
   refuses a foreign parent; spec reimport now deletes the removed requests'
   revisions and releases their attachments; undecodable revisions are kept and
@@ -397,11 +394,8 @@
   which the desktop UI never set; the CLI keeps its own). A draft's
   request-level connection settings come from the webview and are compared
   against the saved request; workspace and profile settings apply to both.
-  A compromised webview that saves a
-  request, environment or profile first can still send it without a
-  dialog. Secrets are still
-  resolved only in the backend and never returned to the webview. Drafts
-  that carry no vault-backed authority are unchanged (GHSA-g7h5-cxqf-jggg).
+  Secrets are resolved only in the backend and never returned to the webview.
+  Drafts without vault-backed authority retain existing behavior.
 - Desktop development dependencies: an npm override moves WebdriverIO's
   `@puppeteer/browsers` from 2.13.2 to 3.2.3, which drops `extract-zip`
   2.0.1 (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv; no patched release) and

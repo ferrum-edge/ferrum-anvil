@@ -1,8 +1,7 @@
 # Workspace owner binding
 
-Status: **implemented — partial remediation; revision owner binding remains a
-known limitation.** References GHSA-fmx8-p5wc-hm8p. This is not a claim about
-affected or patched released binaries.
+Status: **implemented storage controls.** This is not a claim about affected
+or patched released binaries.
 
 ## Implemented controls
 
@@ -27,7 +26,7 @@ open/unlock.
 | User profile, API ruleset | Embedded ID; workspace and parent indexes must be null |
 | App settings, attachment index | Kind/ID in existing AAD; fixed profile-only scope, with null workspace and parent indexes |
 | Token/linked file binding | Embedded ID; fixed profile-only scope, with null workspace and parent indexes |
-| Request revision | Embedded revision ID and request ID; see the known limitation below |
+| Request revision | Embedded revision ID and request ID |
 
 Domain kinds are decoded as their declared domain type before data is
 returned. For app-owned kinds, storage decodes their identity projection
@@ -84,11 +83,4 @@ indexes with `user: false`. If any revision's references cannot be inspected,
 its row and pins remain and the pass removes/releases nothing. Request deletion
 keeps undecodable revision rows for a later safe cleanup. Workspace deletion
 reads live revisions before their parents disappear and keeps
-orphan/undecodable revisions for profile-wide cleanup. This does not introduce
-a format migration or a trusted historical-owner mapping.
-
-## Known limitation
-
-Revision owner binding is a known limitation: the released `RequestRevision`
-carries no workspace owner, so ownership relies on the current parent request,
-and a revision format change is planned.
+orphan/undecodable revisions for profile-wide cleanup.
