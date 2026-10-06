@@ -208,6 +208,83 @@ and diagnostic import off the UI thread.
   `--runtime-probe` remains a separate explicit opt-in that launches the
   extracted `AppRun`.
 
+- Desktop security: PEM selection uses purpose-bound native choosers.
+  Certificate reads return validated certificate PEM and refuse key material;
+  private-key grants are consumed once into the workspace vault, returning
+  only a secret reference to the renderer. A PEM file that combines a
+  certificate and a private key is refused by the certificate picker; split it
+  into a certificate file and a key file first (see
+  [docs/identity.md §9](docs/identity.md#9-client-certificates-mtls-pem-files)).
+- Portable bundles: validate archive declarations and mandatory manifest,
+  checksum, format, schema and vault metadata before expanding payloads.
+  Charge the remaining aggregate budget before allocating each entry,
+  verify actual ZIP sizes against declarations, and hash attachments during
+  reading without retaining a second copy. This fix kept the 1 GiB total and
+  512 MiB per-entry limits; the bundle resource policy under Security has
+  since lowered them to 256 MiB and 128 MiB. It addressed the
+  validation-order and accounting part of GHSA-jqq4-v58m-6fcw.
+- Load preflight: iteration variables, dataset columns, values extracted by
+  earlier chain steps and dynamic helpers in the path, query, method, headers
+  or body of a fixed origin no longer stop a plan (#288). The preflight judges
+  each URL origin, with every per-run value layered above
+  workspace, environment and folder variables as the worker layers it, and a
+  repeated chain step sees what its earlier positions extracted. For HTTP and
+  every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
+  proxy URL), a per-run value that reaches the URL's scheme or host is
+  refused, naming its source but never its value. A per-run port is allowed
+  only after a fixed loopback host. Locality now uses the execution parser
+  and connector's fixed literals/overrides with IP-family filtering.
+  `localhost` and `*.localhost` count as loopback with the system resolver
+  unless an override is configured, in which case its addresses are checked;
+  custom DNS and other unpinned names still require remote-traffic consent
+  without a preflight lookup, preventing DNS rebinding and resolver waits.
+  Proxy-resolved target names remain unproven despite client overrides, and
+  proxy addresses use the connector's host spelling. HTTP forward-proxy
+  authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
+  Host headers; per-run Host values/names require the warning. Session protocols
+  use their actual CONNECT target. MASQUE requires the canonical routing
+  template for local classification; custom or per-run templates require the
+  warning even with loopback target and proxy origins. OAuth token endpoints use
+  the same origin, fixed-address and NO_PROXY checks; external-browser
+  authorization names remain unproven. Nested conflicting OAuth profiles
+  are refused consistently before acquiring any token, while valid
+  single-OAuth multi-auth remains supported (#295, #296). Empty optional
+  OAuth authorization URLs are skipped; present values are still checked.
+- Desktop imports: refresh the selected workspace's environments, profiles,
+  history and request tree after a spec import or bundle import. Open tabs for
+  replaced requests now reload when clean; unsaved drafts and running sends or
+  sessions are preserved safely.
+- Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
+- Diagnostics: cancellation findings now use the local-client scope only when
+  dispatch recorded no request bytes; canceled requests that may have reached
+  the peer use the client-to-peer scope.
+- DTLS over MASQUE: when the tunnel ends while a handshake flight is being
+  written, the failure is now always `DtlsHandshakeFailed` in the
+  `DtlsHandshake` phase, with the write error as its message. It used to be
+  `RequestWriteFailed` or `DtlsHandshakeFailed` depending on which side
+  noticed first (#270).
+- Desktop: the update dialog shows release notes as readable text instead of
+  raw Markdown. GitHub callouts read "Warning: …", emphasis, quote, heading
+  and code markers are dropped, bullets read "•" and links read
+  "text (url)". The notes are still text: nothing is rendered as markup and
+  links are not clickable.
+- The ignored Python `websockets` permessage-deflate interoperability test
+  now runs on `websockets` 14 and 15 as well as 13.x: its fixture
+  feature-detects the negotiated extensions (`.extensions` on 13.x, the new
+  asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
+  version range is documented where the run instructions live (#275).
+- Desktop: switching a request to MCP now saves the default `tools/list`
+  operation, so the editor shows exactly what will be sent and Send no longer
+  refuses a new MCP request for missing settings (#286).
+- Desktop: choosing `.proto files…` as the gRPC schema source now records it as
+  `proto_files`, not a descriptor set, even though the controlled select
+  re-renders while the native dialog is open; the choice is merged into the
+  latest draft rather than one captured before the dialog opened (#287).
+- Desktop: the vault-authority confirmation dialog tells two identically named
+  proxy or TLS profiles apart with a short id suffix, and when the difference
+  is past the third DNS override it says how many more differ instead of
+  falling back to the generic "connection settings differ" line (#319, N4).
+
 ### Added
 
 - Adopt published `contracts-edge-0.9.11` (`390edbd5b2485af0988e02f7827fde778d76ae0a`)
@@ -329,85 +406,6 @@ and diagnostic import off the UI thread.
   0.9.9 catalog records it, and the contract drift test counts it among the
   headers Anvil reads and checks Anvil's lookup reader against the pinned
   schema.
-
-### Fixed
-
-- Desktop security: PEM selection uses purpose-bound native choosers.
-  Certificate reads return validated certificate PEM and refuse key material;
-  private-key grants are consumed once into the workspace vault, returning
-  only a secret reference to the renderer. A PEM file that combines a
-  certificate and a private key is refused by the certificate picker; split it
-  into a certificate file and a key file first (see
-  [docs/identity.md §9](docs/identity.md#9-client-certificates-mtls-pem-files)).
-- Portable bundles: validate archive declarations and mandatory manifest,
-  checksum, format, schema and vault metadata before expanding payloads.
-  Charge the remaining aggregate budget before allocating each entry,
-  verify actual ZIP sizes against declarations, and hash attachments during
-  reading without retaining a second copy. This fix kept the 1 GiB total and
-  512 MiB per-entry limits; the bundle resource policy under Security has
-  since lowered them to 256 MiB and 128 MiB. It addressed the
-  validation-order and accounting part of GHSA-jqq4-v58m-6fcw.
-- Load preflight: iteration variables, dataset columns, values extracted by
-  earlier chain steps and dynamic helpers in the path, query, method, headers
-  or body of a fixed origin no longer stop a plan (#288). The preflight judges
-  each URL origin, with every per-run value layered above
-  workspace, environment and folder variables as the worker layers it, and a
-  repeated chain step sees what its earlier positions extracted. For HTTP and
-  every session protocol (WebSocket, SSE, gRPC, MCP, TCP, UDP and a MASQUE
-  proxy URL), a per-run value that reaches the URL's scheme or host is
-  refused, naming its source but never its value. A per-run port is allowed
-  only after a fixed loopback host. Locality now uses the execution parser
-  and connector's fixed literals/overrides with IP-family filtering.
-  `localhost` and `*.localhost` count as loopback with the system resolver
-  unless an override is configured, in which case its addresses are checked;
-  custom DNS and other unpinned names still require remote-traffic consent
-  without a preflight lookup, preventing DNS rebinding and resolver waits.
-  Proxy-resolved target names remain unproven despite client overrides, and
-  proxy addresses use the connector's host spelling. HTTP forward-proxy
-  authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
-  Host headers; per-run Host values/names require the warning. Session protocols
-  use their actual CONNECT target. MASQUE requires the canonical routing
-  template for local classification; custom or per-run templates require the
-  warning even with loopback target and proxy origins. OAuth token endpoints use
-  the same origin, fixed-address and NO_PROXY checks; external-browser
-  authorization names remain unproven. Nested conflicting OAuth profiles
-  are refused consistently before acquiring any token, while valid
-  single-OAuth multi-auth remains supported (#295, #296). Empty optional
-  OAuth authorization URLs are skipped; present values are still checked.
-- Desktop imports: refresh the selected workspace's environments, profiles,
-  history and request tree after a spec import or bundle import. Open tabs for
-  replaced requests now reload when clean; unsaved drafts and running sends or
-  sessions are preserved safely.
-- Diagnostics: `tcp.reply_after_half_close` now uses the retained stream transcript to verify that received bytes followed Anvil's half-close, and reports only those bytes. Missing transcript evidence no longer produces a chronology claim (#285).
-- Diagnostics: cancellation findings now use the local-client scope only when
-  dispatch recorded no request bytes; canceled requests that may have reached
-  the peer use the client-to-peer scope.
-- DTLS over MASQUE: when the tunnel ends while a handshake flight is being
-  written, the failure is now always `DtlsHandshakeFailed` in the
-  `DtlsHandshake` phase, with the write error as its message. It used to be
-  `RequestWriteFailed` or `DtlsHandshakeFailed` depending on which side
-  noticed first (#270).
-- Desktop: the update dialog shows release notes as readable text instead of
-  raw Markdown. GitHub callouts read "Warning: …", emphasis, quote, heading
-  and code markers are dropped, bullets read "•" and links read
-  "text (url)". The notes are still text: nothing is rendered as markup and
-  links are not clickable.
-- The ignored Python `websockets` permessage-deflate interoperability test
-  now runs on `websockets` 14 and 15 as well as 13.x: its fixture
-  feature-detects the negotiated extensions (`.extensions` on 13.x, the new
-  asyncio `ServerConnection.protocol.extensions` on 14/15), and the supported
-  version range is documented where the run instructions live (#275).
-- Desktop: switching a request to MCP now saves the default `tools/list`
-  operation, so the editor shows exactly what will be sent and Send no longer
-  refuses a new MCP request for missing settings (#286).
-- Desktop: choosing `.proto files…` as the gRPC schema source now records it as
-  `proto_files`, not a descriptor set, even though the controlled select
-  re-renders while the native dialog is open; the choice is merged into the
-  latest draft rather than one captured before the dialog opened (#287).
-- Desktop: the vault-authority confirmation dialog tells two identically named
-  proxy or TLS profiles apart with a short id suffix, and when the difference
-  is past the third DNS override it says how many more differ instead of
-  falling back to the generic "connection settings differ" line (#319, N4).
 
 ## [0.1.1] - 2026-10-01
 
