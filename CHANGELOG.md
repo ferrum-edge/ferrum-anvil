@@ -42,11 +42,18 @@
 - Linked-file reads and granted file reads and exports no longer follow a symlinked
   ancestor directory. The chosen path is walked one folder at a time without following
   a link (on Unix `openat` with `O_NOFOLLOW | O_DIRECTORY`, then the file is opened,
-  created and renamed relative to the opened folder). On Windows each folder on the
-  path is opened as itself, refused if it is a symbolic link or junction, and held
-  without delete sharing until the operation is done. An export also checks that its
-  folder is still the one chosen. Size limits, grant semantics and error messages are
-  unchanged. On Unix other than Linux, every folder on a chosen path must be listable.
+  created and renamed relative to the opened folder). On macOS a single open refuses a
+  link at any folder on the path (`O_NOFOLLOW_ANY`): a file is read by opening it
+  directly and an export opens only its own folder, so no folder above a chosen file
+  (such as Documents, Desktop or a removable volume) is opened. This needs macOS 11 or
+  later, which the desktop bundle now requires. On Windows each folder on the path is
+  opened as itself, refused if it is a symbolic link or junction, and held without
+  delete sharing until the operation is done. An export also checks that its folder is
+  still the one chosen, and a failed export removes only a temporary file it created.
+  Size limits, grant semantics and error messages are unchanged. On Windows and on Unix
+  other than Linux and macOS, every folder on a chosen path must be one Anvil can list
+  (on Windows, open for reading): a path through a folder it may traverse but not list
+  is refused.
 
 ### Breaking
 

@@ -13,6 +13,13 @@
 //!   following a link (`O_NOFOLLOW | O_DIRECTORY`). The file is then opened,
 //!   created, renamed or removed relative to the opened folder (`openat`,
 //!   `renameat`, `unlinkat`), so its path is never resolved again.
+//! - On macOS (and Apple's other systems) a single open refuses a link at any
+//!   folder on the path, and at the file itself (`O_NOFOLLOW_ANY`, macOS 11
+//!   and later), so no folder above is opened: a protected folder such as
+//!   Documents, Desktop or a removable volume above a chosen file is never
+//!   opened for listing, which would need access to that whole folder. A file
+//!   read opens the file directly; an export opens only its folder and then
+//!   works relative to it as above.
 //! - On Windows each folder is opened in turn as itself
 //!   (`FILE_FLAG_OPEN_REPARSE_POINT`), checked not to be a link, and held open
 //!   without delete sharing until the operation is done: a held folder cannot
@@ -22,8 +29,8 @@
 //!   delete access cannot be held, and the operation fails.
 //! - Elsewhere the path is used as it is.
 //!
-//! Each folder on the path must be one Anvil can open: on Unix other than
-//! Linux, one it can list.
+//! Each folder on the path must be one Anvil can open: on Windows and on Unix
+//! other than Linux and macOS, one it can list.
 
 use crate::file_grants::{FileId, file_id};
 use std::ffi::OsStr;
@@ -54,10 +61,69 @@ fn not_absolute() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "the path is not absolute and normalized")
 }
 
+/// Open the absolute, normalized `path` for reading if it is a regular file;
+/// `None` when it is not, a link at it or at a folder on it included. A FIFO
+/// or device never blocks the open: it is opened non-blocking (which does not
+/// change how a regular file reads) and never as a controlling terminal, and
+/// the opened handle is checked.
+#[cfg(target_vendor = "apple")]
+pub(crate) fn open_regular(path: &Path) -> io::Result<Option<(File, Metadata)>> {
+    use rustix::fs::{Mode, OFlags};
+    if !is_normalized(path) {
+        return Err(not_absolute());
+    }
+    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::NOFOLLOW_ANY | OFlags::CLOEXEC;
+    regular(rustix::fs::open(path, flags, Mode::empty()))
+}
+
+/// Open the absolute, normalized `path` for reading if it is a regular file;
+/// `None` when it is not, a link at it or at a folder on it included
+/// ([`Dir::open_regular`]).
+#[cfg(not(target_vendor = "apple"))]
+pub(crate) fn open_regular(path: &Path) -> io::Result<Option<(File, Metadata)>> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(None);
+    };
+    let Some(dir) = Dir::open(parent)? else {
+        return Ok(None);
+    };
+    dir.open_regular(name)
+}
+
+/// Whether `path` is the root followed only by folder and file names.
+#[cfg(target_vendor = "apple")]
+fn is_normalized(path: &Path) -> bool {
+    let mut components = path.components();
+    components.next() == Some(Component::RootDir) && components.all(|c| matches!(c, Component::Normal(_)))
+}
+
 #[cfg(unix)]
 impl Dir {
     /// Open the folder at the absolute, normalized `path`; `None` when a
+    /// folder on it (or the folder itself) is a link or not a folder. Only
+    /// the folder itself is opened.
+    #[cfg(target_vendor = "apple")]
+    pub(crate) fn open(path: &Path) -> io::Result<Option<Dir>> {
+        use rustix::fs::{Mode, OFlags};
+        if !is_normalized(path) {
+            return Err(not_absolute());
+        }
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW_ANY | OFlags::CLOEXEC;
+        let fd = match rustix::fs::open(path, flags, Mode::empty()) {
+            Ok(fd) => File::from(fd),
+            Err(e) if is_link(e) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        // The check that counts is on the opened handle.
+        if !fd.metadata()?.is_dir() {
+            return Ok(None);
+        }
+        Ok(Some(Dir { fd }))
+    }
+
+    /// Open the folder at the absolute, normalized `path`; `None` when a
     /// folder on it (or the folder itself) is a link or not a folder.
+    #[cfg(not(target_vendor = "apple"))]
     pub(crate) fn open(path: &Path) -> io::Result<Option<Dir>> {
         use rustix::fs::{Mode, OFlags};
         // Opening a folder only to walk below it needs no permission to list
@@ -99,16 +165,11 @@ impl Dir {
     /// open: it is opened non-blocking (which does not change how a regular
     /// file reads) and never as a controlling terminal, and the opened handle
     /// is checked.
+    #[cfg(not(target_vendor = "apple"))]
     pub(crate) fn open_regular(&self, name: &OsStr) -> io::Result<Option<(File, Metadata)>> {
         use rustix::fs::{Mode, OFlags};
         let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let file = match rustix::fs::openat(&self.fd, name, flags, Mode::empty()) {
-            Ok(fd) => File::from(fd),
-            Err(e) if is_link(e) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let meta = file.metadata()?;
-        Ok(meta.is_file().then_some((file, meta)))
+        regular(rustix::fs::openat(&self.fd, name, flags, Mode::empty()))
     }
 
     /// Create `name` in this folder for writing. Anything already there under
@@ -130,6 +191,20 @@ impl Dir {
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         Ok(rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty())?)
     }
+}
+
+/// The file just opened without following a link, if it is a regular file;
+/// `None` when it is not, a link included.
+#[cfg(unix)]
+fn regular(opened: rustix::io::Result<rustix::fd::OwnedFd>) -> io::Result<Option<(File, Metadata)>> {
+    let file = match opened {
+        Ok(fd) => File::from(fd),
+        Err(e) if is_link(e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    // The check that counts is on the opened handle.
+    let meta = file.metadata()?;
+    Ok(meta.is_file().then_some((file, meta)))
 }
 
 /// Whether opening without following a link failed because of one (or
@@ -277,7 +352,7 @@ impl Dir {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::Dir;
+    use super::{Dir, open_regular};
     use std::ffi::OsStr;
     use std::os::unix::fs::symlink;
 
@@ -288,9 +363,10 @@ mod tests {
         let root = std::fs::canonicalize(root.path()).unwrap();
         let chosen = root.join("chosen");
         std::fs::create_dir_all(chosen.join("inner")).unwrap();
-        std::fs::write(chosen.join("inner/rows.csv"), "id\n1\n").unwrap();
-        let inner = Dir::open(&chosen.join("inner")).unwrap().unwrap();
-        assert!(inner.open_regular(OsStr::new("rows.csv")).unwrap().is_some());
+        let rows = chosen.join("inner/rows.csv");
+        std::fs::write(&rows, "id\n1\n").unwrap();
+        assert!(Dir::open(&chosen.join("inner")).unwrap().is_some());
+        assert!(open_regular(&rows).unwrap().is_some());
 
         // The chosen folder swapped for a link to another one with the same
         // layout.
@@ -301,8 +377,10 @@ mod tests {
         symlink(&elsewhere, &chosen).unwrap();
         assert!(Dir::open(&chosen.join("inner")).unwrap().is_none());
         assert!(Dir::open(&chosen).unwrap().is_none());
+        assert!(open_regular(&rows).unwrap().is_none());
         // The real folder still opens.
         assert!(Dir::open(&elsewhere.join("inner")).unwrap().is_some());
+        assert!(open_regular(&elsewhere.join("inner/rows.csv")).unwrap().is_some());
     }
 
     #[test]
@@ -333,8 +411,56 @@ mod tests {
         std::fs::write(&target, "secret").unwrap();
         symlink(&target, root.join("link.txt")).unwrap();
         let dir = Dir::open(&root).unwrap().unwrap();
-        assert!(dir.open_regular(OsStr::new("link.txt")).unwrap().is_none());
+        assert!(open_regular(&root.join("link.txt")).unwrap().is_none());
         assert!(dir.create_new(OsStr::new("link.txt"), false).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"secret");
+    }
+}
+
+#[cfg(all(test, windows))]
+pub(crate) mod windows_tests {
+    use super::{Dir, open_regular};
+    use std::path::Path;
+
+    /// Make `link` a junction to the folder `target` (unlike a symbolic link,
+    /// one needs neither administrator rights nor developer mode).
+    pub(crate) fn junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+        assert!(out.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn a_junction_on_the_path_is_not_followed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("inner")).unwrap();
+        std::fs::write(elsewhere.join("inner").join("rows.csv"), "secret\n").unwrap();
+        junction(&temp.path().join("chosen"), &temp.path().join("elsewhere"));
+        // Not canonicalized: that would resolve the junction.
+        let chosen = root.join("chosen");
+        assert!(Dir::open(&chosen).unwrap().is_none());
+        assert!(Dir::open(&chosen.join("inner")).unwrap().is_none());
+        assert!(open_regular(&chosen.join("inner").join("rows.csv")).unwrap().is_none());
+        // The real folder still opens.
+        assert!(Dir::open(&elsewhere.join("inner")).unwrap().is_some());
+        assert!(open_regular(&elsewhere.join("inner").join("rows.csv")).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_held_folder_cannot_be_moved_aside_until_it_is_released() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let parent = root.join("parent");
+        let chosen = parent.join("chosen");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let dir = Dir::open(&chosen).unwrap().unwrap();
+        // Neither the folder nor one above it can be renamed to make room for
+        // a junction in its place.
+        assert!(std::fs::rename(&chosen, parent.join("moved")).is_err());
+        assert!(std::fs::rename(&parent, root.join("moved")).is_err());
+        assert!(std::fs::metadata(&chosen).unwrap().is_dir());
+        drop(dir);
+        std::fs::rename(&parent, root.join("moved")).unwrap();
     }
 }

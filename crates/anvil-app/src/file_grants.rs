@@ -581,21 +581,15 @@ fn certificate_pem(bytes: &[u8]) -> Result<String, GrantError> {
 
 /// Open the absolute, canonical `path` for reading if it is a regular file;
 /// `None` when it is not, a link included. Callers canonicalize `path` just
-/// before, so a link at it or at a folder on it was swapped in since: the
-/// path is walked without following one ([`Dir`]). A FIFO or device found at
-/// the path never blocks the open, even one swapped in just before it, and
+/// before, so a link at it or at a folder on it was swapped in since: it is
+/// opened without following one (`crate::no_follow`). A FIFO or device found
+/// at the path never blocks the open, even one swapped in just before it, and
 /// the opened handle is checked. The path is checked first as a cheap filter.
 pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
     if !std::fs::symlink_metadata(path)?.is_file() {
         return Ok(None);
     }
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Ok(None);
-    };
-    let Some(dir) = Dir::open(parent)? else {
-        return Ok(None);
-    };
-    dir.open_regular(name)
+    crate::no_follow::open_regular(path)
 }
 
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
@@ -626,9 +620,12 @@ fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool
     // A fresh, exclusively created file: an existing file or link under the
     // temporary name is never opened or followed.
     let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    // Renaming replaces the destination entry itself; a link there is
-    // replaced, not followed.
-    match write_new(&folder, &tmp, bytes, owner_only).and_then(|()| folder.rename(&tmp, name)) {
+    let file = folder.create_new(&tmp, owner_only).map_err(io)?;
+    // Only a file created here is removed when the write fails, never an
+    // entry that was already there under the temporary name. Renaming
+    // replaces the destination entry itself; a link there is replaced, not
+    // followed.
+    match write_synced(file, bytes).and_then(|()| folder.rename(&tmp, name)) {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = folder.remove_file(&tmp);
@@ -637,10 +634,11 @@ fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool
     }
 }
 
-fn write_new(folder: &Dir, name: &OsStr, bytes: &[u8], owner_only: bool) -> std::io::Result<()> {
-    let mut f = folder.create_new(name, owner_only)?;
-    f.write_all(bytes)?;
-    f.sync_all()
+/// Write `bytes` to `file` and flush them to disk; the file is closed
+/// before it is renamed.
+fn write_synced(mut file: File, bytes: &[u8]) -> std::io::Result<()> {
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn refuse_directory(dest: &Path) -> Result<(), GrantError> {
@@ -742,5 +740,34 @@ mod tests {
         std::fs::create_dir_all(&chosen).unwrap();
         assert_eq!(write_in(&chosen, id, name, b"{}", false).unwrap_err(), GrantError::Changed);
         assert!(std::fs::read_dir(&chosen).unwrap().next().is_none());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{Dir, GrantError, open_regular, write_in};
+    use crate::no_follow::windows_tests::junction;
+    use std::ffi::OsStr;
+
+    /// The folder was chosen, then a folder above it was moved aside and a
+    /// junction to a folder with the same layout put in its place: nothing is
+    /// read or written through the junction.
+    #[test]
+    fn an_export_folder_reached_through_a_junction_is_not_written_through() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let chosen = root.join("parent").join("exports");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let id = Dir::open(&chosen).unwrap().unwrap().id().unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("exports")).unwrap();
+        std::fs::rename(root.join("parent"), root.join("moved")).unwrap();
+        junction(&temp.path().join("parent"), &temp.path().join("elsewhere"));
+        let name = OsStr::new("bundle.anvil");
+        assert_eq!(write_in(&chosen, id, name, b"bundle", true).unwrap_err(), GrantError::Changed);
+        assert!(std::fs::read_dir(elsewhere.join("exports")).unwrap().next().is_none());
+        assert!(std::fs::read_dir(root.join("moved").join("exports")).unwrap().next().is_none());
+        std::fs::write(elsewhere.join("exports").join("rows.csv"), "secret\n").unwrap();
+        assert!(open_regular(&chosen.join("rows.csv")).unwrap().is_none());
     }
 }
