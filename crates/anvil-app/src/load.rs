@@ -465,8 +465,9 @@ impl App {
     }
 
     pub fn load_report(&self, run_id: &Id) -> Result<LoadReport> {
-        let all: Vec<LoadReport> = self.store.list_load_reports(None)?;
-        all.into_iter().find(|r| r.run_id == *run_id).ok_or_else(|| AppError::NotFound(format!("load report {run_id}")))
+        // Reports are stored under their run id; only this one is decrypted.
+        let report: Option<LoadReport> = self.store.get_load_report(run_id)?;
+        report.filter(|r| r.run_id == *run_id).ok_or_else(|| AppError::NotFound(format!("load report {run_id}")))
     }
 
     pub fn delete_load_report(&self, run_id: &Id) -> Result<()> {

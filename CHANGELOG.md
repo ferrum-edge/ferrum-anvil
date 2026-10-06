@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Security
+
+- Request revisions are sealed together with the workspace and request that own them, and are
+  read only while that request still belongs to that workspace. History records and load
+  reports are read only under the workspace (and, for history, the request) sealed in them, on
+  every read path, and a write must index them under that owner. A history record is also
+  sealed together with the response body it references and is read only with that body. A
+  write never replaces a stored history record or load report under another owner. See
+  [docs/security/workspace-owner-binding.md](docs/security/workspace-owner-binding.md).
+  - The database schema moves to 3. At the first open or unlock, each existing revision whose
+    request authenticates is sealed again under that request's workspace, and each existing
+    history record that opens under its owner is sealed again with its body, in one
+    transaction. Any other revision or record is left as it was, stays refused as before and is
+    never adopted; the number left is logged. A database whose recorded version was set back is
+    refused.
+  - Before that step, a `before-schema-3` checkpoint of the database is taken in the profile's
+    `checkpoints` folder. See
+    [Going back to an earlier build](docs/storage-and-recovery.md#going-back-to-an-earlier-build).
+  - A profile-wide read that meets a history record or load report failing these checks names
+    its id, so it can be found and deleted.
+  - **BREAKING:** earlier builds refuse a schema 3 database, and a full backup made from one,
+    as newer. Portable bundles still import into earlier builds. Close earlier builds before
+    upgrading.
+
 ## [0.1.2] - 2026-10-06
 
 Security hardening release covering renderer authority and native confirmations, linked-file and

@@ -10,8 +10,11 @@
 //! in the UI.
 //! Object reads also compare the sealed identity with row metadata; object
 //! updates authenticate the old identity and preserve its workspace inside
-//! a write transaction. Revisions resolve their owner through their sealed
-//! request id. Profile-only kinds must have no workspace or parent index.
+//! a write transaction. Revisions seal the workspace and request that own
+//! them (schema 3) and must still match their request's sealed owner.
+//! History records and load reports are read only under the workspace sealed
+//! in them, and a history record is bound to the response body it references
+//! (schema 3). Profile-only kinds must have no workspace or parent index.
 //!
 //! One connection serves the whole profile. Ordinary operations lock it per
 //! statement; [`Store::atomically`] holds it for its whole transaction and
@@ -31,7 +34,8 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde_json::value::RawValue;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
@@ -45,7 +49,7 @@ pub const DB_FILE: &str = "anvil.db";
 /// before failing with `SQLITE_BUSY`.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
-pub const DB_SCHEMA_VERSION: i64 = 2;
+pub const DB_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -249,9 +253,8 @@ fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
         }
         kind::REVISION => {
             let v: RequestRevision = decode(json)?;
-            // This released type has no workspace field. Check the current
-            // parent's sealed owner, never its index alone. Historical owner
-            // proof needs the format decision in workspace-owner-binding.md.
+            // This released type has no workspace field: the owner is sealed
+            // around it (see `SealedRevision`) and checked in `open_object`.
             (Some(v.id), None, Some(v.request_id))
         }
         kind::ENVIRONMENT => {
@@ -372,6 +375,98 @@ fn secret_aad(id: &str, owner: Option<&str>) -> Vec<u8> {
     }
 }
 
+/// Associated data of a request revision sealed by schema 3, whose plaintext
+/// is a [`SealedRevision`]. The id is prefixed with its length, and the `v3`
+/// prefix keeps it apart from the schema 1 [`aad`] that earlier revisions
+/// were sealed under, so neither opens as the other.
+fn revision_aad(id: &str) -> Vec<u8> {
+    format!("anvil/v3/objects/revision/{}:{id}", id.len()).into_bytes()
+}
+
+/// Plaintext of a schema 3 request revision: the released revision JSON with
+/// the request and the workspace that owned it when it was sealed. The owner
+/// is part of the authenticated payload, so a revision put back under another
+/// workspace, or under a request id reused elsewhere, no longer validates.
+#[derive(Serialize, Deserialize)]
+struct SealedRevision<'a> {
+    workspace_id: Id,
+    request_id: Id,
+    #[serde(borrow)]
+    revision: &'a RawValue,
+}
+
+/// Seal `json`, revision `id` of `request_id`, for workspace `workspace_id`.
+fn seal_revision(key: &Key, id: &str, workspace_id: Id, request_id: Id, json: &[u8]) -> Result<Vec<u8>> {
+    let revision: &RawValue = serde_json::from_slice(json)?;
+    let pt = Zeroizing::new(serde_json::to_vec(&SealedRevision { workspace_id, request_id, revision })?);
+    Ok(crypto::seal(key, &revision_aad(id), &pt))
+}
+
+/// Open schema 3 revision `id`: its sealed owner, its sealed request and the
+/// released revision JSON. Row indexes are not consulted.
+fn open_revision(key: &Key, id: &str, env: &[u8]) -> Result<(Id, Id, Zeroizing<Vec<u8>>)> {
+    let pt = crypto::open(key, &revision_aad(id), env).map_err(|_| StoreError::Integrity)?;
+    let sealed: SealedRevision<'_> = serde_json::from_slice(&pt).map_err(|_| StoreError::Integrity)?;
+    Ok((sealed.workspace_id, sealed.request_id, Zeroizing::new(sealed.revision.get().as_bytes().to_vec())))
+}
+
+/// Associated data of a history record sealed by schema 3: its id and the
+/// response body blob its row references (`None`: no body). A blob id is a
+/// keyed hash of its content and a blob opens only under its own id, so a
+/// record whose body column is pointed at another blob, or cleared, no longer
+/// opens. The id and the blob id are each prefixed with their length, and the
+/// `v3` prefix keeps it apart from the schema 1 [`aad`] that earlier records
+/// were sealed under.
+fn history_aad(id: &str, body: Option<&str>) -> Vec<u8> {
+    match body {
+        Some(b) => format!("anvil/v3/history/record/{}:{id}/body/{}:{b}", id.len(), b.len()).into_bytes(),
+        None => format!("anvil/v3/history/record/{}:{id}/no-body", id.len()).into_bytes(),
+    }
+}
+
+/// The owner fields an execution record seals. A record without them (no
+/// workspace or request) has `None`.
+#[derive(Deserialize)]
+struct HistoryOwner {
+    #[serde(default)]
+    workspace_id: Option<Id>,
+    #[serde(default)]
+    request_id: Option<Id>,
+}
+
+/// Refuse a history record whose sealed workspace or request differs from
+/// the row's plaintext indexes.
+fn check_history_owner(json: &[u8], workspace_id: Option<&str>, request_id: Option<&str>) -> Result<()> {
+    let sealed: HistoryOwner = serde_json::from_slice(json).map_err(|_| StoreError::Integrity)?;
+    if sealed.workspace_id.map(|w| w.to_string()).as_deref() != workspace_id
+        || sealed.request_id.map(|r| r.to_string()).as_deref() != request_id
+    {
+        return Err(StoreError::Integrity);
+    }
+    Ok(())
+}
+
+/// The owner a load report seals: the workspace of the plan it ran.
+#[derive(Deserialize)]
+struct ReportOwner {
+    plan: ReportPlan,
+}
+
+#[derive(Deserialize)]
+struct ReportPlan {
+    workspace_id: Id,
+}
+
+/// Refuse a load report whose sealed workspace differs from the row's
+/// plaintext index.
+fn check_report_owner(json: &[u8], workspace_id: Option<&str>) -> Result<()> {
+    let sealed: ReportOwner = serde_json::from_slice(json).map_err(|_| StoreError::Integrity)?;
+    if Some(sealed.plan.workspace_id.to_string()).as_deref() != workspace_id {
+        return Err(StoreError::Integrity);
+    }
+    Ok(())
+}
+
 /// One schema step. Each runs in its own write transaction together with the
 /// version bump that records it.
 enum Migration {
@@ -379,6 +474,17 @@ enum Migration {
     Sql(&'static str),
     /// Re-seal every vault secret under [`secret_aad`] (v2).
     SecretOwners,
+    /// Seal every request revision with its owner under [`revision_aad`], and
+    /// every history record with its response body under [`history_aad`] (v3).
+    RecordBindings,
+}
+
+impl Migration {
+    /// Whether the step seals existing rows again, after which earlier builds
+    /// refuse the database (see [`migrate_on`]).
+    fn reseals(&self) -> bool {
+        !matches!(self, Migration::Sql(_))
+    }
 }
 
 const MIGRATIONS: &[Migration] = &[
@@ -386,7 +492,14 @@ const MIGRATIONS: &[Migration] = &[
     Migration::Sql(BASELINE),
     // v2 — vault secrets bind their owner.
     Migration::SecretOwners,
+    // v3 — request revisions bind their workspace and request, history
+    // records the response body they reference.
+    Migration::RecordBindings,
 ];
+
+/// How many rows a step that seals rows again reads at a time, so it never
+/// holds a whole table in memory.
+const MIGRATION_BATCH: i64 = 256;
 
 const BASELINE: &str = r#"
     CREATE TABLE objects (
@@ -451,14 +564,131 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
         let env = crypto::seal(key, &v2, &pt);
         conn.execute("UPDATE secrets SET payload=?1 WHERE id=?2", params![env, id])?;
     }
+    record_left(conn, "secrets_left_at_v2", left)?;
+    Ok(left)
+}
+
+/// Record in `meta` under `name` how many rows a step left as they were, or
+/// remove an earlier count when it left none.
+fn record_left(conn: &Connection, name: &str, left: u64) -> Result<()> {
     if left > 0 {
         conn.execute(
-            "INSERT INTO meta(key, value) VALUES('secrets_left_at_v2', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![left.to_string()],
+            "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![name, left.to_string()],
         )?;
     } else {
-        conn.execute("DELETE FROM meta WHERE key='secrets_left_at_v2'", [])?;
+        conn.execute("DELETE FROM meta WHERE key=?1", params![name])?;
     }
+    Ok(())
+}
+
+/// v3: seal each request revision, sealed under [`aad`] until now, as a
+/// [`SealedRevision`] under [`revision_aad`] with the workspace that owns its
+/// request. Only a revision that the schema 2 read accepts is sealed: it
+/// decrypts, its sealed request id is its parent index, and that request
+/// itself authenticates with the revision's workspace index as its sealed
+/// owner. The owner comes from that request, never from the revision's
+/// indexes alone. Any other revision (an orphan, or one whose request does
+/// not authenticate or is owned elsewhere) is left as it is, still sealed
+/// under [`aad`], which ordinary reads no longer accept: it stays refused,
+/// as it already was, and is never adopted. Returns how many were left, also
+/// recorded in `meta` (`revisions_left_at_v3`, removed when none was).
+///
+/// Revisions are read [`MIGRATION_BATCH`] at a time in row order, and each
+/// request is authenticated once however many revisions it has.
+///
+/// A row that opens under [`revision_aad`] instead was sealed by schema 3,
+/// so the version recorded in `meta` was set back after this step ran: the
+/// step fails with `Integrity` and its transaction writes nothing.
+fn seal_revision_owners(conn: &Connection, key: &Key) -> Result<u64> {
+    let records = Records { key: key.clone(), conn };
+    // Request id -> the workspace it authenticates under, if it does.
+    let mut owners: HashMap<String, Option<String>> = HashMap::new();
+    let sql = "SELECT workspace_id, parent_id, payload, id, rowid FROM objects
+               WHERE kind=?1 AND (?2 IS NULL OR rowid>?2) ORDER BY rowid LIMIT ?3";
+    let mut st = conn.prepare(sql)?;
+    let mut left = 0;
+    // The last row id read; `None` before the first batch.
+    let mut after: Option<i64> = None;
+    loop {
+        let rows = st.query_map(params![kind::REVISION, after, MIGRATION_BATCH], |r| {
+            Ok((r.get::<_, i64>(4)?, r.get::<_, String>(3)?, ObjectRow::read(r)?))
+        })?;
+        let rows: Vec<(i64, String, ObjectRow)> = rows.collect::<std::result::Result<_, _>>()?;
+        let Some(&(last, ..)) = rows.last() else { break };
+        after = Some(last);
+        for (_, id, row) in rows {
+            if crypto::open(key, &revision_aad(&id), &row.payload).is_ok() {
+                return Err(StoreError::Integrity);
+            }
+            let owner = match row.parent.as_deref() {
+                None => None,
+                Some(request) => match owners.get(request) {
+                    Some(owner) => owner.clone(),
+                    None => {
+                        let owner = records.request_owner(request)?;
+                        owners.insert(request.to_string(), owner.clone());
+                        owner
+                    }
+                },
+            };
+            let env = match records.reseal_legacy_revision(&id, &row, owner.as_deref()) {
+                Ok(env) => env,
+                Err(StoreError::Integrity | StoreError::Serde(_)) => {
+                    left += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            conn.execute("UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3", params![env, kind::REVISION, id])?;
+        }
+    }
+    record_left(conn, "revisions_left_at_v3", left)?;
+    Ok(left)
+}
+
+/// v3: seal each history record, sealed under [`aad`] until now, under
+/// [`history_aad`] with the response body its row references when the step
+/// runs, as revisions take their request's owner once. Only a record that
+/// the schema 2 read accepts is sealed: it decrypts, and the workspace and
+/// request it seals are its row's indexes. Any other record is left as it
+/// is, still sealed under [`aad`], which reads no longer accept: it stays
+/// refused and can be deleted. Returns how many were left, also recorded in
+/// `meta` (`history_left_at_v3`, removed when none was). Records are read
+/// [`MIGRATION_BATCH`] at a time in row order.
+///
+/// A row that opens under [`history_aad`] instead was sealed by schema 3, so
+/// the version recorded in `meta` was set back after this step ran: the step
+/// fails with `Integrity` and its transaction writes nothing.
+fn seal_history_bodies(conn: &Connection, key: &Key) -> Result<u64> {
+    let sql = format!("SELECT rowid, {HISTORY_COLUMNS} FROM history WHERE (?1 IS NULL OR rowid>?1) ORDER BY rowid LIMIT ?2");
+    let mut st = conn.prepare(&sql)?;
+    let mut left = 0;
+    // The last row id read; `None` before the first batch.
+    let mut after: Option<i64> = None;
+    loop {
+        let rows = st.query_map(params![after, MIGRATION_BATCH], |r| Ok((r.get::<_, i64>(0)?, HistoryRow::read_from(r, 1)?)))?;
+        let rows: Vec<(i64, HistoryRow)> = rows.collect::<std::result::Result<_, _>>()?;
+        let Some(&(last, _)) = rows.last() else { break };
+        after = Some(last);
+        for (_, row) in rows {
+            let bound = history_aad(&row.id, row.body_blob.as_deref());
+            if crypto::open(key, &bound, &row.payload).is_ok() {
+                return Err(StoreError::Integrity);
+            }
+            let Ok(pt) = crypto::open(key, &aad("history", "record", &row.id), &row.payload) else {
+                left += 1;
+                continue;
+            };
+            if check_history_owner(&pt, row.workspace_id.as_deref(), row.request_id.as_deref()).is_err() {
+                left += 1;
+                continue;
+            }
+            let env = crypto::seal(key, &bound, &pt);
+            conn.execute("UPDATE history SET payload=?1 WHERE id=?2", params![env, row.id])?;
+        }
+    }
+    record_left(conn, "history_left_at_v3", left)?;
     Ok(left)
 }
 
@@ -483,6 +713,25 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
     Ok(())
 }
 
+/// Copy the database on `conn`, as it stands, into the `checkpoints` folder
+/// of the profile in `dir` (see [`Store::checkpoint`]). A name already taken
+/// in the same millisecond gets a number, so an earlier checkpoint is never
+/// in the way.
+fn checkpoint_on(conn: &Connection, dir: &Path, label: &str) -> Result<PathBuf> {
+    let dir = dir.join("checkpoints");
+    std::fs::create_dir_all(&dir)?;
+    let safe: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+    let mut path = dir.join(format!("{stamp}-{safe}.db"));
+    let mut n = 1;
+    while path.exists() {
+        n += 1;
+        path = dir.join(format!("{stamp}-{safe}-{n}.db"));
+    }
+    conn.execute("VACUUM INTO ?1", params![path.display().to_string()])?;
+    Ok(path)
+}
+
 /// Apply the pending migrations to the database on `conn` with `key`, which
 /// [`verify_key_on`] has checked first, so a wrong key fails before anything
 /// is re-sealed with it. Each step runs in its own write transaction that
@@ -491,10 +740,23 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
 /// creates the unversioned indexes ([`HISTORY_BODY_INDEX`]) where they are
 /// missing, as a best effort; with nothing pending and every index in place
 /// it only reads.
-fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
+///
+/// Before a step seals the rows of an existing database again, which earlier
+/// builds then refuse, a checkpoint of the database as it was is taken in the
+/// `checkpoints` folder of profile `profile` (`before-schema-<version>`), so
+/// an earlier build can still be gone back to. A checkpoint that cannot be
+/// taken fails the migration before anything is written. `None` takes none:
+/// a checkpoint being restored is itself such a copy.
+fn migrate_on(conn: &mut Connection, key: &Key, profile: Option<&Path>) -> Result<()> {
     let found = stored_schema_version(conn)?;
     if found > DB_SCHEMA_VERSION {
         return Err(StoreError::FutureSchema { found, supported: DB_SCHEMA_VERSION });
+    }
+    let reseal = (1i64..).zip(MIGRATIONS).find(|(v, step)| *v > found && step.reseals());
+    if found > 0
+        && let (Some(dir), Some((v, _))) = (profile, reseal)
+    {
+        checkpoint_on(conn, dir, &format!("before-schema-{v}"))?;
     }
     for (v, step) in (1i64..).zip(MIGRATIONS) {
         if v <= found {
@@ -509,20 +771,26 @@ fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
         if v <= found {
             continue;
         }
-        let left = match step {
+        let left: Vec<(u64, &str)> = match step {
             Migration::Sql(sql) => {
                 tx.execute_batch(sql)?;
-                0
+                Vec::new()
             }
-            Migration::SecretOwners => reseal_secret_owners(&tx, key)?,
+            Migration::SecretOwners => vec![(reseal_secret_owners(&tx, key)?, "vault secrets that did not decrypt were left unchanged")],
+            Migration::RecordBindings => vec![
+                (seal_revision_owners(&tx, key)?, "request revisions whose request did not authenticate were left unchanged"),
+                (seal_history_bodies(&tx, key)?, "history records that did not decrypt under their owner were left unchanged"),
+            ],
         };
         tx.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![v.to_string()],
         )?;
         tx.commit()?;
-        if left > 0 {
-            tracing::warn!(schema = v, left, "vault secrets that did not decrypt were left as they were");
+        for (left, what) in left {
+            if left > 0 {
+                tracing::warn!(schema = v, left, "{what}");
+            }
         }
     }
     // Best effort: a missing index only slows lookups, so it never keeps a
@@ -533,38 +801,62 @@ fn migrate_on(conn: &mut Connection, key: &Key) -> Result<()> {
     Ok(())
 }
 
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    let sql = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)";
+    Ok(conn.query_row(sql, params![name], |r| r.get::<_, bool>(0))?)
+}
+
 /// Refuse the database on `conn` when its recorded version was set back below
-/// 2 after the v2 step ran: a vault secret in it opens under [`secret_aad`],
-/// which only schema 2 seals with, so that step would fail on it (see
-/// [`reseal_secret_owners`]). Reads only.
+/// a step that has run: below 2 while a vault secret in it opens under
+/// [`secret_aad`], or below 3 while a request revision opens under
+/// [`revision_aad`] or a history record under [`history_aad`]. Only that step
+/// seals with that data, so it would fail on the row (see
+/// [`reseal_secret_owners`], [`seal_revision_owners`] and
+/// [`seal_history_bodies`]). Reads only.
 fn check_not_set_back(conn: &Connection, key: &Key) -> Result<()> {
-    if stored_schema_version(conn)? >= 2 {
-        return Ok(());
+    let found = stored_schema_version(conn)?;
+    if found < 2 && has_table(conn, "secrets")? {
+        let mut st = conn.prepare("SELECT id, workspace_id, payload FROM secrets")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Vec<u8>>(2)?)))?;
+        for row in rows {
+            let (id, owner, env) = row?;
+            if crypto::open(key, &secret_aad(&id, owner.as_deref()), &env).is_ok() {
+                return Err(StoreError::Integrity);
+            }
+        }
     }
-    let sql = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='secrets')";
-    if !conn.query_row(sql, [], |r| r.get::<_, bool>(0))? {
-        return Ok(());
+    if found < 3 && has_table(conn, "objects")? {
+        let mut st = conn.prepare("SELECT id, payload FROM objects WHERE kind=?1")?;
+        let rows = st.query_map(params![kind::REVISION], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        for row in rows {
+            let (id, env) = row?;
+            if crypto::open(key, &revision_aad(&id), &env).is_ok() {
+                return Err(StoreError::Integrity);
+            }
+        }
     }
-    let mut st = conn.prepare("SELECT id, workspace_id, payload FROM secrets")?;
-    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Vec<u8>>(2)?)))?;
-    for row in rows {
-        let (id, owner, env) = row?;
-        if crypto::open(key, &secret_aad(&id, owner.as_deref()), &env).is_ok() {
-            return Err(StoreError::Integrity);
+    if found < 3 && has_table(conn, "history")? {
+        let mut st = conn.prepare(&format!("SELECT {HISTORY_COLUMNS} FROM history"))?;
+        for row in st.query_map([], |r| HistoryRow::read_from(r, 0))? {
+            let row = row?;
+            if crypto::open(key, &history_aad(&row.id, row.body_blob.as_deref()), &row.payload).is_ok() {
+                return Err(StoreError::Integrity);
+            }
         }
     }
     Ok(())
 }
 
 /// Copy the database `src` over the one on `conn`, then check `key` against
-/// the copy and migrate it.
+/// the copy and migrate it. The checkpoint `src` is itself the copy a
+/// migration would keep, so it takes none.
 fn restore_on(conn: &mut Connection, src: &Connection, key: &Key) -> Result<()> {
     {
         let backup = rusqlite::backup::Backup::new(src, conn)?;
         backup.run_to_completion(256, Duration::from_millis(0), None)?;
     }
     verify_key_on(conn, key)?;
-    migrate_on(conn, key)
+    migrate_on(conn, key, None)
 }
 
 impl Store {
@@ -583,7 +875,7 @@ impl Store {
         }
         // The key is checked before a migration re-seals anything with it.
         verify_key_on(&conn, &key)?;
-        migrate_on(&mut conn, &key)?;
+        migrate_on(&mut conn, &key, Some(dir))?;
         Ok(Store {
             dir: dir.to_path_buf(),
             conn: Mutex::new(conn),
@@ -666,10 +958,11 @@ impl Store {
     }
 
     /// Unlock with `key`: check it, apply any pending migration (such as the
-    /// v2 re-seal of vault secrets) with it, and only then keep it, all under
-    /// one hold of the connection, so no other call runs with a key that is
-    /// not yet checked or on a database not yet migrated. A wrong key, or a
-    /// migration that fails, leaves the store locked.
+    /// v2 re-seal of vault secrets or the v3 seal of revision owners and
+    /// history bodies) with it, and only then keep it, all under one hold of the connection, so no
+    /// other call runs with a key that is not yet checked or on a database
+    /// not yet migrated. A wrong key, or a migration that fails, leaves the
+    /// store locked.
     pub fn unlock(&self, key: Key) -> Result<()> {
         self.unlock_if(key, || true)
     }
@@ -688,7 +981,7 @@ impl Store {
     pub fn unlock_if(&self, key: Key, gate: impl FnOnce() -> bool) -> Result<()> {
         let r = self.conn().and_then(|mut conn| {
             verify_key_on(&conn, &key)?;
-            migrate_on(&mut conn, &key)?;
+            migrate_on(&mut conn, &key, Some(&self.dir))?;
             let mut k = self.key.write();
             if !gate() {
                 return Ok(false);
@@ -826,7 +1119,10 @@ impl Store {
     /// Store a history record and its optional response body. The body blob
     /// and the history row that references it commit in one write
     /// transaction, so `prune_history` on any connection to this profile
-    /// never sees the body unreferenced and collects it.
+    /// never sees the body unreferenced and collects it. The record is sealed
+    /// together with the id of its body. One already stored under `id` must
+    /// authenticate and seal the same workspace and request, or the write
+    /// fails with `Ownership`.
     pub fn add_history<T: Serialize>(
         &self,
         id: &Id,
@@ -891,9 +1187,18 @@ impl Store {
 
     // ------------------------------------------------------------ load reports
 
+    /// Store a load report. One already stored under `id` must authenticate
+    /// and seal the same workspace, which is checked under SQLite's write
+    /// lock, or the write fails with `Ownership`.
     pub fn put_load_report<T: Serialize>(&self, id: &Id, workspace_id: Option<&Id>, started_at_ms: i64, report: &T) -> Result<()> {
-        let (conn, key) = self.sealing()?;
-        Records { key, conn: &conn }.put_load_report(id, workspace_id, started_at_ms, report)
+        self.atomically(|tx| tx.put_load_report(id, workspace_id, started_at_ms, report))
+    }
+
+    /// Load report `id`, checked against the workspace it seals.
+    pub fn get_load_report<T: DeserializeOwned>(&self, id: &Id) -> Result<Option<T>> {
+        let key = self.key()?;
+        let conn = self.conn()?;
+        Records { key, conn: &conn }.get_load_report(id)
     }
 
     pub fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
@@ -955,22 +1260,19 @@ impl Store {
     /// Consistent copy of the database (ciphertext) for restore checkpoints.
     pub fn checkpoint(&self, label: &str) -> Result<PathBuf> {
         let conn = self.writing()?;
-        let dir = self.dir.join("checkpoints");
-        std::fs::create_dir_all(&dir)?;
-        let safe: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
-        let path = dir.join(format!("{}-{safe}.db", chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ")));
-        conn.execute("VACUUM INTO ?1", params![path.display().to_string()])?;
-        Ok(path)
+        checkpoint_on(&conn, &self.dir, label)
     }
 
     /// Replace the live database with a checkpoint, discarding every change
-    /// made since it was taken. Nothing calls this automatically. A
+    /// made since it was taken. Nothing calls this automatically. Besides
+    /// those the app takes, a `before-schema-<version>` checkpoint is taken
+    /// before a migration seals existing rows again (see `migrate_on`). A
     /// checkpoint written by a newer schema, sealed with another key, or
-    /// whose recorded version was set back below schema 2 after it re-sealed
-    /// its vault secrets, is refused before the live database is touched; one
-    /// taken before a migration is migrated again, under the same hold of the
-    /// connection as the copy. A copy or migration that fails leaves the
-    /// store locked.
+    /// whose recorded version was set back below a step that already ran on
+    /// it (see `check_not_set_back`), is refused before the live database
+    /// is touched; one taken before a migration is migrated again, under the
+    /// same hold of the connection as the copy. A copy or migration that
+    /// fails leaves the store locked.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
         let key = self.key()?;
         let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -1184,11 +1486,13 @@ impl StoreRead<'_> {
     /// No spec, route, owner, file name or other revision data is returned.
     /// `None` requires callers to use ordinary validated reads instead.
     ///
-    /// Legacy revisions have no authenticated historical workspace owner.
-    /// Neither plaintext owner/parent indexes nor a recreated request supply
-    /// that proof. This read ignores those indexes only to preserve references
-    /// or exclude an orphan from a portable backup; it never adopts or reseals
-    /// the row. Keep undecodable rows and their pins until safely resolved.
+    /// Revisions left under the schema 1 seal by the schema 3 migration have
+    /// no authenticated historical workspace owner, and neither plaintext
+    /// owner/parent indexes nor a recreated request supply that proof. This
+    /// read opens them, and schema 3 revisions, ignoring those indexes only
+    /// to preserve references or exclude an orphan from a portable backup; it
+    /// never adopts or reseals the row. Keep undecodable rows and their pins
+    /// until safely resolved.
     #[doc(hidden)]
     pub fn orphan_revision_attachment_refs_for_retention(&self, id: &Id) -> Result<Option<HashSet<String>>> {
         self.records()?.orphan_revision_attachment_refs_for_retention(id)
@@ -1243,7 +1547,10 @@ impl StoreRead<'_> {
         self.records()?.get_blob(id)
     }
 
-    /// Every history entry (no limit), newest first.
+    /// Every history entry (no limit), newest first, each checked against the
+    /// workspace and request its record seals and the body it is bound to. An
+    /// entry that fails names its id (`ObjectIntegrity`), so it can be found
+    /// and deleted.
     pub fn history_entries(&self) -> Result<Vec<HistoryEntry>> {
         self.records()?.list_history(None, None, None)
     }
@@ -1256,12 +1563,11 @@ impl StoreRead<'_> {
         self.records()?.list_load_reports(workspace_id)
     }
 
-    /// Id and workspace of every stored load report.
+    /// Id and workspace of every stored load report, each checked against
+    /// the workspace it seals. A report that fails names its id
+    /// (`ObjectIntegrity`), so it can be found and deleted.
     pub fn load_report_entries(&self) -> Result<Vec<(String, Option<String>)>> {
-        let _ = self.store.key()?;
-        let mut st = self.conn.prepare("SELECT id,workspace_id FROM load_reports")?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<Vec<(String, Option<String>)>, _>>()?;
-        Ok(rows)
+        Ok(self.records()?.load_report_rows(None)?.into_iter().map(|(id, ws, _)| (id, ws)).collect())
     }
 }
 
@@ -1272,6 +1578,50 @@ struct Records<'c> {
     key: Key,
     conn: &'c Connection,
 }
+
+/// A history row: its id, workspace and request indexes, start, size, the
+/// response body blob it references and the sealed record.
+struct HistoryRow {
+    id: String,
+    workspace_id: Option<String>,
+    request_id: Option<String>,
+    started_at: i64,
+    size: i64,
+    body_blob: Option<String>,
+    payload: Vec<u8>,
+}
+
+/// The columns [`HistoryRow::read_from`] reads, in order.
+const HISTORY_COLUMNS: &str = "id, workspace_id, request_id, started_at, size, body_blob, payload";
+
+impl HistoryRow {
+    /// Read [`HISTORY_COLUMNS`] from `row`, starting at column `first`.
+    fn read_from(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(first)?,
+            workspace_id: row.get(first + 1)?,
+            request_id: row.get(first + 2)?,
+            started_at: row.get(first + 3)?,
+            size: row.get(first + 4)?,
+            body_blob: row.get(first + 5)?,
+            payload: row.get(first + 6)?,
+        })
+    }
+}
+
+/// Name the history record or load report `id` a profile read failed on, so
+/// it can be found and deleted, instead of the generic decrypt error. Only
+/// the kind and id are disclosed.
+fn row_integrity(kind: &str, id: &str, e: StoreError) -> StoreError {
+    match e {
+        StoreError::Integrity => StoreError::ObjectIntegrity { kind: kind.to_string(), id: id.to_string() },
+        other => other,
+    }
+}
+
+/// A load report checked against its sealed workspace: id, workspace index
+/// and the decrypted report.
+type ReportRow = (String, Option<String>, Zeroizing<Vec<u8>>);
 
 struct ObjectRow {
     owner: Option<String>,
@@ -1340,10 +1690,13 @@ impl Records<'_> {
         {
             return Err(StoreError::NotFound("workspace".into()));
         }
-        if kind == kind::REVISION {
+        let env = if kind == kind::REVISION {
             self.validate_revision_owner(owner.as_deref(), parent.as_deref())?;
-        }
-        let env = crypto::seal(&self.key, &aad("objects", kind, &id_s), &json);
+            let (Some(ws), Some(request)) = (workspace_id, parent_id) else { return Err(StoreError::Integrity) };
+            seal_revision(&self.key, &id_s, *ws, *request, &json)?
+        } else {
+            crypto::seal(&self.key, &aad("objects", kind, &id_s), &json)
+        };
         self.conn.execute(
             "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(kind,id) DO UPDATE SET workspace_id=excluded.workspace_id, parent_id=excluded.parent_id, sort_key=excluded.sort_key, updated_at=excluded.updated_at, payload=excluded.payload",
@@ -1379,12 +1732,53 @@ impl Records<'_> {
     }
 
     fn open_object(&self, kind: &str, id: &str, row: &ObjectRow) -> Result<Zeroizing<Vec<u8>>> {
-        let pt = crypto::open(&self.key, &aad("objects", kind, id), &row.payload).map_err(|_| StoreError::Integrity)?;
-        validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
-        if kind == kind::REVISION {
-            self.validate_revision_owner(row.owner.as_deref(), row.parent.as_deref())?;
+        if kind != kind::REVISION {
+            let pt = crypto::open(&self.key, &aad("objects", kind, id), &row.payload).map_err(|_| StoreError::Integrity)?;
+            validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
+            return Ok(pt);
         }
+        // Only schema 3 revisions open here: a revision left under the schema
+        // 1 seal at the migration has no authenticated owner and stays refused.
+        let (owner, request, pt) = open_revision(&self.key, id, &row.payload)?;
+        if row.owner.as_deref() != Some(owner.to_string().as_str()) || row.parent.as_deref() != Some(request.to_string().as_str()) {
+            return Err(StoreError::Integrity);
+        }
+        validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
+        // The sealed owner is historical: the request must still be that
+        // workspace's, so one deleted and its id reused elsewhere does not
+        // take the revision along.
+        self.validate_revision_owner(row.owner.as_deref(), row.parent.as_deref())?;
         Ok(pt)
+    }
+
+    /// The schema 3 envelope of legacy revision `id`, for the v3 migration
+    /// only, if the schema 2 read accepts it: it opens under the schema 1
+    /// [`aad`], its sealed id and request match the row, and that request
+    /// authenticates with the revision's workspace index as its sealed owner,
+    /// `request_owner` (see [`Records::request_owner`]). `Integrity`
+    /// otherwise.
+    fn reseal_legacy_revision(&self, id: &str, row: &ObjectRow, request_owner: Option<&str>) -> Result<Vec<u8>> {
+        let pt = crypto::open(&self.key, &aad("objects", kind::REVISION, id), &row.payload).map_err(|_| StoreError::Integrity)?;
+        validate_object(kind::REVISION, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
+        // `validate_object` requires an owner index, so a request that does
+        // not authenticate (`None`) never matches.
+        if request_owner != row.owner.as_deref() {
+            return Err(StoreError::Integrity);
+        }
+        let parse = |v: Option<&str>| v.and_then(|v| v.parse::<Id>().ok()).ok_or(StoreError::Integrity);
+        seal_revision(&self.key, id, parse(row.owner.as_deref())?, parse(row.parent.as_deref())?, &pt)
+    }
+
+    /// The workspace request `id` authenticates under: its sealed owner,
+    /// which its owner index matches. `None` when it is missing or does not
+    /// decrypt or validate.
+    fn request_owner(&self, id: &str) -> Result<Option<String>> {
+        let Ok(id) = id.parse::<Id>() else { return Ok(None) };
+        match self.get::<anvil_domain::workspace::RequestDefinition>(kind::REQUEST, &id) {
+            Ok(request) => Ok(request.map(|r| r.workspace_id.to_string())),
+            Err(StoreError::Integrity | StoreError::Serde(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn validate_revision_owner(&self, owner: Option<&str>, parent: Option<&str>) -> Result<()> {
@@ -1401,9 +1795,17 @@ impl Records<'_> {
         let Some(row) = self.object_row(kind::REVISION, &id_s)? else {
             return Ok(None);
         };
-        let pt = crypto::open(&self.key, &aad("objects", kind::REVISION, &id_s), &row.payload).map_err(|_| StoreError::Integrity)?;
+        // A schema 3 revision seals its request; one left under the schema 1
+        // seal at the migration (an orphan already then) has only its own.
+        let (sealed_request, pt) = match open_revision(&self.key, &id_s, &row.payload) {
+            Ok((_, request, pt)) => (Some(request), pt),
+            Err(_) => {
+                let legacy = crypto::open(&self.key, &aad("objects", kind::REVISION, &id_s), &row.payload);
+                (None, legacy.map_err(|_| StoreError::Integrity)?)
+            }
+        };
         let revision: anvil_domain::workspace::RequestRevision = serde_json::from_slice(&pt)?;
-        if revision.id != *id {
+        if revision.id != *id || sealed_request.is_some_and(|r| r != revision.request_id) {
             return Err(StoreError::Integrity);
         }
         // Presence, not the parent index or a failed ordinary parent read:
@@ -1575,24 +1977,38 @@ impl Records<'_> {
         record: &T,
         body: Option<&[u8]>,
     ) -> Result<()> {
+        let json = Zeroizing::new(serde_json::to_vec(record)?);
+        let (ws, request) = (workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()));
+        // The indexes must name the owner the record seals, or reading it
+        // back would refuse it.
+        check_history_owner(&json, ws.as_deref(), request.as_deref())?;
+        let id_s = id.to_string();
+        // A record already stored under this id must authenticate, and is
+        // replaced only by one with the same owner, as an object's is.
+        let replaced = match self.history_row(&id_s)? {
+            Some(old) => {
+                self.open_history(&old)?;
+                if old.workspace_id != ws || old.request_id != request {
+                    return Err(StoreError::Ownership);
+                }
+                old.body_blob
+            }
+            None => None,
+        };
         // The blob is unreferenced until the history row below is written:
         // callers run this inside one transaction (see `Store::add_history`).
         let body_blob = match body {
             Some(b) if !b.is_empty() => Some(self.put_blob(b)?),
             _ => None,
         };
-        let json = Zeroizing::new(serde_json::to_vec(record)?);
-        let id_s = id.to_string();
-        let env = crypto::seal(&self.key, &aad("history", "record", &id_s), &json);
+        let env = crypto::seal(&self.key, &history_aad(&id_s, body_blob.as_deref()), &json);
         let size = env.len() as i64 + body.map(|b| b.len() as i64).unwrap_or(0);
-        // Replacing a record drops its reference to the old body.
-        let replaced: Option<String> =
-            self.conn.query_row("SELECT body_blob FROM history WHERE id=?1", params![id_s], |r| r.get(0)).optional()?.flatten();
         self.conn.execute(
             "INSERT OR REPLACE INTO history(id,workspace_id,request_id,started_at,size,body_blob,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![id_s, workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), started_at_ms, size, body_blob, env],
+            params![id_s, ws, request, started_at_ms, size, body_blob, env],
         )?;
-        // As `Store::release_blob`: the old body goes unless another history
+        // Replacing a record drops its reference to the old body. As
+        // `Store::release_blob`: the old body goes unless another history
         // record, or this one again, still uses it. A pinned blob is an
         // attachment's and stays.
         if let Some(old) = replaced {
@@ -1604,31 +2020,52 @@ impl Records<'_> {
         Ok(())
     }
 
-    /// Newest first; `None` lists every entry.
+    /// Newest first; `None` lists every entry. Each entry's workspace and
+    /// request indexes are checked against the ones its record seals, and its
+    /// body column against the one it is bound to, so a listing never names a
+    /// record under an owner it does not have. An entry that fails names its
+    /// id.
     fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: Option<usize>) -> Result<Vec<HistoryEntry>> {
         // SQLite treats a negative LIMIT as no limit.
         let limit = limit.map(|l| i64::try_from(l).unwrap_or(i64::MAX)).unwrap_or(-1);
-        let mut st = self.conn.prepare(
-            "SELECT id,workspace_id,request_id,started_at,size FROM history WHERE (?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR request_id=?2) ORDER BY started_at DESC, id DESC LIMIT ?3",
-        )?;
-        let rows = st
-            .query_map(params![workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()), limit], |r| {
-                Ok(HistoryEntry { id: r.get(0)?, workspace_id: r.get(1)?, request_id: r.get(2)?, started_at: r.get(3)?, size: r.get(4)? })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let filter = "(?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR request_id=?2)";
+        let sql = format!("SELECT {HISTORY_COLUMNS} FROM history WHERE {filter} ORDER BY started_at DESC, id DESC LIMIT ?3");
+        let mut st = self.conn.prepare(&sql)?;
+        let (ws, request) = (workspace_id.map(|w| w.to_string()), request_id.map(|r| r.to_string()));
+        let rows = st.query_map(params![ws, request, limit], |r| HistoryRow::read_from(r, 0))?;
+        let mut out = Vec::new();
+        // One row in memory at a time.
+        for row in rows {
+            let row = row?;
+            self.open_history(&row).map_err(|e| row_integrity("history record", &row.id, e))?;
+            let HistoryRow { id, workspace_id, request_id, started_at, size, .. } = row;
+            out.push(HistoryEntry { id, workspace_id, request_id, started_at, size });
+        }
+        Ok(out)
+    }
+
+    fn history_row(&self, id: &str) -> Result<Option<HistoryRow>> {
+        let sql = format!("SELECT {HISTORY_COLUMNS} FROM history WHERE id=?1");
+        Ok(self.conn.query_row(&sql, params![id], |r| HistoryRow::read_from(r, 0)).optional()?)
+    }
+
+    /// Decrypt a history record, bound to its row's id and body column, and
+    /// check that its sealed workspace and request are the row's indexes.
+    fn open_history(&self, row: &HistoryRow) -> Result<Zeroizing<Vec<u8>>> {
+        let bound = history_aad(&row.id, row.body_blob.as_deref());
+        let pt = crypto::open(&self.key, &bound, &row.payload).map_err(|_| StoreError::Integrity)?;
+        check_history_owner(&pt, row.workspace_id.as_deref(), row.request_id.as_deref())?;
+        Ok(pt)
     }
 
     fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
-        let row: Option<(Vec<u8>, Option<String>)> = self
-            .conn
-            .query_row("SELECT payload, body_blob FROM history WHERE id=?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?;
-        let Some((env, blob)) = row else { return Ok(None) };
-        let pt = crypto::open(&self.key, &aad("history", "record", id), &env).map_err(|_| StoreError::Integrity)?;
+        let Some(row) = self.history_row(id)? else { return Ok(None) };
+        let pt = self.open_history(&row)?;
         let rec: T = serde_json::from_slice(&pt)?;
-        let body = match blob {
-            Some(b) => self.get_blob(&b)?,
+        // The record opened under this body id, and a blob opens only under
+        // its own, so the body is the one stored with the record.
+        let body = match &row.body_blob {
+            Some(b) => self.get_blob(b)?,
             None => None,
         };
         Ok(Some((rec, body)))
@@ -1636,24 +2073,69 @@ impl Records<'_> {
 
     fn put_load_report<T: Serialize>(&self, id: &Id, workspace_id: Option<&Id>, started_at_ms: i64, report: &T) -> Result<()> {
         let json = serde_json::to_vec(report)?;
+        let ws = workspace_id.map(|w| w.to_string());
+        // The index must name the workspace the report seals.
+        check_report_owner(&json, ws.as_deref())?;
         let id_s = id.to_string();
+        // A report already stored under this id must authenticate, and is
+        // replaced only by one for the same workspace.
+        if let Some((old_ws, old)) = self.report_row(&id_s)? {
+            self.open_report(&id_s, old_ws.as_deref(), &old)?;
+            if old_ws != ws {
+                return Err(StoreError::Ownership);
+            }
+        }
         let env = crypto::seal(&self.key, &aad("load_reports", "report", &id_s), &json);
         self.conn.execute(
             "INSERT OR REPLACE INTO load_reports(id,workspace_id,started_at,payload) VALUES(?1,?2,?3,?4)",
-            params![id_s, workspace_id.map(|w| w.to_string()), started_at_ms, env],
+            params![id_s, ws, started_at_ms, env],
         )?;
         Ok(())
     }
 
-    fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
-        let mut st =
-            self.conn.prepare("SELECT id,payload FROM load_reports WHERE (?1 IS NULL OR workspace_id=?1) ORDER BY started_at DESC")?;
-        let rows: Vec<(String, Vec<u8>)> = st
-            .query_map(params![workspace_id.map(|w| w.to_string())], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
+    /// The workspace index and sealed payload of load report `id`.
+    fn report_row(&self, id: &str) -> Result<Option<(Option<String>, Vec<u8>)>> {
+        let sql = "SELECT workspace_id, payload FROM load_reports WHERE id=?1";
+        Ok(self.conn.query_row(sql, params![id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
+    /// Decrypt load report `id` and check that its sealed workspace is the
+    /// row's index, `workspace_id`.
+    fn open_report(&self, id: &str, workspace_id: Option<&str>, env: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let pt = crypto::open(&self.key, &aad("load_reports", "report", id), env).map_err(|_| StoreError::Integrity)?;
+        check_report_owner(&pt, workspace_id)?;
+        Ok(pt)
+    }
+
+    fn get_load_report<T: DeserializeOwned>(&self, id: &Id) -> Result<Option<T>> {
+        let id_s = id.to_string();
+        let Some((ws, env)) = self.report_row(&id_s)? else { return Ok(None) };
+        let pt = self.open_report(&id_s, ws.as_deref(), &env)?;
+        Ok(Some(serde_json::from_slice(&pt)?))
+    }
+
+    /// Every load report of `workspace_id` (`None`: of every workspace),
+    /// newest first, each checked against the workspace it seals: a decrypted
+    /// report and its row id and workspace index. A report that fails names
+    /// its id.
+    fn load_report_rows(&self, workspace_id: Option<&Id>) -> Result<Vec<ReportRow>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id,workspace_id,payload FROM load_reports WHERE (?1 IS NULL OR workspace_id=?1) ORDER BY started_at DESC")?;
+        let filter = workspace_id.map(|w| w.to_string());
+        let rows = st.query_map(params![filter], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         let mut out = Vec::new();
-        for (id, env) in rows {
-            let pt = crypto::open(&self.key, &aad("load_reports", "report", &id), &env).map_err(|_| StoreError::Integrity)?;
+        for row in rows {
+            let (id, ws, env): (String, Option<String>, Vec<u8>) = row?;
+            let pt = self.open_report(&id, ws.as_deref(), &env).map_err(|e| row_integrity("load report", &id, e))?;
+            out.push((id, ws, pt));
+        }
+        Ok(out)
+    }
+
+    fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        let mut out = Vec::new();
+        for (_, _, pt) in self.load_report_rows(workspace_id)? {
             out.push(serde_json::from_slice(&pt)?);
         }
         Ok(out)
