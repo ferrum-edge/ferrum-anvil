@@ -8,6 +8,10 @@
 //! timestamps, sizes). While locked, the store has no key
 //! and every data operation fails with `Locked` — enforcement lives here, not
 //! in the UI.
+//! Object reads also compare the sealed identity with row metadata; object
+//! updates authenticate the old identity and preserve its workspace inside
+//! a write transaction. Revisions resolve their owner through their sealed
+//! request id. Profile-only kinds must have no workspace or parent index.
 //!
 //! One connection serves the whole profile. Ordinary operations lock it per
 //! statement; [`Store::atomically`] holds it for its whole transaction and
@@ -25,8 +29,9 @@ use crate::crypto::{self, Key};
 use anvil_domain::Id;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
@@ -54,6 +59,12 @@ pub enum StoreError {
     FutureSchema { found: i64, supported: i64 },
     #[error("stored data could not be decrypted (wrong key or corruption)")]
     Integrity,
+    #[error("an existing object's workspace or immutable parent cannot be changed")]
+    Ownership,
+    #[error("the parent folder belongs to another workspace")]
+    ForeignFolderParent,
+    #[error("stored {kind} {id} failed its ownership or integrity check")]
+    ObjectIntegrity { kind: String, id: String },
     /// A `Store` method was called from inside that store's own
     /// [`Store::atomically`] closure. The closure must use its [`StoreTx`];
     /// nested transactions are not supported.
@@ -205,6 +216,147 @@ const NOTE_PREFIX: &str = "note:";
 
 fn aad(table: &str, kind: &str, id: &str) -> Vec<u8> {
     format!("anvil/v1/{table}/{kind}/{id}").into_bytes()
+}
+
+/// Identity already inside the released encrypted payload. Kind and row id
+/// are authenticated by `aad`; owner and parent must agree with these sealed
+/// fields before plaintext indexing metadata can select an object.
+struct ObjectIdentity {
+    id: Option<Id>,
+    owner: Option<Id>,
+    parent: Option<Id>,
+}
+
+fn object_identity(k: &str, json: &[u8]) -> Result<ObjectIdentity> {
+    use anvil_domain::workspace::*;
+
+    fn decode<T: DeserializeOwned>(json: &[u8]) -> Result<T> {
+        serde_json::from_slice(json).map_err(|_| StoreError::Integrity)
+    }
+
+    let (id, owner, parent) = match k {
+        kind::WORKSPACE => {
+            let v: Workspace = decode(json)?;
+            (Some(v.meta.id), None, None)
+        }
+        kind::FOLDER => {
+            let v: Folder = decode(json)?;
+            (Some(v.meta.id), Some(v.workspace_id), v.parent_id)
+        }
+        kind::REQUEST => {
+            let v: RequestDefinition = decode(json)?;
+            (Some(v.meta.id), Some(v.workspace_id), v.folder_id)
+        }
+        kind::REVISION => {
+            let v: RequestRevision = decode(json)?;
+            // This released type has no workspace field. Check the current
+            // parent's sealed owner, never its index alone. Historical owner
+            // proof needs the format decision in workspace-owner-binding.md.
+            (Some(v.id), None, Some(v.request_id))
+        }
+        kind::ENVIRONMENT => {
+            let v: Environment = decode(json)?;
+            (Some(v.meta.id), Some(v.workspace_id), None)
+        }
+        kind::TLS_PROFILE => {
+            let v: anvil_domain::tls::TlsProfile = decode(json)?;
+            (Some(v.id), Some(v.workspace_id), None)
+        }
+        kind::PROXY_PROFILE => {
+            let v: anvil_domain::tls::ProxyProfile = decode(json)?;
+            (Some(v.id), Some(v.workspace_id), None)
+        }
+        kind::INTEGRATION => {
+            let v: anvil_domain::integration::IntegrationProfile = decode(json)?;
+            (Some(v.id), Some(v.workspace_id), None)
+        }
+        kind::DATASET => {
+            let v: Dataset = decode(json)?;
+            (Some(v.meta.id), Some(v.workspace_id), None)
+        }
+        kind::SCENARIO => {
+            let v: Scenario = decode(json)?;
+            (Some(v.meta.id), Some(v.workspace_id), None)
+        }
+        kind::LOAD_PLAN => {
+            let v: anvil_domain::load::LoadPlan = decode(json)?;
+            (Some(v.id), Some(v.workspace_id), None)
+        }
+        kind::RUN_REPORT => {
+            let v: anvil_domain::runner::RunReport = decode(json)?;
+            (Some(v.run_id), Some(v.workspace_id), None)
+        }
+        kind::USER_PROFILE => {
+            let v: UserProfile = decode(json)?;
+            (Some(v.meta.id), None, None)
+        }
+        kind::API_RULESET => {
+            let v: anvil_domain::settings::StoredRuleset = decode(json)?;
+            (Some(v.id), None, None)
+        }
+        kind::APP_SETTINGS => {
+            let _: anvil_domain::settings::AppSettings = decode(json)?;
+            // Profile-only, with no embedded id. The row id is in the AAD.
+            (None, None, None)
+        }
+        kind::SPEC_SOURCE => {
+            // App-owned type: project only the sealed identity fields so
+            // storage does not depend on the application crate.
+            #[derive(Deserialize)]
+            struct Source {
+                import_id: Id,
+            }
+            #[derive(Deserialize)]
+            struct Record {
+                source: Source,
+                workspace_id: Id,
+            }
+            let v: Record = decode(json)?;
+            (Some(v.source.import_id), Some(v.workspace_id), None)
+        }
+        kind::DEVICE_IDENTITY_SEAL => {
+            #[derive(Deserialize)]
+            struct Seal {
+                workspace_id: Id,
+            }
+            let v: Seal = decode(json)?;
+            (Some(v.workspace_id), Some(v.workspace_id), None)
+        }
+        kind::TOKEN_FILE | kind::LINKED_FILE => {
+            #[derive(Deserialize)]
+            struct Binding {
+                id: Id,
+            }
+            let v: Binding = decode(json)?;
+            (Some(v.id), None, None)
+        }
+        kind::IMPORT_SOURCE => {
+            // Attachment indexes are profile-only and have no embedded id.
+            // Reject treating them as workspace objects; AAD binds kind/id.
+            #[derive(Deserialize)]
+            struct Index {
+                attachment: String,
+                blob: String,
+            }
+            let v: Index = decode(json)?;
+            let _ = (v.attachment, v.blob);
+            (None, None, None)
+        }
+        _ => return Err(StoreError::Integrity),
+    };
+    Ok(ObjectIdentity { id, owner, parent })
+}
+
+fn validate_object(k: &str, id: &str, owner: Option<&str>, parent: Option<&str>, json: &[u8]) -> Result<()> {
+    let identity = object_identity(k, json)?;
+    if identity.id.is_some_and(|sealed| sealed.to_string() != id)
+        || identity.parent.map(|p| p.to_string()).as_deref() != parent
+        || (k != kind::REVISION && identity.owner.map(|w| w.to_string()).as_deref() != owner)
+        || (k == kind::REVISION && owner.is_none())
+    {
+        return Err(StoreError::Integrity);
+    }
+    Ok(())
 }
 
 /// Associated data of a vault secret: its id and the workspace that owns it
@@ -566,20 +718,17 @@ impl Store {
         sort_key: f64,
         value: &T,
     ) -> Result<()> {
-        let (conn, key) = self.sealing()?;
-        Records { key, conn: &conn }.put(kind, id, workspace_id, parent_id, sort_key, value)
+        // Authenticate the existing row and compare owners under SQLite's
+        // write lock, including against writers on another Store connection.
+        self.atomically(|tx| tx.put(kind, id, workspace_id, parent_id, sort_key, value))
     }
 
     pub fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
-        Records { key, conn: &conn }.get(kind, id)
+        self.read_consistently(|read| read.get(kind, id))
     }
 
     pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
-        Records { key, conn: &conn }.list(kind, workspace_id)
+        self.read_consistently(|read| read.list(kind, workspace_id))
     }
 
     pub fn delete(&self, kind: &str, id: &Id) -> Result<bool> {
@@ -925,7 +1074,25 @@ impl StoreTx<'_> {
     pub fn delete_workspace(&self, ws: &Id) -> Result<()> {
         let _ = self.store.key()?;
         let ws = ws.to_string();
-        self.tx.execute("DELETE FROM objects WHERE workspace_id=?1", params![ws])?;
+        // Authenticate live revision owners before removing any parent.
+        // An orphan's index supplies no historical owner; preserve it (and
+        // any undecodable revision) for profile-wide reference accounting.
+        let mut revisions = Vec::new();
+        for row in self.object_meta(kind::REVISION)? {
+            if row.workspace_id.as_deref() != Some(ws.as_str()) {
+                continue;
+            }
+            let Ok(id) = row.id.parse::<Id>() else { continue };
+            match self.get::<anvil_domain::workspace::RequestRevision>(kind::REVISION, &id) {
+                Ok(Some(_)) => revisions.push(id),
+                Ok(None) | Err(StoreError::Integrity | StoreError::Serde(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        for id in revisions {
+            self.delete(kind::REVISION, &id)?;
+        }
+        self.tx.execute("DELETE FROM objects WHERE workspace_id=?1 AND kind<>?2", params![ws, kind::REVISION])?;
         self.tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws])?;
         self.tx.execute("DELETE FROM secrets WHERE workspace_id=?1", params![ws])?;
         self.tx.execute("DELETE FROM history WHERE workspace_id=?1", params![ws])?;
@@ -1011,6 +1178,22 @@ impl StoreRead<'_> {
         self.records()?.get(kind, id)
     }
 
+    /// Internal profile-wide retention inspection, never revision access or
+    /// workspace authorization. `Some` contains only stored attachment hashes
+    /// from an authentic revision whose sealed request ID has no parent row.
+    /// No spec, route, owner, file name or other revision data is returned.
+    /// `None` requires callers to use ordinary validated reads instead.
+    ///
+    /// Legacy revisions have no authenticated historical workspace owner.
+    /// Neither plaintext owner/parent indexes nor a recreated request supply
+    /// that proof. This read ignores those indexes only to preserve references
+    /// or exclude an orphan from a portable backup; it never adopts or reseals
+    /// the row. Keep undecodable rows and their pins until safely resolved.
+    #[doc(hidden)]
+    pub fn orphan_revision_attachment_refs_for_retention(&self, id: &Id) -> Result<Option<HashSet<String>>> {
+        self.records()?.orphan_revision_attachment_refs_for_retention(id)
+    }
+
     pub fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         self.records()?.list(kind, workspace_id)
     }
@@ -1090,6 +1273,45 @@ struct Records<'c> {
     conn: &'c Connection,
 }
 
+struct ObjectRow {
+    owner: Option<String>,
+    parent: Option<String>,
+    payload: Vec<u8>,
+}
+
+impl ObjectRow {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self { owner: row.get(0)?, parent: row.get(1)?, payload: row.get(2)? })
+    }
+}
+
+// Only canonical content hashes may leave the restricted orphan inspection.
+// Walk the typed spec's serialization so all stored attachment variants count.
+fn collect_retention_attachment_refs(value: &serde_json::Value, refs: &mut HashSet<String>) -> Result<()> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("kind").and_then(|v| v.as_str()) == Some("stored") {
+                let sha = fields.get("sha256").and_then(|v| v.as_str()).ok_or(StoreError::Integrity)?;
+                let canonical = sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if sha.len() != 64 || !canonical {
+                    return Err(StoreError::Integrity);
+                }
+                refs.insert(sha.to_string());
+            }
+            for v in fields.values() {
+                collect_retention_attachment_refs(v, refs)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for v in values {
+                collect_retention_attachment_refs(v, refs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 impl Records<'_> {
     fn put<T: Serialize>(
         &self,
@@ -1102,43 +1324,124 @@ impl Records<'_> {
     ) -> Result<()> {
         let json = Zeroizing::new(serde_json::to_vec(value)?);
         let id_s = id.to_string();
+        let owner = workspace_id.map(|w| w.to_string());
+        let parent = parent_id.map(|p| p.to_string());
+        validate_object(kind, &id_s, owner.as_deref(), parent.as_deref(), &json)?;
+        if let Some(existing) = self.object_row(kind, &id_s)? {
+            // An altered index must fail before a save can seal its lie into
+            // a new payload, even when the submitted owner matches that index.
+            self.open_object(kind, &id_s, &existing)?;
+            if existing.owner != owner || (kind == kind::REVISION && existing.parent != parent) {
+                return Err(StoreError::Ownership);
+            }
+        }
+        if let Some(ws) = workspace_id
+            && self.get::<anvil_domain::workspace::Workspace>(kind::WORKSPACE, ws)?.is_none()
+        {
+            return Err(StoreError::NotFound("workspace".into()));
+        }
+        if kind == kind::REVISION {
+            self.validate_revision_owner(owner.as_deref(), parent.as_deref())?;
+        }
         let env = crypto::seal(&self.key, &aad("objects", kind, &id_s), &json);
         self.conn.execute(
             "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(kind,id) DO UPDATE SET workspace_id=excluded.workspace_id, parent_id=excluded.parent_id, sort_key=excluded.sort_key, updated_at=excluded.updated_at, payload=excluded.payload",
-            params![kind, id_s, workspace_id.map(|w| w.to_string()), parent_id.map(|p| p.to_string()), sort_key, chrono::Utc::now().timestamp_millis(), env],
+            params![
+                kind,
+                id_s,
+                owner,
+                parent,
+                sort_key,
+                chrono::Utc::now().timestamp_millis(),
+                env
+            ],
         )?;
         Ok(())
     }
 
     fn get<T: DeserializeOwned>(&self, kind: &str, id: &Id) -> Result<Option<T>> {
         let id_s = id.to_string();
-        let env: Option<Vec<u8>> =
-            self.conn.query_row("SELECT payload FROM objects WHERE kind=?1 AND id=?2", params![kind, id_s], |r| r.get(0)).optional()?;
-        match env {
+        match self.object_row(kind, &id_s)? {
             None => Ok(None),
-            Some(e) => {
-                let pt = crypto::open(&self.key, &aad("objects", kind, &id_s), &e).map_err(|_| StoreError::Integrity)?;
+            Some(row) => {
+                let pt = self.open_object(kind, &id_s, &row)?;
                 Ok(Some(serde_json::from_slice(&pt)?))
             }
         }
     }
 
+    fn object_row(&self, kind: &str, id: &str) -> Result<Option<ObjectRow>> {
+        Ok(self
+            .conn
+            .query_row("SELECT workspace_id, parent_id, payload FROM objects WHERE kind=?1 AND id=?2", params![kind, id], ObjectRow::read)
+            .optional()?)
+    }
+
+    fn open_object(&self, kind: &str, id: &str, row: &ObjectRow) -> Result<Zeroizing<Vec<u8>>> {
+        let pt = crypto::open(&self.key, &aad("objects", kind, id), &row.payload).map_err(|_| StoreError::Integrity)?;
+        validate_object(kind, id, row.owner.as_deref(), row.parent.as_deref(), &pt)?;
+        if kind == kind::REVISION {
+            self.validate_revision_owner(row.owner.as_deref(), row.parent.as_deref())?;
+        }
+        Ok(pt)
+    }
+
+    fn validate_revision_owner(&self, owner: Option<&str>, parent: Option<&str>) -> Result<()> {
+        let request_id: Id = parent.ok_or(StoreError::Integrity)?.parse().map_err(|_| StoreError::Integrity)?;
+        let request = self.get::<anvil_domain::workspace::RequestDefinition>(kind::REQUEST, &request_id)?.ok_or(StoreError::Integrity)?;
+        if Some(request.workspace_id.to_string()).as_deref() != owner {
+            return Err(StoreError::Integrity);
+        }
+        Ok(())
+    }
+
+    fn orphan_revision_attachment_refs_for_retention(&self, id: &Id) -> Result<Option<HashSet<String>>> {
+        let id_s = id.to_string();
+        let Some(row) = self.object_row(kind::REVISION, &id_s)? else {
+            return Ok(None);
+        };
+        let pt = crypto::open(&self.key, &aad("objects", kind::REVISION, &id_s), &row.payload).map_err(|_| StoreError::Integrity)?;
+        let revision: anvil_domain::workspace::RequestRevision = serde_json::from_slice(&pt)?;
+        if revision.id != *id {
+            return Err(StoreError::Integrity);
+        }
+        // Presence, not the parent index or a failed ordinary parent read:
+        // a corrupt or metadata-tampered existing request is not an orphan.
+        if self.object_row(kind::REQUEST, &revision.request_id.to_string())?.is_some() {
+            return Ok(None);
+        }
+        let spec = serde_json::to_value(&revision.spec)?;
+        let mut refs = HashSet::new();
+        collect_retention_attachment_refs(&spec, &mut refs)?;
+        Ok(Some(refs))
+    }
+
     fn list<T: DeserializeOwned>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
         let mut out = Vec::new();
-        let rows: Vec<(String, Vec<u8>)> = match workspace_id {
+        let query_owner = workspace_id.map(|ws| ws.to_string());
+        let rows: Vec<(String, ObjectRow)> = match workspace_id {
             Some(w) => {
-                let mut st =
-                    self.conn.prepare("SELECT id, payload FROM objects WHERE kind=?1 AND workspace_id=?2 ORDER BY sort_key, updated_at")?;
-                st.query_map(params![kind, w.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
+                let mut st = self.conn.prepare(
+                    "SELECT workspace_id, parent_id, payload, id FROM objects
+                     WHERE kind=?1 AND workspace_id=?2 ORDER BY sort_key, updated_at",
+                )?;
+                st.query_map(params![kind, w.to_string()], |r| Ok((r.get(3)?, ObjectRow::read(r)?)))?
+                    .collect::<std::result::Result<_, _>>()?
             }
             None => {
-                let mut st = self.conn.prepare("SELECT id, payload FROM objects WHERE kind=?1 ORDER BY sort_key, updated_at")?;
-                st.query_map(params![kind], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?
+                let mut st = self.conn.prepare(
+                    "SELECT workspace_id, parent_id, payload, id FROM objects
+                     WHERE kind=?1 ORDER BY sort_key, updated_at",
+                )?;
+                st.query_map(params![kind], |r| Ok((r.get(3)?, ObjectRow::read(r)?)))?.collect::<std::result::Result<_, _>>()?
             }
         };
-        for (id, env) in rows {
-            let pt = crypto::open(&self.key, &aad("objects", kind, &id), &env).map_err(|_| StoreError::Integrity)?;
+        for (id, row) in rows {
+            if query_owner.is_some() && row.owner.as_deref() != query_owner.as_deref() {
+                return Err(StoreError::Integrity);
+            }
+            let pt = self.open_object(kind, &id, &row)?;
             out.push(serde_json::from_slice(&pt)?);
         }
         Ok(out)

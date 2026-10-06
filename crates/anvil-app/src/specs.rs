@@ -3,7 +3,7 @@
 //! previews, persists with provenance, and plans reimports. Nothing imported
 //! is ever sent or run as part of importing.
 
-use crate::workspace::{put_attachment_in, release_attachment_in, spec_hash};
+use crate::workspace::{delete_requests_in, put_attachment_in, release_attachment_in, spec_hash};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -594,9 +594,8 @@ impl App {
                 }
                 s.put(kind::REQUEST, &q.meta.id, Some(&q.workspace_id), q.folder_id.as_ref(), q.sort_key, &q)?;
             }
-            for id in &deleted {
-                s.delete(kind::REQUEST, id)?;
-            }
+            let removed: Vec<RequestDefinition> = previous.iter().filter(|q| deleted.contains(&q.meta.id)).cloned().collect();
+            delete_requests_in(s, &removed)?;
             for e in &environments {
                 s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, e)?;
             }

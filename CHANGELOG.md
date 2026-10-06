@@ -23,6 +23,17 @@
 
 ### Fixed
 
+- Storage: validate sealed object IDs, workspace owners and parents against
+  row metadata, and reject existing-owner changes in transactional saves.
+  Folder/request moves retain their relationship checks. Request revisions
+  carry no sealed workspace owner, so revision ownership still relies on the
+  current parent request and needs an explicit format/migration decision; this
+  is a partial GHSA-fmx8-p5wc-hm8p remediation. User-visible changes: full
+  backups exclude authentic orphan revisions (listed in the manifest); saving
+  a request with a changed workspace now errors; creating or saving a folder
+  refuses a foreign parent; spec reimport now deletes the removed requests'
+  revisions and releases their attachments; undecodable revisions are kept and
+  block attachment cleanup. See `docs/security/workspace-owner-binding.md`.
 - Repair Edge 0.9.11 adoption controls: use a deliberately unsupported release sentinel,
   assert all six supported record catalogs and include 0.9.11 in timeout/token expectations.
   UP-018 now requires the exact version-specific H1 ceiling signal and keeps independent

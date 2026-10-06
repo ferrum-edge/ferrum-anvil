@@ -88,7 +88,8 @@ const SECRET: &str = "secret";
 const HISTORY: &str = "history";
 const LOAD_REPORT: &str = "load_report";
 
-/// Object kinds a full backup carries, every row of each.
+/// Object kinds a full backup carries. Ownerless orphan revisions are
+/// explicitly excluded in the manifest; their attachment bytes are carried.
 pub const OBJECT_KINDS: &[&str] = &[
     kind::WORKSPACE,
     kind::FOLDER,
@@ -118,7 +119,7 @@ pub const NOT_CARRIED_KINDS: &[(&str, &str)] = &[
 
 /// Every store table and how a full backup covers it.
 pub const TABLES: &[(&str, &str)] = &[
-    ("objects", "every row of the kinds in OBJECT_KINDS; attachment index rows are rebuilt from the attachments"),
+    ("objects", "OBJECT_KINDS with reported orphan exclusions; attachment indexes rebuilt on restore"),
     ("secrets", "every vault secret, workspace-owned and profile-level"),
     ("blobs", "attachment contents and stored response bodies, with the attachments and history records that use them"),
     ("history", "every execution record with its stored response body"),
@@ -398,6 +399,7 @@ pub fn open(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<(Back
 /// checked.
 struct Raw {
     objects: Vec<ObjectRow>,
+    excluded: Vec<String>,
     /// Attachment index entries and the blob each names.
     index: Vec<(Value, Option<Zeroizing<Vec<u8>>>)>,
     secrets: Vec<SecretRow>,
@@ -630,12 +632,33 @@ impl App {
     fn snapshot(&self) -> Result<Snapshot> {
         let raw = self.store.read_consistently(|r| {
             let mut objects = Vec::new();
+            let mut excluded = Vec::new();
             for k in OBJECT_KINDS {
                 let mut rows = r.object_meta(k)?;
                 rows.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
                 for m in rows {
                     let id: Id = m.id.parse().map_err(|_| StoreError::Integrity)?;
-                    let value: Value = r.get(k, &id)?.ok_or_else(|| StoreError::NotFound(format!("{k} {id}")))?;
+                    let orphan = if *k == kind::REVISION {
+                        r.orphan_revision_attachment_refs_for_retention(&id).map_err(|e| object_integrity(k, &id, e))?
+                    } else {
+                        None
+                    };
+                    if orphan.is_some() {
+                        // No historical owner can be established. Keep the
+                        // original row in the profile/checkpoints, without
+                        // exposing its spec or assigning a workspace in the
+                        // portable backup. Attachment indexes are read below.
+                        excluded.push(format!(
+                            "orphan revision {id} (historical workspace owner is unverifiable; \
+                             revision excluded, attachment bytes retained)"
+                        ));
+                        continue;
+                    }
+                    let value: Value = match r.get(k, &id) {
+                        Ok(Some(value)) => value,
+                        Ok(None) => return Err(StoreError::NotFound(format!("{k} {id}"))),
+                        Err(e) => return Err(object_integrity(k, &id, e)),
+                    };
                     let (workspace_id, parent_id, sort_key) = (m.workspace_id, m.parent_id, m.sort_key);
                     objects.push(ObjectRow { kind: (*k).to_string(), id: m.id, workspace_id, parent_id, sort_key, value });
                 }
@@ -666,11 +689,10 @@ impl App {
             load_reports.sort_by(|a, b| run_id(a).cmp(run_id(b)));
             let token_files = r.object_meta(kind::TOKEN_FILE)?.len();
             let linked_files = r.object_meta(kind::LINKED_FILE)?.len();
-            Ok(Raw { objects, index, secrets, history, load_reports, token_files, linked_files })
+            Ok(Raw { objects, excluded, index, secrets, history, load_reports, token_files, linked_files })
         })?;
-        let Raw { objects, index, secrets, history, load_reports, token_files, linked_files } = raw;
+        let Raw { objects, mut excluded, index, secrets, history, load_reports, token_files, linked_files } = raw;
         let mut attachments = Vec::new();
-        let mut excluded = Vec::new();
         for (entry, blob) in &index {
             match (entry.get("attachment").and_then(Value::as_str), blob) {
                 (Some(sha), Some(bytes)) => {
@@ -686,6 +708,16 @@ impl App {
         attachments.sort_by(|a, b| a.sha256.as_str().cmp(b.sha256.as_str()));
         let contents = BackupContents { objects, secrets, attachments, history, load_reports };
         Ok(Snapshot { contents, excluded, token_files, linked_files })
+    }
+}
+
+/// Name the object a full-backup read failed on instead of surfacing the
+/// generic decrypt error, which is misleading for a metadata or owner
+/// mismatch. Only the kind and ID are disclosed, never any secret data.
+fn object_integrity(kind_name: &str, id: &Id, e: StoreError) -> StoreError {
+    match e {
+        StoreError::Integrity => StoreError::ObjectIntegrity { kind: kind_name.to_string(), id: id.to_string() },
+        other => other,
     }
 }
 
