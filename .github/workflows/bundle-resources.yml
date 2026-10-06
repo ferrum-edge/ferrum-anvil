@@ -1,4 +1,5 @@
-# Candidate qualification only. No approval, merge, release or advisory action.
+# Resource qualification of the bundle policy. No approval, merge, release or
+# advisory action.
 name: Bundle resource qualification
 
 on:
@@ -176,8 +177,13 @@ jobs:
               preflight) export ANVIL_RESOURCE_EXPECTED_SNAPSHOT=76ed2bc3569bae64e691ecbf1a16e17bf7743107 ;;
               released) export ANVIL_RESOURCE_EXPECTED_SNAPSHOT=d69aa97fbe0cb670a1a6a0462c8826a820144bf6 ;;
             esac
-            for case in proposal_exact released_exact entry_over total_over \
-              invalid_manifest invalid_checksums metadata_exact; do
+            cases="proposal_exact released_exact entry_over total_over"
+            cases="$cases invalid_manifest invalid_checksums metadata_exact"
+            # Earlier snapshots parse the amplifying JSON into ~5 GiB of Values.
+            if [ "$variant" = candidate ]; then
+              cases="$cases json_nodes_over"
+            fi
+            for case in $cases; do
               export ANVIL_RESOURCE_CASE="$case"
               metric="$RUNNER_TEMP/bundle-resource-results/$variant-$case.txt"
               if [ "$RUNNER_OS" = Linux ]; then
@@ -211,7 +217,7 @@ jobs:
               assert match, f"missing RSS metric: {path.name}"
               rss = int(match[1]) * (1024 if linux else 1)
               metrics[path.stem] = rss
-          assert len(metrics) == 21, "every snapshot/case must produce a metric"
+          assert len(metrics) == 22, "every snapshot/case must produce a metric"
           lines = ["snapshot_case\tpeak_rss_bytes"]
           for case, rss in sorted(metrics.items()):
               lines.append(f"{case}\t{rss}")
@@ -227,6 +233,8 @@ jobs:
               assert metrics["candidate-proposal_exact"] < large / 2
           for case in ("invalid_manifest", "invalid_checksums", "released_exact"):
               assert metrics[f"candidate-{case}"] <= 256 * 1024**2
+          # Refused before parsing: the file plus one inflated 128 MiB entry.
+          assert metrics["candidate-json_nodes_over"] <= 512 * 1024**2
           summary = "\n".join(lines) + "\n"
           (root / "peak-rss.tsv").write_text(summary)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:

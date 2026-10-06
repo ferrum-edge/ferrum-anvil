@@ -13,8 +13,16 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
 const MIB: u64 = 1024 * 1024;
-const CASES: [&str; 7] =
-    ["proposal_exact", "released_exact", "entry_over", "total_over", "invalid_manifest", "invalid_checksums", "metadata_exact"];
+const CASES: [&str; 8] = [
+    "proposal_exact",
+    "released_exact",
+    "entry_over",
+    "total_over",
+    "invalid_manifest",
+    "invalid_checksums",
+    "metadata_exact",
+    "json_nodes_over",
+];
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("ANVIL_RESOURCE_FIXTURES").expect("hosted fixture directory"))
@@ -107,7 +115,7 @@ fn checksums(files: &BTreeMap<String, Vec<u8>>, names: &[String]) -> BTreeMap<St
 
 fn generate(case: &str, path: &Path) {
     let mut files = base_files();
-    let attachment_count = if case == "metadata_exact" {
+    let attachment_count = if case == "metadata_exact" || case == "json_nodes_over" {
         0
     } else if case == "entry_over" {
         1
@@ -127,6 +135,15 @@ fn generate(case: &str, path: &Path) {
         files.insert("manifest.json".into(), serde_json::to_vec_pretty(&manifest).unwrap());
         assert_eq!(files["manifest.json"].len() as u64, 128 * MIB);
     }
+    if case == "json_nodes_over" {
+        // 128 MiB of two-byte `0,` values (64 Mi of them): about 5 GiB once
+        // parsed into serde_json Values, unless counted and refused first.
+        let mut objects = b"{\"requests\":[".to_vec();
+        objects.extend(b"0,".repeat(((128 * MIB - 16) / 2) as usize));
+        objects.extend(b"0]}");
+        assert_eq!(objects.len() as u64, 128 * MIB);
+        files.insert("workspace/objects.json".into(), objects);
+    }
     // Names/digests have fixed encoded lengths, so metadata overhead is exact
     // before attachment hashes are known. Fixtures include this overhead.
     let placeholders: Vec<_> = (0..attachment_count).map(|index| format!("attachments/{index:064x}")).collect();
@@ -136,7 +153,7 @@ fn generate(case: &str, path: &Path) {
         "released_exact" => 1024 * MIB,
         "total_over" => 256 * MIB + 1,
         "entry_over" => overhead + 128 * MIB + 1,
-        "metadata_exact" => overhead,
+        "metadata_exact" | "json_nodes_over" => overhead,
         _ => 256 * MIB,
     };
     assert!(total <= 1024 * MIB);
@@ -162,7 +179,7 @@ fn generate(case: &str, path: &Path) {
     }
     for (name, data) in &files {
         // The metadata boundary uses Stored to remain within the ratio policy.
-        let options = if case == "metadata_exact" {
+        let options = if case == "metadata_exact" || case == "json_nodes_over" {
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
         } else {
             deflated
@@ -202,6 +219,8 @@ fn measure_resource_open() {
     let variant = assert_snapshot();
     let case = std::env::var("ANVIL_RESOURCE_CASE").expect("hosted case");
     assert!(CASES.contains(&case.as_str()));
+    // Earlier snapshots would parse it all: measured for the candidate only.
+    assert!(case != "json_nodes_over" || variant == "candidate");
     let path = fixture_dir().join(format!("{case}.zip"));
     assert!(std::fs::metadata(&path).unwrap().len() <= 256 * MIB);
     let bytes = std::fs::read(path).unwrap();
@@ -220,7 +239,7 @@ fn measure_resource_open() {
     match case.as_str() {
         "invalid_manifest" => assert!(matches!(result, Err(BundleError::NotABundle(_)))),
         "invalid_checksums" => assert!(matches!(result, Err(BundleError::Checksum(_)))),
-        "released_exact" | "entry_over" | "total_over" if variant == "candidate" => {
+        "released_exact" | "entry_over" | "total_over" | "json_nodes_over" if variant == "candidate" => {
             assert!(matches!(result, Err(BundleError::Limits(_))));
         }
         _ => {

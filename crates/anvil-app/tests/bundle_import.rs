@@ -30,39 +30,34 @@ const TOKEN: &str = "placeholder-bearer-token";
 #[test]
 fn app_export_preview_and_write_agree_at_the_attachment_entry_boundary() {
     let data = vec![17; bundle::MAX_ENTRY_BYTES as usize + 1];
+    // One byte over is refused when it is attached: it could never be exported.
+    // (An export naming such a file stored before the cap: port.rs unit tests.)
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "boundary");
+    let error = app.put_attachment("boundary.bin", &data, None).unwrap_err();
+    assert!(matches!(&error, AppError::Invalid(why) if why.contains("'boundary.bin'")), "{error}");
+    let data = &data[..bundle::MAX_ENTRY_BYTES as usize];
     for mode in [ExportMode::ShareSafely, ExportMode::EncryptedTransfer] {
-        for extra in [0, 1] {
-            let root = tempfile::tempdir().unwrap();
-            let app = new_app(root.path(), "boundary");
-            let ws = app.create_workspace("Boundary").unwrap().meta.id;
-            let length = bundle::MAX_ENTRY_BYTES as usize + extra;
-            let attachment = app.put_attachment("boundary.bin", &data[..length], None).unwrap();
-            let mut spec = RequestSpec::http("POST", "https://api.example.test/");
-            spec.body = Body::Binary { attachment, content_type: None };
-            app.create_request(&ws, None, "Boundary", spec).unwrap();
-            app.set_secret(&ws, "bearer", TOKEN).unwrap();
-            let pass = (mode == ExportMode::EncryptedTransfer).then_some(EXPORT_PASS);
-            let dry = app.export_preview_with_standards(Some(&ws), mode, false, false);
-            let written = app.export_with_standards(Some(&ws), mode, pass, false, false);
-            if extra == 0 {
-                let dry = dry.unwrap();
-                let (bytes, written) = written.unwrap();
-                assert_eq!(dry.manifest.counts, written.manifest.counts);
-                assert_eq!(dry.secrets_included, written.secrets_included);
-                if let Some(vault) = &written.manifest.vault {
-                    assert_eq!(vault.kdf, KdfParams::interactive());
-                }
-                let opened = bundle::open(&bytes, pass).unwrap();
-                let retained: usize = opened.graph.attachments.values().map(Vec::len).sum();
-                assert_eq!(retained, length);
-                assert_eq!(opened.secrets_restored, pass.is_some());
-            } else {
-                for error in [dry.unwrap_err(), written.unwrap_err()] {
-                    assert!(matches!(error, AppError::Bundle(BundleError::Limits(_))));
-                    assert!(!error.to_string().contains(TOKEN));
-                }
-            }
+        let root = tempfile::tempdir().unwrap();
+        let app = new_app(root.path(), "boundary");
+        let ws = app.create_workspace("Boundary").unwrap().meta.id;
+        let attachment = app.put_attachment("boundary.bin", data, None).unwrap();
+        let mut spec = RequestSpec::http("POST", "https://api.example.test/");
+        spec.body = Body::Binary { attachment, content_type: None };
+        app.create_request(&ws, None, "Boundary", spec).unwrap();
+        app.set_secret(&ws, "bearer", TOKEN).unwrap();
+        let pass = (mode == ExportMode::EncryptedTransfer).then_some(EXPORT_PASS);
+        let dry = app.export_preview_with_standards(Some(&ws), mode, false, false).unwrap();
+        let (bytes, written) = app.export_with_standards(Some(&ws), mode, pass, false, false).unwrap();
+        assert_eq!(dry.manifest.counts, written.manifest.counts);
+        assert_eq!(dry.secrets_included, written.secrets_included);
+        if let Some(vault) = &written.manifest.vault {
+            assert_eq!(vault.kdf, KdfParams::interactive());
         }
+        let opened = bundle::open(&bytes, pass).unwrap();
+        let retained: usize = opened.graph.attachments.values().map(Vec::len).sum();
+        assert_eq!(retained, data.len());
+        assert_eq!(opened.secrets_restored, pass.is_some());
     }
 }
 

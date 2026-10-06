@@ -19,11 +19,18 @@ pub const FORMAT_VERSION: u32 = 2;
 pub const MIN_VAULT_FORMAT_VERSION: u32 = 2;
 pub const MAX_ENTRIES: usize = 20_000;
 /// Shared import/export budget for all inflated entry bytes, including metadata.
-/// This bounds cumulative bytes read, not parser, KDF or process memory.
+/// This bounds cumulative bytes read; [`MAX_JSON_NODES`] bounds what parsing
+/// them adds. Neither bounds KDF or whole-process memory.
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// Metadata, attachments, history and the sealed vault have the same entry budget.
 pub const MAX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_RATIO: u64 = 200;
+/// Shared import/export budget for the JSON values and object keys of every
+/// JSON entry (manifest, checksum list, objects, history and vault payload).
+/// Parsed JSON costs far more than its text: a two-byte `0,` becomes an
+/// 80-byte `serde_json::Value`. Entries are counted without parsing, before
+/// serde allocates anything, so parsing retains at most about 320 MiB.
+pub const MAX_JSON_NODES: u64 = 4 * 1024 * 1024;
 const FORMAT: &str = "anvil-bundle";
 const MANIFEST_ENTRY: &str = "manifest.json";
 const CHECKSUMS_ENTRY: &str = "checksums.json";
@@ -294,12 +301,71 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
     Ok((manifest, objects, vault))
 }
 
+// Counts the JSON values and object keys in text, without parsing or
+// allocating: each string, container and bare scalar (number, true, false,
+// null) is one node. Text may arrive in pieces; the state carries over.
+#[derive(Default)]
+struct NodeCounter {
+    nodes: u64,
+    quoted: bool,
+    escaped: bool,
+    scalar: bool,
+}
+
+impl NodeCounter {
+    fn scan(&mut self, text: &[u8]) {
+        for &byte in text {
+            if self.quoted {
+                if self.escaped {
+                    self.escaped = false;
+                } else if byte == b'\\' {
+                    self.escaped = true;
+                } else if byte == b'"' {
+                    self.quoted = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' | b'{' | b'[' => {
+                    self.quoted = byte == b'"';
+                    self.scalar = false;
+                    self.nodes += 1;
+                }
+                b'}' | b']' | b',' | b':' | b' ' | b'\t' | b'\r' | b'\n' => self.scalar = false,
+                _ if !self.scalar => {
+                    self.scalar = true;
+                    self.nodes += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn charge_nodes(name: &str, nodes: u64, remaining: &mut u64, limits: ReadLimits) -> Result<(), BundleError> {
+    let Some(left) = remaining.checked_sub(nodes) else {
+        let max = limits.nodes;
+        return Err(BundleError::Limits(format!("entry '{name}' exceeds the {max}-value JSON budget ({nodes} values)")));
+    };
+    *remaining = left;
+    Ok(())
+}
+
+// Charge an entry's JSON values before serde allocates anything for them.
+fn charge_json_nodes(name: &str, text: &[u8], remaining: &mut u64, limits: ReadLimits) -> Result<(), BundleError> {
+    let mut counter = NodeCounter::default();
+    counter.scan(text);
+    charge_nodes(name, counter.nodes, remaining, limits)
+}
+
 // Count serialization without retaining another payload buffer. The writer stops
-// at the same remaining/entry budget used by the reader. Errors contain entry
-// names and limits only, never serialized objects or vault plaintext.
+// at the same remaining/entry budget used by the reader, and counts the JSON
+// values the reader will charge. Errors contain entry names and limits only,
+// never serialized objects or vault plaintext.
 struct LengthWriter {
     bytes: u64,
     bound: u64,
+    json: NodeCounter,
 }
 
 impl Write for LengthWriter {
@@ -308,6 +374,7 @@ impl Write for LengthWriter {
         match next {
             Some(next) if next <= self.bound => {
                 self.bytes = next;
+                self.json.scan(bytes);
                 Ok(bytes.len())
             }
             _ => Err(std::io::Error::other("export byte budget exceeded")),
@@ -329,15 +396,17 @@ fn charge_json<T: Serialize>(
     pretty: bool,
     overhead: u64,
     remaining: &mut u64,
+    nodes: &mut u64,
     limits: ReadLimits,
 ) -> Result<(), BundleError> {
-    let mut writer = LengthWriter { bytes: overhead, bound: (*remaining).min(limits.entry) };
+    let mut writer = LengthWriter { bytes: overhead, bound: (*remaining).min(limits.entry), json: NodeCounter::default() };
     if overhead > writer.bound {
         return Err(export_size_error(name, limits));
     }
     let result = if pretty { serde_json::to_writer_pretty(&mut writer, value) } else { serde_json::to_writer(&mut writer, value) };
     result.map_err(|e| if e.is_io() { export_size_error(name, limits) } else { BundleError::Json(e) })?;
-    charge_entry_bytes(name, writer.bytes, remaining, limits)
+    charge_entry_bytes(name, writer.bytes, remaining, limits)?;
+    charge_nodes(name, writer.json.nodes, nodes, limits)
 }
 
 fn export_preflight(
@@ -349,12 +418,14 @@ fn export_preflight(
     limits: ReadLimits,
 ) -> Result<(), BundleError> {
     let mut remaining = limits.total;
+    let mut nodes = limits.nodes;
     // SHA-256 hex digests all serialize to exactly the same 64-byte length.
-    // Salt randomness and ciphertext contents do not change serialized lengths.
+    // Salt randomness and ciphertext contents do not change serialized lengths
+    // or JSON values.
     let mut checksums = BTreeMap::new();
     let mut exported_manifest = manifest.clone();
     let mut names = vec![MANIFEST_ENTRY.to_string(), "workspace/objects.json".to_string()];
-    charge_json("workspace/objects.json", objects, true, 0, &mut remaining, limits)?;
+    charge_json("workspace/objects.json", objects, true, 0, &mut remaining, &mut nodes, limits)?;
     for (hash, data) in &graph.attachments {
         let name = format!("attachments/{hash}");
         safe_name(&name)?;
@@ -363,18 +434,19 @@ fn export_preflight(
     }
     if opts.include_history && !graph.history.is_empty() {
         let name = "history/records.jsonl";
-        let mut writer = LengthWriter { bytes: 0, bound: remaining.min(limits.entry) };
+        let mut writer = LengthWriter { bytes: 0, bound: remaining.min(limits.entry), json: NodeCounter::default() };
         for record in &graph.history {
             serde_json::to_writer(&mut writer, record)
                 .map_err(|e| if e.is_io() { export_size_error(name, limits) } else { BundleError::Json(e) })?;
             writer.write_all(b"\n").map_err(|_| export_size_error(name, limits))?;
         }
         charge_entry_bytes(name, writer.bytes, &mut remaining, limits)?;
+        charge_nodes(name, writer.json.nodes, &mut nodes, limits)?;
         names.push(name.into());
     }
     if opts.mode == ExportMode::EncryptedTransfer {
         check_kdf(&opts.kdf)?;
-        charge_json(VAULT_ENTRY, vault, false, VAULT_ENVELOPE_OVERHEAD, &mut remaining, limits)?;
+        charge_json(VAULT_ENTRY, vault, false, VAULT_ENVELOPE_OVERHEAD, &mut remaining, &mut nodes, limits)?;
         exported_manifest.vault = Some(VaultInfo {
             kdf: opts.kdf,
             salt_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 16]),
@@ -389,8 +461,8 @@ fn export_preflight(
     for name in names {
         checksums.insert(name, "0".repeat(64));
     }
-    charge_json(MANIFEST_ENTRY, &exported_manifest, true, 0, &mut remaining, limits)?;
-    charge_json(CHECKSUMS_ENTRY, &checksums, true, 0, &mut remaining, limits)
+    charge_json(MANIFEST_ENTRY, &exported_manifest, true, 0, &mut remaining, &mut nodes, limits)?;
+    charge_json(CHECKSUMS_ENTRY, &checksums, true, 0, &mut remaining, &mut nodes, limits)
 }
 
 fn zip_export_files(files: &[(String, Cow<'_, [u8]>)], stored: &BTreeSet<String>) -> Result<Vec<u8>, BundleError> {
@@ -601,9 +673,49 @@ struct ReadLimits {
     total: u64,
     entry: u64,
     ratio: u64,
+    nodes: u64,
 }
 
-const READ_LIMITS: ReadLimits = ReadLimits { entries: MAX_ENTRIES, total: MAX_TOTAL_BYTES, entry: MAX_ENTRY_BYTES, ratio: MAX_RATIO };
+const READ_LIMITS: ReadLimits =
+    ReadLimits { entries: MAX_ENTRIES, total: MAX_TOTAL_BYTES, entry: MAX_ENTRY_BYTES, ratio: MAX_RATIO, nodes: MAX_JSON_NODES };
+
+// A central header is 46 fixed bytes plus its name (at most 255 bytes, see
+// [`safe_name`]), extra field and comment; 4 KiB covers what zip tools add.
+const MAX_DIRECTORY_HEADER_BYTES: u64 = 46 + 255 + 4096;
+
+// zip indexes (and reserves memory for) every entry an end-of-central-directory
+// record declares before any check of ours can walk the directory. It tries the
+// end records in the file from the last one until one parses, so each is
+// checked here first, from the raw bytes: none may be ZIP64 (bundles never need
+// it, and only ZIP64 declares more than 65,535 entries), and the last one must
+// declare at most `limits.entries` entries in a directory that fits before it.
+fn check_end_records(bytes: &[u8], limits: ReadLimits) -> Result<(), BundleError> {
+    let mut last = true;
+    let mut end = bytes.len();
+    while let Some(at) = bytes[..end].windows(4).rposition(|w| w == b"PK\x05\x06") {
+        end = at + 3;
+        let Some(record) = bytes.get(at..at + 22) else { continue };
+        let u16_at = |i: usize| u64::from(u16::from_le_bytes([record[i], record[i + 1]]));
+        let u32_at = |i: usize| u64::from(u32::from_le_bytes([record[i], record[i + 1], record[i + 2], record[i + 3]]));
+        // Like zip, skip a record whose comment runs past the end of the file.
+        if at as u64 + 22 + u16_at(20) > bytes.len() as u64 {
+            continue;
+        }
+        let (on_disk, entries, size, offset) = (u16_at(8), u16_at(10), u32_at(12), u32_at(16));
+        let zip64 = entries == 0xFFFF || size == 0xFFFF_FFFF || offset == 0xFFFF_FFFF;
+        if zip64 && at >= 20 && bytes[at - 20..].starts_with(b"PK\x06\x07") {
+            return Err(BundleError::Limits("ZIP64 archives are not supported".into()));
+        }
+        if std::mem::take(&mut last) {
+            let declared = on_disk.max(entries);
+            if declared > limits.entries as u64 || size > at as u64 || size > declared * MAX_DIRECTORY_HEADER_BYTES {
+                let what = format!("{declared} entries in a {size}-byte central directory (max {} entries)", limits.entries);
+                return Err(BundleError::Limits(what));
+            }
+        }
+    }
+    Ok(())
+}
 
 struct EntryInfo {
     index: usize,
@@ -759,8 +871,10 @@ fn verify_digest(name: &str, digest: &str, checksums: &BTreeMap<String, String>)
 
 /// Open and fully validate a bundle. Nothing is written anywhere.
 /// Directory and mandatory metadata checks precede payload expansion. The
-/// Shared 256 MiB/128 MiB byte budgets are not bounds on parser or process memory.
+/// shared 256 MiB/128 MiB byte budgets bound what is inflated and retained, and
+/// [`MAX_JSON_NODES`] what parsing adds; neither bounds KDF or process memory.
 pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleError> {
+    check_end_records(bytes, READ_LIMITS)?;
     let zr = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| BundleError::NotABundle(e.to_string()))?;
     open_archive(bytes, zr, passphrase, READ_LIMITS)
 }
@@ -775,9 +889,11 @@ fn open_archive<R: Read + Seek>(
 ) -> Result<Opened, BundleError> {
     let entries = preflight(&mut zr, bytes, limits)?;
     let mut remaining = limits.total;
+    let mut nodes = limits.nodes;
     let (manifest_bytes, manifest_digest) = read_entry(&mut zr, MANIFEST_ENTRY, &entries[MANIFEST_ENTRY], &mut remaining, limits)?;
     let checksums: BTreeMap<String, String> = {
         let (data, _) = read_entry(&mut zr, CHECKSUMS_ENTRY, &entries[CHECKSUMS_ENTRY], &mut remaining, limits)?;
+        charge_json_nodes(CHECKSUMS_ENTRY, &data, &mut nodes, limits)?;
         serde_json::from_slice(&data)?
     };
     for name in entries.keys().filter(|name| name.as_str() != CHECKSUMS_ENTRY) {
@@ -792,6 +908,7 @@ fn open_archive<R: Read + Seek>(
         }
     }
     verify_digest(MANIFEST_ENTRY, &manifest_digest, &checksums)?;
+    charge_json_nodes(MANIFEST_ENTRY, &manifest_bytes, &mut nodes, limits)?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(|e| BundleError::NotABundle(format!("manifest: {e}")))?;
     drop(manifest_bytes);
     if manifest.format != FORMAT {
@@ -852,6 +969,7 @@ fn open_archive<R: Read + Seek>(
         let name = "workspace/objects.json";
         let (data, digest) = read_entry(&mut zr, name, &entries[name], &mut remaining, limits)?;
         verify_digest(name, &digest, &checksums)?;
+        charge_json_nodes(name, &data, &mut nodes, limits)?;
         serde_json::from_slice(&data)?
     };
     // Only full backups carried app settings.
@@ -883,6 +1001,7 @@ fn open_archive<R: Read + Seek>(
         let aad = vault_aad(manifest.format_version, &checksums);
         let pt = crypto::open(&key, &aad, &enc).map_err(|_| BundleError::WrongPassphrase)?;
         drop(enc);
+        charge_json_nodes(VAULT_ENTRY, &pt, &mut nodes, limits)?;
         let payload: VaultPayload = serde_json::from_slice(&pt)?;
         // Literals go back only to the fields the manifest lists as replaced,
         // each of which must still hold its placeholder.
@@ -912,6 +1031,7 @@ fn open_archive<R: Read + Seek>(
     if let Some(info) = entries.get(history_name) {
         let (h, digest) = read_entry(&mut zr, history_name, info, &mut remaining, limits)?;
         verify_digest(history_name, &digest, &checksums)?;
+        charge_json_nodes(history_name, &h, &mut nodes, limits)?;
         for line in h.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
             let record: serde_json::Value = serde_json::from_slice(line)?;
             check_record_schema(&record, "history record")?;
@@ -1047,6 +1167,26 @@ mod read_tests {
             total: files.iter().map(|(_, data)| data.len() as u64).sum(),
             entry: files.iter().map(|(_, data)| data.len() as u64).max().unwrap(),
             ratio: MAX_RATIO,
+            nodes: MAX_JSON_NODES,
+        }
+    }
+
+    fn json_nodes(text: &[u8]) -> u64 {
+        let mut counter = NodeCounter::default();
+        counter.scan(text);
+        counter.nodes
+    }
+
+    // The JSON values of every entry but attachments and the sealed vault.
+    fn plain_json_nodes(files: &Files) -> u64 {
+        files.iter().filter(|(name, _)| !name.starts_with("attachments/") && name != VAULT_ENTRY).map(|(_, data)| json_nodes(data)).sum()
+    }
+
+    fn assert_no_attachment_reads(counts: &ReadCounts) {
+        for (name, count) in counts.borrow().iter() {
+            if name.starts_with("attachments/") {
+                assert_eq!(*count, 0, "unexpected payload read from {name}");
+            }
         }
     }
 
@@ -1257,6 +1397,7 @@ mod read_tests {
     fn valid_archives_open_at_exact_scaled_budgets_and_keep_vault_binding() {
         assert_eq!((READ_LIMITS.total, READ_LIMITS.entry), (256 << 20, 128 << 20));
         assert_eq!((READ_LIMITS.ratio, READ_LIMITS.entries), (200, 20_000));
+        assert_eq!(READ_LIMITS.nodes, 4 << 20);
         for mode in [ExportMode::ShareSafely, ExportMode::EncryptedTransfer] {
             let files = fixture(mode);
             let limits = boundary_limits(&files);
@@ -1487,7 +1628,13 @@ mod read_tests {
                 entry.read_to_end(&mut data).unwrap();
                 files.push((entry.name().to_string(), data));
             }
-            let limits = boundary_limits(&files);
+            // Export and import count the same JSON values, the vault
+            // plaintext included, so the exact node budget also round-trips.
+            let mut nodes = plain_json_nodes(&files);
+            if mode == ExportMode::EncryptedTransfer {
+                nodes += json_nodes(&serde_json::to_vec(&prepared.2).unwrap());
+            }
+            let limits = ReadLimits { nodes, ..boundary_limits(&files) };
             let data = prepared.clone();
             let dry = preview_prepared(&graph, &opts, data, limits).unwrap();
             assert_eq!(dry.manifest.counts, written.manifest.counts);
@@ -1512,6 +1659,7 @@ mod read_tests {
                 ReadLimits { total: limits.total - 1, ..limits },
                 ReadLimits { entry: limits.entry - 1, ..limits },
                 ReadLimits { entries: limits.entries - 1, ..limits },
+                ReadLimits { nodes: limits.nodes - 1, ..limits },
             ] {
                 let data = prepared.clone();
                 let dry_error = preview_prepared(&graph, &opts, data, smaller).unwrap_err();
@@ -1605,9 +1753,88 @@ mod read_tests {
         };
         assert!(matches!(preview(&too_many, &opts), Err(BundleError::Limits(_))));
         assert!(matches!(write(&too_many, &opts), Err(BundleError::Limits(_))));
-        let mut writer = LengthWriter { bytes: 7, bound: 8 };
+        let mut writer = LengthWriter { bytes: 7, bound: 8, json: NodeCounter::default() };
         assert!(writer.write_all(b"secret").is_err());
         assert_eq!(writer.bytes, 7);
+    }
+
+    #[test]
+    fn json_values_are_counted_without_parsing_even_across_pieces() {
+        let text = br#"{"requests":[0,0,0,[],{},"",true,null,-1.5e3]} "a\"b{[""#;
+        assert_eq!(json_nodes(text), 13);
+        // The exporter counts serializer output written in arbitrary pieces.
+        let mut counter = NodeCounter::default();
+        for piece in text.chunks(3) {
+            counter.scan(piece);
+        }
+        assert_eq!(counter.nodes, 13);
+        assert_eq!(json_nodes(b"\"\\\\\" 0"), 2);
+    }
+
+    #[test]
+    fn amplifying_json_is_refused_by_counting_values_before_it_is_parsed() {
+        let original = fixture(ExportMode::ShareSafely);
+        let mut history = original.clone();
+        history.push(("history/records.jsonl".into(), b"0\n".repeat(64)));
+        update_checksums(&mut history);
+        // Every JSON entry shares one inclusive budget; the last one charged
+        // is refused one value over it, before any later entry is read.
+        for (files, last) in [(&original, "workspace/objects.json"), (&history, "history/records.jsonl")] {
+            let exact = ReadLimits { nodes: plain_json_nodes(files), ..boundary_limits(files) };
+            let bytes = pack(files, zip::CompressionMethod::Stored, false);
+            let (archive, _) = tracked(&bytes);
+            open_archive(&bytes, archive, None, exact).unwrap();
+            let (archive, counts) = tracked(&bytes);
+            let error = open_archive(&bytes, archive, None, ReadLimits { nodes: exact.nodes - 1, ..exact }).unwrap_err();
+            assert!(matches!(&error, BundleError::Limits(why) if why.contains(last)), "{error}");
+            if last == "workspace/objects.json" {
+                assert_no_attachment_reads(&counts);
+            }
+        }
+        // At production limits. Each two-byte `0,` would parse to an 80-byte
+        // Value: 4 Mi of them (8 MiB) to over 320 MiB, and a 128 MiB entry of
+        // them (64 Mi values, under 1 MiB compressed) to about 5 GiB.
+        let mut text = b"{\"requests\":[".to_vec();
+        text.extend(b"0,".repeat(MAX_JSON_NODES as usize));
+        text.extend(b"0]}");
+        assert_eq!(json_nodes(&text), MAX_JSON_NODES + 4);
+        let mut files = original;
+        files.iter_mut().find(|(name, _)| name == "workspace/objects.json").unwrap().1 = text;
+        update_checksums(&mut files);
+        // Stored, so the ratio rule cannot be what refuses it.
+        let bytes = pack(&files, zip::CompressionMethod::Stored, false);
+        let (archive, counts) = tracked(&bytes);
+        let error = open_archive(&bytes, archive, None, READ_LIMITS).unwrap_err();
+        assert!(matches!(&error, BundleError::Limits(why) if why.contains("workspace/objects.json")), "{error}");
+        assert_no_attachment_reads(&counts);
+        assert!(matches!(open(&bytes, None), Err(BundleError::Limits(_))));
+    }
+
+    #[test]
+    fn end_records_are_checked_before_zip_indexes_the_directory() {
+        let files = fixture(ExportMode::ShareSafely);
+        let bytes = pack(&files, zip::CompressionMethod::Stored, false);
+        open(&bytes, None).unwrap();
+        check_end_records(&bytes, ReadLimits { entries: files.len(), ..READ_LIMITS }).unwrap();
+        let fewer = ReadLimits { entries: files.len() - 1, ..READ_LIMITS };
+        assert!(matches!(check_end_records(&bytes, fewer), Err(BundleError::Limits(_))));
+        let end = bytes.len() - 22;
+        assert_eq!(&bytes[end..end + 4], b"PK\x05\x06");
+        // Too many entries on the disk or in all, or a directory that cannot
+        // fit before its record: refused from the record, not by zip.
+        let over = (MAX_ENTRIES as u16 + 1).to_le_bytes().to_vec();
+        for (at, value) in [(8, over.clone()), (10, over), (12, (end as u32 + 1).to_le_bytes().to_vec())] {
+            let mut lying = bytes.clone();
+            lying[end + at..end + at + value.len()].copy_from_slice(&value);
+            assert!(matches!(open(&lying, None), Err(BundleError::Limits(_))), "field at {at}");
+        }
+        // zip falls back to an earlier end record when the last one fails, and
+        // only a ZIP64 one can declare millions of entries: any is refused.
+        let mut zip64 = b"PK\x06\x07".to_vec();
+        zip64.extend([0u8; 16]);
+        zip64.extend(b"PK\x05\x06\0\0\0\0\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\0\0");
+        zip64.extend(&bytes);
+        assert!(matches!(open(&zip64, None), Err(BundleError::Limits(why)) if why.contains("ZIP64")));
     }
 
     #[test]

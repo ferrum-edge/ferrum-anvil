@@ -78,6 +78,35 @@ impl ImportApproval {
     }
 }
 
+/// Refuse to export a stored file larger than one bundle entry, naming the
+/// file and the request or dataset that holds it. Files are capped when they
+/// are attached ([`App::put_attachment`]); this catches ones stored before.
+fn check_attachment_size(g: &PortableGraph, sha: &str, size: u64, max: u64) -> Result<()> {
+    if size <= max {
+        return Ok(());
+    }
+    let requests = g.requests.iter().map(|r| ("request", &r.name, serde_json::to_value(r)));
+    let datasets = g.datasets.iter().map(|d| ("dataset", &d.name, serde_json::to_value(d)));
+    let holder = requests
+        .chain(datasets)
+        .find_map(|(what, name, value)| Some(format!("the file '{}' of {what} '{name}'", stored_file_name(&value.ok()?, sha)?)))
+        .unwrap_or_else(|| format!("the stored file {sha}"));
+    let why = format!("{holder} is {size} bytes, over the {max}-byte limit for one bundle entry");
+    Err(AppError::Bundle(bundle::BundleError::Limits(format!("{why}; remove it or attach a smaller file, then export again"))))
+}
+
+// The name of the stored file `sha` anywhere in a serialized request or dataset.
+fn stored_file_name(value: &serde_json::Value, sha: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Object(o) if o.get("sha256").and_then(|s| s.as_str()) == Some(sha) => {
+            o.get("file_name").and_then(|f| f.as_str()).map(str::to_string)
+        }
+        serde_json::Value::Object(o) => o.values().find_map(|v| stored_file_name(v, sha)),
+        serde_json::Value::Array(a) => a.iter().find_map(|v| stored_file_name(v, sha)),
+        _ => None,
+    }
+}
+
 /// SHA-256 (lowercase hex) of an import file, as [`ImportReport::bundle_sha256`].
 pub fn file_sha256(file: &[u8]) -> String {
     hex::encode(Sha256::digest(file))
@@ -157,6 +186,7 @@ impl App {
             if sha.len() == 64
                 && let Some(b) = self.get_attachment(&sha)?
             {
+                check_attachment_size(&g, &sha, b.len() as u64, bundle::MAX_ENTRY_BYTES)?;
                 g.attachments.insert(sha, b);
             }
         }
@@ -708,4 +738,33 @@ fn missing_secrets(g: &PortableGraph) -> Vec<String> {
 fn gateway_hosts_overlap(a: &IntegrationProfile, b: &IntegrationProfile) -> bool {
     let (IntegrationKind::FerrumGateway { hosts: x, .. }, IntegrationKind::FerrumGateway { hosts: y, .. }) = (&a.kind, &b.kind);
     x.iter().any(|h| y.iter().any(|k| h.host.eq_ignore_ascii_case(&k.host) && (h.port.is_none() || k.port.is_none() || h.port == k.port)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::ProfileManager;
+    use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
+
+    #[test]
+    fn an_export_names_a_stored_file_larger_than_a_bundle_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let pm = ProfileManager::new(root.path());
+        let (s, dek, _recovery) = pm.create_passphrase("t", "correct horse battery", KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        let app = App::open(s.dir, h, dek).unwrap();
+        let ws = app.create_workspace("Legacy").unwrap().meta.id;
+        let attachment = app.put_attachment("huge.bin", b"eleven byte", None).unwrap();
+        let AttachmentRef::Stored { sha256, .. } = attachment.clone() else { unreachable!() };
+        let mut spec = RequestSpec::http("POST", "https://api.example.test/");
+        spec.body = Body::Binary { attachment, content_type: None };
+        app.create_request(&ws, None, "Upload", spec).unwrap();
+        let g = app.graph(Some(&ws), false, false).unwrap();
+        // Scaled down: an 11-byte file against a 10-byte entry budget.
+        check_attachment_size(&g, &sha256, 11, 11).unwrap();
+        let error = check_attachment_size(&g, &sha256, 11, 10).unwrap_err();
+        assert!(matches!(error, AppError::Bundle(bundle::BundleError::Limits(_))));
+        let message = error.to_string();
+        assert!(message.contains("the file 'huge.bin' of request 'Upload' is 11 bytes"), "{message}");
+    }
 }
