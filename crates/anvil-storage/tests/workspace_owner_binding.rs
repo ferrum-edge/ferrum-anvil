@@ -1,5 +1,7 @@
-//! Production Store tests for the released v1 object envelope. Metadata-only
-//! attackers below receive a SQLite connection, never the data encryption key.
+//! Production Store tests for the released v1 object envelope, the schema 3
+//! revision envelope and the owners sealed in history records and load
+//! reports. Metadata-only attackers below receive a SQLite connection, never
+//! the data encryption key.
 
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
@@ -168,6 +170,15 @@ fn row(db: &Connection, object: &Object) -> StoredRow {
     .unwrap()
 }
 
+// A schema 3 revision envelope, as the store seals one. Fixtures use it to
+// plant authentic ciphertext with chosen contents, not as an attacker.
+fn sealed_revision(key: &Key, revision: &Object, owner: Id, request: Id, value: &Value) -> Vec<u8> {
+    let id = revision.id.to_string();
+    let aad = format!("anvil/v3/objects/revision/{}:{id}", id.len());
+    let envelope = json!({"workspace_id": owner, "request_id": request, "revision": value});
+    crypto::seal(key, aad.as_bytes(), &serde_json::to_vec(&envelope).unwrap())
+}
+
 // This attacker has no key. Change only the plaintext routing column.
 fn change_owner(db: &Connection, object: &Object, owner: Option<Id>) {
     db.execute(
@@ -295,10 +306,112 @@ fn already_sealed_wrong_id_owner_type_and_parent_are_refused_without_resealing()
     revision.put(&store).unwrap();
     let mut wrong_parent = revision.value.clone();
     wrong_parent["request_id"] = json!(Id::new());
-    let aad = format!("anvil/v1/objects/revision/{}", revision.id);
-    let payload = crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&wrong_parent).unwrap());
-    db.execute("UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2", params![payload, revision.id.to_string()]).unwrap();
-    assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)));
+    let legacy = format!("anvil/v1/objects/revision/{}", revision.id);
+    for payload in [
+        // The revision names another request than the envelope around it.
+        sealed_revision(&key, &revision, a, request, &wrong_parent),
+        // Sealed for workspace `b`, though indexed (and requested) under `a`.
+        sealed_revision(&key, &revision, b, request, &revision.value),
+        // The schema 1 seal binds no owner, so it no longer opens at all.
+        crypto::seal(&key, legacy.as_bytes(), &serde_json::to_vec(&revision.value).unwrap()),
+    ] {
+        db.execute("UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2", params![payload, revision.id.to_string()]).unwrap();
+        assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)));
+        assert!(matches!(store.list::<Value>(kind::REVISION, Some(&a)), Err(StoreError::Integrity)));
+    }
+}
+
+#[test]
+fn a_revision_replayed_after_its_request_id_is_reused_in_another_workspace_is_refused() {
+    let (dir, store, key, a, b, request) = open();
+    let db = Connection::open(dir.path().join(DB_FILE)).unwrap();
+    let revision = fixture(kind::REVISION, a, request);
+    revision.put(&store).unwrap();
+    let old = row(&db, &revision);
+    store.delete(kind::REVISION, &revision.id).unwrap();
+    store.delete(kind::REQUEST, &request).unwrap();
+    // The same request id, created again in workspace `b`.
+    let mut reused = fixture(kind::REQUEST, b, Id::nil());
+    reused.id = request;
+    reused.value["id"] = json!(request);
+    reused.put(&store).unwrap();
+
+    let insert = "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES('revision',?1,?2,?3,0,0,?4)";
+    let legacy = format!("anvil/v1/objects/revision/{}", revision.id);
+    let unowned = crypto::seal(&key, legacy.as_bytes(), &serde_json::to_vec(&revision.value).unwrap());
+    // The old authentic row under either owner index, and the same revision
+    // as an earlier schema sealed it, which bound no owner.
+    for (owner, payload) in [(a, &old.payload), (b, &old.payload), (b, &unowned)] {
+        db.execute(insert, params![revision.id.to_string(), owner.to_string(), request.to_string(), payload]).unwrap();
+        assert!(matches!(store.get::<Value>(kind::REVISION, &revision.id), Err(StoreError::Integrity)), "{owner}");
+        assert!(matches!(store.list::<Value>(kind::REVISION, Some(&owner)), Err(StoreError::Integrity)), "{owner}");
+        assert!(store.put(kind::REVISION, &revision.id, Some(&b), Some(&request), 0.0, &revision.value).is_err());
+        db.execute("DELETE FROM objects WHERE kind='revision' AND id=?1", params![revision.id.to_string()]).unwrap();
+    }
+    // A revision written for the reused request belongs to its workspace.
+    store.put(kind::REVISION, &revision.id, Some(&b), Some(&request), 0.0, &revision.value).unwrap();
+    assert_eq!(store.get::<Value>(kind::REVISION, &revision.id).unwrap(), Some(revision.value.clone()));
+}
+
+#[test]
+fn history_records_and_load_reports_are_read_only_under_the_owner_they_seal() {
+    let (dir, store, _key, a, b, request) = open();
+    let db = Connection::open(dir.path().join(DB_FILE)).unwrap();
+    let id = Id::new();
+    let record = json!({"id": id, "workspace_id": a, "request_id": request, "status": 200});
+    store.add_history(&id, Some(&a), Some(&request), 1, &record, Some(b"body".as_slice())).unwrap();
+    assert_eq!(store.list_history(Some(&a), Some(&request), 10).unwrap().len(), 1);
+    assert_eq!(store.get_history::<Value>(&id.to_string()).unwrap().unwrap().0, record);
+
+    let edits = [
+        ("UPDATE history SET workspace_id=?1 WHERE id=?2", Some(b)),
+        ("UPDATE history SET workspace_id=?1 WHERE id=?2", None),
+        ("UPDATE history SET request_id=?1 WHERE id=?2", Some(Id::new())),
+        ("UPDATE history SET request_id=?1 WHERE id=?2", None),
+    ];
+    for (edit, value) in edits {
+        db.execute(edit, params![value.map(|v| v.to_string()), id.to_string()]).unwrap();
+        assert!(matches!(store.get_history::<Value>(&id.to_string()), Err(StoreError::Integrity)), "{edit}");
+        assert!(matches!(store.list_history(None, None, 10), Err(StoreError::Integrity)), "{edit}");
+        assert!(matches!(store.read_consistently(|r| r.history_entries()), Err(StoreError::Integrity)), "{edit}");
+        if value == Some(b) {
+            assert!(matches!(store.list_history(Some(&b), None, 10), Err(StoreError::Integrity)));
+        }
+        let restore = "UPDATE history SET workspace_id=?1, request_id=?2 WHERE id=?3";
+        db.execute(restore, params![a.to_string(), request.to_string(), id.to_string()]).unwrap();
+    }
+    assert_eq!(store.list_history(Some(&a), None, 10).unwrap().len(), 1);
+    // A write must index a record under the owner it seals.
+    let other = Id::new();
+    let mut moved = record.clone();
+    moved["id"] = json!(other);
+    for (ws, req) in [(Some(&b), Some(&request)), (None, Some(&request)), (Some(&a), None)] {
+        let result = store.add_history(&other, ws, req, 1, &moved, Some(b"other body".as_slice()));
+        assert!(matches!(result, Err(StoreError::Integrity)));
+    }
+    assert!(store.get_history::<Value>(&other.to_string()).unwrap().is_none());
+
+    let run = Id::new();
+    let report = json!({"run_id": run, "plan": {"id": Id::new(), "workspace_id": a}});
+    store.put_load_report(&run, Some(&a), 1, &report).unwrap();
+    assert_eq!(store.list_load_reports::<Value>(Some(&a)).unwrap(), vec![report.clone()]);
+    let set_owner = |owner: Option<Id>| {
+        db.execute("UPDATE load_reports SET workspace_id=?1 WHERE id=?2", params![owner.map(|w| w.to_string()), run.to_string()]).unwrap();
+    };
+    for owner in [Some(b), None] {
+        set_owner(owner);
+        assert!(matches!(store.list_load_reports::<Value>(None), Err(StoreError::Integrity)));
+        assert!(matches!(store.read_consistently(|r| r.load_report_entries()), Err(StoreError::Integrity)));
+        if let Some(owner) = owner {
+            assert!(matches!(store.list_load_reports::<Value>(Some(&owner)), Err(StoreError::Integrity)));
+        }
+    }
+    set_owner(Some(a));
+    assert_eq!(store.read_consistently(|r| r.load_report_entries()).unwrap(), vec![(run.to_string(), Some(a.to_string()))]);
+    // A write must index a report under the workspace its plan names.
+    assert!(matches!(store.put_load_report(&run, Some(&b), 2, &report), Err(StoreError::Integrity)));
+    assert!(matches!(store.put_load_report(&Id::new(), None, 2, &report), Err(StoreError::Integrity)));
+    assert_eq!(store.list_load_reports::<Value>(None).unwrap(), vec![report]);
 }
 
 #[test]
@@ -406,6 +519,10 @@ fn orphan_inspection_refuses_ciphertext_wrong_ids_and_non_hash_attachment_data()
         vec![0],
         crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&wrong_id).unwrap()),
         crypto::seal(&key, aad.as_bytes(), &serde_json::to_vec(&invalid_hash).unwrap()),
+        sealed_revision(&key, &revision, a, request, &wrong_id),
+        sealed_revision(&key, &revision, a, request, &invalid_hash),
+        // The envelope names another request than the revision inside it.
+        sealed_revision(&key, &revision, a, Id::new(), &revision.value),
     ] {
         db.execute("UPDATE objects SET payload=?1 WHERE kind='revision' AND id=?2", params![payload, revision.id.to_string()]).unwrap();
         let before = row(&db, &revision);
