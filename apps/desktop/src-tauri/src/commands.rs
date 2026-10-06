@@ -2,14 +2,14 @@
 //! refuses while locked; secrets never cross into the webview except where
 //! the user explicitly typed them (they are stored and only references return).
 
-use crate::state::{DesktopState, ImportGate, PendingEntry, cancel_pending};
+use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, PendingEntry, cancel_pending};
 use anvil_app::cleanup::StorageCleanupRecord;
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::Unlock;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
-use anvil_domain::events::ExecutionEvent;
+use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::ExecutionRecord;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::request::RequestSpec;
@@ -541,12 +541,248 @@ pub fn body_view(raw: &[u8], decoded: Option<&[u8]>, content_type: Option<&str>)
     }
 }
 
-#[tauri::command]
-pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) -> R<anvil_engine::preview::EffectiveRequest> {
-    // Taken before the app is read: a preview built across a lock or a
-    // profile switch is not returned (as in `blocking`).
-    let seen = st.epoch();
-    let app = st.app()?;
+/// These payload replies bypass the generated async responder: its enqueue
+/// happens after the command returns and cannot share our lock boundary.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendArgs {
+    input: SendInput,
+    execution_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenSessionArgs {
+    input: SendInput,
+    execution_id: String,
+    #[serde(deserialize_with = "nonempty_attempt_id")]
+    attempt_id: String,
+}
+
+#[derive(Deserialize)]
+struct PreviewArgs {
+    input: SendInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpArgs {
+    input: McpDiscoverInput,
+    execution_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionArgs {
+    execution_id: String,
+    #[serde(deserialize_with = "nonempty_attempt_id")]
+    attempt_id: String,
+    command: SessionCommand,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelSessionArgs {
+    execution_id: String,
+    #[serde(deserialize_with = "nonempty_attempt_id")]
+    attempt_id: String,
+}
+
+/// Reject empty attempts while decoding, before native state or admission is read.
+fn nonempty_attempt_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let attempt = String::deserialize(deserializer)?;
+    if attempt.is_empty() {
+        return Err(serde::de::Error::custom("attemptId must be nonempty"));
+    }
+    Ok(attempt)
+}
+
+pub(crate) fn with_execution_commands(
+    other: impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        if matches!(
+            invoke.message.command(),
+            "send_request" | "effective_request" | "mcp_discover_tools" | "session_open" | "session_send" | "session_cancel"
+        ) {
+            execution_command(invoke);
+            true
+        } else {
+            other(invoke)
+        }
+    }
+}
+
+pub(crate) fn execution_command(invoke: tauri::ipc::Invoke) {
+    match invoke.message.command() {
+        "send_request" => payload_reply(invoke, |handle, fence, args: SendArgs| async move {
+            send_request(handle, fence, args.input, args.execution_id).await
+        }),
+        "effective_request" => {
+            payload_reply(invoke, |_, fence, args: PreviewArgs| async move { effective_request(fence, args.input).await })
+        }
+        "mcp_discover_tools" => payload_reply(invoke, |handle, fence, args: McpArgs| async move {
+            mcp_discover_tools(handle, fence, args.input, args.execution_id).await
+        }),
+        "session_open" => payload_reply(invoke, |handle, fence, args: OpenSessionArgs| async move {
+            crate::cmd_sessions::session_open(handle, fence, args.input, args.execution_id, args.attempt_id).await
+        }),
+        "session_send" => payload_reply_admitted(
+            invoke,
+            |st, fence, args: &SessionArgs| crate::cmd_sessions::admit_control(st, fence, &args.execution_id, &args.attempt_id),
+            |handle, control, args| async move {
+                crate::cmd_sessions::session_send(&handle.state::<DesktopState>(), control, args.command).await
+            },
+        ),
+        "session_cancel" => payload_reply_admitted(
+            invoke,
+            |st, fence, args: &CancelSessionArgs| crate::cmd_sessions::admit_cancel(st, fence, &args.execution_id, &args.attempt_id),
+            |handle, control, _| async move { crate::cmd_sessions::session_cancel(&handle.state::<DesktopState>(), control).await },
+        ),
+        _ => invoke.resolver.reject("unknown execution command"),
+    }
+}
+
+fn payload_reply<A, T, F, Fut>(invoke: tauri::ipc::Invoke, work: F)
+where
+    A: serde::de::DeserializeOwned + Send + 'static,
+    T: Serialize + Send + 'static,
+    F: FnOnce(AppHandle, PayloadFence, A) -> Fut + Send + 'static,
+    Fut: Future<Output = R<T>> + Send + 'static,
+{
+    payload_reply_admitted(invoke, |_, fence, _: &A| Ok(fence), work);
+}
+
+fn payload_reply_admitted<A, C, T, F, Fut>(invoke: tauri::ipc::Invoke, admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>, work: F)
+where
+    A: serde::de::DeserializeOwned + Send + 'static,
+    C: Send + 'static,
+    T: Serialize + Send + 'static,
+    F: FnOnce(AppHandle, C, A) -> Fut + Send + 'static,
+    Fut: Future<Output = R<T>> + Send + 'static,
+{
+    let handle = invoke.message.webview().app_handle().clone();
+    let resolver = invoke.resolver;
+    dispatch_payload_command(
+        handle.clone(),
+        invoke.message.payload(),
+        admit,
+        move |admitted, args| work(handle, admitted, args),
+        move |response| match response {
+            tauri::ipc::InvokeResponse::Ok(body) => resolver.respond(Ok(body)),
+            tauri::ipc::InvokeResponse::Err(err) => resolver.respond(Result::<(), _>::Err(err)),
+        },
+    );
+}
+
+/// The production decoder/admission/work gate, shared with tests without a native window.
+fn dispatch_payload_command<S, A, C, T, F, Fut>(
+    source: S,
+    payload: &tauri::ipc::InvokeBody,
+    admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>,
+    work: F,
+    reply: impl FnOnce(tauri::ipc::InvokeResponse) + Send + 'static,
+) where
+    S: PayloadState,
+    A: serde::de::DeserializeOwned + Send + 'static,
+    C: Send + 'static,
+    T: Serialize + Send + 'static,
+    F: FnOnce(C, A) -> Fut + Send + 'static,
+    Fut: Future<Output = R<T>> + Send + 'static,
+{
+    let args = match payload {
+        // Borrowed: request bodies can be large, and are never cloned here.
+        tauri::ipc::InvokeBody::Json(value) => A::deserialize(value),
+        _ => {
+            reply(R::<T>::Err("expected JSON execution arguments".into()).into());
+            return;
+        }
+    };
+    let args = match args {
+        Ok(args) => args,
+        Err(err) => {
+            reply(R::<T>::Err(err.to_string()).into());
+            return;
+        }
+    };
+    // Controls bind the exact pending/open slot synchronously at IPC
+    // admission, before the command future can be delayed by scheduling.
+    let admission: R<_> = source.with_state(|st| {
+        let fence = st.admit_payload()?;
+        let admitted = admit(st, fence.clone(), &args)?;
+        Ok((fence, admitted))
+    });
+    let (fence, admitted) = match admission {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            reply(R::<T>::Err(err).into());
+            return;
+        }
+    };
+    let future = work(admitted, args);
+    dispatch_payload_reply(source, fence, future, reply);
+}
+
+/// The production async work/IPC serialization/enqueue path. Only the final
+/// blocking delivery holds shared synchronous access; async work holds none.
+pub(crate) fn dispatch_payload_reply<S, T>(
+    source: S,
+    fence: PayloadFence,
+    work: impl Future<Output = R<T>> + Send + 'static,
+    reply: impl FnOnce(tauri::ipc::InvokeResponse) + Send + 'static,
+) where
+    S: PayloadState,
+    T: Serialize + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        let out = work.await;
+        tauri::async_runtime::spawn_blocking(move || {
+            source.with_state(|st| reply_payload(st, &fence, out, reply));
+        });
+    });
+}
+
+/// Serialize into Tauri's actual response body and enqueue under the fence.
+/// A stale detailed error is payload too: return only the scalar LOCKED code.
+fn reply_payload<T: Serialize>(st: &DesktopState, fence: &PayloadFence, out: R<T>, reply: impl FnOnce(tauri::ipc::InvokeResponse)) {
+    let mut reply = Some(reply);
+    let mut out = Some(out);
+    if st
+        .deliver_payload(fence, || {
+            reply.take().expect("one reply")(out.take().expect("one result").into());
+        })
+        .is_err()
+    {
+        reply.expect("undelivered reply")(R::<T>::Err("LOCKED".into()).into());
+    }
+}
+
+/// The shared production sink for manual sends and interactive sessions.
+/// Preserve the manual send's existing progress throttle; session messages
+/// and critical events are never dropped merely because another reply runs.
+pub(crate) fn execution_sink<S: PayloadState>(
+    source: S,
+    fence: PayloadFence,
+    throttle_progress: bool,
+    emit: impl Fn(&ExecutionEvent) + Send + Sync + 'static,
+) -> anvil_transport::EventFn {
+    let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
+    Arc::new(move |ev| {
+        if throttle_progress && matches!(ev, ExecutionEvent::BodyProgress { .. }) {
+            let mut last = last_progress.lock();
+            if last.elapsed() < std::time::Duration::from_millis(100) {
+                return;
+            }
+            *last = std::time::Instant::now();
+        }
+        source.with_state(|st| {
+            let _ = st.deliver_payload(&fence, || emit(&ev));
+        });
+    })
+}
+
+async fn effective_request(fence: PayloadFence, input: SendInput) -> R<anvil_engine::preview::EffectiveRequest> {
+    let app = fence.app;
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
@@ -554,39 +790,24 @@ pub async fn effective_request(st: State<'_, DesktopState>, input: SendInput) ->
     let builder = app.clone();
     let ctx = anvil_app::off_runtime(move || builder.build_context(rid, &ws, input.spec, &opts)).await.map_err(e)?;
     let preview = app.engine.preview(&ctx).map_err(|f| format!("{:?}: {}", f.kind, f.message))?;
-    if st.epoch() != seen {
-        return Err("LOCKED".into());
-    }
     Ok(preview)
 }
 
-#[tauri::command]
-pub async fn send_request(st: State<'_, DesktopState>, handle: AppHandle, input: SendInput, execution_id: String) -> R<ExecutionView> {
+async fn send_request(handle: AppHandle, fence: PayloadFence, input: SendInput, execution_id: String) -> R<ExecutionView> {
+    let st = handle.state::<DesktopState>();
     let exec_id = id(&execution_id)?;
-    // Registered before the app is read, so a lock from now on either refuses
-    // `app()` or cancels this token. Retired when dropped, also if the send
-    // fails early or panics.
+    // Register, then validate the admission again: a lock before registration
+    // refuses the fence, and one after validation cancels the registered token.
+    // Retired when dropped, also if the send fails early or panics.
     let pending = crate::state::PendingEntry::register(&st.running, exec_id)?;
-    let app = st.app()?;
+    st.check_payload(&fence)?;
+    let app = fence.app.clone();
     let ws = id(&input.workspace_id)?;
     let rid = input.request_id.as_deref().map(id).transpose()?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
     let h2 = handle.clone();
-    let owner = app.clone();
-    let last_progress = parking_lot::Mutex::new(std::time::Instant::now());
-    let sink: anvil_transport::EventFn = Arc::new(move |ev: ExecutionEvent| {
-        // Only to the window of the profile the send started under.
-        if !h2.state::<DesktopState>().is_current(&owner) {
-            return;
-        }
-        if matches!(ev, ExecutionEvent::BodyProgress { .. }) {
-            let mut l = last_progress.lock();
-            if l.elapsed() < std::time::Duration::from_millis(100) {
-                return;
-            }
-            *l = std::time::Instant::now();
-        }
-        let _ = h2.emit("execution-event", &ev);
+    let sink = execution_sink(handle.clone(), fence.clone(), true, move |ev| {
+        let _ = h2.emit("execution-event", ev);
     });
     let events = EventCtx { execution_id: exec_id, sink: Some(sink) };
     let opts = SendOptions {
@@ -621,14 +842,16 @@ pub struct McpDiscoverInput {
 /// request per listed tool beside it. Canceled like a send (by
 /// `cancel_execution` with `execution_id`, or a lock); the list is recorded
 /// in history like a send.
-#[tauri::command]
-pub async fn mcp_discover_tools(
-    st: State<'_, DesktopState>,
+async fn mcp_discover_tools(
+    handle: AppHandle,
+    fence: PayloadFence,
     input: McpDiscoverInput,
     execution_id: String,
 ) -> R<anvil_app::mcp::McpDiscovered> {
+    let st = handle.state::<DesktopState>();
     let pending = PendingEntry::register(&st.running, id(&execution_id)?)?;
-    let app = st.app()?;
+    st.check_payload(&fence)?;
+    let app = fence.app;
     let ws = id(&input.workspace_id)?;
     let rid = id(&input.request_id)?;
     let env = input.environment_id.as_deref().map(id).transpose()?;
@@ -1070,12 +1293,233 @@ fn ingest_pkcs12(st: &DesktopState, grant: &str, workspace_id: &str, label: &str
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::state::Running;
     use crate::state::tests::{PASSPHRASE, TempRoot, create};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use tokio::sync::oneshot;
+
+    #[derive(Clone)]
+    struct ObservedPayloadState {
+        state: Arc<DesktopState>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl PayloadState for ObservedPayloadState {
+        fn with_state<T>(&self, f: impl FnOnce(&DesktopState) -> T) -> T {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            f(&self.state)
+        }
+    }
+
+    fn assert_rejected_session_command<A, C>(
+        st: &Arc<DesktopState>,
+        payload: serde_json::Value,
+        admit: impl FnOnce(&DesktopState, PayloadFence, &A) -> R<C>,
+        expected: &str,
+    ) where
+        A: serde::de::DeserializeOwned + Send + 'static,
+        C: Send + 'static,
+    {
+        let source = ObservedPayloadState { state: st.clone(), reads: Arc::default() };
+        let admissions = AtomicUsize::new(0);
+        let work_created = Arc::new(AtomicUsize::new(0));
+        let work_count = work_created.clone();
+        let activity = *st.last_activity.lock();
+        let epoch = st.epoch();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        // This is the gate called by payload_reply_admitted, including its
+        // real decoder, admit_payload, control admission and work dispatch.
+        dispatch_payload_command(
+            source.clone(),
+            &tauri::ipc::InvokeBody::Json(payload),
+            |st, fence, args: &A| {
+                admissions.fetch_add(1, Ordering::SeqCst);
+                admit(st, fence, args)
+            },
+            move |_, _| {
+                work_count.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<(), String>(()) }
+            },
+            move |response| reply_tx.send(response).unwrap(),
+        );
+        let response = reply_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        match response {
+            tauri::ipc::InvokeResponse::Err(err) => assert_eq!(err.0, serde_json::json!(expected)),
+            _ => panic!("invalid session input reached work"),
+        }
+        assert_eq!(source.reads.load(Ordering::SeqCst), 0, "native state accessed");
+        assert_eq!(admissions.load(Ordering::SeqCst), 0, "command admitted");
+        assert_eq!(work_created.load(Ordering::SeqCst), 0, "work future created");
+        assert_eq!(*st.last_activity.lock(), activity, "vault activity changed");
+        assert_eq!(st.epoch(), epoch);
+        assert!(st.running.lock().is_empty(), "execution registered");
+        assert!(st.sessions.lock().is_empty(), "session registered");
+    }
+
+    #[test]
+    fn missing_and_empty_session_attempts_have_no_production_gate_effects() {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (app, _) = create(&st, "session gate");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let execution_id = Id::new().to_string();
+        let input = serde_json::json!({
+            "workspace_id": Id::new(), "request_id": null,
+            "spec": RequestSpec::http("GET", "tcp://127.0.0.1:1"),
+            "environment_id": null, "send_anyway": false, "run_override": null
+        });
+        let command = SessionCommand::SendText { text: "must not reach engine".into() };
+        for locked in [false, true] {
+            if locked {
+                st.lock();
+            }
+            for empty in [false, true] {
+                let mut open = serde_json::json!({ "input": input, "executionId": execution_id });
+                let mut send = serde_json::json!({
+                    "executionId": execution_id, "command": command
+                });
+                let mut cancel = serde_json::json!({ "executionId": execution_id });
+                if empty {
+                    for payload in [&mut open, &mut send, &mut cancel] {
+                        payload["attemptId"] = serde_json::json!("");
+                    }
+                }
+                let expected = if empty { "attemptId must be nonempty" } else { "missing field `attemptId`" };
+                let admit_open = |_: &DesktopState, fence, _: &OpenSessionArgs| Ok(fence);
+                assert_rejected_session_command(&st, open, admit_open, expected);
+                assert_rejected_session_command(
+                    &st,
+                    send,
+                    |st, fence, args: &SessionArgs| crate::cmd_sessions::admit_control(st, fence, &args.execution_id, &args.attempt_id),
+                    expected,
+                );
+                assert_rejected_session_command(
+                    &st,
+                    cancel,
+                    |st, fence, args: &CancelSessionArgs| {
+                        crate::cmd_sessions::admit_cancel(st, fence, &args.execution_id, &args.attempt_id)
+                    },
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonempty_session_attempt_reaches_production_work_unchanged() {
+        let root = TempRoot::new();
+        let st = Arc::new(DesktopState::new(root.0.clone()));
+        let (app, _) = create(&st, "matching session gate");
+        st.set_app_since(app, st.epoch()).unwrap();
+        let source = ObservedPayloadState { state: st, reads: Arc::default() };
+        let execution_id = Id::new().to_string();
+        let attempt_id = Id::new().to_string();
+        let payload = serde_json::json!({
+            "input": {
+                "workspace_id": Id::new(), "request_id": null, "spec": null,
+                "environment_id": null, "send_anyway": false, "run_override": null
+            },
+            "executionId": execution_id, "attemptId": attempt_id
+        });
+        let admissions = AtomicUsize::new(0);
+        let work_polled = Arc::new(AtomicUsize::new(0));
+        let work_count = work_polled.clone();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dispatch_payload_command(
+            source.clone(),
+            &tauri::ipc::InvokeBody::Json(payload),
+            |st, fence, _: &OpenSessionArgs| {
+                admissions.fetch_add(1, Ordering::SeqCst);
+                st.check_payload(&fence)?;
+                Ok(fence)
+            },
+            move |_, args| async move {
+                work_count.fetch_add(1, Ordering::SeqCst);
+                Ok((args.execution_id, args.attempt_id))
+            },
+            move |response| reply_tx.send(response).unwrap(),
+        );
+        let response = reply_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        match response {
+            tauri::ipc::InvokeResponse::Ok(body) => {
+                let identity = body.deserialize::<(String, String)>().unwrap();
+                assert_eq!(identity, (execution_id, attempt_id));
+            }
+            _ => panic!("matching session input was rejected"),
+        }
+        let reads = source.reads.load(Ordering::SeqCst);
+        assert_eq!(reads, 2, "admission and reply delivery");
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(work_polled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn session_ipc_requires_the_expected_attempt_identity_before_dispatch() {
+        let execution_id = Id::new().to_string();
+        let attempt_id = Id::new().to_string();
+        let input = serde_json::json!({
+            "workspace_id": Id::new(), "request_id": null,
+            "spec": RequestSpec::http("GET", "tcp://127.0.0.1:1"),
+            "environment_id": null, "send_anyway": false, "run_override": null
+        });
+        let command = SessionCommand::SendText { text: "matching attempt".into() };
+        let open = serde_json::json!({ "input": input, "executionId": execution_id, "attemptId": attempt_id });
+        let send = serde_json::json!({ "executionId": execution_id, "attemptId": attempt_id, "command": command });
+        let cancel = serde_json::json!({ "executionId": execution_id, "attemptId": attempt_id });
+        // These are the exact argument types decoded by payload_reply_admitted
+        // before admission, future creation, or any engine/context work.
+        for invalid in [None, Some(serde_json::Value::Null), Some(serde_json::json!(42))] {
+            let mut open = open.clone();
+            let mut send = send.clone();
+            let mut cancel = cancel.clone();
+            for payload in [&mut open, &mut send, &mut cancel] {
+                let object = payload.as_object_mut().unwrap();
+                object.remove("attemptId");
+                if let Some(invalid) = &invalid {
+                    object.insert("attemptId".into(), invalid.clone());
+                }
+            }
+            assert!(serde_json::from_value::<OpenSessionArgs>(open).is_err());
+            assert!(serde_json::from_value::<SessionArgs>(send).is_err());
+            assert!(serde_json::from_value::<CancelSessionArgs>(cancel).is_err());
+        }
+        let open: OpenSessionArgs = serde_json::from_value(open).unwrap();
+        let send: SessionArgs = serde_json::from_value(send).unwrap();
+        let cancel: CancelSessionArgs = serde_json::from_value(cancel).unwrap();
+        for (execution, attempt) in
+            [(open.execution_id, open.attempt_id), (send.execution_id, send.attempt_id), (cancel.execution_id, cancel.attempt_id)]
+        {
+            assert_eq!(execution, execution_id);
+            assert_eq!(attempt, attempt_id);
+        }
+        assert_eq!(send.command, command);
+    }
+
+    pub(crate) fn payload_view() -> ExecutionView {
+        let record = serde_json::from_value(serde_json::json!({
+            "id": Id::new(), "schema_version": anvil_domain::SCHEMA_VERSION,
+            "adapter_version": "test", "catalog_version": "test",
+            "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:00Z",
+            "prepared": {
+                "protocol": "http", "method": "GET", "url": "https://payload-canary.invalid",
+                "headers": [], "body_bytes": 0, "auth_label": "none",
+                "tls_verification_enabled": true,
+                "settings": anvil_domain::settings::EffectiveSettings::default(),
+                "inferred": [], "omitted_secrets": []
+            },
+            "attempts": [], "assertion_results": [], "extracted": [], "findings": [],
+            "outcome": {
+                "transport": "completed", "application": "success", "assertions": "not_run",
+                "protocol_status": { "protocol": "none" }, "dispatch": "sent",
+                "warnings": [], "summary": "payload-canary"
+            }
+        }))
+        .unwrap();
+        ExecutionView { record, body: body_view(b"payload-canary", None, None) }
+    }
 
     #[test]
     fn private_key_ingestion_paused_before_write_is_abandoned_after_lock_and_reunlock() {

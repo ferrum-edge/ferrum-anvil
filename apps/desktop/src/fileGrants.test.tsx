@@ -66,7 +66,7 @@ describe("file grants in the renderer", () => {
     await api.addDataset("ws", t, "users", []);
     await api.exportLoadReport("run", "json", t);
     await api.exportRunReport("run", "junit", t);
-    await api.specPreview({ kind: "file", grant: t }, {} as never);
+    await api.specPreview({ kind: "file", grant: t }, {} as never, { kind: "new_workspace" });
     expect(argKeys()).not.toContain("path");
     for (const [, args] of invoke.mock.calls) expect(JSON.stringify(args)).toContain(t);
   });

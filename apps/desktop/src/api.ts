@@ -123,6 +123,14 @@ export interface ExecutionView {
   record: ExecutionRecord;
   body: BodyView;
 }
+export interface SessionEnded {
+  execution_id: string;
+  attempt_id: string;
+  view?: ExecutionView | null;
+  error?: string | null;
+}
+/** Interactive packets always carry their admitted attempt; manual sends omit it. */
+export type NativeExecutionEvent = ExecutionEvent & { attempt_id?: string };
 export interface HistoryItem {
   id: string;
   /** Unix epoch milliseconds. */
@@ -477,7 +485,14 @@ export interface SpecImportReport {
   required_variables: { name: string; secret: boolean; reason: string; pointers: string[] }[];
   counts: { operations_found: number; requests: number; folders: number; environments: number; skipped_operations: number; warnings: number };
 }
+/** Native byte/plan digests, scoped to the desktop's admitted review context. */
+export interface SpecApproval {
+  binding: { source_sha256: string; plan_sha256: string };
+  scope: string;
+}
 export interface SpecPreview {
+  binding: SpecApproval["binding"];
+  approval: SpecApproval;
   detected: { kind: string; dialect: string; syntax: string; declared_version?: string | null; note?: string | null };
   title?: string | null;
   report: SpecImportReport;
@@ -789,12 +804,17 @@ export const api = {
   oauthSignOut: (input: SendInput) => call<boolean>("oauth_sign_out", { input }),
   loginProviders: () => call<ProviderInfo[]>("login_providers"),
 
-  sessionOpen: (input: SendInput, executionId: string) => call<string>("session_open", { input, executionId }),
-  sessionSend: (executionId: string, command: SessionCommand) => call<void>("session_send", { executionId, command }),
-  sessionCancel: (executionId: string) => call<void>("session_cancel", { executionId }),
+  sessionOpen: (input: SendInput, executionId: string, attemptId: string) =>
+    call<string>("session_open", { input, executionId, attemptId }),
+  sessionSend: (executionId: string, attemptId: string, command: SessionCommand) =>
+    call<void>("session_send", { executionId, attemptId, command }),
+  sessionCancel: (executionId: string, attemptId: string) =>
+    call<void>("session_cancel", { executionId, attemptId }),
 
-  specPreview: (input: SpecInput, options: ImportOptions) => call<SpecPreview>("spec_preview", { input, options }),
-  specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget) => call<SpecImported>("spec_import", { input, options, target }),
+  specPreview: (input: SpecInput, options: ImportOptions, target: SpecTarget) =>
+    call<SpecPreview>("spec_preview", { input, options, target }),
+  specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget, approval: SpecApproval) =>
+    call<SpecImported>("spec_import", { input, options, target, approval }),
   specSources: (workspaceId: string) => call<SpecSourceRecord[]>("spec_sources", { workspaceId }),
 
   standards: () => call<StandardsView>("standards_view"),
@@ -829,8 +849,8 @@ export const api = {
     call<SecretRef>("import_pkcs12_file", { grant, workspaceId, label }),
 };
 
-export function onExecutionEvent(cb: (e: ExecutionEvent) => void): Promise<UnlistenFn> {
-  return listen<ExecutionEvent>("execution-event", (ev) => cb(ev.payload));
+export function onExecutionEvent(cb: (e: NativeExecutionEvent) => void): Promise<UnlistenFn> {
+  return listen<NativeExecutionEvent>("execution-event", (ev) => cb(ev.payload));
 }
 
 export function onLoadProgress(cb: (e: { run_key: string; progress: LoadProgress }) => void): Promise<UnlistenFn> {
@@ -841,8 +861,8 @@ export function onLoadFinished(cb: (e: { run_key: string; run_id?: string | null
   return listen<{ run_key: string; run_id?: string | null; error?: string | null }>("load-finished", (ev) => cb(ev.payload));
 }
 
-export function onSessionEnded(cb: (e: { execution_id: string; view?: ExecutionView | null; error?: string | null }) => void): Promise<UnlistenFn> {
-  return listen<{ execution_id: string; view?: ExecutionView | null; error?: string | null }>("session-ended", (ev) => cb(ev.payload));
+export function onSessionEnded(cb: (e: SessionEnded) => void): Promise<UnlistenFn> {
+  return listen<SessionEnded>("session-ended", (ev) => cb(ev.payload));
 }
 
 export function onRunEvent(cb: (e: RunEvent) => void): Promise<UnlistenFn> {
