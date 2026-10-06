@@ -188,9 +188,11 @@
   proxy URL), a per-run value that reaches the URL's scheme or host is
   refused, naming its source but never its value. A per-run port is allowed
   only after a fixed loopback host. Locality now uses the execution parser
-  and connector's fixed literals/overrides with IP-family filtering; unpinned
-  system/custom DNS names require remote-traffic consent without a preflight
-  lookup, preventing DNS rebinding and blocking resolver shutdown waits.
+  and connector's fixed literals/overrides with IP-family filtering.
+  `localhost` and `*.localhost` count as loopback with the system resolver
+  unless an override is configured, in which case its addresses are checked;
+  custom DNS and other unpinned names still require remote-traffic consent
+  without a preflight lookup, preventing DNS rebinding and resolver waits.
   Proxy-resolved target names remain unproven despite client overrides, and
   proxy addresses use the connector's host spelling. HTTP forward-proxy
   authority checks cover HTTP/1.1 and h2c with fixed, templated and auth-written
@@ -201,7 +203,8 @@
   the same origin, fixed-address and NO_PROXY checks; external-browser
   authorization names remain unproven. Nested conflicting OAuth profiles
   are refused consistently before acquiring any token, while valid
-  single-OAuth multi-auth remains supported (#295, #296).
+  single-OAuth multi-auth remains supported (#295, #296). Empty optional
+  OAuth authorization URLs are skipped; present values are still checked.
 - Desktop imports: refresh the selected workspace's environments, profiles,
   history and request tree after a spec import or bundle import. Open tabs for
   replaced requests now reload when clean; unsaved drafts and running sends or

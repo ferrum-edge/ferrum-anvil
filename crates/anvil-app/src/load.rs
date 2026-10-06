@@ -10,6 +10,7 @@ use anvil_domain::Id;
 use anvil_domain::auth::OAuthGrant;
 use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, UnitSemantics};
 use anvil_domain::request::{AttachmentRef, Protocol};
+use anvil_domain::settings::ResolverMode;
 use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_domain::workspace::DatasetFormat as DomainDatasetFormat;
 use anvil_domain::workspace::Workspace;
@@ -331,7 +332,8 @@ impl App {
 
             if let Some(oauth) = oauth {
                 let mut auth_urls = vec![("OAuth token URL", oauth.token_url.as_str())];
-                if matches!(oauth.grant, OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken) {
+                let authorization_url_required = matches!(oauth.grant, OAuthGrant::AuthorizationCodePkce | OAuthGrant::RefreshToken);
+                if authorization_url_required && !oauth.authorization_url.is_empty() {
                     auth_urls.push(("OAuth authorization URL", oauth.authorization_url.as_str()));
                 }
                 for (label, template) in auth_urls {
@@ -748,14 +750,24 @@ fn proxy_label(proxy: &ProxyProfile) -> String {
 /// preflight must not wait for the OS resolver's blocking task to finish.
 fn fixed_host_is_loopback(ctx: &anvil_engine::ExecutionContext, host: &str, port: u16) -> bool {
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
+    let system_resolver = matches!(&settings.resolver, ResolverMode::System);
     let dns = anvil_transport::dns::DnsConfig {
         resolver: settings.resolver,
         overrides: settings.dns_overrides,
         ip_preference: settings.ip_preference,
     };
-    anvil_transport::dns::fixed_resolution(host, port, &dns)
-        .and_then(std::result::Result::ok)
-        .is_some_and(|resolution| !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())))
+    match anvil_transport::dns::fixed_resolution(host, port, &dns) {
+        Some(Ok(resolution)) => !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())),
+        Some(Err(_)) => false,
+        None => system_resolver && is_localhost_name(host),
+    }
+}
+
+fn is_localhost_name(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host = host.strip_suffix('.').unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host.rsplit_once('.').is_some_and(|(suffix, label)| !suffix.is_empty() && label.eq_ignore_ascii_case("localhost"))
 }
 
 fn literal_is_loopback(host: &str) -> bool {
@@ -821,7 +833,7 @@ fn host_is_loopback(host: &str) -> bool {
     match h.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
         Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
-        Err(_) => h.strip_suffix('.').unwrap_or(h).eq_ignore_ascii_case("localhost"),
+        Err(_) => is_localhost_name(h),
     }
 }
 
