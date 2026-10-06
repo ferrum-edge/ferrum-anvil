@@ -1,16 +1,18 @@
-# Portable bundle resource policy: unmerged owner-approval candidate
+# Portable bundle resource policy: unmerged 256 MiB/128 MiB owner-approved candidate
 
-Status: implemented on a proposal branch only; no human approval, default-main
-activation, release, patched-version claim or advisory closure is authorized.
-GHSA-jqq4-v58m-6fcw remains partially addressed by PR #303, landed as
-`76ed2bc3569bae64e691ecbf1a16e17bf7743107`, which preserved 1 GiB/512 MiB.
-Anvil `anvil-v0.1.1` and `anvil-v0.1.0` were published on October 1, 2026.
-Reducing accepted archives and export behavior therefore needs a product decision;
-the advisory's scanned-snapshot scope does not establish affected binary ranges.
+Status: implemented on a proposal branch only; no default-main activation, release,
+patched-version claim or advisory closure is authorized. An owner-delegate decision
+on 2026-10-06 approved revising the caps to 256 MiB total / 128 MiB per entry
+(four times below the released 1 GiB/512 MiB), pending exact-head hosted
+qualification and landing. GHSA-jqq4-v58m-6fcw remains partially addressed by
+PR #303, landed as `76ed2bc3569bae64e691ecbf1a16e17bf7743107`, which preserved
+1 GiB/512 MiB. Anvil `anvil-v0.1.1` and `anvil-v0.1.0` were published on
+October 1, 2026; the advisory's scanned-snapshot scope does not establish
+affected binary ranges.
 
-## Concrete 64 MiB/32 MiB policy
+## Concrete 256 MiB/128 MiB policy
 
-`bundle::MAX_TOTAL_BYTES` is 67,108,864 and `MAX_ENTRY_BYTES` is 33,554,432.
+`bundle::MAX_TOTAL_BYTES` is 268,435,456 and `MAX_ENTRY_BYTES` is 134,217,728.
 Both boundaries are inclusive; manifest, checksums, objects, history, attachments
 and vault ciphertext use one policy. Metadata has no additional smaller cap.
 The 20,000-entry and integer-quotient ratio limit of 200 remain unchanged.
@@ -38,8 +40,8 @@ partially write a destination. Export preparation still allocates parsed objects
 
 Compatibility: format 1 share-safe and format 2 share-safe/encrypted transfers
 within policy remain supported; unbound format 1 vaults remain refused. Older
-archives over either limit are refused by normal preview/import. Exact 64 MiB
-includes metadata, so two complete 32 MiB attachments cannot fit together.
+archives over either limit are refused by normal preview/import. Exact 256 MiB
+includes metadata, so two complete 128 MiB attachments cannot fit together.
 Oversized exports are refused in preview/write; no splitting or exception path
 is introduced. Full ANVILBAK backups and their reader are outside this candidate.
 
@@ -56,12 +58,12 @@ and expected accept/refuse result,
 rather than inferring the variant from whichever library was built last.
 Generation/builds run outside measurement; OS time measures the recorded test
 executable directly, and each opening gets a fresh process.
-Synthetic streamed fixtures cover exact 1 GiB/512 MiB and 64 MiB/32 MiB, one-byte
-entry/total excess, invalid manifest/checksums and an exact 32 MiB valid manifest.
-Fixture archives are capped at 64 MiB compressed, generation at 1 GiB inflated;
+Synthetic streamed fixtures cover exact 1 GiB/512 MiB and 256 MiB/128 MiB, one-byte
+entry/total excess, invalid manifest/checksums and an exact 128 MiB valid manifest.
+Fixture archives are capped at 256 MiB compressed, generation at 1 GiB inflated;
 Linux opening is capped at 4 GiB virtual memory, and hosted steps have timeouts.
 GNU time reports RSS in KiB; macOS time reports bytes. Scalar logs/TSV only are
-uploaded. Fixture regression ceilings (512 MiB candidate, 3 GiB baselines,
+uploaded. Fixture regression ceilings (1 GiB candidate, 3 GiB baselines,
 256 MiB early refusals) allow allocator/runner variance; they are not app limits.
 Candidate boundary RSS must also be below half each 1 GiB baseline's measured RSS.
 Ordinary hosted CI retains format/vault positives and read-counter barriers on
@@ -70,7 +72,7 @@ Exact serialized boundary regressions exercise preview, write and open with a
 fixed prepared timestamp, production KDF metadata, the 41-byte sealed envelope,
 and one-byte entry/aggregate excess. They show the one-byte encrypted-manifest
 undercount with testing KDF parameters. An app regression covers share-safe and
-encrypted export at exactly 32 MiB per attachment and one byte over.
+encrypted export at exactly 128 MiB per attachment and one byte over.
 
 Initial hosted qualification at `fecc636348fdedf5314f9505ba77fcd96860e574`
 [failed during fixture generation on Linux and macOS](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37194746083):
@@ -81,7 +83,8 @@ The [hosted Linux formatter diff](https://github.com/ferrum-edge/ferrum-anvil/ac
 has been applied literally. The initial macOS boundary test also failed import
 validation because its synthetic secret had an invalid ID and no workspace owner;
 the fixture now carries a valid ID and an included owner workspace.
-Exact-source hosted RSS qualification passed on `843e750eb2a27636b3ff9fd19b5b6d936f3b71cd`
+Under the earlier 64 MiB/32 MiB proposal, exact-source hosted RSS qualification
+passed on `843e750eb2a27636b3ff9fd19b5b6d936f3b71cd`
 in [run 37195941241](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37195941241):
 Linux job 111417695811 and macOS job 111417695940 both succeeded. Each host ran
 21 fresh-process cases using separate compiled variants and harness-embedded
@@ -101,12 +104,14 @@ the reported `maximumresidentsetsize` bytes. Representative maximum RSS was:
 | preflight `released_exact` | 1,099,431,936 | 1,018,937,344 |
 | released `released_exact` | 2,175,176,704 | 1,648,197,632 |
 
-The candidate boundary case was below half of both measured baselines on each
-host, and the ceiling control passed. Invalid metadata and one-byte over-limit
-refusals had controlled low RSS. These are measurements of synthetic source-test
-binaries. They are not measurements of released desktop binaries or a legitimate
-export corpus, and do not prove worst-case behavior, OOM safety, or whole-process
-DoS resistance.
+These figures are for the earlier 64 MiB/32 MiB candidate; the approved
+256 MiB/128 MiB revision changes the fixture sizes and regression ceilings and
+therefore needs a fresh hosted qualification. The candidate boundary case was
+below half of both measured baselines on each host, and the ceiling control
+passed. Invalid metadata and one-byte over-limit refusals had controlled low RSS.
+These are measurements of synthetic source-test binaries. They are not
+measurements of released desktop binaries or a legitimate export corpus, and do
+not prove worst-case behavior, OOM safety, or whole-process DoS resistance.
 
 The measurement run does not make the ordinary CI result green. On the same
 `843e750` source, [ordinary CI run 37195941263](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37195941263)
@@ -146,6 +151,7 @@ Preserving large metadata acceptance needs a lazy representation and caller chan
 not merely file-backed attachments. Portability/app/storage owners must coordinate
 that API migration and approve staging costs; it is not implemented here.
 
-Root owns the draft PR, independent review and hosted qualification. Only after
-those are concrete should product/security owners choose 64 MiB/32 MiB plus export
-refusal, or staged compatibility preservation. No owner decision is assumed.
+Root owns the draft PR, independent review and hosted qualification. The
+owner-delegate chose 256 MiB/128 MiB plus export refusal on 2026-10-06; the
+staged compatibility alternative remains documented above but is not selected.
+No release decision is assumed.

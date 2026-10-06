@@ -115,6 +115,15 @@
 
 ### Changed
 
+- Portable bundles: the owner-approved resource policy bounds imports and
+  exports at 256 MiB total and 128 MiB per entry (four times below the released
+  1 GiB/512 MiB). The manifest, checksum list, objects, history, attachments and
+  sealed vault share the same inclusive per-entry budget, one byte over either
+  limit is refused, and oversized exports are refused during preview/write
+  without splitting. Format 1 share-safe and format 2 share-safe/encrypted
+  transfers within policy still open. This remains a draft proposal:
+  exact-head hosted qualification and landing are pending, and no release or
+  advisory closure is claimed.
 - Documentation: link Anvil's contract pin to the immutable Ferrum contract
   release and describe the central store, consumed files and re-vendoring rule.
 - Documentation: reconcile the completion report's current-state statements

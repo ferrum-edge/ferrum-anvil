@@ -20,9 +20,9 @@ pub const MIN_VAULT_FORMAT_VERSION: u32 = 2;
 pub const MAX_ENTRIES: usize = 20_000;
 /// Shared import/export budget for all inflated entry bytes, including metadata.
 /// This bounds cumulative bytes read, not parser, KDF or process memory.
-pub const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// Metadata, attachments, history and the sealed vault have the same entry budget.
-pub const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_RATIO: u64 = 200;
 const FORMAT: &str = "anvil-bundle";
 const MANIFEST_ENTRY: &str = "manifest.json";
@@ -759,7 +759,7 @@ fn verify_digest(name: &str, digest: &str, checksums: &BTreeMap<String, String>)
 
 /// Open and fully validate a bundle. Nothing is written anywhere.
 /// Directory and mandatory metadata checks precede payload expansion. The
-/// Shared 64 MiB/32 MiB byte budgets are not bounds on parser or process memory.
+/// Shared 256 MiB/128 MiB byte budgets are not bounds on parser or process memory.
 pub fn open(bytes: &[u8], passphrase: Option<&str>) -> Result<Opened, BundleError> {
     let zr = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| BundleError::NotABundle(e.to_string()))?;
     open_archive(bytes, zr, passphrase, READ_LIMITS)
@@ -1255,7 +1255,7 @@ mod read_tests {
 
     #[test]
     fn valid_archives_open_at_exact_scaled_budgets_and_keep_vault_binding() {
-        assert_eq!((READ_LIMITS.total, READ_LIMITS.entry), (64 << 20, 32 << 20));
+        assert_eq!((READ_LIMITS.total, READ_LIMITS.entry), (256 << 20, 128 << 20));
         assert_eq!((READ_LIMITS.ratio, READ_LIMITS.entries), (200, 20_000));
         for mode in [ExportMode::ShareSafely, ExportMode::EncryptedTransfer] {
             let files = fixture(mode);

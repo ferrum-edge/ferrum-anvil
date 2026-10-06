@@ -217,7 +217,9 @@ jobs:
               lines.append(f"{case}\t{rss}")
               # These generous ceilings apply to these fixtures, not arbitrary
               # JSON, concurrent desktop work, vaults or other architectures.
-              ceiling = (512 if case.startswith("candidate-") else 3072) * 1024**2
+              # The candidate ceiling scales with the approved 256 MiB/128 MiB
+              # budgets (four times the earlier 64 MiB/32 MiB proposal).
+              ceiling = (1024 if case.startswith("candidate-") else 3072) * 1024**2
               assert rss <= ceiling, f"fixture RSS regression: {case}: {rss}"
           for baseline in ("released", "preflight"):
               large = metrics[f"{baseline}-released_exact"]

@@ -32,7 +32,7 @@ fn assert_snapshot() -> String {
     assert_eq!(variant, built_variant, "measured binary must match the named variant");
     assert_eq!(snapshot, built_snapshot, "measured binary must match the exact snapshot");
     let (total, entry) = match variant.as_str() {
-        "candidate" => (64 * MIB, 32 * MIB),
+        "candidate" => (256 * MIB, 128 * MIB),
         "preflight" | "released" => (1024 * MIB, 512 * MIB),
         _ => panic!("unknown qualification variant"),
     };
@@ -68,7 +68,7 @@ fn base_files() -> BTreeMap<String, Vec<u8>> {
 
 // A bounded 16 KiB synthetic tile, repeated while hashing/writing. No allocation
 // follows an untrusted declaration. The largest inflated fixture is exactly the
-// released 1 GiB limit; its compressed archive is capped at 64 MiB below.
+// released 1 GiB limit; its compressed archive is capped at 256 MiB below.
 fn tile(seed: u64) -> Vec<u8> {
     let mut state = seed;
     (0..16 * 1024)
@@ -121,11 +121,11 @@ fn generate(case: &str, path: &Path) {
         files.insert("manifest.json".into(), b"{}".to_vec());
     }
     if case == "metadata_exact" {
-        let padding = 32 * MIB - files["manifest.json"].len() as u64;
+        let padding = 128 * MIB - files["manifest.json"].len() as u64;
         let old = manifest["app_version"].as_str().unwrap();
         manifest["app_version"] = format!("{old}{}", "x".repeat(padding as usize)).into();
         files.insert("manifest.json".into(), serde_json::to_vec_pretty(&manifest).unwrap());
-        assert_eq!(files["manifest.json"].len() as u64, 32 * MIB);
+        assert_eq!(files["manifest.json"].len() as u64, 128 * MIB);
     }
     // Names/digests have fixed encoded lengths, so metadata overhead is exact
     // before attachment hashes are known. Fixtures include this overhead.
@@ -134,16 +134,16 @@ fn generate(case: &str, path: &Path) {
         + serde_json::to_vec_pretty(&checksums(&files, &placeholders)).unwrap().len() as u64;
     let total = match case {
         "released_exact" => 1024 * MIB,
-        "total_over" => 64 * MIB + 1,
-        "entry_over" => overhead + 32 * MIB + 1,
+        "total_over" => 256 * MIB + 1,
+        "entry_over" => overhead + 128 * MIB + 1,
         "metadata_exact" => overhead,
-        _ => 64 * MIB,
+        _ => 256 * MIB,
     };
     assert!(total <= 1024 * MIB);
-    let first = if case == "released_exact" { 512 * MIB } else { 32 * MIB };
+    let first = if case == "released_exact" { 512 * MIB } else { 128 * MIB };
     let lengths = match attachment_count {
         0 => Vec::new(),
-        1 => vec![32 * MIB + 1],
+        1 => vec![128 * MIB + 1],
         _ => vec![first, total - overhead - first],
     };
     let tiles: Vec<_> = (0..attachment_count).map(|index| tile(index as u64 + 17)).collect();
@@ -171,7 +171,7 @@ fn generate(case: &str, path: &Path) {
         writer.write_all(data).unwrap();
     }
     let file = writer.finish().unwrap();
-    assert!(file.metadata().unwrap().len() <= 64 * MIB);
+    assert!(file.metadata().unwrap().len() <= 256 * MIB);
     // File::create is write-only, including the handle returned by finish.
     drop(file);
     let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
@@ -203,7 +203,7 @@ fn measure_resource_open() {
     let case = std::env::var("ANVIL_RESOURCE_CASE").expect("hosted case");
     assert!(CASES.contains(&case.as_str()));
     let path = fixture_dir().join(format!("{case}.zip"));
-    assert!(std::fs::metadata(&path).unwrap().len() <= 64 * MIB);
+    assert!(std::fs::metadata(&path).unwrap().len() <= 256 * MIB);
     let bytes = std::fs::read(path).unwrap();
     let expected_retained = {
         let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
@@ -229,9 +229,9 @@ fn measure_resource_open() {
             assert_eq!(retained, expected_retained);
             assert!(retained <= bundle::MAX_TOTAL_BYTES);
             if case == "metadata_exact" {
-                assert!(opened.manifest.app_version.len() as u64 > 31 * MIB);
+                assert!(opened.manifest.app_version.len() as u64 > 127 * MIB);
             } else {
-                assert!(retained > 31 * MIB);
+                assert!(retained > 127 * MIB);
             }
             println!("retained_attachment_bytes={retained}");
         }
