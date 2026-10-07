@@ -22,9 +22,9 @@ file before reading all of it. Read the Breaking section below before upgrading.
     from an earlier schema is restored), each existing revision whose request authenticates and
     belongs to the workspace it is filed under is sealed again under that workspace, and each
     existing history record that opens under its owner is sealed again with its body, in one
-    transaction with the version bump. Every revision and record that schema 2 could read stays
-    readable. Any other revision or record is left as it was, stays refused as before and is
-    never adopted; the number left is logged and recorded in the database's `meta` table
+    transaction with the version bump. Every revision that schema 2 could read, and every history
+    record an earlier build wrote, stays readable. Any other revision or record is left as it
+    was, is refused and is never adopted; the number left is logged and recorded in the database's `meta` table
     (`revisions_left_at_v3`, `history_left_at_v3`). A database whose recorded version was set
     back below 3 is refused and the profile stays locked.
   - Before that step, a `before-schema-3` checkpoint of the database is taken in the profile's
