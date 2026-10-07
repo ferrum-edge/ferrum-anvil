@@ -224,7 +224,7 @@ the evidence says `"signed": false` and
 
 Unsigned means the files are exactly what CI built from the recorded commit
 (check `SHA256SUMS` and `release-evidence.json`), but the operating system
-cannot attribute them to Ferrum Edge. macOS Gatekeeper blocks an unsigned app
+cannot attribute them to Ferrum Edge LLC. macOS Gatekeeper blocks an unsigned app
 downloaded from the internet unless the user explicitly allows it (on Apple
 silicon the bundle carries only an ad-hoc signature); Windows SmartScreen
 warns. Do not publish unsigned installers as a production download, and never

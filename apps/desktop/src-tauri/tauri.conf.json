@@ -35,7 +35,7 @@
     "category": "DeveloperTool",
     "shortDescription": "Put your APIs to the test",
     "longDescription": "Ferrum Anvil is a local-first API and network testing client with evidence-based diagnostics for Ferrum Edge.",
-    "copyright": "\u00a9 2026 Ferrum Edge. PolyForm Noncommercial 1.0.0 with commercial licensing.",
+    "copyright": "\u00a9 2026 Ferrum Edge LLC. PolyForm Noncommercial 1.0.0 with commercial licensing.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
