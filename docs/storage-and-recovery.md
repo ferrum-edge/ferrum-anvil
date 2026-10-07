@@ -611,8 +611,8 @@ different owner; Merge keeps those.
     releases, as it did before, until it is deleted.
   - A history record is sealed again with the body column its row has when
     the step runs, if it decrypts and the workspace and request it seals are
-    its columns (what a schema 2 read accepted). Any other record is left
-    exactly as it was, stays refused and can be deleted; the number left is
+    its columns (the binding every earlier build wrote). Any other record is
+    left exactly as it was, is refused from then on and can be deleted; the number left is
     logged and recorded in `meta` (`history_left_at_v3`, removed when none
     is left).
   - A revision or history record that already opens under its schema 3 AAD
