@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
+
 ## [0.1.3] - 2026-10-06
 
 Storage and desktop hardening release: request revisions, history records and load reports are
