@@ -31,7 +31,7 @@
 
 ### Security
 
-- Treat response extractions and dataset cells as literal values, cap total variable references at 16,384 per resolver, bound text redaction to one pass over the input, refuse MCP initialize redirects and withhold MCP session headers on cross-origin redirects, and charge copied operation descriptions to the lint model budget.
+- Treat response extractions and dataset cells as literal values, cap total variable references at 16,384 per resolver, bound text redaction to one pass over the input, refuse MCP initialize redirects and withhold MCP session headers on cross-origin redirects, and charge copied operation descriptions to the lint model budget (#343).
 
 ### Breaking
 
