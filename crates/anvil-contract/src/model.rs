@@ -11,7 +11,7 @@
 //! fields reach the original object for dialect-specific rules.
 
 use crate::locate::ptr;
-use crate::spec::{Spec, internal_pointer};
+use crate::spec::{Reach, Spec, internal_pointer};
 use anvil_import::Dialect;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -121,22 +121,55 @@ impl OperationRef<'_> {
     }
 }
 
-/// Every operation of the document (3.2 `query` and `additionalOperations`
-/// included; in older dialects those fields are not operations).
-pub fn operations(spec: &Spec) -> Vec<OperationRef<'_>> {
-    let mut out = vec![];
-    let Some(paths) = spec.root.get("paths").and_then(Value::as_object) else { return out };
-    for (path, raw_item) in paths {
-        if path.starts_with("x-") {
-            continue;
+/// A Path Item and its operations (3.2 `query` and `additionalOperations`
+/// included; in older dialects those fields are not operations), read once
+/// however many paths `$ref` it.
+pub(crate) struct PathItem<'a> {
+    pub(crate) value: &'a Value,
+    pub(crate) pointer: String,
+    /// Lower-case method, pointer and object.
+    pub(crate) operations: Vec<(String, String, &'a Value)>,
+}
+
+/// Every path with its Path Item (an index into the first list), in document
+/// order. A Path Item that several paths `$ref` (directly or through other
+/// references) is resolved and listed once: a path finds it by where its
+/// reference ends, without walking there again.
+pub(crate) fn read_paths(spec: &Spec) -> (Vec<PathItem<'_>>, Vec<(&str, usize)>) {
+    let mut items: Vec<PathItem<'_>> = vec![];
+    let mut paths = vec![];
+    let mut by_pointer: HashMap<String, usize> = HashMap::new();
+    // Where a reference ends ([`crate::spec::RefTarget::id`]) → its item.
+    let mut by_target: HashMap<usize, usize> = HashMap::new();
+    let Some(map) = spec.root.get("paths").and_then(Value::as_object) else { return (items, paths) };
+    for (path, raw) in map.iter().filter(|(k, _)| !k.starts_with("x-")) {
+        let at = ptr("/paths", path);
+        let (value, pointer, target) = match spec.reach(raw, &at) {
+            Reach::Inline(value) => (value, at, None),
+            Reach::Target(t) => {
+                if let Some(i) = by_target.get(&t.id) {
+                    paths.push((path.as_str(), *i));
+                    continue;
+                }
+                let Some(value) = spec.target_value(&t) else { continue };
+                (value, t.pointer.to_string(), Some(t.id))
+            }
+            Reach::Unresolved => continue,
+        };
+        let i = match by_pointer.get(&pointer) {
+            Some(i) => *i,
+            None => {
+                by_pointer.insert(pointer.clone(), items.len());
+                items.push(PathItem { value, operations: item_operations(spec, value, &pointer), pointer });
+                items.len() - 1
+            }
+        };
+        if let Some(id) = target {
+            by_target.insert(id, i);
         }
-        let pptr = ptr("/paths", path);
-        let Some((item, item_pointer)) = spec.usable(raw_item, &pptr) else { continue };
-        for (method, pointer, op) in item_operations(spec, item, &item_pointer) {
-            out.push(OperationRef { method, path: path.clone(), pointer, op, item, item_pointer: item_pointer.clone() });
-        }
+        paths.push((path.as_str(), i));
     }
-    out
+    (items, paths)
 }
 
 /// The operations of a Path Item: lower-case method, pointer and object.
@@ -436,6 +469,10 @@ pub struct Model<'a> {
     pub targets: Vec<Target>,
     /// Operations left out because the work or view budget ran out.
     pub skipped_operations: usize,
+    /// The view budget ran out: targets past that point (operations counted
+    /// in `skipped_operations`, and also parameters, responses, schemas,
+    /// properties and security schemes) were not built.
+    pub incomplete: bool,
 }
 
 /// Parameters, responses and media types looked at across all operations
@@ -461,7 +498,7 @@ impl<'a> Model<'a> {
     pub fn build(spec: &'a Spec, examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>) -> Model<'a> {
         let mut b = ModelBuilder::new(spec, MAX_MODEL_VIEW_BYTES);
         b.build(examples);
-        Model { spec, targets: b.targets, skipped_operations: b.skipped_operations }
+        Model { spec, targets: b.targets, skipped_operations: b.skipped_operations, incomplete: b.exhausted }
     }
 
     pub fn of_kind(&self, kind: TargetKind) -> impl Iterator<Item = &Target> {
@@ -514,13 +551,6 @@ struct SharedOperation<'a> {
     duplicate_params: BTreeSet<String>,
     work: usize,
     view_cost: usize,
-}
-
-/// A Path Item and its operations, read once however many paths `$ref` it.
-struct PathItem<'a> {
-    value: &'a Value,
-    pointer: String,
-    operations: Vec<(String, String, &'a Value)>,
 }
 
 impl<'a> ModelBuilder<'a> {
@@ -641,23 +671,7 @@ impl<'a> ModelBuilder<'a> {
         let scheme_names: HashSet<String> = security_schemes(spec).map(|(m, _)| m.keys().cloned().collect()).unwrap_or_default();
         // Each path with its Path Item (an index into `items`): a Path Item
         // `$ref`'d by several paths is resolved and listed once.
-        let mut items: Vec<PathItem<'a>> = vec![];
-        let mut path_items: Vec<(&'a str, usize)> = vec![];
-        let mut item_index: HashMap<String, usize> = HashMap::new();
-        if let Some(paths) = root.get("paths").and_then(Value::as_object) {
-            for (path, raw) in paths.iter().filter(|(k, _)| !k.starts_with("x-")) {
-                let Some((value, pointer)) = spec.usable(raw, &ptr("/paths", path)) else { continue };
-                let i = match item_index.get(&pointer) {
-                    Some(i) => *i,
-                    None => {
-                        item_index.insert(pointer.clone(), items.len());
-                        items.push(PathItem { value, operations: item_operations(spec, value, &pointer), pointer });
-                        items.len() - 1
-                    }
-                };
-                path_items.push((path.as_str(), i));
-            }
-        }
+        let (items, path_items) = read_paths(spec);
         let mut id_counts: HashMap<&str, usize> = HashMap::new();
         let mut used_tags: HashSet<&str> = HashSet::new();
         let mut used_schemes: HashSet<String> = HashSet::new();
@@ -1568,6 +1582,28 @@ mod tests {
             // Nothing is attempted once the budget is spent.
             assert!(builder.reservations < 100, "{}", builder.reservations);
         }
+    }
+
+    #[test]
+    fn a_budget_spent_after_the_operations_is_not_silent() {
+        let description = "d".repeat(64 * 1024);
+        let schemas: Map<String, Value> =
+            (0..100).map(|i| (format!("S{i}"), json!({"type": "string", "description": description}))).collect();
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "components": {"schemas": schemas}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let builder = build(&spec, 1024 * 1024);
+
+        // Every operation fits and the schemas do not: the model says so.
+        assert_eq!(builder.skipped_operations, 0);
+        assert!(builder.exhausted);
+        assert!(builder.targets.iter().filter(|t| t.kind == TargetKind::Schema).count() < 100);
+        let model = Model::build(&spec, &mut |_, _| vec![]);
+        assert!(!model.incomplete && model.skipped_operations == 0);
     }
 
     #[test]

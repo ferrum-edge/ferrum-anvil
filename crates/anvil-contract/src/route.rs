@@ -9,9 +9,13 @@
 //! the most literal segments wins (a segment mixing text and a parameter
 //! counts half), then the longest base path, then the operation the request
 //! was imported from.
+//!
+//! A Path Item that many paths `$ref` is read once and its operations are
+//! shared by those paths; each (path, operation) the router lists is charged
+//! to [`MAX_ROUTE_BYTES`].
 
 use crate::locate::ptr;
-use crate::model::{OperationRef, operations};
+use crate::model::{OperationRef, PathItem, read_paths};
 use crate::observe::{percent_decode, split_url};
 use crate::spec::Spec;
 use regex::Regex;
@@ -23,6 +27,14 @@ use std::collections::{HashMap, HashSet};
 const MAX_BASES: usize = 64;
 /// Declared values kept per server variable segment of a base path.
 const MAX_CHOICES: usize = 64;
+/// What the operations a router lists may cost, in bytes. Each (path,
+/// operation) is charged its method, path, pointers and declared statuses
+/// for the copies an analysis keeps per operation (its record, label and
+/// coverage entry), so paths that `$ref` one Path Item cost like distinct
+/// ones. Past this, the remaining operations are left out and counted.
+pub const MAX_ROUTE_BYTES: usize = crate::model::MAX_MODEL_VIEW_BYTES;
+/// Charged per listed operation besides its text.
+const ROUTE_OPERATION_BYTES: usize = 512;
 
 #[derive(Debug, Clone)]
 enum Seg {
@@ -136,21 +148,37 @@ pub struct Server {
     origin: Option<Regex>,
 }
 
+/// One operation of one path: the path, its Path Item (an index into
+/// [`Router::items`]) and the operation's index in that item.
+#[derive(Debug, Clone, Copy)]
+struct Entry<'a> {
+    path: &'a str,
+    item: usize,
+    op: usize,
+}
+
 pub struct Router<'a> {
-    pub ops: Vec<OperationRef<'a>>,
+    /// Path Items, each once however many paths `$ref` it.
+    items: Vec<PathItem<'a>>,
+    /// Each listed operation of each path, in document order.
+    entries: Vec<Entry<'a>>,
     templates: Vec<Template>,
+    /// Template indexes by path.
+    by_path: HashMap<&'a str, usize>,
     /// Template indexes by segment count.
     by_len: HashMap<usize, Vec<usize>>,
     bases: Vec<Base>,
     pub servers: Vec<Server>,
     /// Server URLs whose base path was not kept ([`MAX_BASES`]).
     pub dropped_servers: usize,
+    /// Operations not listed because they did not fit [`MAX_ROUTE_BYTES`].
+    pub skipped_operations: usize,
 }
 
 /// Where an observed request lands.
 #[derive(Debug, Clone)]
 pub enum Route {
-    /// A declared operation (index into [`Router::ops`]).
+    /// A declared operation (see [`Router::operation`]).
     Operation { op: usize, template: String, base: String },
     /// A declared path without this method.
     Method { template: String, base: String },
@@ -160,23 +188,45 @@ pub enum Route {
 
 impl<'a> Router<'a> {
     pub fn new(spec: &'a Spec) -> Router<'a> {
-        let ops = operations(spec);
+        let (items, path_items) = read_paths(spec);
+        // What a copy of each operation's declared statuses costs, once per
+        // Path Item.
+        let status_bytes: Vec<Vec<usize>> =
+            items.iter().map(|item| item.operations.iter().map(|(_, _, op)| statuses_cost(op)).collect()).collect();
+        // Each path's operations, charged before they are listed; once one
+        // does not fit, the rest are counted instead.
+        let mut entries: Vec<Entry<'a>> = vec![];
+        let mut left = MAX_ROUTE_BYTES;
+        let mut skipped_operations = 0;
+        for &(path, i) in &path_items {
+            let item = &items[i];
+            for (k, (method, pointer, _)) in item.operations.iter().enumerate() {
+                let cost =
+                    ROUTE_OPERATION_BYTES + 3 * (method.len() + path.len() + pointer.len()) + item.pointer.len() + status_bytes[i][k];
+                if skipped_operations > 0 || cost > left {
+                    skipped_operations += item.operations.len() - k;
+                    break;
+                }
+                left -= cost;
+                entries.push(Entry { path, item: i, op: k });
+            }
+        }
         let mut templates: Vec<Template> = vec![];
-        let mut by_path: HashMap<String, usize> = HashMap::new();
-        for (i, op) in ops.iter().enumerate() {
-            match by_path.get(&op.path) {
+        let mut by_path: HashMap<&'a str, usize> = HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            match by_path.get(e.path) {
                 Some(t) => templates[*t].ops.push(i),
                 None => {
-                    by_path.insert(op.path.clone(), templates.len());
-                    templates.push(Template::new(&op.path, vec![i]));
+                    by_path.insert(e.path, templates.len());
+                    templates.push(Template::new(e.path, vec![i]));
                 }
             }
         }
         // Paths without operations still count as declared paths.
         if let Some(paths) = spec.root.get("paths").and_then(Value::as_object) {
             for p in paths.keys().filter(|k| !k.starts_with("x-")) {
-                if !by_path.contains_key(p) {
-                    by_path.insert(p.clone(), templates.len());
+                if !by_path.contains_key(p.as_str()) {
+                    by_path.insert(p.as_str(), templates.len());
                     templates.push(Template::new(p, vec![]));
                 }
             }
@@ -208,9 +258,15 @@ impl<'a> Router<'a> {
             }
         } else {
             let mut lists = vec![spec.root.get("servers")];
-            for op in &ops {
-                lists.push(op.item.get("servers"));
-                lists.push(op.op.get("servers"));
+            // Each Path Item's servers and its operations' once, in the order
+            // the paths first reach them.
+            let mut listed = vec![false; items.len()];
+            for &(_, i) in &path_items {
+                if std::mem::replace(&mut listed[i], true) {
+                    continue;
+                }
+                lists.push(items[i].value.get("servers"));
+                lists.extend(items[i].operations.iter().map(|(_, _, op)| op.get("servers")));
             }
             for list in lists.into_iter().flatten().filter_map(Value::as_array) {
                 for s in list {
@@ -279,7 +335,52 @@ impl<'a> Router<'a> {
             })
             .collect();
         let dropped_servers = dropped.len();
-        Router { ops, templates, by_len, bases, servers, dropped_servers }
+        Router { items, entries, templates, by_path, by_len, bases, servers, dropped_servers, skipped_operations }
+    }
+
+    /// How many operations are listed (the indexes of [`Route::Operation`]).
+    pub fn operation_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Listed operation `i`.
+    pub fn operation(&self, i: usize) -> OperationRef<'a> {
+        let e = self.entries[i];
+        let item = &self.items[e.item];
+        let (method, pointer, _) = &item.operations[e.op];
+        OperationRef {
+            method: method.clone(),
+            path: e.path.to_string(),
+            pointer: pointer.clone(),
+            op: item.operations[e.op].2,
+            item: item.value,
+            item_pointer: item.pointer.clone(),
+        }
+    }
+
+    /// The operation object of listed operation `i`: the same for every
+    /// path that reaches it through one Path Item.
+    pub fn operation_object(&self, i: usize) -> (usize, usize) {
+        (self.entries[i].item, self.entries[i].op)
+    }
+
+    /// The methods (upper case) listed for the declared path `path`.
+    pub fn methods_of(&self, path: &str) -> Vec<String> {
+        let ops = self.by_path.get(path).map(|t| self.templates[*t].ops.as_slice()).unwrap_or_default();
+        ops.iter().map(|o| self.method(*o).to_ascii_uppercase()).collect()
+    }
+
+    /// The lower-case method of listed operation `i`.
+    fn method(&self, i: usize) -> &str {
+        let e = &self.entries[i];
+        &self.items[e.item].operations[e.op].0
+    }
+
+    /// [`op_key`] of listed operation `i`.
+    fn key(&self, i: usize) -> String {
+        let e = &self.entries[i];
+        let (method, _, op) = &self.items[e.item].operations[e.op];
+        operation_key(op.get("operationId").and_then(Value::as_str), method, e.path)
     }
 
     /// Whether `base` (observed segments) is a declared server base path.
@@ -314,8 +415,7 @@ impl<'a> Router<'a> {
                 let better = match best {
                     None => true,
                     Some((bl, bb, bt, _)) => {
-                        let hinted =
-                            |i: usize| hint.is_some_and(|h| self.templates[i].ops.iter().any(|o| op_key(&self.ops[*o]) == strip_dup(h)));
+                        let hinted = |i: usize| hint.is_some_and(|h| self.templates[i].ops.iter().any(|o| self.key(*o) == strip_dup(h)));
                         (lits, base_len) > (*bl, *bb) || ((lits, base_len) == (*bl, *bb) && hinted(ti) && !hinted(*bt))
                     }
                 };
@@ -358,7 +458,7 @@ impl<'a> Router<'a> {
             return Route::Path { base };
         };
         let t = &self.templates[ti];
-        let find = |m: &str| t.ops.iter().copied().find(|o| self.ops[*o].method == m);
+        let find = |m: &str| t.ops.iter().copied().find(|o| self.method(*o) == m);
         // Servers commonly answer HEAD for GET routes.
         match find(&method).or_else(|| if method == "head" { find("get") } else { None }) {
             Some(op) => Route::Operation { op, template: t.path.clone(), base },
@@ -402,7 +502,16 @@ fn strict_segments(base: &str, vars: Option<&Value>) -> Vec<Seg> {
 
 /// The importer's operation key: the operationId, else `METHOD path`.
 pub fn op_key(op: &OperationRef<'_>) -> String {
-    op.operation_id().map(str::to_string).unwrap_or_else(|| format!("{} {}", op.method.to_ascii_uppercase(), op.path))
+    operation_key(op.operation_id(), &op.method, &op.path)
+}
+
+fn operation_key(operation_id: Option<&str>, method: &str, path: &str) -> String {
+    operation_id.map(str::to_string).unwrap_or_else(|| format!("{} {}", method.to_ascii_uppercase(), path))
+}
+
+/// What a copy of an operation's declared statuses costs.
+fn statuses_cost(op: &Value) -> usize {
+    op.get("responses").and_then(Value::as_object).map_or(0, |m| m.keys().map(|k| k.len() + 24).sum())
 }
 
 /// Drop the importer's `#n` suffix for duplicate keys.
@@ -416,6 +525,8 @@ fn strip_dup(k: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Map, json};
+    use std::sync::atomic::Ordering;
 
     fn spec(text: &str) -> Spec {
         Spec::parse(text.as_bytes()).unwrap()
@@ -433,7 +544,7 @@ mod tests {
 
     fn op_of(r: &Router, route: Route) -> String {
         match route {
-            Route::Operation { op, base, .. } => format!("{} @{base}", op_key(&r.ops[op])),
+            Route::Operation { op, base, .. } => format!("{} @{base}", r.key(op)),
             Route::Method { template, base } => format!("method {template} @{base}"),
             Route::Path { base } => format!("path @{base}"),
         }
@@ -550,5 +661,54 @@ mod tests {
         let r = Router::new(&s);
         assert_eq!(op_of(&r, r.route("GET", "https://api.example/v2/items/1", None)), "getItem @/v2");
         assert_eq!(r.origin_declared("https://api.example"), Some(true));
+    }
+
+    #[test]
+    fn paths_sharing_a_path_item_share_its_operations() {
+        let paths: Map<String, Value> =
+            (0..20_000).map(|i| (format!("/p{i}/{{id}}"), json!({"$ref": "#/components/pathItems/Shared"}))).collect();
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
+            "components": {"pathItems": {"Shared": {"get": {"operationId": "shared"}, "post": {}}}}});
+        let s = spec(&doc.to_string());
+        let r = Router::new(&s);
+        assert_eq!((r.items.len(), r.operation_count(), r.skipped_operations), (1, 40_000, 0));
+        assert_eq!(op_of(&r, r.route("GET", "/p19999/7", None)), "shared @");
+        assert_eq!(op_of(&r, r.route("POST", "/p42/7", None)), "POST /p42/{id} @");
+        let Route::Operation { op, .. } = r.route("POST", "/p42/7", None) else { panic!("not routed") };
+        let op = r.operation(op);
+        assert_eq!(
+            (op.path.as_str(), op.pointer.as_str(), op.item_pointer.as_str()),
+            ("/p42/{id}", "/components/pathItems/Shared/post", "/components/pathItems/Shared")
+        );
+        assert_eq!(r.methods_of("/p42/{id}"), ["GET", "POST"]);
+    }
+
+    #[test]
+    fn a_deep_shared_path_item_is_read_once_and_its_paths_are_bounded() {
+        // A Path Item at a pointer of about 200 KB, which 20,000 paths reach
+        // through 100 aliases of one more reference.
+        let key = "k".repeat(4_000);
+        let mut item = json!({"get": {"operationId": "shared"}, "post": {}});
+        for _ in 0..50 {
+            let mut level = Map::new();
+            level.insert(key.clone(), item);
+            item = Value::Object(level);
+        }
+        let mut aliases: Map<String, Value> = (0..100).map(|i| (format!("A{i}"), json!({"$ref": "#/components/pathItems/B"}))).collect();
+        aliases.insert("B".into(), json!({"$ref": format!("#/x{}", format!("/{key}").repeat(50))}));
+        let paths: Map<String, Value> =
+            (0..20_000).map(|i| (format!("/p{i}/{{id}}"), json!({"$ref": format!("#/components/pathItems/A{}", i % 100)}))).collect();
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths, "x": item,
+            "components": {"pathItems": aliases}});
+        let s = spec(&doc.to_string());
+        let r = Router::new(&s);
+        // Each alias once, then `B` and the Path Item once, and the Path Item
+        // once more to read it.
+        assert_eq!(s.walks.load(Ordering::Relaxed), 100 + 3);
+        assert_eq!(r.items.len(), 1);
+        // Every listed operation is charged its pointer: the rest are counted.
+        assert!(r.operation_count() > 0 && r.operation_count() < 1_000, "{}", r.operation_count());
+        assert_eq!(r.operation_count() + r.skipped_operations, 40_000);
+        assert_eq!(op_of(&r, r.route("GET", "/p0/7", None)), "shared @");
     }
 }

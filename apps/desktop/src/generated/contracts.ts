@@ -3715,6 +3715,13 @@ export interface LintReport {
    * completely (see `model::MAX_MODEL_WORK`).
    */
   skipped_operations?: number;
+  /**
+   * The description is too large to lint completely: past some point,
+   * nothing more was checked (operations, parameters, responses, schemas,
+   * properties and security schemes), whether or not operations were left
+   * out.
+   */
+  incomplete?: boolean;
 }
 /**
  * A ruleset that took part in a [`RuleSet`].

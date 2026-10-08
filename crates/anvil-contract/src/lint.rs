@@ -132,12 +132,18 @@ pub struct LintReport {
     /// completely (see `model::MAX_MODEL_WORK`).
     #[serde(default)]
     pub skipped_operations: usize,
+    /// The description is too large to lint completely: past some point,
+    /// nothing more was checked (operations, parameters, responses, schemas,
+    /// properties and security schemes), whether or not operations were left
+    /// out.
+    #[serde(default)]
+    pub incomplete: bool,
 }
 
 impl LintReport {
     /// Whether no finding reaches `threshold` (`None`: always passes).
-    /// Operations left out (`skipped_operations`) are not considered: the
-    /// CLI refuses such a report unless told to accept it.
+    /// What was left out (`skipped_operations`, `incomplete`) is not
+    /// considered: the CLI refuses such a report unless told to accept it.
     pub fn passes(&self, threshold: Option<Severity>) -> bool {
         threshold.is_none_or(|t| self.counts.at_least(t) == 0)
     }
@@ -198,6 +204,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
             .then(a.message.cmp(&b.message))
     });
     let skipped_operations = model.skipped_operations;
+    let incomplete = model.incomplete;
     let examples_not_checked = checker.not_checked;
     let (unresolved_refs, unresolved_ref_count) = spec.unresolved();
     let mut dropped = out.dropped;
@@ -225,6 +232,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
         unresolved_ref_count,
         examples_not_checked,
         skipped_operations,
+        incomplete,
     }
 }
 

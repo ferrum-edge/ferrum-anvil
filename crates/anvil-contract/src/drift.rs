@@ -387,7 +387,7 @@ struct State<'a> {
 /// Compare observations with the description.
 pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -> DriftReport {
     let router = Router::new(spec);
-    let n_ops = router.ops.len();
+    let n_ops = router.operation_count();
     let mut st = State {
         spec,
         router,
@@ -755,8 +755,7 @@ impl<'a> State<'a> {
         let label = format!("{method} {pattern}");
         let (kind, message, pointer) = match &template {
             Some(t) => {
-                let declared: Vec<String> =
-                    self.router.ops.iter().filter(|x| &x.path == t).map(|x| x.method.to_ascii_uppercase()).collect();
+                let declared = self.router.methods_of(t);
                 let list = if declared.is_empty() { "no operations".into() } else { declared.join(", ") };
                 (
                     DriftKind::UndeclaredMethod,
@@ -808,7 +807,7 @@ impl<'a> State<'a> {
 
     fn check_operation(&mut self, i: usize, o: &Observation) {
         let spec = self.spec;
-        let op = self.router.ops[i].clone();
+        let op = self.router.operation(i);
         let label = op.label();
         let op_ptr = op.pointer.clone();
         let b = budget(spec, &op);
@@ -1307,7 +1306,7 @@ impl<'a> State<'a> {
 
         // Undeclared responses, media types, query parameters, request types.
         for (i, acc) in self.ops.iter().enumerate() {
-            let op = &self.router.ops[i];
+            let op = &self.router.operation(i);
             let label = op.label();
             let op_ptr = op.pointer.clone();
             let mut by_code: BTreeMap<&String, Vec<(&Option<String>, &Shape)>> = BTreeMap::new();
@@ -1619,8 +1618,10 @@ impl<'a> State<'a> {
             }
         }
         let mut coverage = vec![];
+        // Declared statuses once per operation, however many paths reach it.
+        let mut statuses: HashMap<(usize, usize), Vec<String>> = HashMap::new();
         for (i, acc) in self.ops.iter().enumerate() {
-            let op = &self.router.ops[i];
+            let op = &self.router.operation(i);
             let label = op.label();
             let b = budget(spec, op);
             let mut lat = acc.latencies.clone();
@@ -1703,7 +1704,10 @@ impl<'a> State<'a> {
                     vec![PatchOp::replace(ptr(&x_ptr, field), json!(raised))],
                 );
             }
-            let declared_statuses: Vec<String> = responses(spec, op).into_iter().map(|r| r.code).collect();
+            let declared_statuses = statuses
+                .entry(self.router.operation_object(i))
+                .or_insert_with(|| responses(spec, op).into_iter().map(|r| r.code).collect())
+                .clone();
             let finding_count = per_operation.get(&label).copied().unwrap_or(0);
             coverage.push(OperationCoverage {
                 operation: label,
@@ -1777,6 +1781,12 @@ impl<'a> State<'a> {
                 self.router.dropped_servers,
             );
         }
+        if self.router.skipped_operations > 0 {
+            self.notes.insert(
+                "the description is too large to compare completely; calls to the operations left out are reported as undeclared".into(),
+                self.router.skipped_operations,
+            );
+        }
         let undeclared = self
             .endpoints
             .into_iter()
@@ -1790,7 +1800,7 @@ impl<'a> State<'a> {
                 declared_version: spec.declared_version.clone(),
                 sha256: spec.sha256.clone(),
                 size_bytes: spec.size_bytes,
-                operations: self.router.ops.len(),
+                operations: self.router.operation_count(),
             },
             observations: total,
             matched: self.matched,

@@ -67,6 +67,11 @@
       "format": "uint",
       "minimum": 0,
       "default": 0
+    },
+    "incomplete": {
+      "description": "The description is too large to lint completely: past some point,\nnothing more was checked (operations, parameters, responses, schemas,\nproperties and security schemes), whether or not operations were left\nout.",
+      "type": "boolean",
+      "default": false
     }
   },
   "required": [

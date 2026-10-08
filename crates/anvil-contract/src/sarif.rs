@@ -110,6 +110,10 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
             "the description is too large to lint completely: {} operation(s) were not checked",
             report.skipped_operations
         )}}));
+    } else if report.incomplete {
+        notes.push(json!({"level": "warning", "message": {"text":
+            "the description is too large to lint completely: some schemas, parameters, responses or security schemes were not checked"
+        }}));
     }
     if report.unresolved_ref_count > 0 {
         notes.push(json!({"level": "warning", "message": {"text": format!(
