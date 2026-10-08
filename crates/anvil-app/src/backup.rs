@@ -1562,9 +1562,7 @@ mod tests {
         let target_dir = tempfile::tempdir().unwrap();
         let target = new_test_app(target_dir.path());
         target.create_workspace("Local workspace").unwrap();
-        target
-            .add_api_ruleset("local.yaml", b"anvil_ruleset: 1\nname: Local\nrules:\n  info-contact: error\n")
-            .unwrap();
+        target.add_api_ruleset("local.yaml", b"anvil_ruleset: 1\nname: Local\nrules:\n  info-contact: error\n").unwrap();
         let before = target.api_standards().unwrap().rulesets;
 
         let preview = target.restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
