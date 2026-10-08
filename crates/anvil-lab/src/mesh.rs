@@ -7,9 +7,13 @@
 //! * **sidecar** (`lab/gateway/mesh-sidecar.{conf,json}`, STRICT): the
 //!   inbound mTLS listener (15006-equivalent) on 127.0.0.1:17606 fronts the
 //!   local workload `anvil-lab-svc` = the echo fixture on 127.0.0.1:17801,
-//!   with one MeshPolicy DENY for the lab client on `/denied/*`. It also
-//!   relays an authenticated bare HTTP/2 CONNECT (the HBONE wire shape)
-//!   through the inbound relay destination guard.
+//!   with one MeshPolicy DENY on `/denied/*` for a second lab identity
+//!   (`anvil-lab-other`, MESH-007). It also relays an authenticated bare
+//!   HTTP/2 CONNECT (the HBONE wire shape) through the inbound relay
+//!   destination guard. The DENY does not name the client SVID the HBONE
+//!   scenarios present: from 0.9.15 a relayed CONNECT is authorized as a
+//!   Layer-4 session, where a DENY ignores `paths` and still matches on its
+//!   identity (#6081).
 //! * **sidecar-permissive** (same files, PERMISSIVE): inbound on
 //!   127.0.0.1:17626, so a certificate-less TLS client reaches the CONNECT
 //!   gate (`hbone_unauthenticated_peer`) for a destination the relay admits.
@@ -142,6 +146,9 @@ pub(crate) fn ferrum_profile() -> IntegrationProfile {
 pub(crate) enum Svid {
     /// `spiffe://cluster.local/ns/ferrum/sa/anvil-lab-client` (mesh root).
     Client,
+    /// `spiffe://cluster.local/ns/ferrum/sa/anvil-lab-other` (mesh root): the
+    /// identity the sidecar's MeshPolicy denies on `/denied/*`.
+    Other,
     None,
     /// `spiffe://partner.example/...` from a root the mesh does not trust.
     Partner,
@@ -168,6 +175,7 @@ impl Env {
             extra_roots_pem: vec![self.pki.ca.cert.clone()],
             client_identity: match svid {
                 Svid::Client => Some(identity(&self.pki.client, &self.pki.ca)),
+                Svid::Other => Some(identity(&self.pki.other, &self.pki.ca)),
                 Svid::Partner => Some(identity(&self.pki.foreign_client, &self.pki.foreign_ca)),
                 Svid::None => None,
             },
@@ -608,14 +616,15 @@ fn mesh006(env: &Env) -> Fut<'_> {
     })
 }
 
-/// MESH-007: AuthorizationPolicy (MeshPolicy) DENY for this client on /denied/*.
+/// MESH-007: AuthorizationPolicy (MeshPolicy) DENY on /denied/* for the
+/// identity the policy names (`anvil-lab-other`, another mesh-root SVID).
 fn mesh007(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let (from, b0) = (env.sidecar.log_lines().len(), env.backend.log.count_requests());
         let o = send(
             &env.engine,
-            &env.direct("https", "/denied/x", Some(env.tls("client SVID → svc", Svid::Client, ids::SVC_SPIFFE_ID, None))),
+            &env.direct("https", "/denied/x", Some(env.tls("denied SVID → svc", Svid::Other, ids::SVC_SPIFFE_ID, None))),
         )
         .await;
         c.status_in(&o, &[403]);
@@ -864,7 +873,7 @@ fn all() -> Vec<Def> {
         Def { id: "MESH-004", title: "Plaintext client rejected by the STRICT inbound listener", run: mesh004 },
         Def { id: "MESH-005", title: "No client SVID refused at mTLS (sidecar STRICT)", run: mesh005 },
         Def { id: "MESH-006", title: "Client SVID from an untrusted trust domain refused at mTLS (sidecar)", run: mesh006 },
-        Def { id: "MESH-007", title: "AuthorizationPolicy (MeshPolicy) DENY for the client identity", run: mesh007 },
+        Def { id: "MESH-007", title: "AuthorizationPolicy (MeshPolicy) DENY for a denied client identity", run: mesh007 },
         Def { id: "MESH-008", title: "HBONE-shaped CONNECT over mTLS on the sidecar inbound reaches the workload", run: mesh008 },
         Def { id: "MESH-009", title: "Relay destination guard (sidecar): undeclared port refused at relay synthesis", run: mesh009 },
         Def { id: "MESH-010", title: "Ambient HBONE, valid SVID: loopback destination refused by the relay guard", run: mesh010 },

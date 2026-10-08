@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.14 (candidate), v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 and v0.9.5, file mode)
+# Ferrum Anvil failure lab - profile "auth" (ferrum-edge v0.9.15 (candidate), v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 and v0.9.5, file mode)
 #
 # Scenarios: AUTH-001..010, 015..025, 027..032, GW-011 and lab extensions
 #            AUTH-X01..X05 (see docs/lab/auth-tls.md).

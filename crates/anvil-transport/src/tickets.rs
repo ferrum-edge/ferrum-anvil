@@ -20,6 +20,12 @@
 //! ([`TicketCache::clear_isolation`] drops one workspace's with the
 //! workspace). A connection whose attempt began before that clear resumes
 //! nothing and keeps none of the tickets it receives.
+//!
+//! A QUIC context also keeps the address-validation tokens (RFC 9000 §8.1.3,
+//! `NEW_TOKEN`) its server issued, with the same isolation and lifetime as its
+//! tickets. A resumed connection presents one, so a server that serves 0-RTT
+//! requests before its handshake completes only for validated client
+//! addresses (Ferrum Edge from v0.9.15) can do so.
 
 use crate::fence::Generations;
 use crate::tls::{self, ObservationHandle, ObservingClientCert, ObservingVerifier, PreparedTls, SlotCell, SlotHandle};
@@ -145,6 +151,8 @@ pub(crate) struct ResumptionContext {
     verifier: Arc<ObservingVerifier>,
     resolver: Arc<ObservingClientCert>,
     pub(crate) store: Arc<TicketStore>,
+    /// QUIC address-validation tokens from this context's connections.
+    pub(crate) quic_tokens: Arc<quinn::TokenMemoryCache>,
     gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -158,7 +166,14 @@ impl ResumptionContext {
     fn new(prepared: &PreparedTls) -> Self {
         let cell = SlotCell::new(Arc::new(Mutex::new(SlotHandle::default())));
         let (verifier, resolver) = tls::stable_identity(prepared, cell.clone());
-        ResumptionContext { cell, verifier, resolver, store: Arc::new(TicketStore::default()), gate: Arc::new(tokio::sync::Mutex::new(())) }
+        ResumptionContext {
+            cell,
+            verifier,
+            resolver,
+            store: Arc::new(TicketStore::default()),
+            quic_tokens: Arc::new(quinn::TokenMemoryCache::default()),
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Wait for the handshake gate, then route the verifier and resolver to
@@ -303,6 +318,7 @@ mod tests {
         ] {
             assert!(!Arc::ptr_eq(&a, &b), "a context must not be shared across isolation keys");
             assert!(!Arc::ptr_eq(&a.store, &b.store));
+            assert!(!Arc::ptr_eq(&a.quic_tokens, &b.quic_tokens), "address-validation tokens stay with their context");
             assert!(!Arc::ptr_eq(&a.verifier, &b.verifier), "tickets resume only with their own verifier");
         }
         assert_eq!(cache.contexts(), 7);

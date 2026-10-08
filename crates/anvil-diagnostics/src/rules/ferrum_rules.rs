@@ -927,7 +927,8 @@ mod tests {
                 && !text.contains("0.9.9")
                 && !text.contains("0.9.10")
                 && !text.contains("0.9.11")
-                && !text.contains("0.9.14"),
+                && !text.contains("0.9.14")
+                && !text.contains("0.9.15"),
             "no release-specific claim for an unaudited release: {text}"
         );
         // A token outside the shared vocabulary stays unknown.
@@ -970,6 +971,7 @@ mod tests {
             ("ferrum-edge-0.9.10", "Ferrum Edge 0.9.10"),
             ("ferrum-edge-0.9.11", "Ferrum Edge 0.9.11"),
             ("ferrum-edge-0.9.14", "Ferrum Edge 0.9.14"),
+            ("ferrum-edge-0.9.15", "Ferrum Edge 0.9.15"),
         ] {
             let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
             let f = diagnose_as(Protocol::Http, &r, body, compat);
@@ -1057,7 +1059,14 @@ mod tests {
             "{}",
             t914.explanation
         );
-        for f in [t95, t97, t98, t99, t910, t911, t914] {
+        let t915 = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.15");
+        let t915 = find(&t915, "ferrum.token.backend_timeout").unwrap();
+        assert!(
+            t915.explanation.contains("Ferrum Edge 0.9.15") && t915.explanation.contains("a backend held the request"),
+            "{}",
+            t915.explanation
+        );
+        for f in [t95, t97, t98, t99, t910, t911, t914, t915] {
             assert_eq!(f.confidence, Confidence::Likely);
             assert!(f.does_not_prove.iter().any(|d| d == "That the backend received the request."), "{:?}", f.does_not_prove);
         }
@@ -1075,6 +1084,7 @@ mod tests {
             "ferrum-edge-0.9.10",
             "ferrum-edge-0.9.11",
             "ferrum-edge-0.9.14",
+            "ferrum-edge-0.9.15",
         ];
         for id in supported {
             assert_eq!(crate::catalog_version_for(&t(id)), format!("findings:{v} ferrum:{id}"));

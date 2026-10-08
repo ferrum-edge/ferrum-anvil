@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 #
 # Structural lint for the Ferrum Anvil gateway lab profiles (every supported ferrum-edge release:
-# v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11 and the v0.9.14 candidate).
+# v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14 and the v0.9.15 candidate).
 #
 # Why this exists: `ferrum-edge validate` rejects unknown keys on GatewayConfig, Proxy,
 # Consumer, PluginConfig and Upstream (serde deny_unknown_fields), and every plugin used here
@@ -10,7 +10,7 @@
 # and upstream targets are LENIENT: a misspelled key there is silently ignored and the lab
 # silently misconfigures. This script checks every key against field lists copied from the
 # v0.9.5 source (the field sets below are identical in v0.9.7 and v0.9.8 and still accepted at v0.9.9
-# and v0.9.10/v0.9.11/v0.9.14; source re-checked when each was added),
+# and v0.9.10/v0.9.11/v0.9.14/v0.9.15; source re-checked when each was added),
 # plus proxy/plugin association rules and resource_counts.
 #
 # Field lists: src/config/types.rs @ v0.9.5 (structs Proxy 2609, Consumer 3025,
@@ -27,6 +27,13 @@
 # v0.9.12 to v0.9.14 leave src/config/types.rs, env_config.rs and conf_file.rs byte-identical and
 # change no plugin key set (plugins only declare the request headers they change, and OIDC
 # refuses two more published session keys); see docs/audit/gateway-0.9.14-delta.md.
+# v0.9.15 adds no field to these structs (src/config/types.rs gains helper methods only; env_config.rs
+# gains FERRUM_PER_IP_IPV6_PREFIX, FERRUM_HTTP3_CONNECT_UDP_MAX_SESSIONS_PER_IP,
+# FERRUM_HTTP3_MAX_UNVALIDATED_HANDSHAKES and FERRUM_MESH_TENANT_TLS_FILE_ROOTS). It removes ldap_auth
+# consumer_mapping (now refused), adds rate_limiting ipv6_prefix and mcp_gateway
+# sessions.max_sessions_per_principal (older releases reject both, so profiles must not use them), and
+# confines plugin environment references to FERRUM_PLUGIN_SECRET_<NAME>; see
+# docs/audit/gateway-0.9.15-delta.md.
 #
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
@@ -122,7 +129,8 @@ PLUGIN_KEYS = {
   # Added for the policy profile; accepted by `ferrum-edge validate` v0.9.5 and v0.9.7 (live-checked);
   # the key sets of every plugin listed here are unchanged at v0.9.8 and unchanged or only extended
   # at v0.9.9 (source-checked: rate_limiting gains mcp_tool_calls, waf gains on_unlisted_content_type,
-  # category_modes and detection_paranoia_level; nothing is removed); unchanged at v0.9.10/v0.9.11/v0.9.14.
+  # category_modes and detection_paranoia_level; nothing is removed); unchanged at v0.9.10/v0.9.11/v0.9.14;
+  # v0.9.15 adds rate_limiting ipv6_prefix, not allowed here while older releases are supported.
   'bot_detection' => %w[blocked_patterns allow_list allow_missing_user_agent custom_response_code],
   'rate_limiting' => %w[limit_by expose_headers limits redis_failure_policy] + REDIS,
   'ai_response_guard' => %w[action pii_patterns custom_pii_patterns blocked_phrases blocked_patterns
@@ -133,16 +141,17 @@ PLUGIN_KEYS = {
   'ldap_auth' => %w[ldap_url bind_dn_template search_base_dn search_filter canonical_identity_attribute
                     service_account_dn service_account_password group_base_dn group_filter required_groups
                     group_attribute starttls connect_timeout_seconds request_timeout_seconds
-                    max_concurrent_requests cache_ttl_seconds max_cache_entries consumer_mapping
-                    hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read)
+                    max_concurrent_requests cache_ttl_seconds max_cache_entries
+                    hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read; consumer_mapping refused from v0.9.15)
   'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256],         # mtls_auth.rs:995-1045 (keys read)
-  'grpc_web' => %w[expose_headers],                                                     # grpc_web.rs:1218 parse_expose_headers (only key; v0.9.7 to v0.9.14)
+  'grpc_web' => %w[expose_headers],                                                     # grpc_web.rs:1218 parse_expose_headers (only key; v0.9.7 to v0.9.15)
   'oidc_relying_party' => %w[providers session behavior],                               # oidc_relying_party.rs:89 (CONFIG_FIELDS)
   'soap_ws_security' => %w[reject_missing_security_header content_type timestamp username_token
                            x509_signature saml nonce] + REDIS,                        # soap_ws_security.rs:648-664 (ROOT_CONFIG_KEYS)
   # Added for the mcp profile; the closed key sets (MCP_*_KEYS, reject_unknown_mcp_keys) are
   # identical at v0.9.5, v0.9.7 and v0.9.8 (source-checked); v0.9.9 only adds keys (policy.tools.*
-  # allowed_groups / denied_groups, servers.*.openapi); unchanged at v0.9.10/v0.9.11/v0.9.14.
+  # allowed_groups / denied_groups, servers.*.openapi); unchanged at v0.9.10/v0.9.11/v0.9.14/v0.9.15
+  # (v0.9.15 adds only the nested sessions.max_sessions_per_principal).
   'mcp_gateway' => %w[capabilities discovery enabled endpoint mode observability policy servers
                       sessions validation]                                            # mcp_gateway.rs:99-110 (MCP_CONFIG_KEYS)
 }.freeze

@@ -171,7 +171,7 @@ pub fn release_at_least(min: &str) -> bool {
 /// The release named by the default pin (`lab/gateway/RELEASE.lock`), the
 /// repository's pinned Edge release. A lab check whose public signal the pin
 /// itself qualifies ([`DEFAULT_LOCK`], source-audited in
-/// `docs/audit/gateway-0.9.14-delta.md`) keys on this instead of a version
+/// `docs/audit/gateway-0.9.15-delta.md`) keys on this instead of a version
 /// literal, so moving the pin moves the check with it.
 pub fn pinned_release() -> &'static str {
     static PINNED: OnceLock<String> = OnceLock::new();
@@ -510,9 +510,10 @@ mod tests {
         let pin = lock_at(DEFAULT_LOCK).release;
         assert!(release_in(&pin, "v0.9.11", &pin));
         assert!(release_in("v0.9.11", "v0.9.11", &pin));
-        assert!(release_in("v0.9.14", "v0.9.11", "v0.9.14"));
-        assert!(!release_in("v0.9.10", "v0.9.11", "v0.9.14"));
-        assert!(!release_in("v0.9.15", "v0.9.11", "v0.9.14"));
+        assert!(release_in("v0.9.14", "v0.9.11", "v0.9.15"));
+        assert!(release_in("v0.9.15", "v0.9.11", "v0.9.15"));
+        assert!(!release_in("v0.9.10", "v0.9.11", "v0.9.15"));
+        assert!(!release_in("v0.9.16", "v0.9.11", "v0.9.15"));
     }
 
     /// Every supported release has a well-formed lock and an embedded
@@ -520,7 +521,7 @@ mod tests {
     #[test]
     fn every_supported_release_has_a_lock_and_a_catalog() {
         let releases = available_releases();
-        let expected = ["v0.9.5", "v0.9.7", "v0.9.8", "v0.9.9", "v0.9.10", "v0.9.11", "v0.9.14"];
+        let expected = ["v0.9.5", "v0.9.7", "v0.9.8", "v0.9.9", "v0.9.10", "v0.9.11", "v0.9.14", "v0.9.15"];
         assert_eq!(releases, expected);
         for r in releases {
             let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));
@@ -598,7 +599,8 @@ mod tests {
         assert!(release_order("v0.9.10") > release_order("v0.9.9"));
         assert!(release_order("v0.9.11") > release_order("v0.9.10"));
         assert!(release_order("v0.9.14") > release_order("v0.9.11"));
-        assert!(release_order("v1.0.0") > release_order("v0.9.14"));
+        assert!(release_order("v0.9.15") > release_order("v0.9.14"));
+        assert!(release_order("v1.0.0") > release_order("v0.9.15"));
         assert_eq!(release_order(" v0.9.8"), release_order("0.9.8"));
         // Lock files sort as text ("v0.9.10" before "v0.9.5"); the list is in release order.
         let releases = available_releases();

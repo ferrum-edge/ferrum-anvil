@@ -119,7 +119,7 @@ fn every_canonical_fixture_passes_the_real_parser_and_independent_schema_gate() 
     }
     let mut tested = BTreeSet::new();
     for (contract, expected_valid, expected_invalid) in
-        [("diagnostic-report", 8, 4), ("diagnostic-finding", 2, 3), ("diagnostic-ref", 4, 6)]
+        [("diagnostic-report", 8, 4), ("diagnostic-finding", 2, 3), ("diagnostic-ref", 5, 7)]
     {
         let schema: Value =
             serde_json::from_slice(&std::fs::read(vendor().join(format!("schemas/{contract}/v1.schema.json"))).unwrap()).unwrap();

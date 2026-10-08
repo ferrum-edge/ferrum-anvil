@@ -17,13 +17,16 @@ backend path parameters are involved.
 
 ## Contract and producer pins
 
-The published canonical pin is `contracts-edge-0.9.14`, full commit
-`ddbdd845733b7046c4393ac951011dafb774db33`. Every previously adopted path is
+The published canonical pin is `contracts-edge-0.9.15`, full commit
+`6fb64c5dc2e014204c17609fc717d976f3b4589e`. Every previously adopted path is
 vendored byte-exact and covered by `contracts/ferrum-contracts/PIN`. Token/class/
 header parity, reference-reader qualification and all original precise negative
 expectations remain strict. The expanded manifest's other scopes do not add imports.
-The diagnostic-report schema and every report, finding and reference fixture are
+The diagnostic-report schema and every earlier report, finding and reference fixture are
 byte-identical to `contracts-edge-0.9.11`, which first published the shared v1 freeze.
+`contracts-edge-0.9.15` adds one valid and one invalid diagnostic-ref fixture for the
+`route_protocol_admission` label (accepted in `rejection.phase`, refused in
+`detail.rejection_phase`); both are vendored and exercised by the reader and schema gates.
 
 That freeze is EXISTING/implemented shared v1: root accepted the unchanged freeze
 at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e` after owner/consumer
