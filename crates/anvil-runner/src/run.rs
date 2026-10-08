@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 const MAX_URL: usize = 2_048;
 const MAX_TEXT: usize = 1_024;
 const MAX_SUMMARY: usize = 512;
-/// Larger sensitive values are omitted instead of indexing them for redaction.
+/// Larger sensitive values fail the step and cause response-derived record data to be discarded.
 const MAX_SENSITIVE_EXTRACTION_BYTES: usize = 64 * 1024;
 
 /// Execute a plan. Returns an error only when the run cannot start (trust,
@@ -278,6 +278,7 @@ impl Run {
             // recorded or reported.
             let mut new_secrets = Vec::new();
             for (var, value, sensitive) in std::mem::take(&mut out.extracted) {
+                extracted.retain(|(s, e)| *s != scope || e.name != var);
                 if sensitive && value.len() > MAX_SENSITIVE_EXTRACTION_BYTES {
                     out.body = bytes::Bytes::new();
                     out.decoded_body = None;
@@ -285,9 +286,31 @@ impl Run {
                         response.body.captured_bytes = 0;
                         response.body.blob_sha256 = None;
                     }
+                    // Do not build a redaction matcher from an unbounded value. Remove
+                    // every response-derived record surface and do not forward this
+                    // variable, so the cleartext cannot reach history or later steps.
+                    out.record.prepared.url.clear();
+                    out.record.prepared.headers.clear();
+                    out.record.prepared.inferred.clear();
+                    out.record.attempts.clear();
+                    out.record.response = None;
+                    out.record.stream = None;
+                    out.record.assertion_results.clear();
+                    out.record.extracted.clear();
+                    out.record.findings.clear();
+                    out.record.outcome.transport = TransportState::Failed;
+                    out.record.outcome.application = ApplicationState::NotEvaluated;
+                    out.record.outcome.assertions = AssertionState::NotRun;
+                    out.record.outcome.protocol_status = ProtocolStatus::None;
+                    out.record.outcome.warnings.clear();
+                    out.record.outcome.summary = format!(
+                        "Sensitive extraction '{var}' exceeded the 64 KiB limit; response data was discarded."
+                    );
                     self.notes.push(
                         &self.secrets,
-                        "A sensitive extraction exceeded the 64 KiB limit and was omitted; its response body was discarded.",
+                        format!(
+                            "Sensitive extraction '{var}' exceeded the 64 KiB limit; step failed, response discarded, value not forwarded."
+                        ),
                     );
                     continue;
                 }
@@ -295,7 +318,6 @@ impl Run {
                     new_secrets.push(value.clone());
                     self.secrets.add_name(&var);
                 }
-                extracted.retain(|(s, e)| *s != scope || e.name != var);
                 extracted.push((scope, VarEntry { name: var, value, secret: sensitive, literal: true }));
             }
             self.secrets.add_values(new_secrets);

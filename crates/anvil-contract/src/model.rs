@@ -505,6 +505,13 @@ impl<'a> ModelBuilder<'a> {
         if !self.seen.insert((kind, key)) {
             return;
         }
+        if kind != TargetKind::Operation {
+            let copied_bytes = pointer.len().saturating_add(label.len()).saturating_add(copied_string_bytes(&view));
+            if self.view_bytes.saturating_add(copied_bytes) > self.view_byte_limit {
+                return;
+            }
+            self.view_bytes += copied_bytes;
+        }
         let Value::Object(view) = view else { return };
         self.targets.push(Target { kind, pointer, label, view });
     }
@@ -1103,5 +1110,32 @@ mod tests {
         assert!(builder.skipped_operations > 0);
         assert!(builder.view_bytes <= builder.view_byte_limit);
         assert!(builder.targets.iter().any(|t| t.kind == TargetKind::Operation));
+    }
+
+    #[test]
+    fn child_views_with_large_operation_ids_are_charged_to_the_view_byte_budget() {
+        let operation_id = "x".repeat(1024 * 1024);
+        let parameters: Vec<Value> = (0..300)
+            .map(|i| json!({"name": format!("parameter-{i}"), "in": "query", "schema": {"type": "string"}}))
+            .collect();
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": {"/large": {"get": {"operationId": operation_id, "parameters": parameters}}}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let mut builder = ModelBuilder {
+            spec: &spec,
+            targets: vec![],
+            seen: HashSet::new(),
+            work: 0,
+            view_bytes: 0,
+            view_byte_limit: MAX_MODEL_VIEW_BYTES,
+            skipped_operations: 0,
+        };
+        builder.build(&mut |_, _| vec![]);
+
+        assert!(builder.view_bytes <= builder.view_byte_limit);
+        assert!(builder.targets.iter().filter(|t| t.kind == TargetKind::Parameter).count() < 300);
     }
 }

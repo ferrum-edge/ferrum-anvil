@@ -100,7 +100,7 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let mut p = Recording::default();
     let mut login = RequestSpec::http("POST", &f.url("/status/200"));
-    login.params.push(KeyValue::new("body", r#"{"token":"%7B%7Bsecret%7D%7D","user":"alice"}"#));
+    login.params.push(KeyValue::new("body", r#"{"token":"\u007b\u007bsecret\u007d\u007d","user":"alice"}"#));
     login.extractions.push(Extraction {
         variable: "auth_token".into(),
         source: ExtractionSource::JsonPath { path: "$.token".into() },
@@ -137,7 +137,7 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
 }
 
 #[tokio::test]
-async fn oversized_sensitive_extractions_are_omitted_and_the_response_body_is_discarded() {
+async fn oversized_sensitive_extractions_fail_closed_and_discard_response_data() {
     init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let mut p = Recording::default();
@@ -155,11 +155,16 @@ async fn oversized_sensitive_extractions_are_omitted_and_the_response_body_is_di
         .await
         .unwrap();
 
-    assert!(report.passed(), "{report:#?}");
+    assert!(!report.passed(), "{report:#?}");
     assert!(report.iterations[0].steps[0].extracted.is_empty());
+    assert!(report.notes.iter().any(|note| note.contains("large_secret") && note.contains("64 KiB limit")));
     let record = p.records.lock();
     assert!(record[0].1.is_empty(), "the response body was discarded");
-    assert!(record[0].0.contains("64 KiB limit"));
+    assert!(record[0].0.contains("large_secret"));
+    assert!(record[0].0.contains("\"attempts\":[]"), "redirect records were discarded");
+    assert!(record[0].0.contains("\"assertion_results\":[]"), "assertion results were discarded");
+    assert!(!record[0].0.contains("\"response\":"), "response headers and body were discarded");
+    assert!(!record[0].0.contains(&"x".repeat(64 * 1024 + 1)));
 }
 
 fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {
