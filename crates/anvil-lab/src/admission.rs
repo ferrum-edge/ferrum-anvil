@@ -321,18 +321,22 @@ async fn hold_and_probe(
     (first, o, seen, op_log_class(&m.gateway, from, proxy_id, allowed).await)
 }
 
+/// The first release that dispatches UP-018's bodyless GET on the direct
+/// HTTP/1.1 pool; earlier releases use reqwest.
+const DIRECT_H1_FIRST_RELEASE: &str = "v0.9.11";
+
 /// UP-018 (HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
 /// mesh_external destination; the only connection is held by a slow
 /// request, so the next request needs a second socket and is refused.
-/// The pinned release uses direct H1 for this bodyless GET; earlier releases
-/// use reqwest.
+/// Releases from v0.9.11 through the pinned release use direct H1 for this
+/// bodyless GET (the v0.9.14 source audit found the lane unchanged); earlier
+/// releases use reqwest.
 fn up018(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let m = &env.mesh;
         let log = &m.backend.log;
-        let pinned = crate::gateway::pinned_release();
-        let direct_h1 = crate::gateway::current_lock().release == pinned;
+        let direct_h1 = crate::gateway::release_from_through_pin(DIRECT_H1_FIRST_RELEASE);
         let (status, marker, body, token, class) = if direct_h1 {
             (502, "connection_failure", r#"{"error":"Backend unavailable"}"#, "ferrum.token.connection_failure", "backend_connection_limit")
         } else {

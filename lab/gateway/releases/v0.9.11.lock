@@ -1,10 +1,10 @@
-# Reviewed candidate default for the Anvil failure lab; hosted Anvil qualification recorded.
+# An earlier supported release, selected with `anvil-lab --release v0.9.11`
+# (or ANVIL_LAB_RELEASE=v0.9.11); the default pin moved to v0.9.14.
+# Hosted Anvil qualification of v0.9.11 is recorded in docs/audit/gateway-0.9.11-delta.md.
 # Published Edge v0.9.11, release 403215981, immutable source below.
 # Asset names and SHA-256 are the actual downloaded release bytes, verified
 # against GitHub API digests and published .sha256 files by root (2026-10-04).
 # https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.11
-# This release-specific copy and RELEASE.lock have identical pins.
-# Earlier supported releases retain their own locks under releases/.
 release v0.9.11
 source_sha c764084b3b51c3f7ffde268c039688d35e49c553
 ferrum-edge-macos-aarch64 d9a535fda68f17c67e7a44de4c6c0d037145d8772067c7051fa9bd47a30e12ea

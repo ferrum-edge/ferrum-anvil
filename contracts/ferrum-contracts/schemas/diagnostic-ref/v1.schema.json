@@ -8,13 +8,13 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Included in Ferrum Edge v0.9.9.",
+    "edge_availability": "Released since Ferrum Edge v0.9.9; unchanged wire contract re-read at verified v0.9.12 source 0d917701b63ef38210c49df830f48cf0457cbc7d.",
     "wire_version": "ferrum.diagnostic_ref.v1",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.9",
-        "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.DiagnosticRefLookup",
@@ -26,8 +26,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.9",
-        "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+        "ref": "v0.9.12",
+        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
         "path": "src/diagnostic_ref.rs",
         "symbols": [
           "DIAGNOSTIC_REF_SCHEMA_VERSION",

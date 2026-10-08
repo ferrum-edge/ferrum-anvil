@@ -658,7 +658,7 @@ saves one request per listed tool in the same folder
 ## Shared diagnostic preview
 
 Desktop Import → Diagnostic preview accepts pasted/file JSON for the published
-`contracts-edge-0.9.11` finding, reference and accepted unchanged shared report v1,
+`contracts-edge-0.9.14` finding, reference and accepted unchanged shared report v1,
 plus the exact historical Alloy CLI envelope. Preview stays read-only, bounded and
 in memory; imported facts remain unverified with unknown Anvil confidence. It does
 not apply changes, fetch URLs/Edge records, trust supplied claims or attribute timings.
