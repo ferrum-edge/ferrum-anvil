@@ -15,7 +15,7 @@
 //! fetched: a schema that uses one cannot be compiled.
 
 use crate::model::Direction;
-use crate::spec::{Spec, internal_pointer};
+use crate::spec::{Reach, Spec, internal_pointer};
 use anvil_import::Dialect;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
@@ -80,7 +80,8 @@ pub fn linear_patterns() -> jsonschema::PatternOptions<jsonschema::Regex> {
 
 /// The converted schema with the `$ref` targets it reaches, as one document.
 pub fn bundle(spec: &Spec, schema: &Value, direction: Direction) -> Result<Value, String> {
-    let root = convert(spec, schema, direction, 0);
+    let mut flags = Flags::new();
+    let root = convert_in(spec, schema, direction, 0, &mut flags);
     let mut doc = Value::Object(Map::new());
     let mut pending: Vec<String> = vec![];
     collect_refs(&root, &mut pending)?;
@@ -100,7 +101,7 @@ pub fn bundle(spec: &Spec, schema: &Value, direction: Direction) -> Result<Value
         let Some(raw) = spec.root.pointer(&target) else {
             return Err(format!("unresolved reference #{target}"));
         };
-        let converted = convert(spec, raw, direction, 0);
+        let converted = convert_in(spec, raw, direction, 0, &mut flags);
         let mut found = vec![];
         collect_refs(&converted, &mut found)?;
         pending.extend(found.into_iter().filter(|t| queued.insert(t.clone())));
@@ -367,8 +368,19 @@ fn legacy(d: Dialect) -> bool {
     matches!(d, Dialect::Swagger20 | Dialect::OpenApi30)
 }
 
+/// The `readOnly` or `writeOnly` flag of each `$ref` target read so far,
+/// by [`crate::spec::RefTarget::id`] (`None`: the target is missing): a
+/// bundle reads each target once, however many required properties lead
+/// there.
+type Flags = HashMap<usize, Option<bool>>;
+
 /// Convert one schema (not following `$ref`s) for `direction`.
 pub fn convert(spec: &Spec, schema: &Value, direction: Direction, depth: usize) -> Value {
+    convert_in(spec, schema, direction, depth, &mut Flags::new())
+}
+
+/// [`convert`], reading the flags of `$ref` targets through `flags`.
+fn convert_in(spec: &Spec, schema: &Value, direction: Direction, depth: usize, flags: &mut Flags) -> Value {
     let Value::Object(src) = schema else {
         // `true`/`false` schemas (3.1+) and anything malformed pass through.
         return schema.clone();
@@ -385,7 +397,9 @@ pub fn convert(spec: &Spec, schema: &Value, direction: Direction, depth: usize) 
     for (k, v) in src {
         let converted = match k.as_str() {
             "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => match v {
-                Value::Object(m) => Value::Object(m.iter().map(|(n, s)| (n.clone(), convert(spec, s, direction, depth + 1))).collect()),
+                Value::Object(m) => {
+                    Value::Object(m.iter().map(|(n, s)| (n.clone(), convert_in(spec, s, direction, depth + 1, flags))).collect())
+                }
                 other => other.clone(),
             },
             "items"
@@ -399,15 +413,28 @@ pub fn convert(spec: &Spec, schema: &Value, direction: Direction, depth: usize) 
             | "unevaluatedProperties"
             | "unevaluatedItems"
             | "additionalItems" => match v {
-                Value::Array(a) => Value::Array(a.iter().map(|s| convert(spec, s, direction, depth + 1)).collect()),
-                s => convert(spec, s, direction, depth + 1),
+                Value::Array(a) => Value::Array(a.iter().map(|s| convert_in(spec, s, direction, depth + 1, flags)).collect()),
+                s => convert_in(spec, s, direction, depth + 1, flags),
             },
             "allOf" | "anyOf" | "oneOf" | "prefixItems" => match v {
-                Value::Array(a) => Value::Array(a.iter().map(|s| convert(spec, s, direction, depth + 1)).collect()),
+                Value::Array(a) => Value::Array(a.iter().map(|s| convert_in(spec, s, direction, depth + 1, flags)).collect()),
                 other => other.clone(),
             },
             "required" => match v {
-                Value::Array(names) => Value::Array(names.iter().filter(|n| !excluded(spec, src, n, direction)).cloned().collect()),
+                Value::Array(names) => {
+                    // Each name is looked up once, however often it is listed.
+                    let mut dropped: HashMap<&str, bool> = HashMap::new();
+                    let mut kept = vec![];
+                    for n in names {
+                        if let Some(name) = n.as_str()
+                            && *dropped.entry(name).or_insert_with(|| excluded(spec, src, name, direction, flags))
+                        {
+                            continue;
+                        }
+                        kept.push(n.clone());
+                    }
+                    Value::Array(kept)
+                }
                 other => other.clone(),
             },
             // Annotations of OpenAPI with no validation meaning.
@@ -448,16 +475,24 @@ pub fn convert(spec: &Spec, schema: &Value, direction: Direction, depth: usize) 
     Value::Object(out)
 }
 
-/// Whether required property `name` of `parent` does not apply in `direction`.
-fn excluded(spec: &Spec, parent: &Map<String, Value>, name: &Value, direction: Direction) -> bool {
-    let Some(name) = name.as_str() else { return false };
+/// Whether required property `name` of `parent` does not apply in
+/// `direction`. A referenced property's target is read once (`flags`).
+fn excluded(spec: &Spec, parent: &Map<String, Value>, name: &str, direction: Direction, flags: &mut Flags) -> bool {
     let Some(prop) = parent.get("properties").and_then(|p| p.get(name)) else { return false };
-    let (prop, _) = spec.deref(prop, "");
     let flag = match direction {
         Direction::Request => "readOnly",
         Direction::Response => "writeOnly",
     };
-    prop.get(flag).and_then(Value::as_bool).unwrap_or(false)
+    let read = |v: &Value| v.get(flag).and_then(Value::as_bool).unwrap_or(false);
+    match spec.reach(prop, "") {
+        Reach::Inline(v) => read(v),
+        Reach::Target(t) => {
+            let found = *flags.entry(t.id).or_insert_with(|| spec.target_value(&t).map(read));
+            // A missing target leaves the reference itself, as `Spec::deref`.
+            found.unwrap_or_else(|| read(prop))
+        }
+        Reach::Unresolved => read(prop),
+    }
 }
 
 #[cfg(test)]
@@ -649,5 +684,35 @@ mod tests {
         let s = spec(r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"##);
         assert!(compile(&s, &json!({"$ref": "https://example.com/x.json"}), Direction::Response).is_err());
         assert!(compile(&s, &json!({"$ref": "#/components/schemas/Missing"}), Direction::Response).is_err());
+    }
+
+    #[test]
+    fn a_bundle_reads_each_referenced_target_once() {
+        // 1,000 required properties, each a reference to one alias of a
+        // write-only schema at a pointer of about 200 KB.
+        let key = "k".repeat(4_000);
+        let mut target = json!({"type": "string", "writeOnly": true});
+        for _ in 0..50 {
+            let mut level = Map::new();
+            level.insert(key.clone(), target);
+            target = Value::Object(level);
+        }
+        let deep = format!("#/x{}", format!("/{key}").repeat(50));
+        let names: Vec<String> = (0..1_000).map(|i| format!("n{i}")).collect();
+        let properties: Map<String, Value> = names.iter().map(|n| (n.clone(), json!({"$ref": "#/p"}))).collect();
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "x": target, "p": {"$ref": deep}});
+        let s = spec(&doc.to_string());
+        let schema = json!({"type": "object", "required": names, "properties": properties});
+        let walks = || s.walks.load(std::sync::atomic::Ordering::Relaxed);
+        // The first bundle also follows the chain, once for the document.
+        bundle(&s, &schema, Direction::Response).unwrap();
+        let before = walks();
+        let response = bundle(&s, &schema, Direction::Response).unwrap();
+        assert_eq!(walks() - before, 1);
+        assert_eq!(response["allOf"][0]["required"], json!([]), "write-only in a response");
+        let before = walks();
+        let request = bundle(&s, &schema, Direction::Request).unwrap();
+        assert_eq!(walks() - before, 1);
+        assert_eq!(request["allOf"][0]["required"].as_array().map(Vec::len), Some(1_000));
     }
 }

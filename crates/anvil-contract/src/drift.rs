@@ -55,6 +55,13 @@ const MAX_SCHEMA_FIXES: usize = 500;
 const MAX_ENUM_TOKENS: usize = 20;
 /// Body values walked for schema suggestions, across the analysis.
 const MAX_WALK_STEPS: usize = 2_000_000;
+/// What walking bodies along their schemas may cost, in bytes: the
+/// references followed and the schema pointers copied on the way (see
+/// [`Spec::resolve_within`]). Apart from [`MAX_RESOLVE_BYTES`], so that
+/// walks never leave operations unresolved.
+const MAX_WALK_BYTES: usize = 256 * 1024 * 1024;
+/// Noted once either walking budget is spent.
+const WALK_SPENT: &str = "the analysis' budget for walking bodies is spent; later bodies got no schema suggestions";
 /// Query parameter names kept per undeclared endpoint or per operation.
 const MAX_QUERY_NAMES: usize = 50;
 /// Undeclared endpoints and undeclared servers reported.
@@ -370,6 +377,8 @@ struct State<'a> {
     declared: HashMap<(usize, usize), Option<Rc<Declared<'a>>>>,
     /// What resolving them may still cost.
     resolve_meter: Meter,
+    /// What walking bodies may still cost (see [`MAX_WALK_BYTES`]).
+    walk_bytes: Meter,
     opts: DriftOptions,
     findings: BTreeMap<String, FindingAcc>,
     ops: Vec<OpAcc>,
@@ -421,6 +430,7 @@ pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -
         operations: vec![None; n_ops],
         declared: HashMap::new(),
         resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
+        walk_bytes: Meter::new(MAX_WALK_BYTES),
         opts: opts.clone(),
         findings: BTreeMap::new(),
         ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
@@ -1139,10 +1149,40 @@ impl<'a> State<'a> {
         }
         self.walk_steps += n;
         if self.walk_steps > MAX_WALK_STEPS {
-            self.note("the analysis' budget for walking bodies is spent; later bodies got no schema suggestions");
+            self.note(WALK_SPENT);
             return false;
         }
         true
+    }
+
+    /// Charge `bytes` copied while walking bodies to [`State::walk_bytes`];
+    /// false once that budget is spent.
+    fn walk_charge(&mut self, bytes: usize) -> bool {
+        let fresh = !self.walk_bytes.exhausted();
+        if self.walk_bytes.charge(bytes) {
+            return true;
+        }
+        if fresh {
+            self.note(WALK_SPENT);
+        }
+        false
+    }
+
+    /// [`Spec::deref`] charged to [`State::walk_bytes`]: `None` once that
+    /// budget is spent.
+    fn walk_deref(&mut self, v: &'a Value, at: &str) -> Option<(&'a Value, String)> {
+        let fresh = !self.walk_bytes.exhausted();
+        let spec: &'a Spec = self.spec;
+        match spec.resolve_within(v, at, &mut self.walk_bytes) {
+            Some(found) => Some(found),
+            None if self.walk_bytes.exhausted() => {
+                if fresh {
+                    self.note(WALK_SPENT);
+                }
+                None
+            }
+            None => Some((v, at.to_string())),
+        }
     }
 
     /// The fix at `key`, created with `owner` unless a cap is reached.
@@ -1182,12 +1222,16 @@ impl<'a> State<'a> {
         o: &Observation,
         failed: bool,
     ) {
-        if depth > 32 || !self.spend(1) {
+        if depth > 32 || self.walk_bytes.exhausted() || !self.spend(1) {
             return;
         }
-        let spec: &'a Spec = self.spec;
-        let (s, at) = spec.deref(schema, at);
+        let Some((s, at)) = self.walk_deref(schema, at) else { return };
         if s.get("oneOf").is_some() || s.get("anyOf").is_some() {
+            return;
+        }
+        // The copies of `at` below: the holder and the first part, or a
+        // fix's key and its suggestion's.
+        if !self.walk_charge(2 * at.len()) {
             return;
         }
         let owner = || schema_owner(&at, code, label);
@@ -1223,7 +1267,8 @@ impl<'a> State<'a> {
                 }
                 let mut parts: Vec<(&'a Value, String)> = vec![(s, at.clone())];
                 for (k, b) in all.iter().enumerate() {
-                    parts.push(spec.deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())));
+                    let Some(part) = self.walk_deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())) else { return };
+                    parts.push(part);
                 }
                 // Reading the schema costs as much as its members.
                 let members: usize = parts
@@ -1268,12 +1313,18 @@ impl<'a> State<'a> {
                 }
                 for (k, x) in obj {
                     if let Some(&(ps, pi)) = declared.get(k.as_str()) {
+                        if !self.walk_charge(parts[pi].1.len() + k.len()) {
+                            return;
+                        }
                         let pp = ptr(&ptr(&parts[pi].1, "properties"), k);
                         self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
                     } else if let Some((ap, app)) = &additional {
-                        let (ap, app) = (*ap, app.clone());
-                        self.walk(ap, &app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
+                        self.walk(*ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
                     } else if names_properties && safe_name(k) {
+                        // The fix's key, then its suggestion's.
+                        if !self.walk_charge(2 * (holder.len() + k.len())) {
+                            return;
+                        }
                         let key = FixKey::AddProperty { at: holder.clone(), name: k.clone() };
                         if let Some(e) = self.fix(&key, owner) {
                             e.1.add(x);
@@ -1283,13 +1334,22 @@ impl<'a> State<'a> {
                     }
                 }
                 for (name, pi) in required {
-                    let rp = parts[pi].1.clone();
-                    let write_only = declared
-                        .get(name)
-                        .is_some_and(|(ps, _)| spec.deref(ps, "").0.get("writeOnly").and_then(Value::as_bool) == Some(true));
+                    let write_only = match declared.get(name) {
+                        Some(&(ps, _)) => match self.walk_deref(ps, "") {
+                            Some((p, _)) => p.get("writeOnly").and_then(Value::as_bool) == Some(true),
+                            None => return,
+                        },
+                        None => false,
+                    };
                     if write_only {
                         continue;
                     }
+                    // The copies of the pointer below: the entry's key, its
+                    // owner and the link.
+                    if !self.walk_charge(3 * parts[pi].1.len()) {
+                        return;
+                    }
+                    let rp = parts[pi].1.clone();
                     let missing = !obj.contains_key(name);
                     if missing {
                         fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
@@ -1304,6 +1364,9 @@ impl<'a> State<'a> {
             }
             Value::Array(items) => {
                 if let Some(is) = s.get("items").filter(|i| i.is_object()) {
+                    if !self.walk_charge(at.len()) {
+                        return;
+                    }
                     let ip = ptr(&at, "items");
                     let child = ptr(ipath, "*");
                     for x in items.iter().take(self.opts.max_items_walked) {
@@ -1463,8 +1526,12 @@ impl<'a> State<'a> {
             }
         }
 
-        // Undeclared endpoints.
+        // Undeclared endpoints. What each template's Path Item declares is
+        // resolved once, however many methods were called on it.
+        let mut items: HashMap<&str, Option<PathItemView>> = HashMap::new();
+        let no_params = BTreeSet::new();
         let mut not_describable = 0;
+        let mut unresolved_items = 0;
         for ((method, pattern), acc) in &self.endpoints {
             let key = format!("endpoint|{method}|{pattern}");
             // Where the dialect describes this method: a Path Item field, or
@@ -1481,6 +1548,17 @@ impl<'a> State<'a> {
                 not_describable += 1;
                 continue;
             };
+            let (declared_path_params, path_ptr, path_key) = match &acc.template {
+                Some(t) => {
+                    let item = items.entry(t.as_str()).or_insert_with(|| path_item_view(spec, t, &mut self.resolve_meter));
+                    let Some(item) = item.as_ref() else {
+                        unresolved_items += 1;
+                        continue;
+                    };
+                    (&item.params, item.pointer.clone(), t.clone())
+                }
+                None => (&no_params, Router::path_pointer(pattern), pattern.clone()),
+            };
             let mut resp = serde_json::Map::new();
             let codes: BTreeSet<&String> = acc.responses.keys().map(|(c, _)| c).collect();
             for code in codes {
@@ -1491,13 +1569,6 @@ impl<'a> State<'a> {
             if resp.is_empty() {
                 resp.insert("default".into(), json!({"description": "Not observed yet"}));
             }
-            let declared_path_params: BTreeSet<String> = acc
-                .template
-                .as_ref()
-                .and_then(|t| spec.root.pointer(&Router::path_pointer(t)))
-                .and_then(|item| item.get("parameters").and_then(Value::as_array))
-                .map(|ps| ps.iter().filter_map(|p| spec.deref(p, "").0.get("name").and_then(Value::as_str).map(str::to_string)).collect())
-                .unwrap_or_default();
             let mut params = vec![];
             for name in crate::model::template_params(pattern) {
                 if declared_path_params.contains(&name) {
@@ -1537,16 +1608,6 @@ impl<'a> State<'a> {
                 }
             }
             operation.insert("responses".into(), Value::Object(resp));
-            let (path_ptr, path_key) = match &acc.template {
-                Some(t) => (
-                    spec.root
-                        .pointer(&Router::path_pointer(t))
-                        .map(|v| spec.deref(v, &Router::path_pointer(t)).1)
-                        .unwrap_or_else(|| Router::path_pointer(t)),
-                    t.clone(),
-                ),
-                None => (Router::path_pointer(pattern), pattern.clone()),
-            };
             let mut detail = format!("Seen {} time(s).", acc.calls);
             if let Some(prefix) = &acc.unknown_prefix {
                 detail.push_str(&format!(" The prefix {prefix} is not a declared server path; it was left out."));
@@ -1564,6 +1625,12 @@ impl<'a> State<'a> {
         }
         if not_describable > 0 {
             self.notes.insert(format!("{} description has no place for some observed methods; they got no suggestion", d), not_describable);
+        }
+        if unresolved_items > 0 {
+            self.notes.insert(
+                "the description is too large to compare completely; some undeclared endpoints got no suggestion".into(),
+                unresolved_items,
+            );
         }
 
         // Schema fixes.
@@ -1924,6 +1991,37 @@ fn required_headers<'a>(spec: &'a Spec, resp: &Response<'a>, meter: &mut Meter) 
     out
 }
 
+/// What a Path Item declares for the suggestions of undeclared methods on it.
+struct PathItemView {
+    /// Where it is (its `$ref` followed).
+    pointer: String,
+    /// The names of its path-level parameters.
+    params: BTreeSet<String>,
+}
+
+/// The Path Item of `template`, each reference followed within `meter`:
+/// `None` once a charge is refused.
+fn path_item_view(spec: &Spec, template: &str, meter: &mut Meter) -> Option<PathItemView> {
+    let at = Router::path_pointer(template);
+    let Some(item) = spec.root.pointer(&at) else { return Some(PathItemView { pointer: at, params: BTreeSet::new() }) };
+    let pointer = match spec.resolve_within(item, &at, meter) {
+        Some((_, p)) => p,
+        None if meter.exhausted() => return None,
+        None => at.clone(),
+    };
+    let base = ptr(&at, "parameters");
+    let mut params = BTreeSet::new();
+    for (i, p) in item.get("parameters").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let p = match spec.resolve_within(p, &ptr(&base, &i.to_string()), meter) {
+            Some((p, _)) => p,
+            None if meter.exhausted() => return None,
+            None => p,
+        };
+        params.extend(p.get("name").and_then(Value::as_str).map(str::to_string));
+    }
+    Some(PathItemView { pointer, params })
+}
+
 fn fix_suggestion_key(k: &FixKey) -> String {
     match k {
         FixKey::AddProperty { at, name } => format!("prop|{at}|{name}"),
@@ -2165,5 +2263,107 @@ mod tests {
             spec.walks.load(std::sync::atomic::Ordering::Relaxed)
         };
         assert_eq!(walks(1), walks(2_000));
+    }
+
+    /// `v` under 50 members named `key`, and a reference to it from `name`.
+    fn buried(key: &str, name: &str, mut v: Value) -> (Value, String) {
+        for _ in 0..50 {
+            let mut level = serde_json::Map::new();
+            level.insert(key.to_string(), v);
+            v = Value::Object(level);
+        }
+        (v, format!("#/{name}{}", format!("/{key}").repeat(50)))
+    }
+
+    #[test]
+    fn walking_bodies_is_charged_for_the_pointers_it_copies() {
+        // A response schema behind one alias of a pointer of about 200 KB:
+        // each body walked along it copies that pointer for each key.
+        let key = "k".repeat(4_000);
+        let (xs, deep) = buried(&key, "xs", json!({"type": "object", "properties": {"id": {"type": "string"}}}));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok",
+                "content": {"application/json": {"schema": {"$ref": "#/s"}}}}}}}},
+            "xs": xs, "s": {"$ref": deep}});
+        let text = doc.to_string();
+        let call = |i: usize| Observation {
+            id: format!("har:{i}"),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                headers: vec![],
+                bytes: None,
+                body: ObservedBody::Json(json!({"id": "x", "extra": i})),
+            }),
+            latency_ms: None,
+        };
+        // Pointers walked to follow references in an analysis of `calls`
+        // calls.
+        let walks = |calls: usize| {
+            let spec = Spec::parse(text.as_bytes()).unwrap();
+            let observations: Vec<Observation> = (0..calls).map(&call).collect();
+            let report = analyze(&spec, &observations, &DriftOptions::default());
+            assert!(report.suggestions.iter().any(|s| s.title.contains("extra")), "{:?}", report.suggestions);
+            (spec.walks.load(std::sync::atomic::Ordering::Relaxed), report.notes)
+        };
+        let (few, notes) = walks(10);
+        assert!(!notes.iter().any(|n| n.starts_with(WALK_SPENT)), "{notes:?}");
+        // Past the budget, bodies are no longer walked: no more references
+        // are followed, however many calls there are.
+        let (many, notes) = walks(2_000);
+        assert!(notes.iter().any(|n| n.starts_with(WALK_SPENT)), "{notes:?}");
+        assert!(many < 2_000, "{many}");
+        assert!(few < many, "{few} {many}");
+        assert_eq!(walks(4_000).0, many);
+    }
+
+    #[test]
+    fn path_parameters_are_resolved_once_however_many_methods_are_undeclared() {
+        // 100 path-level parameters, each behind one alias of a pointer of
+        // about 200 KB.
+        let key = "k".repeat(4_000);
+        let (xp, deep) = buried(&key, "xp", json!({"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}));
+        let params: Vec<Value> = (0..100).map(|_| json!({"$ref": "#/p"})).collect();
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a/{id}": {"parameters": params, "get": {"responses": {"200": {"description": "ok"}}}}},
+            "xp": xp, "p": {"$ref": deep}});
+        let text = doc.to_string();
+        let call = |method: &str| Observation {
+            id: format!("har:{method}"),
+            at: None,
+            method: method.into(),
+            url: "/a/7".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: None,
+            latency_ms: None,
+        };
+        // Pointers walked to follow references in an analysis of a call
+        // with each of `methods`, none declared.
+        let walks = |methods: &[&str]| {
+            let spec = Spec::parse(text.as_bytes()).unwrap();
+            let observations: Vec<Observation> = methods.iter().map(|m| call(m)).collect();
+            let report = analyze(&spec, &observations, &DriftOptions::default());
+            for m in methods {
+                let s = report.suggestions.iter().find(|s| s.title == format!("Document {m} /a/{{id}}")).expect(m);
+                // `id` is declared on the Path Item: the operation does not
+                // repeat it.
+                let ops = serde_json::to_string(&s.ops).unwrap();
+                assert!(!ops.contains(r#""in":"path""#), "{ops}");
+            }
+            spec.walks.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(walks(&["POST"]), walks(&["POST", "PUT", "DELETE", "PATCH", "TRACE"]));
     }
 }

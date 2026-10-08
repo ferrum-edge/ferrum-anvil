@@ -13,7 +13,10 @@
   and in `spec-drift` to a 256 MiB budget for resolving each operation's parameters, body,
   responses and required headers, which happens once per operation rather than once per call.
   Named example references are charged too, and rules on `raw.` fields no longer copy the whole
-  object for each path that reaches it. The operations `spec-drift` matches against are capped
+  object for each path that reaches it. Walking observed bodies along their schemas for
+  suggestions has its own 256 MiB budget, suggestions for undeclared methods read each Path
+  Item's parameters once, and a schema validator reads each referenced required property's
+  target once. The operations `spec-drift` matches against are capped
   at 256 MiB of their paths, pointers and declared statuses; any left out are counted in a note
   and in `spec.operations`. A lint whose copy budget runs out reports `incomplete` (as do the
   text, SARIF and desktop outputs), and `anvil lint-spec` exits with 3 for it unless
