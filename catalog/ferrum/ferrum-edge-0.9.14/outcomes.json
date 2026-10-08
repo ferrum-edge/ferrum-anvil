@@ -6,7 +6,7 @@
     "source_sha": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d"
   },
   "generated_on": "2026-10-08",
-  "method": "Source delta audit against immutable v0.9.11 and v0.9.14 trees (covering v0.9.12 and v0.9.13); carried citations remapped through identical source text, changed paths inspected for observable semantics. Source-audited candidate pending hosted Anvil gates; no live 0.9.14 lab evidence and no completeness claim. See docs/audit/gateway-0.9.14-delta.md.",
+  "method": "Source delta audit against immutable v0.9.11 and v0.9.14 trees (covering v0.9.12 and v0.9.13); carried citations remapped through identical source text, changed paths inspected for observable semantics. Hosted all-profile Lab evidence and the pre-existing MESH-011 exception are recorded below; no completeness claim. See docs/audit/gateway-0.9.14-delta.md.",
   "public_tokens": [
     "connection_failure",
     "backend_timeout",
@@ -48,14 +48,14 @@
     },
     {
       "name": "X-Gateway-Upstream-Status",
-      "writer": "src/proxy/mod.rs:43164 (builder .header when upstream_is_fallback, after the :42895 strip); src/http3/server.rs:11421-11437 (finalize_h3_response_routing_headers: strip on every response, insert only when is_fallback)",
+      "writer": "src/proxy/mod.rs:43164 (builder .header when upstream_is_fallback, after the :43147 strip); src/http3/server.rs:11421-11437 (finalize_h3_response_routing_headers: strip on every response, insert only when is_fallback)",
       "semantics": "Only value 'degraded': load balancer used the all-unhealthy (or unhealthy-subset -> parent) fallback. May accompany any status including 2xx.",
       "spoofable_by_backend": true,
       "spoofing_notes": "v0.9.8 (#5759): a backend- or hook-written copy is stripped on the H1/H2 backend-response builder (src/proxy/mod.rs:43147) and on every HTTP/3 response (src/http3/server.rs:11427), so on those paths only the gateway's own 'degraded' reaches the client and never twice. Plugin reject paths do not strip it, and any non-Ferrum endpoint can send it."
     },
     {
       "name": "gateway-error-reason",
-      "writer": "src/proxy/mod.rs:3770 (backend_tls_sni_requires_direct_h2), :40883/:40955/:41007/:45931 (mesh dispatch); src/http3/server.rs and src/http3/cross_protocol.rs mesh/egress refusal builders; src/http3/websocket.rs:860",
+      "writer": "src/proxy/mod.rs:3770 (backend_tls_sni_requires_direct_h2), :41135/:41207/:41259/:46183 (mesh dispatch); src/http3/server.rs and src/http3/cross_protocol.rs mesh/egress refusal builders; src/http3/websocket.rs:860",
       "semantics": "Undocumented gateway-authored reason on some DispatchPolicyRejected 502s. Values seen: 'backend_tls_sni_requires_direct_h2', 'backend-egress-policy-denied' (H3 bridge only), mesh reasons such as 'mesh transport dispatch required for this backend target', 'Unix socket retry dispatch is unavailable', 'HBONE transport or gateway identity is unavailable for retry target'.",
       "spoofable_by_backend": true,
       "spoofing_notes": "Not in any strip list (src/proxy/headers.rs:817 is_backend_response_strip_header)."
@@ -1429,7 +1429,7 @@
     ]
   },
   "matrix_seed_reconciliation": {
-    "source": "Historical seed coverage from the v0.9.5..v0.9.11 audits, carried with the v0.9.11 -> v0.9.14 source delta recorded in docs/audit/gateway-0.9.14-delta.md; hosted scenario counts pending.",
+    "source": "Historical seed coverage from the v0.9.5..v0.9.11 audits, carried with the v0.9.11 -> v0.9.14 source delta recorded in docs/audit/gateway-0.9.14-delta.md; hosted scenario counts recorded in the qualification evidence below.",
     "notes": {
       "dns_lookup_error/UP-001": "public body is path-dependent: reqwest preflight 'Backend DNS resolution failed' vs pools 'Backend unavailable'",
       "tls_error/UP-004,UP-006": "backend mTLS on the reqwest HTTP/1 pool surfaces as connection_pool_error (connection_failure) or connection_reset (backend_error), not tls_error",
@@ -28201,7 +28201,7 @@
       "shared_signal_with": [],
       "minimum_truthful_diagnosis": "Ferrum Edge reports the route's total request deadline (HTTPRoute timeouts.request / mesh_route_dispatch request_timeout_ms) ran out before a response head was available; the response does not say which phase used the time or whether the backend received the request.",
       "must_not_claim": "That the backend was slow or received the request (the deadline also spans gateway-side phases, the client upload and retry backoff), which phase expired, the configured duration, or that the request is safe to replay.",
-      "remediation": "Gateway operator / API owner: compare the rule's timeouts.request with backend latency plus client upload time and retry backoff; the gateway transaction log records metadata route_request_timeout = dispatch | before_dispatch | retry_backoff (src/plugins/mod.rs:272, :4714). Retry only idempotent requests.",
+      "remediation": "Gateway operator / API owner: compare the rule's timeouts.request with backend latency plus client upload time and retry backoff; the gateway transaction log records metadata route_request_timeout = dispatch | before_dispatch | retry_backoff (src/plugins/mod.rs:272, :4717). Retry only idempotent requests.",
       "owner": "unknown",
       "fixture_ids": [],
       "notes": "v0.9.6+ only (no route deadline exists at v0.9.5). X-Gateway-Error comes from status 504 (src/retry.rs:287); from v0.9.8 the sibling that no backend held carries request_timeout instead (upstream.route_request_timeout.not_dispatched), so on this release backend_timeout on this body means a backend held the attempt. Enforced on native HTTP/3 and the HTTP/3 bridge too (v0.9.8, #5646, #5729). Never retried. Error_class read_write_timeout (charged to the backend). On HTTP/1.1 / HTTP/2 built with an empty header map, so no Content-Type. v0.9.11: request_on_wire is tracked separately from health-neutral classification. The same route_timeout phase decides request_timeout before backend handoff versus backend_timeout during dispatch; per-attempt budgets remain separate. A native-H3 HEADERS-completion marker does not identify partial first-wire submission, so lifetime expiry never licenses replay."
@@ -29857,10 +29857,10 @@
     }
   ],
   "qualification": {
-    "state": "reviewed_candidate_pending_hosted_anvil_gates",
-    "live_0_9_14_evidence": false,
+    "state": "reviewed_candidate_qualified",
+    "live_0_9_14_evidence": true,
     "baseline": "ferrum-edge-0.9.11",
-    "scope": "Carried observable inventory with v0.9.12-v0.9.14 source delta notes; not a comprehensive inventory of new admin endpoints or a live compatibility claim. Hosted Anvil qualification is pending and will be recorded in docs/audit/gateway-0.9.14-delta.md."
+    "scope": "Carried observable inventory with v0.9.12-v0.9.14 source delta notes; not a comprehensive inventory of new admin endpoints. Hosted all-profile Lab run 37758644110 on PR head 7b19d50e: macOS 556 passed / 2 failed / 19 skipped; Ubuntu 552 passed / 2 failed / 21 skipped. UP-018 and UP-018-untrusted passed on both OSes. MESH-011 and MESH-011-untrusted failed on both OSes, matching main nightly run 37612351285 across v0.9.5-v0.9.11; pre-existing and tracked in ferrum-anvil#341, unrelated to this adoption. Full evidence: docs/audit/gateway-0.9.14-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1887) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1650 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals."
 }

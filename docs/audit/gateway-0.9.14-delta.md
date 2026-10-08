@@ -8,7 +8,7 @@
 | Contracts | Published `contracts-edge-0.9.14`, `ddbdd845733b7046c4393ac951011dafb774db33` |
 | Catalog | [`ferrum-edge-0.9.14/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json), 553 carried outcome IDs with the delta below |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.14.lock`; v0.9.11 is retained as an earlier supported release |
-| Hosted qualification | Pending: root dispatches the manual Lab run (`workflow_dispatch`, `profile=all`) on the PR head |
+| Hosted qualification | All-profile Lab run 37758644110 on the PR head; results and the pre-existing MESH-011 exception are recorded below |
 | Audit date | 2026-10-08 |
 
 The [immutable comparison][compare] changes 57 files under `src/` (8,316 insertions, 1,091
@@ -41,8 +41,8 @@ below. The catalog records no new outcome ID, no new token and no new diagnostic
 
 Local validation is static inspection, `git diff --check` and read-only consistency checks of
 the new JSON only; no project tooling ran locally. Unit, parser and catalog checks cannot
-establish live gateway compatibility. No 0.9.14 lab result, physical-device acceptance or
-performance measurement is claimed.
+establish live gateway compatibility. Hosted Lab evidence is recorded below; no physical-device
+acceptance or performance measurement is claimed.
 
 ## Marker, error class and header decisions
 
@@ -78,6 +78,7 @@ reclassification notes to the `protocol_error`, `read_write_timeout` and
 
 | Surface | Exact delta / reuse decision | Edge source (v0.9.14) | Anvil impact |
 |---|---|---|---|
+| hickory-resolver 0.26.2 (v0.9.13) | CNAME following, record-class rejection and the truncated-response retry bound changed; resolver edge cases can affect whether a backend name resolves. | `Cargo.lock`; `src/proxy/mod.rs:46979`; `src/retry.rs:481` | The Anvil DNS-failure classification remains `dns_lookup_error`. When resolution fails, the path-specific 502 body/token remain `Backend DNS resolution failed` / `connection_failure` on shared preflight and `Backend unavailable` / `backend_error` on pooled paths. |
 | Capability-probe setup (#6032) | A gRPC, direct-H2, H3 or gateway-to-mesh HBONE request that joined a capability probe's backend setup (connect budget capped at 5 s) shared the probe's failure. A failed probe-owned create is no longer authoritative for a joined request; it re-dials under its own `backend_connect_timeout_ms`. | [`probe_owned`][probe] `src/pool/mod.rs:418` | **Unchanged signal; notes updated** (`upstream.connect.timeout`). Fewer spurious startup failures; no timing claim. |
 | Native H3 connect timing (v0.9.13) | An established cold H3 connection is no longer misreported as `connection_timeout` when its task wakes after the connect instant. | [`src/http3/client.rs:1494`][h3-connect] | **Unchanged signal; note on `upstream.connect.timeout`.** |
 | gRPC affinity (v0.9.13) | A missing or closed shard is created on a detached single-flight task while a ready sibling serves the call; a connection pins at most `min(32, SETTINGS_MAX_CONCURRENT_STREAMS)` calls; slot tables are per gateway. Up to `FERRUM_POOL_HTTP2_CONNECTIONS_PER_HOST` backend connections per host are possible. The vendored h2 stream-lifetime patch is retired. | [`src/proxy/frontend_affinity.rs:44`][affinity], [`:94`][affinity-limit] | **No outcome change.** Recorded in drift; live connection width needs lab evidence. |
@@ -158,12 +159,14 @@ acceptance changed. The source audit found no scenario whose asserted signal mov
 
 ## Qualification status
 
-Hosted qualification of this source is pending. Root will dispatch the manual Lab run
-(`workflow_dispatch`, `profile=all`) on the PR head; CI, Desktop E2E and the core-only PR Lab run
-on the PR. Their results, including per-OS totals and skip reasons, belong in this record once
-they exist; nothing here is a hosted result. This adoption grants no Anvil release/tag,
-platform signing, OAuth, physical-device native acceptance, provider-account or broader
-performance acceptance.
+The hosted all-profile Lab run 37758644110 (`workflow_dispatch`, `profile=all`) ran on PR
+head `7b19d50e`. macOS reported 556 passed / 2 failed / 19 skipped; Ubuntu reported 552
+passed / 2 failed / 21 skipped. UP-018 and UP-018-untrusted passed on both operating systems.
+The only failures were MESH-011 and MESH-011-untrusted on both operating systems. The main
+nightly run 37612351285 fails those same scenarios across v0.9.5–v0.9.11; this is a
+pre-existing Anvil issue tracked in [#341](https://github.com/ferrum-edge/ferrum-anvil/issues/341),
+unrelated to this Edge adoption. No physical-device native acceptance, platform signing, OAuth,
+provider-account or broader performance acceptance is claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/c764084b3b51c3f7ffde268c039688d35e49c553...9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d
 [changelog]: https://github.com/ferrum-edge/ferrum-edge/blob/9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d/CHANGELOG.md
