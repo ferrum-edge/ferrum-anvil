@@ -524,21 +524,26 @@ fn generalize(path: &str) -> String {
     // The last literal segment names the next parameter.
     let mut prev = "";
     let mut used = BTreeSet::new();
+    // The next suffix to try for each stem. Resuming here instead of from
+    // one keeps naming bounded by the input size, not quadratic in the
+    // number of colliding segments in one path.
+    let mut next = BTreeMap::new();
     for seg in path.split('/').filter(|s| !s.is_empty()) {
         out.push('/');
         if !literal_segment(seg) {
             let base = prev.trim_end_matches('s');
-            let mut name = if base.is_empty() || !base.chars().all(|c| c.is_ascii_alphanumeric()) {
+            let stem = if base.is_empty() || !base.chars().all(|c| c.is_ascii_alphanumeric()) {
                 "id".to_string()
             } else {
                 format!("{}Id", base.to_ascii_lowercase())
             };
-            let stem = name.clone();
-            let mut n = 1;
+            let n = next.entry(stem.clone()).or_insert(1u64);
+            let mut name = if *n == 1 { stem.clone() } else { format!("{stem}{n}") };
             while !used.insert(name.clone()) {
-                n += 1;
+                *n += 1;
                 name = format!("{stem}{n}");
             }
+            *n += 1;
             out.push_str(&format!("{{{name}}}"));
             prev = "";
         } else {
@@ -1977,5 +1982,17 @@ mod tests {
         assert_eq!(nice_ceil(2100.0), 2500.0);
         assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 50.0), 2.0);
         assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 95.0), 4.0);
+    }
+
+    #[test]
+    fn pathological_path_parameters_are_named_within_input_size() {
+        // Every non-literal segment here names the same `{id}` stem. Restarting
+        // the suffix search from one for each segment made this quadratic; the
+        // work is now bounded by the number of segments.
+        const SEGMENTS: usize = 50_000;
+        let path = "/123".repeat(SEGMENTS);
+        let generalized = generalize(&path);
+        assert_eq!(generalized.matches('{').count(), SEGMENTS);
+        assert!(generalized.ends_with(&format!("{{id{SEGMENTS}}}")), "{}", &generalized[generalized.len() - 32..]);
     }
 }

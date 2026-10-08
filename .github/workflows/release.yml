@@ -521,17 +521,55 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          signing="$(node -p 'require("./upload/release-evidence.json").signing')"
-          updater="$(node -p 'const u = require("./upload/release-evidence.json").updater; u.manifest ? u.detail : ""')"
-          {
-            echo "Draft release of Ferrum Anvil $VERSION built from \`$RELEASE_COMMIT\` by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
-            echo
-            echo "**Signing:** $signing."
-            echo
-            if [ -n "$updater" ]; then echo "**In-app updates:** $updater."; echo; fi
-            echo "Verify downloads with \`SHA256SUMS\`. \`release-evidence.json\` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs."
-            echo
-            echo "This draft is not published. Review the evidence (docs/release.md) before publishing."
-          } > "$RUNNER_TEMP/notes.md"
+          node --input-type=module <<'NODE'
+          import * as fs from "node:fs";
+          const evidencePath = "upload/release-evidence.json";
+          const stat = fs.lstatSync(evidencePath);
+          if (!stat.isFile()) throw new Error("release evidence must be a regular file");
+          const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+          if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+            throw new Error("release evidence must be a JSON object");
+          }
+          if (evidence.format !== "anvil-release-evidence" || evidence.version !== 1) {
+            throw new Error("unsupported release evidence format or version");
+          }
+          if (
+            ![
+              "signed and verified on the build runner (see targets[].signing)",
+              "unsigned — owner credentials not configured",
+            ].includes(evidence.signing)
+          ) {
+            throw new Error("release evidence signing has an invalid value");
+          }
+          const updater = evidence.updater;
+          if (!updater || typeof updater !== "object" || Array.isArray(updater)) {
+            throw new Error("release evidence updater must be an object");
+          }
+          if (
+            typeof updater.signed !== "boolean" ||
+            !(updater.manifest === null || updater.manifest === "latest.json") ||
+            typeof updater.detail !== "string" ||
+            updater.detail.length === 0 ||
+            !Array.isArray(updater.platforms) ||
+            !updater.platforms.every((platform) => typeof platform === "string") ||
+            !(updater.key_id === null || typeof updater.key_id === "string")
+          ) {
+            throw new Error("release evidence updater has an invalid shape");
+          }
+          const lines = [
+            `Draft release of Ferrum Anvil ${process.env.VERSION} built from \`${process.env.RELEASE_COMMIT}\` by [run ${process.env.GITHUB_RUN_ID}](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}).`,
+            "",
+            `**Signing:** ${evidence.signing}.`,
+            "",
+          ];
+          if (updater.manifest) lines.push(`**In-app updates:** ${updater.detail}.`, "");
+          lines.push(
+            "Verify downloads with `SHA256SUMS`. `release-evidence.json` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs.",
+            "",
+            "This draft is not published. Review the evidence (docs/release.md) before publishing.",
+            "",
+          );
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/notes.md`, lines.join("\n"));
+          NODE
           gh release create "$TAG" upload/* --draft --verify-tag --repo "$GITHUB_REPOSITORY" \
             --title "Ferrum Anvil $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

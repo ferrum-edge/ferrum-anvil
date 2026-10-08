@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+
+- Release creation reads the uploaded release-evidence file as JSON data and validates its
+  format before using it in draft notes; it no longer loads it as code (#333).
+
 ### Added
 
 - Adopt published `contracts-edge-0.9.14` (`ddbdd845733b7046c4393ac951011dafb774db33`)
@@ -17,6 +22,8 @@
 
 ### Changed
 
+- Full backup Replace restores keep local API rulesets when the backup has no app-settings
+  section, and the preview explains that choice (#336).
 - Gateway catalog 0.9.14: a buffered-collector read error answers the eager collector's
   502 `{"error":"Backend response body read failed"}`, so that body is ambiguous between the two
   collectors on 0.9.14 and the old `{"error":"Backend response read error"}` body is matched only
@@ -34,6 +41,7 @@
 - The draft confirmation counts every DNS override that differs, including one whose change is
   hidden by the shortened address list (#335).
 - Ruleset details reload their source text after Replace (#339).
+- `spec-drift --har` names path parameters in time bounded by the path length. A URL with many colliding parameter segments could stall the analysis (#334).
 - Lab MESH-011 reaches the Ambient gateway again (#341). Its TEST-NET target `192.0.2.10` was
   refused locally by the destination policy added in #308, before the CONNECT was sent, so the
   scenario failed instead of proving the gateway's refusal. It now targets the unrouted
