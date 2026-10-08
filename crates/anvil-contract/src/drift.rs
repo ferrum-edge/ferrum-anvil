@@ -1319,7 +1319,7 @@ impl<'a> State<'a> {
                         let pp = ptr(&ptr(&parts[pi].1, "properties"), k);
                         self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
                     } else if let Some((ap, app)) = &additional {
-                        self.walk(*ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
+                        self.walk(ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
                     } else if names_properties && safe_name(k) {
                         // The fix's key, then its suggestion's.
                         if !self.walk_charge(2 * (holder.len() + k.len())) {
