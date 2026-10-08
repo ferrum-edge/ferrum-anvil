@@ -13,7 +13,7 @@
 //!   destination guard. The DENY does not name the client SVID the HBONE
 //!   scenarios present: from 0.9.15 a relayed CONNECT is authorized as a
 //!   Layer-4 session, where a DENY ignores `paths` and still matches on its
-//!   identity (#6081).
+//!   identity (Edge issue #6081 / #6083).
 //! * **sidecar-permissive** (same files, PERMISSIVE): inbound on
 //!   127.0.0.1:17626, so a certificate-less TLS client reaches the CONNECT
 //!   gate (`hbone_unauthenticated_peer`) for a destination the relay admits.
@@ -617,7 +617,10 @@ fn mesh006(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-007: AuthorizationPolicy (MeshPolicy) DENY on /denied/* for the
-/// identity the policy names (`anvil-lab-other`, another mesh-root SVID).
+/// identity the policy names (`anvil-lab-other`, another mesh-root SVID). A
+/// control request of that identity to `/echo` reaches the workload, so the
+/// DENY is path-scoped: a plain request carries its path to authorization on
+/// every release (from 0.9.15 only a relayed CONNECT is a Layer-4 session).
 fn mesh007(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -639,6 +642,17 @@ fn mesh007(env: &Env) -> Fut<'_> {
         backend_unchanged(&mut c, env, b0);
         let log = wait_op_lines(&env.sidecar, from, &["\"request_path\":\"/denied/x\"", "\"response_status_code\":403"]).await;
         c.add(CheckKind::GroundTruth, "operator log: 403 transaction for /denied/x", !log.is_empty(), "");
+        let b1 = env.backend.log.count_requests();
+        let tls = env.tls("denied SVID → svc, other path", Svid::Other, ids::SVC_SPIFFE_ID, None);
+        let control = send(&env.engine, &env.direct("https", "/echo", Some(tls))).await;
+        let status = control.record.response.as_ref().map(|r| r.status);
+        c.add(
+            CheckKind::GroundTruth,
+            "control: the same identity gets 200 on /echo (the DENY is path-scoped)",
+            status == Some(200),
+            format!("{status:?}"),
+        );
+        backend_received(&mut c, env, b1, "/echo");
         outcome(o, c, log)
     })
 }

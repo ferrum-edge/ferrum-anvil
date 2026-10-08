@@ -645,6 +645,19 @@ mod tests {
         }
     }
 
+    /// v0.9.15 continues a browser login on the sealed pending-flow cookie when
+    /// the instance-local pending-login cache is full, so the 503 that 0.9.14
+    /// answered matches no 0.9.15 outcome (it is in `removed_outcomes`).
+    #[test]
+    fn oidc_state_cache_full_is_not_catalogued_from_0_9_15() {
+        let text = r#"{"error":"OIDC state cache full"}"#;
+        let bf = body_facts(Some("application/json"), text.as_bytes());
+        let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
+        let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids("ferrum-edge-0.9.14"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
+        assert!(ids("ferrum-edge-0.9.15").is_empty());
+    }
+
     #[test]
     fn unknown_compatibility_ids_get_no_catalog_and_only_the_shared_vocabulary() {
         for id in ["ferrum-edge-0.9.6", "ferrum-edge-1.0.0", "", "FERRUM-EDGE-0.9.7"] {

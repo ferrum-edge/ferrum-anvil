@@ -222,7 +222,7 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.15` (candidate default; hosted gates pending) | v0.9.15, `25b3739` | **557** (553 carried IDs + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta, no live compatibility claim) |
+| `ferrum-edge-0.9.15` (candidate default; hosted gates pending) | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta, no live compatibility claim) |
 | `ferrum-edge-0.9.14` | v0.9.14, `9bd4d5f` | **553 carried IDs** | [audit/gateway-0.9.14-delta.md](audit/gateway-0.9.14-delta.md) (source delta covering v0.9.12–v0.9.14; hosted qualification recorded) |
 | `ferrum-edge-0.9.11` | v0.9.11, `c764084` | **553 carried IDs** | [audit/gateway-0.9.11-delta.md](audit/gateway-0.9.11-delta.md) (source delta; hosted qualification recorded) |
 | `ferrum-edge-0.9.10` | v0.9.10, `ee040d5` | **553** | [audit/gateway-0.9.10-delta.md](audit/gateway-0.9.10-delta.md) (delta on top of the 0.9.9 audit) |

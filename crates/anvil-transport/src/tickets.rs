@@ -369,4 +369,39 @@ mod tests {
         cache.context(cache.generation(), "ws-a", TicketTransport::Tls, "example.test", 443, &p, &["h2"]);
         assert_eq!(cache.contexts(), 3);
     }
+
+    #[test]
+    fn quic_address_validation_tokens_live_and_die_with_their_context() {
+        use quinn::TokenStore;
+        let cache = TicketCache::new();
+        let p = prepared(false);
+        let quic = |isolation: &str| cache.context(cache.generation(), isolation, TicketTransport::Quic, "example.test", 443, &p, &["h3"]);
+        let token = bytes::Bytes::from_static(b"new-token");
+
+        // A NEW_TOKEN token stored by one connection is presented by the next
+        // connection of the same context, once.
+        quic("ws-a").quic_tokens.insert("example.test", token.clone());
+        assert_eq!(quic("ws-a").quic_tokens.take("example.test"), Some(token.clone()));
+        assert_eq!(quic("ws-a").quic_tokens.take("example.test"), None, "a token is presented at most once");
+
+        // A workspace delete drops that workspace's tokens only.
+        quic("ws-a").quic_tokens.insert("example.test", token.clone());
+        quic("ws-b").quic_tokens.insert("example.test", token.clone());
+        cache.clear_isolation("ws-a");
+        assert_eq!(quic("ws-a").quic_tokens.take("example.test"), None);
+        assert_eq!(quic("ws-b").quic_tokens.take("example.test"), Some(token.clone()));
+
+        // The vault lock drops every context's tokens.
+        quic("ws-b").quic_tokens.insert("example.test", token.clone());
+        cache.clear();
+        assert_eq!(quic("ws-b").quic_tokens.take("example.test"), None);
+
+        // An attempt that began before a clear keeps none of the tokens it receives.
+        let before = cache.generation();
+        cache.clear();
+        let late = cache.context(before, "ws-a", TicketTransport::Quic, "example.test", 443, &p, &["h3"]);
+        late.quic_tokens.insert("example.test", token);
+        assert!(!Arc::ptr_eq(&late.quic_tokens, &quic("ws-a").quic_tokens));
+        assert_eq!(quic("ws-a").quic_tokens.take("example.test"), None);
+    }
 }

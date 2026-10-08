@@ -48,14 +48,14 @@
     },
     {
       "name": "X-Gateway-Upstream-Status",
-      "writer": "src/proxy/mod.rs:43355 (builder .header when upstream_is_fallback, after the :43147 strip); src/http3/server.rs:11576-11592 (finalize_h3_response_routing_headers: strip on every response, insert only when is_fallback)",
+      "writer": "src/proxy/mod.rs:43355 (builder .header when upstream_is_fallback, after the :43338 strip); src/http3/server.rs:11576-11592 (finalize_h3_response_routing_headers: strip on every response, insert only when is_fallback)",
       "semantics": "Only value 'degraded': load balancer used the all-unhealthy (or unhealthy-subset -> parent) fallback. May accompany any status including 2xx.",
       "spoofable_by_backend": true,
       "spoofing_notes": "v0.9.8 (#5759): a backend- or hook-written copy is stripped on the H1/H2 backend-response builder (src/proxy/mod.rs:43338) and on every HTTP/3 response (src/http3/server.rs:11582), so on those paths only the gateway's own 'degraded' reaches the client and never twice. Plugin reject paths do not strip it, and any non-Ferrum endpoint can send it."
     },
     {
       "name": "gateway-error-reason",
-      "writer": "src/proxy/mod.rs:3777 (backend_tls_sni_requires_direct_h2), :41135/:41207/:41259/:46183 (mesh dispatch); src/http3/server.rs and src/http3/cross_protocol.rs mesh/egress refusal builders; src/http3/websocket.rs:868",
+      "writer": "src/proxy/mod.rs:3777 (backend_tls_sni_requires_direct_h2), :41326/:41398/:41450/:46374 (mesh dispatch); src/http3/server.rs and src/http3/cross_protocol.rs mesh/egress refusal builders; src/http3/websocket.rs:868",
       "semantics": "Undocumented gateway-authored reason on some DispatchPolicyRejected 502s. Values seen: 'backend_tls_sni_requires_direct_h2', 'backend-egress-policy-denied' (H3 bridge only), mesh reasons such as 'mesh transport dispatch required for this backend target', 'Unix socket retry dispatch is unavailable', 'HBONE transport or gateway identity is unavailable for retry target'.",
       "spoofable_by_backend": true,
       "spoofing_notes": "Not in any strip list (src/proxy/headers.rs:986 is_backend_response_strip_header)."
@@ -505,7 +505,6 @@
       "plugin.oidc_relying_party.challenge_browser_malformed_authority",
       "plugin.oidc_relying_party.challenge_browser_host_mismatch",
       "plugin.oidc_relying_party.challenge_browser_discovery_unavailable",
-      "plugin.oidc_relying_party.challenge_browser_state_cache_full",
       "plugin.oidc_relying_party.challenge_browser_too_many_pending_logins",
       "plugin.oidc_relying_party.challenge_browser_state_creation_failed",
       "plugin.oidc_relying_party.challenge_browser_random_generation_failed",
@@ -539,7 +538,6 @@
       "plugin.oidc_relying_party.challenge_browser_malformed_authority",
       "plugin.oidc_relying_party.challenge_browser_host_mismatch",
       "plugin.oidc_relying_party.challenge_browser_discovery_unavailable",
-      "plugin.oidc_relying_party.challenge_browser_state_cache_full",
       "plugin.oidc_relying_party.challenge_browser_too_many_pending_logins",
       "plugin.oidc_relying_party.challenge_browser_state_creation_failed",
       "plugin.oidc_relying_party.challenge_browser_random_generation_failed",
@@ -609,7 +607,6 @@
       "plugin.oidc_relying_party.challenge_browser_malformed_authority",
       "plugin.oidc_relying_party.challenge_browser_host_mismatch",
       "plugin.oidc_relying_party.challenge_browser_discovery_unavailable",
-      "plugin.oidc_relying_party.challenge_browser_state_cache_full",
       "plugin.oidc_relying_party.challenge_browser_too_many_pending_logins",
       "plugin.oidc_relying_party.challenge_browser_state_creation_failed",
       "plugin.oidc_relying_party.challenge_browser_random_generation_failed",
@@ -1465,7 +1462,14 @@
       "source": "headers[X-Gateway-Error].semantics; plugin reject path src/proxy/mod.rs:27478 normalize_reject_response_with_provenance adds none (unchanged)"
     }
   },
-  "removed_outcomes": [],
+  "removed_outcomes": [
+    {
+      "id": "plugin.oidc_relying_party.challenge_browser_state_cache_full",
+      "removed_in": "v0.9.15",
+      "reason": "v0.9.15 (#6079) inserts every pending browser login through insert_pending_flow_or_use_sealed_cookie (src/plugins/oidc_relying_party.rs:3081-3096, called at :2250), which treats a full instance-local pending-login cache as success (:3088): the sealed pending-flow cookie carries the complete flow and the callback already accepts a missing local entry for cross-replica completion, so the challenge redirects to the IdP as usual. The 503 {\"error\":\"OIDC state cache full\"} is no longer sent; its constant (:63) and the StateCache::insert return (:2887) survive only as the internal signal that wrapper swallows. While the cache is full the per-client check is skipped too, so plugin.oidc_relying_party.challenge_browser_too_many_pending_logins cannot fire in that state.",
+      "v0_9_14_entry": "catalog/ferrum/ferrum-edge-0.9.14/outcomes.json"
+    }
+  ],
   "outcomes": [
     {
       "id": "upstream.dns.resolution_failed.reqwest_preflight",
@@ -4098,7 +4102,7 @@
       "fixture_ids": [
         "GW-007"
       ],
-      "notes": "rejection_phase=allowed_methods (logs only). Allow is gateway-authoritative (policy cannot alter it). v0.9.15 (#6080, #6098): HTTP/2 Extended CONNECT and HTTP/3 :protocol=websocket requests are evaluated as GET, the method of the backend WebSocket handshake, by allowed_methods (and by mesh_authz :method and opa input.method), as HTTP/1.1 Upgrade already was; a WebSocket route whose allowed_methods lists CONNECT but not GET now answers this 405 to those requests. Plain CONNECT and CONNECT-UDP keep CONNECT, and the 0-RTT method gate still reads the wire method."
+      "notes": "rejection_phase=allowed_methods (logs only). Allow is gateway-authoritative (policy cannot alter it). v0.9.15 (#6080; issue #6098 / #6099): HTTP/2 Extended CONNECT and HTTP/3 :protocol=websocket requests are evaluated as GET, the method of the backend WebSocket handshake, by allowed_methods (and by mesh_authz :method and opa input.method), as HTTP/1.1 Upgrade already was; a WebSocket route whose allowed_methods lists CONNECT but not GET now answers this 405 to those requests. Plain CONNECT and CONNECT-UDP keep CONNECT, and the 0-RTT method gate still reads the wire method."
     },
     {
       "id": "gateway.routing.trace_or_connect_blocked",
@@ -8562,7 +8566,7 @@
       "remediation": "Act on the body reason.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "Established tunnel faults reset with H3_MESSAGE_ERROR / H3_INTERNAL_ERROR (connect_udp.rs:2638, 2789). v0.9.15 (#6098, #6100): each tunnel holds a per-client slot keyed on the resolved client IP (IPv6 grouped by FERRUM_PER_IP_IPV6_PREFIX, default /64) for its lifetime; over the cap the request gets the same 503 {\"error\":\"CONNECT-UDP session limit exceeded\"} as the process-wide limit, before any socket is created, so the body cannot tell which limit applied (operator log connect_udp_per_ip_session_limit)."
+      "notes": "Established tunnel faults reset with H3_MESSAGE_ERROR / H3_INTERNAL_ERROR (connect_udp.rs:2638, 2789). v0.9.15 (issue #6098 / #6099, #6100): each tunnel holds a per-client slot keyed on the resolved client IP (IPv6 grouped by FERRUM_PER_IP_IPV6_PREFIX, default /64) for its lifetime; over the cap the request gets the same 503 {\"error\":\"CONNECT-UDP session limit exceeded\"} as the process-wide limit, before any socket is created, so the body cannot tell which limit applied (operator log connect_udp_per_ip_session_limit)."
     },
     {
       "id": "protocol.http.retry_after_spec_expose",
@@ -13757,49 +13761,6 @@
       "notes": "Once discovery succeeds it is never re-fetched in that plugin generation, so a later IdP outage never produces this. In Multi mode this 5xx outranks other plugins' 4xx. Public reason detail: IdP discovery unavailable. Distinguishability: Same body as callback_discovery_unavailable (400 there). Distinguishable from credential rejections (503 vs 302/401)."
     },
     {
-      "id": "plugin.oidc_relying_party.challenge_browser_state_cache_full",
-      "family": "auth",
-      "protocols": [
-        "http1",
-        "http2",
-        "http3",
-        "ws"
-      ],
-      "source": [
-        {
-          "path": "src/plugins/oidc_relying_party.rs",
-          "line": 2887,
-          "symbol": "StateCache::insert",
-          "sha": "25b3739"
-        }
-      ],
-      "condition": "Instance-local pending-login cache holds behavior.state_cache_max_entries (default 10000) live entries.",
-      "error_class": null,
-      "public_signal": {
-        "http_status": 503,
-        "x_gateway_error": null,
-        "other_headers": {
-          "Content-Type": "application/json"
-        },
-        "body_shape": "{\"error\":\"OIDC state cache full\"}",
-        "grpc_status": null,
-        "ws_close_code": null,
-        "transport": "complete HTTP response"
-      },
-      "evidence_visibility": "public",
-      "shared_signal_with": [],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its oidc_relying_party plugin produced this outcome; the condition is: Instance-local pending-login cache holds behavior.state_cache_max_entries (default 10000) live entries.",
-      "must_not_claim": "That the backend application produced this response (unless the destination is not a trusted Ferrum endpoint, in which case the body alone proves nothing); that an identity provider/directory/policy dependency is down, or a more specific credential defect than the body states.",
-      "remediation": "Gateway operator: check the oidc_relying_party plugin's dependency/configuration and gateway logs; the caller can retry later if the dependency recovers.",
-      "owner": "gateway_operator",
-      "fixture_ids": [
-        "AUTH-017",
-        "AUTH-011",
-        "AUTH-012"
-      ],
-      "notes": "Checked before discovery, can mask a discovery outage. Public reason detail: Global pending-login capacity. Distinguishability: Unique body."
-    },
-    {
       "id": "plugin.oidc_relying_party.challenge_browser_too_many_pending_logins",
       "family": "auth",
       "protocols": [
@@ -13840,7 +13801,7 @@
         "AUTH-011",
         "AUTH-012"
       ],
-      "notes": "Rate limit expressed as 503 (not 429), no Retry-After. Public reason detail: Per-client pending-login limit. Distinguishability: Unique body. v0.9.15 (#6079): the client-IP key groups native IPv6 clients by a fixed /64 (src/plugins/oidc_relying_party.rs:2243); IPv4 stays per-address."
+      "notes": "Rate limit expressed as 503 (not 429), no Retry-After. Public reason detail: Per-client pending-login limit. Distinguishability: Unique body. v0.9.15 (#6079): the client-IP key groups native IPv6 clients by a fixed /64 (src/plugins/oidc_relying_party.rs:2243); IPv4 stays per-address. v0.9.15 (#6079): the per-client limit applies only while the instance-local pending-login cache has room; when that cache is full the gateway skips both checks and continues the login with the sealed pending-flow cookie (src/plugins/oidc_relying_party.rs:3081-3096), so this 503 is not sent in that state."
     },
     {
       "id": "plugin.oidc_relying_party.challenge_browser_state_creation_failed",
@@ -15024,7 +14985,7 @@
       "remediation": "Caller: use an identity/scope permitted for this route, or ask the API owner/operator to grant access.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "Plugin name mesh_authz is a public builtin with no mesh-mode gate (mesh mode injects it globally), so an operator CAN configure it on an ordinary gateway; without a client-cert SPIFFE ID, principal-scoped ALLOW rules never match -> implicit deny. gRPC: grpc-status 7. Public reason detail: None (policy name only in metadata / admin recorder). Distinguishability: Identical to mesh_ext_authz check_failed_closed at default statusOnError=403 and to provider denials that return 403 without forwarded headers. gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.9 (#5948, PR #5950): on a route that allows ';' path parameters (MeshService.allow_path_parameters or ferrum.io/allow-path-parameters, #5947) every rule is judged on the raw and the parameter-stripped path: DENY, CUSTOM and AUDIT match on either spelling, ALLOW only on both, so '/admin;x/users' now meets a DENY on '/admin/*' and this 403 is answered more often there. Routes without the opt-in refuse ';' earlier with gateway.routing.path_parameter_refused (400). connection.sni conditions are normalized (trailing dot, case, IDNA A-label) and the received SNI loses one trailing dot before policy, so a DENY on admin.example.com now also fires for 'admin.example.com.' (#5903). A to.headers rule on a pseudo-header (':path', ':method', ':authority', ':scheme') is refused at config validation instead of never matching (#5951, PR #5952). The public signal is unchanged. v0.9.15 (#6081, issue #6081): a byte-stream or datagram HBONE CONNECT relay, including a bare authenticated HTTP/2 CONNECT on the Sidecar inbound listener, is authorized as a Layer-4 session (src/plugins/mesh/authz.rs:3028): to.operation methods, paths, hosts and headers, requestPrincipals and when: request.headers[...] / request.auth.* are unobservable, so a DENY rule ignores them and matches on its remaining constraints, an ALLOW or AUDIT rule that needs one never matches, and a matched CUSTOM rule refuses the relay with this 403 without calling the provider. An L7 rule that selects a workload reached over HBONE therefore refuses the whole tunnel; the public signal does not say which rule."
+      "notes": "Plugin name mesh_authz is a public builtin with no mesh-mode gate (mesh mode injects it globally), so an operator CAN configure it on an ordinary gateway; without a client-cert SPIFFE ID, principal-scoped ALLOW rules never match -> implicit deny. gRPC: grpc-status 7. Public reason detail: None (policy name only in metadata / admin recorder). Distinguishability: Identical to mesh_ext_authz check_failed_closed at default statusOnError=403 and to provider denials that return 403 without forwarded headers. gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.9 (#5948, PR #5950): on a route that allows ';' path parameters (MeshService.allow_path_parameters or ferrum.io/allow-path-parameters, #5947) every rule is judged on the raw and the parameter-stripped path: DENY, CUSTOM and AUDIT match on either spelling, ALLOW only on both, so '/admin;x/users' now meets a DENY on '/admin/*' and this 403 is answered more often there. Routes without the opt-in refuse ';' earlier with gateway.routing.path_parameter_refused (400). connection.sni conditions are normalized (trailing dot, case, IDNA A-label) and the received SNI loses one trailing dot before policy, so a DENY on admin.example.com now also fires for 'admin.example.com.' (#5903). A to.headers rule on a pseudo-header (':path', ':method', ':authority', ':scheme') is refused at config validation instead of never matching (#5951, PR #5952). The public signal is unchanged. v0.9.15 (issue #6081 / #6083): a byte-stream or datagram HBONE CONNECT relay, including a bare authenticated HTTP/2 CONNECT on the Sidecar inbound listener, is authorized as a Layer-4 session (src/plugins/mesh/authz.rs:3028): to.operation methods, paths, hosts and headers, requestPrincipals and when: request.headers[...] / request.auth.* are unobservable, so a DENY rule ignores them and matches on its remaining constraints, an ALLOW or AUDIT rule that needs one never matches, and a matched CUSTOM rule refuses the relay with this 403 without calling the provider. An L7 rule that selects a workload reached over HBONE therefore refuses the whole tunnel; the public signal does not say which rule."
     },
     {
       "id": "plugin.mesh_authz.ingress_listener_port_missing",
@@ -15260,7 +15221,7 @@
       "remediation": "Caller: use an identity/scope permitted for this route, or ask the API owner/operator to grant access.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "http_status = provider's status verbatim (provider-determined). failOpen never applies. Providers come only from mesh_slice.ext_authz_providers (mesh mode or operator-supplied slice). gRPC: mapped via http_reject_status_to_grpc_status; forwarded grpc-status overrides. Status/body operator-configurable. Public reason detail: Provider status + allow-listed provider headers (e.g. location, www-authenticate); provider body never forwarded. Distinguishability: Provider 403 with no forwarded headers == plugin.mesh_authz.denied. v0.9.15 (#6081): a matched CUSTOM rule on an HBONE CONNECT relay never reaches the provider; mesh_authz refuses the relay with 403 {\"error\":\"Mesh authorization denied\"} (plugin.mesh_authz.denied, ext_authz outcome unexecutable)."
+      "notes": "http_status = provider's status verbatim (provider-determined). failOpen never applies. Providers come only from mesh_slice.ext_authz_providers (mesh mode or operator-supplied slice). gRPC: mapped via http_reject_status_to_grpc_status; forwarded grpc-status overrides. Status/body operator-configurable. Public reason detail: Provider status + allow-listed provider headers (e.g. location, www-authenticate); provider body never forwarded. Distinguishability: Provider 403 with no forwarded headers == plugin.mesh_authz.denied. v0.9.15 (issue #6081 / #6083): a matched CUSTOM rule on an HBONE CONNECT relay never reaches the provider; mesh_authz refuses the relay with 403 {\"error\":\"Mesh authorization denied\"} (plugin.mesh_authz.denied, ext_authz outcome unexecutable)."
     },
     {
       "id": "plugin.mesh_ext_authz.provider_denied_status_coerced",
@@ -15301,7 +15262,7 @@
       "remediation": "Caller: use an identity/scope permitted for this route, or ask the API owner/operator to grant access.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "Public reason detail: None beyond forwarded headers. Distinguishability: Without forwarded headers == plugin.mesh_authz.denied. gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.15 (#6081): a matched CUSTOM rule on an HBONE CONNECT relay never reaches the provider; mesh_authz refuses the relay with 403 {\"error\":\"Mesh authorization denied\"} (plugin.mesh_authz.denied, ext_authz outcome unexecutable)."
+      "notes": "Public reason detail: None beyond forwarded headers. Distinguishability: Without forwarded headers == plugin.mesh_authz.denied. gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.15 (issue #6081 / #6083): a matched CUSTOM rule on an HBONE CONNECT relay never reaches the provider; mesh_authz refuses the relay with 403 {\"error\":\"Mesh authorization denied\"} (plugin.mesh_authz.denied, ext_authz outcome unexecutable)."
     },
     {
       "id": "plugin.mesh_ext_authz.check_failed_closed",
@@ -15361,7 +15322,7 @@
       "remediation": "Caller: use an identity/scope permitted for this route, or ask the API owner/operator to grant access.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "statusOnError default 403 from Kubernetes meshConfig parsing; other carriers must supply it. failOpen=true -> Allow (DENY/ALLOW tiers still apply). Status/body operator-configurable. Public reason detail: None. Distinguishability: EXT-AUTHZ OUTAGE IS INDISTINGUISHABLE from a policy deny at the default statusOnError=403; distinguishable only if the operator sets statusOnError (400-599) to something else. gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.15 (#6081): a matched CUSTOM rule on an HBONE CONNECT relay never reaches the provider; mesh_authz refuses the relay with 403 {\"error\":\"Mesh authorization denied\"} (plugin.mesh_authz.denied, ext_authz outcome unexecutable)."
+      "notes": "statusOnError default 403 from Kubernetes meshConfig parsing; other carriers must supply it. failOpen=true -> Allow (DENY/ALLOW tiers still apply). Status/body operator-configurable. Public reason detail: None. Distinguishability: EXT-AUTHZ OUTAGE IS INDISTINGUISHABLE from a policy deny at the default statusOnError=403; distinguishable only if the operator sets statusOnError (400-599) to something else. gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.15 (issue #6081 / #6083): a matched CUSTOM rule on an HBONE CONNECT relay never reaches the provider; mesh_authz refuses the relay with 403 {\"error\":\"Mesh authorization denied\"} (plugin.mesh_authz.denied, ext_authz outcome unexecutable)."
     },
     {
       "id": "plugin.mesh_ext_authz.body_too_large",
@@ -19420,7 +19381,7 @@
       "remediation": "Check the gateway plugin configuration for this route.",
       "owner": "unknown",
       "fixture_ids": [],
-      "notes": "Public reason detail: Reveals that the termination config uses a 2xx status. Distinguishability: Normal termination (configured status/body). gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.15 (#6098): an HTTP/2 or HTTP/3 Extended CONNECT WebSocket is treated as a tunnel here too, although its policy method is now GET (src/plugins/request_termination.rs:536), so a 2xx termination of it draws this 403."
+      "notes": "Public reason detail: Reveals that the termination config uses a 2xx status. Distinguishability: Normal termination (configured status/body). gRPC status derived from src/proxy/grpc_proxy.rs:3018 mapping. v0.9.15 (issue #6098 / #6099): an HTTP/2 or HTTP/3 Extended CONNECT WebSocket is treated as a tunnel here too, although its policy method is now GET (src/plugins/request_termination.rs:536), so a 2xx termination of it draws this 403."
     },
     {
       "id": "plugin.response_mock.matched_rule",
@@ -28370,7 +28331,7 @@
       "shared_signal_with": [],
       "minimum_truthful_diagnosis": "Ferrum Edge reports the route's total request deadline (HTTPRoute timeouts.request / mesh_route_dispatch request_timeout_ms) ran out before a response head was available; the response does not say which phase used the time or whether the backend received the request.",
       "must_not_claim": "That the backend was slow or received the request (the deadline also spans gateway-side phases, the client upload and retry backoff), which phase expired, the configured duration, or that the request is safe to replay.",
-      "remediation": "Gateway operator / API owner: compare the rule's timeouts.request with backend latency plus client upload time and retry backoff; the gateway transaction log records metadata route_request_timeout = dispatch | before_dispatch | retry_backoff (src/plugins/mod.rs:272, :4717). Retry only idempotent requests.",
+      "remediation": "Gateway operator / API owner: compare the rule's timeouts.request with backend latency plus client upload time and retry backoff; the gateway transaction log records metadata route_request_timeout = dispatch | before_dispatch | retry_backoff (src/plugins/mod.rs:272, :4728). Retry only idempotent requests.",
       "owner": "unknown",
       "fixture_ids": [],
       "notes": "v0.9.6+ only (no route deadline exists at v0.9.5). X-Gateway-Error comes from status 504 (src/retry.rs:287); from v0.9.8 the sibling that no backend held carries request_timeout instead (upstream.route_request_timeout.not_dispatched), so on this release backend_timeout on this body means a backend held the attempt. Enforced on native HTTP/3 and the HTTP/3 bridge too (v0.9.8, #5646, #5729). Never retried. Error_class read_write_timeout (charged to the backend). On HTTP/1.1 / HTTP/2 built with an empty header map, so no Content-Type. v0.9.11: request_on_wire is tracked separately from health-neutral classification. The same route_timeout phase decides request_timeout before backend handoff versus backend_timeout during dispatch; per-attempt budgets remain separate. A native-H3 HEADERS-completion marker does not identify partial first-wire submission, so lifetime expiry never licenses replay."
@@ -28962,7 +28923,7 @@
       "remediation": "Mesh operator: destination log 'HBONE tunnel closed: admission revoked' with reason; reconnect opens a fresh CONNECT under current policy.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.6+ (issue #5042 step 1). v0.9.5 tunnels outlived later policy/trust changes. Byte-tunnel first failure is a ConnectionAborted io error with message 'HBONE tunnel terminated: mesh admission revoked by a later policy generation' (classified connection_closed, retry.rs:946); the datagram relay logs body_error_class connection_closed. v0.9.8 (#5765): a datagram relay that ends on a socket error is recorded as an error with hbone.udp.termination_reason (src/proxy/hbone_proxy.rs:241); the client still sees a clean HTTP/2 END_STREAM. v0.9.9 (#5781/#5858, PRs #5856, #5863, vendored hyper 1.9.0 Upgraded::reset_with_connect_error): every relay ending except a peer close or an idle expiry resets the CONNECT stream with RST_STREAM(CONNECT_ERROR): a revocation, a socket error on either side (a backend that resets the connection, a datagram relay's tunnel_read_error / tunnel_write_error / app_send_error / app_recv_error), a backend read or write deadline, a datagram write stall and the TCP half-close cap. The client can now tell a cut tunnel from a complete one, but the reset code is the same for every cause, so the specific reason stays operator-log only. v0.9.15 (#6087): a live tunnel admitted on a view that a reload makes omit the route's authentication or admission policy (gateway.routing.protocol_not_permitted) is revoked with authorization_denied (src/proxy/hbone_admission_fence.rs:2129); a relay re-evaluation now authorizes the tunnel as a Layer-4 session (#6081)."
+      "notes": "New in v0.9.6+ (issue #5042 step 1). v0.9.5 tunnels outlived later policy/trust changes. Byte-tunnel first failure is a ConnectionAborted io error with message 'HBONE tunnel terminated: mesh admission revoked by a later policy generation' (classified connection_closed, retry.rs:946); the datagram relay logs body_error_class connection_closed. v0.9.8 (#5765): a datagram relay that ends on a socket error is recorded as an error with hbone.udp.termination_reason (src/proxy/hbone_proxy.rs:241); the client still sees a clean HTTP/2 END_STREAM. v0.9.9 (#5781/#5858, PRs #5856, #5863, vendored hyper 1.9.0 Upgraded::reset_with_connect_error): every relay ending except a peer close or an idle expiry resets the CONNECT stream with RST_STREAM(CONNECT_ERROR): a revocation, a socket error on either side (a backend that resets the connection, a datagram relay's tunnel_read_error / tunnel_write_error / app_send_error / app_recv_error), a backend read or write deadline, a datagram write stall and the TCP half-close cap. The client can now tell a cut tunnel from a complete one, but the reset code is the same for every cause, so the specific reason stays operator-log only. v0.9.15 (#6087): a live tunnel admitted on a view that a reload makes omit the route's authentication or admission policy (gateway.routing.protocol_not_permitted) is revoked with authorization_denied (src/proxy/hbone_admission_fence.rs:2129); a relay re-evaluation now authorizes the tunnel as a Layer-4 session (issue #6081 / #6083)."
     },
     {
       "id": "plugin.oauth2_introspection.token_not_yet_valid",
@@ -30131,7 +30092,7 @@
       "change_id": "source_citations",
       "kind": "mechanical",
       "refs": "v0.9.14 -> v0.9.15",
-      "client_visible_effect": "Structured and unqualified prose citations remapped through the immutable unified diff; three structured citations inside changed hunks repointed by hand. Changed semantics recorded separately below and in docs/audit/gateway-0.9.15-delta.md. No completeness claim.",
+      "client_visible_effect": "Structured and unqualified prose citations remapped through the immutable unified diff; three structured citations inside changed hunks repointed by hand (one of them, the OIDC state-cache-full return, belonged to the outcome later removed as oidc_state_cache_full_fallback). Changed semantics recorded separately below and in docs/audit/gateway-0.9.15-delta.md. No completeness claim.",
       "evidence": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d..25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "anvil_impact": "Separate catalog with current source identity; all previous catalogs retained.",
       "outcome_ids": []
@@ -30209,6 +30170,18 @@
       ]
     },
     {
+      "change_id": "oidc_state_cache_full_fallback",
+      "kind": "removed",
+      "refs": "v0.9.14 -> v0.9.15",
+      "client_visible_effect": "A browser login challenge no longer gets 503 {\"error\":\"OIDC state cache full\"} when the instance-local pending-login cache is full: the gateway relies on the sealed pending-flow cookie alone and redirects to the IdP as usual. While that cache is full the per-client pending-login limit is not checked either.",
+      "evidence": "src/plugins/oidc_relying_party.rs:3081; src/plugins/oidc_relying_party.rs:3088; src/plugins/oidc_relying_party.rs:2250",
+      "anvil_impact": "Outcome removed (removed_outcomes); the 0.9.14 and earlier catalogs keep it, and on a 0.9.15 profile its body matches no outcome. The per-client 503's notes record that it fires only while the global cache has room.",
+      "outcome_ids": [
+        "plugin.oidc_relying_party.challenge_browser_state_cache_full",
+        "plugin.oidc_relying_party.challenge_browser_too_many_pending_logins"
+      ]
+    },
+    {
       "change_id": "mesh_relay_l4_authorization",
       "kind": "changed",
       "refs": "v0.9.14 -> v0.9.15",
@@ -30279,7 +30252,7 @@
     "state": "source_audited_candidate",
     "live_0_9_15_evidence": false,
     "baseline": "ferrum-edge-0.9.14",
-    "scope": "Carried observable inventory with the v0.9.15 source delta, plus four outcomes for new client-visible refusals; not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab qualification (manual workflow_dispatch, profile=all) is pending. Full evidence: docs/audit/gateway-0.9.15-delta.md."
+    "scope": "Carried observable inventory with the v0.9.15 source delta (552 of the 553 v0.9.14 outcomes; the OIDC state-cache-full 503 is removed), plus four outcomes for new client-visible refusals; not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab qualification (manual workflow_dispatch, profile=all) is pending. Full evidence: docs/audit/gateway-0.9.15-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1887) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1650 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token."
 }
