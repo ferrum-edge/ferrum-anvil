@@ -306,9 +306,8 @@ impl Run {
                     out.record.outcome.assertions = AssertionState::NotRun;
                     out.record.outcome.protocol_status = ProtocolStatus::None;
                     out.record.outcome.warnings.clear();
-                    out.record.outcome.summary = format!(
-                        "Sensitive extraction '{var}' exceeded the 64 KiB limit; response data was discarded."
-                    );
+                    out.record.outcome.summary =
+                        format!("Sensitive extraction '{var}' exceeded the 64 KiB limit; response data was discarded.");
                     self.notes.push(
                         &self.secrets,
                         format!(
@@ -317,6 +316,8 @@ impl Run {
                     );
                     continue;
                 }
+                // A value extracted again within the limit is available again.
+                unavailable_extractions.remove(&(scope, var.clone()));
                 if sensitive {
                     new_secrets.push(value.clone());
                     self.secrets.add_name(&var);

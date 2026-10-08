@@ -65,6 +65,23 @@ impl Spec {
         })
     }
 
+    /// `root` as a document, without the parser's bounds: tests check that an
+    /// analysis bounds itself on inputs those limits would refuse.
+    #[cfg(test)]
+    pub(crate) fn unchecked(dialect: Dialect, root: Value) -> Spec {
+        Spec {
+            dialect,
+            declared_version: None,
+            syntax: Syntax::Json,
+            root,
+            sha256: String::new(),
+            size_bytes: 0,
+            text: String::new(),
+            locator: OnceLock::new(),
+            unresolved: Mutex::new((BTreeSet::new(), 0)),
+        }
+    }
+
     pub fn is_swagger2(&self) -> bool {
         self.dialect == Dialect::Swagger20
     }

@@ -376,7 +376,7 @@ async fn a_cross_origin_redirect_drops_the_session_id() {
     let headers = other.log.last_request_headers().expect("the redirect was followed");
     assert!(!headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id")), "{headers:?}");
     assert!(headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-protocol-version")), "{headers:?}");
-    assert!(notes(&o).contains("credential headers withheld on the redirect"), "{}", notes(&o));
+    assert!(notes(&o).contains("MCP session header withheld on the cross-origin redirect"), "{}", notes(&o));
     assert_eq!(f.state.closed.lock().len(), 1, "the session is still ended at its own origin");
 }
 

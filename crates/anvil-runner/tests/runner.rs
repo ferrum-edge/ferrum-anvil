@@ -212,6 +212,49 @@ async fn oversized_sensitive_extractions_do_not_store_cookies_or_fall_back_to_ou
     assert!(!records[2].0.contains("Cookie"), "the discarded response cookie was not sent later");
 }
 
+#[tokio::test]
+async fn a_later_extraction_within_the_limit_makes_the_variable_available_again() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let mut large = RequestSpec::http("POST", &f.url("/echo"));
+    large.body = Body::Raw { text: "x".repeat(64 * 1024 + 1), content_type: Some("text/plain".into()) };
+    large.extractions.push(Extraction {
+        variable: "session".into(),
+        source: ExtractionSource::JsonPath { path: "$.body".into() },
+        sensitive: true,
+    });
+    let large_id = p.add("Large extraction", large);
+    let mut small = RequestSpec::http("POST", &f.url("/status/200"));
+    small.params.push(KeyValue::new("body", r#"{"token":"tok-small-0001"}"#));
+    small.extractions.push(Extraction {
+        variable: "session".into(),
+        source: ExtractionSource::JsonPath { path: "$.token".into() },
+        sensitive: true,
+    });
+    let small_id = p.add("Small extraction", small);
+    let mut send = RequestSpec::http("GET", &f.url("/echo"));
+    send.headers.push(KeyValue::new("X-Token", "{{session}}"));
+    let send_id = p.add("Send", send);
+
+    let engine = Engine::new();
+    let report = anvil_runner::run(
+        &engine,
+        &p,
+        plan(&[(large_id, "Large extraction"), (small_id, "Small extraction"), (send_id, "Send")]),
+        RunOptions::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let steps = &report.iterations[0].steps;
+    assert_eq!(steps[0].status, RunStepStatus::Failed);
+    assert_eq!(steps[2].status, RunStepStatus::Passed, "{report:#?}");
+    let seen = f.log.last_request_headers().unwrap();
+    assert_eq!(header(&seen, "x-token"), Some("tok-small-0001"));
+}
+
 fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {
     let mut s = RequestSpec::http("POST", &f.url("/status/200"));
     s.params.push(KeyValue::new("body", format!(r#"{{"token":"{token}"}}"#)));
