@@ -289,10 +289,12 @@ fn dns_overrides(settings: &EffectiveSettings) -> Option<String> {
     Some(named.join("; "))
 }
 
-/// DNS overrides from the fourth on that `draft` sets differently from
-/// `saved`; the first three are named in full by [`dns_overrides`].
-fn hidden_dns_differences(draft: &EffectiveSettings, saved: &EffectiveSettings) -> usize {
-    draft.dns_overrides.iter().skip(3).zip(saved.dns_overrides.iter().skip(3)).filter(|(a, b)| a != b).count()
+/// DNS overrides that `draft` sets differently from `saved`, comparing every
+/// entry in full. The dialog names at most the first three, each cut short by
+/// [`shown`], so a difference can hide in the text it shows or past the third.
+fn differing_dns_overrides(draft: &EffectiveSettings, saved: &EffectiveSettings) -> usize {
+    let n = draft.dns_overrides.len().max(saved.dns_overrides.len());
+    (0..n).filter(|&i| draft.dns_overrides.get(i) != saved.dns_overrides.get(i)).count()
 }
 
 /// The kind of `auth`, and where an API key goes, in words.
@@ -349,8 +351,9 @@ fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts)
     if facts.dns != saved_facts.dns {
         out.push(format!("DNS overrides: {} (saved: {})", said(&facts.dns), said(&saved_facts.dns)));
     } else if draft.settings.dns_overrides != saved.settings.dns_overrides {
-        let n = hidden_dns_differences(&draft.settings, &saved.settings);
-        out.push(format!("DNS overrides: and {n} more DNS overrides differ"));
+        let n = differing_dns_overrides(&draft.settings, &saved.settings);
+        let what = if n == 1 { "override differs" } else { "overrides differ" };
+        out.push(format!("DNS overrides: {n} {what} past the shown text"));
     }
     if facts.proxy != saved_facts.proxy {
         out.push(format!("Proxy: {} (saved: {})", said(&facts.proxy), said(&saved_facts.proxy)));
@@ -873,6 +876,23 @@ mod tests {
         let (fs, fd) = (Facts::of(&cs), Facts::of(&cd));
         assert_eq!(fs.dns, fd.dns, "only the hidden fourth differs");
         let lines = changes(&Binding::of(&cd), &fd, &Binding::of(&cs), &fs);
-        assert!(lines.iter().any(|l| l.contains("and 1 more DNS overrides differ")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("1 override differs past the shown text")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_dns_override_hidden_by_truncation_is_reported() {
+        // The shown summary cuts each address list to 64 characters; the last
+        // address differs only past that cut, so both summaries read alike.
+        let addresses = |last: &str| ["192.168.100.101", "192.168.100.102", "192.168.100.103", last].map(String::from).to_vec();
+        let mut saved = RequestSpec::http("GET", "https://shop.example/v1");
+        saved.auth = AuthConfig::None;
+        saved.settings.dns_overrides.push(DnsOverride { host: "api.example".into(), addresses: addresses("192.168.100.104") });
+        let mut draft = saved.clone();
+        draft.settings.dns_overrides[0].addresses = addresses("192.168.100.199");
+        let (cs, cd) = (ExecutionContext::standalone(saved), ExecutionContext::standalone(draft));
+        let (fs, fd) = (Facts::of(&cs), Facts::of(&cd));
+        assert_eq!(fs.dns, fd.dns, "the changed address is past the shown text");
+        let lines = changes(&Binding::of(&cd), &fd, &Binding::of(&cs), &fs);
+        assert!(lines.iter().any(|l| l.contains("1 override differs past the shown text")), "{lines:?}");
     }
 }

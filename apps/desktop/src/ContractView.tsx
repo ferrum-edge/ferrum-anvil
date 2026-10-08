@@ -506,6 +506,8 @@ function RulesetPage(props: {
   const [textError, setTextError] = useState<string | null>(null);
   useEffect(() => {
     let current = true;
+    setText(null);
+    setTextError(null);
     void api
       .standardsRulesetText(r.id)
       .then((value) => current && setText(value))
@@ -513,7 +515,7 @@ function RulesetPage(props: {
     return () => {
       current = false;
     };
-  }, [r.id]);
+  }, [r.id, r.sha256]);
   return (
     <div className="page narrow">
       <div className="page-head">

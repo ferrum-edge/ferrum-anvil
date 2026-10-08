@@ -38,6 +38,9 @@
 
 ### Fixed
 
+- The draft confirmation counts every DNS override that differs, including one whose change is
+  hidden by the shortened address list (#335).
+- Ruleset details reload their source text after Replace (#339).
 - `spec-drift --har` names path parameters in time bounded by the path length. A URL with many colliding parameter segments could stall the analysis (#334).
 - Lab MESH-011 reaches the Ambient gateway again (#341). Its TEST-NET target `192.0.2.10` was
   refused locally by the destination policy added in #308, before the CONNECT was sent, so the

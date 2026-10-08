@@ -200,6 +200,30 @@ test("ruleset details fetch only that ruleset's text on demand", async () => {
   expect(calls("standards_ruleset_text")).toEqual([{ rulesetId: "r1" }]);
 });
 
+test("replacing a ruleset refetches its source text", async () => {
+  let fetches = 0;
+  backend({
+    file_choose: (a) => {
+      expect(a.purpose).toBe("ruleset");
+      return [{ token: "g-rules", file_name: "team2.yaml" }];
+    },
+    // Replace keeps the ruleset's id, but its content and digest change.
+    standards_replace: () => {
+      standards = { ...standards, rulesets: [{ ...teamRuleset, file_name: "team2.yaml", size: 2048, sha256: "def456" }] };
+      return standards;
+    },
+    standards_ruleset_text: () => (fetches++ === 0 ? "old rules\n" : "new rules\n"),
+  });
+  standards = { ...standards, rulesets: [teamRuleset] };
+  render(<ContractView workspaceId="A" notify={notify} />);
+  fireEvent.click(await screen.findByText("Team rules"));
+  expect(await screen.findByText((_, element) => element?.tagName === "PRE" && element.textContent === "old rules\n")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /Replace/ }));
+  expect(await screen.findByText((_, element) => element?.tagName === "PRE" && element.textContent === "new rules\n")).toBeTruthy();
+  expect(calls("standards_replace")).toEqual([{ rulesetId: "r1", grant: "g-rules" }]);
+  expect(calls("standards_ruleset_text")).toEqual([{ rulesetId: "r1" }, { rulesetId: "r1" }]);
+});
+
 test("switching workspaces drops the previous workspace's selected import", async () => {
   backend();
   const r = render(<ContractView workspaceId="A" notify={notify} />);
