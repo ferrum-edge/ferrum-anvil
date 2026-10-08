@@ -40,7 +40,12 @@ company ruleset.
   levels) and findings are capped, and every walk over the document is
   linear in its size. A member name longer than 4 KiB, or member names whose
   JSON Pointers add up to more than 64 MiB, refuse the spec (positions and
-  targets keep one pointer per member). Regular expressions, in rules and
+  targets keep one pointer per member). Each `$ref` string is followed
+  once per spec and remembered, so many references that share a chain
+  follow it once, and a Path Item that many paths `$ref` is read once. Each
+  use of a reference still reads the value it ends at and copies its
+  pointer: that is charged, with the reference, to the budgets below before
+  it is done. Regular expressions, in rules and
   in the `pattern`/`patternProperties` of schemas, use the linear-time
   `regex` crate with a size limit; a schema whose pattern needs look-around
   or a back-reference is not used to check examples.
@@ -66,7 +71,15 @@ company ruleset.
   responses and media types at most in all. Inherited path-level
   parameters, the document's security requirements and a shared response's
   headers count for each operation. Past that, the remaining operations are
-  counted in `skipped_operations` and not checked.
+  counted in `skipped_operations` and not checked. What the targets copy out
+  of the description, and the references followed to build them, are
+  capped at 256 MiB (an operation reached through several paths counts for
+  each); once a copy does not fit, nothing more is checked (an operation
+  whose parameters, body or responses do not fit is left out whole), and
+  the report says so with `incomplete` (and
+  `skipped_operations` for the operations), as do the text, SARIF and
+  desktop outputs. `anvil lint-spec` exits with 3 for such a report unless
+  `--allow-incomplete` is passed.
 - **Unresolvable references are reported, not checked.** An external,
   missing, cyclic or too deep `$ref` is skipped: the parameter, response,
   body or path item behind it is not a target, so no rule reports on the
@@ -387,7 +400,17 @@ when it was captured completely, decoded, is JSON and at most 1 MiB, and
 while the analysis has parsed less than 32 MiB of bodies in all; otherwise a
 note says why (history set to keep no response bodies, say). Schema
 compiles share the linter's scanning budget and body walks for suggestions
-stop after 2,000,000 values, each with a note.
+stop after 2,000,000 values, each with a note. The operations an analysis
+matches against are capped at 256 MiB of their paths, pointers and
+declared statuses (an operation reached through several paths counts for
+each); past that, the rest are left out with a note, and calls to them are
+reported as undeclared. Each operation's parameters, request body,
+responses and required headers are resolved once, however many paths and
+calls reach it, and what that costs (the references followed and what is
+copied out of them) is capped at 256 MiB too; past that, calls to the
+operations not yet resolved are not checked and their declared statuses
+are not listed, each with a note. `spec.operations` counts the operations
+left out of matching as well.
 
 **Keeping observed values out.** Findings, suggestions and the
 undeclared-endpoint list carry names, status codes, media types, sizes and

@@ -26,13 +26,15 @@ use crate::infer::{Shape, mark_nullable, safe_name};
 use crate::lint::MAX_EXAMPLE_SCAN_STEPS;
 use crate::lint::SpecSummary;
 use crate::locate::ptr;
-use crate::model::{Direction, METHODS, Media, OperationRef, parameters, request_body, responses, schema_types, swagger_media};
+use crate::model::{
+    Direction, METHODS, Media, OperationRef, Param, RequestBody, Response, body_of, parameters, responses, schema_types, swagger_media,
+};
 use crate::observe::{Observation, ObservedBody, count_values, essence, is_json, split_url};
 use crate::patch::{self, PatchOp};
 use crate::route::{Route, Router};
 use crate::ruleset::Severity;
 use crate::schema;
-use crate::spec::Spec;
+use crate::spec::{Meter, Spec};
 use anvil_import::Dialect;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -40,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 /// The extension an operation, path item or document declares its budget in.
 pub const EXPECTATIONS: &str = "x-anvil-expectations";
@@ -52,6 +55,13 @@ const MAX_SCHEMA_FIXES: usize = 500;
 const MAX_ENUM_TOKENS: usize = 20;
 /// Body values walked for schema suggestions, across the analysis.
 const MAX_WALK_STEPS: usize = 2_000_000;
+/// What walking bodies along their schemas may cost, in bytes: the
+/// references followed and the schema pointers copied on the way (see
+/// [`Spec::resolve_within`]). Apart from [`MAX_RESOLVE_BYTES`], so that
+/// walks never leave operations unresolved.
+const MAX_WALK_BYTES: usize = 256 * 1024 * 1024;
+/// Noted once either walking budget is spent.
+const WALK_SPENT: &str = "the analysis' budget for walking bodies is spent; later bodies got no schema suggestions";
 /// Query parameter names kept per undeclared endpoint or per operation.
 const MAX_QUERY_NAMES: usize = 50;
 /// Undeclared endpoints and undeclared servers reported.
@@ -67,6 +77,14 @@ const MAX_SUGGESTIONS: usize = 2_000;
 const MAX_ERROR_WORK: usize = 1_000_000;
 /// How an observed method that is not an HTTP token is shown.
 const INVALID_METHOD: &str = "(invalid method)";
+/// What resolving the operations' parameters, bodies, responses and required
+/// response headers may cost, in bytes: the references followed and what is
+/// copied out of them (see [`Spec::resolve_within`]). Each operation is
+/// resolved once, however many paths and calls reach it; past this, calls to
+/// the rest are not checked.
+const MAX_RESOLVE_BYTES: usize = crate::model::MAX_MODEL_VIEW_BYTES;
+/// Charged per required response header kept, besides its pointer.
+const HEADER_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DriftOptions {
@@ -352,6 +370,15 @@ enum FixKey {
 struct State<'a> {
     spec: &'a Spec,
     router: Router<'a>,
+    /// Each listed operation, built the first time a call reaches it.
+    operations: Vec<Option<Rc<OperationRef<'a>>>>,
+    /// What each operation object declares, resolved once (`None`: it did
+    /// not fit [`MAX_RESOLVE_BYTES`]; see [`State::lists`]).
+    declared: HashMap<(usize, usize), Option<Rc<Declared<'a>>>>,
+    /// What resolving them may still cost.
+    resolve_meter: Meter,
+    /// What walking bodies may still cost (see [`MAX_WALK_BYTES`]).
+    walk_bytes: Meter,
     opts: DriftOptions,
     findings: BTreeMap<String, FindingAcc>,
     ops: Vec<OpAcc>,
@@ -384,13 +411,26 @@ struct State<'a> {
     pending_links: BTreeSet<(String, String, String, String, String)>,
 }
 
+/// What an operation declares, resolved once for every call to it.
+struct Declared<'a> {
+    params: Vec<Param<'a>>,
+    body: Option<RequestBody<'a>>,
+    resps: Vec<Response<'a>>,
+    /// The required headers of each of `resps`: name and pointer.
+    required_headers: Vec<Vec<(&'a str, String)>>,
+}
+
 /// Compare observations with the description.
 pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -> DriftReport {
     let router = Router::new(spec);
-    let n_ops = router.ops.len();
+    let n_ops = router.operation_count();
     let mut st = State {
         spec,
         router,
+        operations: vec![None; n_ops],
+        declared: HashMap::new(),
+        resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
+        walk_bytes: Meter::new(MAX_WALK_BYTES),
         opts: opts.clone(),
         findings: BTreeMap::new(),
         ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
@@ -446,8 +486,9 @@ fn reason(code: &str) -> &'static str {
     }
 }
 
-/// The declared response for `code`: exact, then `4XX`, then `default`.
-fn declared_response<'a, 'b>(resps: &'b [crate::model::Response<'a>], code: &str) -> Option<&'b crate::model::Response<'a>> {
+/// The declared response for `code` (an index into `resps`): exact, then
+/// `4XX`, then `default`.
+fn declared_response(resps: &[Response<'_>], code: &str) -> Option<usize> {
     let range = |declared: &str| {
         // Bytes, not characters: a declared key may be any string.
         let d = declared.as_bytes();
@@ -455,9 +496,9 @@ fn declared_response<'a, 'b>(resps: &'b [crate::model::Response<'a>], code: &str
     };
     resps
         .iter()
-        .find(|r| r.code == code)
-        .or_else(|| resps.iter().find(|r| range(&r.code)))
-        .or_else(|| resps.iter().find(|r| r.code == "default"))
+        .position(|r| r.code == code)
+        .or_else(|| resps.iter().position(|r| range(&r.code)))
+        .or_else(|| resps.iter().position(|r| r.code == "default"))
 }
 
 /// The declared media type `ct` falls under.
@@ -755,8 +796,7 @@ impl<'a> State<'a> {
         let label = format!("{method} {pattern}");
         let (kind, message, pointer) = match &template {
             Some(t) => {
-                let declared: Vec<String> =
-                    self.router.ops.iter().filter(|x| &x.path == t).map(|x| x.method.to_ascii_uppercase()).collect();
+                let declared = self.router.methods_of(t);
                 let list = if declared.is_empty() { "no operations".into() } else { declared.join(", ") };
                 (
                     DriftKind::UndeclaredMethod,
@@ -806,11 +846,38 @@ impl<'a> State<'a> {
         }
     }
 
+    /// Listed operation `i`, built once however many calls reach it.
+    fn operation(&mut self, i: usize) -> Rc<OperationRef<'a>> {
+        let router = &self.router;
+        Rc::clone(self.operations[i].get_or_insert_with(|| Rc::new(router.operation(i))))
+    }
+
+    /// What listed operation `i` declares, resolved the first time a call
+    /// reaches its operation object (one Path Item that several paths `$ref`
+    /// is resolved once) and charged to [`MAX_RESOLVE_BYTES`]. `None` once
+    /// that is spent: no partial lists are kept.
+    fn lists(&mut self, i: usize) -> Option<Rc<Declared<'a>>> {
+        let object = self.router.operation_object(i);
+        if let Some(found) = self.declared.get(&object) {
+            return found.clone();
+        }
+        let op = self.operation(i);
+        let spec = self.spec;
+        let meter = &mut self.resolve_meter;
+        let params = parameters(spec, &op, meter);
+        let body = body_of(spec, &op, &params, meter);
+        let resps = responses(spec, &op, meter);
+        let headers = resps.iter().map(|r| required_headers(spec, r, meter)).collect();
+        let found = (!meter.exhausted()).then(|| Rc::new(Declared { params, body, resps, required_headers: headers }));
+        self.declared.insert(object, found.clone());
+        found
+    }
+
     fn check_operation(&mut self, i: usize, o: &Observation) {
         let spec = self.spec;
-        let op = self.router.ops[i].clone();
+        let op = self.operation(i);
         let label = op.label();
-        let op_ptr = op.pointer.clone();
+        let op_ptr = &op.pointer;
         let b = budget(spec, &op);
         {
             let acc = &mut self.ops[i];
@@ -830,9 +897,13 @@ impl<'a> State<'a> {
                 Some(op_ptr.clone()),
             );
         }
+        let Some(lists) = self.lists(i) else {
+            self.note("the description is too large to compare completely; some calls to declared operations were not checked");
+            return;
+        };
 
         // Parameters.
-        let params = parameters(spec, &op);
+        let params = &lists.params;
         let has_querystring = params.iter().any(|p| p.location == "querystring");
         if !has_querystring {
             for q in &o.query {
@@ -882,9 +953,9 @@ impl<'a> State<'a> {
         if o.request_bytes > 0
             && let Some(ct) = o.request_content_type.as_deref()
         {
-            let body = request_body(spec, &op);
-            let declared = body.as_ref().map(|b| b.media.clone()).unwrap_or_default();
-            if media_for(&declared, ct).is_none() {
+            let body = lists.body.as_ref();
+            let declared = body.map(|b| b.media.as_slice()).unwrap_or_default();
+            if media_for(declared, ct).is_none() {
                 let e = essence(ct);
                 let list = if declared.is_empty() {
                     "no request body".to_string()
@@ -898,7 +969,7 @@ impl<'a> State<'a> {
                     o,
                     format!("{label} was sent a {e} body; the description declares {list}"),
                     Some(label.clone()),
-                    body.as_ref().map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
+                    body.map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
                 ) {
                     self.link(&key, &key);
                     self.ops[i].new_request_types.insert(e);
@@ -937,8 +1008,7 @@ impl<'a> State<'a> {
         }
         let has_body = !matches!(r.body, ObservedBody::Empty) && r.bytes != Some(0);
         let ct = r.content_type.as_deref().map(essence).filter(|_| has_body);
-        let resps = responses(spec, &op);
-        let Some(resp) = declared_response(&resps, &code) else {
+        let Some(k) = declared_response(&lists.resps, &code) else {
             let key = format!("status|{op_ptr}|{code}");
             if !self.finding(
                 key.clone(),
@@ -946,7 +1016,7 @@ impl<'a> State<'a> {
                 o,
                 format!("{label} returned {code}, which is not a documented response"),
                 Some(label.clone()),
-                Some(ptr(&op_ptr, "responses")),
+                Some(ptr(op_ptr, "responses")),
             ) {
                 return;
             }
@@ -957,20 +1027,18 @@ impl<'a> State<'a> {
             }
             return;
         };
+        let resp = &lists.resps[k];
         // Required response headers.
-        if let Some(hs) = resp.value.get("headers").and_then(Value::as_object) {
-            for (name, h) in hs {
-                let (h, hptr) = spec.deref(h, &ptr(&ptr(&resp.pointer, "headers"), name));
-                if h.get("required").and_then(Value::as_bool) == Some(true) && !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
-                    self.finding(
-                        format!("header|{hptr}"),
-                        DriftKind::MissingResponseHeader,
-                        o,
-                        format!("The {code} response of {label} did not include the required header `{name}`"),
-                        Some(label.clone()),
-                        Some(hptr),
-                    );
-                }
+        for (name, hptr) in &lists.required_headers[k] {
+            if !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
+                self.finding(
+                    format!("header|{hptr}"),
+                    DriftKind::MissingResponseHeader,
+                    o,
+                    format!("The {code} response of {label} did not include the required header `{name}`"),
+                    Some(label.clone()),
+                    Some(hptr.clone()),
+                );
             }
         }
         let Some(ct) = ct else {
@@ -1081,10 +1149,40 @@ impl<'a> State<'a> {
         }
         self.walk_steps += n;
         if self.walk_steps > MAX_WALK_STEPS {
-            self.note("the analysis' budget for walking bodies is spent; later bodies got no schema suggestions");
+            self.note(WALK_SPENT);
             return false;
         }
         true
+    }
+
+    /// Charge `bytes` copied while walking bodies to [`State::walk_bytes`];
+    /// false once that budget is spent.
+    fn walk_charge(&mut self, bytes: usize) -> bool {
+        let fresh = !self.walk_bytes.exhausted();
+        if self.walk_bytes.charge(bytes) {
+            return true;
+        }
+        if fresh {
+            self.note(WALK_SPENT);
+        }
+        false
+    }
+
+    /// [`Spec::deref`] charged to [`State::walk_bytes`]: `None` once that
+    /// budget is spent.
+    fn walk_deref(&mut self, v: &'a Value, at: &str) -> Option<(&'a Value, String)> {
+        let fresh = !self.walk_bytes.exhausted();
+        let spec: &'a Spec = self.spec;
+        match spec.resolve_within(v, at, &mut self.walk_bytes) {
+            Some(found) => Some(found),
+            None if self.walk_bytes.exhausted() => {
+                if fresh {
+                    self.note(WALK_SPENT);
+                }
+                None
+            }
+            None => Some((v, at.to_string())),
+        }
     }
 
     /// The fix at `key`, created with `owner` unless a cap is reached.
@@ -1124,12 +1222,16 @@ impl<'a> State<'a> {
         o: &Observation,
         failed: bool,
     ) {
-        if depth > 32 || !self.spend(1) {
+        if depth > 32 || self.walk_bytes.exhausted() || !self.spend(1) {
             return;
         }
-        let spec: &'a Spec = self.spec;
-        let (s, at) = spec.deref(schema, at);
+        let Some((s, at)) = self.walk_deref(schema, at) else { return };
         if s.get("oneOf").is_some() || s.get("anyOf").is_some() {
+            return;
+        }
+        // The copies of `at` below: the holder and the first part, or a
+        // fix's key and its suggestion's.
+        if !self.walk_charge(2 * at.len()) {
             return;
         }
         let owner = || schema_owner(&at, code, label);
@@ -1165,7 +1267,8 @@ impl<'a> State<'a> {
                 }
                 let mut parts: Vec<(&'a Value, String)> = vec![(s, at.clone())];
                 for (k, b) in all.iter().enumerate() {
-                    parts.push(spec.deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())));
+                    let Some(part) = self.walk_deref(b, &ptr(&ptr(&at, "allOf"), &k.to_string())) else { return };
+                    parts.push(part);
                 }
                 // Reading the schema costs as much as its members.
                 let members: usize = parts
@@ -1210,12 +1313,18 @@ impl<'a> State<'a> {
                 }
                 for (k, x) in obj {
                     if let Some(&(ps, pi)) = declared.get(k.as_str()) {
+                        if !self.walk_charge(parts[pi].1.len() + k.len()) {
+                            return;
+                        }
                         let pp = ptr(&ptr(&parts[pi].1, "properties"), k);
                         self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
                     } else if let Some((ap, app)) = &additional {
-                        let (ap, app) = (*ap, app.clone());
-                        self.walk(ap, &app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
+                        self.walk(ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
                     } else if names_properties && safe_name(k) {
+                        // The fix's key, then its suggestion's.
+                        if !self.walk_charge(2 * (holder.len() + k.len())) {
+                            return;
+                        }
                         let key = FixKey::AddProperty { at: holder.clone(), name: k.clone() };
                         if let Some(e) = self.fix(&key, owner) {
                             e.1.add(x);
@@ -1225,13 +1334,22 @@ impl<'a> State<'a> {
                     }
                 }
                 for (name, pi) in required {
-                    let rp = parts[pi].1.clone();
-                    let write_only = declared
-                        .get(name)
-                        .is_some_and(|(ps, _)| spec.deref(ps, "").0.get("writeOnly").and_then(Value::as_bool) == Some(true));
+                    let write_only = match declared.get(name) {
+                        Some(&(ps, _)) => match self.walk_deref(ps, "") {
+                            Some((p, _)) => p.get("writeOnly").and_then(Value::as_bool) == Some(true),
+                            None => return,
+                        },
+                        None => false,
+                    };
                     if write_only {
                         continue;
                     }
+                    // The copies of the pointer below: the entry's key, its
+                    // owner and the link.
+                    if !self.walk_charge(3 * parts[pi].1.len()) {
+                        return;
+                    }
+                    let rp = parts[pi].1.clone();
                     let missing = !obj.contains_key(name);
                     if missing {
                         fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
@@ -1246,6 +1364,9 @@ impl<'a> State<'a> {
             }
             Value::Array(items) => {
                 if let Some(is) = s.get("items").filter(|i| i.is_object()) {
+                    if !self.walk_charge(at.len()) {
+                        return;
+                    }
                     let ip = ptr(&at, "items");
                     let child = ptr(ipath, "*");
                     for x in items.iter().take(self.opts.max_items_walked) {
@@ -1307,7 +1428,7 @@ impl<'a> State<'a> {
 
         // Undeclared responses, media types, query parameters, request types.
         for (i, acc) in self.ops.iter().enumerate() {
-            let op = &self.router.ops[i];
+            let op = &self.router.operation(i);
             let label = op.label();
             let op_ptr = op.pointer.clone();
             let mut by_code: BTreeMap<&String, Vec<(&Option<String>, &Shape)>> = BTreeMap::new();
@@ -1374,18 +1495,21 @@ impl<'a> State<'a> {
                     vec![PatchOp::add(ptr(&ptr(&op_ptr, "parameters"), "-"), param)],
                 );
             }
+            // Only checked operations have new request types: their body is
+            // already resolved.
+            let body = self.declared.get(&self.router.operation_object(i)).and_then(Option::as_ref).and_then(|d| d.body.as_ref());
             for ct in &acc.new_request_types {
                 let key = format!("reqtype|{op_ptr}|{ct}");
                 let ops = if d == Dialect::Swagger20 {
                     let mut consumes = swagger_media(spec, op.op, "consumes").unwrap_or_default();
                     consumes.push(ct.clone());
                     let mut ops = vec![PatchOp::union(ptr(&op_ptr, "consumes"), consumes.into_iter().map(Value::String).collect())];
-                    if request_body(spec, op).is_none() {
+                    if body.is_none() {
                         ops.push(PatchOp::add(ptr(&ptr(&op_ptr, "parameters"), "-"), json!({"name": "body", "in": "body", "schema": {}})));
                     }
                     ops
                 } else {
-                    match request_body(spec, op) {
+                    match body {
                         Some(b) => vec![PatchOp::add(ptr(&ptr(&b.pointer, "content"), ct), json!({"schema": {}}))],
                         None => vec![PatchOp::add(ptr(&op_ptr, "requestBody"), json!({"content": {ct.clone(): {"schema": {}}}}))],
                     }
@@ -1402,8 +1526,12 @@ impl<'a> State<'a> {
             }
         }
 
-        // Undeclared endpoints.
+        // Undeclared endpoints. What each template's Path Item declares is
+        // resolved once, however many methods were called on it.
+        let mut items: HashMap<&str, Option<PathItemView>> = HashMap::new();
+        let no_params = BTreeSet::new();
         let mut not_describable = 0;
+        let mut unresolved_items = 0;
         for ((method, pattern), acc) in &self.endpoints {
             let key = format!("endpoint|{method}|{pattern}");
             // Where the dialect describes this method: a Path Item field, or
@@ -1420,6 +1548,17 @@ impl<'a> State<'a> {
                 not_describable += 1;
                 continue;
             };
+            let (declared_path_params, path_ptr, path_key) = match &acc.template {
+                Some(t) => {
+                    let item = items.entry(t.as_str()).or_insert_with(|| path_item_view(spec, t, &mut self.resolve_meter));
+                    let Some(item) = item.as_ref() else {
+                        unresolved_items += 1;
+                        continue;
+                    };
+                    (&item.params, item.pointer.clone(), t.clone())
+                }
+                None => (&no_params, Router::path_pointer(pattern), pattern.clone()),
+            };
             let mut resp = serde_json::Map::new();
             let codes: BTreeSet<&String> = acc.responses.keys().map(|(c, _)| c).collect();
             for code in codes {
@@ -1430,13 +1569,6 @@ impl<'a> State<'a> {
             if resp.is_empty() {
                 resp.insert("default".into(), json!({"description": "Not observed yet"}));
             }
-            let declared_path_params: BTreeSet<String> = acc
-                .template
-                .as_ref()
-                .and_then(|t| spec.root.pointer(&Router::path_pointer(t)))
-                .and_then(|item| item.get("parameters").and_then(Value::as_array))
-                .map(|ps| ps.iter().filter_map(|p| spec.deref(p, "").0.get("name").and_then(Value::as_str).map(str::to_string)).collect())
-                .unwrap_or_default();
             let mut params = vec![];
             for name in crate::model::template_params(pattern) {
                 if declared_path_params.contains(&name) {
@@ -1476,16 +1608,6 @@ impl<'a> State<'a> {
                 }
             }
             operation.insert("responses".into(), Value::Object(resp));
-            let (path_ptr, path_key) = match &acc.template {
-                Some(t) => (
-                    spec.root
-                        .pointer(&Router::path_pointer(t))
-                        .map(|v| spec.deref(v, &Router::path_pointer(t)).1)
-                        .unwrap_or_else(|| Router::path_pointer(t)),
-                    t.clone(),
-                ),
-                None => (Router::path_pointer(pattern), pattern.clone()),
-            };
             let mut detail = format!("Seen {} time(s).", acc.calls);
             if let Some(prefix) = &acc.unknown_prefix {
                 detail.push_str(&format!(" The prefix {prefix} is not a declared server path; it was left out."));
@@ -1503,6 +1625,12 @@ impl<'a> State<'a> {
         }
         if not_describable > 0 {
             self.notes.insert(format!("{} description has no place for some observed methods; they got no suggestion", d), not_describable);
+        }
+        if unresolved_items > 0 {
+            self.notes.insert(
+                "the description is too large to compare completely; some undeclared endpoints got no suggestion".into(),
+                unresolved_items,
+            );
         }
 
         // Schema fixes.
@@ -1619,8 +1747,12 @@ impl<'a> State<'a> {
             }
         }
         let mut coverage = vec![];
+        // Declared statuses once per operation, however many paths reach it
+        // (`None`: past the resolution budget).
+        let mut statuses: HashMap<(usize, usize), Option<Vec<String>>> = HashMap::new();
+        let mut unlisted = 0;
         for (i, acc) in self.ops.iter().enumerate() {
-            let op = &self.router.ops[i];
+            let op = &self.router.operation(i);
             let label = op.label();
             let b = budget(spec, op);
             let mut lat = acc.latencies.clone();
@@ -1703,7 +1835,15 @@ impl<'a> State<'a> {
                     vec![PatchOp::replace(ptr(&x_ptr, field), json!(raised))],
                 );
             }
-            let declared_statuses: Vec<String> = responses(spec, op).into_iter().map(|r| r.code).collect();
+            let object = self.router.operation_object(i);
+            let declared_statuses = match self.declared.get(&object) {
+                Some(Some(lists)) => Some(lists.resps.iter().map(|r| r.code.clone()).collect()),
+                _ => statuses.entry(object).or_insert_with(|| declared_codes(spec, op, &mut self.resolve_meter)).clone(),
+            };
+            let declared_statuses = declared_statuses.unwrap_or_else(|| {
+                unlisted += 1;
+                vec![]
+            });
             let finding_count = per_operation.get(&label).copied().unwrap_or(0);
             coverage.push(OperationCoverage {
                 operation: label,
@@ -1720,6 +1860,12 @@ impl<'a> State<'a> {
                 budget: b,
                 findings: finding_count,
             });
+        }
+        if unlisted > 0 {
+            self.notes.insert(
+                "the description is too large to compare completely; some operations' declared statuses are not listed".into(),
+                unlisted,
+            );
         }
         if !spec.is_swagger2() {
             for (origin, (n, base)) in &self.servers {
@@ -1777,6 +1923,12 @@ impl<'a> State<'a> {
                 self.router.dropped_servers,
             );
         }
+        if self.router.skipped_operations > 0 {
+            self.notes.insert(
+                "the description is too large to compare completely; calls to the operations left out are reported as undeclared".into(),
+                self.router.skipped_operations,
+            );
+        }
         let undeclared = self
             .endpoints
             .into_iter()
@@ -1790,7 +1942,8 @@ impl<'a> State<'a> {
                 declared_version: spec.declared_version.clone(),
                 sha256: spec.sha256.clone(),
                 size_bytes: spec.size_bytes,
-                operations: self.router.ops.len(),
+                // Those left out of matching too.
+                operations: self.router.operation_count() + self.router.skipped_operations,
             },
             observations: total,
             matched: self.matched,
@@ -1805,6 +1958,68 @@ impl<'a> State<'a> {
             notes: self.notes.into_iter().map(|(n, c)| format!("{n} ({c}×)")).collect(),
         }
     }
+}
+
+/// The declared statuses of `op`, charged to `meter`; `None` once it is
+/// spent.
+fn declared_codes<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Option<Vec<String>> {
+    let resps = responses(spec, op, meter);
+    (!meter.exhausted()).then(|| resps.into_iter().map(|r| r.code).collect())
+}
+
+/// The required headers of `resp`: name and pointer, each charged to `meter`
+/// (see [`responses`]).
+fn required_headers<'a>(spec: &'a Spec, resp: &Response<'a>, meter: &mut Meter) -> Vec<(&'a str, String)> {
+    let mut out = vec![];
+    let Some(headers) = resp.value.get("headers").and_then(Value::as_object) else { return out };
+    if !meter.charge(resp.pointer.len() + 8) {
+        return out;
+    }
+    let base = ptr(&resp.pointer, "headers");
+    for (name, h) in headers {
+        if meter.exhausted() {
+            break;
+        }
+        let Some((h, hptr)) = spec.resolve_within(h, &ptr(&base, name), meter) else { continue };
+        if h.get("required").and_then(Value::as_bool) == Some(true) {
+            if !meter.charge(HEADER_BYTES + name.len()) {
+                break;
+            }
+            out.push((name.as_str(), hptr));
+        }
+    }
+    out
+}
+
+/// What a Path Item declares for the suggestions of undeclared methods on it.
+struct PathItemView {
+    /// Where it is (its `$ref` followed).
+    pointer: String,
+    /// The names of its path-level parameters.
+    params: BTreeSet<String>,
+}
+
+/// The Path Item of `template`, each reference followed within `meter`:
+/// `None` once a charge is refused.
+fn path_item_view(spec: &Spec, template: &str, meter: &mut Meter) -> Option<PathItemView> {
+    let at = Router::path_pointer(template);
+    let Some(item) = spec.root.pointer(&at) else { return Some(PathItemView { pointer: at, params: BTreeSet::new() }) };
+    let pointer = match spec.resolve_within(item, &at, meter) {
+        Some((_, p)) => p,
+        None if meter.exhausted() => return None,
+        None => at.clone(),
+    };
+    let base = ptr(&at, "parameters");
+    let mut params = BTreeSet::new();
+    for (i, p) in item.get("parameters").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let p = match spec.resolve_within(p, &ptr(&base, &i.to_string()), meter) {
+            Some((p, _)) => p,
+            None if meter.exhausted() => return None,
+            None => p,
+        };
+        params.extend(p.get("name").and_then(Value::as_str).map(str::to_string));
+    }
+    Some(PathItemView { pointer, params })
 }
 
 fn fix_suggestion_key(k: &FixKey) -> String {
@@ -1971,12 +2186,12 @@ mod tests {
         assert_eq!(method_token("get"), "GET");
         assert_eq!(method_token("GET /x"), INVALID_METHOD);
         let null = Value::Null;
-        let resps: Vec<crate::model::Response> = ["é1", "4xx", "ñXX", "default"]
+        let resps: Vec<Response> = ["é1", "4xx", "ñXX", "default"]
             .iter()
-            .map(|c| crate::model::Response { code: c.to_string(), pointer: String::new(), value: &null, media: vec![] })
+            .map(|c| Response { code: c.to_string(), pointer: String::new(), value: &null, media: vec![] })
             .collect();
-        assert_eq!(declared_response(&resps, "404").map(|r| r.code.as_str()), Some("4xx"));
-        assert_eq!(declared_response(&resps, "500").map(|r| r.code.as_str()), Some("default"));
+        assert_eq!(declared_response(&resps, "404").map(|i| resps[i].code.as_str()), Some("4xx"));
+        assert_eq!(declared_response(&resps, "500").map(|i| resps[i].code.as_str()), Some("default"));
         assert_eq!(nice_ceil(412.0), 500.0);
         assert_eq!(nice_ceil(180.0), 200.0);
         assert_eq!(nice_ceil(2100.0), 2500.0);
@@ -1994,5 +2209,161 @@ mod tests {
         let generalized = generalize(&path);
         assert_eq!(generalized.matches('{').count(), SEGMENTS);
         assert!(generalized.ends_with(&format!("{{id{SEGMENTS}}}")), "{}", &generalized[generalized.len() - 32..]);
+    }
+
+    #[test]
+    fn each_operation_is_resolved_once_however_many_calls_reach_it() {
+        // A parameter, a response and its header at pointers of about
+        // 200 KB, each behind one alias.
+        let key = "k".repeat(4_000);
+        let nest = |mut v: Value| {
+            for _ in 0..50 {
+                let mut level = serde_json::Map::new();
+                level.insert(key.clone(), v);
+                v = Value::Object(level);
+            }
+            v
+        };
+        let deep = |name: &str| format!("#/{name}{}", format!("/{key}").repeat(50));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"get": {"parameters": [{"$ref": "#/p"}], "responses": {"200": {"$ref": "#/r"}}}}},
+            "xp": nest(json!({"name": "q", "in": "query", "required": true})),
+            "xr": nest(json!({"description": "ok", "headers": {"X-Id": {"$ref": "#/h"}}})),
+            "xh": nest(json!({"required": true, "schema": {"type": "string"}})),
+            "p": {"$ref": deep("xp")}, "r": {"$ref": deep("xr")}, "h": {"$ref": deep("xh")}});
+        let text = doc.to_string();
+        let call = |i: usize| Observation {
+            id: format!("har:{i}"),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 200,
+                content_type: None,
+                headers: vec![],
+                bytes: Some(0),
+                body: ObservedBody::Empty,
+            }),
+            latency_ms: None,
+        };
+        // Pointers walked to follow references in an analysis of `calls`
+        // calls, each missing the required parameter and header.
+        let walks = |calls: usize| {
+            let spec = Spec::parse(text.as_bytes()).unwrap();
+            let observations: Vec<Observation> = (0..calls).map(&call).collect();
+            let report = analyze(&spec, &observations, &DriftOptions::default());
+            for kind in [DriftKind::MissingRequiredParameter, DriftKind::MissingResponseHeader] {
+                assert_eq!(report.findings.iter().find(|f| f.kind == kind).map(|f| f.count), Some(calls), "{kind:?}");
+            }
+            spec.walks.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(walks(1), walks(2_000));
+    }
+
+    /// `v` under 50 members named `key`, and a reference to it from `name`.
+    fn buried(key: &str, name: &str, mut v: Value) -> (Value, String) {
+        for _ in 0..50 {
+            let mut level = serde_json::Map::new();
+            level.insert(key.to_string(), v);
+            v = Value::Object(level);
+        }
+        (v, format!("#/{name}{}", format!("/{key}").repeat(50)))
+    }
+
+    #[test]
+    fn walking_bodies_is_charged_for_the_pointers_it_copies() {
+        // A response schema behind one alias of a pointer of about 200 KB:
+        // each body walked along it copies that pointer for each key.
+        let key = "k".repeat(4_000);
+        let (xs, deep) = buried(&key, "xs", json!({"type": "object", "properties": {"id": {"type": "string"}}}));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok",
+                "content": {"application/json": {"schema": {"$ref": "#/s"}}}}}}}},
+            "xs": xs, "s": {"$ref": deep}});
+        let text = doc.to_string();
+        let call = |i: usize| Observation {
+            id: format!("har:{i}"),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                headers: vec![],
+                bytes: None,
+                body: ObservedBody::Json(json!({"id": "x", "extra": i})),
+            }),
+            latency_ms: None,
+        };
+        // Pointers walked to follow references in an analysis of `calls`
+        // calls.
+        let walks = |calls: usize| {
+            let spec = Spec::parse(text.as_bytes()).unwrap();
+            let observations: Vec<Observation> = (0..calls).map(&call).collect();
+            let report = analyze(&spec, &observations, &DriftOptions::default());
+            assert!(report.suggestions.iter().any(|s| s.title.contains("extra")), "{:?}", report.suggestions);
+            (spec.walks.load(std::sync::atomic::Ordering::Relaxed), report.notes)
+        };
+        let (few, notes) = walks(10);
+        assert!(!notes.iter().any(|n| n.starts_with(WALK_SPENT)), "{notes:?}");
+        // Past the budget, bodies are no longer walked: no more references
+        // are followed, however many calls there are.
+        let (many, notes) = walks(2_000);
+        assert!(notes.iter().any(|n| n.starts_with(WALK_SPENT)), "{notes:?}");
+        assert!(many < 2_000, "{many}");
+        assert!(few < many, "{few} {many}");
+        assert_eq!(walks(4_000).0, many);
+    }
+
+    #[test]
+    fn path_parameters_are_resolved_once_however_many_methods_are_undeclared() {
+        // 100 path-level parameters, each behind one alias of a pointer of
+        // about 200 KB.
+        let key = "k".repeat(4_000);
+        let (xp, deep) = buried(&key, "xp", json!({"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}));
+        let params: Vec<Value> = (0..100).map(|_| json!({"$ref": "#/p"})).collect();
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a/{id}": {"parameters": params, "get": {"responses": {"200": {"description": "ok"}}}}},
+            "xp": xp, "p": {"$ref": deep}});
+        let text = doc.to_string();
+        let call = |method: &str| Observation {
+            id: format!("har:{method}"),
+            at: None,
+            method: method.into(),
+            url: "/a/7".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: None,
+            latency_ms: None,
+        };
+        // Pointers walked to follow references in an analysis of a call
+        // with each of `methods`, none declared.
+        let walks = |methods: &[&str]| {
+            let spec = Spec::parse(text.as_bytes()).unwrap();
+            let observations: Vec<Observation> = methods.iter().map(|m| call(m)).collect();
+            let report = analyze(&spec, &observations, &DriftOptions::default());
+            for m in methods {
+                let s = report.suggestions.iter().find(|s| s.title == format!("Document {m} /a/{{id}}")).expect(m);
+                // `id` is declared on the Path Item: the operation does not
+                // repeat it.
+                let ops = serde_json::to_string(&s.ops).unwrap();
+                assert!(!ops.contains(r#""in":"path""#), "{ops}");
+            }
+            spec.walks.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(walks(&["POST"]), walks(&["POST", "PUT", "DELETE", "PATCH", "TRACE"]));
     }
 }

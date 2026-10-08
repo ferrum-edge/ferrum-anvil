@@ -398,6 +398,9 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
       {(report.skipped_operations ?? 0) > 0 && (
         <div className="warn-box">The description is too large to check completely: {report.skipped_operations} operation(s) were not checked.</div>
       )}
+      {report.incomplete && (report.skipped_operations ?? 0) === 0 && (
+        <div className="warn-box">The description is too large to check completely: some schemas, parameters, responses or security schemes were not checked.</div>
+      )}
       {(report.examples_not_checked ?? 0) > 0 && (
         <p className="hint">
           {report.examples_not_checked} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far.

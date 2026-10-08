@@ -340,6 +340,29 @@ fn shared_path_item_descriptions_count_against_the_model_budget() {
 }
 
 #[test]
+fn a_budget_spent_after_the_operations_reaches_the_report() {
+    // 1,000 security schemes behind one alias of a scheme at a pointer of
+    // about 400 KB: each is charged that pointer, past the view budget once
+    // the only operation is built.
+    let key = "k".repeat(4_000);
+    let mut scheme = json!({"type": "apiKey", "in": "header", "name": "X"});
+    for _ in 0..100 {
+        let mut level = serde_json::Map::new();
+        level.insert(key.clone(), scheme);
+        scheme = serde_json::Value::Object(level);
+    }
+    let schemes: serde_json::Map<String, serde_json::Value> = (0..1_000).map(|i| (format!("k{i}"), json!({"$ref": "#/alias"}))).collect();
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+        "components": {"securitySchemes": schemes}, "x": scheme, "alias": {"$ref": format!("#/x{}", format!("/{key}").repeat(100))}});
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert_eq!((r.spec.operations, r.skipped_operations), (1, 0));
+    assert!(r.incomplete);
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["incomplete"], true);
+}
+
+#[test]
 fn examples_behind_an_exploding_schema_are_counted_not_checked() {
     let mut schemas = serde_json::Map::new();
     for i in 0..25 {

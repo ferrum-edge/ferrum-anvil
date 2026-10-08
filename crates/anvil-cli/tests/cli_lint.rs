@@ -97,3 +97,34 @@ fn an_incomplete_lint_is_a_local_error_unless_accepted() {
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("too large to lint completely"));
 }
+
+#[test]
+fn a_lint_cut_short_after_the_operations_is_a_local_error_unless_accepted() {
+    // Every operation is checked, but 1,000 security schemes behind one alias
+    // of a scheme at a pointer of about 400 KB do not fit the copy budget.
+    let data = tempfile::tempdir().unwrap();
+    let key = "k".repeat(4_000);
+    let mut scheme = serde_json::json!({"type": "apiKey", "in": "header", "name": "X"});
+    for _ in 0..100 {
+        let mut level = serde_json::Map::new();
+        level.insert(key.clone(), scheme);
+        scheme = serde_json::Value::Object(level);
+    }
+    let schemes: serde_json::Map<String, serde_json::Value> =
+        (0..1_000).map(|i| (format!("k{i}"), serde_json::json!({"$ref": "#/alias"}))).collect();
+    let doc = serde_json::json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+        "components": {"securitySchemes": schemes}, "x": scheme, "alias": {"$ref": format!("#/x{}", format!("/{key}").repeat(100))}});
+    let spec = data.path().join("deep.json");
+    std::fs::write(&spec, doc.to_string()).unwrap();
+    let out = anvil(data.path(), &["lint-spec", spec.to_str().unwrap(), "--fail-on", "never", "--format", "json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!((report["incomplete"].as_bool(), report["skipped_operations"].as_u64()), (Some(true), Some(0)));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("some targets not checked") && stderr.contains("--allow-incomplete"), "{stderr}");
+    let out = anvil(data.path(), &["lint-spec", spec.to_str().unwrap(), "--fail-on", "never", "--allow-incomplete"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("some schemas, parameters, responses or security schemes were not checked"), "{text}");
+}

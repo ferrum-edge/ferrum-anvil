@@ -11,7 +11,7 @@
 //! fields reach the original object for dialect-specific rules.
 
 use crate::locate::ptr;
-use crate::spec::{Spec, internal_pointer};
+use crate::spec::{Meter, Reach, Spec, internal_pointer};
 use anvil_import::Dialect;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -121,22 +121,55 @@ impl OperationRef<'_> {
     }
 }
 
-/// Every operation of the document (3.2 `query` and `additionalOperations`
-/// included; in older dialects those fields are not operations).
-pub fn operations(spec: &Spec) -> Vec<OperationRef<'_>> {
-    let mut out = vec![];
-    let Some(paths) = spec.root.get("paths").and_then(Value::as_object) else { return out };
-    for (path, raw_item) in paths {
-        if path.starts_with("x-") {
-            continue;
+/// A Path Item and its operations (3.2 `query` and `additionalOperations`
+/// included; in older dialects those fields are not operations), read once
+/// however many paths `$ref` it.
+pub(crate) struct PathItem<'a> {
+    pub(crate) value: &'a Value,
+    pub(crate) pointer: String,
+    /// Lower-case method, pointer and object.
+    pub(crate) operations: Vec<(String, String, &'a Value)>,
+}
+
+/// Every path with its Path Item (an index into the first list), in document
+/// order. A Path Item that several paths `$ref` (directly or through other
+/// references) is resolved and listed once: a path finds it by where its
+/// reference ends, without walking there again.
+pub(crate) fn read_paths(spec: &Spec) -> (Vec<PathItem<'_>>, Vec<(&str, usize)>) {
+    let mut items: Vec<PathItem<'_>> = vec![];
+    let mut paths = vec![];
+    let mut by_pointer: HashMap<String, usize> = HashMap::new();
+    // Where a reference ends ([`crate::spec::RefTarget::id`]) → its item.
+    let mut by_target: HashMap<usize, usize> = HashMap::new();
+    let Some(map) = spec.root.get("paths").and_then(Value::as_object) else { return (items, paths) };
+    for (path, raw) in map.iter().filter(|(k, _)| !k.starts_with("x-")) {
+        let at = ptr("/paths", path);
+        let (value, pointer, target) = match spec.reach(raw, &at) {
+            Reach::Inline(value) => (value, at, None),
+            Reach::Target(t) => {
+                if let Some(i) = by_target.get(&t.id) {
+                    paths.push((path.as_str(), *i));
+                    continue;
+                }
+                let Some(value) = spec.target_value(&t) else { continue };
+                (value, t.pointer.to_string(), Some(t.id))
+            }
+            Reach::Unresolved => continue,
+        };
+        let i = match by_pointer.get(&pointer) {
+            Some(i) => *i,
+            None => {
+                by_pointer.insert(pointer.clone(), items.len());
+                items.push(PathItem { value, operations: item_operations(spec, value, &pointer), pointer });
+                items.len() - 1
+            }
+        };
+        if let Some(id) = target {
+            by_target.insert(id, i);
         }
-        let pptr = ptr("/paths", path);
-        let Some((item, item_pointer)) = spec.usable(raw_item, &pptr) else { continue };
-        for (method, pointer, op) in item_operations(spec, item, &item_pointer) {
-            out.push(OperationRef { method, path: path.clone(), pointer, op, item, item_pointer: item_pointer.clone() });
-        }
+        paths.push((path.as_str(), i));
     }
-    out
+    (items, paths)
 }
 
 /// The operations of a Path Item: lower-case method, pointer and object.
@@ -170,25 +203,57 @@ pub struct Param<'a> {
     pub pointer: String,
 }
 
+/// Charged by the lists below for each entry they keep, besides its text.
+const ENTRY_BYTES: usize = 64;
+
 /// Path-level parameters merged with the operation's (the operation wins on
-/// the same name and location).
-pub fn parameters<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Vec<Param<'a>> {
-    let mut out: Vec<Option<Param<'a>>> = vec![];
-    // (name, in) → index in `out`: a later entry replaces an earlier one.
-    let mut index: HashMap<(String, String), usize> = HashMap::new();
-    let lists =
-        [(op.item.get("parameters"), ptr(&op.item_pointer, "parameters")), (op.op.get("parameters"), ptr(&op.pointer, "parameters"))];
-    for (list, base) in lists {
+/// the same name and location). Every reference followed and every copy is
+/// charged to `meter` before it is made (see [`Spec::resolve_within`]);
+/// once one does not fit, the list stops short and [`Meter::exhausted`]
+/// says so. The same goes for [`request_body`] and [`responses`].
+pub fn parameters<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Vec<Param<'a>> {
+    merge_parameters(parameter_lists(spec, op, meter))
+}
+
+/// The resolved entries of the Path Item's and of the operation's parameter
+/// lists, in order.
+fn parameter_lists<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> [Vec<Param<'a>>; 2] {
+    let mut out = [vec![], vec![]];
+    let lists = [(op.item.get("parameters"), op.item_pointer.as_str()), (op.op.get("parameters"), op.pointer.as_str())];
+    for (k, (list, owner)) in lists.into_iter().enumerate() {
         let Some(list) = list.and_then(Value::as_array) else { continue };
-        for (i, raw) in list.iter().enumerate() {
-            let Some((p, pointer)) = spec.usable(raw, &ptr(&base, &i.to_string())) else { continue };
-            let name = p.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-            let location = p.get("in").and_then(Value::as_str).unwrap_or("").to_string();
-            if let Some(prev) = index.insert((name.clone(), location.clone()), out.len()) {
-                out[prev] = None;
-            }
-            out.push(Some(Param { name, location, value: p, pointer }));
+        if !meter.charge(owner.len() + 11) {
+            break;
         }
+        let base = ptr(owner, "parameters");
+        for (i, raw) in list.iter().enumerate() {
+            if meter.exhausted() {
+                break;
+            }
+            let Some((p, pointer)) = spec.resolve_within(raw, &ptr(&base, &i.to_string()), meter) else { continue };
+            let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+            let location = p.get("in").and_then(Value::as_str).unwrap_or("");
+            // The name and location are copied into the entry and its key.
+            if !meter.charge(ENTRY_BYTES + 2 * (name.len() + location.len())) {
+                break;
+            }
+            out[k].push(Param { name: name.to_string(), location: location.to_string(), value: p, pointer });
+        }
+    }
+    out
+}
+
+/// One list of [`parameter_lists`]: a later entry replaces an earlier one
+/// with the same name and location.
+fn merge_parameters<'a>(lists: [Vec<Param<'a>>; 2]) -> Vec<Param<'a>> {
+    let mut out: Vec<Option<Param<'a>>> = vec![];
+    // (name, in) → index in `out`.
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
+    for p in lists.into_iter().flatten() {
+        if let Some(prev) = index.insert((p.name.clone(), p.location.clone()), out.len()) {
+            out[prev] = None;
+        }
+        out.push(Some(p));
     }
     out.into_iter().flatten().collect()
 }
@@ -245,101 +310,142 @@ pub fn swagger_media(spec: &Spec, op: &Value, field: &str) -> Option<Vec<String>
     list_of_strings(op.get(field)).or_else(|| list_of_strings(spec.root.get(field)))
 }
 
-fn content_media<'a>(spec: &'a Spec, owner: &'a Value, owner_ptr: &str) -> Vec<Media<'a>> {
+/// [`swagger_media`], else `default`, with each entry charged to `meter`
+/// before it is read: the list stops short once one does not fit.
+fn swagger_media_within(spec: &Spec, op: &Value, field: &str, default: &str, meter: &mut Meter) -> Vec<String> {
+    let Some(list) = op.get(field).and_then(Value::as_array).or_else(|| spec.root.get(field).and_then(Value::as_array)) else {
+        return vec![default.to_string()];
+    };
     let mut out = vec![];
-    let Some(content) = owner.get("content").and_then(Value::as_object) else { return out };
-    let cptr = ptr(owner_ptr, "content");
-    for (mt, obj) in content {
-        let mptr = ptr(&cptr, mt);
-        let Some((obj, mptr)) = spec.usable(obj, &mptr) else { continue };
-        let schema = obj.get("schema");
-        out.push(Media { media_type: mt.clone(), pointer: mptr.clone(), object: Some(obj), schema, schema_pointer: ptr(&mptr, "schema") });
+    for v in list {
+        let text = v.as_str();
+        if !meter.charge(ENTRY_BYTES + text.map_or(0, str::len)) {
+            break;
+        }
+        out.extend(text.map(str::to_string));
     }
     out
 }
 
-pub fn request_body<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Option<RequestBody<'a>> {
+/// Swagger 2.0 media types of the body parameter or response at `pointer`,
+/// one per type in `types`, each charged to `meter` first.
+fn swagger_types<'a>(
+    types: &[String],
+    pointer: &str,
+    object: Option<&'a Value>,
+    schema: Option<&'a Value>,
+    meter: &mut Meter,
+) -> Vec<Media<'a>> {
+    let mut out = vec![];
+    for media_type in types {
+        // Each copies the pointer, and again for its schema.
+        if !meter.charge(ENTRY_BYTES + media_type.len() + 2 * pointer.len() + 7) {
+            break;
+        }
+        let schema_pointer = if object.is_some() { ptr(pointer, "schema") } else { String::new() };
+        out.push(Media { media_type: media_type.clone(), pointer: pointer.to_string(), object, schema, schema_pointer });
+    }
+    out
+}
+
+fn content_media<'a>(spec: &'a Spec, owner: &'a Value, owner_ptr: &str, meter: &mut Meter) -> Vec<Media<'a>> {
+    let mut out = vec![];
+    let Some(content) = owner.get("content").and_then(Value::as_object) else { return out };
+    if !meter.charge(owner_ptr.len() + 8) {
+        return out;
+    }
+    let cptr = ptr(owner_ptr, "content");
+    for (mt, obj) in content {
+        if meter.exhausted() {
+            break;
+        }
+        let Some((obj, mptr)) = spec.resolve_within(obj, &ptr(&cptr, mt), meter) else { continue };
+        // The media type, and the pointer again for its schema.
+        if !meter.charge(ENTRY_BYTES + mt.len() + mptr.len() + 7) {
+            break;
+        }
+        let schema_pointer = ptr(&mptr, "schema");
+        out.push(Media { media_type: mt.clone(), pointer: mptr, object: Some(obj), schema: obj.get("schema"), schema_pointer });
+    }
+    out
+}
+
+/// The request body of an operation (see [`parameters`] for `meter`).
+pub fn request_body<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Option<RequestBody<'a>> {
+    let params = if spec.is_swagger2() { parameters(spec, op, meter) } else { vec![] };
+    body_of(spec, op, &params, meter)
+}
+
+/// [`request_body`] of `op`, whose [`parameters`] (Swagger 2.0 describes
+/// its body with them) are `params`.
+pub(crate) fn body_of<'a>(spec: &'a Spec, op: &OperationRef<'a>, params: &[Param<'a>], meter: &mut Meter) -> Option<RequestBody<'a>> {
     if spec.is_swagger2() {
-        let params = parameters(spec, op);
         if let Some(body) = params.iter().find(|p| p.location == "body") {
-            let types = swagger_media(spec, op.op, "consumes").unwrap_or_else(|| vec!["application/json".into()]);
-            let media = types
-                .into_iter()
-                .map(|mt| Media {
-                    media_type: mt,
-                    pointer: body.pointer.clone(),
-                    object: Some(body.value),
-                    schema: body.value.get("schema"),
-                    schema_pointer: ptr(&body.pointer, "schema"),
-                })
-                .collect();
+            let types = swagger_media_within(spec, op.op, "consumes", "application/json", meter);
+            if !meter.charge(ENTRY_BYTES + body.pointer.len()) {
+                return None;
+            }
             return Some(RequestBody {
+                media: swagger_types(&types, &body.pointer, Some(body.value), body.value.get("schema"), meter),
                 pointer: body.pointer.clone(),
                 value: body.value,
                 required: body.value.get("required").and_then(Value::as_bool).unwrap_or(false),
-                media,
             });
         }
         let form: Vec<&Param> = params.iter().filter(|p| p.location == "formData").collect();
         if let Some(first) = form.first() {
             let has_file = form.iter().any(|p| p.value.get("type").and_then(Value::as_str) == Some("file"));
             let default = if has_file { "multipart/form-data" } else { "application/x-www-form-urlencoded" };
-            let types = swagger_media(spec, op.op, "consumes").unwrap_or_else(|| vec![default.into()]);
-            let media = types
-                .into_iter()
-                .map(|mt| Media {
-                    media_type: mt,
-                    pointer: first.pointer.clone(),
-                    object: None,
-                    schema: None,
-                    schema_pointer: String::new(),
-                })
-                .collect();
+            let types = swagger_media_within(spec, op.op, "consumes", default, meter);
+            if !meter.charge(ENTRY_BYTES + first.pointer.len()) {
+                return None;
+            }
             return Some(RequestBody {
+                media: swagger_types(&types, &first.pointer, None, None, meter),
                 pointer: first.pointer.clone(),
                 value: first.value,
                 required: form.iter().any(|p| p.value.get("required").and_then(Value::as_bool).unwrap_or(false)),
-                media,
             });
         }
         return None;
     }
     let raw = op.op.get("requestBody")?;
-    let (value, pointer) = spec.usable(raw, &ptr(&op.pointer, "requestBody"))?;
+    let (value, pointer) = spec.resolve_within(raw, &ptr(&op.pointer, "requestBody"), meter)?;
     Some(RequestBody {
         required: value.get("required").and_then(Value::as_bool).unwrap_or(false),
-        media: content_media(spec, value, &pointer),
+        media: content_media(spec, value, &pointer, meter),
         pointer,
         value,
     })
 }
 
-pub fn responses<'a>(spec: &'a Spec, op: &OperationRef<'a>) -> Vec<Response<'a>> {
+/// The responses of an operation (see [`parameters`] for `meter`).
+pub fn responses<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Vec<Response<'a>> {
     let mut out = vec![];
     let Some(map) = op.op.get("responses").and_then(Value::as_object) else { return out };
+    if !meter.charge(op.pointer.len() + 10) {
+        return out;
+    }
     let base = ptr(&op.pointer, "responses");
+    // Swagger 2.0: the operation's (or the document's) `produces`, read once.
+    let produces = if spec.is_swagger2() { swagger_media_within(spec, op.op, "produces", "application/json", meter) } else { vec![] };
     for (code, raw) in map {
+        if meter.exhausted() {
+            break;
+        }
         if code.starts_with("x-") {
             continue;
         }
-        let Some((value, pointer)) = spec.usable(raw, &ptr(&base, code)) else { continue };
-        let media = if spec.is_swagger2() {
-            match value.get("schema") {
-                Some(schema) => swagger_media(spec, op.op, "produces")
-                    .unwrap_or_else(|| vec!["application/json".into()])
-                    .into_iter()
-                    .map(|mt| Media {
-                        media_type: mt,
-                        pointer: pointer.clone(),
-                        object: Some(value),
-                        schema: Some(schema),
-                        schema_pointer: ptr(&pointer, "schema"),
-                    })
-                    .collect(),
-                None => vec![],
-            }
+        let Some((value, pointer)) = spec.resolve_within(raw, &ptr(&base, code), meter) else { continue };
+        if !meter.charge(ENTRY_BYTES + code.len()) {
+            break;
+        }
+        let media = if !spec.is_swagger2() {
+            content_media(spec, value, &pointer, meter)
+        } else if let Some(schema) = value.get("schema") {
+            swagger_types(&produces, &pointer, Some(value), Some(schema), meter)
         } else {
-            content_media(spec, value, &pointer)
+            vec![]
         };
         out.push(Response { code: code.clone(), pointer, value, media });
     }
@@ -436,6 +542,10 @@ pub struct Model<'a> {
     pub targets: Vec<Target>,
     /// Operations left out because the work or view budget ran out.
     pub skipped_operations: usize,
+    /// The view budget ran out: targets past that point (operations counted
+    /// in `skipped_operations`, and also parameters, responses, schemas,
+    /// properties and security schemes) were not built.
+    pub incomplete: bool,
 }
 
 /// Parameters, responses and media types looked at across all operations
@@ -461,7 +571,7 @@ impl<'a> Model<'a> {
     pub fn build(spec: &'a Spec, examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>) -> Model<'a> {
         let mut b = ModelBuilder::new(spec, MAX_MODEL_VIEW_BYTES);
         b.build(examples);
-        Model { spec, targets: b.targets, skipped_operations: b.skipped_operations }
+        Model { spec, targets: b.targets, skipped_operations: b.skipped_operations, incomplete: b.exhausted }
     }
 
     pub fn of_kind(&self, kind: TargetKind) -> impl Iterator<Item = &Target> {
@@ -516,13 +626,6 @@ struct SharedOperation<'a> {
     view_cost: usize,
 }
 
-/// A Path Item and its operations, read once however many paths `$ref` it.
-struct PathItem<'a> {
-    value: &'a Value,
-    pointer: String,
-    operations: Vec<(String, String, &'a Value)>,
-}
-
 impl<'a> ModelBuilder<'a> {
     fn new(spec: &'a Spec, view_byte_limit: usize) -> ModelBuilder<'a> {
         ModelBuilder {
@@ -571,6 +674,30 @@ impl<'a> ModelBuilder<'a> {
         }
         self.view_bytes += bytes;
         true
+    }
+
+    /// A meter over what is left of the view budget, for lists that follow
+    /// references (see [`parameters`]); [`Self::settle`] charges what it
+    /// spent.
+    fn meter(&self) -> Meter {
+        Meter::new(if self.exhausted { 0 } else { self.view_byte_limit.saturating_sub(self.view_bytes) })
+    }
+
+    /// Charge what `meter` spent; once it refused a charge, nothing more is
+    /// built.
+    fn settle(&mut self, meter: &Meter) {
+        self.view_bytes += meter.spent();
+        if meter.exhausted() {
+            self.exhausted = true;
+        }
+    }
+
+    /// [`Spec::resolve_within`], charged to the view budget.
+    fn resolve(&mut self, v: &'a Value, at: &str) -> Option<(&'a Value, String)> {
+        let mut meter = self.meter();
+        let found = self.spec.resolve_within(v, at, &mut meter);
+        self.settle(&meter);
+        found
     }
 
     /// What copying `v` into a view costs: its text and member names, plus
@@ -641,23 +768,7 @@ impl<'a> ModelBuilder<'a> {
         let scheme_names: HashSet<String> = security_schemes(spec).map(|(m, _)| m.keys().cloned().collect()).unwrap_or_default();
         // Each path with its Path Item (an index into `items`): a Path Item
         // `$ref`'d by several paths is resolved and listed once.
-        let mut items: Vec<PathItem<'a>> = vec![];
-        let mut path_items: Vec<(&'a str, usize)> = vec![];
-        let mut item_index: HashMap<String, usize> = HashMap::new();
-        if let Some(paths) = root.get("paths").and_then(Value::as_object) {
-            for (path, raw) in paths.iter().filter(|(k, _)| !k.starts_with("x-")) {
-                let Some((value, pointer)) = spec.usable(raw, &ptr("/paths", path)) else { continue };
-                let i = match item_index.get(&pointer) {
-                    Some(i) => *i,
-                    None => {
-                        item_index.insert(pointer.clone(), items.len());
-                        items.push(PathItem { value, operations: item_operations(spec, value, &pointer), pointer });
-                        items.len() - 1
-                    }
-                };
-                path_items.push((path.as_str(), i));
-            }
-        }
+        let (items, path_items) = read_paths(spec);
         let mut id_counts: HashMap<&str, usize> = HashMap::new();
         let mut used_tags: HashSet<&str> = HashSet::new();
         let mut used_schemes: HashSet<String> = HashSet::new();
@@ -870,7 +981,10 @@ impl<'a> ModelBuilder<'a> {
         // Security schemes.
         if let Some((schemes, base)) = security_schemes(spec) {
             for (name, raw) in schemes {
-                let Some((s, pointer)) = spec.usable(raw, &ptr(&base, name)) else { continue };
+                if self.exhausted {
+                    break;
+                }
+                let Some((s, pointer)) = self.resolve(raw, &ptr(&base, name)) else { continue };
                 let flows_cost = match s.get("flows").and_then(Value::as_object) {
                     Some(f) => names_cost(f.keys().map(String::as_str)),
                     None => str_cost(s, "flow"),
@@ -1005,9 +1119,28 @@ impl<'a> ModelBuilder<'a> {
             self.work = self.work.saturating_add(listed);
             return None;
         }
-        let params = parameters(spec, op);
-        let body = request_body(spec, op);
-        let resps = responses(spec, op);
+        // Every reference followed and every copy kept is charged first.
+        // Once one does not fit, nothing more is built and the operation is
+        // left out: no partial lists are kept.
+        let mut meter = self.meter();
+        let levels = parameter_lists(spec, op, &mut meter);
+        // The same name and location twice in one parameter list.
+        let mut duplicate_params = BTreeSet::new();
+        for level in &levels {
+            let mut this_level = HashSet::new();
+            for p in level {
+                if !this_level.insert((p.name.as_str(), p.location.as_str())) {
+                    duplicate_params.insert(format!("{} ({})", p.name, p.location));
+                }
+            }
+        }
+        let params = merge_parameters(levels);
+        let body = body_of(spec, op, &params, &mut meter);
+        let resps = responses(spec, op, &mut meter);
+        self.settle(&meter);
+        if self.exhausted {
+            return None;
+        }
         // Inheriting operations reuse the document's names (gathered once).
         let security_names = match own_security {
             Some(reqs) => requirement_names(Some(reqs)),
@@ -1029,21 +1162,6 @@ impl<'a> ModelBuilder<'a> {
         self.work += work;
         if self.work > MAX_MODEL_WORK {
             return None;
-        }
-        // The same name and location twice in one parameter list.
-        let mut duplicate_params = BTreeSet::new();
-        let levels =
-            [(op.item.get("parameters"), ptr(&op.item_pointer, "parameters")), (op.op.get("parameters"), ptr(&op.pointer, "parameters"))];
-        for (list, base) in levels {
-            let mut this_level = HashSet::new();
-            for (i, raw) in list.and_then(Value::as_array).into_iter().flatten().enumerate() {
-                let Some((p, _)) = spec.usable(raw, &ptr(&base, &i.to_string())) else { continue };
-                let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-                let location = p.get("in").and_then(Value::as_str).unwrap_or("");
-                if !this_level.insert((name, location)) {
-                    duplicate_params.insert(format!("{name} ({location})"));
-                }
-            }
         }
         // What a copy of its view costs, but for what depends on the path.
         let media_cost = |m: &Media<'_>| 2 * m.media_type.len() + VALUE_BYTES + m.pointer.len() + m.schema_pointer.len();
@@ -1077,7 +1195,6 @@ impl<'a> ModelBuilder<'a> {
         id_counts: &HashMap<&str, usize>,
         examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
     ) {
-        let spec = self.spec;
         // An operation reached through several paths is resolved and sized
         // once, and what is under it is a target once.
         let (shared, first) = match self.shared.get(&op.pointer) {
@@ -1283,7 +1400,10 @@ impl<'a> ModelBuilder<'a> {
             if let Some(h) = header_map {
                 let base = ptr(&r.pointer, "headers");
                 for (name, raw) in h {
-                    let Some((hv, hptr)) = spec.usable(raw, &ptr(&base, name)) else { continue };
+                    if self.exhausted {
+                        return;
+                    }
+                    let Some((hv, hptr)) = self.resolve(raw, &ptr(&base, name)) else { continue };
                     if self.is_seen(TargetKind::Header, &hptr) {
                         continue;
                     }
@@ -1346,7 +1466,10 @@ impl<'a> ModelBuilder<'a> {
                 || obj.get("examples").and_then(Value::as_object).is_some_and(|e| !e.is_empty())
                 || m.schema.is_some_and(|s| s.get("example").is_some() || s.get("examples").is_some())
         };
-        let schema = m.schema.map(|s| spec.deref(s, &m.schema_pointer).0);
+        let schema = m.schema.map(|s| self.resolve(s, &m.schema_pointer).map_or(s, |(v, _)| v));
+        if self.exhausted {
+            return;
+        }
         let example_errors = examples(m, direction);
         // The label and the owner of its properties repeat the operation's.
         let where_bytes = code.map_or(16, |c| c.len() + 13) + label.len();
@@ -1568,6 +1691,61 @@ mod tests {
             // Nothing is attempted once the budget is spent.
             assert!(builder.reservations < 100, "{}", builder.reservations);
         }
+    }
+
+    #[test]
+    fn a_budget_spent_after_the_operations_is_not_silent() {
+        let description = "d".repeat(64 * 1024);
+        let schemas: Map<String, Value> =
+            (0..100).map(|i| (format!("S{i}"), json!({"type": "string", "description": description}))).collect();
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}},
+            "components": {"schemas": schemas}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let builder = build(&spec, 1024 * 1024);
+
+        // Every operation fits and the schemas do not: the model says so.
+        assert_eq!(builder.skipped_operations, 0);
+        assert!(builder.exhausted);
+        assert!(builder.targets.iter().filter(|t| t.kind == TargetKind::Schema).count() < 100);
+        let model = Model::build(&spec, &mut |_, _| vec![]);
+        assert!(!model.incomplete && model.skipped_operations == 0);
+    }
+
+    #[test]
+    fn parameter_references_to_one_long_pointer_are_charged_before_they_are_followed() {
+        // A parameter at a pointer of about 400 KB, behind one alias that
+        // 650,000 parameters of one operation refer to.
+        let key = "k".repeat(4_000);
+        let mut deep = json!({"name": "q", "in": "query"});
+        for _ in 0..100 {
+            let mut level = Map::new();
+            level.insert(key.clone(), deep);
+            deep = Value::Object(level);
+        }
+        let parameters: Vec<Value> = (0..650_000).map(|_| json!({"$ref": "#/a"})).collect();
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": {"/a": {"get": {"parameters": parameters}}},
+            "x": deep,
+            "a": {"$ref": format!("#/x{}", format!("/{key}").repeat(100))}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let builder = build(&spec, MAX_MODEL_VIEW_BYTES);
+
+        // Each use of the pointer is charged before it is walked or copied:
+        // the budget runs out after a few hundred, and the operation is left
+        // out rather than built from part of its parameters.
+        let walks = spec.walks.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(walks < 1_000, "{walks}");
+        assert!(builder.exhausted);
+        assert!(builder.view_bytes <= builder.view_byte_limit);
+        assert_eq!(builder.skipped_operations, 1);
+        assert!(!builder.targets.iter().any(|t| matches!(t.kind, TargetKind::Operation | TargetKind::Parameter)));
     }
 
     #[test]
