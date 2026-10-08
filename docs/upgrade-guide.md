@@ -1,5 +1,31 @@
 # Upgrade guide
 
+## 0.1.4
+
+0.1.4 keeps database schema 3 and the bundle and backup formats of 0.1.3.
+These behaviour changes may need action; the [changelog](../CHANGELOG.md)
+has the full list.
+
+- Response extractions and dataset cells are sent literally: a value
+  containing `{{...}}` is no longer expanded. If a workflow needs template
+  expansion, store the template in an ordinary workspace or request variable.
+- A redirected MCP initialize request is refused. Point the request at the
+  final MCP endpoint.
+- Rust code that constructs `anvil_engine::vars::VarEntry` directly must set
+  `literal`: `false` for template-backed variables, `true` for values that
+  must remain data.
+- `anvil lint-spec` exits with 3 when its report is incomplete (a copy budget
+  ran out), as it already did when operations were left out. Pass
+  `--allow-incomplete` where an incomplete lint is acceptable.
+- The System resolver keeps `localhost` and `*.localhost` on loopback: only
+  loopback answers are kept, so a name that resolves to no loopback address
+  now fails; use a DNS override to reach a non-loopback address.
+- A sensitive extraction larger than 64 KiB now fails its step; the response
+  is discarded and the value is not passed to later steps.
+- Findings that quote `X-Gateway-Error` values show them as received
+  (redacted), no longer lowercased. Update anything that matches that quoted
+  text in findings or saved history.
+
 ## 0.1.3
 
 ### Database schema 3

@@ -2,13 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-08
+
+Hardening release: Anvil adopts Ferrum Edge v0.9.14 and `contracts-edge-0.9.14`, bounds variable
+expansion, text redaction, specification routing and reference resolution, refuses MCP initialize
+redirects, keeps `localhost` names on loopback and redacts gateway diagnostic values before
+cutting them. Some of these change behaviour; read the Breaking section below before upgrading.
+
 ### Security
 
 - Release creation reads the uploaded release-evidence file as JSON data and validates its
   format before using it in draft notes; it no longer loads it as code (#333).
-- Bound resource use when routing and resolving references in untrusted specifications. Each
-  `$ref` string's chain is followed once per spec, and a Path Item that many paths `$ref` is
-  read once and shared by them. Every use of a reference (reading the value it ends at and
+- Response extractions and dataset cells are treated as literal values, total variable
+  references are capped at 16,384 per resolver, text redaction is bounded to one pass over the
+  input, MCP initialize redirects are refused and MCP session headers are withheld on
+  cross-origin redirects, and everything the lint model copies out of a document is charged
+  before it is copied, with an operation shared by several paths resolved once (#343).
+- Resource use when routing and resolving references in untrusted specifications is bounded.
+  Each `$ref` string's chain is followed once per spec, and a Path Item that many paths `$ref`
+  is read once and shared by them. Every use of a reference (reading the value it ends at and
   copying its pointer) is charged before it is made: in `lint-spec` to the 256 MiB copy budget,
   and in `spec-drift` to a 256 MiB budget for resolving each operation's parameters, body,
   responses and required headers, which happens once per operation rather than once per call.
@@ -16,16 +28,35 @@
   object for each path that reaches it. Walking observed bodies along their schemas for
   suggestions has its own 256 MiB budget, suggestions for undeclared methods read each Path
   Item's parameters once, and a schema validator reads each referenced required property's
-  target once. The operations `spec-drift` matches against are capped
-  at 256 MiB of their paths, pointers and declared statuses; any left out are counted in a note
-  and in `spec.operations`. A lint whose copy budget runs out reports `incomplete` (as do the
-  text, SARIF and desktop outputs), and `anvil lint-spec` exits with 3 for it unless
-  `--allow-incomplete` is passed (#349).
+  target once. The operations `spec-drift` matches against are capped at 256 MiB of their
+  paths, pointers and declared statuses; any left out are counted in a note and in
+  `spec.operations`. A lint whose copy budget runs out reports `incomplete` (as do the text,
+  SARIF and desktop outputs); see Breaking for the `lint-spec` exit code (#349).
 - Gateway diagnostic-reference findings redact a malformed `X-Ferrum-Diagnostic-Ref` value and a
   mismatched record's value before cutting them to 80 characters, so a known secret that crosses
-  the cut is replaced whole instead of leaving its prefix in findings and saved history (#337).
-  Findings that quote an `X-Gateway-Error` value now show it as received and redacted, never
-  lowercased, so a known secret in it no longer reaches findings and saved history in lowercase.
+  the cut is replaced whole in findings and saved history. Findings that quote an
+  `X-Gateway-Error` value redact it as received, before it is split or cut, so a known secret in
+  it is replaced in its own case (#337).
+
+### Breaking
+
+- Response extractions and dataset cells containing `{{...}}` are sent literally instead of being
+  expanded. If a workflow needs template expansion, store the intended template in an ordinary
+  workspace or request variable (#343).
+- MCP initialize redirects are refused. Point the request at the final MCP endpoint (#343).
+- Rust consumers that construct `anvil_engine::vars::VarEntry` directly must now set `literal`
+  to `false` for template-backed variables or `true` for values that must remain data (#343).
+- `anvil lint-spec` exits with 3 when its report is `incomplete` (a copy budget ran out), as it
+  already did when operations were left out. Pass `--allow-incomplete` to accept an incomplete
+  report; the exit code then follows the findings (#349).
+- System DNS resolves `localhost` and `*.localhost` only to loopback. Only loopback answers
+  are kept, so a name whose hosts-file or resolver answers include no loopback address now
+  fails; use a DNS override to target a non-loopback address (#338).
+- A sensitive extraction larger than 64 KiB now fails its step: the response is discarded
+  and the value is not passed to later steps (#343).
+- Findings that quote `X-Gateway-Error` marker values show them as received (redacted), no
+  longer lowercased. Anything that matches the quoted text in findings or saved history must
+  expect the received case (#337).
 
 ### Added
 
@@ -36,7 +67,7 @@
   diagnostic-report schema and every diagnostic fixture are unchanged.
 - Add the separately source-audited Edge v0.9.14 catalog and release-asset locks at
   `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (release 405571232), selected as the lab and
-  new-profile candidate default pending hosted Anvil gates. v0.9.12 and v0.9.13 are covered by
+  new-profile default, qualified by hosted Lab runs (see the audit). v0.9.12 and v0.9.13 are covered by
   the audit, not pinned. v0.9.11 and the earlier catalogs and locks stay supported, and the
   nightly lab now also runs v0.9.11. See `docs/audit/gateway-0.9.14-delta.md`.
 
@@ -54,26 +85,19 @@
 - Lab UP-018 expects the direct-H1 connection-ceiling signal from v0.9.11 through the pinned
   release instead of on the pinned release only, so the retained v0.9.11 keeps its signal now
   that the pin is v0.9.14.
-- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
-
-### Security
-
-- Treat response extractions and dataset cells as literal values, cap total variable references at 16,384 per resolver, bound text redaction to one pass over the input, refuse MCP initialize redirects and withhold MCP session headers on cross-origin redirects, and charge everything the lint model copies out of a document before copying it, resolving an operation shared by several paths once (#343).
-
-### Breaking
-
-- Response extractions and dataset cells containing `{{...}}` are sent literally instead of being expanded. If a workflow needs template expansion, store the intended template in an ordinary workspace or request variable.
-- MCP initialize redirects are refused. Point the request at the final MCP endpoint.
-- Rust consumers that construct `anvil_engine::vars::VarEntry` directly must now set `literal` to `false` for template-backed variables or `true` for values that must remain data (#343).
+- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required
+  Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle
+  copyright.
 
 ### Fixed
 
-- System DNS keeps `localhost` and `*.localhost` destinations on loopback, matching the load preflight's local classification (#338).
-  Hosts-file entries that point these names at non-loopback addresses now fail; use a DNS override to target a non-loopback address.
+- System DNS keeps `localhost` and `*.localhost` destinations on loopback, matching the load
+  preflight's local classification; see Breaking (#338).
 - The draft confirmation counts every DNS override that differs, including one whose change is
   hidden by the shortened address list (#335).
 - Ruleset details reload their source text after Replace (#339).
-- `spec-drift --har` names path parameters in time bounded by the path length. A URL with many colliding parameter segments could stall the analysis (#334).
+- `spec-drift --har` names path parameters in time bounded by the path length. A URL with many
+  colliding parameter segments could stall the analysis (#334).
 - Lab MESH-011 reaches the Ambient gateway again (#341). Its TEST-NET target `192.0.2.10` was
   refused locally by the destination policy added in #308, before the CONNECT was sent, so the
   scenario failed instead of proving the gateway's refusal. It now targets the unrouted

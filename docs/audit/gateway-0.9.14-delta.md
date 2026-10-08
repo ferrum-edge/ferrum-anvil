@@ -8,7 +8,7 @@
 | Contracts | Published `contracts-edge-0.9.14`, `ddbdd845733b7046c4393ac951011dafb774db33` |
 | Catalog | [`ferrum-edge-0.9.14/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json), 553 carried outcome IDs with the delta below |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.14.lock`; v0.9.11 is retained as an earlier supported release |
-| Hosted qualification | All-profile Lab run 37758644110 on the PR head; results and the pre-existing MESH-011 exception are recorded below |
+| Hosted qualification | All-profile Lab run 37758644110 on the PR head and scheduled all-profile Lab run 37770270997 after the MESH-011 fix (#342); results are recorded below |
 | Audit date | 2026-10-08 |
 
 The [immutable comparison][compare] changes 57 files under `src/` (8,316 insertions, 1,091
@@ -163,10 +163,21 @@ The hosted all-profile Lab run 37758644110 (`workflow_dispatch`, `profile=all`) 
 head `7b19d50e`. macOS reported 556 passed / 2 failed / 19 skipped; Ubuntu reported 552
 passed / 2 failed / 21 skipped. UP-018 and UP-018-untrusted passed on both operating systems.
 The only failures were MESH-011 and MESH-011-untrusted on both operating systems. The main
-nightly run 37612351285 fails those same scenarios across v0.9.5–v0.9.11; this is a
-pre-existing Anvil issue tracked in [#341](https://github.com/ferrum-edge/ferrum-anvil/issues/341),
-unrelated to this Edge adoption. No physical-device native acceptance, platform signing, OAuth,
-provider-account or broader performance acceptance is claimed.
+nightly run 37612351285 failed those same scenarios across v0.9.5–v0.9.11. That was a
+pre-existing Anvil issue ([#341](https://github.com/ferrum-edge/ferrum-anvil/issues/341)),
+unrelated to this Edge adoption: Anvil's destination policy refused the scenario's TEST-NET
+target locally, before the CONNECT reached the gateway. It is fixed by
+[#342](https://github.com/ferrum-edge/ferrum-anvil/pull/342), which moves the target to an
+address the policy admits and asserts that no local refusal occurred.
+
+The scheduled all-profile Lab run 37770270997 on main at `615739ae` (the #342 merge) passed
+MESH-011 and MESH-011-untrusted on both operating systems, for v0.9.14 and for every earlier
+supported release. For v0.9.14, macOS reported 558 passed / 0 failed / 19 skipped and Ubuntu
+553 passed / 1 failed / 21 skipped. The Ubuntu failure was GW-020-BUDGET-untrusted: the lab read the
+gateway operator log before the rejected request's line was written (a lab-side read race, not a
+gateway behaviour change); it passed on macOS in that run and on both operating systems in run
+37758644110. No physical-device native acceptance, platform signing,
+OAuth, provider-account or broader performance acceptance is claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/c764084b3b51c3f7ffde268c039688d35e49c553...9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d
 [changelog]: https://github.com/ferrum-edge/ferrum-edge/blob/9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d/CHANGELOG.md
