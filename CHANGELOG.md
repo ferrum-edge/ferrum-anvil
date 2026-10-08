@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+
+- Release creation reads the uploaded release-evidence file as JSON data and validates its
+  format before using it in draft notes; it no longer loads it as code (#333).
+
 ### Added
 
 - Adopt published `contracts-edge-0.9.14` (`ddbdd845733b7046c4393ac951011dafb774db33`)
@@ -17,6 +22,8 @@
 
 ### Changed
 
+- Full backup Replace restores keep local API rulesets when the backup has no app-settings
+  section, and the preview explains that choice (#336).
 - Gateway catalog 0.9.14: a buffered-collector read error answers the eager collector's
   502 `{"error":"Backend response body read failed"}`, so that body is ambiguous between the two
   collectors on 0.9.14 and the old `{"error":"Backend response read error"}` body is matched only
