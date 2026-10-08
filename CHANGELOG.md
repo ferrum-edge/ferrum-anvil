@@ -29,6 +29,9 @@
   CONNECT relays, external identities no longer mapped to Consumers, `Connection`-nominated fields
   removed at ingress, per-principal replay capacity, strict MTOM framing, QUIC address validation
   and the 0.5-RTT path reserved for validated sources.
+- Gateway catalog 0.9.15 drops the OIDC relying party's "state cache full" 503: v0.9.15 falls back
+  to the sealed state cookie instead of refusing the login, so the outcome is recorded under
+  `removed_outcomes`.
 - HTTP/3 0-RTT: Anvil keeps the QUIC address-validation (`NEW_TOKEN`) tokens a server issues with
   its session tickets, in the same isolated, in-memory context, and presents one on the resumed
   connection. Ferrum Edge v0.9.15 serves a 0-RTT request before its handshake completes only for
