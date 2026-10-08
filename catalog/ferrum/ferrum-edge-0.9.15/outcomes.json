@@ -6,7 +6,7 @@
     "source_sha": "25b37395ff61bfea0f3ffd189d9011c4984fa755"
   },
   "generated_on": "2026-10-08",
-  "method": "Source delta audit against immutable v0.9.14 and v0.9.15 trees; carried citations remapped through identical source text, changed paths inspected for observable semantics. Hosted all-profile Lab qualification is pending; no completeness claim. See docs/audit/gateway-0.9.15-delta.md.",
+  "method": "Source delta audit against immutable v0.9.14 and v0.9.15 trees; carried citations remapped through identical source text, changed paths inspected for observable semantics. Hosted all-profile Lab evidence is recorded in the audit; no completeness claim. See docs/audit/gateway-0.9.15-delta.md.",
   "public_tokens": [
     "connection_failure",
     "backend_timeout",
@@ -1427,7 +1427,7 @@
     ]
   },
   "matrix_seed_reconciliation": {
-    "source": "Historical seed coverage from the v0.9.5..v0.9.14 audits, carried with the v0.9.14 -> v0.9.15 source delta recorded in docs/audit/gateway-0.9.15-delta.md; hosted qualification pending.",
+    "source": "Historical seed coverage from the v0.9.5..v0.9.14 audits, carried with the v0.9.14 -> v0.9.15 source delta recorded in docs/audit/gateway-0.9.15-delta.md; hosted scenario counts recorded in the qualification evidence there.",
     "notes": {
       "dns_lookup_error/UP-001": "public body is path-dependent: reqwest preflight 'Backend DNS resolution failed' vs pools 'Backend unavailable'",
       "tls_error/UP-004,UP-006": "backend mTLS on the reqwest HTTP/1 pool surfaces as connection_pool_error (connection_failure) or connection_reset (backend_error), not tls_error",

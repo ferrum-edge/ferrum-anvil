@@ -7,7 +7,7 @@
 | Contracts | Published `contracts-edge-0.9.15`, `6fb64c5dc2e014204c17609fc717d976f3b4589e` |
 | Catalog | [`ferrum-edge-0.9.15/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json), 556 outcome IDs: the 553 of 0.9.14 − 1 removed + 4 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.15.lock`; v0.9.14 is retained as an earlier supported release |
-| Hosted qualification | Pending: root dispatches the manual all-profile Lab run (`workflow_dispatch`, `profile=all`) on the PR head |
+| Hosted qualification | All-profile Lab run 37847538911 on PR head `a2d764ec`; results are recorded below |
 | Audit date | 2026-10-08 |
 
 v0.9.15 is a security release (26 published advisories). The [immutable comparison][compare]
@@ -38,7 +38,7 @@ historical.
 Citation text equality alone does not establish behavioral equality. Every changed request
 path below was read against its surrounding source, the [0.9.15 changelog][changelog] and the
 [upgrade guide][upgrade]. A global comparison of every catalog public signal (status, token and
-JSON body, 398 signals) against the 0.9.14 and 0.9.15 catalogs finds four new match sets, all of
+JSON body) against the 0.9.14 and 0.9.15 catalogs finds four new match sets, all of
 them the new outcomes below, and one signal that matches nothing on 0.9.15: the removed OIDC
 state-cache-full 503. Every other carried signal matches the same outcomes as on 0.9.14. A
 catalog-to-catalog comparison cannot detect an emitter that stopped firing; that removal was found
@@ -184,10 +184,19 @@ The source audit found no other scenario whose asserted signal moves:
 
 ## Qualification status
 
-Pending. Root dispatches the hosted manual Lab run (`workflow_dispatch`, `profile=all`) on the PR
-head; its results, including MESH-007/008, the sidecar UDP/DTLS tunnels, EARLY-001/002 and UP-018,
-belong in this section. No physical-device native acceptance, platform signing, OAuth,
-provider-account or broader performance acceptance is claimed.
+The hosted all-profile Lab run 37847538911 (`workflow_dispatch`, `profile=all`) ran all 14
+profiles against v0.9.15 on PR head `a2d764ec`. Ubuntu reported 554 passed / 0 failed / 21
+skipped. On macOS the first attempt failed only PROTO-022.rogue-untrusted at its recovery check,
+which sends a single DTLS datagram after the refused handshake and received no echo; the trusted
+variant passed in the same attempt. The failed job's rerun (attempt 2) reported 558 passed /
+0 failed / 19 skipped. That recovery check has no retry, so one lost datagram fails it
+([#355](https://github.com/ferrum-edge/ferrum-anvil/issues/355)); this PR changes no DTLS or TLS
+scenario. MESH-007 (including its new path-scope control), MESH-008, the sidecar UDP and DTLS
+scenarios (MESH-020 to MESH-028 and MESH-031 to MESH-034; MESH-029 and MESH-030 are Ambient and
+EgressGateway scenarios this profile skips by design), EARLY-001/002 and UP-018 passed, trusted and untrusted, on both operating systems.
+Later commits on the PR change only test fixture counts and documentation. No physical-device
+native acceptance, platform signing, OAuth, provider-account or broader performance acceptance is
+claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d...25b37395ff61bfea0f3ffd189d9011c4984fa755
 [changelog]: https://github.com/ferrum-edge/ferrum-edge/blob/25b37395ff61bfea0f3ffd189d9011c4984fa755/CHANGELOG.md
