@@ -173,9 +173,10 @@ address the policy admits and asserts that no local refusal occurred.
 The scheduled all-profile Lab run 37770270997 on main at `615739ae` (the #342 merge) passed
 MESH-011 and MESH-011-untrusted on both operating systems, for v0.9.14 and for every earlier
 supported release. For v0.9.14, macOS reported 558 passed / 0 failed / 19 skipped and Ubuntu
-553 passed / 1 failed / 21 skipped. The Ubuntu failure was GW-020-BUDGET-untrusted (the gateway
-operator log had no `before_proxy` rejection phase); it passed on macOS in that run and on both
-operating systems in run 37758644110. No physical-device native acceptance, platform signing,
+553 passed / 1 failed / 21 skipped. The Ubuntu failure was GW-020-BUDGET-untrusted: the lab read the
+gateway operator log before the rejected request's line was written (a lab-side read race, not a
+gateway behaviour change); it passed on macOS in that run and on both operating systems in run
+37758644110. No physical-device native acceptance, platform signing,
 OAuth, provider-account or broader performance acceptance is claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/c764084b3b51c3f7ffde268c039688d35e49c553...9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d

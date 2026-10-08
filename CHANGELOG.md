@@ -49,9 +49,11 @@ cutting them. Some of these change behaviour; read the Breaking section below be
 - `anvil lint-spec` exits with 3 when its report is `incomplete` (a copy budget ran out), as it
   already did when operations were left out. Pass `--allow-incomplete` to accept an incomplete
   report; the exit code then follows the findings (#349).
-- System DNS resolves `localhost` and `*.localhost` only to loopback. Hosts-file entries that
-  point these names at non-loopback addresses now fail; use a DNS override to target a
-  non-loopback address (#338).
+- System DNS resolves `localhost` and `*.localhost` only to loopback. Only loopback answers
+  are kept, so a name whose hosts-file or resolver answers include no loopback address now
+  fails; use a DNS override to target a non-loopback address (#338).
+- A sensitive extraction larger than 64 KiB now fails its step: the response is discarded
+  and the value is not passed to later steps (#343).
 - Findings that quote `X-Gateway-Error` marker values show them as received (redacted), no
   longer lowercased. Anything that matches the quoted text in findings or saved history must
   expect the received case (#337).
@@ -65,7 +67,7 @@ cutting them. Some of these change behaviour; read the Breaking section below be
   diagnostic-report schema and every diagnostic fixture are unchanged.
 - Add the separately source-audited Edge v0.9.14 catalog and release-asset locks at
   `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (release 405571232), selected as the lab and
-  new-profile candidate default pending hosted Anvil gates. v0.9.12 and v0.9.13 are covered by
+  new-profile default, qualified by hosted Lab runs (see the audit). v0.9.12 and v0.9.13 are covered by
   the audit, not pinned. v0.9.11 and the earlier catalogs and locks stay supported, and the
   nightly lab now also runs v0.9.11. See `docs/audit/gateway-0.9.14-delta.md`.
 

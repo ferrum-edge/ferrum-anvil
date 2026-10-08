@@ -17,9 +17,11 @@ has the full list.
 - `anvil lint-spec` exits with 3 when its report is incomplete (a copy budget
   ran out), as it already did when operations were left out. Pass
   `--allow-incomplete` where an incomplete lint is acceptable.
-- The System resolver keeps `localhost` and `*.localhost` on loopback. A
-  hosts-file entry that points one of these names at another address now
-  fails; use a DNS override to reach a non-loopback address.
+- The System resolver keeps `localhost` and `*.localhost` on loopback: only
+  loopback answers are kept, so a name that resolves to no loopback address
+  now fails; use a DNS override to reach a non-loopback address.
+- A sensitive extraction larger than 64 KiB now fails its step; the response
+  is discarded and the value is not passed to later steps.
 - Findings that quote `X-Gateway-Error` values show them as received
   (redacted), no longer lowercased. Update anything that matches that quoted
   text in findings or saved history.
