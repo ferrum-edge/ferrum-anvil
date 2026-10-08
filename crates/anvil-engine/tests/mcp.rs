@@ -381,6 +381,32 @@ async fn a_cross_origin_redirect_drops_the_session_id() {
 }
 
 #[tokio::test]
+async fn a_cross_origin_redirect_drops_the_session_id_when_credential_forwarding_is_enabled() {
+    init();
+    let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::RedirectOperation(to))).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = mcp_ctx(&f.url(), list());
+    ctx.settings_layers.push((
+        "test".into(),
+        SettingsOverrides {
+            redirects: Some(anvil_domain::settings::RedirectPolicy {
+                follow: true,
+                max: 10,
+                forward_credentials_cross_origin: true,
+            }),
+            ..Default::default()
+        },
+    ));
+    let o = run(&e, &ctx).await;
+    let headers = other.log.last_request_headers().expect("the redirect was followed");
+    assert!(!headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id")), "{headers:?}");
+    assert!(headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-protocol-version")), "{headers:?}");
+    assert!(notes(&o).contains("credential headers withheld on the redirect"), "{}", notes(&o));
+}
+
+#[tokio::test]
 async fn initialize_does_not_follow_a_cross_origin_redirect() {
     init();
     let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();

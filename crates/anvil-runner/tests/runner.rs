@@ -6,7 +6,7 @@
 use anvil_domain::Id;
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::outcome::{ApplicationState, AssertionState, TransportState};
-use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::runner::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_domain::workspace::DatasetFormat;
@@ -100,7 +100,7 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let mut p = Recording::default();
     let mut login = RequestSpec::http("POST", &f.url("/status/200"));
-    login.params.push(KeyValue::new("body", r#"{"token":"{{secret}}","user":"alice"}"#));
+    login.params.push(KeyValue::new("body", r#"{"token":"%7B%7Bsecret%7D%7D","user":"alice"}"#));
     login.extractions.push(Extraction {
         variable: "auth_token".into(),
         source: ExtractionSource::JsonPath { path: "$.token".into() },
@@ -134,6 +134,32 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     assert_eq!(header(&seen, "x-token"), Some("{{secret}}"));
     assert_eq!(header(&seen, "x-step"), Some("0/1"), "anvil.iteration / anvil.step builtins");
     assert_eq!(p.records.lock().len(), 2, "each executed step is handed over for history");
+}
+
+#[tokio::test]
+async fn oversized_sensitive_extractions_are_omitted_and_the_response_body_is_discarded() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let mut request = RequestSpec::http("POST", &f.url("/echo"));
+    request.body = Body::Raw { text: "x".repeat(64 * 1024 + 1), content_type: Some("text/plain".into()) };
+    request.extractions.push(Extraction {
+        variable: "large_secret".into(),
+        source: ExtractionSource::JsonPath { path: "$.body".into() },
+        sensitive: true,
+    });
+    let request_id = p.add("Large extraction", request);
+
+    let engine = Engine::new();
+    let report = anvil_runner::run(&engine, &p, plan(&[(request_id, "Large extraction")]), RunOptions::default(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(report.passed(), "{report:#?}");
+    assert!(report.iterations[0].steps[0].extracted.is_empty());
+    let record = p.records.lock();
+    assert!(record[0].1.is_empty(), "the response body was discarded");
+    assert!(record[0].0.contains("64 KiB limit"));
 }
 
 fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {

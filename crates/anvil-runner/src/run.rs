@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_URL: usize = 2_048;
 const MAX_TEXT: usize = 1_024;
 const MAX_SUMMARY: usize = 512;
+/// Larger sensitive values are omitted instead of indexing them for redaction.
+const MAX_SENSITIVE_EXTRACTION_BYTES: usize = 64 * 1024;
 
 /// Execute a plan. Returns an error only when the run cannot start (trust,
 /// validation); once started, cancellation or an abort still yields a
@@ -276,6 +278,19 @@ impl Run {
             // recorded or reported.
             let mut new_secrets = Vec::new();
             for (var, value, sensitive) in std::mem::take(&mut out.extracted) {
+                if sensitive && value.len() > MAX_SENSITIVE_EXTRACTION_BYTES {
+                    out.body = bytes::Bytes::new();
+                    out.decoded_body = None;
+                    if let Some(response) = &mut out.record.response {
+                        response.body.captured_bytes = 0;
+                        response.body.blob_sha256 = None;
+                    }
+                    self.notes.push(
+                        &self.secrets,
+                        "A sensitive extraction exceeded the 64 KiB limit and was omitted; its response body was discarded.",
+                    );
+                    continue;
+                }
                 if sensitive {
                     new_secrets.push(value.clone());
                     self.secrets.add_name(&var);

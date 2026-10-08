@@ -453,10 +453,21 @@ pub struct Model<'a> {
 /// (path-level ones count again for every operation that inherits them).
 /// Past this, the remaining operations are left out and counted.
 pub const MAX_MODEL_WORK: usize = 2_000_000;
+/// Bytes copied into per-path operation views, counted separately from the
+/// object-work budget so ordinary long descriptions do not consume that budget.
+pub const MAX_MODEL_VIEW_BYTES: usize = 256 * 1024 * 1024;
 
 impl<'a> Model<'a> {
     pub fn build(spec: &'a Spec, examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>) -> Model<'a> {
-        let mut b = ModelBuilder { spec, targets: vec![], seen: HashSet::new(), work: 0, skipped_operations: 0 };
+        let mut b = ModelBuilder {
+            spec,
+            targets: vec![],
+            seen: HashSet::new(),
+            work: 0,
+            view_bytes: 0,
+            view_byte_limit: MAX_MODEL_VIEW_BYTES,
+            skipped_operations: 0,
+        };
         b.build(examples);
         Model { spec, targets: b.targets, skipped_operations: b.skipped_operations }
     }
@@ -481,6 +492,8 @@ struct ModelBuilder<'a> {
     /// shared through `$ref` is one target.
     seen: HashSet<(TargetKind, String)>,
     work: usize,
+    view_bytes: usize,
+    view_byte_limit: usize,
     skipped_operations: usize,
 }
 
@@ -761,8 +774,6 @@ impl<'a> ModelBuilder<'a> {
             Some(reqs) => requirement_names(Some(reqs)),
             None => global_security_names.to_vec(),
         };
-        let copied_text_bytes =
-            ["summary", "description"].iter().filter_map(|key| op.op.get(*key).and_then(Value::as_str)).map(str::len).sum::<usize>();
         // Everything below is proportional to these (inherited parameters and
         // the document's security count for every operation).
         self.work += 1
@@ -775,8 +786,7 @@ impl<'a> ModelBuilder<'a> {
                 .sum::<usize>()
             + body.as_ref().map_or(0, |b| b.media.len())
             + op.item.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
-            + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
-            + copied_text_bytes;
+            + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len);
         if self.work > MAX_MODEL_WORK {
             self.skipped_operations += 1;
             return;
@@ -802,11 +812,7 @@ impl<'a> ModelBuilder<'a> {
             }
         }
         let operation_id = op.operation_id();
-        self.push(
-            TargetKind::Operation,
-            op.pointer.clone(),
-            label.clone(),
-            json!({
+        let operation_view = json!({
                 "method": op.method,
                 "method_upper": op.method.to_ascii_uppercase(),
                 "path": op.path,
@@ -842,8 +848,14 @@ impl<'a> ModelBuilder<'a> {
                 "undefined_security_schemes": security_names.iter().filter(|n| !scheme_names.contains(*n)).collect::<Vec<_>>(),
                 "duplicate_parameters": dup_params,
                 "extensions": extensions(op.op),
-            }),
-        );
+        });
+        let copied_bytes = op.pointer.len().saturating_add(label.len()).saturating_add(copied_string_bytes(&operation_view));
+        if self.view_bytes.saturating_add(copied_bytes) > self.view_byte_limit {
+            self.skipped_operations += 1;
+            return;
+        }
+        self.view_bytes += copied_bytes;
+        self.push(TargetKind::Operation, op.pointer.clone(), label.clone(), operation_view);
         let ctx =
             json!({"method": op.method, "method_upper": op.method.to_ascii_uppercase(), "path": op.path, "operation_id": operation_id});
 
@@ -1045,5 +1057,51 @@ fn merge(view: &mut Value, ctx: &Value) {
         for (k, x) in c {
             v.entry(k.clone()).or_insert_with(|| x.clone());
         }
+    }
+}
+
+fn copied_string_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(s) => s.len(),
+        Value::Array(values) => values.iter().fold(0usize, |sum, value| sum.saturating_add(copied_string_bytes(value))),
+        Value::Object(values) => values
+            .iter()
+            .fold(0usize, |sum, (key, value)| sum.saturating_add(key.len()).saturating_add(copied_string_bytes(value))),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_operation_extensions_are_charged_to_the_view_byte_budget() {
+        let extension = "x".repeat(128 * 1024);
+        let mut paths = serde_json::Map::new();
+        for i in 0..12 {
+            paths.insert(format!("/shared-{i}"), json!({"$ref": "#/components/pathItems/Shared"}));
+        }
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": paths,
+            "components": {"pathItems": {"Shared": {"get": {"x-doc": extension}}}}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let mut builder = ModelBuilder {
+            spec: &spec,
+            targets: vec![],
+            seen: HashSet::new(),
+            work: 0,
+            view_bytes: 0,
+            view_byte_limit: 1024 * 1024,
+            skipped_operations: 0,
+        };
+        builder.build(&mut |_, _| vec![]);
+
+        assert!(builder.skipped_operations > 0);
+        assert!(builder.view_bytes <= builder.view_byte_limit);
+        assert!(builder.targets.iter().any(|t| t.kind == TargetKind::Operation));
     }
 }
