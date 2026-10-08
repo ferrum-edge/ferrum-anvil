@@ -29,6 +29,10 @@
   that the pin is v0.9.14.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
 
+### Fixed
+
+- `spec-drift --har` names path parameters in time bounded by the path length. A URL with many colliding parameter segments could stall the analysis (#334).
+
 ## [0.1.3] - 2026-10-06
 
 Storage and desktop hardening release: request revisions, history records and load reports are
