@@ -45,6 +45,7 @@
 - Response extractions and dataset cells containing `{{...}}` are sent literally instead of being expanded. If a workflow needs template expansion, store the intended template in an ordinary workspace or request variable.
 - MCP initialize redirects are refused. Point the request at the final MCP endpoint.
 - Rust consumers that construct `anvil_engine::vars::VarEntry` directly must now set `literal` to `false` for template-backed variables or `true` for values that must remain data (#343).
+
 ### Fixed
 
 - `spec-drift --har` names path parameters in time bounded by the path length. A URL with many colliding parameter segments could stall the analysis (#334).

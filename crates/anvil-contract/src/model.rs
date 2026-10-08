@@ -859,7 +859,7 @@ impl<'a> ModelBuilder<'a> {
                     method: method.clone(),
                     path: path.to_string(),
                     pointer: pointer.clone(),
-                    op: *value,
+                    op: value,
                     item: item.value,
                     item_pointer: item.pointer.clone(),
                 };
