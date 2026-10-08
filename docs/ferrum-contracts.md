@@ -9,7 +9,7 @@ Publication is verified by [canonical PR #23](https://github.com/ferrum-edge/fer
 the successful [main validation](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/37841329610)
 and the [tag release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.15).
 The lab and new-profile default now select the separately source-audited
-v0.9.15 candidate, pending hosted Anvil qualification. Earlier catalogs and locks
+v0.9.15 release, with [hosted Anvil qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded. Earlier catalogs and locks
 remain supported; v0.9.14 retains its mapping to `contracts-edge-0.9.14`, v0.9.11 to
 `contracts-edge-0.9.11` and v0.9.9/v0.9.10 to `contracts-edge-0.9.9` (or its additive r2
 revision).

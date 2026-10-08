@@ -4,7 +4,7 @@
 - Scenarios run against a pinned Ferrum Edge release binary in file mode
   (mesh mode for the mesh profile), with generated PKI, loopback-only ports
   and controllable fixtures. The default pin is `lab/gateway/RELEASE.lock`
-  (v0.9.15 candidate pending hosted Anvil gates; originally v0.9.5); every supported release keeps its own lock in
+  (v0.9.15 with [hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded; originally v0.9.5); every supported release keeps its own lock in
   `lab/gateway/releases/` and is selected with `--release`.
 - Ground truth comes from fixture logs and the gateway's operator
   `error_class` log lines. It is used only by checks and never fed to the

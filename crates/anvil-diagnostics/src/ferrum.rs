@@ -18,8 +18,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// The source-audited candidate new profiles default to. Live v0.9.15
-/// compatibility awaits hosted Anvil gates (`docs/audit/gateway-0.9.15-delta.md`).
+/// The source-audited release new profiles default to. Hosted Anvil
+/// qualification is recorded in `docs/audit/gateway-0.9.15-delta.md`.
 pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.15";
 
 const EDGE_0_9_15: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json");

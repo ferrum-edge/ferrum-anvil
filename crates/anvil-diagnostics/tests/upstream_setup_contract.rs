@@ -12,9 +12,8 @@
 //!   HTTP/1.1 lane runs in `anvil-lab run admission`: reqwest on the historical
 //!   releases, direct H1 on 0.9.11 (hosted qualification recorded in
 //!   `docs/audit/gateway-0.9.11-delta.md`), 0.9.14 (hosted qualification
-//!   recorded in `docs/audit/gateway-0.9.14-delta.md`) and 0.9.15
-//!   (source-audited in `docs/audit/gateway-0.9.15-delta.md`; hosted
-//!   qualification pending).
+//!   recorded in `docs/audit/gateway-0.9.14-delta.md`) and 0.9.15 (hosted
+//!   qualification recorded in `docs/audit/gateway-0.9.15-delta.md`).
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
 //! the exact public signal the source-audited catalogs record for each outcome
