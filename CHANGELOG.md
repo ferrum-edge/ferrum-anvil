@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- `spec-drift --har` names path parameters in time bounded by the path length. A URL with many colliding parameter segments could stall the analysis (#334).
 - Lab MESH-011 reaches the Ambient gateway again (#341). Its TEST-NET target `192.0.2.10` was
   refused locally by the destination policy added in #308, before the CONNECT was sent, so the
   scenario failed instead of proving the gateway's refusal. It now targets the unrouted
