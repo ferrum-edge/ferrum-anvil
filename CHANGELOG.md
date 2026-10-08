@@ -21,6 +21,11 @@
   and in `spec.operations`. A lint whose copy budget runs out reports `incomplete` (as do the
   text, SARIF and desktop outputs), and `anvil lint-spec` exits with 3 for it unless
   `--allow-incomplete` is passed (#349).
+- Gateway diagnostic-reference findings redact a malformed `X-Ferrum-Diagnostic-Ref` value and a
+  mismatched record's value before cutting them to 80 characters, so a known secret that crosses
+  the cut is replaced whole instead of leaving its prefix in findings and saved history (#337).
+  Findings that quote an `X-Gateway-Error` value now show it as received and redacted, never
+  lowercased, so a known secret in it no longer reaches findings and saved history in lowercase.
 
 ### Added
 
@@ -63,6 +68,8 @@
 
 ### Fixed
 
+- System DNS keeps `localhost` and `*.localhost` destinations on loopback, matching the load preflight's local classification (#338).
+  Hosts-file entries that point these names at non-loopback addresses now fail; use a DNS override to target a non-loopback address.
 - The draft confirmation counts every DNS override that differs, including one whose change is
   hidden by the shortened address list (#335).
 - Ruleset details reload their source text after Replace (#339).
