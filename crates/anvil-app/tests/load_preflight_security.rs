@@ -71,6 +71,19 @@ fn pin(app: &App, workspace: Id, host: &str, addresses: &[&str]) {
     app.save_workspace(ws).unwrap();
 }
 
+#[test]
+fn localhost_preflight_uses_fixed_addresses_before_system_locality() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Fixed localhost address").unwrap().meta.id;
+    let p = plan(&app, ws, RequestSpec::http("GET", "http://api.localhost:8080/"));
+
+    pin(&app, ws, "api.localhost", &["198.51.100.7"]);
+    assert!(warns(&app, &p), "a fixed non-loopback answer remains remote");
+    pin(&app, ws, "api.localhost", &["127.0.0.1"]);
+    assert!(!warns(&app, &p), "a fixed loopback answer remains local");
+}
+
 fn proxy(app: &App, workspace: Id, kind: ProxyKind, address: &str, no_proxy: &str) -> ProxyProfile {
     app.save_proxy_profile(ProxyProfile {
         id: Id::new(),

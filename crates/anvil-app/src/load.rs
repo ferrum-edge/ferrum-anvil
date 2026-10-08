@@ -763,6 +763,7 @@ fn fixed_host_is_loopback(ctx: &anvil_engine::ExecutionContext, host: &str, port
     match anvil_transport::dns::fixed_resolution(host, port, &dns) {
         Some(Ok(resolution)) => !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())),
         Some(Err(_)) => false,
+        // System transport resolution enforces this same localhost loopback rule in dns.rs.
         None => system_resolver && is_localhost_name(host),
     }
 }
