@@ -9,6 +9,8 @@
 - Gateway diagnostic-reference findings redact a malformed `X-Ferrum-Diagnostic-Ref` value and a
   mismatched record's value before cutting them to 80 characters, so a known secret that crosses
   the cut is replaced whole instead of leaving its prefix in findings and saved history (#337).
+  Findings that quote an `X-Gateway-Error` value now show it as received and redacted, never
+  lowercased, so a known secret in it no longer reaches findings and saved history in lowercase.
 
 ### Added
 

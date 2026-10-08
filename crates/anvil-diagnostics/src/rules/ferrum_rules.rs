@@ -20,6 +20,8 @@ use anvil_domain::outcome::{OutcomeWarning, WarningCode};
 
 const MARKER: &str = "x-gateway-error";
 const UPSTREAM_STATUS: &str = "x-gateway-upstream-status";
+/// Most characters of one marker value a finding quotes.
+const MAX_SHOWN_MARKER_CHARS: usize = 80;
 
 fn scope_for_family(f: &str) -> SourceScope {
     match f {
@@ -107,6 +109,24 @@ impl Basis {
     }
 }
 
+/// The marker values as a finding quotes them: each value redacted whole
+/// before it is split at commas, so a secret is matched in its own case and
+/// in one piece, then each part trimmed, without control characters and cut.
+/// The lowercased tokens are for matching only.
+fn shown_markers(ctx: &Ctx<'_>, values: &[&str]) -> Vec<String> {
+    let mut shown: Vec<String> = Vec::new();
+    for &v in values {
+        let v = ctx.input.redact.map_or_else(|| v.to_string(), |redact| redact(v));
+        for part in v.split(',') {
+            let p: String = part.trim().chars().filter(|c| !c.is_control()).take(MAX_SHOWN_MARKER_CHARS).collect();
+            if !p.is_empty() && !shown.contains(&p) {
+                shown.push(p);
+            }
+        }
+    }
+    shown
+}
+
 fn audited_releases() -> String {
     ferrum::compatibility_ids().collect::<Vec<_>>().join(", ")
 }
@@ -121,8 +141,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     let idx = ctx.attempt_index();
 
     // Collect marker values (repeated headers and comma-joined values).
+    let values: Vec<&str> = r.header_values(MARKER).into_iter().chain(r.trailer_values(MARKER)).collect();
     let mut tokens: Vec<String> = Vec::new();
-    for v in r.header_values(MARKER).into_iter().chain(r.trailer_values(MARKER)) {
+    for v in &values {
         for part in v.split(',') {
             let p = part.trim().to_ascii_lowercase();
             if !p.is_empty() && !tokens.contains(&p) {
@@ -130,6 +151,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             }
         }
     }
+    // What a finding quotes of the values: never the lowercased tokens, which no redactor matches.
+    let shown = if tokens.is_empty() { vec![] } else { shown_markers(ctx, &values) };
     let degraded = r.header_values(UPSTREAM_STATUS).iter().any(|v| v.trim().eq_ignore_ascii_case("degraded"));
 
     let (trusted, channel_auth, profile, compat) = match ctx.input.trust {
@@ -154,8 +177,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 Owner::Caller,
                 Severity::Info,
             )
-            .var("values", if tokens.is_empty() { "X-Gateway-Upstream-Status: degraded".into() } else { tokens.join(", ") });
-            for t in &tokens {
+            .var("values", if tokens.is_empty() { "X-Gateway-Upstream-Status: degraded".into() } else { shown.join(", ") });
+            for t in &shown {
                 d = d.ev_at(E::FerrumMarkerUnverified, "header.x-gateway-error", t.clone(), idx);
             }
             out.push(d);
@@ -223,8 +246,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 Owner::GatewayOperator,
                 Severity::Warning,
             )
-            .var("values", tokens.join(", "));
-            for t in &tokens {
+            .var("values", shown.join(", "));
+            for t in &shown {
                 d = d.ev_at(src, "header.x-gateway-error", t.clone(), idx);
             }
             out.push(d);
@@ -244,8 +267,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 Owner::GatewayOperator,
                 Severity::Warning,
             )
-            .ev_at(src, "header.x-gateway-error", t.clone(), idx)
-            .var("token", t.clone())
+            .ev_at(src, "header.x-gateway-error", shown.join(", "), idx)
+            .var("token", shown.join(", "))
             .var("basis", basis.describe()),
         );
         return;
@@ -707,6 +730,36 @@ mod tests {
                 assert!(!(4..=SECRET.len()).any(|n| text.contains(&SECRET[..n])), "{}: a prefix of the secret is quoted: {text}", x.code);
             }
         }
+    }
+
+    /// Marker values are matched lowercased but quoted as received, redacted
+    /// before they are split at commas: a mixed-case secret is never quoted
+    /// lowercased (which no redactor matches) nor in pieces.
+    #[test]
+    fn marker_values_are_quoted_redacted_never_lowercased() {
+        use anvil_domain::secret::REDACTED;
+        const SECRETS: [&str; 2] = ["Sk-Live-Marker,Secret-7Q", "Sk-Live-Mixed-Case-7Q"];
+        let scrub = |s: &str| SECRETS.iter().fold(s.to_string(), |s, secret| s.replace(secret, REDACTED));
+        let leaks = |f: &[DiagnosticFinding]| {
+            let texts = f.iter().flat_map(|x| std::iter::once(&x.explanation).chain(x.evidence.iter().map(|e| &e.value)));
+            texts.map(|t| t.to_ascii_lowercase()).any(|t| t.contains("sk-live") || t.contains("secret-7q") || t.contains("case-7q"))
+        };
+        // A comma inside the secret makes two lowercased tokens: they conflict, quoted redacted whole.
+        let r = response(502, "application/json", &[("x-gateway-error", SECRETS[0])]);
+        let f = diagnose_redacted(Protocol::Http, &r, b"{}", "ferrum-edge-0.9.9", Some(&scrub));
+        let conflicting = find(&f, "ferrum.marker.conflicting").expect("two tokens conflict");
+        assert_eq!(evidence(conflicting, "header.x-gateway-error"), Some(REDACTED));
+        assert!(!leaks(&f), "{f:?}");
+        // One value outside the vocabulary.
+        let r = response(502, "application/json", &[("x-gateway-error", SECRETS[1])]);
+        let f = diagnose_redacted(Protocol::Http, &r, b"{}", "ferrum-edge-0.9.9", Some(&scrub));
+        let unknown = find(&f, "ferrum.marker.unknown_token").expect("an unknown token");
+        assert_eq!(evidence(unknown, "header.x-gateway-error"), Some(REDACTED));
+        assert!(!leaks(&f), "{f:?}");
+        // The vocabulary is still matched whatever the case.
+        let r = response(502, "application/json", &[("x-gateway-error", "Connection_Failure")]);
+        let f = diagnose_redacted(Protocol::Http, &r, b"{}", "ferrum-edge-0.9.9", Some(&scrub));
+        assert!(find(&f, "ferrum.token.connection_failure").is_some(), "{:?}", codes(&f));
     }
 
     fn find<'a>(f: &'a [DiagnosticFinding], code: &str) -> Option<&'a DiagnosticFinding> {

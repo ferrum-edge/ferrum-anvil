@@ -93,7 +93,9 @@ fn bounded(t: Timeouts, total_ms: u64) -> Timeouts {
 impl Lookup<'_> {
     /// Look up the reference `response` carries. `attempt` is the recorded
     /// attempt that produced it (its start and end bound the record's
-    /// creation time); `redactor` learns the credential.
+    /// creation time); `redactor` learns the credential. A malformed
+    /// reference is kept as received: the rule quotes it with the
+    /// execution's final redactor, which knows every secret this one does.
     pub(crate) async fn run(
         &self,
         access: &DiagnosticDetailAccess,
@@ -104,7 +106,7 @@ impl Lookup<'_> {
     ) -> GatewayDetail {
         let reference = match gd::response_ref(response) {
             ResponseRef::Absent => return GatewayDetail::NoReference,
-            ResponseRef::Invalid(value) => return GatewayDetail::InvalidReference { value: redactor.text(&value) },
+            ResponseRef::Invalid(value) => return GatewayDetail::InvalidReference { value },
             ResponseRef::Present(r) => r,
         };
         let took = chrono::Duration::microseconds(i64::try_from(attempt.duration_us).unwrap_or(i64::MAX));
@@ -316,6 +318,9 @@ impl Lookup<'_> {
 /// `App::build_context`, never from a stored profile directly: that is where a
 /// restored workspace's lookups are paused until device identity is allowed
 /// again, and passing stored access here would skip that seal.
+///
+/// A malformed reference comes back as received: quote it only through the
+/// rules, with a redactor ([`anvil_diagnostics::DiagnosticInput::redact`]).
 pub async fn lookup_recorded(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -386,6 +391,7 @@ mod tests {
             reference: gd::parse_ref("fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f").unwrap(),
             status: 502,
             gateway_error: None,
+            gateway_error_shown: None,
             protocol: Some("http1"),
             namespace: None,
             not_before: now,
@@ -425,5 +431,98 @@ mod tests {
         assert_eq!((b.connect_ms, b.total_ms), (Some(500), Some(1_000)), "the request's shorter timeouts apply");
         // A retry gets only what is left of the overall bound.
         assert_eq!(bounded(Timeouts::default(), 1_200).connect_ms, Some(1_200));
+    }
+
+    /// A malformed reference is kept as received: the lookup's redactor, which
+    /// knows only the secrets resolved so far, never rewrites it. The record
+    /// quotes it with the execution's final redactor, so a secret learned
+    /// after the lookup is redacted whole, also one that contains a secret
+    /// known before it (an early pass would split it around that secret's
+    /// marker, and its other parts would no longer match).
+    #[tokio::test]
+    async fn an_invalid_reference_is_quoted_with_the_final_redactor() {
+        use crate::record::{Assembly, assemble};
+        use anvil_diagnostics::FerrumTrust;
+        use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry};
+        use anvil_domain::secret::{REDACTED, SensitiveValue};
+        use anvil_transport::http::AttemptOutput;
+        const EARLY: &str = "LEAKME-early-0123";
+        const LATE: &str = "sk-live-LEAKME-early-0123-late";
+        // The quote's cut falls 4 characters into the later secret.
+        let padding = "p".repeat(gd::MAX_QUOTE_CHARS - 4);
+        let value = format!("{padding}{LATE}");
+        let url = "http://127.0.0.1:18080/";
+        let engine = Engine::new();
+        let ctx = ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", url));
+        let settings = crate::settings::resolve(&ctx.settings_layers);
+        let resolver = Resolver::new(vec![], None);
+        let lookup = Lookup { engine: &engine, epoch: engine.sensitive_epoch(), ctx: &ctx, settings: &settings, resolver: &resolver };
+        let credential = SensitiveValue::template("unused");
+        let access = DiagnosticDetailAccess { base_url: "http://127.0.0.1:18090".into(), credential, namespace: None };
+        let response = ResponseRecord {
+            status: 502,
+            reason: None,
+            http_version: "HTTP/1.1".into(),
+            headers: vec![HeaderEntry { name: gd::REF_HEADER.into(), value: value.clone() }],
+            trailers: vec![],
+            trailers_received: false,
+            body: BodyCapture {
+                completeness: BodyCompleteness::NoBody,
+                wire_bytes: 0,
+                declared_length: None,
+                captured_bytes: 0,
+                display_truncated: false,
+                content_type: None,
+                content_encoding: None,
+                decoded_bytes: None,
+                decoding: None,
+                decoding_detail: None,
+                blob_sha256: None,
+            },
+        };
+        let attempt = anvil_transport::session::new_attempt(0, AttemptReason::Initial, "GET", url);
+        let mut redactor = Redactor::new(vec![EARLY.into()], vec![]);
+        let detail = lookup.run(&access, &response, &attempt, &mut redactor, &CancellationToken::new()).await;
+        assert_eq!(detail, GatewayDetail::InvalidReference { value: value.clone() }, "kept as received");
+        // Learned after the lookup, as the resolver's secrets are.
+        redactor.add_secret(LATE);
+        let output = assemble(Assembly {
+            ctx: &ctx,
+            started_at: attempt.started_at,
+            prepared_method: "GET".into(),
+            prepared_url: url.into(),
+            prepared_headers: vec![],
+            prepared_body: Bytes::new(),
+            content_type: None,
+            auth_label: "none".into(),
+            auth_facts: vec![],
+            settings: EffectiveSettings::default(),
+            tls_profile: None,
+            proxy: None,
+            tls_verification_enabled: true,
+            inferred: vec![],
+            lint_bypassed: None,
+            attempts: vec![],
+            last: AttemptOutput { observation: attempt, response: Some(response), body: Bytes::new() },
+            trust: FerrumTrust::Trusted {
+                profile_name: "lab gateway".into(),
+                compatibility_id: "ferrum-edge-0.9.9".into(),
+                channel_authenticated: false,
+            },
+            credentials_stripped: false,
+            protocol_fallback_from: None,
+            redactor: &redactor,
+            extra_findings: vec![],
+            stream: None,
+            protocol_status_override: None,
+            workload_api: None,
+            body_view: None,
+            gateway_detail: Some(detail),
+        });
+        let finding = output.record.findings.iter().find(|f| f.code == "ferrum.detail.invalid_reference").expect("the finding");
+        let quoted = finding.evidence.iter().find(|e| e.key == "header.x-ferrum-diagnostic-ref").expect("the quoted reference");
+        assert_eq!(quoted.value, format!("{padding}{REDACTED}"));
+        let record = serde_json::to_string(&output.record).unwrap();
+        assert!(!record.contains(&format!("{padding}{}", &LATE[..4])), "a prefix of the later secret reached the record");
     }
 }

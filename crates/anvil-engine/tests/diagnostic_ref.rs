@@ -506,3 +506,31 @@ async fn g01_a_secret_crossing_a_quoted_values_cut_is_redacted_whole() {
     no_prefix(&o);
     token_stays_in_the_lookup(&o, &f);
 }
+
+/// A known request secret the response sends as its `X-Gateway-Error` value,
+/// against a record of `connection_failure`: the token is compared
+/// lowercased, but no finding quotes the lowercased value (which no redactor
+/// matches), and the saved record holds the secret in neither case.
+#[tokio::test]
+async fn g01_a_secret_in_the_gateway_error_is_never_quoted_lowercased() {
+    const SECRET: &str = "sk-live-LEAKME-Gateway-Error-0123";
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = vault_ref();
+    let admin = Admin::start(200, vec![], record(REF, 502, "ferrum")).await;
+    let url = f.url(&format!("/status/502?header=X-Gateway-Error:{SECRET}&header=X-Ferrum-Diagnostic-Ref:{REF}"));
+    let mut c = ctx(&url, Some(access(&admin, None, &secret)), &secret);
+    c.auth_layers = vec![("request".into(), AuthConfig::Bearer { token: SensitiveValue::template(SECRET), prefix: "Bearer".into() })];
+    let o = run(&e, &c).await;
+    let m = finding(&o, "ferrum.detail.mismatch");
+    let quoted = m.evidence.iter().find(|x| x.key == "detail.mismatch").expect("the quoted mismatch");
+    assert_eq!(quoted.value, format!("gateway_error: record connection_failure, response {REDACTED}"));
+    let unknown = finding(&o, "ferrum.marker.unknown_token");
+    assert!(unknown.evidence.iter().any(|x| x.key == "header.x-gateway-error" && x.value == REDACTED), "{:?}", unknown.evidence);
+    let record = serde_json::to_string(&o.record).unwrap();
+    for form in [SECRET.to_string(), SECRET.to_ascii_lowercase()] {
+        assert!(!record.contains(&form[..14]), "the secret reached the record as {}", &form[..14]);
+    }
+    token_stays_in_the_lookup(&o, &f);
+}

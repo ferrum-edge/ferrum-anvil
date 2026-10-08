@@ -201,8 +201,9 @@ fn resolved(view: &RefView, ceiling: Confidence, status: u16) -> Draft {
     d
 }
 
-/// `record` is what the record says, as the finding quotes it.
-fn mismatch(m: &Mismatch, record: String) -> Draft {
+/// `record` and `response` are what the record says and what the response
+/// shows, as the finding quotes them (redacted, then cut).
+fn mismatch(m: &Mismatch, record: String, response: String) -> Draft {
     Draft::new(
         "ferrum.detail.mismatch",
         RULE,
@@ -212,10 +213,10 @@ fn mismatch(m: &Mismatch, record: String) -> Draft {
         Severity::Warning,
     )
     .ev(E::HttpStatus, "detail.lookup.status", "200")
-    .ev(E::BodyContent, "detail.mismatch", format!("{}: record {}, response {}", m.field, record, m.response))
+    .ev(E::BodyContent, "detail.mismatch", format!("{}: record {}, response {}", m.field, record, response))
     .var("field", m.field)
     .var("record", record)
-    .var("response", m.response.clone())
+    .var("response", response)
 }
 
 fn refused(status: u16, lookup_authenticated: bool) -> Draft {
@@ -297,7 +298,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     let ceiling = if data_authenticated && lookup_authenticated { Confidence::Confirmed } else { Confidence::Likely };
     let draft = match outcome {
         LookupOutcome::Resolved(view) => resolved(view, ceiling, r.status),
-        LookupOutcome::Mismatch(m) => mismatch(m, quoted(ctx.input.redact, &m.record)),
+        LookupOutcome::Mismatch(m) => mismatch(m, quoted(ctx.input.redact, &m.record), quoted(ctx.input.redact, &m.response)),
         LookupOutcome::Refused { status } => refused(*status, lookup_authenticated),
         LookupOutcome::NotFound { owner_replica } => unavailable(owner_replica.as_deref()),
         LookupOutcome::RateLimited => rate_limited(),
