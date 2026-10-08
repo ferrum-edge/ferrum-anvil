@@ -1072,8 +1072,7 @@ pub(crate) async fn execute_viewing(
                         let cross_origin = t.origin() != original_origin;
                         let mut headers = current.headers.clone();
                         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("host"));
-                        let session_withheld = cross_origin
-                            && headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id"));
+                        let session_withheld = cross_origin && headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id"));
                         if session_withheld {
                             headers.retain(|(n, _)| !n.eq_ignore_ascii_case("mcp-session-id"));
                             prep.inferred.push(format!("MCP session header withheld on the cross-origin redirect to {}", t.authority));

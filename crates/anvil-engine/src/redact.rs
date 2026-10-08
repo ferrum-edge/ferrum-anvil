@@ -168,10 +168,7 @@ impl Redactor {
             None
         } else {
             Some(
-                AhoCorasickBuilder::new()
-                    .match_kind(MatchKind::LeftmostLongest)
-                    .build(&patterns)
-                    .expect("redaction patterns are nonempty"),
+                AhoCorasickBuilder::new().match_kind(MatchKind::LeftmostLongest).build(&patterns).expect("redaction patterns are nonempty"),
             )
         };
     }

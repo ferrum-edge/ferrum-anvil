@@ -392,10 +392,7 @@ mod tests {
     fn layer(label: &str, vars: &[(&str, &str, bool)]) -> VarLayer {
         VarLayer {
             label: label.into(),
-            vars: vars
-                .iter()
-                .map(|(n, v, s)| VarEntry { name: n.to_string(), value: v.to_string(), secret: *s, literal: false })
-                .collect(),
+            vars: vars.iter().map(|(n, v, s)| VarEntry { name: n.to_string(), value: v.to_string(), secret: *s, literal: false }).collect(),
         }
     }
 

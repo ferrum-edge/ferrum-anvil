@@ -761,11 +761,8 @@ impl<'a> ModelBuilder<'a> {
             Some(reqs) => requirement_names(Some(reqs)),
             None => global_security_names.to_vec(),
         };
-        let copied_text_bytes = ["summary", "description"]
-            .iter()
-            .filter_map(|key| op.op.get(*key).and_then(Value::as_str))
-            .map(str::len)
-            .sum::<usize>();
+        let copied_text_bytes =
+            ["summary", "description"].iter().filter_map(|key| op.op.get(*key).and_then(Value::as_str)).map(str::len).sum::<usize>();
         // Everything below is proportional to these (inherited parameters and
         // the document's security count for every operation).
         self.work += 1
