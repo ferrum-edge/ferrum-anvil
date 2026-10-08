@@ -2,8 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Adopt published `contracts-edge-0.9.14` (`ddbdd845733b7046c4393ac951011dafb774db33`)
+  byte-exact. Four vendored files change: the gateway error and header vocabularies
+  (v0.9.14 provenance and reclassification notes, with the same tokens, classes and diagnostic
+  headers), diagnostic-ref provenance and the canonical negative-expectations manifest. The
+  diagnostic-report schema and every diagnostic fixture are unchanged.
+- Add the separately source-audited Edge v0.9.14 catalog and release-asset locks at
+  `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (release 405571232), selected as the lab and
+  new-profile candidate default pending hosted Anvil gates. v0.9.12 and v0.9.13 are covered by
+  the audit, not pinned. v0.9.11 and the earlier catalogs and locks stay supported, and the
+  nightly lab now also runs v0.9.11. See `docs/audit/gateway-0.9.14-delta.md`.
+
 ### Changed
 
+- Gateway catalog 0.9.14: a buffered-collector read error answers the eager collector's
+  502 `{"error":"Backend response body read failed"}`, so that body is ambiguous between the two
+  collectors on 0.9.14 and the old `{"error":"Backend response read error"}` body is matched only
+  on earlier releases. Backend HTTP/2 resets now logged `protocol_error`, the early-upload
+  route-timeout phase, request-buffer `RESOURCE_EXHAUSTED` alignment, HTTP/3 buffer admission and
+  client-reset upload handling are recorded on the existing outcomes without changing their
+  public signals.
+- Lab UP-018 expects the direct-H1 connection-ceiling signal from v0.9.11 through the pinned
+  release instead of on the pinned release only, so the retained v0.9.11 keeps its signal now
+  that the pin is v0.9.14.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
 
 ## [0.1.3] - 2026-10-06

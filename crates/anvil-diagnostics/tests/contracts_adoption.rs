@@ -37,10 +37,11 @@ fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<S
     (missing, extra)
 }
 
-/// The published pin targets Edge v0.9.11. The unchanged v1 vocabularies
-/// also match the retained v0.9.9 and v0.9.10 catalogs; their historical
-/// release-to-contract mappings remain contracts-edge-0.9.9(-r2).
-const PINNED_RELEASES: [&str; 3] = ["ferrum-edge-0.9.9", "ferrum-edge-0.9.10", "ferrum-edge-0.9.11"];
+/// The published pin targets Edge v0.9.14. Its v1 vocabularies keep every
+/// token and class, so they also match the retained v0.9.9, v0.9.10 and
+/// v0.9.11 catalogs; their historical release-to-contract mappings remain
+/// contracts-edge-0.9.9(-r2) and contracts-edge-0.9.11.
+const PINNED_RELEASES: [&str; 4] = ["ferrum-edge-0.9.9", "ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14"];
 
 /// A catalog of a release the pin covers agrees with the pinned vocabularies:
 /// the same public tokens and error classes, each class with the contract's
@@ -123,8 +124,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
             _ => panic!("malformed PIN line: {line}"),
         }
     }
-    assert_eq!(tag, Some("contracts-edge-0.9.11"));
-    assert_eq!(commit, Some("390edbd5b2485af0988e02f7827fde778d76ae0a"));
+    assert_eq!(tag, Some("contracts-edge-0.9.14"));
+    assert_eq!(commit, Some("ddbdd845733b7046c4393ac951011dafb774db33"));
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
         "vocabularies/gateway-headers.json",
@@ -180,12 +181,12 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
-    assert_eq!(errors["edge_release"], "v0.9.11");
-    assert_eq!(headers["edge_release"], "v0.9.11");
+    assert_eq!(errors["edge_release"], "v0.9.14");
+    assert_eq!(headers["edge_release"], "v0.9.14");
     for vocabulary in [&errors, &headers] {
         for source in vocabulary["provenance"].as_array().unwrap() {
-            assert_eq!(source["ref"], "v0.9.11");
-            assert_eq!(source["commit"], "c764084b3b51c3f7ffde268c039688d35e49c553");
+            assert_eq!(source["ref"], "v0.9.14");
+            assert_eq!(source["commit"], "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d");
         }
     }
     for compatibility_id in PINNED_RELEASES {

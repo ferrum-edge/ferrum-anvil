@@ -1,11 +1,12 @@
 # Failure lab: `early` profile
 
-The v0.9.11 default is a source-audited release with hosted Anvil qualification recorded.
+The v0.9.14 default is a source-audited candidate pending hosted Anvil gates.
 Results and observations below remain historical; see
-[the 0.9.11 source delta](../audit/gateway-0.9.11-delta.md).
+[the 0.9.14 source delta](../audit/gateway-0.9.14-delta.md) and, for the retained v0.9.11,
+[its hosted qualification](../audit/gateway-0.9.11-delta.md).
 
 This profile drives Anvil's TLS 1.3 / QUIC **0-RTT early data** ([protocols.md §3.12](../protocols.md))
-against the **real, pinned Ferrum Edge release binary** (v0.9.11 candidate default, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
+against the **real, pinned Ferrum Edge release binary** (v0.9.14 candidate default, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
 `--release`). There are no gateway mocks.
 
 The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3 early data)"),

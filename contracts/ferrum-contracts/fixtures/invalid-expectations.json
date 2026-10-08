@@ -176,48 +176,361 @@
     "instance_path": "/namespace_etag",
     "keyword": "pattern"
   },
-  "backend-egress-policy/invalid/allow-overlay-guarantee.json": {
+  "backend-egress-policy/v1/invalid/allow-overlay-guarantee.json": {
     "instance_path": "/public_only_guaranteed",
     "keyword": "const"
   },
-  "backend-egress-policy/invalid/false-public-guarantee.json": {
+  "backend-egress-policy/v1/invalid/false-public-guarantee.json": {
     "instance_path": "/public_only_guaranteed",
     "keyword": "const"
   },
-  "backend-egress-policy/invalid/leaked-cidr-field.json": {
+  "backend-egress-policy/v1/invalid/leaked-cidr-field.json": {
     "instance_path": "",
     "keyword": "additionalProperties"
   },
-  "backend-egress-policy/invalid/mode-class-mismatch.json": {
+  "backend-egress-policy/v1/invalid/mode-class-mismatch.json": {
     "instance_path": "/mode_allowed_ip_classes",
     "keyword": "const"
   },
-  "backend-egress-policy/invalid/unknown-classification.json": {
+  "backend-egress-policy/v1/invalid/unknown-classification.json": {
     "instance_path": "/ip_classification",
     "keyword": "enum"
   },
-  "backend-egress-policy/invalid/unknown-enforcement-scope.json": {
+  "backend-egress-policy/v1/invalid/unknown-enforcement-scope.json": {
     "instance_path": "/enforcement_scope",
     "keyword": "enum"
   },
-  "backend-egress-policy/invalid/unknown-mode.json": {
+  "backend-egress-policy/v1/invalid/unknown-mode.json": {
     "instance_path": "/mode",
     "keyword": "enum"
   },
-  "backend-egress-policy/invalid/unknown-version.json": {
+  "backend-egress-policy/v1/invalid/unknown-version.json": {
     "instance_path": "/schema_version",
     "keyword": "enum"
   },
-  "backend-egress-policy/invalid/wrong-evaluation-stage.json": {
+  "backend-egress-policy/v1/invalid/wrong-evaluation-stage.json": {
     "instance_path": "/evaluation_order/0",
     "keyword": "const"
   },
-  "vocabulary-backend-egress-policy/invalid/short-commit.json": {
+  "vocabulary-backend-egress-policy/v1/invalid/short-commit.json": {
     "instance_path": "/provenance/0/commit",
     "keyword": "pattern"
   },
-  "vocabulary-backend-egress-policy/invalid/unknown-mode.json": {
+  "vocabulary-backend-egress-policy/v1/invalid/unknown-mode.json": {
     "instance_path": "/modes/0",
     "keyword": "enum"
+  },
+  "admin-deployment-snapshot/v1/invalid/weak-token.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v1/invalid/row-token.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v1/invalid/token-list.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v1/invalid/token-with-line-break.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v1/invalid/unknown-profile.json": {
+    "instance_path": "/profile",
+    "keyword": "enum"
+  },
+  "admin-deployment-snapshot/v1/invalid/evidence-not-object.json": {
+    "instance_path": "/evidence",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v1/invalid/spec-not-object.json": {
+    "instance_path": "/api_specs/0",
+    "keyword": "type"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-profile.json": {
+    "instance_path": "/profile",
+    "keyword": "enum"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-durable.json": {
+    "instance_path": "/durable",
+    "keyword": "enum"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-live.json": {
+    "instance_path": "/live",
+    "keyword": "enum"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/cleanup-not-boolean.json": {
+    "instance_path": "/recovery_cleanup_authorized",
+    "keyword": "type"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/durable-only-cleanup.json": {
+    "instance_path": "/live",
+    "keyword": "const"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unknown-durable-cleanup.json": {
+    "instance_path": "/durable",
+    "keyword": "const"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/unconfirmed-cleanup.json": {
+    "instance_path": "/live",
+    "keyword": "const"
+  },
+  "admin-deployment-snapshot/v1/invalid/missing-evidence.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "admin-deployment-mutation-acknowledgement/invalid/missing-cleanup-authorization.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "backend-egress-policy/v2/invalid/allow-overlay-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/false-public-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/admission-only-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/no-data-plane-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/unserved-namespace-guarantee.json": {
+    "instance_path": "/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/leaked-cidr-field.json": {
+    "instance_path": "",
+    "keyword": "additionalProperties"
+  },
+  "backend-egress-policy/v2/invalid/mode-class-mismatch.json": {
+    "instance_path": "/mode_allowed_ip_classes",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/unknown-classification.json": {
+    "instance_path": "/ip_classification",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/unknown-enforcement-scope.json": {
+    "instance_path": "/enforcement_scope",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/unknown-mode.json": {
+    "instance_path": "/mode",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/previous-version.json": {
+    "instance_path": "/schema_version",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/unknown-version.json": {
+    "instance_path": "/schema_version",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/wrong-evaluation-stage.json": {
+    "instance_path": "/evaluation_order/0",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/attestation-on-local-data-plane.json": {
+    "instance_path": "/enforcement_scope",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/attestation-unknown-source.json": {
+    "instance_path": "/data_plane_attestation/source",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/attestation-leaked-cidr-field.json": {
+    "instance_path": "/data_plane_attestation",
+    "keyword": "additionalProperties"
+  },
+  "backend-egress-policy/v2/invalid/attestation-negative-count.json": {
+    "instance_path": "/data_plane_attestation/connected_data_planes",
+    "keyword": "minimum"
+  },
+  "backend-egress-policy/v2/invalid/attestation-missing-data-planes.json": {
+    "instance_path": "/data_plane_attestation",
+    "keyword": "required"
+  },
+  "backend-egress-policy/v2/invalid/weakest-policy-without-reports.json": {
+    "instance_path": "/data_plane_attestation/reporting_data_planes",
+    "keyword": "minimum"
+  },
+  "backend-egress-policy/v2/invalid/reports-without-weakest-policy.json": {
+    "instance_path": "/data_plane_attestation/reporting_data_planes",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/empty-set-complete.json": {
+    "instance_path": "/data_plane_attestation/connected_data_planes",
+    "keyword": "minimum"
+  },
+  "backend-egress-policy/v2/invalid/guarantee-with-unknown-data-plane.json": {
+    "instance_path": "/data_plane_attestation/weakest_policy_complete",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/guarantee-with-allow-overlay.json": {
+    "instance_path": "/data_plane_attestation/weakest_policy/public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/public-only-not-aggregated.json": {
+    "instance_path": "/data_plane_attestation/all_connected_public_only_guaranteed",
+    "keyword": "const"
+  },
+  "backend-egress-policy/v2/invalid/weakest-policy-unknown-mode.json": {
+    "instance_path": "/data_plane_attestation/weakest_policy/mode",
+    "keyword": "enum",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-build-version.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0",
+    "keyword": "additionalProperties"
+  },
+  "backend-egress-policy/v2/invalid/entry-unknown-attestation.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0/attestation",
+    "keyword": "enum"
+  },
+  "backend-egress-policy/v2/invalid/entry-reported-without-policy.json": {
+    "instance_path": "/data_plane_attestation/data_planes/1/policy",
+    "keyword": "type"
+  },
+  "backend-egress-policy/v2/invalid/entry-unknown-with-policy.json": {
+    "instance_path": "/data_plane_attestation/data_planes/2/policy",
+    "keyword": "type"
+  },
+  "backend-egress-policy/v2/invalid/entry-connected-at-without-offset.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0/connected_at",
+    "keyword": "format"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-leaked-cidr-field.json": {
+    "instance_path": "/data_plane_attestation/data_planes/0/policy",
+    "keyword": "additionalProperties",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-mode-class-mismatch.json": {
+    "instance_path": "/data_plane_attestation/data_planes/1/policy/mode_blocked_ip_classes",
+    "keyword": "const",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-false-public-guarantee.json": {
+    "instance_path": "/data_plane_attestation/data_planes/1/policy/public_only_guaranteed",
+    "keyword": "const",
+    "top_keyword": "oneOf"
+  },
+  "backend-egress-policy/v2/invalid/entry-policy-allow-overlay-guarantee.json": {
+    "instance_path": "/data_plane_attestation/data_planes/2/policy/public_only_guaranteed",
+    "keyword": "const",
+    "top_keyword": "oneOf"
+  },
+  "vocabulary-backend-egress-policy/v2/invalid/previous-schema-version.json": {
+    "instance_path": "/schema_version",
+    "keyword": "enum"
+  },
+  "vocabulary-backend-egress-policy/v2/invalid/unknown-mode.json": {
+    "instance_path": "/modes/0",
+    "keyword": "enum"
+  },
+  "vocabulary-backend-egress-policy/v2/invalid/unknown-attestation-status.json": {
+    "instance_path": "/data_plane_attestation_statuses/1",
+    "keyword": "enum"
+  },
+  "vocabulary-backend-egress-policy/v2/invalid/attestation-rule-missing.json": {
+    "instance_path": "",
+    "keyword": "dependentRequired"
+  },
+  "admin-deployment-snapshot/v2/invalid/weak-token.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v2/invalid/row-token.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v2/invalid/token-list.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v2/invalid/token-with-line-break.json": {
+    "instance_path": "/namespace_etag",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v2/invalid/unknown-profile.json": {
+    "instance_path": "/profile",
+    "keyword": "enum"
+  },
+  "admin-deployment-snapshot/v2/invalid/evidence-not-object.json": {
+    "instance_path": "/evidence",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-not-object.json": {
+    "instance_path": "/api_specs/0",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/missing-evidence.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "admin-deployment-snapshot/v2/invalid/missing-api-spec-contents.json": {
+    "instance_path": "",
+    "keyword": "required"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-content-byte-array.json": {
+    "instance_path": "/api_specs/0/spec_content",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-contents-extra-member.json": {
+    "instance_path": "/api_spec_contents/0",
+    "keyword": "additionalProperties"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-missing-proxy-id.json": {
+    "instance_path": "/api_specs/0",
+    "keyword": "required"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-digest-uppercase-sha256.json": {
+    "instance_path": "/api_specs/0/spec_content/sha256",
+    "keyword": "pattern"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-digest-sha256-byte-array.json": {
+    "instance_path": "/api_specs/0/spec_content/sha256",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-digest-negative-len.json": {
+    "instance_path": "/api_specs/0/spec_content/len",
+    "keyword": "minimum"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-digest-string-len.json": {
+    "instance_path": "/api_specs/0/spec_content/len",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-digest-missing-len.json": {
+    "instance_path": "/api_specs/0/spec_content",
+    "keyword": "required"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-digest-extra-member.json": {
+    "instance_path": "/api_specs/0/spec_content",
+    "keyword": "additionalProperties"
+  },
+  "admin-deployment-snapshot/v2/invalid/external-ref-byte-array.json": {
+    "instance_path": "/api_specs/0/external_ref_snapshot",
+    "keyword": "oneOf"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-contents-missing-external-ref.json": {
+    "instance_path": "/api_spec_contents/0",
+    "keyword": "required"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-contents-numeric-id.json": {
+    "instance_path": "/api_spec_contents/0/id",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-contents-base64-byte-array.json": {
+    "instance_path": "/api_spec_contents/0/spec_content_base64",
+    "keyword": "type"
+  },
+  "admin-deployment-snapshot/v2/invalid/spec-contents-external-ref-byte-array.json": {
+    "instance_path": "/api_spec_contents/0/external_ref_snapshot_base64",
+    "keyword": "type"
   }
 }

@@ -2,11 +2,13 @@
 
 Anvil as a client of the **real** Ferrum Edge SPIFFE Workload API (gRPC over a Unix socket), using what it
 issues — an X.509-SVID as the TLS client identity and a JWT-SVID as the bearer token — against the same
-release's mesh inbound listener and a `jwks_auth` route. Pinned releases: **v0.9.11** (`lab/gateway/RELEASE.lock`, hosted Anvil qualification recorded),
-**v0.9.10**, **v0.9.9**, **v0.9.8**, **v0.9.7** and **v0.9.5** (`lab/gateway/releases/`); the Workload API code is identical in v0.9.5 and v0.9.7
+release's mesh inbound listener and a `jwks_auth` route. Pinned releases: **v0.9.14 candidate** (`lab/gateway/RELEASE.lock`, hosted Anvil gates pending),
+**v0.9.11** (hosted Anvil qualification recorded), **v0.9.10**, **v0.9.9**, **v0.9.8**, **v0.9.7** and **v0.9.5** (`lab/gateway/releases/`); the Workload API code is identical in v0.9.5 and v0.9.7
 (`src/identity/workload_api/server.rs`, `src/identity/jwt_svid/`), and `src/identity/` is unchanged from v0.9.8 to v0.9.10. v0.9.8 returns
-`ValidateJWTSVIDResponse.claims` as a `google.protobuf.Struct` (#5780), a field Anvil does not read. These source comparisons and observations remain historical; v0.9.11 has the
-[source-audited candidate delta](../audit/gateway-0.9.11-delta.md), with no new live result claimed.
+`ValidateJWTSVIDResponse.claims` as a `google.protobuf.Struct` (#5780), a field Anvil does not read. These source comparisons and observations remain historical; v0.9.11 has its
+[source delta and hosted qualification](../audit/gateway-0.9.11-delta.md), and `src/identity/` is
+unchanged from v0.9.11 to v0.9.14 ([source-audited candidate delta](../audit/gateway-0.9.14-delta.md),
+with no new live result claimed).
 No SPIRE, no Kubernetes, no control plane.
 
 Protocol behaviour and findings: [protocols.md §3.11](../protocols.md), [diagnostics.md](../diagnostics.md)

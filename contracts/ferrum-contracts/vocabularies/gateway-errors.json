@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
   "vocabulary": "gateway-errors",
   "version": 1,
-  "edge_release": "v0.9.11",
+  "edge_release": "v0.9.14",
   "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the eight coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.11",
-      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
       "path": "src/retry.rs",
       "symbols": [
         "ErrorClass",
@@ -21,20 +21,25 @@
         "x_gateway_error_token_for_class",
         "token_for_rejection_phase",
         "request_reached_wire",
-        "error_class_log_kind"
+        "error_class_log_kind",
+        "classify_body_error",
+        "classify_reqwest_error",
+        "is_backend_h2_reset"
       ]
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.11",
-      "commit": "c764084b3b51c3f7ffde268c039688d35e49c553",
+      "ref": "v0.9.14",
+      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
       "path": "docs/error_classification.md",
       "sections": [
         "Canonical taxonomy (ErrorClass)",
         "HTTP observability vocabulary (X-Gateway-Error)",
         "Header tokens (X-Gateway-Error)",
-        "Granular class to header token"
-      ]
+        "Granular class to header token",
+        "Response body-read failures"
+      ],
+      "note": "v0.9.14 adds no ErrorClass value or token. The protocol_error, read_write_timeout and response_body_too_large meanings note the v0.9.14 reclassification of backend HTTP/2 resets and buffered read errors (ferrum-edge#6028, #6042; issues #6019, #6022)."
     }
   ],
   "header": "X-Gateway-Error",
@@ -112,7 +117,7 @@
       "request_reached_wire": true,
       "log_kind": "read_timeout",
       "x_gateway_error": "backend_timeout",
-      "meaning": "A backend read or write exceeded its per-direction timeout."
+      "meaning": "A backend read or write exceeded its per-direction timeout. From v0.9.14 this includes a timeout that reqwest reports while the buffered collector reads a larger or limited response body (504; earlier releases labelled such reqwest-reported read errors response_body_too_large). The collector's own idle backend_read_timeout_ms timeout was already read_write_timeout."
     },
     {
       "value": "client_disconnect",
@@ -129,7 +134,7 @@
       "request_reached_wire": true,
       "log_kind": "protocol_error",
       "x_gateway_error": "backend_error",
-      "meaning": "HTTP/2 or HTTP/3 protocol error after a stream opened (stream reset, GOAWAY, RST_STREAM), or an RFC 6455 WebSocket protocol violation."
+      "meaning": "HTTP/2 or HTTP/3 protocol error after a stream opened (stream reset, GOAWAY, RST_STREAM), or an RFC 6455 WebSocket protocol violation. From v0.9.14 a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before the response headers, during a buffered body read or while a body streams, is this class and is charged to the target's circuit breaker and passive health; a reset the gateway raises itself keeps its previous class."
     },
     {
       "value": "response_body_too_large",
@@ -137,7 +142,7 @@
       "request_reached_wire": true,
       "log_kind": "response_body_too_large",
       "x_gateway_error": "backend_error",
-      "meaning": "The backend response exceeded the configured maximum size."
+      "meaning": "The backend response exceeded the configured maximum size. From v0.9.14 other read errors in the buffered collector report their real class instead of this one."
     },
     {
       "value": "gateway_buffer_capacity",

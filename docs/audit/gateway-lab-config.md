@@ -17,10 +17,12 @@ v0.9.5 citations; see [`gateway-0.9.7-delta.md`](gateway-0.9.7-delta.md),
 [`gateway-0.9.8-delta.md`](gateway-0.9.8-delta.md),
 [`gateway-0.9.9-delta.md`](gateway-0.9.9-delta.md) and
 [`gateway-0.9.10-delta.md`](gateway-0.9.10-delta.md) for what changed. The binary is now fetched and
-verified by `lab/scripts/fetch-gateway.sh`. The current v0.9.11 candidate default
-is separately audited in [`gateway-0.9.11-delta.md`](gateway-0.9.11-delta.md), with
-hosted Anvil qualification recorded; the historical observations and original profile assertions below
-remain unchanged. The lab runs as described in
+verified by `lab/scripts/fetch-gateway.sh`. v0.9.11 was the default pin from 2026-10-04,
+separately audited in [`gateway-0.9.11-delta.md`](gateway-0.9.11-delta.md) with hosted Anvil
+qualification recorded. The current v0.9.14 candidate default is audited in
+[`gateway-0.9.14-delta.md`](gateway-0.9.14-delta.md), pending hosted Anvil gates; v0.9.12 to
+v0.9.14 change no config struct or plugin key. The historical observations and original
+profile assertions below remain unchanged. The lab runs as described in
 [`../lab/README.md`](../lab/README.md).
 
 ## 0. Provenance and citation convention

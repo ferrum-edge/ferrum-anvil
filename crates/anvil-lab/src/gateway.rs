@@ -170,8 +170,8 @@ pub fn release_at_least(min: &str) -> bool {
 
 /// The release named by the default pin (`lab/gateway/RELEASE.lock`), the
 /// repository's pinned Edge release. A lab check whose public signal the pin
-/// itself qualifies ([`DEFAULT_LOCK`], recorded in
-/// `docs/audit/gateway-0.9.11-delta.md`) keys on this instead of a version
+/// itself qualifies ([`DEFAULT_LOCK`], source-audited in
+/// `docs/audit/gateway-0.9.14-delta.md`) keys on this instead of a version
 /// literal, so moving the pin moves the check with it.
 pub fn pinned_release() -> &'static str {
     static PINNED: OnceLock<String> = OnceLock::new();
@@ -179,6 +179,20 @@ pub fn pinned_release() -> &'static str {
         let text = std::fs::read_to_string(repo_root().join(DEFAULT_LOCK)).unwrap_or_default();
         parse_lock(&text, DEFAULT_LOCK).expect("reading the default gateway lock").release
     })
+}
+
+/// Whether the release under test is `min` (the first release with a changed
+/// public signal) or a later one up to the default pin ([`pinned_release`]).
+/// Every release in that range keeps the signal, which the pin's source audit
+/// re-qualifies, so the check follows the pin and is never assumed for a
+/// release past it.
+pub fn release_from_through_pin(min: &str) -> bool {
+    release_in(&current_lock().release, min, pinned_release())
+}
+
+fn release_in(release: &str, min: &str, max: &str) -> bool {
+    let r = release_order(release);
+    release_order(min) <= r && r <= release_order(max)
 }
 
 fn release_order(tag: &str) -> Vec<u64> {
@@ -489,12 +503,24 @@ mod tests {
         assert_eq!(pinned_release(), lock_at(DEFAULT_LOCK).release);
     }
 
+    /// A signal that changed in `min` is expected from `min` through the pin,
+    /// never before it or past it.
+    #[test]
+    fn release_range_runs_from_the_first_release_through_the_pin() {
+        let pin = lock_at(DEFAULT_LOCK).release;
+        assert!(release_in(&pin, "v0.9.11", &pin));
+        assert!(release_in("v0.9.11", "v0.9.11", &pin));
+        assert!(release_in("v0.9.14", "v0.9.11", "v0.9.14"));
+        assert!(!release_in("v0.9.10", "v0.9.11", "v0.9.14"));
+        assert!(!release_in("v0.9.15", "v0.9.11", "v0.9.14"));
+    }
+
     /// Every supported release has a well-formed lock and an embedded
     /// diagnostics catalog, so the lab's trusted profile never falls back.
     #[test]
     fn every_supported_release_has_a_lock_and_a_catalog() {
         let releases = available_releases();
-        let expected = ["v0.9.5", "v0.9.7", "v0.9.8", "v0.9.9", "v0.9.10", "v0.9.11"];
+        let expected = ["v0.9.5", "v0.9.7", "v0.9.8", "v0.9.9", "v0.9.10", "v0.9.11", "v0.9.14"];
         assert_eq!(releases, expected);
         for r in releases {
             let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));
@@ -571,7 +597,8 @@ mod tests {
         assert!(release_order("v0.9.9") > release_order("v0.9.8"));
         assert!(release_order("v0.9.10") > release_order("v0.9.9"));
         assert!(release_order("v0.9.11") > release_order("v0.9.10"));
-        assert!(release_order("v1.0.0") > release_order("v0.9.11"));
+        assert!(release_order("v0.9.14") > release_order("v0.9.11"));
+        assert!(release_order("v1.0.0") > release_order("v0.9.14"));
         assert_eq!(release_order(" v0.9.8"), release_order("0.9.8"));
         // Lock files sort as text ("v0.9.10" before "v0.9.5"); the list is in release order.
         let releases = available_releases();

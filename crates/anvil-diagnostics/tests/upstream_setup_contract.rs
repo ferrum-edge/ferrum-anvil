@@ -1,5 +1,5 @@
 //! Public-signal contract tests for gateway-to-upstream setup outcomes that
-//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10 or 0.9.11:
+//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11 or 0.9.14:
 //!
 //! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): neither release has a
 //!   dial-admission hook, and exhausting the lab host's real ephemeral ports
@@ -7,15 +7,16 @@
 //! * UP-019 trust withdrawn: emitted only by the mesh HBONE / sidecar-mTLS
 //!   transports when an accepted trust publication withdraws an authority;
 //!   there is no mesh/HBONE lab;
-//! * UP-018 on the pooled lanes (direct H1 in 0.9.11 / H2 / gRPC / H3 / mesh pools), whose
+//! * UP-018 on the pooled lanes (direct H1 from 0.9.11 / H2 / gRPC / H3 / mesh pools), whose
 //!   public signal is the same coarse `connection_failure` family. The
 //!   HTTP/1.1 lane runs in `anvil-lab run admission`: reqwest on the historical
 //!   releases, direct H1 on 0.9.11 (hosted qualification recorded in
-//!   `docs/audit/gateway-0.9.11-delta.md`).
+//!   `docs/audit/gateway-0.9.11-delta.md`) and 0.9.14 (source-audited in
+//!   `docs/audit/gateway-0.9.14-delta.md`; hosted qualification pending).
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
 //! the exact public signal the source-audited catalogs record for each outcome
-//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8,0.9.9,0.9.10,0.9.11}/outcomes.json`;
+//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8,0.9.9,0.9.10,0.9.11,0.9.14}/outcomes.json`;
 //! every test runs against each embedded release's catalog) through the engine's
 //! diagnosis and assert what Anvil may and may not conclude from it. No
 //! private ground truth (operator `error_class`) is ever an input.
@@ -78,7 +79,7 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
 
 /// The strongest trust Anvil can have in an audited gateway release: a trusted
 /// profile over verified TLS. Markers stay spoofable on every audited release
-/// (0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10 and 0.9.11), so attribution never exceeds `likely`.
+/// (0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11 and 0.9.14), so attribution never exceeds `likely`.
 fn trusted_verified(compat: &str) -> FerrumTrust {
     FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: true }
 }
@@ -155,7 +156,7 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 }
 
 /// UP-017 — public-signal contract test, NOT a live reproduction and NOT a
-/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 / 0.9.9 / 0.9.10 / 0.9.11 have no
+/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 / 0.9.9 / 0.9.10 / 0.9.11 / 0.9.14 have no
 /// lab dial-admission hook, and draining
 /// the host's ephemeral ports would be unsafe. The gateway answers port
 /// exhaustion with the same `502 connection_failure {"error":"Backend
@@ -254,7 +255,7 @@ fn up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family() {
 
 /// UP-018, retained reqwest lane — the same public signal the historical
 /// admission lab observes, still available to ineligible bodies/retries on
-/// 0.9.11: a distinct gateway-authored body with the
+/// 0.9.11 and 0.9.14: a distinct gateway-authored body with the
 /// misleading `backend_error` token. Anvil may say "gateway connection
 /// ceiling" (at most likely, gateway admission) but not that the backend is
 /// down or that the application returned 503.
@@ -287,12 +288,18 @@ fn up_018_reqwest_lane_for(compat: &str) {
     assert!(!d.findings.iter().flat_map(|f| f.evidence.iter()).any(|e| e.value.contains("upstream.connection_limit")), "{:?}", codes(&d));
 }
 
-/// 0.9.11's eligible bodyless HTTP/1.1 first attempt uses the direct pool.
+/// 0.9.11's eligible bodyless HTTP/1.1 first attempt uses the direct pool,
+/// and 0.9.14 keeps that lane and its checkout classifier unchanged.
 /// Its ceiling shares the pooled setup-failure signal; operator-only proof
 /// of maxConnections must never turn this public evidence into one cause.
 #[test]
 fn up_018_direct_h1_ceiling_uses_the_0_9_11_ambiguous_setup_signal() {
-    let compat = "ferrum-edge-0.9.11";
+    for compat in ["ferrum-edge-0.9.11", "ferrum-edge-0.9.14"] {
+        up_018_direct_h1_for(compat);
+    }
+}
+
+fn up_018_direct_h1_for(compat: &str) {
     let direct_h1 = |trust| {
         let mut r = response(502, &[("x-gateway-error", "connection_failure"), ("via", "1.1 ferrum-edge")], BACKEND_UNAVAILABLE);
         // The dispatch failure builder has an empty header map; the finalizer
