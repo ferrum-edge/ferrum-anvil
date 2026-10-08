@@ -711,6 +711,27 @@ fn redirect_refused(inferred: &mut Vec<String>, target: &Target, why: &str) {
     inferred.push(format!("redirect to {} not followed: {why}", target.authority));
 }
 
+/// Stores the cookies of a response that another attempt follows (a redirect
+/// hop, an authentication challenge or a 425 retry). Extraction reads only the
+/// final response, whose cookies are stored once its extractions are known.
+fn store_followed_cookies(
+    engine: &Engine,
+    epoch: SensitiveEpoch,
+    prep: &mut Prepared,
+    isolation: &str,
+    target: &Target,
+    response: Option<&ResponseRecord>,
+    redactor: &Redactor,
+) {
+    if prep.settings.cookies
+        && let Some(r) = response
+        && engine.store_cookies(epoch, isolation, target, r, redactor)
+        && !prep.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE)
+    {
+        prep.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+    }
+}
+
 /// A policy that asks for replay of a non-idempotent method is refused
 /// before any traffic: early data can be replayed by anyone on the path.
 fn early_data_policy_check(p: &anvil_domain::settings::EarlyDataPolicy) -> Result<(), TransportFailure> {
@@ -1032,17 +1053,6 @@ pub(crate) async fn execute_viewing(
         attempts.push(out.observation.clone());
         last_hop = current.hop();
 
-        // Store cookies from the response.
-        if prep.settings.cookies
-            && let Some(r) = &out.response
-        {
-            if engine.store_cookies(epoch, &ctx.isolation, &current.target, r, &redactor)
-                && !prep.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE)
-            {
-                prep.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
-            }
-        }
-
         // ---- redirects ----
         if let Some(resp) = &out.response
             && is_redirect(resp.status)
@@ -1072,6 +1082,11 @@ pub(crate) async fn execute_viewing(
                         let cross_origin = t.origin() != original_origin;
                         let mut headers = current.headers.clone();
                         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("host"));
+                        let session_withheld = cross_origin && headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id"));
+                        if session_withheld {
+                            headers.retain(|(n, _)| !n.eq_ignore_ascii_case("mcp-session-id"));
+                            prep.inferred.push(format!("MCP session header withheld on the cross-origin redirect to {}", t.authority));
+                        }
                         if body.is_empty() {
                             headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type") && !n.eq_ignore_ascii_case("content-length"));
                         }
@@ -1156,6 +1171,7 @@ pub(crate) async fn execute_viewing(
                                 prep.inferred.push(n);
                             }
                         }
+                        store_followed_cookies(engine, epoch, &mut prep, &ctx.isolation, &current.target, out.response.as_ref(), &redactor);
                         current = AttemptTarget { method, target: t, headers, body, with_credentials, tls, tls_profile, proxy };
                         reason = AttemptReason::Redirect { status };
                         last = Some(out);
@@ -1180,6 +1196,7 @@ pub(crate) async fn execute_viewing(
             if let ResolvedAuth::Dpop { nonce: n, .. } = &mut prep.auth {
                 *n = Some(nonce);
             }
+            store_followed_cookies(engine, epoch, &mut prep, &ctx.isolation, &current.target, out.response.as_ref(), &redactor);
             reason = AttemptReason::AuthChallenge { scheme: "DPoP".into() };
             last = Some(out);
             continue;
@@ -1196,6 +1213,7 @@ pub(crate) async fn execute_viewing(
             && prep.settings.early_data.allows(&current.method)
         {
             too_early_retried = true;
+            store_followed_cookies(engine, epoch, &mut prep, &ctx.isolation, &current.target, out.response.as_ref(), &redactor);
             reason = AttemptReason::TooEarlyRetry;
             last = Some(out);
             continue;
@@ -1320,6 +1338,9 @@ pub(crate) async fn execute_viewing(
         AttemptReason::ProtocolFallback { from } => Some(from.clone()),
         _ => None,
     });
+    let final_cookie_response = last.response.clone();
+    let isolation = ctx.isolation.clone();
+    let store_cookies = prep.settings.cookies;
     let assembly = Assembly {
         ctx,
         started_at,
@@ -1350,7 +1371,16 @@ pub(crate) async fn execute_viewing(
         body_view: view,
         gateway_detail,
     };
-    let output = record::assemble(assembly);
+    let mut output = record::assemble(assembly);
+    if store_cookies
+        && !output.extracted.iter().any(|(_, value, sensitive)| *sensitive && value.len() > crate::MAX_SENSITIVE_EXTRACTION_BYTES)
+        && let Some(response) = &final_cookie_response
+        && engine.store_cookies(epoch, &isolation, &last_hop.target, response, &redactor)
+    {
+        if !output.record.prepared.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE) {
+            output.record.prepared.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+        }
+    }
     let _ = assertions::evaluate;
     let _: Option<Observed> = None;
     output

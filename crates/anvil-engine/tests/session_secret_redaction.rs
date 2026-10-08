@@ -41,7 +41,10 @@ fn with_secret(spec: RequestSpec, name: &str, value: &str) -> ExecutionContext {
 /// `spec` with each `(name, value)` as a secret variable and short timeouts.
 fn with_secrets(spec: RequestSpec, secrets: &[(&str, &str)]) -> ExecutionContext {
     let mut c = ExecutionContext::standalone(spec);
-    let vars = secrets.iter().map(|(name, value)| VarEntry { name: name.to_string(), value: value.to_string(), secret: true }).collect();
+    let vars = secrets
+        .iter()
+        .map(|(name, value)| VarEntry { name: name.to_string(), value: value.to_string(), secret: true, literal: false })
+        .collect();
     c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
     let timeouts = TimeoutOverrides {
         connect_ms: Some(Some(3_000)),

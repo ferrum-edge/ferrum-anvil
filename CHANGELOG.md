@@ -36,6 +36,16 @@
   that the pin is v0.9.14.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
 
+### Security
+
+- Treat response extractions and dataset cells as literal values, cap total variable references at 16,384 per resolver, bound text redaction to one pass over the input, refuse MCP initialize redirects and withhold MCP session headers on cross-origin redirects, and charge everything the lint model copies out of a document before copying it, resolving an operation shared by several paths once (#343).
+
+### Breaking
+
+- Response extractions and dataset cells containing `{{...}}` are sent literally instead of being expanded. If a workflow needs template expansion, store the intended template in an ordinary workspace or request variable.
+- MCP initialize redirects are refused. Point the request at the final MCP endpoint.
+- Rust consumers that construct `anvil_engine::vars::VarEntry` directly must now set `literal` to `false` for template-backed variables or `true` for values that must remain data (#343).
+
 ### Fixed
 
 - The draft confirmation counts every DNS override that differs, including one whose change is

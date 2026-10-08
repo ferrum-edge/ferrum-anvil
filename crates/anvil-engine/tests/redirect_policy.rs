@@ -131,7 +131,7 @@ fn client_cert_cns(f: &fx::Fixture) -> Vec<Option<String>> {
 fn with_configured_credentials(ctx: &mut ExecutionContext) {
     ctx.var_layers = vec![VarLayer {
         label: "environment:lab".into(),
-        vars: vec![VarEntry { name: "tenant_key".into(), value: "tok-SENSITIVE-tenant-5a4b3c".into(), secret: true }],
+        vars: vec![VarEntry { name: "tenant_key".into(), value: "tok-SENSITIVE-tenant-5a4b3c".into(), secret: true, literal: false }],
     }];
     ctx.spec.headers.push(KeyValue::new("X-API-Key", "tok-SENSITIVE-api-key-1a2b3c"));
     let mut custom = KeyValue::new("X-Custom", "tok-SENSITIVE-custom-4d5e6f");
@@ -351,11 +351,12 @@ async fn redirect_that_would_resend_an_encoded_secret_body_to_another_origin_is_
             ctx.var_layers = vec![VarLayer {
                 label: "environment:lab".into(),
                 vars: vec![
-                    VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },
+                    VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true, literal: false },
                     VarEntry {
                         name: "credentials".into(),
                         value: r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#.into(),
                         secret: true,
+                        literal: false,
                     },
                 ],
             }];

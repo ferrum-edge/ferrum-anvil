@@ -30,6 +30,9 @@ pub mod settings;
 pub mod vars;
 pub mod workload;
 
+/// Sensitive response extractions above this size are refused by the runner.
+pub const MAX_SENSITIVE_EXTRACTION_BYTES: usize = 64 * 1024;
+
 use anvil_domain::execution::{ExecutionRecord, ResponseRecord, TransportFailure};
 use anvil_domain::request::Protocol;
 use anvil_transport::grpc::ChannelUse;
@@ -672,7 +675,7 @@ mod tests {
         let resolver = vars::Resolver::new(
             vec![vars::VarLayer {
                 label: "test".into(),
-                vars: vec![vars::VarEntry { name: "secret".into(), value: "secret-cookie-name".into(), secret: true }],
+                vars: vec![vars::VarEntry { name: "secret".into(), value: "secret-cookie-name".into(), secret: true, literal: false }],
             }],
             None,
         );

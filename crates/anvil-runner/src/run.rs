@@ -14,13 +14,13 @@ use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_transport::recorder::EventCtx;
 use chrono::Utc;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 const MAX_URL: usize = 2_048;
 const MAX_TEXT: usize = 1_024;
 const MAX_SUMMARY: usize = 512;
-
 /// Execute a plan. Returns an error only when the run cannot start (trust,
 /// validation); once started, cancellation or an abort still yields a
 /// (partial) report.
@@ -174,6 +174,7 @@ impl Run {
         // Run-local values, each with the scope of the step that extracted
         // it (`ExecutionContext::scope`).
         let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
+        let mut unavailable_extractions: HashSet<(Option<Id>, String)> = HashSet::new();
         let mut stopped_at: Option<u32> = None;
         let mut failed = false;
         let mut stop = false;
@@ -240,17 +241,17 @@ impl Run {
             };
             let name = if provided.name.is_empty() { name } else { provided.name };
             let mut ctx = provided.context;
+            let scope = ctx.scope;
             ctx.var_layers.push(VarLayer {
                 label: "run".into(),
                 vars: vec![
-                    VarEntry { name: "anvil.iteration".into(), value: it.to_string(), secret: false },
-                    VarEntry { name: "anvil.step".into(), value: pos.to_string(), secret: false },
+                    VarEntry { name: "anvil.iteration".into(), value: it.to_string(), secret: false, literal: false },
+                    VarEntry { name: "anvil.step".into(), value: pos.to_string(), secret: false, literal: false },
                 ],
             });
             // A step under a sealed import root sees only values extracted
             // under that root, and no dataset row (the dataset is the
             // workspace's); a step outside it never sees what it extracted.
-            let scope = ctx.scope;
             if let Some(l) = &dataset_layer {
                 if scope.is_none() {
                     ctx.var_layers.push(l.clone());
@@ -261,6 +262,9 @@ impl Run {
             let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
             if !visible.is_empty() {
                 ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: visible });
+            }
+            for layer in &mut ctx.var_layers {
+                layer.vars.retain(|entry| !unavailable_extractions.contains(&(scope, entry.name.clone())));
             }
             for n in self.secrets.names() {
                 if !ctx.redaction_names.iter().any(|x| x.eq_ignore_ascii_case(n)) {
@@ -276,12 +280,49 @@ impl Run {
             // recorded or reported.
             let mut new_secrets = Vec::new();
             for (var, value, sensitive) in std::mem::take(&mut out.extracted) {
+                extracted.retain(|(s, e)| *s != scope || e.name != var);
+                if sensitive && value.len() > anvil_engine::MAX_SENSITIVE_EXTRACTION_BYTES {
+                    unavailable_extractions.insert((scope, var.clone()));
+                    out.body = bytes::Bytes::new();
+                    out.decoded_body = None;
+                    if let Some(response) = &mut out.record.response {
+                        response.body.captured_bytes = 0;
+                        response.body.blob_sha256 = None;
+                    }
+                    // Do not build a redaction matcher from an unbounded value. Remove
+                    // every response-derived record surface and do not forward this
+                    // variable, so the cleartext cannot reach history or later steps.
+                    out.record.prepared.url.clear();
+                    out.record.prepared.headers.clear();
+                    out.record.prepared.inferred.clear();
+                    out.record.attempts.clear();
+                    out.record.response = None;
+                    out.record.stream = None;
+                    out.record.assertion_results.clear();
+                    out.record.extracted.clear();
+                    out.record.findings.clear();
+                    out.record.outcome.transport = TransportState::Failed;
+                    out.record.outcome.application = ApplicationState::NotEvaluated;
+                    out.record.outcome.assertions = AssertionState::NotRun;
+                    out.record.outcome.protocol_status = ProtocolStatus::None;
+                    out.record.outcome.warnings.clear();
+                    out.record.outcome.summary =
+                        format!("Sensitive extraction '{var}' exceeded the 64 KiB limit; response data was discarded.");
+                    self.notes.push(
+                        &self.secrets,
+                        format!(
+                            "Sensitive extraction '{var}' exceeded the 64 KiB limit; step failed, response discarded, value not forwarded."
+                        ),
+                    );
+                    continue;
+                }
+                // A value extracted again within the limit is available again.
+                unavailable_extractions.remove(&(scope, var.clone()));
                 if sensitive {
                     new_secrets.push(value.clone());
                     self.secrets.add_name(&var);
                 }
-                extracted.retain(|(s, e)| *s != scope || e.name != var);
-                extracted.push((scope, VarEntry { name: var, value, secret: sensitive }));
+                extracted.push((scope, VarEntry { name: var, value, secret: sensitive, literal: true }));
             }
             self.secrets.add_values(new_secrets);
             self.secrets.scrub_record(&mut out.record);

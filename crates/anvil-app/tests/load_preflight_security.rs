@@ -161,8 +161,10 @@ impl SecretResolver for ReplaceIssuerAfterRead {
 }
 
 fn row(ctx: &mut ExecutionContext, name: &str, value: &str) {
-    ctx.var_layers
-        .push(VarLayer { label: "dataset".into(), vars: vec![VarEntry { name: name.into(), value: value.into(), secret: false }] });
+    ctx.var_layers.push(VarLayer {
+        label: "dataset".into(),
+        vars: vec![VarEntry { name: name.into(), value: value.into(), secret: false, literal: false }],
+    });
 }
 
 async fn send(ctx: &ExecutionContext) -> ExecutionOutput {

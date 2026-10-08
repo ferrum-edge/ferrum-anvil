@@ -730,16 +730,21 @@ mod preparation_order {
         c.var_layers = vec![VarLayer {
             label: "workspace".into(),
             vars: vec![
-                VarEntry { name: "unused-vault-name-canary".into(), value: String::new(), secret: true },
-                VarEntry { name: "credential".into(), value: String::new(), secret: true },
-                VarEntry { name: "issuer".into(), value: issuer.into(), secret: false },
-                VarEntry { name: "data".into(), value: "{{unexpanded-data-only}}".into(), secret: false },
+                VarEntry { name: "unused-vault-name-canary".into(), value: String::new(), secret: true, literal: false },
+                VarEntry { name: "credential".into(), value: String::new(), secret: true, literal: false },
+                VarEntry { name: "issuer".into(), value: issuer.into(), secret: false, literal: false },
+                VarEntry { name: "data".into(), value: "{{unexpanded-data-only}}".into(), secret: false, literal: false },
             ],
         }];
         if shadowed {
             c.var_layers.push(VarLayer {
                 label: "run".into(),
-                vars: vec![VarEntry { name: "unused-vault-name-canary".into(), value: "winning-data".into(), secret: false }],
+                vars: vec![VarEntry {
+                    name: "unused-vault-name-canary".into(),
+                    value: "winning-data".into(),
+                    secret: false,
+                    literal: false,
+                }],
             });
         }
         c.secrets = secrets.clone();

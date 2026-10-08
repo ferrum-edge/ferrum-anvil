@@ -111,7 +111,7 @@ async fn a_tool_call_answered_with_an_event_stream_is_checked_on_its_json_rpc_re
     let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, ..Default::default() }).await.unwrap();
     let e = Engine::new();
     let mut c = mcp_ctx(&f.url(), call("echo", r#"{"text":"{{greeting}}"}"#));
-    let greeting = VarEntry { name: "greeting".into(), value: "hello".into(), secret: false };
+    let greeting = VarEntry { name: "greeting".into(), value: "hello".into(), secret: false, literal: false };
     c.var_layers.push(VarLayer { label: "test".into(), vars: vec![greeting] });
     let text = "$.result.structuredContent.text".to_string();
     c.spec.assertions = vec![
@@ -297,7 +297,7 @@ async fn a_session_id_holding_a_variable_reference_is_never_sent_back() {
     let e = Engine::new();
     let secret = "tok-SENSITIVE-mcp-variable";
     let mut c = mcp_ctx(&f.url(), list());
-    let token = VarEntry { name: "api_token".into(), value: secret.into(), secret: true };
+    let token = VarEntry { name: "api_token".into(), value: secret.into(), secret: true, literal: false };
     c.var_layers.push(VarLayer { label: "test".into(), vars: vec![token] });
     let o = run(&e, &c).await;
     assert!(notes(&o).contains("is not a session id Anvil sends back"), "{}", notes(&o));
@@ -376,6 +376,42 @@ async fn a_cross_origin_redirect_drops_the_session_id() {
     let headers = other.log.last_request_headers().expect("the redirect was followed");
     assert!(!headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id")), "{headers:?}");
     assert!(headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-protocol-version")), "{headers:?}");
-    assert!(notes(&o).contains("credential headers withheld on the redirect"), "{}", notes(&o));
+    assert!(notes(&o).contains("MCP session header withheld on the cross-origin redirect"), "{}", notes(&o));
     assert_eq!(f.state.closed.lock().len(), 1, "the session is still ended at its own origin");
+}
+
+#[tokio::test]
+async fn a_cross_origin_redirect_drops_the_session_id_when_credential_forwarding_is_enabled() {
+    init();
+    let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::RedirectOperation(to))).await.unwrap();
+    let e = Engine::new();
+    let mut ctx = mcp_ctx(&f.url(), list());
+    ctx.settings_layers.push((
+        "test".into(),
+        SettingsOverrides {
+            redirects: Some(anvil_domain::settings::RedirectPolicy { follow: true, max: 10, forward_credentials_cross_origin: true }),
+            ..Default::default()
+        },
+    ));
+    let o = run(&e, &ctx).await;
+    let headers = other.log.last_request_headers().expect("the redirect was followed");
+    assert!(!headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id")), "{headers:?}");
+    assert!(headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-protocol-version")), "{headers:?}");
+    assert!(notes(&o).contains("MCP session header withheld on the cross-origin redirect"), "{}", notes(&o));
+}
+
+#[tokio::test]
+async fn initialize_does_not_follow_a_cross_origin_redirect() {
+    init();
+    let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let f = mcp::serve("127.0.0.1:0", hostile(Hostile::RedirectInitialize(to))).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), list())).await;
+    assert_eq!(status(&o), Some(307));
+    assert_eq!(f.state.methods(), ["initialize"]);
+    assert!(other.log.entries().is_empty(), "initialize redirects are not followed");
+    assert!(notes(&o).contains("MCP initialize was answered with HTTP 307, not a session"), "{}", notes(&o));
 }

@@ -6,10 +6,11 @@
 use anvil_domain::Id;
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::outcome::{ApplicationState, AssertionState, TransportState};
-use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::runner::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_domain::workspace::DatasetFormat;
+use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::GroundTruth;
 use anvil_fixtures::http as fx;
@@ -99,7 +100,7 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let mut p = Recording::default();
     let mut login = RequestSpec::http("POST", &f.url("/status/200"));
-    login.params.push(KeyValue::new("body", r#"{"token":"tok-chain-0001","user":"alice"}"#));
+    login.params.push(KeyValue::new("body", r#"{"token":"\u007b\u007bsecret\u007d\u007d","user":"alice"}"#));
     login.extractions.push(Extraction {
         variable: "auth_token".into(),
         source: ExtractionSource::JsonPath { path: "$.token".into() },
@@ -111,6 +112,10 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     me.headers.push(KeyValue::new("X-Token", "{{auth_token}}"));
     me.headers.push(KeyValue::new("X-Step", "{{anvil.iteration}}/{{anvil.step}}"));
     let me_id = p.add("Me", me);
+    p.inner.steps.get_mut(&me_id).unwrap().1.var_layers.push(VarLayer {
+        label: "workspace".into(),
+        vars: vec![VarEntry { name: "secret".into(), value: "vault-secret-1".into(), secret: true, literal: false }],
+    });
 
     let engine = Engine::new();
     let r = anvil_runner::run(&engine, &p, plan(&[(login_id, "Login"), (me_id, "Me")]), RunOptions::default(), CancellationToken::new())
@@ -126,9 +131,128 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     assert!(steps[0].execution_id.is_some() && steps[0].execution_id != steps[1].execution_id);
     // Ground truth: the fixture received the extracted token on step 2.
     let seen = f.log.last_request_headers().unwrap();
-    assert_eq!(header(&seen, "x-token"), Some("tok-chain-0001"));
+    assert_eq!(header(&seen, "x-token"), Some("{{secret}}"));
     assert_eq!(header(&seen, "x-step"), Some("0/1"), "anvil.iteration / anvil.step builtins");
     assert_eq!(p.records.lock().len(), 2, "each executed step is handed over for history");
+}
+
+#[tokio::test]
+async fn oversized_sensitive_extractions_fail_closed_and_discard_response_data() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let mut request = RequestSpec::http("POST", &f.url("/echo"));
+    request.body = Body::Raw { text: "x".repeat(64 * 1024 + 1), content_type: Some("text/plain".into()) };
+    request.extractions.push(Extraction {
+        variable: "large_secret".into(),
+        source: ExtractionSource::JsonPath { path: "$.body".into() },
+        sensitive: true,
+    });
+    let request_id = p.add("Large extraction", request);
+
+    let engine = Engine::new();
+    let report = anvil_runner::run(&engine, &p, plan(&[(request_id, "Large extraction")]), RunOptions::default(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(!report.passed(), "{report:#?}");
+    assert!(report.iterations[0].steps[0].extracted.is_empty());
+    assert!(report.notes.iter().any(|note| note.contains("large_secret") && note.contains("64 KiB limit")));
+    let record = p.records.lock();
+    assert!(record[0].1.is_empty(), "the response body was discarded");
+    assert!(record[0].0.contains("large_secret"));
+    assert!(record[0].0.contains("\"attempts\":[]"), "redirect records were discarded");
+    assert!(record[0].0.contains("\"assertion_results\":[]"), "assertion results were discarded");
+    assert!(!record[0].0.contains("\"response\":"), "response headers and body were discarded");
+    assert!(!record[0].0.contains(&"x".repeat(64 * 1024 + 1)));
+}
+
+#[tokio::test]
+async fn oversized_sensitive_extractions_do_not_store_cookies_or_fall_back_to_outer_variables() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let mut request = RequestSpec::http("GET", &f.url("/sse?count=3000&interval=0&set_cookie=oversized%3Dstored"));
+    request.extractions.push(Extraction {
+        variable: "large_secret".into(),
+        source: ExtractionSource::Regex { pattern: "(?s)(.*)".into(), group: 1 },
+        sensitive: true,
+    });
+    let first_id = p.add("Large extraction", request);
+
+    let second_id = Id::new();
+    let mut second = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo")));
+    second.request_id = Some(second_id);
+    second.spec.headers.push(KeyValue::new("X-Token", "{{large_secret}}"));
+    second.var_layers.push(VarLayer {
+        label: "workspace".into(),
+        vars: vec![VarEntry { name: "large_secret".into(), value: "outer-value".into(), secret: false, literal: false }],
+    });
+    p.inner.insert(second_id, "Use large extraction", second);
+
+    let third_id = p.add("Check cookie jar", RequestSpec::http("GET", &f.url("/echo")));
+    let engine = Engine::new();
+    let report = anvil_runner::run(
+        &engine,
+        &p,
+        plan(&[(first_id, "Large extraction"), (second_id, "Use large extraction"), (third_id, "Check cookie jar")]),
+        RunOptions::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let steps = &report.iterations[0].steps;
+    assert_eq!(steps[0].status, RunStepStatus::Failed);
+    assert_ne!(steps[1].status, RunStepStatus::Passed);
+    assert!(!engine.has_cookie_jar("standalone"));
+    let records = p.records.lock();
+    assert!(records[1].0.contains("large_secret"), "the later step reports the unavailable variable");
+    assert!(!records[2].0.contains("oversized=stored"));
+    assert!(!records[2].0.contains("Cookie"), "the discarded response cookie was not sent later");
+}
+
+#[tokio::test]
+async fn a_later_extraction_within_the_limit_makes_the_variable_available_again() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let mut large = RequestSpec::http("POST", &f.url("/echo"));
+    large.body = Body::Raw { text: "x".repeat(64 * 1024 + 1), content_type: Some("text/plain".into()) };
+    large.extractions.push(Extraction {
+        variable: "session".into(),
+        source: ExtractionSource::JsonPath { path: "$.body".into() },
+        sensitive: true,
+    });
+    let large_id = p.add("Large extraction", large);
+    let mut small = RequestSpec::http("POST", &f.url("/status/200"));
+    small.params.push(KeyValue::new("body", r#"{"token":"tok-small-0001"}"#));
+    small.extractions.push(Extraction {
+        variable: "session".into(),
+        source: ExtractionSource::JsonPath { path: "$.token".into() },
+        sensitive: true,
+    });
+    let small_id = p.add("Small extraction", small);
+    let mut send = RequestSpec::http("GET", &f.url("/echo"));
+    send.headers.push(KeyValue::new("X-Token", "{{session}}"));
+    let send_id = p.add("Send", send);
+
+    let engine = Engine::new();
+    let report = anvil_runner::run(
+        &engine,
+        &p,
+        plan(&[(large_id, "Large extraction"), (small_id, "Small extraction"), (send_id, "Send")]),
+        RunOptions::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let steps = &report.iterations[0].steps;
+    assert_eq!(steps[0].status, RunStepStatus::Failed);
+    assert_eq!(steps[2].status, RunStepStatus::Passed, "{report:#?}");
+    let seen = f.log.last_request_headers().unwrap();
+    assert_eq!(header(&seen, "x-token"), Some("tok-small-0001"));
 }
 
 fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {

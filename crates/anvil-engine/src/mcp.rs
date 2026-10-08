@@ -602,7 +602,14 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
         let seen = Mutex::new(Seen::default());
         // The request's assertions also run on `initialize`: when the
         // handshake fails, its exchange is the result.
-        let init = exchange(ctx, "POST", Some(initialize_body(spec)), None, None, Checks::Assertions);
+        let mut init = exchange(ctx, "POST", Some(initialize_body(spec)), None, None, Checks::Assertions);
+        init.settings_layers.push((
+            "mcp-initialize".into(),
+            SettingsOverrides {
+                redirects: Some(anvil_domain::settings::RedirectPolicy { follow: false, ..Default::default() }),
+                ..Default::default()
+            },
+        ));
         let out = {
             let view = viewer(&seen, Some(INITIALIZE_ID));
             let view: BodyView<'_> = &view;

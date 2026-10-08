@@ -689,14 +689,15 @@ mod tests {
 
     fn prepared(spec: &RequestSpec) -> PreparedHttp {
         let vars = vec![
-            crate::vars::VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true },
-            crate::vars::VarEntry { name: "password_ref".into(), value: "{{password}}".into(), secret: false },
+            crate::vars::VarEntry { name: "password".into(), value: "tok-SENSITIVE-p@ss w/rd+=".into(), secret: true, literal: false },
+            crate::vars::VarEntry { name: "password_ref".into(), value: "{{password}}".into(), secret: false, literal: false },
             crate::vars::VarEntry {
                 name: "credentials".into(),
                 value: r#"{ "user": "alice", "password": "tok-SENSITIVE-gql-9z8y7x" }"#.into(),
                 secret: true,
+                literal: false,
             },
-            crate::vars::VarEntry { name: "user".into(), value: "alice".into(), secret: false },
+            crate::vars::VarEntry { name: "user".into(), value: "alice".into(), secret: false, literal: false },
         ];
         let r = Resolver::new(vec![crate::vars::VarLayer { label: "environment:test".into(), vars }], Some(1));
         let attachments = crate::context::MemoryAttachments::default();

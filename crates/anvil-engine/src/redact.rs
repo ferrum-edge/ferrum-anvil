@@ -14,6 +14,7 @@
 //! exports show a preview for that reason.
 
 use crate::vars::Resolver;
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use anvil_domain::diagnostics::DiagnosticFinding;
 use anvil_domain::execution::HeaderEntry;
 use anvil_domain::request::PayloadEncoding;
@@ -102,13 +103,16 @@ pub struct Redactor {
     secrets: Vec<String>,
     /// Secret values, their canonical percent-encoded forms and their JSON
     /// string escaping, longest first (scrubbed from arbitrary text).
-    patterns: Vec<String>,
+    matcher: Option<AhoCorasick>,
+    /// Patterns retained only when the matcher cannot be built, so redaction
+    /// degrades to a slower replacement pass instead of silently failing.
+    fallback_patterns: Vec<String>,
     extra_names: Vec<String>,
 }
 
 impl Redactor {
     pub fn new(secrets: Vec<String>, extra_names: Vec<String>) -> Self {
-        let mut r = Redactor { secrets, patterns: vec![], extra_names };
+        let mut r = Redactor { secrets, matcher: None, fallback_patterns: vec![], extra_names };
         r.secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         r.reindex();
         r
@@ -163,7 +167,25 @@ impl Redactor {
             patterns.extend(json_escaped(s));
         }
         sort_longest_first(&mut patterns);
-        self.patterns = patterns;
+        self.matcher = if patterns.is_empty() {
+            self.fallback_patterns.clear();
+            None
+        } else {
+            match AhoCorasickBuilder::new()
+                .kind(Some(AhoCorasickKind::ContiguousNFA))
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(&patterns)
+            {
+                Ok(matcher) => {
+                    self.fallback_patterns.clear();
+                    Some(matcher)
+                }
+                Err(_) => {
+                    self.fallback_patterns = patterns;
+                    None
+                }
+            }
+        };
     }
 
     /// Take in another redactor's secret values and names (the exchanges of
@@ -203,12 +225,17 @@ impl Redactor {
     /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
     /// [`Redactor::json_text`] where the structure is known.
     pub fn text(&self, s: &str) -> String {
-        let mut out = s.to_string();
-        for v in &self.patterns {
-            if out.contains(v.as_str()) {
-                out = out.replace(v.as_str(), REDACTED);
-            }
+        let Some(matcher) = &self.matcher else {
+            return fallback_redact(s, &self.fallback_patterns);
+        };
+        let mut out = String::with_capacity(s.len());
+        let mut offset = 0;
+        for found in matcher.find_iter(s) {
+            out.push_str(&s[offset..found.start()]);
+            out.push_str(REDACTED);
+            offset = found.end();
         }
+        out.push_str(&s[offset..]);
         out
     }
 
@@ -688,6 +715,25 @@ fn lower_hex(encoded: &str) -> String {
     out
 }
 
+fn fallback_redact(text: &str, patterns: &[String]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        let next = patterns
+            .iter()
+            .filter_map(|pattern| text[offset..].find(pattern).map(|at| (offset + at, pattern.len())))
+            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        let Some((start, len)) = next else {
+            out.push_str(&text[offset..]);
+            break;
+        };
+        out.push_str(&text[offset..start]);
+        out.push_str(REDACTED);
+        offset = start + len;
+    }
+    out
+}
+
 fn is_scheme(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
@@ -728,6 +774,13 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_redaction_patterns_use_bounded_nfa_memory() {
+        let secret = format!("{}sensitive-tail", "x".repeat(1024 * 1024));
+        let redactor = Redactor::new(vec![secret.clone()], vec![]);
+        assert_eq!(redactor.text(&format!("before {secret} after")), format!("before {REDACTED} after"));
+    }
 
     fn b64(bytes: &[u8]) -> String {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)

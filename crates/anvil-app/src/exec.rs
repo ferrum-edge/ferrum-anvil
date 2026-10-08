@@ -238,7 +238,12 @@ fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver, defer: 
                 }
             }
         };
-        out.push(VarEntry { name: v.name.clone(), value, secret: v.secret || matches!(v.value, SensitiveValue::Secret { .. }) });
+        out.push(VarEntry {
+            name: v.name.clone(),
+            value,
+            secret: v.secret || matches!(v.value, SensitiveValue::Secret { .. }),
+            literal: false,
+        });
     }
     Ok((VarLayer { label, vars: out }, deferred))
 }

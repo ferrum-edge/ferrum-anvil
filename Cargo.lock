@@ -383,6 +383,7 @@ dependencies = [
 name = "anvil-engine"
 version = "0.1.3"
 dependencies = [
+ "aho-corasick",
  "anvil-auth",
  "anvil-diagnostics",
  "anvil-domain",

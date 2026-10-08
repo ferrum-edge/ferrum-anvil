@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn a_deferred_vault_url_is_refused_only_where_the_unit_depends_on_it() {
         use anvil_engine::vars::{DEFERRED_SECRET_VALUE, VarEntry, VarLayer};
-        let target = VarEntry { name: "target".into(), value: DEFERRED_SECRET_VALUE.into(), secret: true };
+        let target = VarEntry { name: "target".into(), value: DEFERRED_SECRET_VALUE.into(), secret: true, literal: false };
         let mut spec = anvil_domain::request::RequestSpec::http("GET", "{{target}}");
         spec.protocol = Protocol::Udp;
         let mut ctx = ExecutionContext::standalone(spec);

@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 /// What a rule applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
@@ -131,41 +132,29 @@ pub fn operations(spec: &Spec) -> Vec<OperationRef<'_>> {
         }
         let pptr = ptr("/paths", path);
         let Some((item, item_pointer)) = spec.usable(raw_item, &pptr) else { continue };
-        for m in METHODS {
-            if let Some(op) = item.get(*m).filter(|o| o.is_object()) {
-                out.push(OperationRef {
-                    method: m.to_string(),
-                    path: path.clone(),
-                    pointer: ptr(&item_pointer, m),
-                    op,
-                    item,
-                    item_pointer: item_pointer.clone(),
-                });
-            }
+        for (method, pointer, op) in item_operations(spec, item, &item_pointer) {
+            out.push(OperationRef { method, path: path.clone(), pointer, op, item, item_pointer: item_pointer.clone() });
         }
-        if spec.dialect == Dialect::OpenApi32 {
-            if let Some(op) = item.get("query").filter(|o| o.is_object()) {
-                out.push(OperationRef {
-                    method: "query".into(),
-                    path: path.clone(),
-                    pointer: ptr(&item_pointer, "query"),
-                    op,
-                    item,
-                    item_pointer: item_pointer.clone(),
-                });
-            }
-            if let Some(extra) = item.get("additionalOperations").and_then(Value::as_object) {
-                let base = ptr(&item_pointer, "additionalOperations");
-                for (m, op) in extra.iter().filter(|(_, o)| o.is_object()) {
-                    out.push(OperationRef {
-                        method: m.to_ascii_lowercase(),
-                        path: path.clone(),
-                        pointer: ptr(&base, m),
-                        op,
-                        item,
-                        item_pointer: item_pointer.clone(),
-                    });
-                }
+    }
+    out
+}
+
+/// The operations of a Path Item: lower-case method, pointer and object.
+fn item_operations<'v>(spec: &Spec, item: &'v Value, item_pointer: &str) -> Vec<(String, String, &'v Value)> {
+    let mut out = vec![];
+    for m in METHODS {
+        if let Some(op) = item.get(*m).filter(|o| o.is_object()) {
+            out.push((m.to_string(), ptr(item_pointer, m), op));
+        }
+    }
+    if spec.dialect == Dialect::OpenApi32 {
+        if let Some(op) = item.get("query").filter(|o| o.is_object()) {
+            out.push(("query".into(), ptr(item_pointer, "query"), op));
+        }
+        if let Some(extra) = item.get("additionalOperations").and_then(Value::as_object) {
+            let base = ptr(item_pointer, "additionalOperations");
+            for (m, op) in extra.iter().filter(|(_, o)| o.is_object()) {
+                out.push((m.to_ascii_lowercase(), ptr(&base, m), op));
             }
         }
     }
@@ -445,7 +434,7 @@ fn referenced_schemas(root: &Value, base: &str) -> HashSet<String> {
 pub struct Model<'a> {
     pub spec: &'a Spec,
     pub targets: Vec<Target>,
-    /// Operations left out because the work budget ran out.
+    /// Operations left out because the work or view budget ran out.
     pub skipped_operations: usize,
 }
 
@@ -453,10 +442,24 @@ pub struct Model<'a> {
 /// (path-level ones count again for every operation that inherits them).
 /// Past this, the remaining operations are left out and counted.
 pub const MAX_MODEL_WORK: usize = 2_000_000;
+/// Bytes the targets copy out of the document: their views, labels and
+/// pointers, and what an operation copies again for every path that reaches
+/// it. Counted separately from the object-work budget so ordinary long
+/// descriptions do not consume that budget. Every copy is charged before it is
+/// made; once one does not fit, nothing more is built and the remaining
+/// operations are counted as left out.
+pub const MAX_MODEL_VIEW_BYTES: usize = 256 * 1024 * 1024;
+/// Charged for every JSON value a view copies, besides its text, so values
+/// without text (numbers, nulls, nesting) count too.
+const VALUE_BYTES: usize = 8;
+/// Charged for the fixed member names and flags of a view.
+const VIEW_BYTES: usize = 256;
+/// The same for an operation view, which has about four times as many.
+const OPERATION_VIEW_BYTES: usize = 1024;
 
 impl<'a> Model<'a> {
     pub fn build(spec: &'a Spec, examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>) -> Model<'a> {
-        let mut b = ModelBuilder { spec, targets: vec![], seen: HashSet::new(), work: 0, skipped_operations: 0 };
+        let mut b = ModelBuilder::new(spec, MAX_MODEL_VIEW_BYTES);
         b.build(examples);
         Model { spec, targets: b.targets, skipped_operations: b.skipped_operations }
     }
@@ -480,11 +483,66 @@ struct ModelBuilder<'a> {
     /// (kind, pointer) of targets already emitted: a parameter or response
     /// shared through `$ref` is one target.
     seen: HashSet<(TargetKind, String)>,
+    /// Schemas whose properties were visited (the Swagger 2.0 media types of
+    /// a body or response share its schema).
+    property_roots: HashSet<String>,
+    /// Operations already resolved, by pointer: one in a Path Item that
+    /// several paths `$ref` is resolved and sized once.
+    shared: HashMap<String, Rc<SharedOperation<'a>>>,
     work: usize,
+    view_bytes: usize,
+    view_byte_limit: usize,
+    /// A copy did not fit the view budget: nothing more is built.
+    exhausted: bool,
     skipped_operations: usize,
+    /// JSON values visited to size copies.
+    #[cfg(test)]
+    walked: usize,
+    /// Copies charged or refused.
+    #[cfg(test)]
+    reservations: usize,
+}
+
+/// What the paths that reach one operation share: its resolved parameters,
+/// body and responses, the work they count and what a copy of its view costs
+/// (both counted again for every path).
+struct SharedOperation<'a> {
+    params: Vec<Param<'a>>,
+    body: Option<RequestBody<'a>>,
+    resps: Vec<Response<'a>>,
+    security_names: Vec<String>,
+    duplicate_params: BTreeSet<String>,
+    work: usize,
+    view_cost: usize,
+}
+
+/// A Path Item and its operations, read once however many paths `$ref` it.
+struct PathItem<'a> {
+    value: &'a Value,
+    pointer: String,
+    operations: Vec<(String, String, &'a Value)>,
 }
 
 impl<'a> ModelBuilder<'a> {
+    fn new(spec: &'a Spec, view_byte_limit: usize) -> ModelBuilder<'a> {
+        ModelBuilder {
+            spec,
+            targets: vec![],
+            seen: HashSet::new(),
+            property_roots: HashSet::new(),
+            shared: HashMap::new(),
+            work: 0,
+            view_bytes: 0,
+            view_byte_limit,
+            exhausted: false,
+            skipped_operations: 0,
+            #[cfg(test)]
+            walked: 0,
+            #[cfg(test)]
+            reservations: 0,
+        }
+    }
+
     fn push(&mut self, kind: TargetKind, pointer: String, label: String, view: Value) {
         // An operation reached through several paths (one Path Item `$ref`'d
         // by each) is a target per path: its path template differs.
@@ -496,10 +554,83 @@ impl<'a> ModelBuilder<'a> {
         self.targets.push(Target { kind, pointer, label, view });
     }
 
+    fn is_seen(&self, kind: TargetKind, pointer: &str) -> bool {
+        self.seen.contains(&(kind, pointer.to_string()))
+    }
+
+    /// Charge `bytes` of copies before making them. Once a charge does not
+    /// fit, nothing more is built.
+    fn reserve(&mut self, bytes: usize) -> bool {
+        #[cfg(test)]
+        {
+            self.reservations += 1;
+        }
+        if self.exhausted || bytes > self.view_byte_limit.saturating_sub(self.view_bytes) {
+            self.exhausted = true;
+            return false;
+        }
+        self.view_bytes += bytes;
+        true
+    }
+
+    /// What copying `v` into a view costs: its text and member names, plus
+    /// [`VALUE_BYTES`] per value. Counting stops past what is left of the
+    /// budget (that copy is never made).
+    fn value_cost(&mut self, v: &Value) -> usize {
+        let left = self.view_byte_limit.saturating_sub(self.view_bytes);
+        let mut total = VALUE_BYTES;
+        let mut stack = vec![v];
+        while let Some(v) = stack.pop() {
+            if total > left {
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.walked += 1;
+            }
+            match v {
+                Value::String(s) => total = total.saturating_add(s.len()),
+                Value::Array(a) => {
+                    total = total.saturating_add(a.len().saturating_mul(VALUE_BYTES));
+                    if total <= left {
+                        stack.extend(a);
+                    }
+                }
+                Value::Object(o) => {
+                    total = total.saturating_add(o.len().saturating_mul(VALUE_BYTES));
+                    if total <= left {
+                        for (k, x) in o {
+                            total = total.saturating_add(k.len());
+                            stack.push(x);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        total
+    }
+
+    /// [`Self::value_cost`] of `v[key]`, when present.
+    fn field_cost(&mut self, v: &Value, key: &str) -> usize {
+        match v.get(key) {
+            Some(x) => self.value_cost(x),
+            None => 0,
+        }
+    }
+
+    /// What copying the `x-` members of `v` costs.
+    fn extensions_cost(&mut self, v: &Value) -> usize {
+        let mut total = VALUE_BYTES;
+        for (k, x) in v.as_object().into_iter().flatten().filter(|(k, _)| k.starts_with("x-")) {
+            total = total.saturating_add(k.len()).saturating_add(self.value_cost(x));
+        }
+        total
+    }
+
     fn build(&mut self, examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>) {
         let spec = self.spec;
         let root = &spec.root;
-        let ops = operations(spec);
         let schema_base = if spec.is_swagger2() { "/definitions" } else { "/components/schemas" };
         let referenced = referenced_schemas(root, schema_base);
         let declared_tags: Vec<String> = root
@@ -508,21 +639,47 @@ impl<'a> ModelBuilder<'a> {
             .map(|a| a.iter().filter_map(|t| t.get("name").and_then(Value::as_str)).map(str::to_string).collect())
             .unwrap_or_default();
         let scheme_names: HashSet<String> = security_schemes(spec).map(|(m, _)| m.keys().cloned().collect()).unwrap_or_default();
+        // Each path with its Path Item (an index into `items`): a Path Item
+        // `$ref`'d by several paths is resolved and listed once.
+        let mut items: Vec<PathItem<'a>> = vec![];
+        let mut path_items: Vec<(&'a str, usize)> = vec![];
+        let mut item_index: HashMap<String, usize> = HashMap::new();
+        if let Some(paths) = root.get("paths").and_then(Value::as_object) {
+            for (path, raw) in paths.iter().filter(|(k, _)| !k.starts_with("x-")) {
+                let Some((value, pointer)) = spec.usable(raw, &ptr("/paths", path)) else { continue };
+                let i = match item_index.get(&pointer) {
+                    Some(i) => *i,
+                    None => {
+                        item_index.insert(pointer.clone(), items.len());
+                        items.push(PathItem { value, operations: item_operations(spec, value, &pointer), pointer });
+                        items.len() - 1
+                    }
+                };
+                path_items.push((path.as_str(), i));
+            }
+        }
         let mut id_counts: HashMap<&str, usize> = HashMap::new();
         let mut used_tags: HashSet<&str> = HashSet::new();
         let mut used_schemes: HashSet<String> = HashSet::new();
-        let mut methods_by_path: HashMap<&str, Vec<&str>> = HashMap::new();
         // The document's requirements once; each operation adds only its own.
         let global_security_names = requirement_names(root.get("security").and_then(Value::as_array));
         used_schemes.extend(global_security_names.iter().cloned());
-        for op in &ops {
-            if let Some(id) = op.operation_id() {
-                *id_counts.entry(id).or_default() += 1;
-            }
-            used_tags.extend(op.op.get("tags").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str));
-            used_schemes.extend(requirement_names(op.op.get("security").and_then(Value::as_array)));
-            methods_by_path.entry(op.path.as_str()).or_default().push(op.method.as_str());
+        // Each operation once, its id counted for every path that reaches it.
+        let mut uses = vec![0usize; items.len()];
+        for (_, i) in &path_items {
+            uses[*i] += 1;
         }
+        for (item, n) in items.iter().zip(uses) {
+            for (_, _, op) in &item.operations {
+                let op = *op;
+                if let Some(id) = op.get("operationId").and_then(Value::as_str) {
+                    *id_counts.entry(id).or_default() += n;
+                }
+                used_tags.extend(op.get("tags").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str));
+                used_schemes.extend(requirement_names(op.get("security").and_then(Value::as_array)));
+            }
+        }
+        let operation_count: usize = path_items.iter().map(|(_, i)| items[*i].operations.len()).sum();
         let declared_tag_set: HashSet<String> = declared_tags.iter().cloned().collect();
 
         // Servers (document level; 2.0 from schemes × host + basePath).
@@ -532,6 +689,11 @@ impl<'a> ModelBuilder<'a> {
                 let base = root.get("basePath").and_then(Value::as_str).unwrap_or("");
                 let schemes = list_of_strings(root.get("schemes")).filter(|s| !s.is_empty()).unwrap_or_else(|| vec!["https".into()]);
                 for s in schemes {
+                    // The URL is copied into the list, the label and the view.
+                    let url_bytes = s.len() + 3 + host.len() + base.len();
+                    if !self.reserve(VIEW_BYTES + 2 * (s.len() + 6) + 4 * url_bytes) {
+                        break;
+                    }
                     let url = format!("{s}://{host}{base}");
                     server_urls.push(url.clone());
                     self.push(
@@ -550,58 +712,85 @@ impl<'a> ModelBuilder<'a> {
         let path_count =
             root.get("paths").and_then(Value::as_object).map(|p| p.keys().filter(|k| !k.starts_with("x-")).count()).unwrap_or(0);
         let global_security = root.get("security").and_then(Value::as_array);
-        self.push(
-            TargetKind::Document,
-            String::new(),
-            "document".into(),
-            json!({
-                "dialect": spec.dialect.label(),
-                "openapi_version": spec.declared_version,
-                "title": spec.title(),
-                "version": spec.version(),
-                "has_servers": !server_urls.is_empty(),
-                "server_urls": server_urls,
-                "tags": declared_tags,
-                "security": requirement_names(global_security),
-                "has_global_security": global_security.is_some_and(|s| !s.is_empty()),
-                "path_count": path_count,
-                "operation_count": ops.len(),
-                "schema_count": component_schemas(spec).map(|(m, _)| m.len()).unwrap_or(0),
-                "security_scheme_count": scheme_names.len(),
-                "json_schema_dialect": opt_str(root, "jsonSchemaDialect"),
-                "has_webhooks": root.get("webhooks").and_then(Value::as_object).is_some_and(|w| !w.is_empty()),
-                "consumes": list_of_strings(root.get("consumes")),
-                "produces": list_of_strings(root.get("produces")),
-                "extensions": extensions(root),
-            }),
-        );
-        if let Some(info) = root.get("info") {
-            let contact =
-                info.get("contact").map(|c| json!({"name": opt_str(c, "name"), "url": opt_str(c, "url"), "email": opt_str(c, "email")}));
-            let license = info
-                .get("license")
-                .map(|l| json!({"name": opt_str(l, "name"), "url": opt_str(l, "url"), "identifier": opt_str(l, "identifier")}));
+        let document_cost = VIEW_BYTES
+            + spec.declared_version.as_ref().map_or(0, |v| v.len() + VALUE_BYTES)
+            + spec.title().map_or(0, |t| t.len() + VALUE_BYTES)
+            + 6 * root.pointer("/info/version").map_or(0, |v| self.value_cost(v))
+            + names_cost(server_urls.iter().map(String::as_str))
+            + names_cost(declared_tags.iter().map(String::as_str))
+            + names_cost(global_security_names.iter().map(String::as_str))
+            + self.field_cost(root, "consumes")
+            + self.field_cost(root, "produces")
+            + str_cost(root, "jsonSchemaDialect")
+            + self.extensions_cost(root);
+        if self.reserve(document_cost) {
             self.push(
-                TargetKind::Info,
-                "/info".into(),
-                "info".into(),
+                TargetKind::Document,
+                String::new(),
+                "document".into(),
                 json!({
-                    "title": opt_str(info, "title"),
-                    "version": info.get("version").map(|v| match v { Value::String(s) => s.clone(), o => o.to_string() }),
-                    "summary": opt_str(info, "summary"),
-                    "description": opt_str(info, "description"),
-                    "terms_of_service": opt_str(info, "termsOfService"),
-                    "contact": contact,
-                    "license": license,
-                    "extensions": extensions(info),
+                    "dialect": spec.dialect.label(),
+                    "openapi_version": spec.declared_version,
+                    "title": spec.title(),
+                    "version": spec.version(),
+                    "has_servers": !server_urls.is_empty(),
+                    "server_urls": server_urls,
+                    "tags": declared_tags,
+                    "security": global_security_names,
+                    "has_global_security": global_security.is_some_and(|s| !s.is_empty()),
+                    "path_count": path_count,
+                    "operation_count": operation_count,
+                    "schema_count": component_schemas(spec).map(|(m, _)| m.len()).unwrap_or(0),
+                    "security_scheme_count": scheme_names.len(),
+                    "json_schema_dialect": opt_str(root, "jsonSchemaDialect"),
+                    "has_webhooks": root.get("webhooks").and_then(Value::as_object).is_some_and(|w| !w.is_empty()),
+                    "consumes": list_of_strings(root.get("consumes")),
+                    "produces": list_of_strings(root.get("produces")),
+                    "extensions": extensions(root),
                 }),
             );
+        }
+        if let Some(info) = root.get("info") {
+            let info_cost = VIEW_BYTES
+                + strs_cost(info, &["title", "summary", "description", "termsOfService"])
+                + 6 * self.field_cost(info, "version")
+                + info.get("contact").map_or(0, |c| strs_cost(c, &["name", "url", "email"]) + VALUE_BYTES)
+                + info.get("license").map_or(0, |l| strs_cost(l, &["name", "url", "identifier"]) + VALUE_BYTES)
+                + self.extensions_cost(info);
+            if self.reserve(info_cost) {
+                let contact = info
+                    .get("contact")
+                    .map(|c| json!({"name": opt_str(c, "name"), "url": opt_str(c, "url"), "email": opt_str(c, "email")}));
+                let license = info
+                    .get("license")
+                    .map(|l| json!({"name": opt_str(l, "name"), "url": opt_str(l, "url"), "identifier": opt_str(l, "identifier")}));
+                self.push(
+                    TargetKind::Info,
+                    "/info".into(),
+                    "info".into(),
+                    json!({
+                        "title": opt_str(info, "title"),
+                        "version": info.get("version").map(|v| match v { Value::String(s) => s.clone(), o => o.to_string() }),
+                        "summary": opt_str(info, "summary"),
+                        "description": opt_str(info, "description"),
+                        "terms_of_service": opt_str(info, "termsOfService"),
+                        "contact": contact,
+                        "license": license,
+                        "extensions": extensions(info),
+                    }),
+                );
+            }
         }
 
         // Tags.
         if let Some(tags) = root.get("tags").and_then(Value::as_array) {
             for (i, t) in tags.iter().enumerate() {
                 let name = t.get("name").and_then(Value::as_str).unwrap_or("");
+                let cost =
+                    VIEW_BYTES + 3 * name.len() + strs_cost(t, &["summary", "description", "parent", "kind"]) + self.extensions_cost(t);
+                if !self.reserve(cost) {
+                    break;
+                }
                 self.push(
                     TargetKind::Tag,
                     format!("/tags/{i}"),
@@ -621,15 +810,26 @@ impl<'a> ModelBuilder<'a> {
         }
 
         // Paths.
-        if let Some(paths) = root.get("paths").and_then(Value::as_object) {
-            for (path, raw) in paths.iter().filter(|(k, _)| !k.starts_with("x-")) {
-                let Some((item, pointer)) = spec.usable(raw, &ptr("/paths", path)) else { continue };
-                let methods: Vec<&str> = methods_by_path.get(path.as_str()).cloned().unwrap_or_default();
+        for (path, i) in &path_items {
+            let item = &items[*i];
+            if !self.is_seen(TargetKind::Path, &item.pointer) {
+                let methods: Vec<&str> = item.operations.iter().map(|(m, _, _)| m.as_str()).collect();
                 let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
                 let static_segments: Vec<&str> = segments.iter().copied().filter(|s| !s.contains('{')).collect();
+                // The path is copied into the label and the view, and again
+                // as its segments and template parameters.
+                let cost = VIEW_BYTES
+                    + 2 * item.pointer.len()
+                    + 6 * path.len()
+                    + VALUE_BYTES * (2 * segments.len() + path.matches('{').count())
+                    + names_cost(methods.iter().copied())
+                    + self.extensions_cost(item.value);
+                if !self.reserve(cost) {
+                    break;
+                }
                 self.push(
                     TargetKind::Path,
-                    pointer,
+                    item.pointer.clone(),
                     format!("path {path}"),
                     json!({
                         "path": path,
@@ -637,26 +837,53 @@ impl<'a> ModelBuilder<'a> {
                         "segments": segments,
                         "static_segments": static_segments,
                         "template_params": template_params(path),
-                        "extensions": extensions(item),
+                        "extensions": extensions(item.value),
                     }),
                 );
-                self.servers(item.get("servers"), &ptr(&ptr("/paths", path), "servers"), "path", &mut vec![]);
             }
+            self.servers(item.value.get("servers"), &ptr(&ptr("/paths", path), "servers"), "path", &mut vec![]);
         }
 
         // Operations and everything under them.
-        for op in &ops {
-            if self.work > MAX_MODEL_WORK {
-                self.skipped_operations += 1;
-                continue;
+        for (path, i) in &path_items {
+            let item = &items[*i];
+            for (k, (method, pointer, value)) in item.operations.iter().enumerate() {
+                // The operation's own copies of its method, path and pointers:
+                // its reference, label, key and view.
+                let copies = 8 * method.len() + 6 * path.len() + 3 * pointer.len() + item.pointer.len() + 8 * VALUE_BYTES;
+                if self.work > MAX_MODEL_WORK || !self.reserve(copies) {
+                    self.skipped_operations += item.operations.len() - k;
+                    break;
+                }
+                let op = OperationRef {
+                    method: method.clone(),
+                    path: path.to_string(),
+                    pointer: pointer.clone(),
+                    op: value,
+                    item: item.value,
+                    item_pointer: item.pointer.clone(),
+                };
+                self.operation(&op, &declared_tag_set, &global_security_names, &scheme_names, &id_counts, examples);
             }
-            self.operation(op, &declared_tag_set, &global_security_names, &scheme_names, &id_counts, examples);
         }
 
         // Security schemes.
         if let Some((schemes, base)) = security_schemes(spec) {
             for (name, raw) in schemes {
                 let Some((s, pointer)) = spec.usable(raw, &ptr(&base, name)) else { continue };
+                let flows_cost = match s.get("flows").and_then(Value::as_object) {
+                    Some(f) => names_cost(f.keys().map(String::as_str)),
+                    None => str_cost(s, "flow"),
+                };
+                let cost = VIEW_BYTES
+                    + 2 * pointer.len()
+                    + 3 * name.len()
+                    + strs_cost(s, &["type", "scheme", "in", "name", "bearerFormat", "openIdConnectUrl", "description"])
+                    + flows_cost
+                    + self.extensions_cost(s);
+                if !self.reserve(cost) {
+                    break;
+                }
                 let flows: Vec<String> = match s.get("flows").and_then(Value::as_object) {
                     Some(f) => f.keys().cloned().collect(),
                     None => s.get("flow").and_then(Value::as_str).map(|f| vec![f.to_string()]).unwrap_or_default(),
@@ -688,9 +915,21 @@ impl<'a> ModelBuilder<'a> {
             for (name, raw) in schemas {
                 let pointer = ptr(&base, name);
                 let is_referenced = referenced.contains(name);
+                let property_names = raw.get("properties").and_then(Value::as_object);
+                let cost = VIEW_BYTES
+                    + 2 * pointer.len()
+                    + 3 * name.len()
+                    + 2 * self.field_cost(raw, "type")
+                    + strs_cost(raw, &["format", "title", "description"])
+                    + property_names.map_or(0, |p| names_cost(p.keys().map(String::as_str)))
+                    + self.field_cost(raw, "required")
+                    + self.field_cost(raw, "enum")
+                    + self.extensions_cost(raw);
+                if !self.reserve(cost) {
+                    break;
+                }
                 let (ty, types, nullable) = schema_types(raw);
-                let properties: Vec<String> =
-                    raw.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default();
+                let properties: Vec<String> = property_names.map(|p| p.keys().cloned().collect()).unwrap_or_default();
                 self.push(
                     TargetKind::Schema,
                     pointer.clone(),
@@ -721,10 +960,21 @@ impl<'a> ModelBuilder<'a> {
     fn servers(&mut self, servers: Option<&Value>, base: &str, level: &str, urls: &mut Vec<String>) {
         let Some(list) = servers.and_then(Value::as_array) else { return };
         for (i, s) in list.iter().enumerate() {
-            let url = s.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+            let url = s.get("url").and_then(Value::as_str).unwrap_or("");
+            let variables = s.get("variables").and_then(Value::as_object);
+            // The URL is copied into the list, the label and the view.
+            let cost = VIEW_BYTES
+                + 2 * (base.len() + 21)
+                + 4 * url.len()
+                + strs_cost(s, &["description", "name"])
+                + variables.map_or(0, |v| names_cost(v.keys().map(String::as_str)))
+                + self.extensions_cost(s);
+            if !self.reserve(cost) {
+                return;
+            }
+            let url = url.to_string();
             urls.push(url.clone());
-            let variables: Vec<String> =
-                s.get("variables").and_then(Value::as_object).map(|v| v.keys().cloned().collect()).unwrap_or_default();
+            let variables: Vec<String> = variables.map(|v| v.keys().cloned().collect()).unwrap_or_default();
             self.push(
                 TargetKind::Server,
                 ptr(base, &i.to_string()),
@@ -741,29 +991,31 @@ impl<'a> ModelBuilder<'a> {
         }
     }
 
-    fn operation(
-        &mut self,
-        op: &OperationRef<'a>,
-        declared_tags: &HashSet<String>,
-        global_security_names: &[String],
-        scheme_names: &HashSet<String>,
-        id_counts: &HashMap<&str, usize>,
-        examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
-    ) {
+    /// Resolve and size an operation the first time a path reaches it.
+    /// `None` when its work does not fit.
+    fn share(&mut self, op: &OperationRef<'a>, global_security_names: &[String]) -> Option<Rc<SharedOperation<'a>>> {
         let spec = self.spec;
-        let label = op.label();
+        let own_security = op.op.get("security").and_then(Value::as_array);
+        // Part of the work below, known before anything is resolved.
+        let listed = 1
+            + own_security.map_or(0, Vec::len)
+            + op.item.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
+            + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len);
+        if self.work.saturating_add(listed) > MAX_MODEL_WORK {
+            self.work = self.work.saturating_add(listed);
+            return None;
+        }
         let params = parameters(spec, op);
         let body = request_body(spec, op);
         let resps = responses(spec, op);
         // Inheriting operations reuse the document's names (gathered once).
-        let own_security = op.op.get("security").and_then(Value::as_array);
         let security_names = match own_security {
             Some(reqs) => requirement_names(Some(reqs)),
             None => global_security_names.to_vec(),
         };
         // Everything below is proportional to these (inherited parameters and
         // the document's security count for every operation).
-        self.work += 1
+        let work = 1
             + params.len()
             + security_names.len()
             + own_security.map_or(0, Vec::len)
@@ -774,13 +1026,12 @@ impl<'a> ModelBuilder<'a> {
             + body.as_ref().map_or(0, |b| b.media.len())
             + op.item.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
             + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len);
-        let tags = list_of_strings(op.op.get("tags")).unwrap_or_default();
-        let template = template_params(&op.path);
-        let path_params: Vec<&str> = params.iter().filter(|p| p.location == "path").map(|p| p.name.as_str()).collect();
-        let codes: Vec<&str> = resps.iter().map(|r| r.code.as_str()).collect();
-        let class = |c: &str, first: char| c.starts_with(first);
+        self.work += work;
+        if self.work > MAX_MODEL_WORK {
+            return None;
+        }
         // The same name and location twice in one parameter list.
-        let mut dup_params = BTreeSet::new();
+        let mut duplicate_params = BTreeSet::new();
         let levels =
             [(op.item.get("parameters"), ptr(&op.item_pointer, "parameters")), (op.op.get("parameters"), ptr(&op.pointer, "parameters"))];
         for (list, base) in levels {
@@ -790,16 +1041,81 @@ impl<'a> ModelBuilder<'a> {
                 let name = p.get("name").and_then(Value::as_str).unwrap_or("");
                 let location = p.get("in").and_then(Value::as_str).unwrap_or("");
                 if !this_level.insert((name, location)) {
-                    dup_params.insert(format!("{name} ({location})"));
+                    duplicate_params.insert(format!("{name} ({location})"));
                 }
             }
         }
+        // What a copy of its view costs, but for what depends on the path.
+        let media_cost = |m: &Media<'_>| 2 * m.media_type.len() + VALUE_BYTES + m.pointer.len() + m.schema_pointer.len();
+        let mut view_cost = OPERATION_VIEW_BYTES
+            + strs_cost(op.op, &["operationId", "summary", "description"])
+            + 3 * self.field_cost(op.op, "tags")
+            + 3 * names_cost(security_names.iter().map(String::as_str))
+            + op.op.get("callbacks").and_then(Value::as_object).map_or(0, |c| names_cost(c.keys().map(String::as_str)))
+            + names_cost(duplicate_params.iter().map(String::as_str))
+            + self.extensions_cost(op.op);
+        for p in &params {
+            view_cost += 5 * (p.name.len() + p.location.len()) + 10 * VALUE_BYTES + p.pointer.len();
+        }
+        if let Some(b) = &body {
+            view_cost += b.pointer.len() + b.media.iter().map(media_cost).sum::<usize>();
+        }
+        for r in &resps {
+            view_cost += 3 * (r.code.len() + VALUE_BYTES) + r.pointer.len() + r.media.iter().map(media_cost).sum::<usize>();
+        }
+        let shared = Rc::new(SharedOperation { params, body, resps, security_names, duplicate_params, work, view_cost });
+        self.shared.insert(op.pointer.clone(), Rc::clone(&shared));
+        Some(shared)
+    }
+
+    fn operation(
+        &mut self,
+        op: &OperationRef<'a>,
+        declared_tags: &HashSet<String>,
+        global_security_names: &[String],
+        scheme_names: &HashSet<String>,
+        id_counts: &HashMap<&str, usize>,
+        examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
+    ) {
+        let spec = self.spec;
+        // An operation reached through several paths is resolved and sized
+        // once, and what is under it is a target once.
+        let (shared, first) = match self.shared.get(&op.pointer) {
+            Some(s) => {
+                let s = Rc::clone(s);
+                self.work += s.work;
+                (s, false)
+            }
+            None => match self.share(op, global_security_names) {
+                Some(s) => (s, true),
+                None => {
+                    self.skipped_operations += 1;
+                    return;
+                }
+            },
+        };
+        if self.work > MAX_MODEL_WORK {
+            self.skipped_operations += 1;
+            return;
+        }
+        let label = op.label();
+        let template = template_params(&op.path);
+        let path_params: Vec<&str> = shared.params.iter().filter(|p| p.location == "path").map(|p| p.name.as_str()).collect();
+        let declared: HashSet<&str> = path_params.iter().copied().collect();
+        let templated: HashSet<&str> = template.iter().map(String::as_str).collect();
+        let undeclared: Vec<&String> = template.iter().filter(|t| !declared.contains(t.as_str())).collect();
+        let unused: Vec<&&str> = path_params.iter().filter(|p| !templated.contains(**p)).collect();
+        let path_cost = names_cost(undeclared.iter().map(|t| t.as_str())) + names_cost(unused.iter().map(|p| **p));
+        if !self.reserve(shared.view_cost + path_cost) {
+            self.skipped_operations += 1;
+            return;
+        }
+        let params = &shared.params;
+        let tags = list_of_strings(op.op.get("tags")).unwrap_or_default();
+        let codes: Vec<&str> = shared.resps.iter().map(|r| r.code.as_str()).collect();
+        let class = |c: &str, first: char| c.starts_with(first);
         let operation_id = op.operation_id();
-        self.push(
-            TargetKind::Operation,
-            op.pointer.clone(),
-            label.clone(),
-            json!({
+        let operation_view = json!({
                 "method": op.method,
                 "method_upper": op.method.to_ascii_uppercase(),
                 "path": op.path,
@@ -814,39 +1130,67 @@ impl<'a> ModelBuilder<'a> {
                 "header_params": params.iter().filter(|p| p.location == "header").map(|p| p.name.clone()).collect::<Vec<_>>(),
                 "path_params": path_params,
                 "cookie_params": params.iter().filter(|p| p.location == "cookie").map(|p| p.name.clone()).collect::<Vec<_>>(),
-                "has_request_body": body.is_some(),
-                "request_content_types": body.as_ref().map(|b| b.media.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>()).unwrap_or_default(),
+                "has_request_body": shared.body.is_some(),
+                "request_content_types": shared.body.as_ref().map(|b| b.media.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>()).unwrap_or_default(),
                 "response_codes": codes,
                 "success_codes": codes.iter().filter(|c| class(c, '2') || class(c, '3')).collect::<Vec<_>>(),
                 "error_codes": codes.iter().filter(|c| class(c, '4') || class(c, '5')).collect::<Vec<_>>(),
                 "client_error_codes": codes.iter().filter(|c| class(c, '4')).collect::<Vec<_>>(),
                 "server_error_codes": codes.iter().filter(|c| class(c, '5')).collect::<Vec<_>>(),
                 "has_default_response": codes.contains(&"default"),
-                "response_content_types": resps.iter().flat_map(|r| r.media.iter().map(|m| m.media_type.clone())).collect::<BTreeSet<_>>(),
-                "security": security_names,
+                "response_content_types": shared.resps.iter().flat_map(|r| r.media.iter().map(|m| m.media_type.clone())).collect::<BTreeSet<_>>(),
+                "security": shared.security_names,
                 // A requirement naming no scheme (`{}`) makes security optional.
-                "has_security": !security_names.is_empty(),
+                "has_security": !shared.security_names.is_empty(),
                 "has_explicit_security": op.op.get("security").is_some(),
                 "callbacks": op.op.get("callbacks").and_then(Value::as_object).map(|c| c.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
                 "operation_id_duplicate": operation_id.is_some_and(|id| id_counts.get(id).copied().unwrap_or(0) > 1),
-                "undeclared_path_params": template.iter().filter(|t| !path_params.contains(&t.as_str())).collect::<Vec<_>>(),
-                "unused_path_params": path_params.iter().filter(|p| !template.iter().any(|t| t == *p)).collect::<Vec<_>>(),
-                "undeclared_tags": list_of_strings(op.op.get("tags")).unwrap_or_default().into_iter().filter(|t| !declared_tags.contains(t)).collect::<Vec<_>>(),
-                "undefined_security_schemes": security_names.iter().filter(|n| !scheme_names.contains(*n)).collect::<Vec<_>>(),
-                "duplicate_parameters": dup_params,
+                "undeclared_path_params": undeclared,
+                "unused_path_params": unused,
+                "undeclared_tags": tags.iter().filter(|t| !declared_tags.contains(*t)).collect::<Vec<_>>(),
+                "undefined_security_schemes": shared.security_names.iter().filter(|n| !scheme_names.contains(*n)).collect::<Vec<_>>(),
+                "duplicate_parameters": shared.duplicate_params,
                 "extensions": extensions(op.op),
-            }),
-        );
-        let ctx =
-            json!({"method": op.method, "method_upper": op.method.to_ascii_uppercase(), "path": op.path, "operation_id": operation_id});
+        });
+        self.push(TargetKind::Operation, op.pointer.clone(), label.clone(), operation_view);
+        if !first {
+            return;
+        }
+        // Copied into every view below, as each label repeats the operation's.
+        let ctx_cost = 96 + 2 * op.method.len() + op.path.len() + operation_id.map_or(0, str::len);
+        if !self.reserve(ctx_cost) {
+            return;
+        }
+        let ctx = json!({
+            "method": op.method,
+            "method_upper": op.method.to_ascii_uppercase(),
+            "path": op.path,
+            "operation_id": operation_id
+        });
 
-        for p in &params {
+        for p in params {
             // A Swagger 2.0 body parameter is the request body target; a
             // shared (inherited or `$ref`'d) parameter is one target.
-            if p.location == "body" || self.seen.contains(&(TargetKind::Parameter, p.pointer.clone())) {
+            if p.location == "body" || self.is_seen(TargetKind::Parameter, &p.pointer) {
                 continue;
             }
             let schema = p.value.get("schema").unwrap_or(p.value);
+            let label_bytes = p.location.len() + p.name.len() + label.len() + 15;
+            let cost = VIEW_BYTES
+                + ctx_cost
+                + 2 * p.pointer.len()
+                + label_bytes
+                + p.name.len()
+                + p.location.len()
+                + strs_cost(p.value, &["description", "style"])
+                + str_cost(schema, "format")
+                + 2 * self.field_cost(schema, "type")
+                + self.field_cost(schema, "enum")
+                + self.field_cost(p.value, "explode")
+                + self.extensions_cost(p.value);
+            if !self.reserve(cost) {
+                return;
+            }
             let (ty, types, nullable) = schema_types(schema);
             let mut view = json!({
                 "name": p.name,
@@ -869,12 +1213,26 @@ impl<'a> ModelBuilder<'a> {
             merge(&mut view, &ctx);
             self.push(TargetKind::Parameter, p.pointer.clone(), format!("{} parameter {} of {label}", p.location, p.name), view);
             if let Some(s) = p.value.get("schema") {
+                // The owner of its properties repeats the label.
+                if !self.reserve(label_bytes + p.pointer.len() + 7) {
+                    return;
+                }
                 self.properties(s, &ptr(&p.pointer, "schema"), &format!("{label} {} parameter {}", p.location, p.name), 0);
             }
         }
 
         // A shared (`$ref`'d) body or response is one target: built once.
-        if let Some(body) = body.as_ref().filter(|b| !self.seen.contains(&(TargetKind::RequestBody, b.pointer.clone()))) {
+        if let Some(body) = shared.body.as_ref().filter(|b| !self.is_seen(TargetKind::RequestBody, &b.pointer)) {
+            let cost = VIEW_BYTES
+                + ctx_cost
+                + 2 * body.pointer.len()
+                + label.len()
+                + str_cost(body.value, "description")
+                + names_cost(body.media.iter().map(|m| m.media_type.as_str()))
+                + self.extensions_cost(body.value);
+            if !self.reserve(cost) {
+                return;
+            }
             let mut view = json!({
                 "required": body.required,
                 "description": opt_str(body.value, "description"),
@@ -888,12 +1246,27 @@ impl<'a> ModelBuilder<'a> {
             }
         }
 
-        for r in &resps {
-            if self.seen.contains(&(TargetKind::Response, r.pointer.clone())) {
+        for r in &shared.resps {
+            if self.exhausted {
+                return;
+            }
+            if self.is_seen(TargetKind::Response, &r.pointer) {
                 continue;
             }
-            let headers: Vec<String> =
-                r.value.get("headers").and_then(Value::as_object).map(|h| h.keys().cloned().collect()).unwrap_or_default();
+            let header_map = r.value.get("headers").and_then(Value::as_object);
+            let cost = VIEW_BYTES
+                + ctx_cost
+                + 2 * r.pointer.len()
+                + label.len()
+                + 2 * r.code.len()
+                + str_cost(r.value, "description")
+                + names_cost(r.media.iter().map(|m| m.media_type.as_str()))
+                + header_map.map_or(0, |h| names_cost(h.keys().map(String::as_str)))
+                + self.extensions_cost(r.value);
+            if !self.reserve(cost) {
+                return;
+            }
+            let headers: Vec<String> = header_map.map(|h| h.keys().cloned().collect()).unwrap_or_default();
             let mut view = json!({
                 "code": r.code,
                 "description": opt_str(r.value, "description"),
@@ -907,10 +1280,26 @@ impl<'a> ModelBuilder<'a> {
             });
             merge(&mut view, &ctx);
             self.push(TargetKind::Response, r.pointer.clone(), format!("{} response of {label}", r.code), view);
-            if let Some(h) = r.value.get("headers").and_then(Value::as_object) {
+            if let Some(h) = header_map {
+                let base = ptr(&r.pointer, "headers");
                 for (name, raw) in h {
-                    let Some((hv, hptr)) = spec.usable(raw, &ptr(&ptr(&r.pointer, "headers"), name)) else { continue };
+                    let Some((hv, hptr)) = spec.usable(raw, &ptr(&base, name)) else { continue };
+                    if self.is_seen(TargetKind::Header, &hptr) {
+                        continue;
+                    }
                     let schema = hv.get("schema").unwrap_or(hv);
+                    let cost = VIEW_BYTES
+                        + ctx_cost
+                        + 2 * hptr.len()
+                        + label.len()
+                        + 2 * (name.len() + r.code.len())
+                        + str_cost(hv, "description")
+                        + str_cost(schema, "format")
+                        + self.field_cost(schema, "type")
+                        + self.extensions_cost(hv);
+                    if !self.reserve(cost) {
+                        return;
+                    }
                     let (ty, _, _) = schema_types(schema);
                     let mut view = json!({
                         "name": name,
@@ -941,14 +1330,15 @@ impl<'a> ModelBuilder<'a> {
         label: &str,
         examples: &mut dyn FnMut(&Media<'a>, Direction) -> Vec<String>,
     ) {
+        let spec = self.spec;
         // A Swagger 2.0 media type shares its pointer with its response; key
         // the target by media type too.
-        let pointer = if self.spec.is_swagger2() { format!("{}#{}", m.pointer, m.media_type) } else { m.pointer.clone() };
-        if self.seen.contains(&(TargetKind::MediaType, pointer.clone())) {
+        let pointer = if spec.is_swagger2() { format!("{}#{}", m.pointer, m.media_type) } else { m.pointer.clone() };
+        if self.exhausted || self.is_seen(TargetKind::MediaType, &pointer) {
             return;
         }
         let obj = m.object.unwrap_or(&Value::Null);
-        let has_example = if self.spec.is_swagger2() {
+        let has_example = if spec.is_swagger2() {
             obj.pointer(&format!("/examples/{}", m.media_type.replace('~', "~0").replace('/', "~1"))).is_some()
                 || m.schema.is_some_and(|s| s.get("example").is_some())
         } else {
@@ -956,11 +1346,27 @@ impl<'a> ModelBuilder<'a> {
                 || obj.get("examples").and_then(Value::as_object).is_some_and(|e| !e.is_empty())
                 || m.schema.is_some_and(|s| s.get("example").is_some() || s.get("examples").is_some())
         };
+        let schema = m.schema.map(|s| spec.deref(s, &m.schema_pointer).0);
+        let example_errors = examples(m, direction);
+        // The label and the owner of its properties repeat the operation's.
+        let where_bytes = code.map_or(16, |c| c.len() + 13) + label.len();
+        let cost = VIEW_BYTES
+            + self.value_cost(ctx)
+            + 2 * pointer.len()
+            + where_bytes
+            + 2 * m.media_type.len()
+            + code.map_or(0, |c| c.len() + VALUE_BYTES)
+            + schema.map_or(0, |s| self.field_cost(s, "type"))
+            + names_cost(example_errors.iter().map(String::as_str))
+            + self.extensions_cost(obj);
+        if !self.reserve(cost) {
+            return;
+        }
         let where_ = match code {
             Some(c) => format!("{c} response of {label}"),
             None => format!("request body of {label}"),
         };
-        let (ty, _, _) = m.schema.map(|s| schema_types(self.spec.deref(s, &m.schema_pointer).0)).unwrap_or((Value::Null, vec![], false));
+        let (ty, _, _) = schema.map(schema_types).unwrap_or((Value::Null, vec![], false));
         let mut view = json!({
             "media_type": m.media_type,
             "direction": match direction { Direction::Request => "request", Direction::Response => "response" },
@@ -969,28 +1375,51 @@ impl<'a> ModelBuilder<'a> {
             "schema_type": ty,
             "schema_is_ref": m.schema.is_some_and(|s| s.get("$ref").is_some()),
             "has_example": has_example,
-            "example_errors": examples(m, direction),
+            "example_errors": example_errors,
             "extensions": extensions(obj),
         });
         merge(&mut view, ctx);
         self.push(TargetKind::MediaType, pointer, format!("{} in the {where_}", m.media_type), view);
-        if let Some(s) = m.schema {
+        if let Some(s) = m.schema
+            && !self.property_roots.contains(&m.schema_pointer)
+        {
+            if !self.reserve(where_bytes + m.media_type.len() + 2 * m.schema_pointer.len() + 3) {
+                return;
+            }
+            self.property_roots.insert(m.schema_pointer.clone());
             self.properties(s, &m.schema_pointer, &format!("{where_} ({})", m.media_type), 0);
         }
     }
 
     /// Properties of an inline schema (not following `$ref`: referenced
     /// schemas are visited as components), through `items`, compositions and
-    /// `additionalProperties`.
+    /// `additionalProperties`. Every pointer and owner label is charged
+    /// before it is built, and the walk ends once the budget is spent.
     fn properties(&mut self, schema: &Value, pointer: &str, owner: &str, depth: usize) {
-        if depth > 24 || schema.get("$ref").is_some() {
+        if self.exhausted || depth > 24 || schema.get("$ref").is_some() {
             return;
         }
         if let Some(props) = schema.get("properties").and_then(Value::as_object) {
-            let required: Vec<&str> =
+            let required: HashSet<&str> =
                 schema.get("required").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            if !self.reserve(pointer.len() + 11) {
+                return;
+            }
+            let base = ptr(pointer, "properties");
             for (name, p) in props {
-                let pptr = ptr(&ptr(pointer, "properties"), name);
+                // Its pointer, label and parent, and the owner of what it
+                // nests, repeat `pointer` or `owner`.
+                let cost = VIEW_BYTES
+                    + 3 * (base.len() + 1 + 2 * name.len())
+                    + 3 * (owner.len() + name.len())
+                    + 2 * self.field_cost(p, "type")
+                    + strs_cost(p, &["format", "description"])
+                    + self.field_cost(p, "enum")
+                    + self.extensions_cost(p);
+                if !self.reserve(cost) {
+                    return;
+                }
+                let pptr = ptr(&base, name);
                 let (ty, types, nullable) = schema_types(p);
                 self.push(
                     TargetKind::Property,
@@ -999,7 +1428,7 @@ impl<'a> ModelBuilder<'a> {
                     json!({
                         "name": name,
                         "parent": owner,
-                        "required": required.contains(&name.as_str()),
+                        "required": required.contains(name.as_str()),
                         "type": ty,
                         "types": types,
                         "nullable": nullable,
@@ -1018,16 +1447,29 @@ impl<'a> ModelBuilder<'a> {
             }
         }
         if let Some(items) = schema.get("items") {
+            if !self.reserve(pointer.len() + owner.len() + 8) {
+                return;
+            }
             self.properties(items, &ptr(pointer, "items"), &format!("{owner}[]"), depth + 1);
         }
         for key in ["allOf", "oneOf", "anyOf"] {
             if let Some(list) = schema.get(key).and_then(Value::as_array) {
+                if !self.reserve(pointer.len() + 6) {
+                    return;
+                }
+                let base = ptr(pointer, key);
                 for (i, s) in list.iter().enumerate() {
-                    self.properties(s, &ptr(&ptr(pointer, key), &i.to_string()), owner, depth + 1);
+                    if !self.reserve(base.len() + 21) {
+                        return;
+                    }
+                    self.properties(s, &ptr(&base, &i.to_string()), owner, depth + 1);
                 }
             }
         }
         if let Some(ap) = schema.get("additionalProperties").filter(|a| a.is_object()) {
+            if !self.reserve(pointer.len() + owner.len() + 24) {
+                return;
+            }
             self.properties(ap, &ptr(pointer, "additionalProperties"), &format!("{owner}{{*}}"), depth + 1);
         }
     }
@@ -1038,5 +1480,119 @@ fn merge(view: &mut Value, ctx: &Value) {
         for (k, x) in c {
             v.entry(k.clone()).or_insert_with(|| x.clone());
         }
+    }
+}
+
+/// What copying the string `v[key]` into a view costs (other values are not
+/// copied).
+fn str_cost(v: &Value, key: &str) -> usize {
+    v.get(key).and_then(Value::as_str).map_or(0, |s| s.len() + VALUE_BYTES)
+}
+
+/// [`str_cost`] of each of `keys`.
+fn strs_cost(v: &Value, keys: &[&str]) -> usize {
+    keys.iter().map(|k| str_cost(v, k)).sum()
+}
+
+/// What copying a list of names into a view costs.
+fn names_cost<'s>(names: impl IntoIterator<Item = &'s str>) -> usize {
+    names.into_iter().fold(0, |sum, n| sum.saturating_add(n.len()).saturating_add(VALUE_BYTES))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build(spec: &Spec, view_byte_limit: usize) -> ModelBuilder<'_> {
+        let mut builder = ModelBuilder::new(spec, view_byte_limit);
+        builder.build(&mut |_, _| vec![]);
+        builder
+    }
+
+    #[test]
+    fn shared_operation_extensions_are_charged_to_the_view_byte_budget() {
+        let extension = "x".repeat(128 * 1024);
+        let mut paths = serde_json::Map::new();
+        for i in 0..12 {
+            paths.insert(format!("/shared-{i}"), json!({"$ref": "#/components/pathItems/Shared"}));
+        }
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": paths,
+            "components": {"pathItems": {"Shared": {"get": {"x-doc": extension}}}}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let builder = build(&spec, 1024 * 1024);
+
+        assert!(builder.skipped_operations > 0);
+        assert!(builder.view_bytes <= builder.view_byte_limit);
+        assert!(builder.targets.iter().any(|t| t.kind == TargetKind::Operation));
+    }
+
+    #[test]
+    fn child_views_with_large_operation_ids_are_charged_to_the_view_byte_budget() {
+        let operation_id = "x".repeat(1024 * 1024);
+        let parameters: Vec<Value> =
+            (0..300).map(|i| json!({"name": format!("parameter-{i}"), "in": "query", "schema": {"type": "string"}})).collect();
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": {"/large": {"get": {"operationId": operation_id, "parameters": parameters}}}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let builder = build(&spec, MAX_MODEL_VIEW_BYTES);
+
+        assert!(builder.view_bytes <= builder.view_byte_limit);
+        let parameter_count = builder.targets.iter().filter(|t| t.kind == TargetKind::Parameter).count();
+        assert!(parameter_count < 300);
+        assert!(parameter_count <= MAX_MODEL_VIEW_BYTES / operation_id.len());
+    }
+
+    #[test]
+    fn long_path_keys_stop_property_copies_at_the_view_byte_budget() {
+        // Every property's pointer, label and parent repeat the path.
+        let properties: Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"type": "string"}))).collect();
+        let parameter = json!({"name": "q", "in": "query", "schema": {"type": "object", "properties": properties}});
+        for (path_bytes, limit) in [(40 << 20, MAX_MODEL_VIEW_BYTES), (1 << 20, 40 << 20)] {
+            let mut document = json!({"openapi": "3.1.0", "paths": {}});
+            document["paths"][format!("/{}", "a".repeat(path_bytes))] = json!({"get": {"parameters": [parameter]}});
+            // Past the parser's member-name limit: the model bounds itself.
+            let spec = Spec::unchecked(Dialect::OpenApi31, document);
+            let builder = build(&spec, limit);
+
+            assert!(builder.exhausted);
+            assert!(builder.view_bytes <= limit);
+            let copied = builder.targets.iter().filter(|t| t.kind == TargetKind::Property).count();
+            assert!(copied <= limit / path_bytes, "{copied}");
+            // Nothing is attempted once the budget is spent.
+            assert!(builder.reservations < 100, "{}", builder.reservations);
+        }
+    }
+
+    #[test]
+    fn shared_path_items_are_resolved_and_sized_once() {
+        let values: Vec<u32> = (0..100_000).collect();
+        let paths: Map<String, Value> = (0..2_000).map(|i| (format!("/p{i}"), json!({"$ref": "#/components/pathItems/Shared"}))).collect();
+        let header = json!({"schema": {"type": "integer"}, "x-values": values});
+        let shared = json!({"get": {
+            "parameters": [{"name": "q", "in": "query", "schema": {"type": "integer", "enum": values}}],
+            "responses": {"200": {"description": "ok", "x-values": values, "headers": {"X-Values": header}}}
+        }});
+        let document = json!({
+            "openapi": "3.1.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": paths,
+            "components": {"pathItems": {"Shared": shared}}
+        });
+        let spec = Spec::parse(document.to_string().as_bytes()).unwrap();
+        let builder = build(&spec, MAX_MODEL_VIEW_BYTES);
+
+        assert_eq!(builder.skipped_operations, 0);
+        assert_eq!(builder.targets.iter().filter(|t| t.kind == TargetKind::Operation).count(), 2_000);
+        assert_eq!(builder.targets.iter().filter(|t| t.kind == TargetKind::Response).count(), 1);
+        // The shared parameter, response and header are sized once, not once
+        // per path.
+        assert!(builder.walked < 4 * values.len(), "{}", builder.walked);
     }
 }
