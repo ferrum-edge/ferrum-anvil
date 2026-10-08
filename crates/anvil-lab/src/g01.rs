@@ -296,7 +296,9 @@ fn trust_010(env: &Env) -> Scenario<'_> {
         let cancel = CancellationToken::new();
         let later = anvil_engine::gateway_detail::lookup_recorded(&env.engine, &x, access, response, sent, &cancel).await;
         let expired = matches!(&later, GatewayDetail::Looked { outcome: LookupOutcome::NotFound { .. }, .. });
-        c.add(CheckKind::GroundTruth, "after its retention the gateway no longer resolves the reference", expired, format!("{later:?}"));
+        // Bounded: an unexpected outcome may hold a value the response supplied, not yet cut.
+        let shown: String = format!("{later:?}").chars().take(300).collect();
+        c.add(CheckKind::GroundTruth, "after its retention the gateway no longer resolves the reference", expired, shown);
         let findings = rediagnose(&o, &later);
         let codes: Vec<&str> = findings.iter().map(|f| f.code.as_str()).collect();
         let unavailable = codes.contains(&"ferrum.detail.unavailable");

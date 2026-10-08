@@ -21,8 +21,9 @@
 //! This module is pure: the engine performs the lookup and passes its outcome
 //! to the rules as [`GatewayDetail`].
 
+use crate::facts::{EXCERPT_LOOKAHEAD_BYTES, Redact, excerpt};
 use anvil_domain::execution::{ConnectionObservation, ResponseRecord};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
 /// Response header carrying the reference.
@@ -157,10 +158,30 @@ pub fn parse_replica(s: &str) -> Option<String> {
     is_lower_hex(s, 8).then(|| s.to_string())
 }
 
+/// Most characters of a text a response or a record supplied that a finding quotes.
+pub const MAX_QUOTE_CHARS: usize = 80;
+
+/// A text a response or a record supplied, kept until a finding quotes it:
+/// as received, and only as long as [`quoted`] needs to redact it before the
+/// cut ([`MAX_QUOTE_CHARS`] characters plus [`EXCERPT_LOOKAHEAD_BYTES`]
+/// bytes), so a secret that crosses the cut is still whole when it is
+/// redacted.
+fn unquoted(s: &str) -> String {
+    let cut = s.char_indices().nth(MAX_QUOTE_CHARS).map_or(s.len(), |(i, _)| i);
+    let mut end = cut.saturating_add(EXCERPT_LOOKAHEAD_BYTES).min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// A text a response or a record supplied, as a finding may quote it: at
-/// most 80 characters, without control characters.
-pub fn bounded(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(80).collect()
+/// most [`MAX_QUOTE_CHARS`] characters, redacted before it is cut
+/// ([`excerpt`]), so a secret that crosses the cut is replaced whole instead
+/// of leaving its prefix, then without control characters, so a secret that
+/// holds one (a tab) still matches.
+pub fn quoted(redact: Redact<'_>, s: &str) -> String {
+    excerpt(redact, s, MAX_QUOTE_CHARS).chars().filter(|c| !c.is_control()).collect()
 }
 
 /// What a response carries in `X-Ferrum-Diagnostic-Ref`.
@@ -168,7 +189,8 @@ pub fn bounded(s: &str) -> String {
 pub enum ResponseRef {
     Absent,
     Present(DiagnosticRef),
-    /// Not a reference the gateway mints, or several different values.
+    /// Not a reference the gateway mints, or several different values: the
+    /// value as received, not yet cut (see [`quoted`]).
     Invalid(String),
 }
 
@@ -178,8 +200,8 @@ pub fn response_ref(r: &ResponseRecord) -> ResponseRef {
     values.dedup();
     match values.as_slice() {
         [] => ResponseRef::Absent,
-        [one] => parse_ref(one).map_or_else(|| ResponseRef::Invalid(bounded(one)), ResponseRef::Present),
-        many => ResponseRef::Invalid(bounded(&many.join(", "))),
+        [one] => parse_ref(one).map_or_else(|| ResponseRef::Invalid(unquoted(one)), ResponseRef::Present),
+        many => ResponseRef::Invalid(unquoted(&many.join(", "))),
     }
 }
 
@@ -188,8 +210,13 @@ pub fn response_ref(r: &ResponseRecord) -> ResponseRef {
 pub struct Binding {
     pub reference: DiagnosticRef,
     pub status: u16,
-    /// The response's `X-Gateway-Error` value(s), lowercased; `None` without one.
+    /// The response's `X-Gateway-Error` tokens, lowercased: for comparison
+    /// only; `None` without one.
     pub gateway_error: Option<String>,
+    /// The response's `X-Gateway-Error` value(s) as received, not yet cut
+    /// (see [`quoted`]): what a finding quotes, so that a secret in it is
+    /// redacted in its own case; `None` without one.
+    pub gateway_error_shown: Option<String>,
     /// `http1`, `http2` or `http3`; `None` when the response's version is
     /// unknown, which no record binds to.
     pub protocol: Option<&'static str>,
@@ -211,8 +238,9 @@ impl Binding {
         sent_at: DateTime<Utc>,
         received_by: DateTime<Utc>,
     ) -> Self {
+        let raw = r.header_values("x-gateway-error");
         let mut tokens: Vec<String> = Vec::new();
-        for v in r.header_values("x-gateway-error") {
+        for v in &raw {
             for part in v.split(',') {
                 let p = part.trim().to_ascii_lowercase();
                 if !p.is_empty() && !tokens.contains(&p) {
@@ -225,6 +253,7 @@ impl Binding {
             reference,
             status: r.status,
             gateway_error: (!tokens.is_empty()).then(|| tokens.join(",")),
+            gateway_error_shown: (!tokens.is_empty()).then(|| unquoted(&raw.join(", "))),
             protocol: protocol_label(&r.http_version),
             namespace: namespace.map(str::trim).filter(|n| !n.is_empty()).map(String::from),
             not_before: sent_at - skew,
@@ -468,14 +497,14 @@ pub fn parse_view(body: &[u8]) -> Result<RefView, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
     pub field: &'static str,
-    /// What the response shows.
+    /// What the response shows, not yet cut (see [`quoted`]).
     pub response: String,
-    /// What the record says.
+    /// What the record says, not yet cut (see [`quoted`]).
     pub record: String,
 }
 
 fn mismatch(field: &'static str, response: impl Into<String>, record: &str) -> Result<(), Mismatch> {
-    Err(Mismatch { field, response: response.into(), record: bounded(record) })
+    Err(Mismatch { field, response: response.into(), record: unquoted(record) })
 }
 
 /// Whether `view` describes the response `b` was taken from: the same
@@ -488,8 +517,10 @@ pub fn check_binding(view: &RefView, b: &Binding) -> Result<(), Mismatch> {
     if view.status != b.status {
         return mismatch("status", b.status.to_string(), &view.status.to_string());
     }
+    // Compared lowercased; reported as received, so a secret in it is redacted in its own case.
     if view.gateway_error != b.gateway_error {
-        return mismatch("gateway_error", b.gateway_error.as_deref().unwrap_or("none"), view.gateway_error.as_deref().unwrap_or("none"));
+        let shown = b.gateway_error_shown.as_deref().unwrap_or("none");
+        return mismatch("gateway_error", shown, view.gateway_error.as_deref().unwrap_or("none"));
     }
     // A response whose protocol is not known never binds.
     if b.protocol != Some(view.protocol.as_str()) {
@@ -502,7 +533,11 @@ pub fn check_binding(view: &RefView, b: &Binding) -> Result<(), Mismatch> {
     }
     match view.created() {
         Some(t) if t >= b.not_before && t <= b.not_after => Ok(()),
-        _ => mismatch("created_at", format!("between {} and {}", b.not_before.to_rfc3339(), b.not_after.to_rfc3339()), &view.created_at),
+        _ => {
+            // Milliseconds keep the window within a quote's cut.
+            let at = |t: DateTime<Utc>| t.to_rfc3339_opts(SecondsFormat::Millis, true);
+            mismatch("created_at", format!("between {} and {}", at(b.not_before), at(b.not_after)), &view.created_at)
+        }
     }
 }
 
@@ -533,6 +568,8 @@ pub enum GatewayDetail {
     /// The response carries no reference.
     NoReference,
     /// The reference is malformed, or several differ: it was not looked up.
+    /// `value` is as received, neither redacted nor cut: the rule quotes it
+    /// with the execution's final redactor (see [`quoted`]).
     InvalidReference { value: String },
     /// The reference was looked up.
     Looked {
@@ -628,7 +665,21 @@ mod tests {
         let two = response(502, "HTTP/1.1", &[("x-ferrum-diagnostic-ref", REF), ("x-ferrum-diagnostic-ref", other)]);
         assert!(matches!(response_ref(&two), ResponseRef::Invalid(_)));
         let forged = response(502, "HTTP/1.1", &[("x-ferrum-diagnostic-ref", "ref-\u{1b}[31m-forged")]);
-        assert_eq!(response_ref(&forged), ResponseRef::Invalid("ref-[31m-forged".into()));
+        assert_eq!(response_ref(&forged), ResponseRef::Invalid("ref-\u{1b}[31m-forged".into()));
+        assert_eq!(quoted(None, "ref-\u{1b}[31m-forged"), "ref-[31m-forged", "a quote never carries control characters");
+    }
+
+    /// A quote is redacted before its control characters are removed and
+    /// before it is cut: a secret holding a tab still matches, and one that
+    /// crosses the cut is replaced whole.
+    #[test]
+    fn a_quote_is_redacted_before_anything_else_changes_it() {
+        use anvil_domain::secret::REDACTED;
+        let secret = "sk-live-tab\there-0123";
+        let redact = |s: &str| s.replace(secret, REDACTED);
+        assert_eq!(quoted(Some(&redact), &format!("ref \u{1b}[31m {secret}")), format!("ref [31m {REDACTED}"));
+        let padding = "p".repeat(MAX_QUOTE_CHARS - 4);
+        assert_eq!(quoted(Some(&redact), &format!("{padding}{secret}")), format!("{padding}{REDACTED}"));
     }
 
     #[test]
@@ -647,6 +698,12 @@ mod tests {
         assert_eq!(field(&other_token, None, &view), "gateway_error");
         let no_token = response(502, "HTTP/1.1", &[]);
         assert_eq!(field(&no_token, None, &view), "gateway_error");
+        // Tokens compare lowercased, but a mismatch reports the value as received.
+        let mixed = response(502, "HTTP/1.1", &[("x-gateway-error", "Connection_Failure"), ("x-ferrum-diagnostic-ref", REF)]);
+        assert_eq!(check_binding(&view, &binding(&mixed, None)), Ok(()));
+        let shown = response(502, "HTTP/1.1", &[("x-gateway-error", "Backend_Error"), ("x-gateway-error", "Quantum_Flux")]);
+        let m = check_binding(&view, &binding(&shown, None)).unwrap_err();
+        assert_eq!((m.field, m.response.as_str()), ("gateway_error", "Backend_Error, Quantum_Flux"));
         let h2 = response(502, "HTTP/2", &[("x-gateway-error", "connection_failure")]);
         assert_eq!(field(&h2, None, &view), "protocol");
         let mut other_ref = binding(&r, None);

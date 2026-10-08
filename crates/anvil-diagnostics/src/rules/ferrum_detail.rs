@@ -9,7 +9,7 @@
 use super::Ctx;
 use crate::Draft;
 use crate::facts::FerrumTrust;
-use crate::gateway_detail::{Detail, GatewayDetail, LookupOutcome, Mismatch, RefView, direct_loopback, unknown_error_classes};
+use crate::gateway_detail::{Detail, GatewayDetail, LookupOutcome, Mismatch, RefView, direct_loopback, quoted, unknown_error_classes};
 use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
 
 const RULE: &str = "ferrum.detail";
@@ -201,7 +201,9 @@ fn resolved(view: &RefView, ceiling: Confidence, status: u16) -> Draft {
     d
 }
 
-fn mismatch(m: &Mismatch) -> Draft {
+/// `record` and `response` are what the record says and what the response
+/// shows, as the finding quotes them (redacted, then cut).
+fn mismatch(m: &Mismatch, record: String, response: String) -> Draft {
     Draft::new(
         "ferrum.detail.mismatch",
         RULE,
@@ -211,10 +213,10 @@ fn mismatch(m: &Mismatch) -> Draft {
         Severity::Warning,
     )
     .ev(E::HttpStatus, "detail.lookup.status", "200")
-    .ev(E::BodyContent, "detail.mismatch", format!("{}: record {}, response {}", m.field, m.record, m.response))
+    .ev(E::BodyContent, "detail.mismatch", format!("{}: record {}, response {}", m.field, record, response))
     .var("field", m.field)
-    .var("record", m.record.clone())
-    .var("response", m.response.clone())
+    .var("record", record)
+    .var("response", response)
 }
 
 fn refused(status: u16, lookup_authenticated: bool) -> Draft {
@@ -252,6 +254,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     let (reference, endpoint, lookup_authenticated, outcome) = match detail {
         GatewayDetail::Looked { reference, endpoint, channel_authenticated: lookup, outcome } => (reference, endpoint, *lookup, outcome),
         GatewayDetail::InvalidReference { value } => {
+            // Redacted before it is cut: a secret crossing the cut would no
+            // longer match when the finding is redacted again.
+            let value = quoted(ctx.input.redact, value);
             out.push(
                 Draft::new(
                     "ferrum.detail.invalid_reference",
@@ -262,7 +267,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
                     Severity::Warning,
                 )
                 .ev_at(E::HttpHeader, REF_KEY, value.clone(), idx)
-                .var("value", value.clone())
+                .var("value", value)
                 .var("profile", profile_name.clone()),
             );
             return;
@@ -293,7 +298,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     let ceiling = if data_authenticated && lookup_authenticated { Confidence::Confirmed } else { Confidence::Likely };
     let draft = match outcome {
         LookupOutcome::Resolved(view) => resolved(view, ceiling, r.status),
-        LookupOutcome::Mismatch(m) => mismatch(m),
+        LookupOutcome::Mismatch(m) => mismatch(m, quoted(ctx.input.redact, &m.record), quoted(ctx.input.redact, &m.response)),
         LookupOutcome::Refused { status } => refused(*status, lookup_authenticated),
         LookupOutcome::NotFound { owner_replica } => unavailable(owner_replica.as_deref()),
         LookupOutcome::RateLimited => rate_limited(),
