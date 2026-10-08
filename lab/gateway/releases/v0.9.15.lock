@@ -1,4 +1,5 @@
-# Source-audited default for the Anvil failure lab; hosted Anvil gates pending.
+# Source-audited default for the Anvil failure lab; hosted Anvil qualification recorded
+# in docs/audit/gateway-0.9.15-delta.md.
 # Published Edge v0.9.15, release 407222520, immutable source below.
 # Asset names and SHA-256 are the GitHub API asset digests of the published
 # release, matching its .sha256 sidecars, verified by root (2026-10-08).

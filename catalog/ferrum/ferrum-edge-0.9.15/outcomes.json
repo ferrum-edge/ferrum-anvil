@@ -30249,10 +30249,10 @@
     }
   ],
   "qualification": {
-    "state": "source_audited_candidate",
-    "live_0_9_15_evidence": false,
+    "state": "reviewed_candidate_qualified",
+    "live_0_9_15_evidence": true,
     "baseline": "ferrum-edge-0.9.14",
-    "scope": "Carried observable inventory with the v0.9.15 source delta (552 of the 553 v0.9.14 outcomes; the OIDC state-cache-full 503 is removed), plus four outcomes for new client-visible refusals; not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab qualification (manual workflow_dispatch, profile=all) is pending. Full evidence: docs/audit/gateway-0.9.15-delta.md."
+    "scope": "Carried observable inventory with the v0.9.15 source delta (552 of the 553 v0.9.14 outcomes; the OIDC state-cache-full 503 is removed), plus four outcomes for new client-visible refusals; not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab run 37847538911 on PR head a2d764ec, all 14 profiles on v0.9.15: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped on the failed job's rerun (attempt 2), after attempt 1 failed only PROTO-022.rogue-untrusted at its single-datagram DTLS recovery check (#355). MESH-007/008, the sidecar UDP and DTLS scenarios, EARLY-001/002 and UP-018 passed on both OSes. Full evidence: docs/audit/gateway-0.9.15-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1887) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1650 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token."
 }

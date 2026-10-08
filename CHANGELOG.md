@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-08
+
+Compatibility release: Anvil adopts Ferrum Edge v0.9.15 and `contracts-edge-0.9.15`, now the lab
+and new-profile default after hosted all-profile Lab qualification (run 37847538911). HTTP/3 0-RTT
+keeps and presents QUIC address-validation tokens, which v0.9.15 requires before it serves a
+0-RTT request ahead of the handshake. The database schema and the bundle and backup formats are unchanged.
+
 ### Added
 
 - Adopt published `contracts-edge-0.9.15` (`6fb64c5dc2e014204c17609fc717d976f3b4589e`)
@@ -12,9 +19,9 @@
   The two new diagnostic-ref fixtures for `route_protocol_admission` are vendored and exercised.
 - Add the separately source-audited Edge v0.9.15 catalog and release-asset locks at
   `25b37395ff61bfea0f3ffd189d9011c4984fa755` (release 407222520), selected as the lab and
-  new-profile candidate default pending hosted Anvil gates. v0.9.14 and the earlier catalogs and
-  locks stay supported, and the nightly lab now also runs v0.9.14. See
-  `docs/audit/gateway-0.9.15-delta.md`.
+  new-profile default, qualified by hosted all-profile Lab run 37847538911 (see the audit).
+  v0.9.14 and the earlier catalogs and locks stay supported, and the nightly lab now also runs
+  v0.9.14. See `docs/audit/gateway-0.9.15-delta.md`.
 - Gateway catalog 0.9.15 adds four outcomes for new v0.9.15 refusals: the route protocol
   admission 403 `{"error":"Request protocol not permitted on this route"}` (native gRPC
   `PERMISSION_DENIED`), the HTTP/1.1 WebSocket non-GET 405 `{"error":"WebSocket upgrades require

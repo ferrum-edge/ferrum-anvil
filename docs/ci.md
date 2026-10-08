@@ -129,7 +129,7 @@ release asset for the runner's OS and architecture with `gh release download`
 (authenticated by the workflow's `github.token`) into `lab/bin/<release>/`.
 It refuses to keep a binary whose SHA-256 differs from its lock:
 
-- `lab/gateway/RELEASE.lock`: the candidate default pin (v0.9.15, hosted Anvil gates pending);
+- `lab/gateway/RELEASE.lock`: the default pin (v0.9.15, hosted Anvil qualification recorded);
 - `lab/gateway/releases/<release>.lock`: every supported release (v0.9.5,
   v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14 and v0.9.15).
 

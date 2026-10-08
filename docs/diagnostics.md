@@ -222,7 +222,7 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.15` (candidate default; hosted gates pending) | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta, no live compatibility claim) |
+| `ferrum-edge-0.9.15` (default; hosted qualification recorded) | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta; [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.14` | v0.9.14, `9bd4d5f` | **553 carried IDs** | [audit/gateway-0.9.14-delta.md](audit/gateway-0.9.14-delta.md) (source delta covering v0.9.12–v0.9.14; hosted qualification recorded) |
 | `ferrum-edge-0.9.11` | v0.9.11, `c764084` | **553 carried IDs** | [audit/gateway-0.9.11-delta.md](audit/gateway-0.9.11-delta.md) (source delta; hosted qualification recorded) |
 | `ferrum-edge-0.9.10` | v0.9.10, `ee040d5` | **553** | [audit/gateway-0.9.10-delta.md](audit/gateway-0.9.10-delta.md) (delta on top of the 0.9.9 audit) |
@@ -468,7 +468,7 @@ only presentation; every card shows its own confidence.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
   (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,
-  v0.9.15 candidate, pending hosted qualification). Every lab profile's trusted profile declares the running release's
+  v0.9.15, with [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded). Every lab profile's trusted profile declares the running release's
   compatibility id, and the lab refuses to run a release without its own
   catalog. Every scenario runs trusted and untrusted: no `ferrum.*`
   gateway attribution may appear when the destination is untrusted, and

@@ -21,8 +21,9 @@ verified by `lab/scripts/fetch-gateway.sh`. v0.9.11 was the default pin from 202
 separately audited in [`gateway-0.9.11-delta.md`](gateway-0.9.11-delta.md) with hosted Anvil
 qualification recorded. v0.9.14 was the default pin from 2026-10-08, audited in
 [`gateway-0.9.14-delta.md`](gateway-0.9.14-delta.md) with hosted Anvil qualification recorded;
-v0.9.12 to v0.9.14 change no config struct or plugin key. The current v0.9.15 candidate default
-is audited in [`gateway-0.9.15-delta.md`](gateway-0.9.15-delta.md), pending hosted Anvil gates;
+v0.9.12 to v0.9.14 change no config struct or plugin key. The current v0.9.15 default is
+audited in [`gateway-0.9.15-delta.md`](gateway-0.9.15-delta.md), with
+[hosted Anvil qualification](gateway-0.9.15-delta.md#qualification-status) recorded;
 it adds no config struct field, removes the `ldap_auth` `consumer_mapping` key and adds plugin
 keys the lab does not use. Its Layer-4 authorization of mesh CONNECT relays made the sidecar
 MeshPolicy name its own denied identity (MESH-007). The historical observations and original
