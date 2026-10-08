@@ -18,6 +18,11 @@ cutting them. Some of these change behaviour; read the Breaking section below be
   input, MCP initialize redirects are refused and MCP session headers are withheld on
   cross-origin redirects, and everything the lint model copies out of a document is charged
   before it is copied, with an operation shared by several paths resolved once (#343).
+  ([GHSA-7x9p-q728-cff3](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-7x9p-q728-cff3))
+  ([GHSA-hcvh-g6w5-64xx](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-hcvh-g6w5-64xx))
+  ([GHSA-hhpp-h9wj-mqv2](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-hhpp-h9wj-mqv2))
+  ([GHSA-m9rg-fq2w-rr43](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-m9rg-fq2w-rr43))
+  ([GHSA-q9v8-676j-6cj7](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-q9v8-676j-6cj7))
 - Resource use when routing and resolving references in untrusted specifications is bounded.
   Each `$ref` string's chain is followed once per spec, and a Path Item that many paths `$ref`
   is read once and shared by them. Every use of a reference (reading the value it ends at and
@@ -32,6 +37,7 @@ cutting them. Some of these change behaviour; read the Breaking section below be
   paths, pointers and declared statuses; any left out are counted in a note and in
   `spec.operations`. A lint whose copy budget runs out reports `incomplete` (as do the text,
   SARIF and desktop outputs); see Breaking for the `lint-spec` exit code (#349).
+  ([GHSA-q9v8-676j-6cj7](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-q9v8-676j-6cj7))
 - Gateway diagnostic-reference findings redact a malformed `X-Ferrum-Diagnostic-Ref` value and a
   mismatched record's value before cutting them to 80 characters, so a known secret that crosses
   the cut is replaced whole in findings and saved history. Findings that quote an
