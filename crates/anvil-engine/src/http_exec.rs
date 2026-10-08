@@ -1032,17 +1032,6 @@ pub(crate) async fn execute_viewing(
         attempts.push(out.observation.clone());
         last_hop = current.hop();
 
-        // Store cookies from the response.
-        if prep.settings.cookies
-            && let Some(r) = &out.response
-        {
-            if engine.store_cookies(epoch, &ctx.isolation, &current.target, r, &redactor)
-                && !prep.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE)
-            {
-                prep.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
-            }
-        }
-
         // ---- redirects ----
         if let Some(resp) = &out.response
             && is_redirect(resp.status)
@@ -1160,6 +1149,13 @@ pub(crate) async fn execute_viewing(
                             if !prep.inferred.contains(&n) {
                                 prep.inferred.push(n);
                             }
+                        }
+                        if prep.settings.cookies
+                            && let Some(r) = &out.response
+                            && engine.store_cookies(epoch, &ctx.isolation, &current.target, r, &redactor)
+                            && !prep.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE)
+                        {
+                            prep.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
                         }
                         current = AttemptTarget { method, target: t, headers, body, with_credentials, tls, tls_profile, proxy };
                         reason = AttemptReason::Redirect { status };
@@ -1325,6 +1321,9 @@ pub(crate) async fn execute_viewing(
         AttemptReason::ProtocolFallback { from } => Some(from.clone()),
         _ => None,
     });
+    let final_cookie_response = last.response.clone();
+    let isolation = ctx.isolation.clone();
+    let store_cookies = prep.settings.cookies;
     let assembly = Assembly {
         ctx,
         started_at,
@@ -1355,7 +1354,18 @@ pub(crate) async fn execute_viewing(
         body_view: view,
         gateway_detail,
     };
-    let output = record::assemble(assembly);
+    let mut output = record::assemble(assembly);
+    if store_cookies
+        && !output.extracted.iter().any(|(_, value, sensitive)| {
+            *sensitive && value.len() > crate::MAX_SENSITIVE_EXTRACTION_BYTES
+        })
+        && let Some(response) = &final_cookie_response
+        && engine.store_cookies(epoch, &isolation, &last_hop.target, response, &redactor)
+    {
+        if !output.record.prepared.inferred.iter().any(|note| note == crate::SECRET_COOKIE_NAME_NOTE) {
+            output.record.prepared.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
+        }
+    }
     let _ = assertions::evaluate;
     let _: Option<Observed> = None;
     output

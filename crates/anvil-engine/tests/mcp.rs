@@ -391,11 +391,7 @@ async fn a_cross_origin_redirect_drops_the_session_id_when_credential_forwarding
     ctx.settings_layers.push((
         "test".into(),
         SettingsOverrides {
-            redirects: Some(anvil_domain::settings::RedirectPolicy {
-                follow: true,
-                max: 10,
-                forward_credentials_cross_origin: true,
-            }),
+            redirects: Some(anvil_domain::settings::RedirectPolicy { follow: true, max: 10, forward_credentials_cross_origin: true }),
             ..Default::default()
         },
     ));

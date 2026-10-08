@@ -167,6 +167,51 @@ async fn oversized_sensitive_extractions_fail_closed_and_discard_response_data()
     assert!(!record[0].0.contains(&"x".repeat(64 * 1024 + 1)));
 }
 
+#[tokio::test]
+async fn oversized_sensitive_extractions_do_not_store_cookies_or_fall_back_to_outer_variables() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut p = Recording::default();
+    let mut request = RequestSpec::http("GET", &f.url("/sse?count=3000&interval=0&set_cookie=oversized%3Dstored"));
+    request.extractions.push(Extraction {
+        variable: "large_secret".into(),
+        source: ExtractionSource::Regex { pattern: "(?s)(.*)".into(), group: 1 },
+        sensitive: true,
+    });
+    let first_id = p.add("Large extraction", request);
+
+    let second_id = Id::new();
+    let mut second = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo")));
+    second.request_id = Some(second_id);
+    second.spec.headers.push(KeyValue::new("X-Token", "{{large_secret}}"));
+    second.var_layers.push(VarLayer {
+        label: "workspace".into(),
+        vars: vec![VarEntry { name: "large_secret".into(), value: "outer-value".into(), secret: false, literal: false }],
+    });
+    p.inner.insert(second_id, "Use large extraction", second);
+
+    let third_id = p.add("Check cookie jar", RequestSpec::http("GET", &f.url("/echo")));
+    let engine = Engine::new();
+    let report = anvil_runner::run(
+        &engine,
+        &p,
+        plan(&[(first_id, "Large extraction"), (second_id, "Use large extraction"), (third_id, "Check cookie jar")]),
+        RunOptions::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let steps = &report.iterations[0].steps;
+    assert_eq!(steps[0].status, RunStepStatus::Failed);
+    assert_ne!(steps[1].status, RunStepStatus::Passed);
+    assert!(!engine.has_cookie_jar("standalone"));
+    let records = p.records.lock();
+    assert!(records[1].0.contains("large_secret"), "the later step reports the unavailable variable");
+    assert!(!records[2].0.contains("oversized=stored"));
+    assert!(!records[2].0.contains("Cookie"), "the discarded response cookie was not sent later");
+}
+
 fn token_login(f: &fx::Fixture, token: &str) -> RequestSpec {
     let mut s = RequestSpec::http("POST", &f.url("/status/200"));
     s.params.push(KeyValue::new("body", format!(r#"{{"token":"{token}"}}"#)));

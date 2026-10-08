@@ -863,10 +863,32 @@ impl<'a> ModelBuilder<'a> {
         }
         self.view_bytes += copied_bytes;
         self.push(TargetKind::Operation, op.pointer.clone(), label.clone(), operation_view);
-        let ctx =
-            json!({"method": op.method, "method_upper": op.method.to_ascii_uppercase(), "path": op.path, "operation_id": operation_id});
+        let ctx_bytes = 6usize
+            .saturating_add(op.method.len())
+            .saturating_add(12)
+            .saturating_add(op.method.len())
+            .saturating_add(4)
+            .saturating_add(op.path.len())
+            .saturating_add(12)
+            .saturating_add(operation_id.map_or(0, str::len));
+        if !self.can_copy_child(ctx_bytes, label.len(), op.pointer.len()) {
+            return;
+        }
+        let ctx = json!({
+            "method": op.method,
+            "method_upper": op.method.to_ascii_uppercase(),
+            "path": op.path,
+            "operation_id": operation_id
+        });
 
         for p in &params {
+            if !self.can_copy_child(
+                ctx_bytes,
+                label.len().saturating_add(p.name.len()).saturating_add(32),
+                p.pointer.len().saturating_add(copied_string_bytes(p.value).saturating_mul(2)),
+            ) {
+                return;
+            }
             // A Swagger 2.0 body parameter is the request body target; a
             // shared (inherited or `$ref`'d) parameter is one target.
             if p.location == "body" || self.seen.contains(&(TargetKind::Parameter, p.pointer.clone())) {
@@ -901,6 +923,13 @@ impl<'a> ModelBuilder<'a> {
 
         // A shared (`$ref`'d) body or response is one target: built once.
         if let Some(body) = body.as_ref().filter(|b| !self.seen.contains(&(TargetKind::RequestBody, b.pointer.clone()))) {
+            if !self.can_copy_child(
+                ctx_bytes,
+                label.len().saturating_add(32),
+                body.pointer.len().saturating_add(copied_string_bytes(body.value).saturating_mul(2)),
+            ) {
+                return;
+            }
             let mut view = json!({
                 "required": body.required,
                 "description": opt_str(body.value, "description"),
@@ -910,11 +939,25 @@ impl<'a> ModelBuilder<'a> {
             merge(&mut view, &ctx);
             self.push(TargetKind::RequestBody, body.pointer.clone(), format!("request body of {label}"), view);
             for m in &body.media {
+                if !self.can_copy_child(
+                    ctx_bytes,
+                    label.len().saturating_add(m.media_type.len()).saturating_add(64),
+                    m.pointer.len().saturating_add(copied_string_bytes(m.object.unwrap_or(&Value::Null)).saturating_mul(2)),
+                ) {
+                    return;
+                }
                 self.media(m, Direction::Request, None, &ctx, &label, examples);
             }
         }
 
         for r in &resps {
+            if !self.can_copy_child(
+                ctx_bytes,
+                label.len().saturating_add(r.code.len()).saturating_add(32),
+                r.pointer.len().saturating_add(copied_string_bytes(r.value).saturating_mul(2)),
+            ) {
+                return;
+            }
             if self.seen.contains(&(TargetKind::Response, r.pointer.clone())) {
                 continue;
             }
@@ -935,6 +978,17 @@ impl<'a> ModelBuilder<'a> {
             self.push(TargetKind::Response, r.pointer.clone(), format!("{} response of {label}", r.code), view);
             if let Some(h) = r.value.get("headers").and_then(Value::as_object) {
                 for (name, raw) in h {
+                    if !self.can_copy_child(
+                        ctx_bytes,
+                        label.len().saturating_add(name.len()).saturating_add(64),
+                        r.pointer
+                            .len()
+                            .saturating_add(name.len())
+                            .saturating_add(10)
+                            .saturating_add(copied_string_bytes(raw).saturating_mul(2)),
+                    ) {
+                        return;
+                    }
                     let Some((hv, hptr)) = spec.usable(raw, &ptr(&ptr(&r.pointer, "headers"), name)) else { continue };
                     let schema = hv.get("schema").unwrap_or(hv);
                     let (ty, _, _) = schema_types(schema);
@@ -953,9 +1007,20 @@ impl<'a> ModelBuilder<'a> {
                 }
             }
             for m in &r.media {
+                if !self.can_copy_child(
+                    ctx_bytes,
+                    label.len().saturating_add(r.code.len()).saturating_add(m.media_type.len()).saturating_add(64),
+                    m.pointer.len().saturating_add(copied_string_bytes(m.object.unwrap_or(&Value::Null)).saturating_mul(2)),
+                ) {
+                    return;
+                }
                 self.media(m, Direction::Response, Some(&r.code), &ctx, &label, examples);
             }
         }
+    }
+
+    fn can_copy_child(&self, ctx_bytes: usize, label_bytes: usize, source_bytes: usize) -> bool {
+        self.view_bytes.saturating_add(ctx_bytes).saturating_add(label_bytes).saturating_add(source_bytes) <= self.view_byte_limit
     }
 
     fn media(
@@ -1071,9 +1136,7 @@ fn copied_string_bytes(value: &Value) -> usize {
     match value {
         Value::String(s) => s.len(),
         Value::Array(values) => values.iter().fold(0usize, |sum, value| sum.saturating_add(copied_string_bytes(value))),
-        Value::Object(values) => values
-            .iter()
-            .fold(0usize, |sum, (key, value)| sum.saturating_add(key.len()).saturating_add(copied_string_bytes(value))),
+        Value::Object(v) => v.iter().fold(0usize, |s, (k, x)| { s.saturating_add(k.len()).saturating_add(copied_string_bytes(x)) }),
         _ => 0,
     }
 }
@@ -1136,6 +1199,8 @@ mod tests {
         builder.build(&mut |_, _| vec![]);
 
         assert!(builder.view_bytes <= builder.view_byte_limit);
-        assert!(builder.targets.iter().filter(|t| t.kind == TargetKind::Parameter).count() < 300);
+        let parameter_count = builder.targets.iter().filter(|t| t.kind == TargetKind::Parameter).count();
+        assert!(parameter_count < 300);
+        assert!(parameter_count <= MAX_MODEL_VIEW_BYTES / operation_id.len());
     }
 }

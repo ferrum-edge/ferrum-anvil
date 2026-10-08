@@ -14,15 +14,13 @@ use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_transport::recorder::EventCtx;
 use chrono::Utc;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 const MAX_URL: usize = 2_048;
 const MAX_TEXT: usize = 1_024;
 const MAX_SUMMARY: usize = 512;
-/// Larger sensitive values fail the step and cause response-derived record data to be discarded.
-const MAX_SENSITIVE_EXTRACTION_BYTES: usize = 64 * 1024;
-
 /// Execute a plan. Returns an error only when the run cannot start (trust,
 /// validation); once started, cancellation or an abort still yields a
 /// (partial) report.
@@ -176,6 +174,7 @@ impl Run {
         // Run-local values, each with the scope of the step that extracted
         // it (`ExecutionContext::scope`).
         let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
+        let mut unavailable_extractions: HashSet<(Option<Id>, String)> = HashSet::new();
         let mut stopped_at: Option<u32> = None;
         let mut failed = false;
         let mut stop = false;
@@ -242,6 +241,7 @@ impl Run {
             };
             let name = if provided.name.is_empty() { name } else { provided.name };
             let mut ctx = provided.context;
+            let scope = ctx.scope;
             ctx.var_layers.push(VarLayer {
                 label: "run".into(),
                 vars: vec![
@@ -252,7 +252,6 @@ impl Run {
             // A step under a sealed import root sees only values extracted
             // under that root, and no dataset row (the dataset is the
             // workspace's); a step outside it never sees what it extracted.
-            let scope = ctx.scope;
             if let Some(l) = &dataset_layer {
                 if scope.is_none() {
                     ctx.var_layers.push(l.clone());
@@ -263,6 +262,9 @@ impl Run {
             let visible: Vec<VarEntry> = extracted.iter().filter(|(s, _)| *s == scope).map(|(_, e)| e.clone()).collect();
             if !visible.is_empty() {
                 ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: visible });
+            }
+            for layer in &mut ctx.var_layers {
+                layer.vars.retain(|entry| !unavailable_extractions.contains(&(scope, entry.name.clone())));
             }
             for n in self.secrets.names() {
                 if !ctx.redaction_names.iter().any(|x| x.eq_ignore_ascii_case(n)) {
@@ -279,7 +281,8 @@ impl Run {
             let mut new_secrets = Vec::new();
             for (var, value, sensitive) in std::mem::take(&mut out.extracted) {
                 extracted.retain(|(s, e)| *s != scope || e.name != var);
-                if sensitive && value.len() > MAX_SENSITIVE_EXTRACTION_BYTES {
+                if sensitive && value.len() > anvil_engine::MAX_SENSITIVE_EXTRACTION_BYTES {
+                    unavailable_extractions.insert((scope, var.clone()));
                     out.body = bytes::Bytes::new();
                     out.decoded_body = None;
                     if let Some(response) = &mut out.record.response {
