@@ -83,8 +83,11 @@ const PERMISSIVE_ADMIN: u16 = 17692;
 const SVC_HOST: &str = "svc.ferrum.svc.cluster.local";
 /// East-west SNI passthrough name shape (outbound_.PORT_._.HOST).
 const EAST_WEST_SNI: &str = "outbound_.17801_._.svc.ferrum.svc.cluster.local";
-/// TEST-NET-1 (RFC 5737): a destination no lab terminator owns; never dialed.
-const TEST_NET: &str = "192.0.2.10";
+/// A destination no lab terminator owns; never dialed. RFC 2544 benchmarking
+/// space (198.18.0.0/15): not routed, yet a unicast zone Anvil's destination
+/// policy admits as an original proxied destination. A reserved TEST-NET
+/// literal would be refused locally before the CONNECT is sent (#341).
+const NOT_TERMINATED: &str = "198.18.0.10";
 
 pub struct Env {
     pub engine: Engine,
@@ -721,15 +724,17 @@ fn mesh010(env: &Env) -> Fut<'_> {
     })
 }
 
-/// MESH-011: Ambient HBONE to a destination this proxy does not terminate (TEST-NET): refused, never dialed.
+/// MESH-011: Ambient HBONE to a destination this proxy does not terminate: the
+/// gateway (not Anvil's local policy) refuses it, never dialed.
 fn mesh011(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = env.ambient.log_lines().len();
+        let authority = format!("{NOT_TERMINATED}:{BACKEND_PORT}");
         let tls = env.tls("client SVID → ztunnel", Svid::Client, ids::ZTUNNEL_SPIFFE_ID, None);
-        let o =
-            send(&env.engine, &env.via_hbone(AMBIENT_HBONE_PORT, &format!("{TEST_NET}:{BACKEND_PORT}"), "/echo", tls, HboneMarker::None))
-                .await;
+        let o = send(&env.engine, &env.via_hbone(AMBIENT_HBONE_PORT, &authority, "/echo", tls, HboneMarker::None)).await;
+        // The CONNECT left Anvil: no local refusal stands in for the gateway's.
+        c.absent_prefix(&o, "local.");
         let refusal = synthesis_refusal();
         tunnel_refused(&mut c, &o, refusal.status, refusal.body);
         c.add(
@@ -741,8 +746,8 @@ fn mesh011(env: &Env) -> Fut<'_> {
             }),
             "",
         );
-        let log = synthesis_refusal_log(&env.ambient, from, TEST_NET).await;
-        c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the TEST-NET authority (nothing dialed)", !log.is_empty(), "");
+        let log = synthesis_refusal_log(&env.ambient, from, NOT_TERMINATED).await;
+        c.add(CheckKind::GroundTruth, "operator log: relay synthesis refused the authority (nothing dialed)", !log.is_empty(), "");
         outcome(o, c, log)
     })
 }
@@ -1136,5 +1141,19 @@ mod tests {
             }
         }
         assert_eq!(super::BACKEND_PORT, 17801);
+    }
+
+    /// MESH-011 must reach the Ambient gateway: its target passes Anvil's own
+    /// destination policy, which refuses reserved literals such as TEST-NET
+    /// before any proxy traffic (#341), and no lab workload declares it.
+    #[test]
+    fn mesh011_target_passes_anvil_destination_policy() {
+        use anvil_transport::destination::permitted_literal;
+        assert!(permitted_literal(super::NOT_TERMINATED), "MESH-011 would be refused locally, never reaching the gateway");
+        assert!(!permitted_literal("192.0.2.10"), "the policy no longer refuses TEST-NET; MESH-011's guard is stale");
+        for f in ["mesh-sidecar.json", "mesh-ambient.json"] {
+            let text = std::fs::read_to_string(repo_root().join("lab/gateway").join(f)).unwrap();
+            assert!(!text.contains(super::NOT_TERMINATED), "{f} declares MESH-011's unterminated address");
+        }
     }
 }

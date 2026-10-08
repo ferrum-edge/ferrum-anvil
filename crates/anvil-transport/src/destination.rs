@@ -122,6 +122,13 @@ fn zone(ip: IpAddr) -> Option<Zone> {
     }
 }
 
+/// Whether `host` may be an original proxied destination: a name, or an IP
+/// literal in a permitted unicast zone. Reserved literals (documentation
+/// TEST-NETs, multicast, unspecified) are refused before any proxy traffic.
+pub fn permitted_literal(host: &str) -> bool {
+    dns::parse_literal(host).is_none_or(|ip| zone(ip).is_some())
+}
+
 impl DestinationPolicy {
     fn validate(&self, host: &str, addrs: &[SocketAddr], redirected: bool) -> Result<(), TransportFailure> {
         let mut zones = 0;
@@ -194,9 +201,7 @@ impl DestinationPolicy {
             }
             // Preserve explicit original proxy requests. Even a later direct
             // NO_PROXY hop has no verified original zone to inherit.
-            if let Some(ip) = dns::parse_literal(&plan.host)
-                && zone(ip).is_none()
-            {
+            if !permitted_literal(&plan.host) {
                 return Err(refused("the original destination is not a permitted unicast address"));
             }
             if crate::http::forward_proxy_routes_authority(plan.https, plan.proxy.as_ref().map(|p| p.kind)) {
@@ -206,10 +211,7 @@ impl DestinationPolicy {
                     .find(|(n, _)| n == http::header::HOST)
                     .and_then(|(_, v)| v.to_str().ok())
                     .unwrap_or(&plan.authority);
-                if let Some(host) = crate::http::authority_host(authority)
-                    && let Some(ip) = dns::parse_literal(&host)
-                    && zone(ip).is_none()
-                {
+                if crate::http::authority_host(authority).is_some_and(|host| !permitted_literal(&host)) {
                     return Err(refused("the proxy request authority is not a permitted unicast address"));
                 }
             }
@@ -352,6 +354,16 @@ mod tests {
         }
         assert!(policy.validate(HOST, &addresses(&["1.1.1.1", "2606:4700::1111"]), true).is_ok());
         assert!(policy.validate(HOST, &addresses(&["::ffff:1.1.1.1"]), true).is_ok());
+    }
+
+    #[test]
+    fn proxied_literals_must_be_permitted_unicast_and_names_pass() {
+        for ok in ["origin.test", "8.8.8.8", "127.0.0.1", "10.0.0.1", "198.18.0.10", "[::1]", "2606:4700::1111"] {
+            assert!(permitted_literal(ok), "{ok}");
+        }
+        for refused in ["192.0.2.10", "198.51.100.7", "203.0.113.1", "0.0.0.0", "224.0.0.1", "[2001:db8::1]", "::"] {
+            assert!(!permitted_literal(refused), "{refused}");
+        }
     }
 
     #[test]
