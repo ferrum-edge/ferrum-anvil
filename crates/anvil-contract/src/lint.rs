@@ -5,7 +5,7 @@ use crate::locate::ptr;
 use crate::model::{Direction, Media, Model, Target, TargetKind};
 use crate::ruleset::{Assertion, FieldToken, Given, Rule, RuleSet, RulesetSummary, Severity};
 use crate::schema;
-use crate::spec::Spec;
+use crate::spec::{Meter, Reach, Spec};
 use anvil_import::Dialect;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ pub const MAX_EXAMPLE_CHECKS: usize = 1_000;
 /// Schema members and items scanned by all the example checks of a lint
 /// together (each compile scans, bundles and builds its schema).
 pub const MAX_EXAMPLE_SCAN_STEPS: usize = 20 * schema::MAX_SCAN_STEPS;
+/// Bytes that following the `$ref`s of named examples may cost in all (see
+/// [`Spec::resolve_within`]); examples past it are counted, not checked.
+const MAX_EXAMPLE_REF_BYTES: usize = crate::model::MAX_MODEL_VIEW_BYTES;
 /// Findings collected before sorting; later ones are only counted.
 const MAX_COLLECTED: usize = 100_000;
 
@@ -158,6 +161,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
         compiles: 0,
         scan_steps: 0,
         scan_budget: MAX_EXAMPLE_SCAN_STEPS,
+        refs: Meter::new(MAX_EXAMPLE_REF_BYTES),
     };
     let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
     let model = Model::build(spec, &mut examples);
@@ -308,56 +312,91 @@ impl Collector<'_> {
     }
 }
 
-/// The values a field path selects on a target.
+/// Where a field path is while it is walked: the target's view, or a value
+/// of the view or of the document.
+#[derive(Clone, Copy)]
+enum Place<'v> {
+    View(&'v Map<String, Value>),
+    Value(&'v Value),
+}
+
+impl<'v> Place<'v> {
+    fn get(self, k: &str) -> Option<&'v Value> {
+        match self {
+            Place::View(m) => m.get(k),
+            Place::Value(v) => v.get(k),
+        }
+    }
+
+    fn members(self) -> Option<&'v Map<String, Value>> {
+        match self {
+            Place::View(m) => Some(m),
+            Place::Value(v) => v.as_object(),
+        }
+    }
+
+    fn to_value(self) -> Value {
+        match self {
+            Place::View(m) => Value::Object(m.clone()),
+            Place::Value(v) => v.clone(),
+        }
+    }
+}
+
+/// The values a field path selects on a target. The walk borrows what it
+/// passes through (for `raw.` fields, the original object, however large)
+/// and copies only what it selects.
 fn select(spec: &Spec, t: &Target, a: &Assertion) -> Vec<Selected> {
     let Some(field) = &a.field else {
         // No field: the function looks at the whole target.
         return vec![Selected { value: Some(Value::Object(t.view.clone())), pointer: None }];
     };
-    let (start, base): (Option<Value>, Option<String>) = if field.raw || t.kind == TargetKind::Node {
+    let (start, base): (Option<Place<'_>>, Option<String>) = if field.raw || t.kind == TargetKind::Node {
         let at = t.pointer.split('#').next().unwrap_or("");
-        let raw = spec.root.pointer(at).map(|v| spec.deref(v, at).0.clone());
-        let raw = if t.kind == TargetKind::Node && !field.raw { Some(Value::Object(t.view.clone())) } else { raw };
-        (raw, Some(at.to_string()))
+        let start = if field.raw {
+            spec.root.pointer(at).map(|v| match spec.reach(v, at) {
+                Reach::Target(r) => Place::Value(spec.target_value(&r).unwrap_or(v)),
+                Reach::Inline(_) | Reach::Unresolved => Place::Value(v),
+            })
+        } else {
+            Some(Place::View(&t.view))
+        };
+        (start, Some(at.to_string()))
     } else {
-        (Some(Value::Object(t.view.clone())), None)
+        (Some(Place::View(&t.view)), None)
     };
-    let mut cur = vec![Selected { value: start, pointer: base }];
+    let mut cur = vec![(start, base)];
     for tok in &field.tokens {
         let mut next = vec![];
-        for s in cur {
+        for (place, pointer) in cur {
             match tok {
-                FieldToken::Key(k) => {
-                    let value = s.value.as_ref().and_then(|v| v.get(k)).cloned();
-                    next.push(Selected { value, pointer: s.pointer.map(|p| ptr(&p, k)) });
-                }
-                FieldToken::Each => match s.value {
-                    Some(Value::Array(items)) => {
-                        for (i, v) in items.into_iter().enumerate() {
-                            next.push(Selected { value: Some(v), pointer: s.pointer.as_ref().map(|p| ptr(p, &i.to_string())) });
+                FieldToken::Key(k) => next.push((place.and_then(|p| p.get(k)).map(Place::Value), pointer.map(|p| ptr(&p, k)))),
+                FieldToken::Each => match place {
+                    Some(Place::Value(Value::Array(items))) => {
+                        for (i, v) in items.iter().enumerate() {
+                            next.push((Some(Place::Value(v)), pointer.as_ref().map(|p| ptr(p, &i.to_string()))));
                         }
                     }
-                    Some(Value::Object(m)) => {
-                        for (k, v) in m {
-                            next.push(Selected { value: Some(v), pointer: s.pointer.as_ref().map(|p| ptr(p, &k)) });
+                    // An object's members; nothing to iterate otherwise.
+                    Some(container) => {
+                        for (k, v) in container.members().into_iter().flatten() {
+                            next.push((Some(Place::Value(v)), pointer.as_ref().map(|p| ptr(p, k))));
                         }
                     }
-                    // Nothing to iterate: nothing to check.
-                    _ => {}
+                    None => {}
                 },
             }
         }
         cur = next;
     }
-    // A pointer into the raw document is only useful where the value exists.
-    for s in &mut cur {
-        if let Some(p) = &s.pointer
-            && spec.root.pointer(p).is_none()
-        {
-            s.pointer = None;
-        }
-    }
-    cur
+    cur.into_iter()
+        .map(|(place, pointer)| Selected {
+            value: place.map(Place::to_value),
+            // A pointer into the raw document is only useful where the value
+            // exists.
+            pointer: pointer.filter(|p| spec.root.pointer(p).is_some()),
+        })
+        .collect()
 }
 
 /// Fill `{{placeholders}}`: `value`, `field`, `reason`, `label`, `rule`,
@@ -413,6 +452,8 @@ struct ExampleChecker {
     /// Members and items scanned by those compiles, and the limit.
     scan_steps: usize,
     scan_budget: usize,
+    /// What following the references of named examples may cost.
+    refs: Meter,
 }
 
 impl ExampleChecker {
@@ -432,9 +473,16 @@ impl ExampleChecker {
                 examples.push(("example".into(), v));
             }
             if let Some(map) = obj.get("examples").and_then(Value::as_object) {
+                let base = ptr(&m.pointer, "examples");
                 for (name, ex) in map {
-                    let at = crate::locate::ptr(&crate::locate::ptr(&m.pointer, "examples"), name);
-                    let Some((ex, _)) = spec.usable(ex, &at) else { continue };
+                    let Some((ex, _)) = spec.resolve_within(ex, &ptr(&base, name), &mut self.refs) else {
+                        // Past the budget for following references: counted,
+                        // not checked.
+                        if self.refs.exhausted() {
+                            self.not_checked += 1;
+                        }
+                        continue;
+                    };
                     if let Some(v) = ex.get("value").or_else(|| ex.get("dataValue")) {
                         examples.push((format!("examples/{name}"), v));
                     }
@@ -491,7 +539,15 @@ mod tests {
     use serde_json::json;
 
     fn checker(scan_budget: usize) -> ExampleChecker {
-        ExampleChecker { budget: MAX_EXAMPLE_CHECKS, not_checked: 0, compiled: HashMap::new(), compiles: 0, scan_steps: 0, scan_budget }
+        ExampleChecker {
+            budget: MAX_EXAMPLE_CHECKS,
+            not_checked: 0,
+            compiled: HashMap::new(),
+            compiles: 0,
+            scan_steps: 0,
+            scan_budget,
+            refs: Meter::new(MAX_EXAMPLE_REF_BYTES),
+        }
     }
 
     #[test]

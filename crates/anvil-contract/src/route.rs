@@ -29,9 +29,10 @@ const MAX_BASES: usize = 64;
 const MAX_CHOICES: usize = 64;
 /// What the operations a router lists may cost, in bytes. Each (path,
 /// operation) is charged its method, path, pointers and declared statuses
-/// for the copies an analysis keeps per operation (its record, label and
-/// coverage entry), so paths that `$ref` one Path Item cost like distinct
-/// ones. Past this, the remaining operations are left out and counted.
+/// for the copies an analysis keeps per operation (its record, label,
+/// coverage entry and [`Router::operation`] once a call reaches it), so
+/// paths that `$ref` one Path Item cost like distinct ones. Past this, the
+/// remaining operations are left out and counted.
 pub const MAX_ROUTE_BYTES: usize = crate::model::MAX_MODEL_VIEW_BYTES;
 /// Charged per listed operation besides its text.
 const ROUTE_OPERATION_BYTES: usize = 512;
@@ -202,7 +203,7 @@ impl<'a> Router<'a> {
             let item = &items[i];
             for (k, (method, pointer, _)) in item.operations.iter().enumerate() {
                 let cost =
-                    ROUTE_OPERATION_BYTES + 3 * (method.len() + path.len() + pointer.len()) + item.pointer.len() + status_bytes[i][k];
+                    ROUTE_OPERATION_BYTES + 4 * (method.len() + path.len() + pointer.len()) + 2 * item.pointer.len() + status_bytes[i][k];
                 if skipped_operations > 0 || cost > left {
                     skipped_operations += item.operations.len() - k;
                     break;
@@ -259,10 +260,11 @@ impl<'a> Router<'a> {
         } else {
             let mut lists = vec![spec.root.get("servers")];
             // Each Path Item's servers and its operations' once, in the order
-            // the paths first reach them.
+            // the paths first reach them; a Path Item without operations
+            // adds none.
             let mut listed = vec![false; items.len()];
             for &(_, i) in &path_items {
-                if std::mem::replace(&mut listed[i], true) {
+                if items[i].operations.is_empty() || std::mem::replace(&mut listed[i], true) {
                     continue;
                 }
                 lists.push(items[i].value.get("servers"));
@@ -376,7 +378,8 @@ impl<'a> Router<'a> {
         &self.items[e.item].operations[e.op].0
     }
 
-    /// [`op_key`] of listed operation `i`.
+    /// The importer's key of listed operation `i`: its operationId, else
+    /// `METHOD path`.
     fn key(&self, i: usize) -> String {
         let e = &self.entries[i];
         let (method, _, op) = &self.items[e.item].operations[e.op];
@@ -498,11 +501,6 @@ fn strict_segments(base: &str, vars: Option<&Value>) -> Vec<Seg> {
             other => other,
         })
         .collect()
-}
-
-/// The importer's operation key: the operationId, else `METHOD path`.
-pub fn op_key(op: &OperationRef<'_>) -> String {
-    operation_key(op.operation_id(), &op.method, &op.path)
 }
 
 fn operation_key(operation_id: Option<&str>, method: &str, path: &str) -> String {
@@ -661,6 +659,18 @@ mod tests {
         let r = Router::new(&s);
         assert_eq!(op_of(&r, r.route("GET", "https://api.example/v2/items/1", None)), "getItem @/v2");
         assert_eq!(r.origin_declared("https://api.example"), Some(true));
+    }
+
+    #[test]
+    fn a_path_item_without_operations_declares_no_servers() {
+        let text = r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+          "/a":{"get":{},"servers":[{"url":"https://a.example/v1"}]},
+          "/b":{"servers":[{"url":"https://b.example/v2"}]}}}"#;
+        let s = spec(text);
+        let r = Router::new(&s);
+        assert_eq!(r.servers.iter().map(|x| x.url.as_str()).collect::<Vec<_>>(), ["https://a.example/v1"]);
+        assert!(r.base_declared("/v1") && !r.base_declared("/v2"));
+        assert_eq!(r.origin_declared("https://b.example"), Some(false));
     }
 
     #[test]

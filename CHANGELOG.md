@@ -7,11 +7,17 @@
 - Release creation reads the uploaded release-evidence file as JSON data and validates its
   format before using it in draft notes; it no longer loads it as code (#333).
 - Bound resource use when routing and resolving references in untrusted specifications. Each
-  `$ref` string is followed once per spec, and a Path Item that many paths `$ref` is read once
-  and shared by them. The operations `spec-drift` matches against are capped at 256 MiB of
-  their paths, pointers and declared statuses; any left out are counted in a note. A lint whose
-  copy budget runs out reports `incomplete` (as do the text, SARIF and desktop outputs), and
-  `anvil lint-spec` exits with 3 for it unless `--allow-incomplete` is passed (#349).
+  `$ref` string's chain is followed once per spec, and a Path Item that many paths `$ref` is
+  read once and shared by them. Every use of a reference (reading the value it ends at and
+  copying its pointer) is charged before it is made: in `lint-spec` to the 256 MiB copy budget,
+  and in `spec-drift` to a 256 MiB budget for resolving each operation's parameters, body,
+  responses and required headers, which happens once per operation rather than once per call.
+  Named example references are charged too, and rules on `raw.` fields no longer copy the whole
+  object for each path that reaches it. The operations `spec-drift` matches against are capped
+  at 256 MiB of their paths, pointers and declared statuses; any left out are counted in a note
+  and in `spec.operations`. A lint whose copy budget runs out reports `incomplete` (as do the
+  text, SARIF and desktop outputs), and `anvil lint-spec` exits with 3 for it unless
+  `--allow-incomplete` is passed (#349).
 
 ### Added
 

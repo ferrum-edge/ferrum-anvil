@@ -97,6 +97,43 @@ impl RefCache {
     }
 }
 
+/// A byte budget for work and copies, each charged before it is done. Once
+/// a charge does not fit, it and every later one are refused.
+#[derive(Debug, Clone)]
+pub struct Meter {
+    left: usize,
+    spent: usize,
+    exhausted: bool,
+}
+
+impl Meter {
+    pub fn new(bytes: usize) -> Meter {
+        Meter { left: bytes, spent: 0, exhausted: false }
+    }
+
+    /// Charge `bytes`; `false` when they do not fit (or an earlier charge
+    /// did not).
+    pub fn charge(&mut self, bytes: usize) -> bool {
+        if self.exhausted || bytes > self.left {
+            self.exhausted = true;
+            return false;
+        }
+        self.left -= bytes;
+        self.spent += bytes;
+        true
+    }
+
+    /// Whether a charge was refused.
+    pub fn exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    /// What the accepted charges add up to.
+    pub fn spent(&self) -> usize {
+        self.spent
+    }
+}
+
 impl Spec {
     /// Parse `bytes` under the importer's bounds (size, nodes, depth).
     /// Performs no I/O: external references are never fetched.
@@ -176,10 +213,33 @@ impl Spec {
         }
     }
 
+    /// [`Spec::resolve`], charged to `meter` before each step: `at` and the
+    /// `$ref` before the reference is looked up, then the pointer it ends at
+    /// before that is walked and copied. So however many references lead to
+    /// one long pointer, what they cost together stays within the meter.
+    /// `None` too once a charge is refused (see [`Meter::exhausted`]).
+    pub fn resolve_within<'a>(&'a self, v: &'a Value, at: &str, meter: &mut Meter) -> Option<(&'a Value, String)> {
+        let r = v.get("$ref").and_then(Value::as_str).map_or(0, str::len);
+        if !meter.charge(at.len() + r) {
+            return None;
+        }
+        match self.reach(v, at) {
+            Reach::Inline(v) => Some((v, at.to_string())),
+            Reach::Target(t) => {
+                if !meter.charge(t.pointer.len()) {
+                    return None;
+                }
+                Some((self.target_value(&t)?, t.pointer.to_string()))
+            }
+            Reach::Unresolved => None,
+        }
+    }
+
     /// Where `v` (at `at`) leads, without walking there: itself, or where its
     /// `$ref` chain ends. Each `$ref` string is followed once per document,
-    /// so many references sharing a chain, however long its pointers, cost
-    /// one walk of it. An unresolvable reference is remembered in
+    /// so many references sharing a chain cost one walk of the chain (each
+    /// use still walks and copies the pointer it ends at: see
+    /// [`Spec::resolve_within`]). An unresolvable reference is remembered in
     /// [`Spec::unresolved`].
     pub fn reach<'a>(&self, v: &'a Value, at: &str) -> Reach<'a> {
         let Some(r) = v.get("$ref").and_then(Value::as_str) else { return Reach::Inline(v) };
@@ -428,6 +488,40 @@ mod tests {
         assert_eq!(spec.walks.load(Ordering::Relaxed), refs.len() + 2);
         let (v, pointer) = spec.resolve(&refs[7], "/r").unwrap();
         assert_eq!((v["type"].as_str(), pointer.len()), (Some("string"), 100 * 4_001 + 2));
+    }
+
+    #[test]
+    fn metered_resolution_charges_every_use_of_a_long_pointer() {
+        // A target with a pointer of about 200 KB behind one alias.
+        let key = "k".repeat(4_000);
+        let mut deep = json!({"type": "string"});
+        for _ in 0..50 {
+            let mut level = Map::new();
+            level.insert(key.clone(), deep);
+            deep = Value::Object(level);
+        }
+        let target = format!("/x{}", format!("/{key}").repeat(50));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "x": deep,
+            "a": {"$ref": format!("#{target}")}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        // Each use is charged its location (`/r`), its `$ref` (`#/a`) and
+        // the pointer it ends at: room for ten uses, not eleven.
+        let r = json!({"$ref": "#/a"});
+        let mut meter = Meter::new(10 * (2 + 3 + target.len()) + 4);
+        let mut found = 0;
+        while spec.resolve_within(&r, "/r", &mut meter).is_some() {
+            found += 1;
+        }
+        assert_eq!(found, 10);
+        assert!(meter.exhausted());
+        assert_eq!(meter.spent(), 10 * (2 + 3 + target.len()));
+        // The alias and the target once to follow the chain, then the target
+        // once per use; a refused use walks nothing.
+        assert_eq!(spec.walks.load(Ordering::Relaxed), 2 + 10);
+        assert!(spec.resolve_within(&r, "/r", &mut meter).is_none());
+        assert_eq!(spec.walks.load(Ordering::Relaxed), 2 + 10);
+        // A refusal is not an unresolvable reference.
+        assert_eq!(spec.unresolved().1, 0);
     }
 
     #[test]

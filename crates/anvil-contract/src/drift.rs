@@ -26,13 +26,15 @@ use crate::infer::{Shape, mark_nullable, safe_name};
 use crate::lint::MAX_EXAMPLE_SCAN_STEPS;
 use crate::lint::SpecSummary;
 use crate::locate::ptr;
-use crate::model::{Direction, METHODS, Media, OperationRef, parameters, request_body, responses, schema_types, swagger_media};
+use crate::model::{
+    Direction, METHODS, Media, OperationRef, Param, RequestBody, Response, body_of, parameters, responses, schema_types, swagger_media,
+};
 use crate::observe::{Observation, ObservedBody, count_values, essence, is_json, split_url};
 use crate::patch::{self, PatchOp};
 use crate::route::{Route, Router};
 use crate::ruleset::Severity;
 use crate::schema;
-use crate::spec::Spec;
+use crate::spec::{Meter, Spec};
 use anvil_import::Dialect;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -40,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 /// The extension an operation, path item or document declares its budget in.
 pub const EXPECTATIONS: &str = "x-anvil-expectations";
@@ -67,6 +70,14 @@ const MAX_SUGGESTIONS: usize = 2_000;
 const MAX_ERROR_WORK: usize = 1_000_000;
 /// How an observed method that is not an HTTP token is shown.
 const INVALID_METHOD: &str = "(invalid method)";
+/// What resolving the operations' parameters, bodies, responses and required
+/// response headers may cost, in bytes: the references followed and what is
+/// copied out of them (see [`Spec::resolve_within`]). Each operation is
+/// resolved once, however many paths and calls reach it; past this, calls to
+/// the rest are not checked.
+const MAX_RESOLVE_BYTES: usize = crate::model::MAX_MODEL_VIEW_BYTES;
+/// Charged per required response header kept, besides its pointer.
+const HEADER_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DriftOptions {
@@ -352,6 +363,13 @@ enum FixKey {
 struct State<'a> {
     spec: &'a Spec,
     router: Router<'a>,
+    /// Each listed operation, built the first time a call reaches it.
+    operations: Vec<Option<Rc<OperationRef<'a>>>>,
+    /// What each operation object declares, resolved once (`None`: it did
+    /// not fit [`MAX_RESOLVE_BYTES`]; see [`State::lists`]).
+    declared: HashMap<(usize, usize), Option<Rc<Declared<'a>>>>,
+    /// What resolving them may still cost.
+    resolve_meter: Meter,
     opts: DriftOptions,
     findings: BTreeMap<String, FindingAcc>,
     ops: Vec<OpAcc>,
@@ -384,6 +402,15 @@ struct State<'a> {
     pending_links: BTreeSet<(String, String, String, String, String)>,
 }
 
+/// What an operation declares, resolved once for every call to it.
+struct Declared<'a> {
+    params: Vec<Param<'a>>,
+    body: Option<RequestBody<'a>>,
+    resps: Vec<Response<'a>>,
+    /// The required headers of each of `resps`: name and pointer.
+    required_headers: Vec<Vec<(&'a str, String)>>,
+}
+
 /// Compare observations with the description.
 pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -> DriftReport {
     let router = Router::new(spec);
@@ -391,6 +418,9 @@ pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -
     let mut st = State {
         spec,
         router,
+        operations: vec![None; n_ops],
+        declared: HashMap::new(),
+        resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
         opts: opts.clone(),
         findings: BTreeMap::new(),
         ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
@@ -446,8 +476,9 @@ fn reason(code: &str) -> &'static str {
     }
 }
 
-/// The declared response for `code`: exact, then `4XX`, then `default`.
-fn declared_response<'a, 'b>(resps: &'b [crate::model::Response<'a>], code: &str) -> Option<&'b crate::model::Response<'a>> {
+/// The declared response for `code` (an index into `resps`): exact, then
+/// `4XX`, then `default`.
+fn declared_response(resps: &[Response<'_>], code: &str) -> Option<usize> {
     let range = |declared: &str| {
         // Bytes, not characters: a declared key may be any string.
         let d = declared.as_bytes();
@@ -455,9 +486,9 @@ fn declared_response<'a, 'b>(resps: &'b [crate::model::Response<'a>], code: &str
     };
     resps
         .iter()
-        .find(|r| r.code == code)
-        .or_else(|| resps.iter().find(|r| range(&r.code)))
-        .or_else(|| resps.iter().find(|r| r.code == "default"))
+        .position(|r| r.code == code)
+        .or_else(|| resps.iter().position(|r| range(&r.code)))
+        .or_else(|| resps.iter().position(|r| r.code == "default"))
 }
 
 /// The declared media type `ct` falls under.
@@ -805,11 +836,38 @@ impl<'a> State<'a> {
         }
     }
 
+    /// Listed operation `i`, built once however many calls reach it.
+    fn operation(&mut self, i: usize) -> Rc<OperationRef<'a>> {
+        let router = &self.router;
+        Rc::clone(self.operations[i].get_or_insert_with(|| Rc::new(router.operation(i))))
+    }
+
+    /// What listed operation `i` declares, resolved the first time a call
+    /// reaches its operation object (one Path Item that several paths `$ref`
+    /// is resolved once) and charged to [`MAX_RESOLVE_BYTES`]. `None` once
+    /// that is spent: no partial lists are kept.
+    fn lists(&mut self, i: usize) -> Option<Rc<Declared<'a>>> {
+        let object = self.router.operation_object(i);
+        if let Some(found) = self.declared.get(&object) {
+            return found.clone();
+        }
+        let op = self.operation(i);
+        let spec = self.spec;
+        let meter = &mut self.resolve_meter;
+        let params = parameters(spec, &op, meter);
+        let body = body_of(spec, &op, &params, meter);
+        let resps = responses(spec, &op, meter);
+        let headers = resps.iter().map(|r| required_headers(spec, r, meter)).collect();
+        let found = (!meter.exhausted()).then(|| Rc::new(Declared { params, body, resps, required_headers: headers }));
+        self.declared.insert(object, found.clone());
+        found
+    }
+
     fn check_operation(&mut self, i: usize, o: &Observation) {
         let spec = self.spec;
-        let op = self.router.operation(i);
+        let op = self.operation(i);
         let label = op.label();
-        let op_ptr = op.pointer.clone();
+        let op_ptr = &op.pointer;
         let b = budget(spec, &op);
         {
             let acc = &mut self.ops[i];
@@ -829,9 +887,13 @@ impl<'a> State<'a> {
                 Some(op_ptr.clone()),
             );
         }
+        let Some(lists) = self.lists(i) else {
+            self.note("the description is too large to compare completely; some calls to declared operations were not checked");
+            return;
+        };
 
         // Parameters.
-        let params = parameters(spec, &op);
+        let params = &lists.params;
         let has_querystring = params.iter().any(|p| p.location == "querystring");
         if !has_querystring {
             for q in &o.query {
@@ -881,9 +943,9 @@ impl<'a> State<'a> {
         if o.request_bytes > 0
             && let Some(ct) = o.request_content_type.as_deref()
         {
-            let body = request_body(spec, &op);
-            let declared = body.as_ref().map(|b| b.media.clone()).unwrap_or_default();
-            if media_for(&declared, ct).is_none() {
+            let body = lists.body.as_ref();
+            let declared = body.map(|b| b.media.as_slice()).unwrap_or_default();
+            if media_for(declared, ct).is_none() {
                 let e = essence(ct);
                 let list = if declared.is_empty() {
                     "no request body".to_string()
@@ -897,7 +959,7 @@ impl<'a> State<'a> {
                     o,
                     format!("{label} was sent a {e} body; the description declares {list}"),
                     Some(label.clone()),
-                    body.as_ref().map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
+                    body.map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
                 ) {
                     self.link(&key, &key);
                     self.ops[i].new_request_types.insert(e);
@@ -936,8 +998,7 @@ impl<'a> State<'a> {
         }
         let has_body = !matches!(r.body, ObservedBody::Empty) && r.bytes != Some(0);
         let ct = r.content_type.as_deref().map(essence).filter(|_| has_body);
-        let resps = responses(spec, &op);
-        let Some(resp) = declared_response(&resps, &code) else {
+        let Some(k) = declared_response(&lists.resps, &code) else {
             let key = format!("status|{op_ptr}|{code}");
             if !self.finding(
                 key.clone(),
@@ -945,7 +1006,7 @@ impl<'a> State<'a> {
                 o,
                 format!("{label} returned {code}, which is not a documented response"),
                 Some(label.clone()),
-                Some(ptr(&op_ptr, "responses")),
+                Some(ptr(op_ptr, "responses")),
             ) {
                 return;
             }
@@ -956,20 +1017,18 @@ impl<'a> State<'a> {
             }
             return;
         };
+        let resp = &lists.resps[k];
         // Required response headers.
-        if let Some(hs) = resp.value.get("headers").and_then(Value::as_object) {
-            for (name, h) in hs {
-                let (h, hptr) = spec.deref(h, &ptr(&ptr(&resp.pointer, "headers"), name));
-                if h.get("required").and_then(Value::as_bool) == Some(true) && !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
-                    self.finding(
-                        format!("header|{hptr}"),
-                        DriftKind::MissingResponseHeader,
-                        o,
-                        format!("The {code} response of {label} did not include the required header `{name}`"),
-                        Some(label.clone()),
-                        Some(hptr),
-                    );
-                }
+        for (name, hptr) in &lists.required_headers[k] {
+            if !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
+                self.finding(
+                    format!("header|{hptr}"),
+                    DriftKind::MissingResponseHeader,
+                    o,
+                    format!("The {code} response of {label} did not include the required header `{name}`"),
+                    Some(label.clone()),
+                    Some(hptr.clone()),
+                );
             }
         }
         let Some(ct) = ct else {
@@ -1373,18 +1432,21 @@ impl<'a> State<'a> {
                     vec![PatchOp::add(ptr(&ptr(&op_ptr, "parameters"), "-"), param)],
                 );
             }
+            // Only checked operations have new request types: their body is
+            // already resolved.
+            let body = self.declared.get(&self.router.operation_object(i)).and_then(Option::as_ref).and_then(|d| d.body.as_ref());
             for ct in &acc.new_request_types {
                 let key = format!("reqtype|{op_ptr}|{ct}");
                 let ops = if d == Dialect::Swagger20 {
                     let mut consumes = swagger_media(spec, op.op, "consumes").unwrap_or_default();
                     consumes.push(ct.clone());
                     let mut ops = vec![PatchOp::union(ptr(&op_ptr, "consumes"), consumes.into_iter().map(Value::String).collect())];
-                    if request_body(spec, op).is_none() {
+                    if body.is_none() {
                         ops.push(PatchOp::add(ptr(&ptr(&op_ptr, "parameters"), "-"), json!({"name": "body", "in": "body", "schema": {}})));
                     }
                     ops
                 } else {
-                    match request_body(spec, op) {
+                    match body {
                         Some(b) => vec![PatchOp::add(ptr(&ptr(&b.pointer, "content"), ct), json!({"schema": {}}))],
                         None => vec![PatchOp::add(ptr(&op_ptr, "requestBody"), json!({"content": {ct.clone(): {"schema": {}}}}))],
                     }
@@ -1618,8 +1680,10 @@ impl<'a> State<'a> {
             }
         }
         let mut coverage = vec![];
-        // Declared statuses once per operation, however many paths reach it.
-        let mut statuses: HashMap<(usize, usize), Vec<String>> = HashMap::new();
+        // Declared statuses once per operation, however many paths reach it
+        // (`None`: past the resolution budget).
+        let mut statuses: HashMap<(usize, usize), Option<Vec<String>>> = HashMap::new();
+        let mut unlisted = 0;
         for (i, acc) in self.ops.iter().enumerate() {
             let op = &self.router.operation(i);
             let label = op.label();
@@ -1704,10 +1768,15 @@ impl<'a> State<'a> {
                     vec![PatchOp::replace(ptr(&x_ptr, field), json!(raised))],
                 );
             }
-            let declared_statuses = statuses
-                .entry(self.router.operation_object(i))
-                .or_insert_with(|| responses(spec, op).into_iter().map(|r| r.code).collect())
-                .clone();
+            let object = self.router.operation_object(i);
+            let declared_statuses = match self.declared.get(&object) {
+                Some(Some(lists)) => Some(lists.resps.iter().map(|r| r.code.clone()).collect()),
+                _ => statuses.entry(object).or_insert_with(|| declared_codes(spec, op, &mut self.resolve_meter)).clone(),
+            };
+            let declared_statuses = declared_statuses.unwrap_or_else(|| {
+                unlisted += 1;
+                vec![]
+            });
             let finding_count = per_operation.get(&label).copied().unwrap_or(0);
             coverage.push(OperationCoverage {
                 operation: label,
@@ -1724,6 +1793,12 @@ impl<'a> State<'a> {
                 budget: b,
                 findings: finding_count,
             });
+        }
+        if unlisted > 0 {
+            self.notes.insert(
+                "the description is too large to compare completely; some operations' declared statuses are not listed".into(),
+                unlisted,
+            );
         }
         if !spec.is_swagger2() {
             for (origin, (n, base)) in &self.servers {
@@ -1800,7 +1875,8 @@ impl<'a> State<'a> {
                 declared_version: spec.declared_version.clone(),
                 sha256: spec.sha256.clone(),
                 size_bytes: spec.size_bytes,
-                operations: self.router.operation_count(),
+                // Those left out of matching too.
+                operations: self.router.operation_count() + self.router.skipped_operations,
             },
             observations: total,
             matched: self.matched,
@@ -1815,6 +1891,37 @@ impl<'a> State<'a> {
             notes: self.notes.into_iter().map(|(n, c)| format!("{n} ({c}×)")).collect(),
         }
     }
+}
+
+/// The declared statuses of `op`, charged to `meter`; `None` once it is
+/// spent.
+fn declared_codes<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Option<Vec<String>> {
+    let resps = responses(spec, op, meter);
+    (!meter.exhausted()).then(|| resps.into_iter().map(|r| r.code).collect())
+}
+
+/// The required headers of `resp`: name and pointer, each charged to `meter`
+/// (see [`responses`]).
+fn required_headers<'a>(spec: &'a Spec, resp: &Response<'a>, meter: &mut Meter) -> Vec<(&'a str, String)> {
+    let mut out = vec![];
+    let Some(headers) = resp.value.get("headers").and_then(Value::as_object) else { return out };
+    if !meter.charge(resp.pointer.len() + 8) {
+        return out;
+    }
+    let base = ptr(&resp.pointer, "headers");
+    for (name, h) in headers {
+        if meter.exhausted() {
+            break;
+        }
+        let Some((h, hptr)) = spec.resolve_within(h, &ptr(&base, name), meter) else { continue };
+        if h.get("required").and_then(Value::as_bool) == Some(true) {
+            if !meter.charge(HEADER_BYTES + name.len()) {
+                break;
+            }
+            out.push((name.as_str(), hptr));
+        }
+    }
+    out
 }
 
 fn fix_suggestion_key(k: &FixKey) -> String {
@@ -1981,12 +2088,12 @@ mod tests {
         assert_eq!(method_token("get"), "GET");
         assert_eq!(method_token("GET /x"), INVALID_METHOD);
         let null = Value::Null;
-        let resps: Vec<crate::model::Response> = ["é1", "4xx", "ñXX", "default"]
+        let resps: Vec<Response> = ["é1", "4xx", "ñXX", "default"]
             .iter()
-            .map(|c| crate::model::Response { code: c.to_string(), pointer: String::new(), value: &null, media: vec![] })
+            .map(|c| Response { code: c.to_string(), pointer: String::new(), value: &null, media: vec![] })
             .collect();
-        assert_eq!(declared_response(&resps, "404").map(|r| r.code.as_str()), Some("4xx"));
-        assert_eq!(declared_response(&resps, "500").map(|r| r.code.as_str()), Some("default"));
+        assert_eq!(declared_response(&resps, "404").map(|i| resps[i].code.as_str()), Some("4xx"));
+        assert_eq!(declared_response(&resps, "500").map(|i| resps[i].code.as_str()), Some("default"));
         assert_eq!(nice_ceil(412.0), 500.0);
         assert_eq!(nice_ceil(180.0), 200.0);
         assert_eq!(nice_ceil(2100.0), 2500.0);
@@ -2004,5 +2111,59 @@ mod tests {
         let generalized = generalize(&path);
         assert_eq!(generalized.matches('{').count(), SEGMENTS);
         assert!(generalized.ends_with(&format!("{{id{SEGMENTS}}}")), "{}", &generalized[generalized.len() - 32..]);
+    }
+
+    #[test]
+    fn each_operation_is_resolved_once_however_many_calls_reach_it() {
+        // A parameter, a response and its header at pointers of about
+        // 200 KB, each behind one alias.
+        let key = "k".repeat(4_000);
+        let nest = |mut v: Value| {
+            for _ in 0..50 {
+                let mut level = serde_json::Map::new();
+                level.insert(key.clone(), v);
+                v = Value::Object(level);
+            }
+            v
+        };
+        let deep = |name: &str| format!("#/{name}{}", format!("/{key}").repeat(50));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"get": {"parameters": [{"$ref": "#/p"}], "responses": {"200": {"$ref": "#/r"}}}}},
+            "xp": nest(json!({"name": "q", "in": "query", "required": true})),
+            "xr": nest(json!({"description": "ok", "headers": {"X-Id": {"$ref": "#/h"}}})),
+            "xh": nest(json!({"required": true, "schema": {"type": "string"}})),
+            "p": {"$ref": deep("xp")}, "r": {"$ref": deep("xr")}, "h": {"$ref": deep("xh")}});
+        let text = doc.to_string();
+        let call = |i: usize| Observation {
+            id: format!("har:{i}"),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 200,
+                content_type: None,
+                headers: vec![],
+                bytes: Some(0),
+                body: ObservedBody::Empty,
+            }),
+            latency_ms: None,
+        };
+        // Pointers walked to follow references in an analysis of `calls`
+        // calls, each missing the required parameter and header.
+        let walks = |calls: usize| {
+            let spec = Spec::parse(text.as_bytes()).unwrap();
+            let observations: Vec<Observation> = (0..calls).map(&call).collect();
+            let report = analyze(&spec, &observations, &DriftOptions::default());
+            for kind in [DriftKind::MissingRequiredParameter, DriftKind::MissingResponseHeader] {
+                assert_eq!(report.findings.iter().find(|f| f.kind == kind).map(|f| f.count), Some(calls), "{kind:?}");
+            }
+            spec.walks.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert_eq!(walks(1), walks(2_000));
     }
 }
