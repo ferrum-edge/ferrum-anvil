@@ -21,6 +21,7 @@
 //! This module is pure: the engine performs the lookup and passes its outcome
 //! to the rules as [`GatewayDetail`].
 
+use crate::facts::{EXCERPT_LOOKAHEAD_BYTES, Redact, excerpt};
 use anvil_domain::execution::{ConnectionObservation, ResponseRecord};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -157,10 +158,24 @@ pub fn parse_replica(s: &str) -> Option<String> {
     is_lower_hex(s, 8).then(|| s.to_string())
 }
 
+/// Most characters of a text a response or a record supplied that a finding quotes.
+pub const MAX_QUOTE_CHARS: usize = 80;
+
+/// A text a response or a record supplied, kept until a finding quotes it:
+/// without control characters, and only as long as [`quoted`] needs to
+/// redact it before the cut ([`MAX_QUOTE_CHARS`] plus
+/// [`EXCERPT_LOOKAHEAD_BYTES`]), so a secret that crosses the cut is still
+/// whole when it is redacted.
+fn unquoted(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(MAX_QUOTE_CHARS + EXCERPT_LOOKAHEAD_BYTES).collect()
+}
+
 /// A text a response or a record supplied, as a finding may quote it: at
-/// most 80 characters, without control characters.
-pub fn bounded(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(80).collect()
+/// most [`MAX_QUOTE_CHARS`] characters, without control characters,
+/// redacted before it is cut ([`excerpt`]): a secret that crosses the cut is
+/// replaced whole instead of leaving its prefix.
+pub fn quoted(redact: Redact<'_>, s: &str) -> String {
+    excerpt(redact, &unquoted(s), MAX_QUOTE_CHARS)
 }
 
 /// What a response carries in `X-Ferrum-Diagnostic-Ref`.
@@ -168,7 +183,8 @@ pub fn bounded(s: &str) -> String {
 pub enum ResponseRef {
     Absent,
     Present(DiagnosticRef),
-    /// Not a reference the gateway mints, or several different values.
+    /// Not a reference the gateway mints, or several different values: the
+    /// value without control characters, not yet cut (see [`quoted`]).
     Invalid(String),
 }
 
@@ -178,8 +194,8 @@ pub fn response_ref(r: &ResponseRecord) -> ResponseRef {
     values.dedup();
     match values.as_slice() {
         [] => ResponseRef::Absent,
-        [one] => parse_ref(one).map_or_else(|| ResponseRef::Invalid(bounded(one)), ResponseRef::Present),
-        many => ResponseRef::Invalid(bounded(&many.join(", "))),
+        [one] => parse_ref(one).map_or_else(|| ResponseRef::Invalid(unquoted(one)), ResponseRef::Present),
+        many => ResponseRef::Invalid(unquoted(&many.join(", "))),
     }
 }
 
@@ -470,12 +486,12 @@ pub struct Mismatch {
     pub field: &'static str,
     /// What the response shows.
     pub response: String,
-    /// What the record says.
+    /// What the record says, not yet cut (see [`quoted`]).
     pub record: String,
 }
 
 fn mismatch(field: &'static str, response: impl Into<String>, record: &str) -> Result<(), Mismatch> {
-    Err(Mismatch { field, response: response.into(), record: bounded(record) })
+    Err(Mismatch { field, response: response.into(), record: unquoted(record) })
 }
 
 /// Whether `view` describes the response `b` was taken from: the same
@@ -533,6 +549,7 @@ pub enum GatewayDetail {
     /// The response carries no reference.
     NoReference,
     /// The reference is malformed, or several differ: it was not looked up.
+    /// `value` is not yet cut (see [`quoted`]).
     InvalidReference { value: String },
     /// The reference was looked up.
     Looked {

@@ -5,11 +5,12 @@
 //! binds to the response is gateway evidence; the header alone never is, and
 //! the lookup credential never leaves the lookup.
 
-use anvil_diagnostics::gateway_detail::{GatewayDetail, LookupOutcome};
+use anvil_diagnostics::gateway_detail::{GatewayDetail, LookupOutcome, MAX_QUOTE_CHARS};
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, EvidenceSource};
 use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
 use anvil_domain::request::RequestSpec;
-use anvil_domain::secret::{SecretRef, SensitiveValue};
+use anvil_domain::secret::{REDACTED, SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::tls::{HostBinding, TlsProfile};
 use anvil_engine::context::MemorySecrets;
@@ -460,4 +461,48 @@ async fn g01_rate_limits_and_other_replicas_stay_public() {
     let o = run(&e, &ctx(&gateway_url(&f, tagged), Some(access(&other_replica, None, &secret)), &secret)).await;
     assert!(finding(&o, "ferrum.detail.unavailable").alternatives.iter().any(|a| a.contains("replica 1a2b3c4d")));
     stays_public(&o);
+}
+
+/// A known request secret placed so that a quoted value's cut splits it: the
+/// finding and the saved record show the redaction marker where it starts,
+/// never a prefix of it, for a malformed reference the response carries and
+/// for a record naming another namespace.
+#[tokio::test]
+async fn g01_a_secret_crossing_a_quoted_values_cut_is_redacted_whole() {
+    const SECRET: &str = "sk-live-LEAKME-diag-ref-cut-0123";
+    init();
+    let padding = "p".repeat(MAX_QUOTE_CHARS - SECRET.len() + 1);
+    let straddling = format!("{padding}{SECRET}");
+    assert!(padding.len() < MAX_QUOTE_CHARS && straddling.len() > MAX_QUOTE_CHARS, "the cut splits the secret");
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = vault_ref();
+    let with_secret = |url: &str, lookup: DiagnosticDetailAccess| {
+        let mut c = ctx(url, Some(lookup), &secret);
+        c.auth_layers = vec![("request".into(), AuthConfig::Bearer { token: SensitiveValue::template(SECRET), prefix: "Bearer".into() })];
+        c
+    };
+    let no_prefix = |o: &ExecutionOutput| {
+        let record = serde_json::to_string(&o.record).unwrap();
+        assert!(!record.contains(&SECRET[..14]), "a prefix of the secret reached the record");
+    };
+
+    // A malformed reference is quoted, never looked up.
+    let admin = Admin::start(200, vec![], record(REF, 502, "ferrum")).await;
+    let o = run(&e, &with_secret(&gateway_url(&f, &straddling), access(&admin, None, &secret))).await;
+    let d = finding(&o, "ferrum.detail.invalid_reference");
+    let quoted = d.evidence.iter().find(|x| x.key == "header.x-ferrum-diagnostic-ref").expect("the quoted reference");
+    assert_eq!(quoted.value, format!("{padding}{REDACTED}"));
+    assert!(admin.heads().is_empty(), "a malformed reference is never looked up");
+    no_prefix(&o);
+
+    // A record of another namespace: the record's namespace is quoted.
+    let other = Admin::start(200, vec![], record(REF, 502, &straddling)).await;
+    let o = run(&e, &with_secret(&gateway_url(&f, REF), access(&other, Some("tenant-a"), &secret))).await;
+    let m = finding(&o, "ferrum.detail.mismatch");
+    let quoted = m.evidence.iter().find(|x| x.key == "detail.mismatch").expect("the quoted mismatch");
+    assert_eq!(quoted.value, format!("namespace: record {padding}{REDACTED}, response tenant-a"));
+    stays_public(&o);
+    no_prefix(&o);
+    token_stays_in_the_lookup(&o, &f);
 }
