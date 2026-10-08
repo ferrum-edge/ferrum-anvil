@@ -11,7 +11,7 @@
   and shared by them. The operations `spec-drift` matches against are capped at 256 MiB of
   their paths, pointers and declared statuses; any left out are counted in a note. A lint whose
   copy budget runs out reports `incomplete` (as do the text, SARIF and desktop outputs), and
-  `anvil lint-spec` exits with 3 for it unless `--allow-incomplete` is passed (#PR).
+  `anvil lint-spec` exits with 3 for it unless `--allow-incomplete` is passed (#349).
 
 ### Added
 
