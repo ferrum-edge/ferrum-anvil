@@ -6,8 +6,8 @@
 
 Compatibility release: Anvil adopts Ferrum Edge v0.9.15 and `contracts-edge-0.9.15`, now the lab
 and new-profile default after hosted all-profile Lab qualification (run 37847538911). HTTP/3 0-RTT
-keeps and presents QUIC address-validation tokens, which v0.9.15 requires before it serves early
-data. The database schema and the bundle and backup formats are unchanged.
+keeps and presents QUIC address-validation tokens, which v0.9.15 requires before it serves a
+0-RTT request ahead of the handshake. The database schema and the bundle and backup formats are unchanged.
 
 ### Added
 
