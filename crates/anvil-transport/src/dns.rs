@@ -185,9 +185,7 @@ fn loopback_addresses(host: &str, ips: Vec<IpAddr>) -> Result<Vec<IpAddr>, Trans
         return Err(TransportFailure::new(
             Phase::Dns,
             FailureKind::DnsNoRecords,
-            format!(
-                "system resolver returned records for {host}, but none were loopback; use a DNS override for non-loopback targets"
-            ),
+            format!("system resolver returned records for {host}, but none were loopback; use a DNS override for non-loopback targets"),
         ));
     }
     Ok(loopback)
@@ -284,21 +282,11 @@ mod tests {
         let answer = system_answer(
             "API.LOCALHOST.",
             8080,
-            vec![
-                "192.0.2.10".parse().unwrap(),
-                "127.0.0.1".parse().unwrap(),
-                "::1".parse().unwrap(),
-            ],
+            vec!["192.0.2.10".parse().unwrap(), "127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
         )
         .unwrap();
 
-        assert_eq!(
-            answer.addrs,
-            vec![
-                SocketAddr::new("127.0.0.1".parse().unwrap(), 8080),
-                SocketAddr::new("::1".parse().unwrap(), 8080),
-            ]
-        );
+        assert_eq!(answer.addrs, vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 8080), SocketAddr::new("::1".parse().unwrap(), 8080),]);
     }
 
     #[test]
