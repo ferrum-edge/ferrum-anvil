@@ -29,6 +29,12 @@
   that the pin is v0.9.14.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
 
+### Fixed
+
+- The draft confirmation counts every DNS override that differs, including one whose change is
+  hidden by the shortened address list (#335).
+- Ruleset details reload their source text after Replace (#339).
+
 ## [0.1.3] - 2026-10-06
 
 Storage and desktop hardening release: request revisions, history records and load reports are
