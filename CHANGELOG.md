@@ -48,6 +48,8 @@
 
 ### Fixed
 
+- System DNS keeps `localhost` and `*.localhost` destinations on loopback, matching the load preflight's local classification (#338).
+  Hosts-file entries that point these names at non-loopback addresses now fail; use a DNS override to target a non-loopback address.
 - The draft confirmation counts every DNS override that differs, including one whose change is
   hidden by the shortened address list (#335).
 - Ruleset details reload their source text after Replace (#339).
