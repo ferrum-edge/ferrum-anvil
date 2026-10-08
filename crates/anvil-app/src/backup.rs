@@ -30,7 +30,9 @@
 //! it: a backup's passphrase says nothing about who made it. App settings
 //! apply to every workspace's requests, so Replace also keeps this profile's
 //! app settings while it holds a workspace the backup does not claim, and the
-//! preview says whether they are kept or replaced. User profiles are restored
+//! preview says whether they are kept or replaced. If a backup has no
+//! app-settings section, Replace keeps this profile's API rulesets and says
+//! so in the preview. User profiles are restored
 //! as carried: nothing reads them yet, so they affect no request. History
 //! records are never dated after the restore, and history records and load
 //! reports of a workspace outside the backup are left out with a warning. Like
@@ -135,6 +137,8 @@ const MERGE_NOTE: &str =
     "Merge keeps this profile's settings and every item that already exists here; Replace restores the backup's versions.";
 const KEPT_SETTINGS_NOTE: &str =
     "Replace keeps this profile's app settings: they apply to every workspace here, and some are not in the backup.";
+const KEPT_RULESETS_WITHOUT_SETTINGS_NOTE: &str =
+    "Replace keeps this profile's API rulesets because the backup has no app-settings section.";
 const REPLACED_SETTINGS_NOTE: &str = "Replace restores the backup's app settings (default request settings such as DNS overrides, resolver, proxy and TLS, and the lock, history and redaction policies): they apply to every workspace here, including ones created later.";
 /// How the note that a restore kept this profile's lock policy, rather than
 /// the backup's weaker one, starts.
@@ -549,8 +553,9 @@ impl App {
     /// authenticates under `passphrase` and every item in it is valid. Then a
     /// checkpoint is taken and every item is written in one transaction:
     /// `Replace` overwrites items with matching ids. `Merge` keeps existing
-    /// items, including app settings. Replace without kept settings also
-    /// replaces local rulesets. App settings apply to every workspace's
+    /// items, including app settings. Replace keeps local rulesets when the
+    /// backup has no app-settings section, and otherwise replaces them when
+    /// app settings are replaced. App settings apply to every workspace's
     /// requests, so Replace keeps this profile's settings while it holds a
     /// workspace the backup does not claim.
     ///
@@ -620,7 +625,8 @@ impl App {
             };
             let keep_settings = keeps_local_settings(&d, &local, policy);
             let local_rulesets: Vec<anvil_domain::settings::StoredRuleset> = s.list(kind::API_RULESET, None)?;
-            let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace && keep_settings {
+            let keep_rulesets = keeps_local_rulesets(&d, &local, policy);
+            let replacing: HashSet<Id> = if policy == ConflictPolicy::Replace && keep_rulesets {
                 d.graph.rulesets.iter().map(|r| r.id).collect()
             } else {
                 HashSet::new()
@@ -639,7 +645,7 @@ impl App {
                 &local_rulesets,
                 &d.graph.rulesets,
                 &replacing,
-                policy != ConflictPolicy::Replace || keep_settings,
+                policy != ConflictPolicy::Replace || keep_rulesets,
                 &skipped,
             );
             if let Err(e) = crate::standards::validate_standards(
@@ -654,7 +660,7 @@ impl App {
             if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended(&d, &local, policy)) {
                 notes.push(format!("Restored API standards would not load: {e}"));
             }
-            if policy == ConflictPolicy::Replace && !keep_settings {
+            if policy == ConflictPolicy::Replace && !keep_rulesets {
                 for ruleset in &local_rulesets {
                     s.delete(kind::API_RULESET, &ruleset.id)?;
                 }
@@ -1134,6 +1140,14 @@ fn keeps_local_settings(d: &Decoded, local: &Local, policy: ConflictPolicy) -> b
     d.graph.app_settings.is_some() && (policy == ConflictPolicy::Merge || local.existing.workspaces.keys().any(|w| !ws.contains(w)))
 }
 
+/// Whether a restore keeps this profile's rulesets. A backup without app
+/// settings makes no claim about profile-wide API standards, so Replace must
+/// retain them; when settings are present, rulesets follow the settings
+/// retention policy.
+fn keeps_local_rulesets(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bool {
+    d.graph.app_settings.is_none() || keeps_local_settings(d, local, policy)
+}
+
 fn include_recommended(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bool {
     if keeps_local_settings(d, local, policy) {
         local.include_recommended
@@ -1147,7 +1161,7 @@ fn include_recommended(d: &Decoded, local: &Local, policy: ConflictPolicy) -> bo
 /// this profile's app settings.
 fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<Vec<String>> {
     let mut notes = port::uncarried_warnings(&d.uncarried, &local.stored, "backup", "restored")?;
-    let replacements: HashSet<Id> = if policy == ConflictPolicy::Replace && keeps_local_settings(d, local, policy) {
+    let replacements: HashSet<Id> = if policy == ConflictPolicy::Replace && keeps_local_rulesets(d, local, policy) {
         d.graph.rulesets.iter().map(|r| r.id).collect()
     } else {
         HashSet::new()
@@ -1161,7 +1175,7 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
         &local.rulesets,
         &d.graph.rulesets,
         &replacements,
-        policy != ConflictPolicy::Replace || keeps_local_settings(d, local, policy),
+        policy != ConflictPolicy::Replace || keeps_local_rulesets(d, local, policy),
         &skipped,
     );
     if let Err(e) = crate::standards::validate_standards(
@@ -1178,6 +1192,9 @@ fn restore_notes(d: &Decoded, local: &Local, policy: ConflictPolicy) -> Result<V
     if policy == ConflictPolicy::Replace && d.graph.app_settings.is_some() {
         let kept = keeps_local_settings(d, local, policy);
         notes.push(if kept { KEPT_SETTINGS_NOTE } else { REPLACED_SETTINGS_NOTE }.into());
+    }
+    if policy == ConflictPolicy::Replace && d.graph.app_settings.is_none() {
+        notes.push(KEPT_RULESETS_WITHOUT_SETTINGS_NOTE.into());
     }
     Ok(notes)
 }
@@ -1531,6 +1548,31 @@ mod tests {
         let target = new_test_app(target_dir.path());
         target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
         assert_eq!(target.folder(&root_id).unwrap().parent_id, Some(parent.meta.id));
+    }
+
+    #[test]
+    fn replace_keeps_local_rulesets_when_backup_has_no_app_settings() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = new_test_app(source_dir.path());
+        let mut snapshot = source.snapshot().unwrap();
+        snapshot.contents.objects.retain(|row| row.kind != kind::APP_SETTINGS);
+        assert!(decode(&snapshot.contents).unwrap().graph.app_settings.is_none());
+        let bytes = seal(&build_manifest(&snapshot), &snapshot.contents, "backup passphrase 1", KdfParams::testing()).unwrap();
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = new_test_app(target_dir.path());
+        target.create_workspace("Local workspace").unwrap();
+        target
+            .add_api_ruleset("local.yaml", b"anvil_ruleset: 1\nname: Local\nrules:\n  info-contact: error\n")
+            .unwrap();
+        let before = target.api_standards().unwrap().rulesets;
+
+        let preview = target.restore_preview(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+        assert!(preview.warnings.iter().any(|warning| warning == KEPT_RULESETS_WITHOUT_SETTINGS_NOTE), "{:?}", preview.warnings);
+        target.restore(&bytes, Some("backup passphrase 1"), ConflictPolicy::Replace).unwrap();
+
+        assert_eq!(target.api_standards().unwrap().rulesets, before);
+        assert_eq!(target.workspaces().unwrap().len(), 1, "Replace keeps unrelated local workspaces");
     }
 
     #[test]

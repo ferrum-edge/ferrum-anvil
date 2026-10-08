@@ -17,6 +17,8 @@
 
 ### Changed
 
+- Full backup Replace restores keep local API rulesets when the backup has no app-settings section, and the preview explains that choice.
+- Release creation parses the uploaded release-evidence JSON as data and validates its format before using it in draft notes.
 - Gateway catalog 0.9.14: a buffered-collector read error answers the eager collector's
   502 `{"error":"Backend response body read failed"}`, so that body is ambiguous between the two
   collectors on 0.9.14 and the old `{"error":"Backend response read error"}` body is matched only
