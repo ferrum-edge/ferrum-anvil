@@ -622,11 +622,9 @@ fn mesh007(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let (from, b0) = (env.sidecar.log_lines().len(), env.backend.log.count_requests());
-        let o = send(
-            &env.engine,
-            &env.direct("https", "/denied/x", Some(env.tls("denied SVID → svc", Svid::Other, ids::SVC_SPIFFE_ID, None))),
-        )
-        .await;
+        let o =
+            send(&env.engine, &env.direct("https", "/denied/x", Some(env.tls("denied SVID → svc", Svid::Other, ids::SVC_SPIFFE_ID, None))))
+                .await;
         c.status_in(&o, &[403]);
         c.not_success(&o);
         let body = o.decoded_body.as_ref().unwrap_or(&o.body);
