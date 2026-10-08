@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 
 const MAX_DEPTH: usize = 16;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
+const MAX_EXPANSIONS: usize = 16_384;
 
 /// The stand-in value of a vault variable whose credential is resolved only
 /// on use, after an OAuth token endpoint is validated. Only a resolver with
@@ -40,6 +41,8 @@ pub struct VarEntry {
     pub name: String,
     pub value: String,
     pub secret: bool,
+    /// Run-local values supplied by a response or dataset are data, not templates.
+    pub literal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,7 @@ pub struct Resolver {
     layers: Vec<VarLayer>,
     secrets: Option<Arc<dyn SecretResolver>>,
     variable_values: Mutex<HashMap<(usize, usize), Zeroizing<String>>>,
+    expansions: AtomicU64,
     value_transform: Option<fn(&str) -> String>,
     pub(crate) oauth_endpoint: Mutex<Option<(String, String)>>,
     counter: AtomicU64,
@@ -110,6 +114,7 @@ impl Resolver {
             layers,
             secrets: None,
             variable_values: Mutex::new(HashMap::new()),
+            expansions: AtomicU64::new(0),
             value_transform: None,
             oauth_endpoint: Mutex::new(None),
             counter: AtomicU64::new(0),
@@ -233,15 +238,27 @@ impl Resolver {
                     )
                     .with_field(field));
                 };
+                if self.expansions.fetch_add(1, Ordering::Relaxed) >= MAX_EXPANSIONS as u64 {
+                    return Err(TransportFailure::new(
+                        Phase::Prepare,
+                        FailureKind::VariableCycle,
+                        format!("variable expansion in {field} exceeded {MAX_EXPANSIONS} references"),
+                    )
+                    .with_field(field));
+                }
                 self.used.lock().push((expr.to_string(), scope.to_string()));
                 stack.push(expr.to_string());
                 let raw = self.variable_value(layer_index, variable_index)?;
-                let value = self.resolve_inner(&raw, field, stack, depth + 1).map_err(|mut failure| {
-                    if entry.secret {
-                        failure.message = "could not resolve a secret variable; check the vault and active variables".into();
-                    }
-                    failure
-                })?;
+                let value = if entry.literal {
+                    raw
+                } else {
+                    self.resolve_inner(&raw, field, stack, depth + 1).map_err(|mut failure| {
+                        if entry.secret {
+                            failure.message = "could not resolve a secret variable; check the vault and active variables".into();
+                        }
+                        failure
+                    })?
+                };
                 stack.pop();
                 if entry.secret && !value.is_empty() {
                     self.secret_substitutions.fetch_add(1, Ordering::Relaxed);
@@ -375,7 +392,10 @@ mod tests {
     fn layer(label: &str, vars: &[(&str, &str, bool)]) -> VarLayer {
         VarLayer {
             label: label.into(),
-            vars: vars.iter().map(|(n, v, s)| VarEntry { name: n.to_string(), value: v.to_string(), secret: *s }).collect(),
+            vars: vars
+                .iter()
+                .map(|(n, v, s)| VarEntry { name: n.to_string(), value: v.to_string(), secret: *s, literal: false })
+                .collect(),
         }
     }
 
@@ -423,6 +443,30 @@ mod tests {
         let r = Resolver::new(vec![layer("env", &[("key", "s3cr3t-value", true), ("k2", "{{key}}", false)])], None);
         assert_eq!(r.resolve("x={{k2}}", "q").unwrap(), "x=s3cr3t-value");
         assert!(r.used_secrets.lock().contains(&"s3cr3t-value".to_string()));
+    }
+
+    #[test]
+    fn literal_values_are_not_expanded_and_fanout_is_bounded() {
+        let data = VarEntry { name: "response".into(), value: "{{secret}}".into(), secret: false, literal: true };
+        let secret = VarEntry { name: "secret".into(), value: "must-not-expand".into(), secret: true, literal: false };
+        let r = Resolver::new(vec![VarLayer { label: "run".into(), vars: vec![data.clone(), secret] }], None);
+        assert_eq!(r.resolve("{{response}}", "body").unwrap(), "{{secret}}");
+
+        let fanout = (0..10)
+            .map(|i| VarEntry {
+                name: format!("v{i}"),
+                value: if i == 9 {
+                    String::new()
+                } else {
+                    let next = format!("{{{{v{}}}}}", i + 1);
+                    format!("{next}{next}{next}{next}")
+                },
+                secret: false,
+                literal: false,
+            })
+            .collect();
+        let r = Resolver::new(vec![VarLayer { label: "run".into(), vars: fanout }], None);
+        assert_eq!(r.resolve("{{v0}}", "body").unwrap_err().kind, FailureKind::VariableCycle);
     }
 
     #[test]

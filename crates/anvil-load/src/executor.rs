@@ -646,8 +646,8 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
     let load = VarLayer {
         label: "load".into(),
         vars: vec![
-            VarEntry { name: "anvil.iteration".into(), value: iter.to_string(), secret: false },
-            VarEntry { name: "anvil.vu".into(), value: slot.to_string(), secret: false },
+            VarEntry { name: "anvil.iteration".into(), value: iter.to_string(), secret: false, literal: false },
+            VarEntry { name: "anvil.vu".into(), value: slot.to_string(), secret: false, literal: false },
         ],
     };
     let row = sh.dataset.as_ref().map(|d| d.row_layer(iter));
@@ -690,7 +690,7 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
         }
         for (name, value, secret) in out.extracted {
             extracted.retain(|(s, e)| *s != scope || e.name != name);
-            extracted.push((scope, VarEntry { name, value, secret }));
+            extracted.push((scope, VarEntry { name, value, secret, literal: true }));
         }
     }
     sh.end_iteration(measured, terminal, app, assertion);

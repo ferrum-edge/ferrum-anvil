@@ -365,9 +365,9 @@ mod endpoint_tests {
                 vec![VarLayer {
                     label: "test".into(),
                     vars: vec![
-                        VarEntry { name: "endpoint".into(), value: "http://issuer.example/token".into(), secret: false },
-                        VarEntry { name: "client".into(), value: "unused-client".into(), secret: true },
-                        VarEntry { name: "credential".into(), value: "unused-credential".into(), secret: true },
+                        VarEntry { name: "endpoint".into(), value: "http://issuer.example/token".into(), secret: false, literal: false },
+                        VarEntry { name: "client".into(), value: "unused-client".into(), secret: true, literal: false },
+                        VarEntry { name: "credential".into(), value: "unused-credential".into(), secret: true, literal: false },
                     ],
                 }],
                 None,

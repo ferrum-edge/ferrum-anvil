@@ -761,6 +761,11 @@ impl<'a> ModelBuilder<'a> {
             Some(reqs) => requirement_names(Some(reqs)),
             None => global_security_names.to_vec(),
         };
+        let copied_text_bytes = ["summary", "description"]
+            .iter()
+            .filter_map(|key| op.op.get(*key).and_then(Value::as_str))
+            .map(str::len)
+            .sum::<usize>();
         // Everything below is proportional to these (inherited parameters and
         // the document's security count for every operation).
         self.work += 1
@@ -773,7 +778,12 @@ impl<'a> ModelBuilder<'a> {
                 .sum::<usize>()
             + body.as_ref().map_or(0, |b| b.media.len())
             + op.item.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
-            + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len);
+            + op.op.get("parameters").and_then(Value::as_array).map_or(0, Vec::len)
+            + copied_text_bytes;
+        if self.work > MAX_MODEL_WORK {
+            self.skipped_operations += 1;
+            return;
+        }
         let tags = list_of_strings(op.op.get("tags")).unwrap_or_default();
         let template = template_params(&op.path);
         let path_params: Vec<&str> = params.iter().filter(|p| p.location == "path").map(|p| p.name.as_str()).collect();

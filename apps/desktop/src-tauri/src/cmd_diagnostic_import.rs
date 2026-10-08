@@ -203,7 +203,7 @@ fn scrub(value: &mut Value, hidden: bool, redactor: &Redactor) {
         return;
     }
     match value {
-        Value::String(text) => *text = redactor.url(&redactor.text(text)),
+        Value::String(text) => *text = redactor.url(text),
         Value::Array(values) => {
             for value in values {
                 scrub(value, false, redactor);

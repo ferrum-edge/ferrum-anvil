@@ -524,7 +524,7 @@ fn preflight_resolver(ctx: &anvil_engine::ExecutionContext, id: &Id, p: &LoadPla
     for variable in layers.iter_mut().flat_map(|layer| layer.vars.iter_mut()) {
         variable.value = mask_dynamic_expressions(&variable.value);
     }
-    let stand_in = |name: &str, value: &str| VarEntry { name: name.into(), value: value.into(), secret: false };
+    let stand_in = |name: &str, value: &str| VarEntry { name: name.into(), value: value.into(), secret: false, literal: false };
     let iteration = vec![stand_in("anvil.iteration", ITERATION_VALUE), stand_in("anvil.vu", ITERATION_VALUE)];
     layers.push(VarLayer { label: "load".into(), vars: iteration });
     // Only a step outside a sealed import root sees the dataset row.

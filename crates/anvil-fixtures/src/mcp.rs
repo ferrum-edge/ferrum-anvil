@@ -92,6 +92,8 @@ pub enum Hostile {
     EndlessStream,
     /// Requests after the handshake are answered `307` to this URL.
     RedirectOperation(&'static str),
+    /// The initialize request is answered `307` to this URL.
+    RedirectInitialize(&'static str),
 }
 
 /// One request the fixture received.
@@ -401,6 +403,13 @@ fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     if method == "initialize" {
+        if let Hostile::RedirectInitialize(to) = opts.hostile {
+            let mut resp = reply(307, None, "");
+            if let Ok(v) = HeaderValue::from_str(to) {
+                resp.headers_mut().insert("location", v);
+            }
+            return resp;
+        }
         let Some(id) = id else { return json_error(400, &Value::Null, "initialize needs an id") };
         let requested = r.params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
         let supported = SUPPORTED_VERSIONS.iter().find(|v| **v == requested).copied().unwrap_or(SUPPORTED_VERSIONS[0]);

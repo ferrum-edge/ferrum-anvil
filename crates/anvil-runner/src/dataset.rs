@@ -107,7 +107,9 @@ impl RunDataset {
             .columns
             .iter()
             .zip(&self.rows[i])
-            .filter_map(|(c, v)| v.as_ref().map(|v| VarEntry { name: c.clone(), value: v.clone(), secret: self.is_sensitive(c) }))
+            .filter_map(|(c, v)| {
+                v.as_ref().map(|v| VarEntry { name: c.clone(), value: v.clone(), secret: self.is_sensitive(c), literal: true })
+            })
             .collect();
         VarLayer { label: format!("dataset '{}' row {}", self.name, i + 1), vars }
     }

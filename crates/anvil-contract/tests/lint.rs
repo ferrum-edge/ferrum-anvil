@@ -327,6 +327,18 @@ components:
 }
 
 #[test]
+fn shared_path_item_descriptions_count_against_the_model_budget() {
+    let description = "x".repeat(300_000);
+    let paths: serde_json::Map<String, serde_json::Value> = (0..8)
+        .map(|i| (format!("/p{i}"), json!({"$ref": "#/components/pathItems/Shared"})))
+        .collect();
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
+        "components": {"pathItems": {"Shared": {"get": {"description": description, "responses": {"200": {"description": "ok"}}}}}}});
+    let r = run(&doc.to_string(), &RuleSet::recommended());
+    assert!(r.skipped_operations > 0, "large shared text is charged before the operation view is built");
+}
+
+#[test]
 fn examples_behind_an_exploding_schema_are_counted_not_checked() {
     let mut schemas = serde_json::Map::new();
     for i in 0..25 {

@@ -215,7 +215,7 @@ async fn v1_header_is_written_first_and_the_receiver_sees_the_declared_client() 
     let mut c = ctx(tcp_spec(&format!("tcp://{}", f.addr), "hello", Some(h)), false);
     c.var_layers.push(anvil_engine::vars::VarLayer {
         label: "run".into(),
-        vars: vec![anvil_engine::vars::VarEntry { name: "dst".into(), value: "198.51.100.1:443".into(), secret: false }],
+        vars: vec![anvil_engine::vars::VarEntry { name: "dst".into(), value: "198.51.100.1:443".into(), secret: false, literal: false }],
     });
     let o = run(&c).await;
     assert_eq!(received(&o, "frame"), vec!["hello"], "{:?}", codes(&o));

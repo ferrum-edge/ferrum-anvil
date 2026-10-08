@@ -672,7 +672,7 @@ mod tests {
         let resolver = vars::Resolver::new(
             vec![vars::VarLayer {
                 label: "test".into(),
-                vars: vec![vars::VarEntry { name: "secret".into(), value: "secret-cookie-name".into(), secret: true }],
+                vars: vec![vars::VarEntry { name: "secret".into(), value: "secret-cookie-name".into(), secret: true, literal: false }],
             }],
             None,
         );

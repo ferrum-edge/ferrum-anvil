@@ -301,7 +301,7 @@ fn plan_request_ids(plan: &LoadPlan) -> Vec<Id> {
 
 fn worker_endpoint_resolver(ctx: &ExecutionContext, id: &Id, plan: &LoadPlan, job: &LoadJob) -> Resolver {
     let mut layers = ctx.var_layers.clone();
-    let stand_in = |name: &str| VarEntry { name: name.into(), value: OAUTH_PER_RUN_VALUE.into(), secret: false };
+    let stand_in = |name: &str| VarEntry { name: name.into(), value: OAUTH_PER_RUN_VALUE.into(), secret: false, literal: false };
     layers.push(VarLayer { label: "load".into(), vars: vec![stand_in("anvil.iteration"), stand_in("anvil.vu")] });
     if ctx.scope.is_none()
         && let Some(dataset) = &job.dataset
@@ -457,7 +457,7 @@ impl WorkerJob {
                     vars: l
                         .vars
                         .into_iter()
-                        .map(|v| VarEntry { name: v.name, value: v.value.expose().to_string(), secret: v.secret })
+                        .map(|v| VarEntry { name: v.name, value: v.value.expose().to_string(), secret: v.secret, literal: false })
                         .collect(),
                 })
                 .collect();
@@ -536,7 +536,7 @@ mod tests {
         ];
         ctx.var_layers = vec![VarLayer {
             label: "env".into(),
-            vars: vec![VarEntry { name: "tok".into(), value: "var-secret-value".into(), secret: true }],
+            vars: vec![VarEntry { name: "tok".into(), value: "var-secret-value".into(), secret: true, literal: false }],
         }];
         let mut vault = HashMap::new();
         vault.insert(used.id, Zeroizing::new("sk-live-TOPSECRET".to_string()));

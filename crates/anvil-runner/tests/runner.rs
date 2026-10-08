@@ -11,6 +11,7 @@ use anvil_domain::runner::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_domain::workspace::DatasetFormat;
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
+use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_fixtures::GroundTruth;
 use anvil_fixtures::http as fx;
 use anvil_runner::provider::MemoryProvider;
@@ -99,7 +100,7 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let mut p = Recording::default();
     let mut login = RequestSpec::http("POST", &f.url("/status/200"));
-    login.params.push(KeyValue::new("body", r#"{"token":"tok-chain-0001","user":"alice"}"#));
+    login.params.push(KeyValue::new("body", r#"{"token":"{{secret}}","user":"alice"}"#));
     login.extractions.push(Extraction {
         variable: "auth_token".into(),
         source: ExtractionSource::JsonPath { path: "$.token".into() },
@@ -111,6 +112,10 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     me.headers.push(KeyValue::new("X-Token", "{{auth_token}}"));
     me.headers.push(KeyValue::new("X-Step", "{{anvil.iteration}}/{{anvil.step}}"));
     let me_id = p.add("Me", me);
+    p.inner.steps.get_mut(&me_id).unwrap().1.var_layers.push(VarLayer {
+        label: "workspace".into(),
+        vars: vec![VarEntry { name: "secret".into(), value: "vault-secret-1".into(), secret: true, literal: false }],
+    });
 
     let engine = Engine::new();
     let r = anvil_runner::run(&engine, &p, plan(&[(login_id, "Login"), (me_id, "Me")]), RunOptions::default(), CancellationToken::new())
@@ -126,7 +131,7 @@ async fn chaining_extracts_a_token_and_the_next_step_sends_it() {
     assert!(steps[0].execution_id.is_some() && steps[0].execution_id != steps[1].execution_id);
     // Ground truth: the fixture received the extracted token on step 2.
     let seen = f.log.last_request_headers().unwrap();
-    assert_eq!(header(&seen, "x-token"), Some("tok-chain-0001"));
+    assert_eq!(header(&seen, "x-token"), Some("{{secret}}"));
     assert_eq!(header(&seen, "x-step"), Some("0/1"), "anvil.iteration / anvil.step builtins");
     assert_eq!(p.records.lock().len(), 2, "each executed step is handed over for history");
 }

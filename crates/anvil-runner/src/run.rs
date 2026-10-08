@@ -243,8 +243,8 @@ impl Run {
             ctx.var_layers.push(VarLayer {
                 label: "run".into(),
                 vars: vec![
-                    VarEntry { name: "anvil.iteration".into(), value: it.to_string(), secret: false },
-                    VarEntry { name: "anvil.step".into(), value: pos.to_string(), secret: false },
+                    VarEntry { name: "anvil.iteration".into(), value: it.to_string(), secret: false, literal: false },
+                    VarEntry { name: "anvil.step".into(), value: pos.to_string(), secret: false, literal: false },
                 ],
             });
             // A step under a sealed import root sees only values extracted
@@ -281,7 +281,7 @@ impl Run {
                     self.secrets.add_name(&var);
                 }
                 extracted.retain(|(s, e)| *s != scope || e.name != var);
-                extracted.push((scope, VarEntry { name: var, value, secret: sensitive }));
+                extracted.push((scope, VarEntry { name: var, value, secret: sensitive, literal: true }));
             }
             self.secrets.add_values(new_secrets);
             self.secrets.scrub_record(&mut out.record);

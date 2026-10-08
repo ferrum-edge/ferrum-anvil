@@ -278,7 +278,7 @@ async fn auth_002_query_key_and_data_020_secrets_redacted_everywhere() {
     let mut ctx = ctx_for(&f.url("/echo?note={{planted}}"));
     ctx.var_layers = vec![VarLayer {
         label: "environment:lab".into(),
-        vars: vec![VarEntry { name: "planted".into(), value: "PLANTED-SECRET-9f8e7d".into(), secret: true }],
+        vars: vec![VarEntry { name: "planted".into(), value: "PLANTED-SECRET-9f8e7d".into(), secret: true, literal: false }],
     }];
     ctx.spec.headers.push(KeyValue::new("X-Trace", "t-{{planted}}"));
     ctx.spec.body = Body::Json { text: r#"{"password":"hunter2-literal","v":"{{planted}}"}"#.into() };
@@ -634,8 +634,8 @@ async fn encoded_secret_query_values_leave_no_reversible_trace_in_the_record() {
     ctx.var_layers = vec![VarLayer {
         label: "environment:lab".into(),
         vars: vec![
-            VarEntry { name: "credential".into(), value: secret.into(), secret: true },
-            VarEntry { name: "spaced".into(), value: spaced.into(), secret: true },
+            VarEntry { name: "credential".into(), value: secret.into(), secret: true, literal: false },
+            VarEntry { name: "spaced".into(), value: spaced.into(), secret: true, literal: false },
         ],
     }];
     ctx.spec.params.push(KeyValue::new("q", "{{credential}}"));
@@ -691,7 +691,7 @@ fn redirect_ctx(f: &fx::Fixture, secret: &str) -> ExecutionContext {
     let mut ctx = ctx_for(&f.url(&format!("/redirect?status=302&to={}", url_encode(location))));
     ctx.var_layers = vec![VarLayer {
         label: "environment:lab".into(),
-        vars: vec![VarEntry { name: "credential".into(), value: secret.into(), secret: true }],
+        vars: vec![VarEntry { name: "credential".into(), value: secret.into(), secret: true, literal: false }],
     }];
     ctx.spec.headers.push(KeyValue::new("X-Credential", "{{credential}}"));
     ctx

@@ -64,6 +64,15 @@ fn every_valid_encoding_of_a_secret_query_value_is_replaced_whole() {
 }
 
 #[test]
+fn text_redaction_never_reprocesses_replacement_markers() {
+    let r = Redactor::new(vec!["‹red".into(), "redacted›".into(), "acted›".into()], vec![]);
+    let input = "‹redacted›".repeat(128);
+    let once = r.text(&input);
+    assert!(once.len() <= input.len() * 3);
+    assert!(r.url(&input).len() <= input.len() * 3);
+}
+
+#[test]
 fn a_secret_inside_a_longer_encoded_value_is_not_recoverable() {
     let r = redactor();
     for q in ["prefix-AUDIT%2Fsecret%2Bwith%3Dreserved-suffix", "prefix-AUDIT%2fsecret%2Bwith%3dreserved-suffix"] {
@@ -302,7 +311,7 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let secret = "reflected-cookie-secret-4k7w";
     let mut c = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/set-cookie?name={{reflected}}&value=ordinary")));
-    let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true }];
+    let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true, literal: false }];
     c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
     let engine = Engine::new();
     let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;

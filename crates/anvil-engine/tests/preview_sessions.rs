@@ -423,7 +423,7 @@ fn grpc_login(url: &str, wire: GrpcWire, version: HttpVersionPolicy) -> Executio
     });
     let mut c = ExecutionContext::standalone(s);
     c.settings_layers.push(("run".into(), SettingsOverrides { http_version: Some(version), ..Default::default() }));
-    let planted = VarEntry { name: "planted".into(), value: PLANTED.into(), secret: true };
+    let planted = VarEntry { name: "planted".into(), value: PLANTED.into(), secret: true, literal: false };
     c.var_layers = vec![VarLayer { label: "environment:lab".into(), vars: vec![planted] }];
     c.attachments = Arc::new(MemoryAttachments(HashMap::from([(sha, Bytes::from_static(ACCOUNTS_PROTO.as_bytes()))])));
     c

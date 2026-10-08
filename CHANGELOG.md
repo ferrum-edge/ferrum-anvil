@@ -29,6 +29,15 @@
   that the pin is v0.9.14.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice, previously "Ferrum Foundry"), `LICENSE-COMMERCIAL.md` and the desktop bundle copyright.
 
+### Security
+
+- Treat response extractions and dataset cells as literal values, cap total variable references at 16,384 per resolver, bound text redaction to one pass over the input, refuse MCP initialize redirects and withhold MCP session headers on cross-origin redirects, and charge copied operation descriptions to the lint model budget.
+
+### Breaking
+
+- Response extractions and dataset cells containing `{{...}}` are sent literally instead of being expanded. If a workflow needs template expansion, store the intended template in an ordinary workspace or request variable.
+- MCP initialize redirects are refused. Point the request at the final MCP endpoint.
+
 ## [0.1.3] - 2026-10-06
 
 Storage and desktop hardening release: request revisions, history records and load reports are
