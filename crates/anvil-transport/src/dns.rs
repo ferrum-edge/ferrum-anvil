@@ -142,14 +142,7 @@ async fn resolve_system(host: &str, port: u16) -> Result<Resolution, TransportFa
     })
     .await;
     match joined {
-        Ok(Ok(ips)) => {
-            let ips = if is_localhost_name(host) { loopback_addresses(host, ips)? } else { ips };
-            if ips.is_empty() {
-                Err(TransportFailure::new(Phase::Dns, FailureKind::DnsNoRecords, format!("{host} has no address records")))
-            } else {
-                Ok(Resolution { addrs: ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect(), source: "system" })
-            }
-        }
+        Ok(Ok(ips)) => system_answer(host, port, ips),
         Ok(Err(e)) => {
             use dns_lookup::LookupErrorKind as L;
             let kind = match e.kind() {
@@ -170,13 +163,20 @@ async fn resolve_system(host: &str, port: u16) -> Result<Resolution, TransportFa
     }
 }
 
-fn is_localhost_name(host: &str) -> bool {
+fn system_answer(host: &str, port: u16, ips: Vec<IpAddr>) -> Result<Resolution, TransportFailure> {
+    let ips = if is_localhost_name(host) { loopback_addresses(host, ips)? } else { ips };
+    if ips.is_empty() {
+        Err(TransportFailure::new(Phase::Dns, FailureKind::DnsNoRecords, format!("{host} has no address records")))
+    } else {
+        Ok(Resolution { addrs: ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect(), source: "system" })
+    }
+}
+
+pub fn is_localhost_name(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let host = host.strip_suffix('.').unwrap_or(host);
     host.eq_ignore_ascii_case("localhost")
-        || host
-            .rsplit_once('.')
-            .is_some_and(|(suffix, label)| !suffix.is_empty() && label.eq_ignore_ascii_case("localhost"))
+        || host.rsplit_once('.').is_some_and(|(rest, tld)| !rest.is_empty() && tld.eq_ignore_ascii_case("localhost"))
 }
 
 fn loopback_addresses(host: &str, ips: Vec<IpAddr>) -> Result<Vec<IpAddr>, TransportFailure> {
@@ -185,40 +185,18 @@ fn loopback_addresses(host: &str, ips: Vec<IpAddr>) -> Result<Vec<IpAddr>, Trans
         return Err(TransportFailure::new(
             Phase::Dns,
             FailureKind::DnsNoRecords,
-            format!("system resolver returned no loopback addresses for localhost name {host}"),
+            format!(
+                "system resolver returned records for {host}, but none were loopback; use a DNS override for non-loopback targets"
+            ),
         ));
     }
     Ok(loopback)
 }
 
-fn is_loopback(ip: IpAddr) -> bool {
+pub fn is_loopback(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ip.is_loopback(),
         IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_localhost_name, loopback_addresses};
-    use std::net::IpAddr;
-
-    #[test]
-    fn system_localhost_answers_keep_only_loopback_addresses() {
-        let ips = vec!["192.0.2.10".parse().unwrap(), "127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
-
-        assert!(is_localhost_name("api.localhost"));
-        assert_eq!(
-            loopback_addresses("api.localhost", ips).unwrap(),
-            vec!["127.0.0.1".parse::<IpAddr>().unwrap(), "::1".parse().unwrap()]
-        );
-    }
-
-    #[test]
-    fn system_localhost_answers_without_loopback_are_rejected() {
-        let error = loopback_addresses("api.localhost", vec!["192.0.2.10".parse().unwrap()]).unwrap_err();
-
-        assert!(error.message.contains("no loopback addresses for localhost name api.localhost"));
     }
 }
 
@@ -282,5 +260,66 @@ async fn resolve_custom(host: &str, port: u16, nameservers: &[String], timeout: 
             };
             Err(TransportFailure::new(Phase::Dns, kind, format!("DNS query for {host} failed: {e}")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_localhost_name, is_loopback, system_answer};
+    use std::net::{IpAddr, SocketAddr};
+
+    #[test]
+    fn localhost_name_matching_handles_case_and_root_dot_without_partial_matches() {
+        for host in ["localhost", "LOCALHOST", "api.localhost", "API.LOCALHOST", "api.localhost."] {
+            assert!(is_localhost_name(host), "expected {host} to be a localhost name");
+        }
+
+        for host in ["notlocalhost", "localhost.example.com", ".localhost", "localhost.."] {
+            assert!(!is_localhost_name(host), "expected {host} not to be a localhost name");
+        }
+    }
+
+    #[test]
+    fn localhost_system_answers_keep_only_loopback_addresses() {
+        let answer = system_answer(
+            "API.LOCALHOST.",
+            8080,
+            vec![
+                "192.0.2.10".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+                "::1".parse().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            answer.addrs,
+            vec![
+                SocketAddr::new("127.0.0.1".parse().unwrap(), 8080),
+                SocketAddr::new("::1".parse().unwrap(), 8080),
+            ]
+        );
+    }
+
+    #[test]
+    fn localhost_system_answers_without_loopback_are_rejected() {
+        let error = system_answer("api.localhost", 8080, vec!["192.0.2.10".parse().unwrap()]).unwrap_err();
+
+        assert!(error.message.contains("records for api.localhost, but none were loopback"));
+        assert!(error.message.contains("use a DNS override"));
+    }
+
+    #[test]
+    fn non_localhost_system_answers_keep_public_addresses() {
+        let answer = system_answer("example.com", 443, vec!["192.0.2.10".parse().unwrap()]).unwrap();
+
+        assert_eq!(answer.addrs, vec![SocketAddr::new("192.0.2.10".parse().unwrap(), 443)]);
+    }
+
+    #[test]
+    fn loopback_classification_includes_ipv4_mapped_ipv6_only_for_loopback() {
+        assert!(is_loopback("::ffff:127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(!is_loopback("0.0.0.0".parse().unwrap()));
+        assert!(!is_loopback("::".parse().unwrap()));
     }
 }

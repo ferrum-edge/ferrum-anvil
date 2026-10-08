@@ -761,22 +761,17 @@ fn fixed_host_is_loopback(ctx: &anvil_engine::ExecutionContext, host: &str, port
         ip_preference: settings.ip_preference,
     };
     match anvil_transport::dns::fixed_resolution(host, port, &dns) {
-        Some(Ok(resolution)) => !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| ip_is_loopback(addr.ip())),
+        Some(Ok(resolution)) => {
+            !resolution.addrs.is_empty() && resolution.addrs.iter().all(|addr| anvil_transport::dns::is_loopback(addr.ip()))
+        }
         Some(Err(_)) => false,
         // System transport resolution enforces this same localhost loopback rule in dns.rs.
-        None => system_resolver && is_localhost_name(host),
+        None => system_resolver && anvil_transport::dns::is_localhost_name(host),
     }
 }
 
-fn is_localhost_name(host: &str) -> bool {
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    let host = host.strip_suffix('.').unwrap_or(host);
-    host.eq_ignore_ascii_case("localhost")
-        || host.rsplit_once('.').is_some_and(|(suffix, label)| !suffix.is_empty() && label.eq_ignore_ascii_case("localhost"))
-}
-
 fn literal_is_loopback(host: &str) -> bool {
-    anvil_transport::dns::parse_literal(host).is_some_and(ip_is_loopback)
+    anvil_transport::dns::parse_literal(host).is_some_and(anvil_transport::dns::is_loopback)
 }
 
 fn target_is_loopback(ctx: &anvil_engine::ExecutionContext, target: &anvil_engine::prepare::Target, proxy_resolved: bool) -> bool {
@@ -785,13 +780,6 @@ fn target_is_loopback(ctx: &anvil_engine::ExecutionContext, target: &anvil_engin
         literal_is_loopback(&target.host)
     } else {
         fixed_host_is_loopback(ctx, &target.host, target.port)
-    }
-}
-
-fn ip_is_loopback(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ip) => ip.is_loopback(),
-        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
     }
 }
 
@@ -836,9 +824,8 @@ fn forward_authority_is_loopback(
 fn host_is_loopback(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
     match h.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
-        Ok(std::net::IpAddr::V6(a)) => a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
-        Err(_) => is_localhost_name(h),
+        Ok(ip) => anvil_transport::dns::is_loopback(ip),
+        Err(_) => anvil_transport::dns::is_localhost_name(h),
     }
 }
 
