@@ -400,7 +400,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(count, 27, "all canonical diagnostic fixtures through IPC DTO and command");
+        assert_eq!(count, 29, "all canonical diagnostic fixtures through IPC DTO and command");
     }
 
     #[test]

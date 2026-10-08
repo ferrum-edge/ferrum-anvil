@@ -1,12 +1,13 @@
 # Failure lab: `mesh` profile (Ferrum Mesh client)
 
-The v0.9.14 default is a source-audited candidate pending hosted Anvil gates.
+The v0.9.15 default is a source-audited candidate pending hosted Anvil gates.
 Results and observations below remain historical; see
-[the 0.9.14 source delta](../audit/gateway-0.9.14-delta.md) and, for the retained v0.9.11,
-[its hosted qualification](../audit/gateway-0.9.11-delta.md).
+[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
+v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
+[0.9.11](../audit/gateway-0.9.11-delta.md)).
 
-Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (v0.9.14 candidate
-default, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`) in **mesh mode**. There is no Kubernetes, no control plane and
+Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (v0.9.15 candidate
+default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`) in **mesh mode**. There is no Kubernetes, no control plane and
 no traffic capture: every gateway runs the localized file source (`FERRUM_MESH_CONFIG_PROTOCOL=file`,
 Ferrum Edge `docs/mesh.md` "Localized file source (no control plane)") with file-based SVIDs
 (`FERRUM_GATEWAY_SVID_*`, "File-Based SVIDs: Two-Process Local Mesh"), and Anvil
@@ -58,7 +59,11 @@ ever bound (a unit test in `crates/anvil-lab/src/mesh.rs` checks the configurati
 
 The mesh documents declare the local workload (`spiffe://cluster.local/ns/ferrum/sa/anvil-lab-svc`,
 or `…/sa/anvil-lab-ztunnel` for Ambient) at `127.0.0.1:17801`, service `svc`, the PeerAuthentication,
-and (sidecar) one MeshPolicy that **denies** the lab client identity on `/denied/*`. The sidecars
+and (sidecar) one MeshPolicy that **denies** a second lab identity (`…/sa/anvil-lab-other`) on
+`/denied/*`. The rule names its own identity rather than the client SVID the HBONE scenarios present:
+from v0.9.15 a relayed CONNECT is authorized as a Layer-4 session, where a DENY ignores `paths` and
+still matches on its identity, so naming the client would refuse every sidecar tunnel
+([0.9.15 delta](../audit/gateway-0.9.15-delta.md)). The sidecars
 materialize an inbound loopback route for `svc` (Host `svc.ferrum.svc.cluster.local`) and relay an
 authenticated bare HTTP/2 CONNECT to the workload's declared address:port. The sidecar workload also
 declares the `udp` ports 17802-17807, so a CONNECT with `x-ferrum-mesh-protocol: udp` to one of them is
@@ -86,7 +91,7 @@ The relay-synthesis refusal reason is only logged at debug level, so the lab sta
 | MESH-004 | plaintext `http://` to the STRICT inbound | not a success, no response accepted, no `http.*` finding | echo got nothing; operator `Frontend TLS handshake failed … InvalidContentType` |
 | MESH-005 | no client SVID (STRICT) | `client.tls.client_cert_required` or the lost-alert `client.tls.closed_after_certificate_request` | echo got nothing; operator `peer sent no certificates` |
 | MESH-006 | client SVID from `partner.example` (untrusted root) | `client.tls.client_cert_rejected` (likely; `handshake_failure` after Anvil's TLS 1.3 Finished) or the lost-alert `client.tls.closed_after_certificate_request` | echo got nothing; operator `Frontend TLS handshake failed` |
-| MESH-007 | `/denied/x` (MeshPolicy DENY for the client identity) | HTTP 403 `{"error":"Mesh authorization denied"}`, not a success, no TLS or backend claim | echo got nothing; operator 403 transaction |
+| MESH-007 | `/denied/x` presenting the `…/sa/anvil-lab-other` SVID (MeshPolicy DENY for that identity) | HTTP 403 `{"error":"Mesh authorization denied"}`, not a success, no TLS or backend claim | echo got nothing; operator 403 transaction; control: the same SVID gets 200 on `/echo` and echo receives it (the DENY is path-scoped) |
 | MESH-008 | **HBONE proxy** at the sidecar inbound, `CONNECT 127.0.0.1:17801`, then GET `/echo` in the tunnel | success; tunnel evidence: `CONNECT` 200, endpoint verified by SPIFFE ID, client SVID presented, outer phases separate from the inner ones | echo got `/echo`; operator `CONNECT` transaction on `__mesh-inbound-hbone-relay` (200, `tcp://127.0.0.1:17801`) |
 | MESH-009 | HBONE to the sidecar, `CONNECT 127.0.0.1:17899` (no workload declares that port) | `hbone_connect_refused`, `hbone.tunnel_refused` (`forward_proxy`) quoting the refusal body (404 `Not Found` on 0.9.5 / 0.9.7, 403 `HBONE relay destination not allowed` from 0.9.8), dispatch `not_dispatched`, destination not blamed | debug: relay synthesis refused, `denial = port_not_declared` (from 0.9.8: transaction line with `mesh.relay.denial_reason`) |
 | MESH-010 | HBONE to the Ambient listener with the client SVID, `CONNECT 127.0.0.1:17801` | mTLS succeeded (endpoint verified), then `hbone.tunnel_refused` (404; 403 from 0.9.8) | debug: `denial = address_not_terminated_here` (Ambient never relays to loopback) |

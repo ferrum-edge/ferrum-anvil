@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+### Added
+
+- Adopt published `contracts-edge-0.9.15` (`6fb64c5dc2e014204c17609fc717d976f3b4589e`)
+  byte-exact. Three vendored files change: the gateway error vocabulary (v0.9.15 provenance and
+  a note that the new `route_protocol_admission` phase maps to no token), the header vocabulary
+  (the new `X-Authenticated-Identity` gateway assertion and the narrower `X-Consumer-Username`;
+  the three diagnostic headers Anvil reads are unchanged) and the negative-expectations manifest.
+  The two new diagnostic-ref fixtures for `route_protocol_admission` are vendored and exercised.
+- Add the separately source-audited Edge v0.9.15 catalog and release-asset locks at
+  `25b37395ff61bfea0f3ffd189d9011c4984fa755` (release 407222520), selected as the lab and
+  new-profile candidate default pending hosted Anvil gates. v0.9.14 and the earlier catalogs and
+  locks stay supported, and the nightly lab now also runs v0.9.14. See
+  `docs/audit/gateway-0.9.15-delta.md`.
+- Gateway catalog 0.9.15 adds four outcomes for new v0.9.15 refusals: the route protocol
+  admission 403 `{"error":"Request protocol not permitted on this route"}` (native gRPC
+  `PERMISSION_DENIED`), the HTTP/1.1 WebSocket non-GET 405 `{"error":"WebSocket upgrades require
+  GET"}`, and `request_deduplication`'s Brotli fingerprint 400 and decode-capacity 503.
+
+### Changed
+
+- Gateway catalog 0.9.15 records, on the existing outcomes and without changing their public
+  signals: HTTP/2 and HTTP/3 WebSockets evaluated as GET by method policy, the HTTP/3 CONNECT-UDP
+  per-client tunnel cap, per-IP IPv6 prefix grouping, `mcp_gateway` per-principal session caps
+  (a full store now refuses instead of evicting another caller), Layer-4 authorization of mesh
+  CONNECT relays, external identities no longer mapped to Consumers, `Connection`-nominated fields
+  removed at ingress, per-principal replay capacity, strict MTOM framing, QUIC address validation
+  and the 0.5-RTT path reserved for validated sources.
+- Gateway catalog 0.9.15 drops the OIDC relying party's "state cache full" 503: v0.9.15 falls back
+  to the sealed state cookie instead of refusing the login, so the outcome is recorded under
+  `removed_outcomes`.
+- HTTP/3 0-RTT: Anvil keeps the QUIC address-validation (`NEW_TOKEN`) tokens a server issues with
+  its session tickets, in the same isolated, in-memory context, and presents one on the resumed
+  connection. Ferrum Edge v0.9.15 serves a 0-RTT request before its handshake completes only for
+  a validated client address.
+- Lab: the mesh sidecar's MeshPolicy denies a dedicated identity on `/denied/*`, and MESH-007
+  presents it. Ferrum Edge v0.9.15 authorizes a relayed CONNECT as a Layer-4 session, where a
+  DENY on the lab client identity would ignore `paths` and refuse every HBONE tunnel. UP-018
+  expects the direct-H1 signal from v0.9.11 through the v0.9.15 pin.
+
 ## [0.1.4] - 2026-10-08
 
 Hardening release: Anvil adopts Ferrum Edge v0.9.14 and `contracts-edge-0.9.14`, bounds variable

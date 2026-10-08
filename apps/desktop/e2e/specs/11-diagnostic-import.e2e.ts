@@ -110,7 +110,7 @@ describe("read-only diagnostic import through native IPC", () => {
         }
       }
     }
-    expect(count).toBe(27);
+    expect(count).toBe(29);
   });
 
   it("keeps actual Alloy timestamps exact in the IPC DTO and the real preview UI", async () => {

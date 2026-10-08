@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "proxyproto" (ferrum-edge v0.9.14 candidate, file mode)
+# Ferrum Anvil failure lab - profile "proxyproto" (ferrum-edge v0.9.15 candidate, file mode)
 #
 # Scenarios: crates/anvil-lab/src/proxyproto.rs, docs/lab/proxyproto.md.
 # Gateway:   HTTP 127.0.0.1:18980, HTTPS 18981, admin 18990, streams 127.0.0.1:18901-18904.

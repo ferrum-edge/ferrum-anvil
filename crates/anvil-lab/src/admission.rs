@@ -329,8 +329,8 @@ const DIRECT_H1_FIRST_RELEASE: &str = "v0.9.11";
 /// mesh_external destination; the only connection is held by a slow
 /// request, so the next request needs a second socket and is refused.
 /// Releases from v0.9.11 through the pinned release use direct H1 for this
-/// bodyless GET (the v0.9.14 source audit found the lane unchanged); earlier
-/// releases use reqwest.
+/// bodyless GET (the v0.9.14 and v0.9.15 source audits found the lane
+/// unchanged); earlier releases use reqwest.
 fn up018(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();

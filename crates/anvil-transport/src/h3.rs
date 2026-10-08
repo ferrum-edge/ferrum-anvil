@@ -1289,6 +1289,9 @@ impl H3Transport {
         };
         let mut client_cfg = quinn::ClientConfig::new(Arc::new(quic_cfg));
         client_cfg.transport_config(client_transport());
+        // Present an address-validation token from an earlier connection of
+        // this context, so the server can treat this source as validated.
+        client_cfg.token_store(ctx.quic_tokens.clone());
         let ep = match self.endpoint(addr.is_ipv6()) {
             Ok(e) => e,
             Err(f) => return Err((f, None, track)),

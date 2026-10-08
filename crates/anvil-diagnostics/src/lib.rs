@@ -24,8 +24,8 @@ use anvil_domain::request::Protocol;
 pub use facts::{BodyFacts, DiagnosticInput, FerrumTrust};
 
 /// Catalog versions this build embeds: the findings wording catalog and every
-/// Ferrum compatibility catalog (e.g.
-/// `findings:V ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,ferrum-edge-0.9.8,ferrum-edge-0.9.9,ferrum-edge-0.9.10,ferrum-edge-0.9.11,ferrum-edge-0.9.14`).
+/// Ferrum compatibility catalog, oldest release first (e.g.
+/// `findings:V ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,…,ferrum-edge-0.9.15`).
 pub fn catalog_version() -> String {
     format!("findings:{} ferrum:{}", render::catalog().version, ferrum::compatibility_ids().collect::<Vec<_>>().join(","))
 }

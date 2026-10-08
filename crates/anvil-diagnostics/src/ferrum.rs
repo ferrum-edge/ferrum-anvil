@@ -18,11 +18,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// The source-audited candidate new profiles default to. Live v0.9.14
-/// compatibility awaits hosted Anvil gates (`docs/audit/gateway-0.9.14-delta.md`).
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.14";
+/// The source-audited candidate new profiles default to. Live v0.9.15
+/// compatibility awaits hosted Anvil gates (`docs/audit/gateway-0.9.15-delta.md`).
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.15";
 
-const EDGE_0_9_14: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json");
+const EDGE_0_9_15: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json");
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
@@ -32,7 +32,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.9", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.9/outcomes.json")),
     ("ferrum-edge-0.9.10", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.10/outcomes.json")),
     ("ferrum-edge-0.9.11", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json")),
-    ("ferrum-edge-0.9.14", EDGE_0_9_14),
+    ("ferrum-edge-0.9.14", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json")),
+    ("ferrum-edge-0.9.15", EDGE_0_9_15),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -511,6 +512,7 @@ mod tests {
                 "ferrum-edge-0.9.10",
                 "ferrum-edge-0.9.11",
                 "ferrum-edge-0.9.14",
+                "ferrum-edge-0.9.15",
             ]
         );
         for id in ids {
@@ -529,12 +531,12 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.14");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.15");
     }
 
     /// `request_timeout` joined the closed vocabulary in 0.9.8 (0.9.9,
-    /// 0.9.10, 0.9.11 and 0.9.14 keep it); the older catalogs do not know it,
-    /// so it is not part of the shared vocabulary.
+    /// 0.9.10, 0.9.11, 0.9.14 and 0.9.15 keep it); the older catalogs do not
+    /// know it, so it is not part of the shared vocabulary.
     #[test]
     fn request_timeout_is_a_token_of_the_0_9_8_and_later_catalogs_only() {
         for id in compatibility_ids().skip(2) {
@@ -565,8 +567,9 @@ mod tests {
 
     /// The `ai_prompt_shield` MCP refusals new in 0.9.10 (a non-UTF-8 request
     /// charset, an unparseable body that may carry a tool call) match from
-    /// their public body from 0.9.10 onward, including 0.9.11 and 0.9.14. The
-    /// content-encoding message existed at 0.9.9 and matches all four.
+    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14 and
+    /// 0.9.15. The content-encoding message existed at 0.9.9 and matches all
+    /// five.
     #[test]
     fn outcomes_new_in_0_9_10_match_only_their_own_catalog() {
         for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
@@ -574,7 +577,7 @@ mod tests {
             let bf = body_facts(Some("application/json"), text.as_bytes());
             let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None };
             let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14"] {
+            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15"] {
                 let catalog = catalog_for(id).unwrap();
                 let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
                 assert_eq!(ids(catalog), expected, "{id}: {reason}");
@@ -586,7 +589,7 @@ mod tests {
         let bf = body_facts(Some("application/json"), text.as_bytes());
         let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14"] {
+        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15"] {
             let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
             assert_eq!(ids(catalog_for(id).unwrap()), expected);
         }
@@ -596,7 +599,8 @@ mod tests {
 
     /// 0.9.14 answers a buffered-collector read error with the eager
     /// collector's body, so that body is ambiguous between the two collectors
-    /// on 0.9.14 and the old body matches only the earlier catalogs.
+    /// from 0.9.14 (0.9.15 keeps it) and the old body matches only the earlier
+    /// catalogs.
     #[test]
     fn buffered_read_error_body_changed_in_0_9_14() {
         let ids = |id: &str, text: &str| {
@@ -609,10 +613,49 @@ mod tests {
         let current = r#"{"error":"Backend response body read failed"}"#;
         let old = r#"{"error":"Backend response read error"}"#;
         let both = ["upstream.body_read_failed.buffered_collector", "upstream.body_read_failed.eager_buffer"];
-        assert_eq!(ids("ferrum-edge-0.9.14", current), both);
+        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15"] {
+            assert_eq!(ids(id, current), both, "{id}");
+            assert!(ids(id, old).is_empty(), "{id}");
+        }
         assert_eq!(ids("ferrum-edge-0.9.11", current), ["upstream.body_read_failed.eager_buffer"]);
-        assert!(ids("ferrum-edge-0.9.14", old).is_empty());
         assert_eq!(ids("ferrum-edge-0.9.11", old), ["upstream.body_read_failed.buffered_collector"]);
+    }
+
+    /// The refusals new in 0.9.15 (route protocol admission, the HTTP/1.1
+    /// WebSocket non-GET upgrade, request_deduplication's charged Brotli
+    /// decode) match from their public body in the 0.9.15 catalog only.
+    #[test]
+    fn outcomes_new_in_0_9_15_match_only_their_own_catalog() {
+        let cases = [
+            (403, r#"{"error":"Request protocol not permitted on this route"}"#, "gateway.routing.protocol_not_permitted"),
+            (405, r#"{"error":"WebSocket upgrades require GET"}"#, "gateway.routing.websocket_upgrade_requires_get"),
+            (
+                400,
+                r#"{"error":"Request body encoding is invalid or exceeds fingerprint limits"}"#,
+                "plugin.request_deduplication.body_encoding_rejected",
+            ),
+            (503, r#"{"error":"Request decode capacity is temporarily unavailable"}"#, "plugin.request_deduplication.decode_capacity"),
+        ];
+        for (status, text, expected) in cases {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status, token: None, body_text: text, body: &bf, grpc_status: None };
+            let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
+            assert_eq!(ids("ferrum-edge-0.9.15"), [expected], "{text}");
+            assert!(ids("ferrum-edge-0.9.14").is_empty(), "{text}");
+        }
+    }
+
+    /// v0.9.15 continues a browser login on the sealed pending-flow cookie when
+    /// the instance-local pending-login cache is full, so the 503 that 0.9.14
+    /// answered matches no 0.9.15 outcome (it is in `removed_outcomes`).
+    #[test]
+    fn oidc_state_cache_full_is_not_catalogued_from_0_9_15() {
+        let text = r#"{"error":"OIDC state cache full"}"#;
+        let bf = body_facts(Some("application/json"), text.as_bytes());
+        let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
+        let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids("ferrum-edge-0.9.14"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
+        assert!(ids("ferrum-edge-0.9.15").is_empty());
     }
 
     #[test]

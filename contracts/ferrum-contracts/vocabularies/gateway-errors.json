@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
   "vocabulary": "gateway-errors",
   "version": 1,
-  "edge_release": "v0.9.14",
+  "edge_release": "v0.9.15",
   "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the eight coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "src/retry.rs",
       "symbols": [
         "ErrorClass",
@@ -29,8 +29,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.14",
-      "commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
+      "ref": "v0.9.15",
+      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
       "path": "docs/error_classification.md",
       "sections": [
         "Canonical taxonomy (ErrorClass)",
@@ -39,7 +39,7 @@
         "Granular class to header token",
         "Response body-read failures"
       ],
-      "note": "v0.9.14 adds no ErrorClass value or token. The protocol_error, read_write_timeout and response_body_too_large meanings note the v0.9.14 reclassification of backend HTTP/2 resets and buffered read errors (ferrum-edge#6028, #6042; issues #6019, #6022)."
+      "note": "v0.9.15 leaves src/retry.rs and this document unchanged. Its new gateway rejection phase route_protocol_admission (src/diagnostic_ref.rs, ferrum-edge#6090) maps to no X-Gateway-Error token in token_for_rejection_phase, so that refusal carries none. v0.9.14 adds no ErrorClass value or token. The protocol_error, read_write_timeout and response_body_too_large meanings note the v0.9.14 reclassification of backend HTTP/2 resets and buffered read errors (ferrum-edge#6028, #6042; issues #6019, #6022)."
     }
   ],
   "header": "X-Gateway-Error",

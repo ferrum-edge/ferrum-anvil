@@ -28,6 +28,11 @@
     "instance_path": "/ref",
     "keyword": "pattern"
   },
+  "diagnostic-ref/invalid/route-protocol-admission-as-detail-phase.json": {
+    "instance_path": "/detail/rejection_phase",
+    "keyword": "enum",
+    "top_keyword": "oneOf"
+  },
   "diagnostic-ref/invalid/uppercase-replica-id.json": {
     "instance_path": "/replica_id",
     "keyword": "pattern"
@@ -119,6 +124,10 @@
   "vocabulary-gateway-errors/invalid/wrong-version.json": {
     "instance_path": "/version",
     "keyword": "const"
+  },
+  "vocabulary-gateway-headers/invalid/availability-without-v.json": {
+    "instance_path": "/headers/1/availability",
+    "keyword": "pattern"
   },
   "vocabulary-gateway-headers/invalid/prefix-without-trailing-dash.json": {
     "instance_path": "/headers/0/name",

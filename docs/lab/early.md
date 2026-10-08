@@ -1,12 +1,13 @@
 # Failure lab: `early` profile
 
-The v0.9.14 default is a source-audited candidate pending hosted Anvil gates.
+The v0.9.15 default is a source-audited candidate pending hosted Anvil gates.
 Results and observations below remain historical; see
-[the 0.9.14 source delta](../audit/gateway-0.9.14-delta.md) and, for the retained v0.9.11,
-[its hosted qualification](../audit/gateway-0.9.11-delta.md).
+[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
+v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
+[0.9.11](../audit/gateway-0.9.11-delta.md)).
 
 This profile drives Anvil's TLS 1.3 / QUIC **0-RTT early data** ([protocols.md §3.12](../protocols.md))
-against the **real, pinned Ferrum Edge release binary** (v0.9.14 candidate default, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
+against the **real, pinned Ferrum Edge release binary** (v0.9.15 candidate default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
 `--release`). There are no gateway mocks.
 
 The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3 early data)"),
@@ -104,6 +105,11 @@ completed is handled as 1-RTT (v0.9.8 `src/http3/server.rs` 2130–2165 and `src
 36557709775 saw this on Ubuntu before the relay existed: one 200 for EARLY-002's 0-RTT PUT, which
 reached the backend once without `Early-Data`. On loopback the client's Finished can reach the
 gateway before the gateway accepts the 0-RTT stream, so without help the window under test is a race.
+From v0.9.15 the gateway takes this pending-handshake path only for a client address it validated
+before the handshake (a Retry or `NEW_TOKEN` token; `src/http3/server.rs:2299` at v0.9.15). Anvil
+keeps the address-validation tokens the gateway sends with its QUIC session tickets
+(`crates/anvil-transport/src/tickets.rs`), so the resumed 0-RTT connection presents one; without it
+every round would be handled as 1-RTT ([0.9.15 delta](../audit/gateway-0.9.15-delta.md)).
 
 **Pending-window relay.** A QUIC server completes its handshake when the client's Finished arrives
 (RFC 9001 §4.1.2). EARLY-001 and EARLY-002 therefore send through a UDP relay

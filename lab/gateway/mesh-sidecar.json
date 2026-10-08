@@ -82,7 +82,7 @@
     ],
     "mesh_policies": [
       {
-        "name": "anvil-lab-deny-client-denied-path",
+        "name": "anvil-lab-deny-other-denied-path",
         "namespace": "ferrum",
         "scope": {
           "kind": "namespace",
@@ -92,7 +92,7 @@
           {
             "from": [
               {
-                "spiffe_id_pattern": "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-client"
+                "spiffe_id_pattern": "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-other"
               }
             ],
             "to": [
