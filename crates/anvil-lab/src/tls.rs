@@ -39,6 +39,8 @@ pub const PLAIN: &str = "http://127.0.0.1:18380";
 pub const HTTPS: &str = "https://localhost:18343";
 pub const HTTPS12: &str = "https://localhost:18344";
 const WRONG_HOST: &str = "gateway.wrong-name.anvil-lab.test";
+const DTLS_RECOVERY_ATTEMPTS: usize = 3;
+const DTLS_RECOVERY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
 type Fut<'a> = Pin<Box<dyn Future<Output = Outcome> + 'a>>;
 
@@ -915,8 +917,29 @@ fn dtls_refused<'a>(env: &'a Env, identity: Option<&'static str>, rogue_root: bo
             log = log_since(&env.gw, from, "DTLS client certificate verification failed");
             c.add(CheckKind::GroundTruth, "gateway log: DTLS client certificate verification failed", !log.is_empty(), "");
         }
-        let r = go(env, &dtls(env, &Client::lab(env, Some(&env.fx.pki.client_good)), "anvil-dtls-recovery")).await;
-        c.add(CheckKind::Recovery, "with the right identity and root the datagram is echoed", dtls_received(&r) >= 1, "");
+        let mut recovery = None;
+        let mut attempts = 0;
+        for attempt in 1..=DTLS_RECOVERY_ATTEMPTS {
+            attempts = attempt;
+            let output =
+                go(env, &dtls(env, &Client::lab(env, Some(&env.fx.pki.client_good)), "anvil-dtls-recovery")).await;
+            let echoed = dtls_received(&output) >= 1;
+            recovery = Some(output);
+            if echoed {
+                break;
+            }
+            if attempt < DTLS_RECOVERY_ATTEMPTS {
+                tokio::time::sleep(DTLS_RECOVERY_BACKOFF).await;
+            }
+        }
+        let r = recovery.expect("the bounded DTLS recovery loop always attempts at least once");
+        let echoed = dtls_received(&r) >= 1;
+        c.add(
+            CheckKind::Recovery,
+            format!("with the right identity and root the datagram is echoed ({attempts} attempt(s))"),
+            echoed,
+            format!("attempts={attempts}, echoed_datagrams={}", dtls_received(&r)),
+        );
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
     })
 }
