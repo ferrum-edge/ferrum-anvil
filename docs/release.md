@@ -50,7 +50,7 @@ described below, before any release build.
 | --- | --- | --- |
 | `aarch64-apple-darwin` | macOS 15 | `.app` → `.dmg` |
 | `x86_64-apple-darwin` | macOS 15 (cross-compiled) | `.app` → `.dmg` |
-| `x86_64-unknown-linux-gnu` | Ubuntu 22.04 (older glibc baseline) | `.deb`, `.rpm`, `.AppImage` |
+| `x86_64-unknown-linux-gnu` | Ubuntu 26.04 (modern Linux baseline) | `.deb`, `.rpm`, `.AppImage` |
 | `x86_64-pc-windows-msvc` | Windows 2025 | `.msi`, NSIS `-setup.exe` |
 
 Each build job:
@@ -207,11 +207,11 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
 Exit status: `0` pass, `1` test hooks found, `2` usage error or an artifact
 that could not be inspected (never reported as a pass).
 
-The Ubuntu 22.04 release build keeps its older glibc baseline. Its distribution
-[`squashfs-tools` package](https://packages.ubuntu.com/jammy/squashfs-tools)
-is `1:4.5-3build1`, whose upstream 4.5 banner is below the checker's 4.5.1
-security floor. The CI fixture jobs on both Ubuntu versions, release preflight,
-and the Linux release build therefore compile only `unsquashfs` from the
+The Ubuntu 26.04 release build targets modern Linux systems. Installers may
+require its newer glibc and system libraries; Ubuntu 22.04 and 24.04 compatibility
+is no longer a release target. The CI fixture job, release preflight, and the
+Linux release build continue to compile a consistent, checksum-pinned
+`unsquashfs` from the
 [upstream 4.7.5 release archive](https://github.com/plougher/squashfs-tools/releases/tag/4.7.5).
 The single composite action `.github/actions/trusted-appimage-extractor/action.yml`
 (used by `ci.yml` and both `release.yml` jobs) requires a GitHub-hosted runner,
@@ -234,9 +234,9 @@ its exact version banner is checked, and its directory is prepended to `PATH`
 for later steps. Fixture `mksquashfs` and bundling tools remain distribution-provided.
 Change the pin only in that action (and the digest shown above). The
 checker still rejects tools below 4.5.1 and unknown banners; provisioning does
-not add an exception for the Ubuntu 4.5 package.
+not add an exception for older distribution packages.
 
-The CI release-checker jobs (Ubuntu 22.04 and 24.04) and release preflight run
+The CI release-checker jobs (Ubuntu 26.04) and release preflight run
 `scripts/tests/test_release_check.py` against the actual checker. Hosted fixtures
 include a native malicious runtime whose sentinel must never appear, real
 compressed SquashFS payloads, both ELF boundary layouts across architectures,

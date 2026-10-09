@@ -29,11 +29,13 @@ env:
 
 jobs:
   rust:
-    name: Rust · ${{ matrix.os }}
+    # Preserve the required status context configured in the main ruleset.
+    # This display name is historical; runs-on below pins Ubuntu 26.04.
+    name: Rust · ${{ matrix.os == 'ubuntu-26.04' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-26.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -84,7 +86,7 @@ jobs:
 
   frontend:
     name: Frontend
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     defaults:
       run:
@@ -112,7 +114,7 @@ jobs:
 
   contracts:
     name: Contract & catalog drift
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,7 +142,7 @@ jobs:
 
   supply-chain:
     name: Supply chain & licensing
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -171,7 +173,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        os: [ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -189,7 +191,7 @@ jobs:
 
   secrets:
     name: Secret scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       GITLEAKS_VERSION: 8.30.1
