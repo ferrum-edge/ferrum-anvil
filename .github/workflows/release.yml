@@ -555,8 +555,9 @@ jobs:
             echo "::error::release notes contain draft-only text"; exit 1
           fi
           grep -qF "Built from \`$RELEASE_COMMIT\`" "$notes" || { echo "::error::release notes are not for $RELEASE_COMMIT"; exit 1; }
-          # The notes' first lines state the signing status; it must be the
-          # verified evidence's.
+          # The notes' first lines state the installers' signing status; it must
+          # agree with release-evidence.json from the same publish job (a
+          # consistency check: SHA256SUMS does not cover that file).
           first="$(head -n 1 "$notes")"
           case "$(jq -r '.signed | if type == "boolean" then tostring else "invalid" end' upload/release-evidence.json)" in
             true) [[ "$first" == '**Signing:** the installers are code-signed '* ]] ;;
