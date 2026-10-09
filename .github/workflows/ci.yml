@@ -29,7 +29,9 @@ env:
 
 jobs:
   rust:
-    name: Rust · ${{ matrix.os }}
+    # Preserve the required status context configured in the main ruleset.
+    # This display name is historical; runs-on below pins Ubuntu 26.04.
+    name: Rust · ${{ matrix.os == 'ubuntu-26.04' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
