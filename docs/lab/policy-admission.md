@@ -256,7 +256,7 @@ suggests disabling the WAF, TLS or a policy.
   - the 3 s pre-drain.
   They passed on an idle Apple-silicon Mac. A heavily loaded host may need longer gaps.
 - **Platform.** The runs recorded here are macOS arm64. CI (`.github/workflows/lab.yml`) also runs the
-  lab on Ubuntu 24.04 and macOS 15; the Windows gateway asset is pinned but not exercised.
+  lab on Ubuntu 26.04 and macOS 15; the Windows gateway asset is pinned but not exercised.
 
 ## 6. Stability record
 

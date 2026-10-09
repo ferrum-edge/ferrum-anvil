@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Pin Linux CI and installer builds to Ubuntu 26.04. Linux installers now target
+  modern system libraries; Ubuntu 22.04/24.04 compatibility is no longer a release
+  target.
+
 - Bounded specification analysis copies less and stops later on large ordinary descriptions (#351):
   - Lint rules on `raw.` fields read the selected value in place instead of copying it once
     for each path that reaches it.

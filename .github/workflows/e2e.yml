@@ -42,7 +42,7 @@ jobs:
             exe: target/debug/anvil-desktop
           - os: windows-2025
             exe: target/debug/anvil-desktop.exe
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             exe: target/debug/anvil-desktop
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75

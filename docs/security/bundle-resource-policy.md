@@ -184,7 +184,7 @@ Full ANVILBAK backups are not bundles and are outside this policy.
 ## Hosted qualification
 
 `.github/workflows/bundle-resources.yml` runs on pull requests that touch the
-bundle code, on Ubuntu 24.04 and macOS 15. It compares three sources:
+bundle code, on Ubuntu 26.04 and macOS 15. It compares three sources:
 
 - this policy;
 - the landed preflight `76ed2bc3569bae64e691ecbf1a16e17bf7743107`, which
