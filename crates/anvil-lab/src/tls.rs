@@ -921,8 +921,7 @@ fn dtls_refused<'a>(env: &'a Env, identity: Option<&'static str>, rogue_root: bo
         let mut attempts = 0;
         for attempt in 1..=DTLS_RECOVERY_ATTEMPTS {
             attempts = attempt;
-            let output =
-                go(env, &dtls(env, &Client::lab(env, Some(&env.fx.pki.client_good)), "anvil-dtls-recovery")).await;
+            let output = go(env, &dtls(env, &Client::lab(env, Some(&env.fx.pki.client_good)), "anvil-dtls-recovery")).await;
             let echoed = dtls_received(&output) >= 1;
             recovery = Some(output);
             if echoed {

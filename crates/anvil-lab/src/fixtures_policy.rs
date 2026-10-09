@@ -200,12 +200,7 @@ fn logged_field_matches(lines: &[String], proxy_id: &str, pointer: &str, allowed
         .iter()
         .filter(|line| line.contains(&format!("\"proxy_id\":\"{proxy_id}\"")))
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|value| {
-            value
-                .pointer(pointer)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
+        .filter_map(|value| value.pointer(pointer).and_then(serde_json::Value::as_str).map(str::to_owned))
         .any(|value| allowed.contains(&value.as_str()))
 }
 
@@ -216,13 +211,7 @@ pub(crate) async fn wait_for_op_field(
     pointer: &str,
     allowed: &[&str],
 ) -> (Vec<String>, bool) {
-    poll_op_log_status(
-        read_lines,
-        |lines| logged_field_matches(lines, proxy_id, pointer, allowed),
-        OP_LOG_WAIT,
-        OP_LOG_INTERVAL,
-    )
-    .await
+    poll_op_log_status(read_lines, |lines| logged_field_matches(lines, proxy_id, pointer, allowed), OP_LOG_WAIT, OP_LOG_INTERVAL).await
 }
 
 pub async fn op_log(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
@@ -235,13 +224,7 @@ pub async fn op_log_class(gw: &Gateway, from: usize, proxy_id: &str, allowed: &[
     wait_for_op_class(|| op_lines(gw, from, proxy_id), proxy_id, allowed).await
 }
 
-pub async fn op_log_field(
-    gw: &Gateway,
-    from: usize,
-    proxy_id: &str,
-    pointer: &str,
-    allowed: &[&str],
-) -> (Vec<String>, bool) {
+pub async fn op_log_field(gw: &Gateway, from: usize, proxy_id: &str, pointer: &str, allowed: &[&str]) -> (Vec<String>, bool) {
     wait_for_op_field(|| op_lines(gw, from, proxy_id), proxy_id, pointer, allowed).await
 }
 
