@@ -47,7 +47,7 @@ packages together by hand, then update both lockfiles in the same change.
 | **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast` → `cargo test --locked -p anvil-desktop --lib` (not on Windows) → `cargo test -p anvil-storage --test os_keychain -- --ignored` (the real OS credential store; on Linux inside a D-Bus session with an unlocked gnome-keyring) |
 | **Frontend** | `npm ci` → `npm run typecheck` → `npm run e2e:typecheck` → `npm test` (vitest, jsdom) → `npm run build` → `npm audit --omit=dev --audit-level=high` |
 | **Contract & catalog drift** | `cargo run -p anvil-cli -- schema --out contracts/schemas` and `npm run contracts`, then fail if `contracts/` or `apps/desktop/src/generated/` changed; `cargo test -p anvil-diagnostics --test catalog_drift` |
-| **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `scripts/release-check.sh` (dependency-graph check only) |
+| **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `node --test scripts/tests/release-notes.test.mjs` (release notes generator, including the current version's CHANGELOG section); `scripts/release-check.sh` (dependency-graph check only) |
 | **Secret scan** | gitleaks 8.30.1 (downloaded and SHA-256 verified) over the full history of the checked-out commit and over the working tree, with `.gitleaks.toml`. For a PR the commit is its merge commit, so the PR's commits and all of `main` are scanned; other branches are not |
 
 The catalog drift test (`crates/anvil-diagnostics/tests/catalog_drift.rs`)
@@ -105,6 +105,7 @@ cargo test --locked -p anvil-diagnostics --test catalog_drift
 cargo install --locked cargo-deny@0.20.2
 cargo deny --locked check
 node scripts/licenses.mjs --check        # regenerate with: node scripts/licenses.mjs
+node --test scripts/tests/release-notes.test.mjs
 scripts/release-check.sh                 # graph check only
 gitleaks git --config .gitleaks.toml --log-opts="--full-history --diff-filter=tuxdb HEAD" --redact .   # gitleaks 8.30.1
 
