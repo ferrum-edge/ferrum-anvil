@@ -375,6 +375,9 @@ enum FixKey {
     Enum { at: String },
 }
 
+/// One operation object's finding keys, by kind and what the call adds to its pointer.
+type OpKeys = HashMap<(DriftKind, String), Rc<str>>;
+
 struct State<'a> {
     spec: &'a Spec,
     router: Router<'a>,
@@ -391,7 +394,7 @@ struct State<'a> {
     findings: BTreeMap<Rc<str>, FindingAcc>,
     /// The keys of each operation object's findings, by kind and what the
     /// call adds to the operation's pointer (see [`State::op_finding`]).
-    op_keys: HashMap<(usize, usize), HashMap<(DriftKind, String), Rc<str>>>,
+    op_keys: HashMap<(usize, usize), OpKeys>,
     ops: Vec<OpAcc>,
     endpoints: BTreeMap<(String, String), EndpointAcc>,
     fixes: BTreeMap<FixKey, (String, Shape, BTreeSet<String>)>,
