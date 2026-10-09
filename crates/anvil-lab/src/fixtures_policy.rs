@@ -154,6 +154,25 @@ async fn poll_op_log(
     }
 }
 
+async fn poll_op_log_status(
+    mut read_lines: impl FnMut() -> Vec<String>,
+    mut ready: impl FnMut(&[String]) -> bool,
+    max: std::time::Duration,
+    interval: std::time::Duration,
+) -> (Vec<String>, bool) {
+    let deadline = tokio::time::Instant::now() + max;
+    loop {
+        let lines = read_lines();
+        if ready(&lines) {
+            return (lines, true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return (lines, false);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 /// Wait (bounded) for at least one operator-log line for `proxy_id`.
 pub(crate) async fn wait_for_op_log(read_lines: impl FnMut() -> Vec<String>) -> Vec<String> {
     poll_op_log(read_lines, |lines| !lines.is_empty(), OP_LOG_WAIT, OP_LOG_INTERVAL).await
@@ -176,6 +195,25 @@ pub(crate) async fn wait_for_op_class(read_lines: impl FnMut() -> Vec<String>, p
     poll_op_log(read_lines, |lines| logged_class_matches(lines, proxy_id, allowed), OP_LOG_WAIT, OP_LOG_INTERVAL).await
 }
 
+fn logged_field_matches(lines: &[String], proxy_id: &str, pointer: &str, allowed: &[&str]) -> bool {
+    lines
+        .iter()
+        .filter(|line| line.contains(&format!("\"proxy_id\":\"{proxy_id}\"")))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| value.pointer(pointer).and_then(serde_json::Value::as_str).map(str::to_owned))
+        .any(|value| allowed.contains(&value.as_str()))
+}
+
+/// Wait (bounded) for a transaction line with the expected field value.
+pub(crate) async fn wait_for_op_field(
+    read_lines: impl FnMut() -> Vec<String>,
+    proxy_id: &str,
+    pointer: &str,
+    allowed: &[&str],
+) -> (Vec<String>, bool) {
+    poll_op_log_status(read_lines, |lines| logged_field_matches(lines, proxy_id, pointer, allowed), OP_LOG_WAIT, OP_LOG_INTERVAL).await
+}
+
 pub async fn op_log(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
     wait_for_op_log(|| op_lines(gw, from, proxy_id)).await
 }
@@ -186,9 +224,13 @@ pub async fn op_log_class(gw: &Gateway, from: usize, proxy_id: &str, allowed: &[
     wait_for_op_class(|| op_lines(gw, from, proxy_id), proxy_id, allowed).await
 }
 
+pub async fn op_log_field(gw: &Gateway, from: usize, proxy_id: &str, pointer: &str, allowed: &[&str]) -> (Vec<String>, bool) {
+    wait_for_op_field(|| op_lines(gw, from, proxy_id), proxy_id, pointer, allowed).await
+}
+
 #[cfg(test)]
 mod op_log_tests {
-    use super::{poll_op_log, wait_for_op_class, wait_for_op_log};
+    use super::{poll_op_log, wait_for_op_class, wait_for_op_field, wait_for_op_log};
     use std::time::Duration;
 
     #[tokio::test]
@@ -223,6 +265,29 @@ mod op_log_tests {
 
         assert_eq!(reads, 2, "returned as soon as the class appeared");
         assert!(lines.iter().any(|l| l.contains("read_write_timeout")));
+    }
+
+    #[tokio::test]
+    async fn waits_for_the_expected_transaction_field() {
+        let mut reads = 0;
+        let (lines, matched) = wait_for_op_field(
+            || {
+                reads += 1;
+                if reads == 1 {
+                    vec![r#"{"proxy_id":"p","metadata":{}}"#.to_owned()]
+                } else {
+                    vec![r#"{"proxy_id":"p","metadata":{"rejection_phase":"before_proxy"}}"#.to_owned()]
+                }
+            },
+            "p",
+            "/metadata/rejection_phase",
+            &["before_proxy"],
+        )
+        .await;
+
+        assert!(matched);
+        assert_eq!(reads, 2);
+        assert!(lines[0].contains("before_proxy"));
     }
 
     #[tokio::test]

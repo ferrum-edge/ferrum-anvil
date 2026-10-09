@@ -13,7 +13,7 @@
 
 use crate::fixtures_policy::{
     PolicyFixtures, Target, body_text, catalog_outcome, caveat, codes, enc, header, indistinguishable, no_claim, no_scope, op_log,
-    operator_field, operator_lines, request, send, skips, with_header,
+    op_log_field, operator_field, operator_lines, request, send, skips, with_header,
 };
 use crate::gateway::Gateway;
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
@@ -647,7 +647,14 @@ fn gw020_budget(env: &Env) -> Fut<'_> {
         c.success(CheckKind::GroundTruth, &b);
         let used: u64 = env.fixtures.ai.calls().iter().skip(calls).map(|x| x.total_tokens).sum();
         c.add(CheckKind::GroundTruth, "provider reported 60 tokens across two calls (limit 50)", used == 60, used.to_string());
-        let ops = env.op(from, "gw020-ai-budget").await;
+        let (ops, rejection_logged) =
+            op_log_field(&env.gateway, from, "gw020-ai-budget", "/metadata/rejection_phase", &["before_proxy"]).await;
+        c.add(
+            CheckKind::GroundTruth,
+            "gateway operator log records the budget rejection",
+            rejection_logged,
+            if rejection_logged { String::new() } else { "timed out after 3s waiting for rejection_phase=before_proxy".into() },
+        );
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["before_proxy"]);
         plugin_reject(&mut c, &o, 429, "http.too_many_requests");
         c.add(CheckKind::GroundTruth, "x-ai-ratelimit-remaining: 0 exposed", header(&o, "x-ai-ratelimit-remaining") == ["0"], "");
