@@ -29,36 +29,65 @@ const MAX_CHAIN_DEPTH: usize = 512;
 /// and the schemas it references: a large `enum` passes, a pathological
 /// one does not stall every compile.
 pub const MAX_SCAN_STEPS: usize = 10 * MAX_EXPANDED_NODES;
+/// Bytes of member names and strings in a schema and the schemas it
+/// references: a compile copies them (converting and bundling the schema,
+/// and the validator keeps some), however few members hold them. About 16
+/// bytes per member of [`MAX_SCAN_STEPS`], so an ordinary schema meets both
+/// limits at about the same size, and only text this long (a description
+/// of several megabytes, say) meets this one first.
+pub const MAX_SCAN_BYTES: usize = 16 * 1024 * 1024;
 /// Schema nodes a check may visit for one value with every `$ref` expanded
 /// (repeated references count each time): beyond this a schema is not used.
 pub const MAX_EXPANDED_NODES: usize = 100_000;
 /// Distinct `$ref` targets copied into one validator.
 const MAX_REF_TARGETS: usize = 4_096;
 
+/// What schema compiles have scanned, or may scan: members and items, and
+/// bytes of member names and strings. Members bound the work of scanning
+/// and measuring a schema, bytes what compiling it copies; neither bounds
+/// the other (a large `enum` of numbers, a long `description`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Scanned {
+    /// Members and items, scalars included.
+    pub steps: usize,
+    /// Bytes of member names and strings.
+    pub bytes: usize,
+}
+
+impl Scanned {
+    /// No limit.
+    pub const UNLIMITED: Scanned = Scanned { steps: usize::MAX, bytes: usize::MAX };
+
+    /// Whether either count is over its limit in `budget`.
+    pub fn exceeds(self, budget: Scanned) -> bool {
+        self.steps > budget.steps || self.bytes > budget.bytes
+    }
+}
+
 /// Build a validator for `schema` (located at `pointer`), as it applies in
 /// `direction`.
 pub fn compile(spec: &Spec, schema: &Value, direction: Direction) -> Result<jsonschema::Validator, String> {
-    compile_within(spec, schema, direction, &mut 0, usize::MAX)
+    compile_within(spec, schema, direction, &mut Scanned::default(), Scanned::UNLIMITED)
 }
 
-/// [`compile`], adding the members and items scanned to `steps` and
-/// refusing once they exceed `budget` (shared by many compiles, e.g. every
-/// example of a lint): each compile scans, bundles and builds its schema.
+/// [`compile`], adding what it scans to `scanned` and refusing once that
+/// exceeds `budget` (shared by many compiles, e.g. every example of a lint):
+/// each compile scans, bundles and builds its schema.
 pub fn compile_within(
     spec: &Spec,
     schema: &Value,
     direction: Direction,
-    steps: &mut usize,
-    budget: usize,
+    scanned: &mut Scanned,
+    budget: Scanned,
 ) -> Result<jsonschema::Validator, String> {
-    if *steps > budget {
+    if scanned.exceeds(budget) {
         return Err("the checks' scanning budget is spent".into());
     }
     // Validation walks the schema with references expanded: a schema that
     // fans out through repeated `$ref`s (each level twice, forty levels
     // deep) compiles cheaply and then validates for ever.
-    measure_counted(spec, schema, steps)?;
-    if *steps > budget {
+    measure_counted(spec, schema, scanned)?;
+    if scanned.exceeds(budget) {
         return Err("the checks' scanning budget is spent".into());
     }
     let wrapper = bundle(spec, schema, direction)?;
@@ -140,18 +169,21 @@ struct Part {
     nodes: usize,
     /// Members and items looked at, scalars included.
     steps: usize,
+    /// Bytes of the member names and strings among them.
+    bytes: usize,
     /// Deepest nesting of objects and lists.
     depth: usize,
     refs: Vec<(String, bool)>,
 }
 
-/// Scan until more than `node_limit` objects and lists, or more than
-/// `step_limit` members and items (scalars included), have been seen.
-fn scan(v: &Value, node_limit: usize, step_limit: usize) -> Part {
-    let mut part = Part { nodes: 0, steps: 0, depth: 0, refs: vec![] };
+/// Scan until more than `node_limit` objects and lists, more than
+/// `step_limit` members and items (scalars included), or more than
+/// `byte_limit` bytes of member names and strings have been seen.
+fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> Part {
+    let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, refs: vec![] };
     let mut stack: Vec<(&Value, bool, usize)> = vec![(v, false, 1)];
     'scan: while let Some((v, down, d)) = stack.pop() {
-        if part.nodes > node_limit || part.steps > step_limit {
+        if part.nodes > node_limit || part.steps > step_limit || part.bytes > byte_limit {
             break;
         }
         part.depth = part.depth.max(d);
@@ -163,7 +195,8 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize) -> Part {
                 }
                 for (k, child) in o {
                     part.steps += 1;
-                    if part.steps > step_limit {
+                    part.bytes += k.len() + text_bytes(child);
+                    if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
                     if k != "$ref" && (child.is_object() || child.is_array()) {
@@ -175,7 +208,8 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize) -> Part {
                 part.nodes += 1;
                 for child in a {
                     part.steps += 1;
-                    if part.steps > step_limit {
+                    part.bytes += text_bytes(child);
+                    if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
                     if child.is_object() || child.is_array() {
@@ -189,6 +223,12 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize) -> Part {
     part
 }
 
+/// The bytes of `v` if it is a string (its members are counted where they
+/// are scanned).
+fn text_bytes(v: &Value) -> usize {
+    v.as_str().map_or(0, str::len)
+}
+
 const ROOT: &str = "#root";
 
 /// Check a schema before it is compiled: refuse a reference cycle that
@@ -196,24 +236,32 @@ const ROOT: &str = "#root";
 /// schema that expands to more than [`MAX_EXPANDED_NODES`] nodes with every
 /// `$ref` expanded (repeated references count each time). Both passes are
 /// iterative, so neither nesting nor reference chains use the call stack.
-/// [`measure`], adding the members and items it looked at to `steps`.
-fn measure_counted(spec: &Spec, schema: &Value, steps: &mut usize) -> Result<usize, String> {
+/// [`measure`], adding the members and items it looked at, and the bytes of
+/// their names and strings, to `total`.
+fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
     let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
+    let too_long = || format!("the schema and the schemas it references have more than {} MiB of names and strings", MAX_SCAN_BYTES >> 20);
     // Every reached schema counts at least once in the expanded size, so
     // scanning stops as soon as the schemas scanned so far exceed the limit
     // (targets nested in one another are scanned once each, not more), or
-    // their members and items (scalars too: a huge `enum`) exceed theirs.
-    let root = scan(schema, MAX_EXPANDED_NODES, MAX_SCAN_STEPS);
+    // their members and items (scalars too: a huge `enum`) or the bytes of
+    // their names and strings (a huge `description`) exceed theirs.
+    let root = scan(schema, MAX_EXPANDED_NODES, MAX_SCAN_STEPS, MAX_SCAN_BYTES);
     let mut scanned = root.nodes;
-    *steps += root.steps;
+    total.steps += root.steps;
+    total.bytes += root.bytes;
     if scanned > MAX_EXPANDED_NODES {
         return Err(too_big());
     }
     if root.steps > MAX_SCAN_STEPS {
         return Err(too_wide());
     }
+    if root.bytes > MAX_SCAN_BYTES {
+        return Err(too_long());
+    }
     let mut stepped = root.steps;
+    let mut bytes = root.bytes;
     let mut parts: HashMap<String, Part> = HashMap::from([(ROOT.to_string(), root)]);
     let mut part_of = |parts: &mut HashMap<String, Part>, key: &str| -> Result<bool, String> {
         if parts.contains_key(key) {
@@ -224,15 +272,20 @@ fn measure_counted(spec: &Spec, schema: &Value, steps: &mut usize) -> Result<usi
         }
         match spec.root.pointer(key) {
             Some(v) => {
-                let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped);
+                let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped, MAX_SCAN_BYTES - bytes);
                 scanned += part.nodes;
                 stepped += part.steps;
-                *steps += part.steps;
+                bytes += part.bytes;
+                total.steps += part.steps;
+                total.bytes += part.bytes;
                 if scanned > MAX_EXPANDED_NODES {
                     return Err(too_big());
                 }
                 if stepped > MAX_SCAN_STEPS {
                     return Err(too_wide());
+                }
+                if bytes > MAX_SCAN_BYTES {
+                    return Err(too_long());
                 }
                 parts.insert(key.to_string(), part);
                 Ok(true)
@@ -646,15 +699,42 @@ mod tests {
             let refs: Vec<Value> = (0..depth).map(|d| json!({"$ref": format!("#/x{}", "/a".repeat(d))})).collect();
             let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "x": v});
             let s = spec(&doc.to_string());
-            let mut steps = 0;
-            let e = measure_counted(&s, &json!({"anyOf": refs}), &mut steps).unwrap_err();
+            let mut scanned = Scanned::default();
+            let e = measure_counted(&s, &json!({"anyOf": refs}), &mut scanned).unwrap_err();
             assert!(e.contains("more than"), "{e}");
             // Bounded by the limits, not by `depth` × the subtree.
-            assert!(steps <= MAX_SCAN_STEPS + depth, "{steps}");
+            assert!(scanned.steps <= MAX_SCAN_STEPS + depth, "{scanned:?}");
         }
         // A large legitimate enum is fine.
         let s = spec(&json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}}).to_string());
         assert!(compile(&s, &json!({"enum": (0..200_000).collect::<Vec<u32>>()}), Direction::Response).is_ok());
+    }
+
+    #[test]
+    fn text_is_charged_however_few_members_hold_it() {
+        // Two members, one a description past the limit: few members, but
+        // every compile would copy it.
+        let s = spec(&json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}}).to_string());
+        let long = json!({"type": "string", "description": "d".repeat(MAX_SCAN_BYTES)});
+        let mut scanned = Scanned::default();
+        let e = compile_within(&s, &long, Direction::Response, &mut scanned, Scanned::UNLIMITED).unwrap_err();
+        assert!(e.contains("MiB of names and strings"), "{e}");
+        assert!(scanned.steps <= 2, "{scanned:?}");
+        assert!(scanned.bytes > MAX_SCAN_BYTES, "{scanned:?}");
+        // The same through a reference.
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "x": long});
+        let s = spec(&doc.to_string());
+        let e = compile(&s, &json!({"$ref": "#/x"}), Direction::Response).unwrap_err();
+        assert!(e.contains("MiB of names and strings"), "{e}");
+        // A shared budget is spent by bytes too.
+        let short = json!({"type": "string", "description": "d".repeat(1_000)});
+        let mut scanned = Scanned::default();
+        let budget = Scanned { steps: usize::MAX, bytes: 2_500 };
+        assert!(compile_within(&s, &short, Direction::Response, &mut scanned, budget).is_ok());
+        assert!(compile_within(&s, &short, Direction::Response, &mut scanned, budget).is_ok());
+        let e = compile_within(&s, &short, Direction::Response, &mut scanned, budget).unwrap_err();
+        assert!(e.contains("budget is spent"), "{e}");
+        assert_eq!(scanned.steps, 6);
     }
 
     #[test]

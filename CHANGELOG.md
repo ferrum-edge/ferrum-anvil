@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bounded specification analysis copies less and stops later on large ordinary descriptions (#351):
+  - Lint rules on `raw.` fields read the selected value in place instead of copying it once
+    for each path that reaches it.
+  - `spec-drift` builds the key of a finding about an operation (which copies the operation's
+    pointer) once per operation, not once per call, and makes a finding's message, operation
+    and pointer only when the finding is new.
+  - Schema compiles for example and body checks are also charged for the bytes of member
+    names and strings they copy, not only for members: a schema and the schemas it references
+    may hold 16 MiB of them, and the compiles of one lint or analysis 320 MiB. A schema with
+    few members and a very long text (a multi-megabyte description, say) is no longer
+    copied by every compile; its examples are counted as not checked.
+  - The `spec-drift` budget for walking bodies along their schemas for suggestions is raised
+    from 256 MiB to 1 GiB. Most of what it charges lasts only while a body is walked, and on a
+    large ordinary description 256 MiB stopped suggestions earlier than before 0.1.4.
+
 ## [0.1.5] - 2026-10-08
 
 Compatibility release: Anvil adopts Ferrum Edge v0.9.15 and `contracts-edge-0.9.15`, now the lab

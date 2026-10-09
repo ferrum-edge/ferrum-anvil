@@ -23,7 +23,7 @@
 //! short enum token.
 
 use crate::infer::{Shape, mark_nullable, safe_name};
-use crate::lint::MAX_EXAMPLE_SCAN_STEPS;
+use crate::lint::MAX_EXAMPLE_SCAN;
 use crate::lint::SpecSummary;
 use crate::locate::ptr;
 use crate::model::{
@@ -33,7 +33,7 @@ use crate::observe::{Observation, ObservedBody, count_values, essence, is_json, 
 use crate::patch::{self, PatchOp};
 use crate::route::{Route, Router};
 use crate::ruleset::Severity;
-use crate::schema;
+use crate::schema::{self, Scanned};
 use crate::spec::{Meter, Spec};
 use anvil_import::Dialect;
 use chrono::{DateTime, Utc};
@@ -58,8 +58,13 @@ const MAX_WALK_STEPS: usize = 2_000_000;
 /// What walking bodies along their schemas may cost, in bytes: the
 /// references followed and the schema pointers copied on the way (see
 /// [`Spec::resolve_within`]). Apart from [`MAX_RESOLVE_BYTES`], so that
-/// walks never leave operations unresolved.
-const MAX_WALK_BYTES: usize = 256 * 1024 * 1024;
+/// walks never leave operations unresolved. Larger than the budgets of what
+/// an analysis keeps: most of these copies are dropped as the walk returns
+/// (only suggested fixes, capped by count, and required-property tallies
+/// keep theirs), and every body walked copies its schema pointers again, so
+/// on a large ordinary description a smaller budget would stop suggestions
+/// early. It bounds the copying work as well as what is kept.
+const MAX_WALK_BYTES: usize = 1024 * 1024 * 1024;
 /// Noted once either walking budget is spent.
 const WALK_SPENT: &str = "the analysis' budget for walking bodies is spent; later bodies got no schema suggestions";
 /// Query parameter names kept per undeclared endpoint or per operation.
@@ -314,6 +319,9 @@ pub fn revise(spec: &Spec, report: &DriftReport, ids: &[String]) -> Revision {
 
 // ---------------------------------------------------------------- analysis
 
+/// A new finding's message, operation and pointer.
+type Details = (String, Option<String>, Option<String>);
+
 #[derive(Default)]
 struct FindingAcc {
     kind: Option<DriftKind>,
@@ -380,7 +388,10 @@ struct State<'a> {
     /// What walking bodies may still cost (see [`MAX_WALK_BYTES`]).
     walk_bytes: Meter,
     opts: DriftOptions,
-    findings: BTreeMap<String, FindingAcc>,
+    findings: BTreeMap<Rc<str>, FindingAcc>,
+    /// The keys of each operation object's findings, by kind and what the
+    /// call adds to the operation's pointer (see [`State::op_finding`]).
+    op_keys: HashMap<(usize, usize), HashMap<(DriftKind, String), Rc<str>>>,
     ops: Vec<OpAcc>,
     endpoints: BTreeMap<(String, String), EndpointAcc>,
     fixes: BTreeMap<FixKey, (String, Shape, BTreeSet<String>)>,
@@ -388,8 +399,8 @@ struct State<'a> {
     required: BTreeMap<(String, String), (usize, usize, String)>,
     servers: BTreeMap<String, (usize, String)>,
     validators: HashMap<(String, bool), Option<jsonschema::Validator>>,
-    /// Members and items scanned by schema compiles.
-    scan_steps: usize,
+    /// What schema compiles scanned (members and items, and bytes).
+    scanned: Scanned,
     /// The longest `required` list of the description.
     max_required: usize,
     /// Body values walked.
@@ -404,7 +415,7 @@ struct State<'a> {
     to: Option<DateTime<Utc>>,
     /// Schema findings by (operation, status, place in the body, error
     /// category; see [`describe`]).
-    schema_places: HashMap<(String, String, String, String), BTreeSet<String>>,
+    schema_places: HashMap<(String, String, String, String), BTreeSet<Rc<str>>>,
     /// Fixes to link to the schema findings about the same place and
     /// category, resolved once at the end: (operation, status, place,
     /// category, suggestion key).
@@ -422,36 +433,7 @@ struct Declared<'a> {
 
 /// Compare observations with the description.
 pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -> DriftReport {
-    let router = Router::new(spec);
-    let n_ops = router.operation_count();
-    let mut st = State {
-        spec,
-        router,
-        operations: vec![None; n_ops],
-        declared: HashMap::new(),
-        resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
-        walk_bytes: Meter::new(MAX_WALK_BYTES),
-        opts: opts.clone(),
-        findings: BTreeMap::new(),
-        ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
-        endpoints: BTreeMap::new(),
-        fixes: BTreeMap::new(),
-        required: BTreeMap::new(),
-        servers: BTreeMap::new(),
-        validators: HashMap::new(),
-        scan_steps: 0,
-        max_required: longest_required(&spec.root),
-        walk_steps: 0,
-        per_schema: HashMap::new(),
-        notes: BTreeMap::new(),
-        matched: 0,
-        without_response: 0,
-        ignored: 0,
-        from: None,
-        to: None,
-        schema_places: HashMap::new(),
-        pending_links: BTreeSet::new(),
-    };
+    let mut st = State::new(spec, opts);
     for o in observations {
         st.observe(o);
     }
@@ -689,34 +671,95 @@ fn allows_null(s: &Value) -> bool {
 }
 
 impl<'a> State<'a> {
+    fn new(spec: &'a Spec, opts: &DriftOptions) -> State<'a> {
+        let router = Router::new(spec);
+        let n_ops = router.operation_count();
+        State {
+            spec,
+            router,
+            operations: vec![None; n_ops],
+            declared: HashMap::new(),
+            resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
+            walk_bytes: Meter::new(MAX_WALK_BYTES),
+            opts: opts.clone(),
+            findings: BTreeMap::new(),
+            op_keys: HashMap::new(),
+            ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
+            endpoints: BTreeMap::new(),
+            fixes: BTreeMap::new(),
+            required: BTreeMap::new(),
+            servers: BTreeMap::new(),
+            validators: HashMap::new(),
+            scanned: Scanned::default(),
+            max_required: longest_required(&spec.root),
+            walk_steps: 0,
+            per_schema: HashMap::new(),
+            notes: BTreeMap::new(),
+            matched: 0,
+            without_response: 0,
+            ignored: 0,
+            from: None,
+            to: None,
+            schema_places: HashMap::new(),
+            pending_links: BTreeSet::new(),
+        }
+    }
+
     fn dialect(&self) -> Dialect {
         self.spec.dialect
     }
 
     /// Record a difference; false when it was not recorded (too many
-    /// distinct ones), and then nothing about it is gathered either.
-    fn finding(
-        &mut self,
-        key: String,
-        kind: DriftKind,
-        obs: &Observation,
-        message: String,
-        operation: Option<String>,
-        pointer: Option<String>,
-    ) -> bool {
-        if !self.findings.contains_key(&key) && self.findings.len() >= MAX_FINDING_KEYS {
-            self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
-            return false;
+    /// distinct ones), and then nothing about it is gathered either. Its
+    /// message, operation and pointer are made only when it is new.
+    fn finding(&mut self, key: &Rc<str>, kind: DriftKind, obs: &Observation, details: impl FnOnce() -> Details) -> bool {
+        if !self.findings.contains_key(key) {
+            if self.findings_full() {
+                self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
+                return false;
+            }
+            let (message, operation, pointer) = details();
+            self.findings.insert(Rc::clone(key), FindingAcc { kind: Some(kind), message, operation, pointer, ..FindingAcc::default() });
         }
-        let f = self.findings.entry(key.clone()).or_default();
-        if f.kind.is_none() {
-            *f = FindingAcc { kind: Some(kind), message, operation, pointer, ..FindingAcc::default() };
-        }
+        let Some(f) = self.findings.get_mut(key) else { return false };
         f.count += 1;
         if f.observations.len() < self.opts.max_examples && !f.observations.contains(&obs.id) {
             f.observations.push(obs.id.clone());
         }
         true
+    }
+
+    /// Record a difference about operation object `object` (see
+    /// [`State::finding`]) under the key `key` builds, and return that key
+    /// when it is recorded. Such a key copies the operation's pointer, which
+    /// may be long: it is built the first time a call to the operation needs
+    /// it and then kept by its kind and `end` (what the call adds: a query
+    /// name, content type or status, or nothing), shared with
+    /// [`State::findings`], instead of being built again for each call. Only
+    /// the keys of recorded findings are kept.
+    fn op_finding(
+        &mut self,
+        object: (usize, usize),
+        kind: DriftKind,
+        end: &str,
+        key: impl FnOnce() -> String,
+        obs: &Observation,
+        details: impl FnOnce() -> Details,
+    ) -> Option<Rc<str>> {
+        let key = match self.op_keys.get(&object).and_then(|keys| keys.get(&(kind, end.to_string()))) {
+            Some(k) => Rc::clone(k),
+            None => {
+                // Not kept, so not recorded: nothing else records it.
+                if self.findings_full() {
+                    self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
+                    return None;
+                }
+                let k: Rc<str> = key().into();
+                self.op_keys.entry(object).or_default().insert((kind, end.to_string()), Rc::clone(&k));
+                k
+            }
+        };
+        self.finding(&key, kind, obs, details).then_some(key)
     }
 
     /// No more distinct differences are recorded: body walks, which only
@@ -726,7 +769,9 @@ impl<'a> State<'a> {
     }
 
     fn link(&mut self, finding: &str, suggestion_key: &str) {
-        if let Some(f) = self.findings.get_mut(finding) {
+        if let Some(f) = self.findings.get_mut(finding)
+            && !f.suggestions.contains(suggestion_key)
+        {
             f.suggestions.insert(suggestion_key.to_string());
         }
     }
@@ -758,15 +803,10 @@ impl<'a> State<'a> {
             } else {
                 Some(generalize(&base)).filter(|g| !g.contains('{') && g != "/").unwrap_or_default()
             };
-            let key = format!("server|{origin}");
-            if self.finding(
-                key.clone(),
-                DriftKind::UndeclaredServer,
-                o,
-                format!("Requests went to {origin}, which is not one of the declared servers"),
-                None,
-                Some(if self.spec.is_swagger2() { "/host".into() } else { "/servers".into() }),
-            ) {
+            let key: Rc<str> = format!("server|{origin}").into();
+            let at = if self.spec.is_swagger2() { "/host" } else { "/servers" };
+            let details = || (format!("Requests went to {origin}, which is not one of the declared servers"), None, Some(at.into()));
+            if self.finding(&key, DriftKind::UndeclaredServer, o, details) {
                 self.link(&key, &key);
                 self.servers.entry(origin.clone()).or_insert((0, base)).0 += 1;
             }
@@ -806,8 +846,8 @@ impl<'a> State<'a> {
             }
             None => (DriftKind::UndeclaredPath, format!("{label} is called, but the description has no such path"), None),
         };
-        let key = format!("endpoint|{method}|{pattern}");
-        if !self.finding(key.clone(), kind, o, message, Some(label), pointer) {
+        let key: Rc<str> = format!("endpoint|{method}|{pattern}").into();
+        if !self.finding(&key, kind, o, || (message, Some(label), pointer)) {
             return;
         }
         self.link(&key, &key);
@@ -876,6 +916,7 @@ impl<'a> State<'a> {
     fn check_operation(&mut self, i: usize, o: &Observation) {
         let spec = self.spec;
         let op = self.operation(i);
+        let object = self.router.operation_object(i);
         let label = op.label();
         let op_ptr = &op.pointer;
         let b = budget(spec, &op);
@@ -888,14 +929,9 @@ impl<'a> State<'a> {
             acc.max_request = acc.max_request.max(Some(o.request_bytes));
         }
         if op.op.get("deprecated").and_then(Value::as_bool) == Some(true) {
-            self.finding(
-                format!("deprecated|{op_ptr}"),
-                DriftKind::DeprecatedOperationCalled,
-                o,
-                format!("{label} is deprecated but was called"),
-                Some(label.clone()),
-                Some(op_ptr.clone()),
-            );
+            let key = || format!("deprecated|{op_ptr}");
+            let details = || (format!("{label} is deprecated but was called"), Some(label.clone()), Some(op_ptr.clone()));
+            self.op_finding(object, DriftKind::DeprecatedOperationCalled, "", key, o, details);
         }
         let Some(lists) = self.lists(i) else {
             self.note("the description is too large to compare completely; some calls to declared operations were not checked");
@@ -916,15 +952,10 @@ impl<'a> State<'a> {
                         self.note(format!("at most {MAX_QUERY_NAMES} undeclared query parameters are reported per operation"));
                         continue;
                     }
-                    let key = format!("query|{op_ptr}|{q}");
-                    if self.finding(
-                        key.clone(),
-                        DriftKind::UndeclaredQueryParameter,
-                        o,
-                        format!("{label} was called with query parameter `{q}`, which is not declared"),
-                        Some(label.clone()),
-                        Some(op_ptr.clone()),
-                    ) {
+                    let key = || format!("query|{op_ptr}|{q}");
+                    let message = || format!("{label} was called with query parameter `{q}`, which is not declared");
+                    let details = || (message(), Some(label.clone()), Some(op_ptr.clone()));
+                    if let Some(key) = self.op_finding(object, DriftKind::UndeclaredQueryParameter, q, key, o, details) {
                         self.link(&key, &key);
                         self.ops[i].new_query.insert(q.clone());
                     }
@@ -938,14 +969,9 @@ impl<'a> State<'a> {
                 _ => true,
             };
             if !present {
-                self.finding(
-                    format!("required|{}|{}", p.pointer, p.name),
-                    DriftKind::MissingRequiredParameter,
-                    o,
-                    format!("{label} was called without the required {} parameter `{}`", p.location, p.name),
-                    Some(label.clone()),
-                    Some(p.pointer.clone()),
-                );
+                let key: Rc<str> = format!("required|{}|{}", p.pointer, p.name).into();
+                let message = || format!("{label} was called without the required {} parameter `{}`", p.location, p.name);
+                self.finding(&key, DriftKind::MissingRequiredParameter, o, || (message(), Some(label.clone()), Some(p.pointer.clone())));
             }
         }
 
@@ -962,15 +988,10 @@ impl<'a> State<'a> {
                 } else {
                     declared.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>().join(", ")
                 };
-                let key = format!("reqtype|{op_ptr}|{e}");
-                if self.finding(
-                    key.clone(),
-                    DriftKind::UndeclaredRequestContentType,
-                    o,
-                    format!("{label} was sent a {e} body; the description declares {list}"),
-                    Some(label.clone()),
-                    body.map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
-                ) {
+                let key = || format!("reqtype|{op_ptr}|{e}");
+                let message = || format!("{label} was sent a {e} body; the description declares {list}");
+                let details = || (message(), Some(label.clone()), Some(body.map_or_else(|| op_ptr.clone(), |b| b.pointer.clone())));
+                if let Some(key) = self.op_finding(object, DriftKind::UndeclaredRequestContentType, &e, key, o, details) {
                     self.link(&key, &key);
                     self.ops[i].new_request_types.insert(e);
                 }
@@ -980,9 +1001,11 @@ impl<'a> State<'a> {
             && o.request_bytes > max
         {
             self.ops[i].large_request += 1;
-            let key = format!("reqsize|{op_ptr}");
-            self.finding(key.clone(), DriftKind::RequestLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
-            self.link(&key, &key);
+            let key = || format!("reqsize|{op_ptr}");
+            let details = || (String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            if let Some(key) = self.op_finding(object, DriftKind::RequestLargerThanDeclared, "", key, o, details) {
+                self.link(&key, &key);
+            }
         }
 
         // Response.
@@ -994,32 +1017,29 @@ impl<'a> State<'a> {
             && l > max
         {
             self.ops[i].slow += 1;
-            let key = format!("slow|{op_ptr}");
-            self.finding(key.clone(), DriftKind::SlowerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
-            self.link(&key, &key);
+            let key = || format!("slow|{op_ptr}");
+            let details = || (String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            if let Some(key) = self.op_finding(object, DriftKind::SlowerThanDeclared, "", key, o, details) {
+                self.link(&key, &key);
+            }
         }
         if let (Some(max), Some(n)) = (b.max_response_bytes, r.bytes)
             && n > max
         {
             self.ops[i].large += 1;
-            let key = format!("size|{op_ptr}");
-            self.finding(key.clone(), DriftKind::ResponseLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
-            self.link(&key, &key);
+            let key = || format!("size|{op_ptr}");
+            let details = || (String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            if let Some(key) = self.op_finding(object, DriftKind::ResponseLargerThanDeclared, "", key, o, details) {
+                self.link(&key, &key);
+            }
         }
         let has_body = !matches!(r.body, ObservedBody::Empty) && r.bytes != Some(0);
         let ct = r.content_type.as_deref().map(essence).filter(|_| has_body);
         let Some(k) = declared_response(&lists.resps, &code) else {
-            let key = format!("status|{op_ptr}|{code}");
-            if !self.finding(
-                key.clone(),
-                DriftKind::UndeclaredStatus,
-                o,
-                format!("{label} returned {code}, which is not a documented response"),
-                Some(label.clone()),
-                Some(ptr(op_ptr, "responses")),
-            ) {
-                return;
-            }
+            let key = || format!("status|{op_ptr}|{code}");
+            let message = || format!("{label} returned {code}, which is not a documented response");
+            let details = || (message(), Some(label.clone()), Some(ptr(op_ptr, "responses")));
+            let Some(key) = self.op_finding(object, DriftKind::UndeclaredStatus, &code, key, o, details) else { return };
             self.link(&key, &key);
             let shape = self.ops[i].new_responses.entry((code, ct)).or_default();
             if let ObservedBody::Json(v) = &r.body {
@@ -1031,14 +1051,9 @@ impl<'a> State<'a> {
         // Required response headers.
         for (name, hptr) in &lists.required_headers[k] {
             if !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
-                self.finding(
-                    format!("header|{hptr}"),
-                    DriftKind::MissingResponseHeader,
-                    o,
-                    format!("The {code} response of {label} did not include the required header `{name}`"),
-                    Some(label.clone()),
-                    Some(hptr.clone()),
-                );
+                let key: Rc<str> = format!("header|{hptr}").into();
+                let message = || format!("The {code} response of {label} did not include the required header `{name}`");
+                self.finding(&key, DriftKind::MissingResponseHeader, o, || (message(), Some(label.clone()), Some(hptr.clone())));
             }
         }
         let Some(ct) = ct else {
@@ -1053,15 +1068,9 @@ impl<'a> State<'a> {
             } else {
                 resp.media.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>().join(", ")
             };
-            let key = format!("ctype|{}|{ct}", resp.pointer);
-            if !self.finding(
-                key.clone(),
-                DriftKind::UndeclaredContentType,
-                o,
-                format!("The {code} response of {label} was {ct}; the description declares {list}"),
-                Some(label.clone()),
-                Some(resp.pointer.clone()),
-            ) {
+            let key: Rc<str> = format!("ctype|{}|{ct}", resp.pointer).into();
+            let message = || format!("The {code} response of {label} was {ct}; the description declares {list}");
+            if !self.finding(&key, DriftKind::UndeclaredContentType, o, || (message(), Some(label.clone()), Some(resp.pointer.clone()))) {
                 return;
             }
             self.link(&key, &key);
@@ -1092,9 +1101,9 @@ impl<'a> State<'a> {
         };
         let vkey = (target.unwrap_or_else(|| media.schema_pointer.clone()), false);
         if !self.validators.contains_key(&vkey) {
-            let v = schema::compile_within(spec, schema, Direction::Response, &mut self.scan_steps, MAX_EXAMPLE_SCAN_STEPS).ok();
+            let v = schema::compile_within(spec, schema, Direction::Response, &mut self.scanned, MAX_EXAMPLE_SCAN).ok();
             if v.is_none() {
-                self.note(if self.scan_steps > MAX_EXAMPLE_SCAN_STEPS {
+                self.note(if self.scanned.exceeds(MAX_EXAMPLE_SCAN) {
                     "the analysis' budget for scanning schemas is spent; bodies of the remaining schemas were not checked"
                 } else {
                     "some response schemas could not be compiled (an external or broken reference); their bodies were not checked"
@@ -1125,15 +1134,10 @@ impl<'a> State<'a> {
         }
         for (place, what, category) in &messages {
             let m = format!("{place} {what}");
-            let key = format!("schema|{}|{m}", media.schema_pointer);
-            if !self.finding(
-                key.clone(),
-                DriftKind::ResponseSchemaMismatch,
-                o,
-                format!("The {code} response of {label} does not match its schema: {m}"),
-                Some(label.clone()),
-                Some(media.schema_pointer.clone()),
-            ) {
+            let key: Rc<str> = format!("schema|{}|{m}", media.schema_pointer).into();
+            let message = || format!("The {code} response of {label} does not match its schema: {m}");
+            let details = || (message(), Some(label.clone()), Some(media.schema_pointer.clone()));
+            if !self.finding(&key, DriftKind::ResponseSchemaMismatch, o, details) {
                 return;
             }
             self.schema_places.entry((label.clone(), code.clone(), place.clone(), category.clone())).or_default().insert(key);
@@ -1409,7 +1413,7 @@ impl<'a> State<'a> {
 
     fn finish(mut self, total: usize) -> DriftReport {
         for (label, code, place, category, skey) in std::mem::take(&mut self.pending_links) {
-            let keys: Vec<String> = self.schema_places.get(&(label, code, place, category)).into_iter().flatten().cloned().collect();
+            let keys: Vec<Rc<str>> = self.schema_places.get(&(label, code, place, category)).into_iter().flatten().cloned().collect();
             for k in keys {
                 self.link(&k, &skey);
             }
@@ -1765,7 +1769,7 @@ impl<'a> State<'a> {
             let x_ptr = ptr(&op.pointer, EXPECTATIONS);
             if let (Some(max), Some(s)) = (b.max_latency_ms, stats) {
                 let key = format!("slow|{}", op.pointer);
-                if let Some(f) = self.findings.get_mut(&key) {
+                if let Some(f) = self.findings.get_mut(key.as_str()) {
                     f.message = format!(
                         "{label} took longer than its {max} ms budget in {} of {} calls (p95 {:.0} ms, slowest {:.0} ms)",
                         acc.slow,
@@ -1820,7 +1824,7 @@ impl<'a> State<'a> {
             ];
             for (prefix, field, max, over, largest, verb, what) in size_budgets {
                 let key = format!("{prefix}|{}", op.pointer);
-                let (Some(max), Some(f)) = (max, self.findings.get_mut(&key)) else { continue };
+                let (Some(max), Some(f)) = (max, self.findings.get_mut(key.as_str())) else { continue };
                 let largest = largest.unwrap_or(0);
                 let of = if what == "request" { "request " } else { "" };
                 f.message = format!("{label} {verb} {max}-byte {of}budget in {over} call(s) (largest {largest} bytes)");
@@ -2273,6 +2277,59 @@ mod tests {
             v = Value::Object(level);
         }
         (v, format!("#/{name}{}", format!("/{key}").repeat(50)))
+    }
+
+    #[test]
+    fn an_operations_finding_keys_are_built_once_however_many_calls_reach_it() {
+        // A deprecated operation in a Path Item behind one alias of a pointer
+        // of about 200 KB: each key about it copies that pointer.
+        let key = "k".repeat(4_000);
+        let (xi, deep) = buried(&key, "xi", json!({"get": {"deprecated": true, "responses": {"200": {"description": "ok"}}}}));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"$ref": "#/i"}}, "xi": xi, "i": {"$ref": deep}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        // Each call is deprecated, sends an undeclared query parameter and
+        // gets an undeclared status.
+        let call = |i: usize| Observation {
+            id: format!("har:{i}"),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec!["limit".into()],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 404,
+                content_type: None,
+                headers: vec![],
+                bytes: Some(0),
+                body: ObservedBody::Empty,
+            }),
+            latency_ms: None,
+        };
+        let mut st = State::new(&spec, &DriftOptions::default());
+        for i in 0..1_000 {
+            st.observe(&call(i));
+        }
+        // One key per finding, kept once and shared with the finding.
+        let kept: Vec<(&(DriftKind, String), &Rc<str>)> = st.op_keys.values().flat_map(|keys| keys.iter()).collect();
+        let mut kinds: Vec<DriftKind> = kept.iter().map(|((kind, _), _)| *kind).collect();
+        kinds.sort();
+        let mut expected = [DriftKind::DeprecatedOperationCalled, DriftKind::UndeclaredQueryParameter, DriftKind::UndeclaredStatus];
+        expected.sort();
+        assert_eq!(kinds, expected);
+        for (_, k) in kept {
+            assert!(k.len() > 200_000, "{}", k.len());
+            let (recorded, f) = st.findings.get_key_value(&**k).unwrap();
+            assert!(Rc::ptr_eq(recorded, k));
+            assert_eq!(f.count, 1_000);
+        }
+        assert_eq!(st.findings.len(), 3);
+        let report = st.finish(1_000);
+        assert_eq!(report.findings.len(), 3, "{:#?}", report.findings);
+        assert!(report.findings.iter().all(|f| f.count == 1_000 && f.operation.as_deref() == Some("GET /a")), "{:#?}", report.findings);
     }
 
     #[test]
