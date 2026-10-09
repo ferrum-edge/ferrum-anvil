@@ -14,7 +14,11 @@ only after the [owner checklist](#owner-checklist-before-publishing-a-draft) is 
    the `[Unreleased]` entries of `CHANGELOG.md` under `## [X.Y.Z] - YYYY-MM-DD`
    with a summary paragraph before the first `###` heading (it becomes the
    release summary; start it with `<Kind> release:` to bold the kind), and
-   commit. Preflight refuses a version without such a section.
+   commit. Use only the headings Added, Changed, Deprecated, Removed, Fixed,
+   Security and Breaking (matched on the first word, in any case, so
+   `### Breaking changes` is Breaking). Preflight refuses a version without
+   such a section, with another `###` heading, or with an empty Breaking
+   section.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
    Or run the workflow manually **from the tag** (Run workflow → *Use workflow
    from* → Tags → `anvil-v0.1.0`). Set `dry_run` to `false` and optionally pass
@@ -86,11 +90,17 @@ bundle, then the [release notes](#release-notes) as a separate artifact (also
 shown in the run summary, so a dry run previews them). For a non-dry-run tag
 only, a separate `release` job (the only job with `contents: write`) downloads
 both, refuses notes that are not a regular file, are empty or over 100 kB,
-contain draft-only text or name another commit, runs
+contain draft-only text, name another commit or state a signing status other
+than `release-evidence.json`'s `signed`, runs
 `gh release create --draft --verify-tag --notes-file`, and then reads the draft
 back and fails if its body has draft-only text or is not the notes. Draft-only
 reminders ("not published", "review before publishing") go to the run summary,
-never into the release body.
+never into the release body. The notes artifact is named `notes-<version>`,
+outside the `release-*` pattern publish downloads the builds with.
+
+If the release job fails after `gh release create` (for example, in the
+read-back step), delete that draft before re-running the job: a re-run creates
+a second draft for the same tag, and `gh release view` may then show either.
 
 ### Release notes
 
@@ -100,14 +110,19 @@ JSON data and validated first):
 
 - the **Unsigned installers** warning (or a signing line when every target is
   signed), with whether in-app updates are signed and the minisign key id;
-- the section's summary paragraphs;
-- a **Security** line when the section has a `### Security` heading;
-- **Upgrade notes** pointing at the CHANGELOG's Breaking section when the
-  section has a `### Breaking` heading;
+- the section's summary paragraphs (hard-wrapped lines are joined; list items
+  stay one per line);
+- a **Security** line when the section has a Security heading;
+- **Upgrade notes** that repeat the section's Breaking items, so a summary
+  that says "read the Breaking section below" points at them, or a line that
+  the CHANGELOG lists no breaking changes;
 - the source commit and run, and links to the CHANGELOG at the tag and the
   [security advisories](https://github.com/ferrum-edge/ferrum-anvil/security/advisories).
 
-It refuses to write notes that contain draft-only text. Tests:
+Relative links in the copied CHANGELOG text are rewritten to the repository
+at the tag. It refuses to write notes that contain draft-only text (the
+`DRAFT_TEXT` pattern, which the release job and the checklist below grep for
+too). Tests:
 `node --test scripts/tests/release-notes.test.mjs` (CI, Supply chain job). The
 owner may add highlights to the body before publishing; keep the generated parts.
 

@@ -7,7 +7,7 @@
 // The notes come from the version's CHANGELOG.md section and the release
 // evidence: the signing warning (or signing line), the section's lead
 // paragraphs as the summary, a security line when the section has a Security
-// heading, upgrade notes pointing at its Breaking section, and the build line
+// heading, upgrade notes repeating its Breaking section, and the build line
 // with links to the CHANGELOG and the security advisories index.
 //
 // The release workflow creates the draft with exactly this body, so the body
@@ -15,8 +15,9 @@
 // draft is not published", review reminders) belongs in the workflow run
 // summary, never here: the script refuses to write notes that contain it.
 //
-// --check only verifies that CHANGELOG.md has a usable section for --version,
-// so preflight fails before anything is built.
+// --check only verifies that CHANGELOG.md has a usable section for --version
+// (a summary, only known ### headings, a non-empty Breaking section), so
+// preflight fails before anything is built.
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,13 +26,44 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const UNSIGNED = "unsigned — owner credentials not configured";
 export const SIGNED = "signed and verified on the build runner (see targets[].signing)";
-// Text that marks a draft placeholder body. None of it may reach a release body.
-export const DRAFT_MARKERS = [/draft release of/i, /this draft is not published/i, /review the evidence .* before publishing/i];
+// Text that marks a draft placeholder body, as a case-insensitive POSIX ERE.
+// None of it may reach a release body. This is the only definition: the
+// release job (DRAFT_TEXT in release.yml) and the owner checklist in
+// docs/release.md grep with exactly this pattern, and a test keeps them equal.
+export const DRAFT_TEXT = "draft release of|this draft is not published|review the evidence .* before publishing";
+const DRAFT_MARKER = new RegExp(DRAFT_TEXT, "i");
+// The ### headings a version section may use: Keep a Changelog's and Breaking.
+// A heading is matched on its first word, so "Breaking changes" is Breaking.
+export const HEADINGS = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security", "Breaking"];
+const headingKind = (h) => HEADINGS.find((k) => new RegExp(`^${k}\\b`, "i").test(h));
+const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// The `## [version]` section of a Keep a Changelog file: its lead paragraphs
-// (hard-wrapped lines joined) and its `###` headings.
+// Blank-line separated Markdown blocks. GitHub keeps line breaks in a release
+// body, so hard-wrapped lines are joined; list items stay one per line (with
+// their indentation), and an item's wrapped lines are joined into it.
+export function blocks(lines) {
+  const out = [];
+  let current = [];
+  for (const line of [...lines, ""]) {
+    if (line.trim() === "") {
+      if (current.length) out.push(current.join("\n"));
+      current = [];
+    } else if (LIST_ITEM.test(line)) {
+      current.push(line.trimEnd());
+    } else if (current.length === 0) {
+      current.push(line.trim());
+    } else {
+      current[current.length - 1] += ` ${line.trim()}`;
+    }
+  }
+  return out;
+}
+
+// The `## [version]` section of a Keep a Changelog file: its lead paragraphs,
+// its `###` headings, whether it has a Security heading, and the blocks of its
+// Breaking section(s).
 export function changelogSection(text, version) {
   if (!VERSION.test(version)) throw new Error(`invalid version ${JSON.stringify(version)}`);
   const lines = text.split(/\r?\n/);
@@ -41,28 +73,38 @@ export function changelogSection(text, version) {
   let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
   if (end < 0) end = lines.length;
   const body = lines.slice(start + 1, end);
-  const firstHeading = body.findIndex((l) => /^### /.test(l));
-  const leadLines = firstHeading < 0 ? body : body.slice(0, firstHeading);
-  const paragraphs = [];
-  let current = [];
-  for (const line of [...leadLines, ""]) {
-    if (line.trim() === "") {
-      if (current.length) paragraphs.push(current.join(" "));
-      current = [];
-    } else {
-      current.push(line.trim());
+  const at = body.flatMap((l, i) => (/^### /.test(l) ? [i] : []));
+  const headings = at.map((i) => body[i].slice(4).trim());
+  for (const h of headings) {
+    if (!headingKind(h)) {
+      throw new Error(`CHANGELOG.md section ${version} has an unknown heading "### ${h}" (use ${HEADINGS.join(", ")})`);
     }
   }
+  const paragraphs = blocks(at.length ? body.slice(0, at[0]) : body);
   if (paragraphs.length === 0) {
     throw new Error(`CHANGELOG.md section ${version} has no summary paragraph before its first ### heading`);
   }
-  const headings = body.filter((l) => /^### /.test(l)).map((l) => l.slice(4).trim());
-  return { paragraphs, headings };
+  const breakingLines = [];
+  at.forEach((i, n) => {
+    if (headingKind(headings[n]) === "Breaking") breakingLines.push(...body.slice(i + 1, at[n + 1] ?? body.length), "");
+  });
+  const breaking = blocks(breakingLines);
+  if (breaking.length === 0 && headings.some((h) => headingKind(h) === "Breaking")) {
+    throw new Error(`CHANGELOG.md section ${version} has an empty Breaking section`);
+  }
+  const security = headings.some((h) => headingKind(h) === "Security");
+  return { paragraphs, headings, security, breaking };
+}
+
+// Relative Markdown links in CHANGELOG text resolve against `base` (the
+// repository at the tag); a release page would otherwise resolve them wrongly.
+export function absoluteLinks(text, base) {
+  return text.replace(/\]\((?![A-Za-z][A-Za-z0-9+.-]*:|[#/])(?:\.\/)?([^()\s]+)\)/g, (_, path) => `](${base}/${path})`);
 }
 
 // "Compatibility release: Anvil adopts ..." -> "**Compatibility release.** Anvil adopts ..."
 export function summaryParagraph(paragraph) {
-  const m = /^([A-Z][A-Za-z ,-]{0,80} release): (.*)$/.exec(paragraph);
+  const m = /^([A-Z][A-Za-z ,-]{0,80} release): ([\s\S]*)$/.exec(paragraph);
   if (!m) return paragraph;
   const rest = m[2].replace(/^[a-z]/, (c) => c.toUpperCase());
   return `**${m[1]}.** ${rest}`;
@@ -117,9 +159,8 @@ export function checkEvidence(evidence, version) {
 }
 
 export function assertNoDraftText(body) {
-  for (const marker of DRAFT_MARKERS) {
-    if (marker.test(body)) throw new Error(`release notes contain draft-only text (${marker})`);
-  }
+  const m = DRAFT_MARKER.exec(body);
+  if (m) throw new Error(`release notes contain draft-only text (${JSON.stringify(m[0])})`);
 }
 
 export function releaseNotes({ changelog, version, tag, evidence }) {
@@ -144,15 +185,20 @@ export function releaseNotes({ changelog, version, tag, evidence }) {
       "",
     );
   }
-  section.paragraphs.forEach((p, i) => out.push(i === 0 ? summaryParagraph(p) : p, ""));
-  if (section.headings.includes("Security")) {
+  const link = (text) => absoluteLinks(text, `${repoUrl}/blob/${expectedTag}`);
+  section.paragraphs.forEach((p, i) => out.push(link(i === 0 ? summaryParagraph(p) : p), ""));
+  if (section.security) {
     out.push(`**Security:** this release fixes security issues present in earlier releases; upgrading is recommended. See the Security section of the [CHANGELOG](${changelogUrl}) and the [security advisories](${advisoriesUrl}).`, "");
   }
+  // A summary may say "read the Breaking section below": the upgrade notes
+  // repeat that section, so the body has it below the summary too.
+  if (section.breaking.length) {
+    out.push(`**Upgrade notes:** this release has breaking changes; read them before upgrading. From the Breaking section of the [CHANGELOG](${changelogUrl}):`, "");
+    for (const b of section.breaking) out.push(link(b), "");
+  } else {
+    out.push("**Upgrade notes:** the CHANGELOG lists no breaking changes for this release.", "");
+  }
   out.push(
-    section.headings.includes("Breaking")
-      ? `**Upgrade notes:** this release has breaking changes. Read the [Breaking section of the CHANGELOG](${changelogUrl}) before upgrading.`
-      : "**Upgrade notes:** the CHANGELOG lists no breaking changes for this release.",
-    "",
     `Built from \`${commit}\` by [run ${runId}](${runUrl}). \`release-evidence.json\` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs. See the [CHANGELOG](${changelogUrl}) for the full list and the [security advisories](${advisoriesUrl}) for published advisories.`,
     "",
   );
@@ -175,7 +221,7 @@ function main() {
   const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
   if (process.argv.includes("--check")) {
     const section = changelogSection(changelog, version);
-    console.log(`CHANGELOG.md ${version}: ${section.paragraphs.length} summary paragraph(s), headings: ${section.headings.join(", ") || "none"}`);
+    console.log(`CHANGELOG.md ${version}: ${section.paragraphs.length} summary paragraph(s), ${section.breaking.length} Breaking block(s), headings: ${section.headings.join(", ") || "none"}`);
     return;
   }
   const evidencePath = arg("--evidence");

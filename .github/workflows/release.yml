@@ -508,11 +508,12 @@ jobs:
           name: release-evidence-${{ needs.preflight.outputs.version }}
           path: upload/
           retention-days: 90
-      # Kept apart from the evidence bundle so the notes never become a release asset.
+      # Kept apart from the evidence bundle so the notes never become a release
+      # asset, and named outside the release-* pattern the build download uses.
       - name: Upload release notes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-notes-${{ needs.preflight.outputs.version }}
+          name: notes-${{ needs.preflight.outputs.version }}
           path: ${{ runner.temp }}/release-notes/notes.md
           if-no-files-found: error
           retention-days: 90
@@ -529,6 +530,9 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
       TAG: ${{ needs.preflight.outputs.tag }}
       RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
+      # Draft-only text, as a case-insensitive ERE: DRAFT_TEXT in
+      # scripts/release-notes.mjs (a test keeps the two equal).
+      DRAFT_TEXT: "draft release of|this draft is not published|review the evidence .* before publishing"
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -538,7 +542,7 @@ jobs:
         run: (cd upload && sha256sum -c SHA256SUMS)
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-notes-${{ needs.preflight.outputs.version }}
+          name: notes-${{ needs.preflight.outputs.version }}
           path: notes/
       # Fail closed: the body is published as-is, so it must be the generated
       # notes and carry no draft-only text (#356).
@@ -547,10 +551,18 @@ jobs:
           notes=notes/notes.md
           [ -f "$notes" ] && [ ! -L "$notes" ] || { echo "::error::release notes must be a regular file"; exit 1; }
           [ -s "$notes" ] && [ "$(wc -c < "$notes")" -le 100000 ] || { echo "::error::release notes are empty or too large"; exit 1; }
-          if grep -inE 'draft release of|this draft is not published|review the evidence .* before publishing' "$notes"; then
+          if grep -inE "$DRAFT_TEXT" "$notes"; then
             echo "::error::release notes contain draft-only text"; exit 1
           fi
           grep -qF "Built from \`$RELEASE_COMMIT\`" "$notes" || { echo "::error::release notes are not for $RELEASE_COMMIT"; exit 1; }
+          # The notes' first lines state the signing status; it must be the
+          # verified evidence's.
+          first="$(head -n 1 "$notes")"
+          case "$(jq -r '.signed | if type == "boolean" then tostring else "invalid" end' upload/release-evidence.json)" in
+            true) [[ "$first" == '**Signing:** the installers are code-signed '* ]] ;;
+            false) [ "$first" = '> [!WARNING]' ] && [[ "$(sed -n 2p "$notes")" == '> **Unsigned installers.** '* ]] ;;
+            *) false ;;
+          esac || { echo "::error::the release notes' signing status does not match release-evidence.json"; exit 1; }
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -564,7 +576,7 @@ jobs:
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body,isDraft > "$RUNNER_TEMP/release.json"
           [ "$(jq -r .isDraft "$RUNNER_TEMP/release.json")" = "true" ] || { echo "::error::$TAG is not a draft"; exit 1; }
           jq -r .body "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/body.md"
-          if grep -inE 'draft release of|this draft is not published|review the evidence .* before publishing' "$RUNNER_TEMP/body.md"; then
+          if grep -inE "$DRAFT_TEXT" "$RUNNER_TEMP/body.md"; then
             echo "::error::the draft body contains draft-only text"; exit 1
           fi
           grep -qF "Built from \`$RELEASE_COMMIT\`" "$RUNNER_TEMP/body.md" || { echo "::error::the draft body is not the release notes"; exit 1; }
