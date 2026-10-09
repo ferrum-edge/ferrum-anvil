@@ -404,11 +404,16 @@ keys that look like data (see below) are not named. A body is checked only
 when it was captured completely, decoded, is JSON and at most 1 MiB, and
 while the analysis has parsed less than 32 MiB of bodies in all; otherwise a
 note says why (history set to keep no response bodies, say). Schema
-compiles share the linter's scanning budgets (members and items, and bytes
-of names and strings) and body walks for suggestions stop after 2,000,000
-values or 1 GiB of references followed and schema pointers copied on the
-way, each with a note. Most of those copies last only while a body is
-walked, so that budget is larger than the ones for what an analysis keeps. The operations an analysis
+compiles have budgets the size of the linter's (members and items, and
+bytes of names and strings), counted for the analysis on its own; a schema
+refused for its size gets a note of its own. Body walks for suggestions
+stop after 2,000,000 values or 1 GiB of references followed and schema
+pointers copied on the way; most of those copies last only while a body is
+walked. What walks keep until the analysis ends (the pointers, names and
+owners of suggested fixes, of required-property tallies and of their links
+to findings, and the calls each fix was seen in) is capped at 256 MiB;
+past that, walks add to what is recorded but record nothing new. Each of
+these limits adds a note when it is reached. The operations an analysis
 matches against are capped at 256 MiB of their paths, pointers and
 declared statuses (an operation reached through several paths counts for
 each); past that, the rest are left out with a note, and calls to them are

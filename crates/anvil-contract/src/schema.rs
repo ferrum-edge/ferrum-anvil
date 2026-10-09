@@ -41,6 +41,9 @@ pub const MAX_SCAN_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXPANDED_NODES: usize = 100_000;
 /// Distinct `$ref` targets copied into one validator.
 const MAX_REF_TARGETS: usize = 4_096;
+/// What every refusal of a schema for its size or nesting starts with (see
+/// [`too_large`]).
+const TOO_LARGE: &str = "too large to check: ";
 
 /// What schema compiles have scanned, or may scan: members and items, and
 /// bytes of member names and strings. Members bound the work of scanning
@@ -62,6 +65,14 @@ impl Scanned {
     pub fn exceeds(self, budget: Scanned) -> bool {
         self.steps > budget.steps || self.bytes > budget.bytes
     }
+}
+
+/// Whether `error`, from [`compile`] or [`compile_within`], refused the
+/// schema for its size or nesting (past one of the limits above) rather
+/// than for an external, broken or cyclic reference or what the validator
+/// rejects.
+pub fn too_large(error: &str) -> bool {
+    error.starts_with(TOO_LARGE)
 }
 
 /// Build a validator for `schema` (located at `pointer`), as it applies in
@@ -125,7 +136,7 @@ pub fn bundle(spec: &Spec, schema: &Value, direction: Direction) -> Result<Value
         }
         copied.insert(target.clone());
         if copied.len() > MAX_REF_TARGETS {
-            return Err(format!("the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
+            return Err(format!("{TOO_LARGE}the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
         }
         let Some(raw) = spec.root.pointer(&target) else {
             return Err(format!("unresolved reference #{target}"));
@@ -199,7 +210,9 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
                     if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
-                    if k != "$ref" && (child.is_object() || child.is_array()) {
+                    // A `$ref` that is not a string is still copied by
+                    // conversion and bundling: scanned like any member.
+                    if child.is_object() || child.is_array() {
                         stack.push((child, down || descends(k), d + 1));
                     }
                 }
@@ -239,9 +252,10 @@ const ROOT: &str = "#root";
 /// [`measure`], adding the members and items it looked at, and the bytes of
 /// their names and strings, to `total`.
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
-    let too_big = || format!("the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
-    let too_wide = || format!("the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
-    let too_long = || format!("the schema and the schemas it references have more than {} MiB of names and strings", MAX_SCAN_BYTES >> 20);
+    let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
+    let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
+    let mib = MAX_SCAN_BYTES >> 20;
+    let too_long = || format!("{TOO_LARGE}the schema and the schemas it references have more than {mib} MiB of names and strings");
     // Every reached schema counts at least once in the expanded size, so
     // scanning stops as soon as the schemas scanned so far exceed the limit
     // (targets nested in one another are scanned once each, not more), or
@@ -268,7 +282,7 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
             return Ok(true);
         }
         if parts.len() >= MAX_REF_TARGETS {
-            return Err(format!("the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
+            return Err(format!("{TOO_LARGE}the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
         }
         match spec.root.pointer(key) {
             Some(v) => {
@@ -354,7 +368,7 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
                 *acc = acc.saturating_add(*n);
             } else if !open.contains(&target) && part_of(&mut parts, &target)? {
                 if stack.len() >= MAX_REF_CHAIN || chain_depth + parts[target.as_str()].depth > MAX_CHAIN_DEPTH {
-                    return Err("the schema nests references too deeply".into());
+                    return Err(format!("{TOO_LARGE}the schema nests references too deeply"));
                 }
                 chain_depth += parts[target.as_str()].depth;
                 open.insert(target.clone());
@@ -735,6 +749,45 @@ mod tests {
         let e = compile_within(&s, &short, Direction::Response, &mut scanned, budget).unwrap_err();
         assert!(e.contains("budget is spent"), "{e}");
         assert_eq!(scanned.steps, 6);
+    }
+
+    #[test]
+    fn a_reference_that_is_not_a_string_is_charged_for_its_text() {
+        // Conversion and bundling copy a `$ref` whatever it holds: an object
+        // of text there is scanned like any other member.
+        let s = spec(&json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}}).to_string());
+        let e = compile(&s, &json!({"$ref": {"d": "d".repeat(MAX_SCAN_BYTES)}}), Direction::Response).unwrap_err();
+        assert!(e.contains("MiB of names and strings"), "{e}");
+        assert!(too_large(&e), "{e}");
+        // A component holding 1 MiB of it, reached by many schemas: each
+        // compile is charged for it, so a shared budget of 10 MiB is spent by
+        // the tenth.
+        let big = json!({"type": "string", "$ref": {"blob": "x".repeat(1 << 20)}});
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "components": {"schemas": {"Big": big}}});
+        let s = spec(&doc.to_string());
+        let schema = json!({"allOf": [{"$ref": "#/components/schemas/Big"}]});
+        let mut scanned = Scanned::default();
+        let budget = Scanned { steps: usize::MAX, bytes: 10 << 20 };
+        let mut refused = None;
+        for i in 0..100 {
+            if compile_within(&s, &schema, Direction::Response, &mut scanned, budget).is_err_and(|e| e.contains("budget is spent")) {
+                refused = Some(i);
+                break;
+            }
+        }
+        assert_eq!(refused, Some(9), "{scanned:?}");
+        assert!(scanned.bytes > 10 << 20, "{scanned:?}");
+    }
+
+    #[test]
+    fn refusals_for_size_are_told_apart() {
+        let s = spec(&json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}}).to_string());
+        let e = compile(&s, &json!({"enum": (0..1_200_000).collect::<Vec<u32>>()}), Direction::Response).unwrap_err();
+        assert!(too_large(&e), "{e}");
+        for schema in [json!({"$ref": "#/nowhere"}), json!({"$ref": "https://example.com/s.json"})] {
+            let e = compile(&s, &schema, Direction::Response).unwrap_err();
+            assert!(!too_large(&e), "{e}");
+        }
     }
 
     #[test]

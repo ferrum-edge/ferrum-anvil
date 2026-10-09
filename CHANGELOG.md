@@ -14,10 +14,19 @@
     names and strings they copy, not only for members: a schema and the schemas it references
     may hold 16 MiB of them, and the compiles of one lint or analysis 320 MiB. A schema with
     few members and a very long text (a multi-megabyte description, say) is no longer
-    copied by every compile; its examples are counted as not checked.
-  - The `spec-drift` budget for walking bodies along their schemas for suggestions is raised
-    from 256 MiB to 1 GiB. Most of what it charges lasts only while a body is walked, and on a
-    large ordinary description 256 MiB stopped suggestions earlier than before 0.1.4.
+    copied by every compile; its examples are counted as not checked. A `$ref` whose value is
+    not a string is counted like any other member, since compiles copy it too. Lint and
+    `spec-drift` each count against their own budget of these sizes. About 16 bytes per member
+    is an estimate, still to be checked on large public descriptions.
+  - `spec-drift` notes a response schema refused for its size apart from one with an external
+    or broken reference.
+  - The `spec-drift` budget for what walking bodies along their schemas for suggestions copies
+    is raised from 256 MiB to 1 GiB. Those copies last only while a body is walked, and on a
+    large ordinary description 256 MiB stopped suggestions earlier than before 0.1.4. What the
+    walks keep until the analysis ends (the pointers, names and owners of suggested fixes, of
+    required-property tallies and of their links to findings, and the calls each fix was seen
+    in) is charged to a separate 256 MiB budget. Past it, walks record nothing new, with a
+    note, so what an analysis keeps stays about where it was.
 
 ## [0.1.5] - 2026-10-08
 
