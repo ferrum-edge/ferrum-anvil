@@ -61,12 +61,15 @@ company ruleset.
     (repeated references count each time);
   - it and the schemas it references have more than 1,000,000 members and
     items (a large `enum` passes; a pathological one is not scanned on
-    every compile).
+    every compile), or more than 16 MiB of member names and strings (each
+    compile copies them, however few members hold them: a description of
+    several megabytes, say).
 
   Examples behind such a schema are counted in `examples_not_checked`. A
   schema is compiled once however many media types `$ref` it, and all the
-  compiles of a lint scan 20,000,000 members and items at most; examples
-  past that are counted as not checked too.
+  compiles of a lint scan 20,000,000 members and items, and 320 MiB of
+  names and strings, at most; examples past that are counted as not checked
+  too.
 - **Operations are bounded too.** They look at 2 million parameters,
   responses and media types at most in all. Inherited path-level
   parameters, the document's security requirements and a shared response's
@@ -149,7 +152,9 @@ selects every item of a list or value of a map (`static_segments.*`,
 leading `raw.` reads the original OpenAPI object of the target (after `$ref`
 resolution) instead of the normalized fields, for dialect-specific or
 extension rules (`raw.x-acme-owner`); a finding then points at that exact
-member. Without `field`, the function sees the whole target.
+member. A `raw.` field is read where it is in the document, not copied,
+however large it is and however many paths reach it. Without `field`, the
+function sees the whole target.
 
 | Function | Options | Fails when the value… |
 |---|---|---|
@@ -399,9 +404,18 @@ keys that look like data (see below) are not named. A body is checked only
 when it was captured completely, decoded, is JSON and at most 1 MiB, and
 while the analysis has parsed less than 32 MiB of bodies in all; otherwise a
 note says why (history set to keep no response bodies, say). Schema
-compiles share the linter's scanning budget and body walks for suggestions
-stop after 2,000,000 values, each with a note. The operations an analysis
-matches against are capped at 256 MiB of their paths, pointers and
+compiles have budgets the size of the linter's (members and items, and
+bytes of names and strings), counted for the analysis on its own; a schema
+refused for its size gets a note of its own. Body walks for suggestions
+stop after 2,000,000 values or 1 GiB of references followed and schema
+pointers copied on the way; most of those copies last only while a body is
+walked. What walks keep until the analysis ends (the pointers, names and
+owners of suggested fixes, of required-property tallies and of their links
+to findings, and the enum values to add) is capped at 256 MiB; past that,
+walks record nothing new, but the calls each recorded fix or tally was seen
+in are still counted exactly. Each of these limits adds a note when it is
+reached. The operations an analysis matches against are capped at 256 MiB
+of their paths, pointers and
 declared statuses (an operation reached through several paths counts for
 each); past that, the rest are left out with a note, and calls to them are
 reported as undeclared. Each operation's parameters, request body,

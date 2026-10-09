@@ -4,12 +4,13 @@ use crate::checks::show;
 use crate::locate::ptr;
 use crate::model::{Direction, Media, Model, Target, TargetKind};
 use crate::ruleset::{Assertion, FieldToken, Given, Rule, RuleSet, RulesetSummary, Severity};
-use crate::schema;
+use crate::schema::{self, Scanned};
 use crate::spec::{Meter, Reach, Spec};
 use anvil_import::Dialect;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 /// Examples validated per lint (each compiles a validator).
@@ -17,6 +18,12 @@ pub const MAX_EXAMPLE_CHECKS: usize = 1_000;
 /// Schema members and items scanned by all the example checks of a lint
 /// together (each compile scans, bundles and builds its schema).
 pub const MAX_EXAMPLE_SCAN_STEPS: usize = 20 * schema::MAX_SCAN_STEPS;
+/// Bytes of schema member names and strings scanned, and so copied, by all
+/// the example checks of a lint together: in the same ratio to
+/// [`MAX_EXAMPLE_SCAN_STEPS`] as one compile's limits.
+pub const MAX_EXAMPLE_SCAN_BYTES: usize = 20 * schema::MAX_SCAN_BYTES;
+/// Both of those.
+pub const MAX_EXAMPLE_SCAN: Scanned = Scanned { steps: MAX_EXAMPLE_SCAN_STEPS, bytes: MAX_EXAMPLE_SCAN_BYTES };
 /// Bytes that following the `$ref`s of named examples may cost in all (see
 /// [`Spec::resolve_within`]); examples past it are counted, not checked.
 const MAX_EXAMPLE_REF_BYTES: usize = crate::model::MAX_MODEL_VIEW_BYTES;
@@ -159,8 +166,8 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
         not_checked: 0,
         compiled: HashMap::new(),
         compiles: 0,
-        scan_steps: 0,
-        scan_budget: MAX_EXAMPLE_SCAN_STEPS,
+        scanned: Scanned::default(),
+        scan_budget: MAX_EXAMPLE_SCAN,
         refs: Meter::new(MAX_EXAMPLE_REF_BYTES),
     };
     let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
@@ -252,9 +259,10 @@ struct Collector<'a> {
     dropped: usize,
 }
 
-/// A selected field value and the pointer it came from, when known.
-struct Selected {
-    value: Option<Value>,
+/// A selected field value and the pointer it came from, when known. A value
+/// of the document or of the target's view is borrowed, not copied.
+struct Selected<'v> {
+    value: Option<Cow<'v, Value>>,
     pointer: Option<String>,
 }
 
@@ -262,19 +270,19 @@ fn apply(spec: &Spec, rule: &Rule, t: &Target, out: &mut Collector<'_>) {
     let sibling = |name: &str| -> Option<Value> { t.view.get(name).cloned() };
     for c in &rule.conditions {
         let selected = select(spec, t, c);
-        if selected.iter().any(|s| c.function.evaluate(s.value.as_ref(), &sibling).is_some()) {
+        if selected.iter().any(|s| c.function.evaluate(s.value.as_deref(), &sibling).is_some()) {
             return;
         }
     }
     for a in &rule.then {
         for s in select(spec, t, a) {
-            let Some(reason) = a.function.evaluate(s.value.as_ref(), &sibling) else { continue };
+            let Some(reason) = a.function.evaluate(s.value.as_deref(), &sibling) else { continue };
             let pointer = s.pointer.unwrap_or_else(|| t.pointer.clone());
             // A Swagger 2.0 synthetic target keys itself `…#suffix`.
             let pointer = pointer.split('#').next().unwrap_or("").to_string();
             let field = a.field.as_ref().map(|f| f.source.clone()).unwrap_or_default();
             let message = match &rule.message {
-                Some(m) => render(m, rule, t, &field, s.value.as_ref(), &reason),
+                Some(m) => render(m, rule, t, &field, s.value.as_deref(), &reason),
                 None if field.is_empty() => format!("{}: {reason}", t.label),
                 None => format!("{}: {field} {reason}", t.label),
             };
@@ -335,21 +343,24 @@ impl<'v> Place<'v> {
         }
     }
 
-    fn to_value(self) -> Value {
+    /// The value here: borrowed, except the view itself, which is a map and
+    /// not a value (it is small: the model's copy of a target).
+    fn to_value(self) -> Cow<'v, Value> {
         match self {
-            Place::View(m) => Value::Object(m.clone()),
-            Place::Value(v) => v.clone(),
+            Place::View(m) => Cow::Owned(Value::Object(m.clone())),
+            Place::Value(v) => Cow::Borrowed(v),
         }
     }
 }
 
-/// The values a field path selects on a target. The walk borrows what it
-/// passes through (for `raw.` fields, the original object, however large)
-/// and copies only what it selects.
-fn select(spec: &Spec, t: &Target, a: &Assertion) -> Vec<Selected> {
+/// The values a field path selects on a target. The walk and what it selects
+/// borrow the target's view or the document (for `raw.` fields, the original
+/// object, however large, however many paths reach it); only a selected
+/// view, which is not a value, is copied.
+fn select<'v>(spec: &'v Spec, t: &'v Target, a: &Assertion) -> Vec<Selected<'v>> {
     let Some(field) = &a.field else {
         // No field: the function looks at the whole target.
-        return vec![Selected { value: Some(Value::Object(t.view.clone())), pointer: None }];
+        return vec![Selected { value: Some(Place::View(&t.view).to_value()), pointer: None }];
     };
     let (start, base): (Option<Place<'_>>, Option<String>) = if field.raw || t.kind == TargetKind::Node {
         let at = t.pointer.split('#').next().unwrap_or("");
@@ -449,9 +460,9 @@ struct ExampleChecker {
     compiled: HashMap<(String, bool), Option<jsonschema::Validator>>,
     /// Compiles attempted.
     compiles: usize,
-    /// Members and items scanned by those compiles, and the limit.
-    scan_steps: usize,
-    scan_budget: usize,
+    /// What those compiles scanned, and the limit.
+    scanned: Scanned,
+    scan_budget: Scanned,
     /// What following the references of named examples may cost.
     refs: Meter,
 }
@@ -510,7 +521,7 @@ impl ExampleChecker {
         if !self.compiled.contains_key(&key) {
             self.budget -= 1;
             self.compiles += 1;
-            let v = schema::compile_within(spec, schema, dir, &mut self.scan_steps, self.scan_budget).ok();
+            let v = schema::compile_within(spec, schema, dir, &mut self.scanned, self.scan_budget).ok();
             self.compiled.insert(key.clone(), v);
         }
         let Some(validator) = self.compiled.get(&key).and_then(Option::as_ref) else {
@@ -538,16 +549,34 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn checker(scan_budget: usize) -> ExampleChecker {
+    fn checker(scan_budget: Scanned) -> ExampleChecker {
         ExampleChecker {
             budget: MAX_EXAMPLE_CHECKS,
             not_checked: 0,
             compiled: HashMap::new(),
             compiles: 0,
-            scan_steps: 0,
+            scanned: Scanned::default(),
             scan_budget,
             refs: Meter::new(MAX_EXAMPLE_REF_BYTES),
         }
+    }
+
+    #[test]
+    fn raw_fields_borrow_the_document() {
+        use crate::checks::Function;
+        use crate::ruleset::FieldPath;
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"get": {"responses": {"200": {"description": "ok"}}}}}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let mut no_examples = |_: &Media<'_>, _: Direction| -> Vec<String> { vec![] };
+        let model = Model::build(&spec, &mut no_examples);
+        let op = model.of_kind(TargetKind::Operation).next().unwrap();
+        let a = Assertion { field: Some(FieldPath::parse("raw.responses").unwrap()), function: Function::Defined };
+        let selected = select(&spec, op, &a);
+        assert_eq!(selected.len(), 1);
+        let Some(Cow::Borrowed(v)) = &selected[0].value else { panic!("the raw value was copied") };
+        assert!(std::ptr::eq(*v, spec.root.pointer("/paths/~1a/get/responses").unwrap()));
+        assert_eq!(selected[0].pointer.as_deref(), Some("/paths/~1a/get/responses"));
     }
 
     #[test]
@@ -579,12 +608,40 @@ mod tests {
         let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
             "components": {"schemas": {"Big": {"type": "integer", "enum": (0..50_000).collect::<Vec<u32>>()}}}});
         let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
-        let mut checker = checker(200_000);
+        let mut checker = checker(Scanned { steps: 200_000, bytes: MAX_EXAMPLE_SCAN_BYTES });
         let mut examples = |m: &Media<'_>, dir: Direction| checker.check(&spec, m, dir);
         drop(Model::build(&spec, &mut examples));
         assert_eq!(checker.compiles, 100);
-        assert!(checker.scan_steps <= 200_000 + 50_010, "{}", checker.scan_steps);
+        assert!(checker.scanned.steps <= 200_000 + 50_010, "{:?}", checker.scanned);
         assert!(checker.not_checked >= 95, "{}", checker.not_checked);
+    }
+
+    #[test]
+    fn compiles_share_one_byte_budget() {
+        // A schema of three members, one a description of 1 MiB: few members,
+        // but each compile copies the text. Each media type wraps it, so none
+        // shares a validator.
+        let mut paths = Map::new();
+        for i in 0..100 {
+            paths.insert(
+                format!("/p{i}"),
+                json!({"get": {"responses": {"200": {"description": "ok", "content": {"application/json": {
+                    "schema": {"allOf": [{"$ref": "#/components/schemas/Long"}]}, "example": "x"}}}}}}),
+            );
+        }
+        let long = json!({"type": "string", "maxLength": 3, "description": "d".repeat(1 << 20)});
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
+            "components": {"schemas": {"Long": long}}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let mut checker = checker(Scanned { steps: MAX_EXAMPLE_SCAN_STEPS, bytes: 10 << 20 });
+        let mut examples = |m: &Media<'_>, dir: Direction| checker.check(&spec, m, dir);
+        drop(Model::build(&spec, &mut examples));
+        assert_eq!(checker.compiles, 100);
+        // Members alone would not have stopped them; bytes did, after about
+        // ten compiles.
+        assert!(checker.scanned.steps < 2_000, "{:?}", checker.scanned);
+        assert!(checker.scanned.bytes <= (11 << 20) + 10_000, "{:?}", checker.scanned);
+        assert!(checker.not_checked >= 89, "{}", checker.not_checked);
     }
 
     #[test]
@@ -600,7 +657,7 @@ mod tests {
         let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": paths,
             "components": {"schemas": {"Big": {"type": "integer", "enum": (0..50_000).collect::<Vec<u32>>()}}}});
         let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
-        let mut checker = checker(MAX_EXAMPLE_SCAN_STEPS);
+        let mut checker = checker(MAX_EXAMPLE_SCAN);
         let mut examples = |m: &Media<'_>, dir: Direction| checker.check(&spec, m, dir);
         let model = Model::build(&spec, &mut examples);
         assert_eq!(model.of_kind(TargetKind::MediaType).count(), 1_000);

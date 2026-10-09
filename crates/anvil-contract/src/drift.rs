@@ -23,7 +23,7 @@
 //! short enum token.
 
 use crate::infer::{Shape, mark_nullable, safe_name};
-use crate::lint::MAX_EXAMPLE_SCAN_STEPS;
+use crate::lint::MAX_EXAMPLE_SCAN;
 use crate::lint::SpecSummary;
 use crate::locate::ptr;
 use crate::model::{
@@ -33,7 +33,7 @@ use crate::observe::{Observation, ObservedBody, count_values, essence, is_json, 
 use crate::patch::{self, PatchOp};
 use crate::route::{Route, Router};
 use crate::ruleset::Severity;
-use crate::schema;
+use crate::schema::{self, Scanned};
 use crate::spec::{Meter, Spec};
 use anvil_import::Dialect;
 use chrono::{DateTime, Utc};
@@ -55,13 +55,25 @@ const MAX_SCHEMA_FIXES: usize = 500;
 const MAX_ENUM_TOKENS: usize = 20;
 /// Body values walked for schema suggestions, across the analysis.
 const MAX_WALK_STEPS: usize = 2_000_000;
-/// What walking bodies along their schemas may cost, in bytes: the
+/// What walking bodies along their schemas may copy, in bytes: the
 /// references followed and the schema pointers copied on the way (see
 /// [`Spec::resolve_within`]). Apart from [`MAX_RESOLVE_BYTES`], so that
-/// walks never leave operations unresolved.
-const MAX_WALK_BYTES: usize = 256 * 1024 * 1024;
+/// walks never leave operations unresolved. Larger than the budgets of what
+/// an analysis keeps: every body walked copies its schema pointers again,
+/// so on a large ordinary description a smaller budget would stop
+/// suggestions early, and these copies are dropped as the walk returns.
+/// The copies that are kept are charged to [`MAX_KEPT_BYTES`] as well.
+const MAX_WALK_BYTES: usize = 1024 * 1024 * 1024;
 /// Noted once either walking budget is spent.
 const WALK_SPENT: &str = "the analysis' budget for walking bodies is spent; later bodies got no schema suggestions";
+/// What walking bodies may keep until the analysis ends, in bytes: the
+/// pointers, names, owners and enum tokens of suggested fixes, of
+/// required-property tallies and of the links from fixes to findings. Past
+/// it, walks record nothing new, but still count the calls of what is
+/// already recorded.
+const MAX_KEPT_BYTES: usize = 256 * 1024 * 1024;
+/// Noted once [`MAX_KEPT_BYTES`] is spent.
+const KEPT_SPENT: &str = "the analysis' budget for keeping schema suggestions is spent; later bodies added no new ones";
 /// Query parameter names kept per undeclared endpoint or per operation.
 const MAX_QUERY_NAMES: usize = 50;
 /// Undeclared endpoints and undeclared servers reported.
@@ -314,6 +326,9 @@ pub fn revise(spec: &Spec, report: &DriftReport, ids: &[String]) -> Revision {
 
 // ---------------------------------------------------------------- analysis
 
+/// A new finding's message, operation and pointer.
+type Details = (String, Option<String>, Option<String>);
+
 #[derive(Default)]
 struct FindingAcc {
     kind: Option<DriftKind>,
@@ -367,6 +382,24 @@ enum FixKey {
     Enum { at: String },
 }
 
+/// A suggested schema fix.
+struct Fix {
+    owner: String,
+    /// For a property: what its values looked like.
+    shape: Shape,
+    /// The calls it was seen in, and the last of them (see
+    /// [`State::observed`]): counted, not kept, so the count stays exact
+    /// past [`MAX_KEPT_BYTES`].
+    seen: usize,
+    last: usize,
+    /// For an enum: the tokens to add.
+    tokens: BTreeSet<String>,
+}
+
+/// One operation object's finding keys, by kind, then by what the call adds
+/// to its pointer (looked up by `&str`, without copying it).
+type OpKeys = HashMap<DriftKind, HashMap<String, Rc<str>>>;
+
 struct State<'a> {
     spec: &'a Spec,
     router: Router<'a>,
@@ -377,19 +410,26 @@ struct State<'a> {
     declared: HashMap<(usize, usize), Option<Rc<Declared<'a>>>>,
     /// What resolving them may still cost.
     resolve_meter: Meter,
-    /// What walking bodies may still cost (see [`MAX_WALK_BYTES`]).
+    /// What walking bodies may still copy (see [`MAX_WALK_BYTES`]).
     walk_bytes: Meter,
+    /// What walking bodies may still keep (see [`MAX_KEPT_BYTES`]).
+    kept: Meter,
     opts: DriftOptions,
-    findings: BTreeMap<String, FindingAcc>,
+    findings: BTreeMap<Rc<str>, FindingAcc>,
+    /// The keys of each operation object's findings, by kind and what the
+    /// call adds to the operation's pointer (see [`State::op_finding`]).
+    op_keys: HashMap<(usize, usize), OpKeys>,
     ops: Vec<OpAcc>,
     endpoints: BTreeMap<(String, String), EndpointAcc>,
-    fixes: BTreeMap<FixKey, (String, Shape, BTreeSet<String>)>,
+    fixes: BTreeMap<FixKey, Fix>,
+    /// Calls observed so far; the current call's number.
+    observed: usize,
     /// (schema holding `required`, name) → (seen, missing, owner).
     required: BTreeMap<(String, String), (usize, usize, String)>,
     servers: BTreeMap<String, (usize, String)>,
     validators: HashMap<(String, bool), Option<jsonschema::Validator>>,
-    /// Members and items scanned by schema compiles.
-    scan_steps: usize,
+    /// What schema compiles scanned (members and items, and bytes).
+    scanned: Scanned,
     /// The longest `required` list of the description.
     max_required: usize,
     /// Body values walked.
@@ -404,7 +444,7 @@ struct State<'a> {
     to: Option<DateTime<Utc>>,
     /// Schema findings by (operation, status, place in the body, error
     /// category; see [`describe`]).
-    schema_places: HashMap<(String, String, String, String), BTreeSet<String>>,
+    schema_places: HashMap<(String, String, String, String), BTreeSet<Rc<str>>>,
     /// Fixes to link to the schema findings about the same place and
     /// category, resolved once at the end: (operation, status, place,
     /// category, suggestion key).
@@ -422,36 +462,7 @@ struct Declared<'a> {
 
 /// Compare observations with the description.
 pub fn analyze(spec: &Spec, observations: &[Observation], opts: &DriftOptions) -> DriftReport {
-    let router = Router::new(spec);
-    let n_ops = router.operation_count();
-    let mut st = State {
-        spec,
-        router,
-        operations: vec![None; n_ops],
-        declared: HashMap::new(),
-        resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
-        walk_bytes: Meter::new(MAX_WALK_BYTES),
-        opts: opts.clone(),
-        findings: BTreeMap::new(),
-        ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
-        endpoints: BTreeMap::new(),
-        fixes: BTreeMap::new(),
-        required: BTreeMap::new(),
-        servers: BTreeMap::new(),
-        validators: HashMap::new(),
-        scan_steps: 0,
-        max_required: longest_required(&spec.root),
-        walk_steps: 0,
-        per_schema: HashMap::new(),
-        notes: BTreeMap::new(),
-        matched: 0,
-        without_response: 0,
-        ignored: 0,
-        from: None,
-        to: None,
-        schema_places: HashMap::new(),
-        pending_links: BTreeSet::new(),
-    };
+    let mut st = State::new(spec, opts);
     for o in observations {
         st.observe(o);
     }
@@ -689,34 +700,97 @@ fn allows_null(s: &Value) -> bool {
 }
 
 impl<'a> State<'a> {
+    fn new(spec: &'a Spec, opts: &DriftOptions) -> State<'a> {
+        let router = Router::new(spec);
+        let n_ops = router.operation_count();
+        State {
+            spec,
+            router,
+            operations: vec![None; n_ops],
+            declared: HashMap::new(),
+            resolve_meter: Meter::new(MAX_RESOLVE_BYTES),
+            walk_bytes: Meter::new(MAX_WALK_BYTES),
+            kept: Meter::new(MAX_KEPT_BYTES),
+            opts: opts.clone(),
+            findings: BTreeMap::new(),
+            op_keys: HashMap::new(),
+            ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
+            endpoints: BTreeMap::new(),
+            fixes: BTreeMap::new(),
+            observed: 0,
+            required: BTreeMap::new(),
+            servers: BTreeMap::new(),
+            validators: HashMap::new(),
+            scanned: Scanned::default(),
+            max_required: longest_required(&spec.root),
+            walk_steps: 0,
+            per_schema: HashMap::new(),
+            notes: BTreeMap::new(),
+            matched: 0,
+            without_response: 0,
+            ignored: 0,
+            from: None,
+            to: None,
+            schema_places: HashMap::new(),
+            pending_links: BTreeSet::new(),
+        }
+    }
+
     fn dialect(&self) -> Dialect {
         self.spec.dialect
     }
 
     /// Record a difference; false when it was not recorded (too many
-    /// distinct ones), and then nothing about it is gathered either.
-    fn finding(
-        &mut self,
-        key: String,
-        kind: DriftKind,
-        obs: &Observation,
-        message: String,
-        operation: Option<String>,
-        pointer: Option<String>,
-    ) -> bool {
-        if !self.findings.contains_key(&key) && self.findings.len() >= MAX_FINDING_KEYS {
-            self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
-            return false;
+    /// distinct ones), and then nothing about it is gathered either. Its
+    /// message, operation and pointer are made only when it is new.
+    fn finding(&mut self, key: &Rc<str>, kind: DriftKind, obs: &Observation, details: impl FnOnce() -> Details) -> bool {
+        if !self.findings.contains_key(key) {
+            if self.findings_full() {
+                self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
+                return false;
+            }
+            let (message, operation, pointer) = details();
+            self.findings.insert(Rc::clone(key), FindingAcc { kind: Some(kind), message, operation, pointer, ..FindingAcc::default() });
         }
-        let f = self.findings.entry(key.clone()).or_default();
-        if f.kind.is_none() {
-            *f = FindingAcc { kind: Some(kind), message, operation, pointer, ..FindingAcc::default() };
-        }
+        let Some(f) = self.findings.get_mut(key) else { return false };
         f.count += 1;
         if f.observations.len() < self.opts.max_examples && !f.observations.contains(&obs.id) {
             f.observations.push(obs.id.clone());
         }
         true
+    }
+
+    /// Record a difference about operation object `object` (see
+    /// [`State::finding`]) under the key `key` builds, and return that key
+    /// when it is recorded. Such a key copies the operation's pointer, which
+    /// may be long: it is built the first time a call to the operation needs
+    /// it and then kept by its kind and `end` (what the call adds: a query
+    /// name, content type or status, or nothing), shared with
+    /// [`State::findings`], instead of being built again for each call. Only
+    /// the keys of recorded findings are kept.
+    fn op_finding(
+        &mut self,
+        object: (usize, usize),
+        kind: DriftKind,
+        end: &str,
+        key: impl FnOnce() -> String,
+        obs: &Observation,
+        details: impl FnOnce() -> Details,
+    ) -> Option<Rc<str>> {
+        let key = match self.op_keys.get(&object).and_then(|keys| keys.get(&kind)).and_then(|ends| ends.get(end)) {
+            Some(k) => Rc::clone(k),
+            None => {
+                // Not kept, so not recorded: nothing else records it.
+                if self.findings_full() {
+                    self.note(format!("only the first {MAX_FINDING_KEYS} distinct differences were collected"));
+                    return None;
+                }
+                let k: Rc<str> = key().into();
+                self.op_keys.entry(object).or_default().entry(kind).or_default().insert(end.to_string(), Rc::clone(&k));
+                k
+            }
+        };
+        self.finding(&key, kind, obs, details).then_some(key)
     }
 
     /// No more distinct differences are recorded: body walks, which only
@@ -726,7 +800,9 @@ impl<'a> State<'a> {
     }
 
     fn link(&mut self, finding: &str, suggestion_key: &str) {
-        if let Some(f) = self.findings.get_mut(finding) {
+        if let Some(f) = self.findings.get_mut(finding)
+            && !f.suggestions.contains(suggestion_key)
+        {
             f.suggestions.insert(suggestion_key.to_string());
         }
     }
@@ -736,6 +812,7 @@ impl<'a> State<'a> {
     }
 
     fn observe(&mut self, o: &Observation) {
+        self.observed += 1;
         if let Some(at) = o.at {
             self.from = Some(self.from.map_or(at, |f| f.min(at)));
             self.to = Some(self.to.map_or(at, |t| t.max(at)));
@@ -758,15 +835,10 @@ impl<'a> State<'a> {
             } else {
                 Some(generalize(&base)).filter(|g| !g.contains('{') && g != "/").unwrap_or_default()
             };
-            let key = format!("server|{origin}");
-            if self.finding(
-                key.clone(),
-                DriftKind::UndeclaredServer,
-                o,
-                format!("Requests went to {origin}, which is not one of the declared servers"),
-                None,
-                Some(if self.spec.is_swagger2() { "/host".into() } else { "/servers".into() }),
-            ) {
+            let key: Rc<str> = format!("server|{origin}").into();
+            let at = if self.spec.is_swagger2() { "/host" } else { "/servers" };
+            let details = || (format!("Requests went to {origin}, which is not one of the declared servers"), None, Some(at.into()));
+            if self.finding(&key, DriftKind::UndeclaredServer, o, details) {
                 self.link(&key, &key);
                 self.servers.entry(origin.clone()).or_insert((0, base)).0 += 1;
             }
@@ -806,8 +878,8 @@ impl<'a> State<'a> {
             }
             None => (DriftKind::UndeclaredPath, format!("{label} is called, but the description has no such path"), None),
         };
-        let key = format!("endpoint|{method}|{pattern}");
-        if !self.finding(key.clone(), kind, o, message, Some(label), pointer) {
+        let key: Rc<str> = format!("endpoint|{method}|{pattern}").into();
+        if !self.finding(&key, kind, o, || (message, Some(label), pointer)) {
             return;
         }
         self.link(&key, &key);
@@ -876,6 +948,7 @@ impl<'a> State<'a> {
     fn check_operation(&mut self, i: usize, o: &Observation) {
         let spec = self.spec;
         let op = self.operation(i);
+        let object = self.router.operation_object(i);
         let label = op.label();
         let op_ptr = &op.pointer;
         let b = budget(spec, &op);
@@ -888,14 +961,9 @@ impl<'a> State<'a> {
             acc.max_request = acc.max_request.max(Some(o.request_bytes));
         }
         if op.op.get("deprecated").and_then(Value::as_bool) == Some(true) {
-            self.finding(
-                format!("deprecated|{op_ptr}"),
-                DriftKind::DeprecatedOperationCalled,
-                o,
-                format!("{label} is deprecated but was called"),
-                Some(label.clone()),
-                Some(op_ptr.clone()),
-            );
+            let key = || format!("deprecated|{op_ptr}");
+            let details = || (format!("{label} is deprecated but was called"), Some(label.clone()), Some(op_ptr.clone()));
+            self.op_finding(object, DriftKind::DeprecatedOperationCalled, "", key, o, details);
         }
         let Some(lists) = self.lists(i) else {
             self.note("the description is too large to compare completely; some calls to declared operations were not checked");
@@ -916,15 +984,10 @@ impl<'a> State<'a> {
                         self.note(format!("at most {MAX_QUERY_NAMES} undeclared query parameters are reported per operation"));
                         continue;
                     }
-                    let key = format!("query|{op_ptr}|{q}");
-                    if self.finding(
-                        key.clone(),
-                        DriftKind::UndeclaredQueryParameter,
-                        o,
-                        format!("{label} was called with query parameter `{q}`, which is not declared"),
-                        Some(label.clone()),
-                        Some(op_ptr.clone()),
-                    ) {
+                    let key = || format!("query|{op_ptr}|{q}");
+                    let message = || format!("{label} was called with query parameter `{q}`, which is not declared");
+                    let details = || (message(), Some(label.clone()), Some(op_ptr.clone()));
+                    if let Some(key) = self.op_finding(object, DriftKind::UndeclaredQueryParameter, q, key, o, details) {
                         self.link(&key, &key);
                         self.ops[i].new_query.insert(q.clone());
                     }
@@ -938,14 +1001,9 @@ impl<'a> State<'a> {
                 _ => true,
             };
             if !present {
-                self.finding(
-                    format!("required|{}|{}", p.pointer, p.name),
-                    DriftKind::MissingRequiredParameter,
-                    o,
-                    format!("{label} was called without the required {} parameter `{}`", p.location, p.name),
-                    Some(label.clone()),
-                    Some(p.pointer.clone()),
-                );
+                let key: Rc<str> = format!("required|{}|{}", p.pointer, p.name).into();
+                let message = || format!("{label} was called without the required {} parameter `{}`", p.location, p.name);
+                self.finding(&key, DriftKind::MissingRequiredParameter, o, || (message(), Some(label.clone()), Some(p.pointer.clone())));
             }
         }
 
@@ -962,15 +1020,10 @@ impl<'a> State<'a> {
                 } else {
                     declared.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>().join(", ")
                 };
-                let key = format!("reqtype|{op_ptr}|{e}");
-                if self.finding(
-                    key.clone(),
-                    DriftKind::UndeclaredRequestContentType,
-                    o,
-                    format!("{label} was sent a {e} body; the description declares {list}"),
-                    Some(label.clone()),
-                    body.map(|b| b.pointer.clone()).or(Some(op_ptr.clone())),
-                ) {
+                let key = || format!("reqtype|{op_ptr}|{e}");
+                let message = || format!("{label} was sent a {e} body; the description declares {list}");
+                let details = || (message(), Some(label.clone()), Some(body.map_or_else(|| op_ptr.clone(), |b| b.pointer.clone())));
+                if let Some(key) = self.op_finding(object, DriftKind::UndeclaredRequestContentType, &e, key, o, details) {
                     self.link(&key, &key);
                     self.ops[i].new_request_types.insert(e);
                 }
@@ -980,9 +1033,11 @@ impl<'a> State<'a> {
             && o.request_bytes > max
         {
             self.ops[i].large_request += 1;
-            let key = format!("reqsize|{op_ptr}");
-            self.finding(key.clone(), DriftKind::RequestLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
-            self.link(&key, &key);
+            let key = || format!("reqsize|{op_ptr}");
+            let details = || (String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            if let Some(key) = self.op_finding(object, DriftKind::RequestLargerThanDeclared, "", key, o, details) {
+                self.link(&key, &key);
+            }
         }
 
         // Response.
@@ -994,32 +1049,29 @@ impl<'a> State<'a> {
             && l > max
         {
             self.ops[i].slow += 1;
-            let key = format!("slow|{op_ptr}");
-            self.finding(key.clone(), DriftKind::SlowerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
-            self.link(&key, &key);
+            let key = || format!("slow|{op_ptr}");
+            let details = || (String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            if let Some(key) = self.op_finding(object, DriftKind::SlowerThanDeclared, "", key, o, details) {
+                self.link(&key, &key);
+            }
         }
         if let (Some(max), Some(n)) = (b.max_response_bytes, r.bytes)
             && n > max
         {
             self.ops[i].large += 1;
-            let key = format!("size|{op_ptr}");
-            self.finding(key.clone(), DriftKind::ResponseLargerThanDeclared, o, String::new(), Some(label.clone()), Some(op_ptr.clone()));
-            self.link(&key, &key);
+            let key = || format!("size|{op_ptr}");
+            let details = || (String::new(), Some(label.clone()), Some(op_ptr.clone()));
+            if let Some(key) = self.op_finding(object, DriftKind::ResponseLargerThanDeclared, "", key, o, details) {
+                self.link(&key, &key);
+            }
         }
         let has_body = !matches!(r.body, ObservedBody::Empty) && r.bytes != Some(0);
         let ct = r.content_type.as_deref().map(essence).filter(|_| has_body);
         let Some(k) = declared_response(&lists.resps, &code) else {
-            let key = format!("status|{op_ptr}|{code}");
-            if !self.finding(
-                key.clone(),
-                DriftKind::UndeclaredStatus,
-                o,
-                format!("{label} returned {code}, which is not a documented response"),
-                Some(label.clone()),
-                Some(ptr(op_ptr, "responses")),
-            ) {
-                return;
-            }
+            let key = || format!("status|{op_ptr}|{code}");
+            let message = || format!("{label} returned {code}, which is not a documented response");
+            let details = || (message(), Some(label.clone()), Some(ptr(op_ptr, "responses")));
+            let Some(key) = self.op_finding(object, DriftKind::UndeclaredStatus, &code, key, o, details) else { return };
             self.link(&key, &key);
             let shape = self.ops[i].new_responses.entry((code, ct)).or_default();
             if let ObservedBody::Json(v) = &r.body {
@@ -1031,14 +1083,9 @@ impl<'a> State<'a> {
         // Required response headers.
         for (name, hptr) in &lists.required_headers[k] {
             if !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
-                self.finding(
-                    format!("header|{hptr}"),
-                    DriftKind::MissingResponseHeader,
-                    o,
-                    format!("The {code} response of {label} did not include the required header `{name}`"),
-                    Some(label.clone()),
-                    Some(hptr.clone()),
-                );
+                let key: Rc<str> = format!("header|{hptr}").into();
+                let message = || format!("The {code} response of {label} did not include the required header `{name}`");
+                self.finding(&key, DriftKind::MissingResponseHeader, o, || (message(), Some(label.clone()), Some(hptr.clone())));
             }
         }
         let Some(ct) = ct else {
@@ -1053,15 +1100,9 @@ impl<'a> State<'a> {
             } else {
                 resp.media.iter().map(|m| m.media_type.clone()).collect::<Vec<_>>().join(", ")
             };
-            let key = format!("ctype|{}|{ct}", resp.pointer);
-            if !self.finding(
-                key.clone(),
-                DriftKind::UndeclaredContentType,
-                o,
-                format!("The {code} response of {label} was {ct}; the description declares {list}"),
-                Some(label.clone()),
-                Some(resp.pointer.clone()),
-            ) {
+            let key: Rc<str> = format!("ctype|{}|{ct}", resp.pointer).into();
+            let message = || format!("The {code} response of {label} was {ct}; the description declares {list}");
+            if !self.finding(&key, DriftKind::UndeclaredContentType, o, || (message(), Some(label.clone()), Some(resp.pointer.clone()))) {
                 return;
             }
             self.link(&key, &key);
@@ -1092,14 +1133,19 @@ impl<'a> State<'a> {
         };
         let vkey = (target.unwrap_or_else(|| media.schema_pointer.clone()), false);
         if !self.validators.contains_key(&vkey) {
-            let v = schema::compile_within(spec, schema, Direction::Response, &mut self.scan_steps, MAX_EXAMPLE_SCAN_STEPS).ok();
-            if v.is_none() {
-                self.note(if self.scan_steps > MAX_EXAMPLE_SCAN_STEPS {
-                    "the analysis' budget for scanning schemas is spent; bodies of the remaining schemas were not checked"
-                } else {
-                    "some response schemas could not be compiled (an external or broken reference); their bodies were not checked"
-                });
-            }
+            let v = match schema::compile_within(spec, schema, Direction::Response, &mut self.scanned, MAX_EXAMPLE_SCAN) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    self.note(if self.scanned.exceeds(MAX_EXAMPLE_SCAN) {
+                        "the analysis' budget for scanning schemas is spent; bodies of the remaining schemas were not checked"
+                    } else if schema::too_large(&e) {
+                        "some response schemas are too large or too deeply nested to check; their bodies were not checked"
+                    } else {
+                        "some response schemas could not be compiled (an external or broken reference); their bodies were not checked"
+                    });
+                    None
+                }
+            };
             self.validators.insert(vkey.clone(), v);
         }
         let Some(validator) = self.validators.get(&vkey).and_then(Option::as_ref) else { return };
@@ -1120,25 +1166,20 @@ impl<'a> State<'a> {
         }
         if messages.is_empty() {
             // Still record required-property presence for relaxations.
-            self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, false);
+            self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, false);
             return;
         }
         for (place, what, category) in &messages {
             let m = format!("{place} {what}");
-            let key = format!("schema|{}|{m}", media.schema_pointer);
-            if !self.finding(
-                key.clone(),
-                DriftKind::ResponseSchemaMismatch,
-                o,
-                format!("The {code} response of {label} does not match its schema: {m}"),
-                Some(label.clone()),
-                Some(media.schema_pointer.clone()),
-            ) {
+            let key: Rc<str> = format!("schema|{}|{m}", media.schema_pointer).into();
+            let message = || format!("The {code} response of {label} does not match its schema: {m}");
+            let details = || (message(), Some(label.clone()), Some(media.schema_pointer.clone()));
+            if !self.finding(&key, DriftKind::ResponseSchemaMismatch, o, details) {
                 return;
             }
             self.schema_places.entry((label.clone(), code.clone(), place.clone(), category.clone())).or_default().insert(key);
         }
-        self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, true);
+        self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, true);
     }
 
     /// Count `n` steps of walking bodies and their schemas; false once the
@@ -1185,24 +1226,70 @@ impl<'a> State<'a> {
         }
     }
 
-    /// The fix at `key`, created with `owner` unless a cap is reached.
-    fn fix(&mut self, key: &FixKey, owner: impl FnOnce() -> String) -> Option<&mut (String, Shape, BTreeSet<String>)> {
+    /// Charge `bytes` that the analysis keeps until it ends (what a new fix,
+    /// tally or link records) to [`State::kept`]; false once that budget is
+    /// spent, and then nothing new is recorded.
+    fn keep(&mut self, bytes: usize) -> bool {
+        let fresh = !self.kept.exhausted();
+        if self.kept.charge(bytes) {
+            return true;
+        }
+        if fresh {
+            self.note(KEPT_SPENT);
+        }
+        false
+    }
+
+    /// The fix at `key`, created with `owner` (and for an enum its first
+    /// `token`) unless a cap or [`MAX_KEPT_BYTES`] is reached, with `token`
+    /// added while they allow and the current call counted.
+    fn fix(&mut self, key: &FixKey, owner: impl FnOnce() -> String, token: Option<&str>) -> Option<&mut Fix> {
         if !self.fixes.contains_key(key) {
             if self.fixes.len() >= MAX_SCHEMA_FIXES {
                 self.note(format!("only {MAX_SCHEMA_FIXES} schema changes are suggested; check again after applying them"));
                 return None;
             }
-            if let FixKey::AddProperty { at, .. } = key {
-                let n = self.per_schema.entry(at.clone()).or_default();
-                if *n >= MAX_PROPERTIES_PER_SCHEMA {
-                    self.note(format!("at most {MAX_PROPERTIES_PER_SCHEMA} undeclared properties are suggested per schema"));
-                    return None;
+            // What is kept: the key, the owner and the first token, and for
+            // a property its schema's count. All or nothing, so that no fix
+            // is kept with nothing to suggest.
+            let bytes = match key {
+                FixKey::AddProperty { at, name } => {
+                    if self.per_schema.get(at).is_some_and(|n| *n >= MAX_PROPERTIES_PER_SCHEMA) {
+                        self.note(format!("at most {MAX_PROPERTIES_PER_SCHEMA} undeclared properties are suggested per schema"));
+                        return None;
+                    }
+                    2 * at.len() + name.len()
                 }
-                *n += 1;
+                FixKey::Nullable { at } | FixKey::Widen { at } | FixKey::Enum { at } => at.len(),
+            };
+            let owner = owner();
+            if !self.keep(bytes + owner.len() + token.map_or(0, str::len)) {
+                return None;
             }
-            self.fixes.insert(key.clone(), (owner(), Shape::default(), BTreeSet::new()));
+            if let FixKey::AddProperty { at, .. } = key {
+                *self.per_schema.entry(at.clone()).or_default() += 1;
+            }
+            let tokens = token.map(str::to_string).into_iter().collect();
+            self.fixes.insert(key.clone(), Fix { owner, shape: Shape::default(), seen: 0, last: 0, tokens });
+        } else if let Some(token) = token {
+            let (fresh, full) = self.fixes.get(key).map(|e| (!e.tokens.contains(token), e.tokens.len() >= MAX_ENUM_TOKENS))?;
+            if fresh {
+                if full {
+                    self.note(format!("at most {MAX_ENUM_TOKENS} new values are suggested per enum"));
+                } else if self.keep(token.len())
+                    && let Some(e) = self.fixes.get_mut(key)
+                {
+                    e.tokens.insert(token.to_string());
+                }
+            }
         }
-        self.fixes.get_mut(key)
+        let observed = self.observed;
+        let e = self.fixes.get_mut(key)?;
+        if e.last != observed {
+            e.last = observed;
+            e.seen += 1;
+        }
+        Some(e)
     }
 
     /// Walk a body along its schema, collecting fixes that would make the
@@ -1210,18 +1297,7 @@ impl<'a> State<'a> {
     /// linked to that response's schema findings of the same place and
     /// category).
     #[allow(clippy::too_many_arguments)]
-    fn walk(
-        &mut self,
-        schema: &'a Value,
-        at: &str,
-        v: &Value,
-        ipath: &str,
-        depth: usize,
-        label: &str,
-        code: &str,
-        o: &Observation,
-        failed: bool,
-    ) {
+    fn walk(&mut self, schema: &'a Value, at: &str, v: &Value, ipath: &str, depth: usize, label: &str, code: &str, failed: bool) {
         if depth > 32 || self.walk_bytes.exhausted() || !self.spend(1) {
             return;
         }
@@ -1236,18 +1312,21 @@ impl<'a> State<'a> {
         }
         let owner = || schema_owner(&at, code, label);
         // Link a fix to the schema findings about the same place and
-        // category (resolved once, in `finish`).
+        // category (resolved once, in `finish`; a new link is kept while
+        // [`MAX_KEPT_BYTES`] allows).
         let fix_link = |st: &mut Self, key: String, at_path: &str, category: &str| {
             if failed {
-                st.pending_links.insert((label.to_string(), code.to_string(), place(at_path), category.to_string(), key));
+                let link = (label.to_string(), code.to_string(), place(at_path), category.to_string(), key);
+                if !st.pending_links.contains(&link) && st.keep(link.0.len() + link.1.len() + link.2.len() + link.3.len() + link.4.len()) {
+                    st.pending_links.insert(link);
+                }
             }
         };
         match v {
             Value::Null => {
                 if !allows_null(s) {
                     let key = FixKey::Nullable { at: at.clone() };
-                    if let Some(e) = self.fix(&key, owner) {
-                        e.2.insert(o.id.clone());
+                    if self.fix(&key, owner, None).is_some() {
                         fix_link(self, fix_suggestion_key(&key), ipath, "type");
                     }
                 }
@@ -1317,18 +1396,17 @@ impl<'a> State<'a> {
                             return;
                         }
                         let pp = ptr(&ptr(&parts[pi].1, "properties"), k);
-                        self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
+                        self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, failed);
                     } else if let Some((ap, app)) = &additional {
-                        self.walk(ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
+                        self.walk(ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, failed);
                     } else if names_properties && safe_name(k) {
                         // The fix's key, then its suggestion's.
                         if !self.walk_charge(2 * (holder.len() + k.len())) {
                             return;
                         }
                         let key = FixKey::AddProperty { at: holder.clone(), name: k.clone() };
-                        if let Some(e) = self.fix(&key, owner) {
-                            e.1.add(x);
-                            e.2.insert(o.id.clone());
+                        if let Some(e) = self.fix(&key, owner, None) {
+                            e.shape.add(x);
                             fix_link(self, fix_suggestion_key(&key), ipath, "additional");
                         }
                     }
@@ -1349,16 +1427,26 @@ impl<'a> State<'a> {
                     if !self.walk_charge(3 * parts[pi].1.len()) {
                         return;
                     }
-                    let rp = parts[pi].1.clone();
+                    let rp = &parts[pi].1;
                     let missing = !obj.contains_key(name);
-                    if missing {
-                        fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
-                    }
-                    let owner = schema_owner(&rp, code, label);
-                    let e = self.required.entry((rp, name.to_string())).or_insert((0, 0, owner));
+                    let tally = (rp.clone(), name.to_string());
+                    // A new tally keeps its key and its owner.
+                    let owner = if self.required.contains_key(&tally) {
+                        String::new()
+                    } else {
+                        let owner = schema_owner(rp, code, label);
+                        if !self.keep(rp.len() + name.len() + owner.len()) {
+                            continue;
+                        }
+                        owner
+                    };
+                    let e = self.required.entry(tally).or_insert((0, 0, owner));
                     e.0 += 1;
+                    // Linked only once tallied, so that the suggestion
+                    // covers the finding.
                     if missing {
                         e.1 += 1;
+                        fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
                     }
                 }
             }
@@ -1370,7 +1458,7 @@ impl<'a> State<'a> {
                     let ip = ptr(&at, "items");
                     let child = ptr(ipath, "*");
                     for x in items.iter().take(self.opts.max_items_walked) {
-                        self.walk(is, &ip, x, &child, depth + 1, label, code, o, failed);
+                        self.walk(is, &ip, x, &child, depth + 1, label, code, failed);
                     }
                 }
             }
@@ -1378,8 +1466,7 @@ impl<'a> State<'a> {
                 let (_, types, _) = schema_types(s);
                 if types.iter().any(|t| t == "integer") && !types.iter().any(|t| t == "number") {
                     let key = FixKey::Widen { at: at.clone() };
-                    if let Some(e) = self.fix(&key, owner) {
-                        e.2.insert(o.id.clone());
+                    if self.fix(&key, owner, None).is_some() {
                         fix_link(self, fix_suggestion_key(&key), ipath, "type");
                     }
                 }
@@ -1391,14 +1478,10 @@ impl<'a> State<'a> {
                     && text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
                 {
                     let key = FixKey::Enum { at: at.clone() };
-                    let token = format!("value:{text}");
-                    let Some(e) = self.fix(&key, owner) else { return };
                     // The token itself is kept (see the module docs), a few
                     // per location.
-                    if e.2.len() < MAX_ENUM_TOKENS {
-                        e.2.insert(token);
-                    } else if !e.2.contains(&token) {
-                        self.note(format!("at most {MAX_ENUM_TOKENS} new values are suggested per enum"));
+                    if self.fix(&key, owner, Some(text)).is_none() {
+                        return;
                     }
                     fix_link(self, fix_suggestion_key(&key), ipath, "enum");
                 }
@@ -1409,7 +1492,7 @@ impl<'a> State<'a> {
 
     fn finish(mut self, total: usize) -> DriftReport {
         for (label, code, place, category, skey) in std::mem::take(&mut self.pending_links) {
-            let keys: Vec<String> = self.schema_places.get(&(label, code, place, category)).into_iter().flatten().cloned().collect();
+            let keys: Vec<Rc<str>> = self.schema_places.get(&(label, code, place, category)).into_iter().flatten().cloned().collect();
             for k in keys {
                 self.link(&k, &skey);
             }
@@ -1635,16 +1718,13 @@ impl<'a> State<'a> {
 
         // Schema fixes.
         let mut enum_groups: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-        for (key, (owner, shape, seen)) in &self.fixes {
+        for (key, Fix { owner, shape, seen, tokens, .. }) in &self.fixes {
             let skey = fix_suggestion_key(key);
             match key {
                 FixKey::AddProperty { at, name } => add(
                     &skey,
                     format!("Document property `{name}` of {owner}"),
-                    format!(
-                        "Seen in {} response(s) but not declared. Its schema is inferred from the observed values (shape only).",
-                        seen.len()
-                    ),
+                    format!("Seen in {seen} response(s) but not declared. Its schema is inferred from the observed values (shape only)."),
                     SuggestionKind::Addition,
                     true,
                     at.clone(),
@@ -1656,7 +1736,7 @@ impl<'a> State<'a> {
                     add(
                         &skey,
                         format!("Allow null at {}", display_pointer(at, owner)),
-                        format!("The API returned null here {} time(s). If null is not intended, fix the API instead.", seen.len()),
+                        format!("The API returned null here {seen} time(s). If null is not intended, fix the API instead."),
                         SuggestionKind::Relaxation,
                         false,
                         at.clone(),
@@ -1683,8 +1763,7 @@ impl<'a> State<'a> {
                     );
                 }
                 FixKey::Enum { at } => {
-                    let values: Vec<String> = seen.iter().filter_map(|s| s.strip_prefix("value:")).map(str::to_string).collect();
-                    enum_groups.entry(at.clone()).or_insert_with(|| (owner.clone(), vec![])).1.extend(values);
+                    enum_groups.entry(at.clone()).or_insert_with(|| (owner.clone(), vec![])).1.extend(tokens.iter().cloned());
                 }
             }
         }
@@ -1765,7 +1844,7 @@ impl<'a> State<'a> {
             let x_ptr = ptr(&op.pointer, EXPECTATIONS);
             if let (Some(max), Some(s)) = (b.max_latency_ms, stats) {
                 let key = format!("slow|{}", op.pointer);
-                if let Some(f) = self.findings.get_mut(&key) {
+                if let Some(f) = self.findings.get_mut(key.as_str()) {
                     f.message = format!(
                         "{label} took longer than its {max} ms budget in {} of {} calls (p95 {:.0} ms, slowest {:.0} ms)",
                         acc.slow,
@@ -1820,7 +1899,7 @@ impl<'a> State<'a> {
             ];
             for (prefix, field, max, over, largest, verb, what) in size_budgets {
                 let key = format!("{prefix}|{}", op.pointer);
-                let (Some(max), Some(f)) = (max, self.findings.get_mut(&key)) else { continue };
+                let (Some(max), Some(f)) = (max, self.findings.get_mut(key.as_str())) else { continue };
                 let largest = largest.unwrap_or(0);
                 let of = if what == "request" { "request " } else { "" };
                 f.message = format!("{label} {verb} {max}-byte {of}budget in {over} call(s) (largest {largest} bytes)");
@@ -2276,6 +2355,69 @@ mod tests {
     }
 
     #[test]
+    fn an_operations_finding_keys_are_built_once_however_many_calls_reach_it() {
+        // A deprecated operation in a Path Item behind one alias of a pointer
+        // of about 200 KB: each key about it copies that pointer.
+        let key = "k".repeat(4_000);
+        let (xi, deep) = buried(&key, "xi", json!({"get": {"deprecated": true, "responses": {"200": {"description": "ok"}}}}));
+        let op_ptr = format!("{}/get", &deep[1..]);
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"$ref": "#/i"}}, "xi": xi, "i": {"$ref": deep}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        // Each call is deprecated, sends an undeclared query parameter and
+        // gets an undeclared status.
+        let call = |i: usize| Observation {
+            id: format!("har:{i}"),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec!["limit".into()],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 404,
+                content_type: None,
+                headers: vec![],
+                bytes: Some(0),
+                body: ObservedBody::Empty,
+            }),
+            latency_ms: None,
+        };
+        let mut st = State::new(&spec, &DriftOptions::default());
+        for i in 0..1_000 {
+            st.observe(&call(i));
+        }
+        // One key per finding, kept once and shared with the finding, with
+        // the same text as before it was kept.
+        let mut kept: Vec<(DriftKind, &str, &Rc<str>)> = vec![];
+        for (kind, ends) in st.op_keys.values().flatten() {
+            kept.extend(ends.iter().map(|(end, k)| (*kind, end.as_str(), k)));
+        }
+        kept.sort_by_key(|(kind, _, _)| *kind);
+        let mut expected = [
+            (DriftKind::DeprecatedOperationCalled, "", format!("deprecated|{op_ptr}")),
+            (DriftKind::UndeclaredQueryParameter, "limit", format!("query|{op_ptr}|limit")),
+            (DriftKind::UndeclaredStatus, "404", format!("status|{op_ptr}|404")),
+        ];
+        expected.sort_by_key(|(kind, _, _)| *kind);
+        let texts: Vec<(DriftKind, &str, &str)> = kept.iter().map(|(kind, end, k)| (*kind, *end, &***k)).collect();
+        let expected: Vec<(DriftKind, &str, &str)> = expected.iter().map(|(kind, end, k)| (*kind, *end, k.as_str())).collect();
+        assert!(texts == expected, "{:?}", texts.iter().map(|(kind, end, k)| (kind, end, k.len())).collect::<Vec<_>>());
+        for (_, _, k) in kept {
+            assert!(k.len() > 200_000, "{}", k.len());
+            let (recorded, f) = st.findings.get_key_value(&**k).unwrap();
+            assert!(Rc::ptr_eq(recorded, k));
+            assert_eq!(f.count, 1_000);
+        }
+        assert_eq!(st.findings.len(), 3);
+        let report = st.finish(1_000);
+        assert_eq!(report.findings.len(), 3, "{:#?}", report.findings);
+        assert!(report.findings.iter().all(|f| f.count == 1_000 && f.operation.as_deref() == Some("GET /a")), "{:#?}", report.findings);
+    }
+
+    #[test]
     fn walking_bodies_is_charged_for_the_pointers_it_copies() {
         // A response schema behind one alias of a pointer of about 200 KB:
         // each body walked along it copies that pointer for each key.
@@ -2323,6 +2465,101 @@ mod tests {
         assert!(many < 2_000, "{many}");
         assert!(few < many, "{few} {many}");
         assert_eq!(walks(4_000).0, many);
+    }
+
+    #[test]
+    fn what_walks_keep_is_charged_to_its_own_budget() {
+        // A response schema at a pointer of about 200 KB requiring 100 names,
+        // and a body missing them all: each name keeps a tally and a link,
+        // both copying that pointer, until the analysis ends.
+        let key = "k".repeat(4_000);
+        let names: Vec<String> = (0..100).map(|i| format!("r{i}")).collect();
+        let (xs, deep) = buried(&key, "xs", json!({"type": "object", "required": names}));
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+            "paths": {"/a": {"get": {"responses": {"200": {"description": "ok",
+                "content": {"application/json": {"schema": {"$ref": "#/s"}}}}}}}},
+            "xs": xs, "s": {"$ref": deep}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let call = Observation {
+            id: "har:0".into(),
+            at: None,
+            method: "GET".into(),
+            url: "/a".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: Some(crate::observe::ObservedResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                headers: vec![],
+                bytes: None,
+                body: ObservedBody::Json(json!({})),
+            }),
+            latency_ms: None,
+        };
+        // A budget for about ten names' copies (the walk's own is far from
+        // spent).
+        let budget = 4 << 20;
+        let mut st = State::new(&spec, &DriftOptions::default());
+        st.kept = Meter::new(budget);
+        st.observe(&call);
+        assert!(st.kept.exhausted() && !st.walk_bytes.exhausted());
+        assert!(st.notes.contains_key(KEPT_SPENT), "{:?}", st.notes.keys());
+        let tallies: usize = st.required.iter().map(|((at, name), (_, _, owner))| at.len() + name.len() + owner.len()).sum();
+        let links: usize = st.pending_links.iter().map(|(l, c, p, k, s)| l.len() + c.len() + p.len() + k.len() + s.len()).sum();
+        assert!(tallies + links <= budget, "{tallies} {links}");
+        assert!(tallies + links > budget / 2, "{tallies} {links}");
+        // The names recorded before the budget was spent are still counted
+        // and suggested; the rest are not recorded.
+        assert!(!st.required.is_empty() && st.required.len() < 100, "{}", st.required.len());
+        assert!(st.required.values().all(|(seen, missing, _)| *seen == 1 && *missing == 1));
+        let report = st.finish(1);
+        assert!(report.notes.iter().any(|n| n.starts_with(KEPT_SPENT)), "{:?}", report.notes);
+        assert_eq!(report.suggestions.iter().filter(|s| s.title.starts_with("Make `r")).count(), 1);
+    }
+
+    #[test]
+    fn a_fix_is_kept_whole_and_counts_its_calls_past_the_kept_budget() {
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {},
+            "components": {"schemas": {"s": {"type": "string", "enum": ["a"]}}}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let at = "/components/schemas/s".to_string();
+        let owner = || "o".to_string();
+        let enums = FixKey::Enum { at: at.clone() };
+        let nulls = FixKey::Nullable { at: at.clone() };
+        let widen = FixKey::Widen { at: at.clone() };
+        // An enum fix is kept with its first token or not at all: a budget
+        // one byte short of both keeps nothing.
+        let whole = at.len() + owner().len() + "zz".len();
+        let mut st = State::new(&spec, &DriftOptions::default());
+        st.kept = Meter::new(whole - 1);
+        st.observed = 1;
+        assert!(st.fix(&enums, owner, Some("zz")).is_none());
+        assert!(st.fixes.is_empty() && st.notes.contains_key(KEPT_SPENT));
+        // Exactly enough for that fix and a null one.
+        let mut st = State::new(&spec, &DriftOptions::default());
+        st.kept = Meter::new(whole + at.len() + owner().len());
+        st.observed = 1;
+        assert_eq!(st.fix(&enums, owner, Some("zz")).map(|f| f.tokens.len()), Some(1));
+        assert!(st.fix(&nulls, owner, None).is_some());
+        // Past it, nothing new is kept, and the fixes already kept still
+        // count each call they are seen in, once per call.
+        assert!(st.fix(&enums, owner, Some("yy")).is_some_and(|f| f.tokens.len() == 1));
+        assert!(st.kept.exhausted());
+        for call in 2..=4 {
+            st.observed = call;
+            assert!(st.fix(&widen, owner, None).is_none());
+            for _ in 0..2 {
+                assert!(st.fix(&nulls, owner, None).is_some());
+            }
+        }
+        assert_eq!(st.fixes.get(&nulls).map(|f| f.seen), Some(4));
+        assert_eq!(st.fixes.get(&enums).map(|f| f.seen), Some(1));
+        let report = st.finish(4);
+        assert!(report.suggestions.iter().any(|s| s.title.starts_with("Add `zz` to the values")), "{:?}", report.suggestions);
+        assert!(report.suggestions.iter().any(|s| s.detail.contains("null here 4 time(s)")), "{:?}", report.suggestions);
     }
 
     #[test]
