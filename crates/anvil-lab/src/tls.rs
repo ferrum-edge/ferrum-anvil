@@ -936,7 +936,7 @@ fn dtls_refused<'a>(env: &'a Env, identity: Option<&'static str>, rogue_root: bo
         let echoed = dtls_received(&r) >= 1;
         c.add(
             CheckKind::Recovery,
-            format!("with the right identity and root the datagram is echoed ({attempts} attempt(s))"),
+            "with the right identity and root the datagram is echoed",
             echoed,
             format!("attempts={attempts}, echoed_datagrams={}", dtls_received(&r)),
         );
