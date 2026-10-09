@@ -411,10 +411,11 @@ stop after 2,000,000 values or 1 GiB of references followed and schema
 pointers copied on the way; most of those copies last only while a body is
 walked. What walks keep until the analysis ends (the pointers, names and
 owners of suggested fixes, of required-property tallies and of their links
-to findings, and the calls each fix was seen in) is capped at 256 MiB;
-past that, walks add to what is recorded but record nothing new. Each of
-these limits adds a note when it is reached. The operations an analysis
-matches against are capped at 256 MiB of their paths, pointers and
+to findings, and the enum values to add) is capped at 256 MiB; past that,
+walks record nothing new, but the calls each recorded fix or tally was seen
+in are still counted exactly. Each of these limits adds a note when it is
+reached. The operations an analysis matches against are capped at 256 MiB
+of their paths, pointers and
 declared statuses (an operation reached through several paths counts for
 each); past that, the rest are left out with a note, and calls to them are
 reported as undeclared. Each operation's parameters, request body,

@@ -24,9 +24,12 @@
     is raised from 256 MiB to 1 GiB. Those copies last only while a body is walked, and on a
     large ordinary description 256 MiB stopped suggestions earlier than before 0.1.4. What the
     walks keep until the analysis ends (the pointers, names and owners of suggested fixes, of
-    required-property tallies and of their links to findings, and the calls each fix was seen
-    in) is charged to a separate 256 MiB budget. Past it, walks record nothing new, with a
-    note, so what an analysis keeps stays about where it was.
+    required-property tallies and of their links to findings, and the enum values to add) is
+    charged to a separate 256 MiB budget. Past it, walks record nothing new, with a note, so
+    what an analysis keeps stays about where it was; the calls each recorded fix was seen in
+    are still counted exactly. Fixes no longer keep the ids of the calls they were seen in,
+    only a count. A fix is kept together with its first enum value or not at all, and a
+    missing required property is linked to its suggestion only once it is tallied.
 
 ### Fixed
 

@@ -67,9 +67,10 @@ const MAX_WALK_BYTES: usize = 1024 * 1024 * 1024;
 /// Noted once either walking budget is spent.
 const WALK_SPENT: &str = "the analysis' budget for walking bodies is spent; later bodies got no schema suggestions";
 /// What walking bodies may keep until the analysis ends, in bytes: the
-/// pointers, names, owners and observation ids of suggested fixes, of
+/// pointers, names, owners and enum tokens of suggested fixes, of
 /// required-property tallies and of the links from fixes to findings. Past
-/// it, walks only add to what is already recorded.
+/// it, walks record nothing new, but still count the calls of what is
+/// already recorded.
 const MAX_KEPT_BYTES: usize = 256 * 1024 * 1024;
 /// Noted once [`MAX_KEPT_BYTES`] is spent.
 const KEPT_SPENT: &str = "the analysis' budget for keeping schema suggestions is spent; later bodies added no new ones";
@@ -381,6 +382,20 @@ enum FixKey {
     Enum { at: String },
 }
 
+/// A suggested schema fix.
+struct Fix {
+    owner: String,
+    /// For a property: what its values looked like.
+    shape: Shape,
+    /// The calls it was seen in, and the last of them (see
+    /// [`State::observed`]): counted, not kept, so the count stays exact
+    /// past [`MAX_KEPT_BYTES`].
+    seen: usize,
+    last: usize,
+    /// For an enum: the tokens to add.
+    tokens: BTreeSet<String>,
+}
+
 /// One operation object's finding keys, by kind, then by what the call adds
 /// to its pointer (looked up by `&str`, without copying it).
 type OpKeys = HashMap<DriftKind, HashMap<String, Rc<str>>>;
@@ -406,7 +421,9 @@ struct State<'a> {
     op_keys: HashMap<(usize, usize), OpKeys>,
     ops: Vec<OpAcc>,
     endpoints: BTreeMap<(String, String), EndpointAcc>,
-    fixes: BTreeMap<FixKey, (String, Shape, BTreeSet<String>)>,
+    fixes: BTreeMap<FixKey, Fix>,
+    /// Calls observed so far; the current call's number.
+    observed: usize,
     /// (schema holding `required`, name) → (seen, missing, owner).
     required: BTreeMap<(String, String), (usize, usize, String)>,
     servers: BTreeMap<String, (usize, String)>,
@@ -700,6 +717,7 @@ impl<'a> State<'a> {
             ops: (0..n_ops).map(|_| OpAcc::default()).collect(),
             endpoints: BTreeMap::new(),
             fixes: BTreeMap::new(),
+            observed: 0,
             required: BTreeMap::new(),
             servers: BTreeMap::new(),
             validators: HashMap::new(),
@@ -794,6 +812,7 @@ impl<'a> State<'a> {
     }
 
     fn observe(&mut self, o: &Observation) {
+        self.observed += 1;
         if let Some(at) = o.at {
             self.from = Some(self.from.map_or(at, |f| f.min(at)));
             self.to = Some(self.to.map_or(at, |t| t.max(at)));
@@ -1147,7 +1166,7 @@ impl<'a> State<'a> {
         }
         if messages.is_empty() {
             // Still record required-property presence for relaxations.
-            self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, false);
+            self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, false);
             return;
         }
         for (place, what, category) in &messages {
@@ -1160,7 +1179,7 @@ impl<'a> State<'a> {
             }
             self.schema_places.entry((label.clone(), code.clone(), place.clone(), category.clone())).or_default().insert(key);
         }
-        self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, o, true);
+        self.walk(schema, &media.schema_pointer, body, "", 0, &label, &code, true);
     }
 
     /// Count `n` steps of walking bodies and their schemas; false once the
@@ -1221,17 +1240,18 @@ impl<'a> State<'a> {
         false
     }
 
-    /// The fix at `key`, created with `owner` unless a cap or
-    /// [`MAX_KEPT_BYTES`] is reached, with `seen` (an observation id, or an
-    /// enum token) recorded in it while they allow.
-    fn fix(&mut self, key: &FixKey, owner: impl FnOnce() -> String, seen: &str) -> Option<&mut (String, Shape, BTreeSet<String>)> {
+    /// The fix at `key`, created with `owner` (and for an enum its first
+    /// `token`) unless a cap or [`MAX_KEPT_BYTES`] is reached, with `token`
+    /// added while they allow and the current call counted.
+    fn fix(&mut self, key: &FixKey, owner: impl FnOnce() -> String, token: Option<&str>) -> Option<&mut Fix> {
         if !self.fixes.contains_key(key) {
             if self.fixes.len() >= MAX_SCHEMA_FIXES {
                 self.note(format!("only {MAX_SCHEMA_FIXES} schema changes are suggested; check again after applying them"));
                 return None;
             }
-            // What is kept: the key and the owner, and for a property its
-            // schema's count.
+            // What is kept: the key, the owner and the first token, and for
+            // a property its schema's count. All or nothing, so that no fix
+            // is kept with nothing to suggest.
             let bytes = match key {
                 FixKey::AddProperty { at, name } => {
                     if self.per_schema.get(at).is_some_and(|n| *n >= MAX_PROPERTIES_PER_SCHEMA) {
@@ -1243,25 +1263,33 @@ impl<'a> State<'a> {
                 FixKey::Nullable { at } | FixKey::Widen { at } | FixKey::Enum { at } => at.len(),
             };
             let owner = owner();
-            if !self.keep(bytes + owner.len()) {
+            if !self.keep(bytes + owner.len() + token.map_or(0, str::len)) {
                 return None;
             }
             if let FixKey::AddProperty { at, .. } = key {
                 *self.per_schema.entry(at.clone()).or_default() += 1;
             }
-            self.fixes.insert(key.clone(), (owner, Shape::default(), BTreeSet::new()));
-        }
-        let (fresh, full) = self.fixes.get(key).map(|e| (!e.2.contains(seen), e.2.len() >= MAX_ENUM_TOKENS))?;
-        if fresh {
-            if full && matches!(key, FixKey::Enum { .. }) {
-                self.note(format!("at most {MAX_ENUM_TOKENS} new values are suggested per enum"));
-            } else if self.keep(seen.len())
-                && let Some(e) = self.fixes.get_mut(key)
-            {
-                e.2.insert(seen.to_string());
+            let tokens = token.map(str::to_string).into_iter().collect();
+            self.fixes.insert(key.clone(), Fix { owner, shape: Shape::default(), seen: 0, last: 0, tokens });
+        } else if let Some(token) = token {
+            let (fresh, full) = self.fixes.get(key).map(|e| (!e.tokens.contains(token), e.tokens.len() >= MAX_ENUM_TOKENS))?;
+            if fresh {
+                if full {
+                    self.note(format!("at most {MAX_ENUM_TOKENS} new values are suggested per enum"));
+                } else if self.keep(token.len())
+                    && let Some(e) = self.fixes.get_mut(key)
+                {
+                    e.tokens.insert(token.to_string());
+                }
             }
         }
-        self.fixes.get_mut(key)
+        let observed = self.observed;
+        let e = self.fixes.get_mut(key)?;
+        if e.last != observed {
+            e.last = observed;
+            e.seen += 1;
+        }
+        Some(e)
     }
 
     /// Walk a body along its schema, collecting fixes that would make the
@@ -1269,18 +1297,7 @@ impl<'a> State<'a> {
     /// linked to that response's schema findings of the same place and
     /// category).
     #[allow(clippy::too_many_arguments)]
-    fn walk(
-        &mut self,
-        schema: &'a Value,
-        at: &str,
-        v: &Value,
-        ipath: &str,
-        depth: usize,
-        label: &str,
-        code: &str,
-        o: &Observation,
-        failed: bool,
-    ) {
+    fn walk(&mut self, schema: &'a Value, at: &str, v: &Value, ipath: &str, depth: usize, label: &str, code: &str, failed: bool) {
         if depth > 32 || self.walk_bytes.exhausted() || !self.spend(1) {
             return;
         }
@@ -1309,7 +1326,7 @@ impl<'a> State<'a> {
             Value::Null => {
                 if !allows_null(s) {
                     let key = FixKey::Nullable { at: at.clone() };
-                    if self.fix(&key, owner, &o.id).is_some() {
+                    if self.fix(&key, owner, None).is_some() {
                         fix_link(self, fix_suggestion_key(&key), ipath, "type");
                     }
                 }
@@ -1379,17 +1396,17 @@ impl<'a> State<'a> {
                             return;
                         }
                         let pp = ptr(&ptr(&parts[pi].1, "properties"), k);
-                        self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, o, failed);
+                        self.walk(ps, &pp, x, &ptr(ipath, k), depth + 1, label, code, failed);
                     } else if let Some((ap, app)) = &additional {
-                        self.walk(ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, o, failed);
+                        self.walk(ap, app, x, &ptr(ipath, "*"), depth + 1, label, code, failed);
                     } else if names_properties && safe_name(k) {
                         // The fix's key, then its suggestion's.
                         if !self.walk_charge(2 * (holder.len() + k.len())) {
                             return;
                         }
                         let key = FixKey::AddProperty { at: holder.clone(), name: k.clone() };
-                        if let Some(e) = self.fix(&key, owner, &o.id) {
-                            e.1.add(x);
+                        if let Some(e) = self.fix(&key, owner, None) {
+                            e.shape.add(x);
                             fix_link(self, fix_suggestion_key(&key), ipath, "additional");
                         }
                     }
@@ -1412,9 +1429,6 @@ impl<'a> State<'a> {
                     }
                     let rp = &parts[pi].1;
                     let missing = !obj.contains_key(name);
-                    if missing {
-                        fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
-                    }
                     let tally = (rp.clone(), name.to_string());
                     // A new tally keeps its key and its owner.
                     let owner = if self.required.contains_key(&tally) {
@@ -1428,8 +1442,11 @@ impl<'a> State<'a> {
                     };
                     let e = self.required.entry(tally).or_insert((0, 0, owner));
                     e.0 += 1;
+                    // Linked only once tallied, so that the suggestion
+                    // covers the finding.
                     if missing {
                         e.1 += 1;
+                        fix_link(self, format!("optional|{rp}"), ipath, &format!("required:{name}"));
                     }
                 }
             }
@@ -1441,7 +1458,7 @@ impl<'a> State<'a> {
                     let ip = ptr(&at, "items");
                     let child = ptr(ipath, "*");
                     for x in items.iter().take(self.opts.max_items_walked) {
-                        self.walk(is, &ip, x, &child, depth + 1, label, code, o, failed);
+                        self.walk(is, &ip, x, &child, depth + 1, label, code, failed);
                     }
                 }
             }
@@ -1449,7 +1466,7 @@ impl<'a> State<'a> {
                 let (_, types, _) = schema_types(s);
                 if types.iter().any(|t| t == "integer") && !types.iter().any(|t| t == "number") {
                     let key = FixKey::Widen { at: at.clone() };
-                    if self.fix(&key, owner, &o.id).is_some() {
+                    if self.fix(&key, owner, None).is_some() {
                         fix_link(self, fix_suggestion_key(&key), ipath, "type");
                     }
                 }
@@ -1463,7 +1480,7 @@ impl<'a> State<'a> {
                     let key = FixKey::Enum { at: at.clone() };
                     // The token itself is kept (see the module docs), a few
                     // per location.
-                    if self.fix(&key, owner, &format!("value:{text}")).is_none() {
+                    if self.fix(&key, owner, Some(text)).is_none() {
                         return;
                     }
                     fix_link(self, fix_suggestion_key(&key), ipath, "enum");
@@ -1701,16 +1718,13 @@ impl<'a> State<'a> {
 
         // Schema fixes.
         let mut enum_groups: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-        for (key, (owner, shape, seen)) in &self.fixes {
+        for (key, Fix { owner, shape, seen, tokens, .. }) in &self.fixes {
             let skey = fix_suggestion_key(key);
             match key {
                 FixKey::AddProperty { at, name } => add(
                     &skey,
                     format!("Document property `{name}` of {owner}"),
-                    format!(
-                        "Seen in {} response(s) but not declared. Its schema is inferred from the observed values (shape only).",
-                        seen.len()
-                    ),
+                    format!("Seen in {seen} response(s) but not declared. Its schema is inferred from the observed values (shape only)."),
                     SuggestionKind::Addition,
                     true,
                     at.clone(),
@@ -1722,7 +1736,7 @@ impl<'a> State<'a> {
                     add(
                         &skey,
                         format!("Allow null at {}", display_pointer(at, owner)),
-                        format!("The API returned null here {} time(s). If null is not intended, fix the API instead.", seen.len()),
+                        format!("The API returned null here {seen} time(s). If null is not intended, fix the API instead."),
                         SuggestionKind::Relaxation,
                         false,
                         at.clone(),
@@ -1749,8 +1763,7 @@ impl<'a> State<'a> {
                     );
                 }
                 FixKey::Enum { at } => {
-                    let values: Vec<String> = seen.iter().filter_map(|s| s.strip_prefix("value:")).map(str::to_string).collect();
-                    enum_groups.entry(at.clone()).or_insert_with(|| (owner.clone(), vec![])).1.extend(values);
+                    enum_groups.entry(at.clone()).or_insert_with(|| (owner.clone(), vec![])).1.extend(tokens.iter().cloned());
                 }
             }
         }
@@ -2505,6 +2518,48 @@ mod tests {
         let report = st.finish(1);
         assert!(report.notes.iter().any(|n| n.starts_with(KEPT_SPENT)), "{:?}", report.notes);
         assert_eq!(report.suggestions.iter().filter(|s| s.title.starts_with("Make `r")).count(), 1);
+    }
+
+    #[test]
+    fn a_fix_is_kept_whole_and_counts_its_calls_past_the_kept_budget() {
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {},
+            "components": {"schemas": {"s": {"type": "string", "enum": ["a"]}}}});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let at = "/components/schemas/s".to_string();
+        let owner = || "o".to_string();
+        let enums = FixKey::Enum { at: at.clone() };
+        let nulls = FixKey::Nullable { at: at.clone() };
+        let widen = FixKey::Widen { at: at.clone() };
+        // An enum fix is kept with its first token or not at all: a budget
+        // one byte short of both keeps nothing.
+        let whole = at.len() + owner().len() + "zz".len();
+        let mut st = State::new(&spec, &DriftOptions::default());
+        st.kept = Meter::new(whole - 1);
+        st.observed = 1;
+        assert!(st.fix(&enums, owner, Some("zz")).is_none());
+        assert!(st.fixes.is_empty() && st.notes.contains_key(KEPT_SPENT));
+        // Exactly enough for that fix and a null one.
+        let mut st = State::new(&spec, &DriftOptions::default());
+        st.kept = Meter::new(whole + at.len() + owner().len());
+        st.observed = 1;
+        assert_eq!(st.fix(&enums, owner, Some("zz")).map(|f| f.tokens.len()), Some(1));
+        assert!(st.fix(&nulls, owner, None).is_some());
+        // Past it, nothing new is kept, and the fixes already kept still
+        // count each call they are seen in, once per call.
+        assert!(st.fix(&enums, owner, Some("yy")).is_some_and(|f| f.tokens.len() == 1));
+        assert!(st.kept.exhausted());
+        for call in 2..=4 {
+            st.observed = call;
+            assert!(st.fix(&widen, owner, None).is_none());
+            for _ in 0..2 {
+                assert!(st.fix(&nulls, owner, None).is_some());
+            }
+        }
+        assert_eq!(st.fixes.get(&nulls).map(|f| f.seen), Some(4));
+        assert_eq!(st.fixes.get(&enums).map(|f| f.seen), Some(1));
+        let report = st.finish(4);
+        assert!(report.suggestions.iter().any(|s| s.title.starts_with("Add `zz` to the values")), "{:?}", report.suggestions);
+        assert!(report.suggestions.iter().any(|s| s.detail.contains("null here 4 time(s)")), "{:?}", report.suggestions);
     }
 
     #[test]
