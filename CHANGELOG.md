@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The GW-020-BUDGET lab scenario waits up to three seconds for the gateway's
+  budget-rejection log entry, and reports a clear timeout if it never appears
+  (#352). PROTO-022 DTLS recovery retries a lost datagram up to three times
+  with a short backoff and records the attempt count (#355).
+
 ## [0.1.5] - 2026-10-08
 
 Compatibility release: Anvil adopts Ferrum Edge v0.9.15 and `contracts-edge-0.9.15`, now the lab
