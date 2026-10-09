@@ -1,6 +1,7 @@
 # Release lane: build installers and CLI binaries per OS/arch from a tag,
 # prove they contain no test hooks, generate checksums, SBOMs, a license
-# report and release evidence, and create a DRAFT GitHub release.
+# report and release evidence, and create a DRAFT GitHub release whose body is
+# already the final release notes (scripts/release-notes.mjs, from CHANGELOG.md).
 #
 #   push tag anvil-vX.Y.Z             -> full build + draft release
 #   manual from a tag, dry_run=false  -> full build + draft release
@@ -101,6 +102,10 @@ jobs:
             echo "epoch=$(git log -1 --format=%ct)"
           } >> "$GITHUB_OUTPUT"
           echo "version $version, tag '${tag:-<dry run>}', commit $(git rev-parse HEAD)"
+      - name: CHANGELOG.md has release notes for this version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/release-notes.mjs --version "$VERSION" --check
       - uses: ./.github/actions/setup
         with:
           tauri-deps: "false"
@@ -485,6 +490,12 @@ jobs:
           args=(--dist dist --test-runs "$RUNNER_TEMP/runs.json")
           [ -n "$TAG" ] && args+=(--tag "$TAG")
           node scripts/release-evidence.mjs "${args[@]}"
+      - name: Release notes (the published body, from CHANGELOG.md and the evidence)
+        run: |
+          args=(--version "$VERSION" --evidence dist/release-evidence.json --out "$RUNNER_TEMP/release-notes/notes.md")
+          [ -n "$TAG" ] && args+=(--tag "$TAG")
+          node scripts/release-notes.mjs "${args[@]}"
+          cat "$RUNNER_TEMP/release-notes/notes.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Flatten release assets
         run: |
           mkdir -p upload
@@ -496,6 +507,15 @@ jobs:
         with:
           name: release-evidence-${{ needs.preflight.outputs.version }}
           path: upload/
+          retention-days: 90
+      # Kept apart from the evidence bundle so the notes never become a release
+      # asset, and named outside the release-* pattern the build download uses.
+      - name: Upload release notes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notes-${{ needs.preflight.outputs.version }}
+          path: ${{ runner.temp }}/release-notes/notes.md
+          if-no-files-found: error
           retention-days: 90
 
   release:
@@ -510,6 +530,9 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
       TAG: ${{ needs.preflight.outputs.tag }}
       RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
+      # Draft-only text, as a case-insensitive ERE: DRAFT_TEXT in
+      # scripts/release-notes.mjs (a test keeps the two equal).
+      DRAFT_TEXT: "draft release of|this draft is not published|review the evidence .* before publishing"
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -517,59 +540,52 @@ jobs:
           path: upload/
       - name: Verify evidence bundle
         run: (cd upload && sha256sum -c SHA256SUMS)
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: notes-${{ needs.preflight.outputs.version }}
+          path: notes/
+      # Fail closed: the body is published as-is, so it must be the generated
+      # notes and carry no draft-only text (#356).
+      - name: Check release notes
+        run: |
+          notes=notes/notes.md
+          [ -f "$notes" ] && [ ! -L "$notes" ] || { echo "::error::release notes must be a regular file"; exit 1; }
+          [ -s "$notes" ] && [ "$(wc -c < "$notes")" -le 100000 ] || { echo "::error::release notes are empty or too large"; exit 1; }
+          if grep -inE "$DRAFT_TEXT" "$notes"; then
+            echo "::error::release notes contain draft-only text"; exit 1
+          fi
+          grep -qF "Built from \`$RELEASE_COMMIT\`" "$notes" || { echo "::error::release notes are not for $RELEASE_COMMIT"; exit 1; }
+          # The notes' first lines state the installers' signing status; it must
+          # agree with release-evidence.json from the same publish job (a
+          # consistency check: SHA256SUMS does not cover that file).
+          first="$(head -n 1 "$notes")"
+          case "$(jq -r '.signed | if type == "boolean" then tostring else "invalid" end' upload/release-evidence.json)" in
+            true) [[ "$first" == '**Signing:** the installers are code-signed '* ]] ;;
+            false) [ "$first" = '> [!WARNING]' ] && [[ "$(sed -n 2p "$notes")" == '> **Unsigned installers.** '* ]] ;;
+            *) false ;;
+          esac || { echo "::error::the release notes' signing status does not match release-evidence.json"; exit 1; }
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          node --input-type=module <<'NODE'
-          import * as fs from "node:fs";
-          const evidencePath = "upload/release-evidence.json";
-          const stat = fs.lstatSync(evidencePath);
-          if (!stat.isFile()) throw new Error("release evidence must be a regular file");
-          const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
-          if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
-            throw new Error("release evidence must be a JSON object");
-          }
-          if (evidence.format !== "anvil-release-evidence" || evidence.version !== 1) {
-            throw new Error("unsupported release evidence format or version");
-          }
-          if (
-            ![
-              "signed and verified on the build runner (see targets[].signing)",
-              "unsigned — owner credentials not configured",
-            ].includes(evidence.signing)
-          ) {
-            throw new Error("release evidence signing has an invalid value");
-          }
-          const updater = evidence.updater;
-          if (!updater || typeof updater !== "object" || Array.isArray(updater)) {
-            throw new Error("release evidence updater must be an object");
-          }
-          if (
-            typeof updater.signed !== "boolean" ||
-            !(updater.manifest === null || updater.manifest === "latest.json") ||
-            typeof updater.detail !== "string" ||
-            updater.detail.length === 0 ||
-            !Array.isArray(updater.platforms) ||
-            !updater.platforms.every((platform) => typeof platform === "string") ||
-            !(updater.key_id === null || typeof updater.key_id === "string")
-          ) {
-            throw new Error("release evidence updater has an invalid shape");
-          }
-          const lines = [
-            `Draft release of Ferrum Anvil ${process.env.VERSION} built from \`${process.env.RELEASE_COMMIT}\` by [run ${process.env.GITHUB_RUN_ID}](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}).`,
-            "",
-            `**Signing:** ${evidence.signing}.`,
-            "",
-          ];
-          if (updater.manifest) lines.push(`**In-app updates:** ${updater.detail}.`, "");
-          lines.push(
-            "Verify downloads with `SHA256SUMS`. `release-evidence.json` ties every artifact to its hash, platform, release check, SBOM, license report, compatibility catalog and test runs.",
-            "",
-            "This draft is not published. Review the evidence (docs/release.md) before publishing.",
-            "",
-          );
-          fs.writeFileSync(`${process.env.RUNNER_TEMP}/notes.md`, lines.join("\n"));
-          NODE
           gh release create "$TAG" upload/* --draft --verify-tag --repo "$GITHUB_REPOSITORY" \
-            --title "Ferrum Anvil $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            --title "Ferrum Anvil $VERSION" --notes-file notes/notes.md
+      - name: Draft body is the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body,isDraft > "$RUNNER_TEMP/release.json"
+          [ "$(jq -r .isDraft "$RUNNER_TEMP/release.json")" = "true" ] || { echo "::error::$TAG is not a draft"; exit 1; }
+          jq -r .body "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/body.md"
+          if grep -inE "$DRAFT_TEXT" "$RUNNER_TEMP/body.md"; then
+            echo "::error::the draft body contains draft-only text"; exit 1
+          fi
+          grep -qF "Built from \`$RELEASE_COMMIT\`" "$RUNNER_TEMP/body.md" || { echo "::error::the draft body is not the release notes"; exit 1; }
+          # Draft-only reminders go to the run summary, never into the release body.
+          {
+            echo "Draft release $TAG of Ferrum Anvil $VERSION created from \`$RELEASE_COMMIT\`. It is not published."
+            echo
+            echo "Its body is the final release notes (below). Review the evidence and the owner checklist in docs/release.md before publishing."
+            echo
+            cat notes/notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
