@@ -1,16 +1,24 @@
 # Releasing Ferrum Anvil
 
 Releases are built by `.github/workflows/release.yml` and always end as a
-**draft** GitHub release. Publishing the draft, announcing it and updating the
-website are manual owner steps, taken only after the
-[owner checklist](#owner-checklist-before-publishing-a-draft) is met.
+**draft** GitHub release whose body is already the final
+[release notes](#release-notes), generated from `CHANGELOG.md`. Publishing the
+draft, announcing it and updating the website are manual owner steps, taken
+only after the [owner checklist](#owner-checklist-before-publishing-a-draft) is met.
 
 ## Cutting a release
 
 1. Make sure `main` is green in CI, Desktop E2E and the nightly Lab.
 2. Bump the version in all three places — `Cargo.toml` (`[workspace.package] version`),
-   `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json` — and
-   commit.
+   `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json` — move
+   the `[Unreleased]` entries of `CHANGELOG.md` under `## [X.Y.Z] - YYYY-MM-DD`
+   with a summary paragraph before the first `###` heading (it becomes the
+   release summary; start it with `<Kind> release:` to bold the kind), and
+   commit. Use only the headings Added, Changed, Deprecated, Removed, Fixed,
+   Security and Breaking (matched on the first word, in any case, so
+   `### Breaking changes` is Breaking). Preflight refuses a version without
+   such a section, with another `###` heading, or with an empty Breaking
+   section.
 3. Tag and push: `git tag anvil-v0.1.0 && git push origin anvil-v0.1.0`.
    Or run the workflow manually **from the tag** (Run workflow → *Use workflow
    from* → Tags → `anvil-v0.1.0`). Set `dry_run` to `false` and optionally pass
@@ -23,13 +31,15 @@ website are manual owner steps, taken only after the
    then uploads evidence to the workflow run for inspection. It does not sign
    artifacts, create a GitHub release, or publish release assets. Setting
    `dry_run: false` requires running from a valid release tag.
-4. Review the draft (checklist below), then publish it by hand.
+4. Review the draft and its body (checklist below), then publish it by hand.
 
 ## What the workflow does
 
 **Preflight** (Ubuntu): the tag must equal `anvil-v<version>` and the three
 version fields must agree; `cargo deny check`; `node scripts/licenses.mjs --check`;
-`scripts/release-check.sh` (dependency graph); the diagnostic catalog drift test.
+`scripts/release-check.sh` (dependency graph); the diagnostic catalog drift test;
+`node scripts/release-notes.mjs --version <version> --check` (the version has a
+`CHANGELOG.md` section with a summary).
 The hosted AppImage checker regression suite also runs with distribution-provided
 `gcc`, `python3` and `mksquashfs`, and the checksum-pinned upstream `unsquashfs`
 described below, before any release build.
@@ -76,9 +86,45 @@ Each build job:
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
 runs for the release commit, `latest.json` (only with signed updater
 artifacts), `SHA256SUMS`, `release-evidence.json` and an uploaded evidence
-bundle. For a non-dry-run tag only, a separate `release` job (the only job with
-`contents: write`) downloads that bundle and runs
-`gh release create --draft --verify-tag`.
+bundle, then the [release notes](#release-notes) as a separate artifact (also
+shown in the run summary, so a dry run previews them). For a non-dry-run tag
+only, a separate `release` job (the only job with `contents: write`) downloads
+both, refuses notes that are not a regular file, are empty or over 100 kB,
+contain draft-only text, name another commit or state a signing status other
+than `release-evidence.json`'s `signed`, runs
+`gh release create --draft --verify-tag --notes-file`, and then reads the draft
+back and fails if its body has draft-only text or is not the notes. Draft-only
+reminders ("not published", "review before publishing") go to the run summary,
+never into the release body. The notes artifact is named `notes-<version>`,
+outside the `release-*` pattern publish downloads the builds with.
+
+If the release job fails after `gh release create` (for example, in the
+read-back step), delete that draft before re-running the job: a re-run creates
+a second draft for the same tag, and `gh release view` may then show either.
+
+### Release notes
+
+`scripts/release-notes.mjs` writes the body the release is published with,
+from the version's `CHANGELOG.md` section and `release-evidence.json` (read as
+JSON data and validated first):
+
+- the **Unsigned installers** warning (or a signing line when every target is
+  signed), with whether in-app updates are signed and the minisign key id;
+- the section's summary paragraphs (hard-wrapped lines are joined; list items
+  stay one per line);
+- a **Security** line when the section has a Security heading;
+- **Upgrade notes** that repeat the section's Breaking items, so a summary
+  that says "read the Breaking section below" points at them, or a line that
+  the CHANGELOG lists no breaking changes;
+- the source commit and run, and links to the CHANGELOG at the tag and the
+  [security advisories](https://github.com/ferrum-edge/ferrum-anvil/security/advisories).
+
+Relative links in the copied CHANGELOG text are rewritten to the repository
+at the tag. It refuses to write notes that contain draft-only text (the
+`DRAFT_TEXT` pattern, which the release job and the checklist below grep for
+too). Tests:
+`node --test scripts/tests/release-notes.test.mjs` (CI, Supply chain job). The
+owner may add highlights to the body before publishing; keep the generated parts.
 
 ### Release evidence
 
@@ -410,6 +456,12 @@ E2E build and requires it to fail.
 - [ ] Clean-install smoke test of each installer (install, first run, create a
       profile, send a request, lock/unlock, uninstall); screenshots attached.
 - [ ] Advisory ignores in `deny.toml` re-reviewed.
+- [ ] The release body is the release notes, not a draft placeholder: it starts
+      with the signing warning (or line), has the summary, upgrade notes and the
+      CHANGELOG and security advisories links, and has no draft-only text.
+      `gh release view anvil-vX.Y.Z --json body --jq .body | grep -inE 'draft release of|this draft is not published|review the evidence .* before publishing'`
+      must print nothing. If the body was edited by hand, re-run this check
+      after the last edit.
 - [ ] Website changes follow only after publishing and link the exact artifact
       URLs and checksums.
 
