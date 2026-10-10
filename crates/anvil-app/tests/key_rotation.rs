@@ -13,6 +13,32 @@ fn app(root: &std::path::Path, name: &str) -> (App, String) {
     (App::open(s.dir, h, k).unwrap(), recovery.to_string())
 }
 #[test]
+fn rotation_rejects_the_current_passphrase_without_changing_committed_state() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, old_recovery) = app(root.path(), "unchanged credential");
+    let ws = source.create_workspace("kept").unwrap();
+    let before = serde_json::to_value(vault::read_header(&source.dir).unwrap()).unwrap();
+    for ordinary_change in [false, true] {
+        let replacement = vault::RotationRecoveryKey::generate();
+        let result = if ordinary_change {
+            source.change_passphrase(OLD, &replacement, KdfParams::testing())
+        } else {
+            source.rotate_data_key(OLD, &replacement, KdfParams::testing())
+        };
+        let refusal = match result {
+            Err(e) => e,
+            Ok(_) => panic!("current passphrase must be refused"),
+        };
+        assert!(refusal.to_string().contains("different from the current"));
+        assert!(!source.is_locked(), "refused rotation keeps the active store usable");
+        assert_eq!(serde_json::to_value(vault::read_header(&source.dir).unwrap()).unwrap(), before);
+        assert_eq!(source.workspace(&ws.meta.id).unwrap().name, "kept");
+        assert!(ProfileManager::unlock(&source.dir, Unlock::RecoveryKey(replacement.as_str())).is_err());
+        assert!(ProfileManager::unlock(&source.dir, Unlock::RecoveryKey(&old_recovery)).is_ok());
+        assert!(ProfileManager::unlock(&source.dir, Unlock::Passphrase(OLD)).is_ok());
+    }
+}
+#[test]
 fn rotation_replaces_recovery_and_retains_portable_backup_restore() {
     let root = tempfile::tempdir().unwrap();
     let (source, old_recovery) = app(root.path(), "source");

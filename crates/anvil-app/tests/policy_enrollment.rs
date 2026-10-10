@@ -21,6 +21,15 @@ fn missing_legacy_policy_blocks_normal_unlock_and_implicit_rotation() {
     let replacement = vault::RotationRecoveryKey::generate();
     assert!(app.rotate_data_key(NEW, &replacement, KdfParams::testing()).is_err());
     assert!(vault::read_header(&dir).unwrap().rotation.is_none());
+    let refusal = ProfileManager::enroll_unlinked_policy(
+        &dir,
+        Unlock::Passphrase(OLD),
+        PolicyRotation { new_passphrase: OLD, recovery: &replacement, kdf: KdfParams::testing() },
+    )
+    .unwrap_err();
+    assert!(refusal.to_string().contains("different from the current"));
+    assert!(vault::read_header(&dir).unwrap().rotation.is_none());
+    assert_eq!(app.workspace(&ws.meta.id).unwrap().name, "kept");
     ProfileManager::enroll_unlinked_policy(
         &dir,
         Unlock::Passphrase(OLD),

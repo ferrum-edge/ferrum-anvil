@@ -23,6 +23,10 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 const PASS: &str = "correct horse battery";
+const SECOND: &str = "second independent passphrase";
+const THIRD: &str = "third independent passphrase";
+const FOURTH: &str = "fourth independent passphrase";
+const FIFTH: &str = "fifth independent passphrase";
 
 fn browser(url: &str) -> Result<(), String> {
     let url = url.to_string();
@@ -112,15 +116,21 @@ async fn linking_rotates_the_key_and_authenticates_policy_presence() {
     let root = tempfile::tempdir().unwrap();
     let (dir, old_recovery) = profile(root.path(), "alice");
     let before = vault::read_header(&dir).unwrap();
-    let (linked, recovery) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
+    let policy_before = state(&dir);
+    let refusal = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap_err();
+    assert!(refusal.to_string().contains("different from the current"));
+    assert_eq!(state(&dir), policy_before, "refused linking cannot publish a policy or key epoch");
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&old_recovery)).is_ok());
+    let (linked, recovery) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, SECOND).unwrap();
     assert_eq!((linked.provider.as_str(), linked.subject.as_str()), ("mock", "fixture-user-1"));
     assert_eq!(linked.email.as_deref(), Some("fixture-user-1@idp.anvil.test"));
     assert_ne!(vault::read_header(&dir).unwrap().key_check, before.key_check);
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&old_recovery)).is_err());
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).is_ok());
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err());
     assert!(!dir.join(IDENTITY_FILE).exists());
     assert!(!state(&dir)["binding"].to_string().contains("idp.anvil.test"));
-    let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).unwrap();
     assert_eq!(ProfileManager::linked_identity(&dir, &key).unwrap().unwrap(), linked);
 }
 
@@ -131,10 +141,10 @@ async fn data_018_fresh_login_policy_is_enforced_in_the_backend() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "alice");
-    let (_, rk) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let (_, rk) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
     assert!(ProfileManager::unlock_requirements(&dir).unwrap().fresh_login_required);
-    assert!(matches!(policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS))), IdentityPolicyError::FreshLoginRequired { .. }));
-    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
+    assert!(matches!(policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND))), IdentityPolicyError::FreshLoginRequired { .. }));
+    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await).unwrap();
     App::open(dir.clone(), h, key).unwrap().create_workspace("after fresh login").unwrap();
     assert!(matches!(
         ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase("wrong passphrase"), sign_in(&p).await),
@@ -143,12 +153,12 @@ async fn data_018_fresh_login_policy_is_enforced_in_the_backend() {
     let stale = sign_in(&p).await;
     let later = stale.authenticated_at() + chrono::Duration::minutes(10);
     assert!(matches!(
-        policy_err(ProfileManager::unlock_with_fresh_login_at(&dir, Unlock::Passphrase(PASS), stale, later)),
+        policy_err(ProfileManager::unlock_with_fresh_login_at(&dir, Unlock::Passphrase(SECOND), stale, later)),
         IdentityPolicyError::StaleProof { .. }
     ));
     idp.set_subject("fixture-user-2", Some("other@idp.anvil.test"));
     assert!(matches!(
-        policy_err(ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await)),
+        policy_err(ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await)),
         IdentityPolicyError::IdentityMismatch { .. }
     ));
     drop(idp);
@@ -163,7 +173,7 @@ async fn identity_alone_never_unlocks() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "alice");
-    let (linked, _) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
+    let (linked, _) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, SECOND).unwrap();
     for guess in [linked.subject.as_str(), linked.email.as_deref().unwrap(), "mock"] {
         assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(guess)).is_err());
         assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(guess)).is_err());
@@ -183,25 +193,25 @@ async fn edited_hint_cannot_switch_the_policy_off_and_recovery_repairs_it_by_rot
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "alice");
-    let (_, rk) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let (_, rk) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
     let mut edited = state(&dir);
     edited["binding"]["require_fresh_login"] = false.into();
     replace_state(&dir, &edited);
-    assert_eq!(policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS))), IdentityPolicyError::BindingTampered);
+    assert_eq!(policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND))), IdentityPolicyError::BindingTampered);
     edited["binding"] = serde_json::Value::Null;
     replace_state(&dir, &edited);
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err());
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).is_err());
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_ok());
     let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).unwrap();
     let app = App::open(dir.clone(), h, key).unwrap();
     assert!(
-        app.rotate_data_key(PASS, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).is_err(),
+        app.rotate_data_key(THIRD, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).is_err(),
         "implicit rotation cannot legitimize missing authenticated policy"
     );
-    let replacement = unlink(&dir, Unlock::RecoveryKey(&rk), None, PASS).unwrap();
+    let replacement = unlink(&dir, Unlock::RecoveryKey(&rk), None, THIRD).unwrap();
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_err());
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&replacement)).is_ok());
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(THIRD)).is_ok());
 }
 
 #[tokio::test]
@@ -211,24 +221,24 @@ async fn relinking_and_unlinking_follow_the_policy_and_rotate_every_epoch() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "alice");
-    let (_, first) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
-    assert!(matches!(policy_err(unlink(&dir, Unlock::Passphrase(PASS), None, PASS)), IdentityPolicyError::FreshLoginRequired { .. }));
+    let (_, first) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
+    assert!(matches!(policy_err(unlink(&dir, Unlock::Passphrase(SECOND), None, THIRD)), IdentityPolicyError::FreshLoginRequired { .. }));
     idp.set_subject("fixture-user-2", None);
     assert!(matches!(
-        policy_err(link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS)),
+        policy_err(link(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await, false, THIRD)),
         IdentityPolicyError::FreshLoginRequired { .. }
     ));
     idp.set_subject("fixture-user-1", None);
-    let (linked, second) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
+    let (linked, second) = link(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await, false, THIRD).unwrap();
     assert!(!linked.require_fresh_login);
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&first)).is_err());
     idp.set_subject("fixture-user-2", None);
-    let (linked, third) = link(&dir, Unlock::RecoveryKey(&second), sign_in(&p).await, true, PASS).unwrap();
+    let (linked, third) = link(&dir, Unlock::RecoveryKey(&second), sign_in(&p).await, true, FOURTH).unwrap();
     assert_eq!(linked.subject, "fixture-user-2");
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&second)).is_err());
-    unlink(&dir, Unlock::Passphrase(PASS), Some(sign_in(&p).await), PASS).unwrap();
+    unlink(&dir, Unlock::Passphrase(FOURTH), Some(sign_in(&p).await), FIFTH).unwrap();
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&third)).is_err());
-    assert_eq!(policy_err(unlink(&dir, Unlock::Passphrase(PASS), None, PASS)), IdentityPolicyError::NotLinked);
+    assert_eq!(policy_err(unlink(&dir, Unlock::Passphrase(FIFTH), None, "sixth independent passphrase")), IdentityPolicyError::NotLinked);
 }
 
 #[tokio::test]
@@ -238,16 +248,16 @@ async fn restoring_someone_elses_backup_keeps_the_local_identity() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (a_dir, _) = profile(root.path(), "alice");
-    link(&a_dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
-    let (h, key) = ProfileManager::unlock(&a_dir, Unlock::Passphrase(PASS)).unwrap();
+    link(&a_dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, SECOND).unwrap();
+    let (h, key) = ProfileManager::unlock(&a_dir, Unlock::Passphrase(SECOND)).unwrap();
     let alice = App::open(a_dir, h, key).unwrap();
     alice.create_workspace("Alice's work").unwrap();
     let (backup, _) = alice.export_backup_with("backup passphrase", KdfParams::testing()).unwrap();
     idp.set_subject("fixture-user-bob", None);
     let (b_dir, _) = profile(root.path(), "bob");
-    link(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    link(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
     let before = state(&b_dir);
-    let (h, key) = ProfileManager::unlock_with_fresh_login(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
+    let (h, key) = ProfileManager::unlock_with_fresh_login(&b_dir, Unlock::Passphrase(SECOND), sign_in(&p).await).unwrap();
     let bob = App::open(b_dir.clone(), h, key).unwrap();
     bob.restore(&backup, Some("backup passphrase"), ConflictPolicy::Merge).unwrap();
     assert!(bob.find_workspace("Alice's work").is_ok());
@@ -619,9 +629,9 @@ async fn authentic_old_policy_replay_cannot_open_current_ciphertext() {
     let stale = App::open(dir.clone(), h, key).unwrap();
     stale.create_workspace("before").unwrap();
     let unlinked = state(&dir);
-    let (_, replacement) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let (_, replacement) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
     let committed = state(&dir);
-    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
+    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await).unwrap();
     let current = App::open(dir.clone(), h, key).unwrap();
     current.create_workspace("after").unwrap();
     assert!(stale.create_workspace("stale writer").is_err());
@@ -643,17 +653,17 @@ async fn stale_authorized_policy_cannot_unlink_or_replace_a_newer_binding() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "concurrency");
-    link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
-    let (authorized, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, SECOND).unwrap();
+    let (authorized, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).unwrap();
     let old_binding = anvil_storage::rotation::binding(&dir).unwrap().unwrap();
-    let (_, recovery) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let (_, recovery) = link(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await, true, THIRD).unwrap();
     let committed = state(&dir);
     for replacement in [None, old_binding] {
         assert!(anvil_storage::rotation::set_binding(&dir, &authorized, &key, replacement).is_err());
         assert_eq!(state(&dir), committed);
     }
-    unlink(&dir, Unlock::RecoveryKey(&recovery), None, PASS).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
+    unlink(&dir, Unlock::RecoveryKey(&recovery), None, FOURTH).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(FOURTH)).is_ok());
 }
 
 #[tokio::test]
@@ -664,11 +674,11 @@ async fn deleting_header_mac_cannot_legitimize_an_unlinked_policy() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "unsigned policy");
-    link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
     let mut edited = state(&dir);
     edited["binding"] = serde_json::Value::Null;
     edited["header"]["rotation"]["binding_digest"] = hex::encode(sha2::Sha256::digest(b"null")).into();
     edited["header"]["protection_mac"] = serde_json::Value::Null;
     replace_state(&dir, &edited);
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err());
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).is_err());
 }

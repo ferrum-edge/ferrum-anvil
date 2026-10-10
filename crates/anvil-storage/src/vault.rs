@@ -163,6 +163,9 @@ pub(crate) fn rotated_header(
     recovery: &RotationRecoveryKey,
     kdf: KdfParams,
 ) -> Result<ProfileHeader, VaultError> {
+    if h.protection == ProtectionMode::Passphrase && unlock_with_passphrase(h, passphrase).is_ok() {
+        return Err(VaultError::Header("choose a passphrase different from the current one".into()));
+    }
     if h.recovery_wrap.is_some() && unlock_with_recovery(h, recovery.as_str()).is_ok() {
         return Err(VaultError::Header("rotation requires a new recovery credential".into()));
     }

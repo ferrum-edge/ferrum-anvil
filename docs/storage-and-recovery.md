@@ -103,14 +103,13 @@ Every unlock verifies it once the data key is obtained:
 - A keychain header never carries a passphrase or recovery wrap, so one
   without a MAC that does is refused too.
 
-Headers and keychain entries from earlier builds have neither the MAC nor
-the tag. They still open, and get both at their next successful unlock (the
-MAC first, then the tag); such a header is trusted as found at its first
-unlock on this build. One gap remains until the entry is gone: a keychain
-entry left over from a conversion done by an earlier build holds the
-untagged key. If the credential store refuses both to delete and to
-overwrite it (step 3 below), a header edited back to keychain mode, with its
-MAC and both wraps removed, still opens from it.
+Headers and keychain entries from earlier builds may lack the MAC or tag.
+An authenticated existing identity policy must still verify before ordinary
+unlock. Missing legacy policy requires explicit owner enrollment and rotation;
+see [deliberate local key rotation](#deliberate-local-key-rotation). Enrolled
+profiles refuse missing canonical state or an unauthenticated policy. A retired
+keychain entry can still recover an old raw profile copy, but cannot decrypt
+ciphertext under the replacement key.
 
 The header is plaintext, so its Argon2id costs and salts are checked before
 any derivation runs, against the same bounds as a bundle's or backup's
@@ -122,47 +121,26 @@ wrapped with costs outside them.
 
 Settings → *Require an unlock passphrase* converts an unlocked keychain
 profile to passphrase protection (*Change unlock passphrase* is for
-passphrase profiles only). The data key does not change, so nothing is
-re-encrypted. In order:
+passphrase profiles only). It generates an independent data key and re-encrypts
+all active encrypted payloads. Save and acknowledge the replacement recovery
+key in the native dialog before commit. The ciphertext, canonical wrapped
+header, policy and canary commit together in a FULL-synchronous SQLite
+transaction; success locks the profile so it must reopen with the new credential.
 
-1. A header from an earlier build gets its MAC, and the keychain entry is
-   tagged if it is not yet. If the credential store refuses, the conversion
-   stops; nothing has changed beyond the MAC, which any unlock on this build
-   also writes.
-2. The header is rewritten atomically with the passphrase wrap, a wrap for a
-   **new recovery key** (shown once) and the passphrase mode with its MAC.
-   From here on the keychain no longer opens the profile.
-   - The rewrite reads the header on disk under an advisory lock on
-     `profile.lock` in the profile directory, which every header writer
-     takes, and the header must still verify under the data key.
-   - The writer syncs its own temporary file (named after its process and a
-     random suffix), renames it over the header, then flushes the directory
-     (`fsync` on macOS, Linux and the BSDs; `FlushFileBuffers` on a directory
-     handle on Windows). The directory flush is best effort: a file system
-     that refuses it (some FUSE and SMB mounts) is logged, not treated as a
-     failure, because the new header is already in place.
-   - A temporary file older than ten minutes, left by a writer that stopped
-     before the rename, is removed by the next writer holding the lock.
-3. The keychain entry is removed and its account name dropped from the
-   header.
-   - If the credential store refuses the delete, the header keeps the account
-     name and the entry is overwritten with a marker that holds no key. If the
-     app stops between the two steps, the header keeps the account name too.
-   - Until the old entry is gone, removal is retried after each successful
-     unlock. The retry edits the header as it is on disk, under the same
-     lock, so a passphrase changed meanwhile by another process is kept. An
-     entry that holds a different key is left alone. Each retry may raise the
-     credential store's own permission prompt.
-   - Settings lists such a leftover entry (service `com.ferrumedge.anvil`,
-     account `profile-<id>`) so it can also be removed by hand. While the
-     entry still holds the key (the store refused the overwrite too, or the
-     app stopped before the delete), a copy of the header saved before the
-     conversion is still a valid keychain header for it. Removing the entry
-     is what fully ends keychain access.
+The matching retired OS credential is removed after commit. Cleanup denial
+leaves a retryable entry and does not undo the committed rotation. Retry is
+serialized across supported Anvil processes and preserves an unrelated entry
+whose key differs when checked. Settings identifies leftovers by service
+`com.ferrumedge.anvil` and account `profile-<id>` for manual removal. An old
+header and retained OS entry may recover historical data; their old key cannot
+decrypt the replacement ciphertext. External OS-tool credential changes are
+outside Anvil's profile fence.
 
-`crates/anvil-storage/tests/keychain_conversion.rs` and
-`crates/anvil-app/tests/keychain_conversion.rs` cover this with
-keyring-core's in-memory mock credential store.
+See [deliberate local key rotation](#deliberate-local-key-rotation) for atomicity,
+crash recovery, supported process coordination and historical restore limits.
+`crates/anvil-app/tests/key_rotation.rs` covers conversion and cleanup retry;
+`crates/anvil-storage/tests/os_keychain.rs` exercises the real credential store
+in hosted platform CI.
 
 A linked provider identity is **not** an unlock method; see
 [identity.md](identity.md).
@@ -573,6 +551,9 @@ from the OS keychain rotates the data key and re-encrypts every active encrypted
 payload. Save and check the replacement recovery key displayed by the native
 dialog **before** confirming the rotation. Cancellation leaves storage unchanged.
 Anvil locks afterwards; reopen with the new passphrase or saved recovery key.
+Choose a fresh passphrase that you have never used for this profile. Rotation
+rejects the current passphrase; choosing a previously compromised historical
+passphrase would authorize that secret again against the new header.
 The old password and recovery credential cannot decrypt later ciphertext.
 A portable Anvil backup retains its independent export password.
 
@@ -587,8 +568,8 @@ anvil --profile PROFILE --passphrase-stdin profile rotate-key \
 ```
 
 Enter the current password on the first stdin line and a new password of at
-least eight characters on the second. Neither is supplied on the command
-line. For an OS-keychain profile, omit `--passphrase-stdin`; the matching
+least eight characters, different from the current one, on the second. Neither
+is supplied on the command line. For an OS-keychain profile, omit `--passphrase-stdin`; the matching
 accessible OS credential unlocks it, and stdin supplies only the new password.
 For a linked profile that requires fresh provider login, use its offline
 recovery key instead: omit `--passphrase-stdin` and add
