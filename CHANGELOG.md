@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Update the desktop E2E Tauri service to 1.5.0, whose supported WebdriverIO
+  dependencies use patched deepmerge-ts 8.0.2. This removes the development-only
+  GHSA-ggr8-5vv4-36mx dependency exception without overriding deepmerge-ts across
+  a major version; production UI dependencies and the WDIO 9.32 runner stay pinned.
+
 - Pin Linux CI and installer builds to Ubuntu 26.04. Linux installers now target
   modern system libraries; Ubuntu 22.04/24.04 compatibility is no longer a release
   target.
