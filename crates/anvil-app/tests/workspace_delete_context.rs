@@ -78,7 +78,8 @@ async fn a_context_built_before_its_workspace_delete_keeps_nothing_for_the_resto
     for ctx in &built {
         let o = app.engine.execute(ctx, EventCtx::none(), CancellationToken::new()).await;
         let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
-        assert_eq!(status(&o), Some(200), "{}: {failure:?}", ctx.spec.url);
+        assert_eq!(status(&o), None, "{}: {failure:?}", ctx.spec.url);
+        assert!(failure.unwrap().message.contains("configuration changed"));
     }
     assert!(!app.engine.has_cookie_jar(&isolation), "a cookie was kept for the deleted workspace");
     assert_eq!(app.engine.prepared_tls_len(), 0, "a TLS configuration was cached for the deleted workspace");

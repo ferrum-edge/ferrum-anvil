@@ -64,9 +64,14 @@ fn rotation_replaces_recovery_and_retains_portable_backup_restore() {
     let after = reopened.export_backup_with("portable backup password", KdfParams::testing()).unwrap().0;
     fresh.restore(&after, Some("portable backup password"), ConflictPolicy::Replace).unwrap();
     assert_eq!(fresh.workspace(&ws.meta.id).unwrap().name, "historical workspace");
+    let credentials_and_policy = |mut header: anvil_storage::ProfileHeader| {
+        header.protection_mac = None;
+        header.rotation.as_mut().unwrap().manifest_root = None;
+        serde_json::to_value(header).unwrap()
+    };
     assert_eq!(
-        serde_json::to_value(vault::read_header(&fresh.dir).unwrap()).unwrap(),
-        serde_json::to_value(target_header).unwrap(),
+        credentials_and_policy(vault::read_header(&fresh.dir).unwrap()),
+        credentials_and_policy(target_header),
         "exports do not transfer local unlock/key policy"
     );
     // The deliberate operation is repeatable, with no old-key bridge.

@@ -221,6 +221,7 @@ impl App {
     /// Freeze every request the plan references (same preparation as Send)
     /// and resolve the dataset.
     pub fn load_job(&self, p: &LoadPlan) -> Result<LoadJob> {
+        let authority = self.store.protected_authority()?;
         self.check_plan_requests(p)?;
         let opts = SendOptions { environment: p.environment_id, ..Default::default() };
         let mut requests = HashMap::new();
@@ -232,6 +233,7 @@ impl App {
             Some(did) => Some(self.load_dataset(&p.workspace_id, &did)?),
             None => None,
         };
+        self.store.check_protected_authority(&authority)?;
         Ok(LoadJob { requests, dataset })
     }
 
@@ -427,9 +429,12 @@ impl App {
         if !p.trusted {
             return Err(AppError::Invalid("imported load plans must be reviewed and saved before they can run".into()));
         }
+        let authority = self.store.protected_authority()?;
         let job = self.load_job(p)?;
         let options = RunOptions { acknowledged, ..RunOptions::default() };
-        WorkerJob::from_load_job(p, &job, options).map_err(|e| AppError::Invalid(e.to_string()))
+        let worker = WorkerJob::from_load_job(p, &job, options).map_err(|e| AppError::Invalid(e.to_string()))?;
+        self.store.check_protected_authority(&authority)?;
+        Ok(worker)
     }
 
     /// Save a report into its plan's workspace. Refused once that workspace

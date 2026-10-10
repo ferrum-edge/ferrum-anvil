@@ -20,6 +20,7 @@ pub struct OpenSession {
     /// The explicit renderer attempt admitted with this slot, never its reused id.
     pub attempt_id: String,
     pub session: tokio::sync::Mutex<Option<SessionHandle>>,
+    authority: parking_lot::Mutex<Option<Arc<dyn anvil_engine::context::SecretResolver>>>,
     /// Interrupts a send waiting on the bounded command queue BEFORE any
     /// canceler tries to take `session`. It cannot be trapped by that wait.
     pub cancel: tokio_util::sync::CancellationToken,
@@ -81,6 +82,7 @@ fn register_session<'a>(
         let slot = Arc::new(OpenSession {
             attempt_id: attempt_id.into(),
             session: tokio::sync::Mutex::new(None),
+            authority: parking_lot::Mutex::new(None),
             cancel: pending.token().clone(),
         });
         sessions.insert(execution_id.into(), (fence.clone(), slot.clone()));
@@ -205,6 +207,8 @@ pub(crate) async fn session_open(
     let sink = session_sink(handle.clone(), fence.clone(), execution_id.clone(), slot.clone(), move |ev| {
         let _ = h2.emit("execution-event", ev);
     });
+    st.check_context_authority(&app, ctx.secrets.as_ref())?;
+    *slot.authority.lock() = Some(ctx.secrets.clone());
     let open = app.engine.open_session(ctx, EventCtx { execution_id: exec_id, sink: Some(sink) });
     let Some((session, canceled)) = pending.open(open, |session| session).await else {
         return Err(CANCELED_BEFORE_OPEN.into());
@@ -311,6 +315,7 @@ async fn until_canceled<T>(cancel: &tokio_util::sync::CancellationToken, work: i
 }
 
 pub(crate) async fn session_send(st: &DesktopState, control: SessionControl, command: SessionCommand) -> R<()> {
+    check_session_authority(st, &control.fence.app, &control.slot)?;
     st.deliver_payload(&control.fence, || control.check_slot(st))??;
     let guard = until_canceled(&control.slot.cancel, control.slot.session.lock()).await?;
     let session = guard.as_ref().ok_or("the session is no longer open")?;
@@ -321,6 +326,9 @@ pub(crate) async fn session_send(st: &DesktopState, control: SessionControl, com
             // SessionHandle::send inserts into its bounded queue during a
             // poll. Revalidate each poll, including one after a queue wait;
             // pending polls release the synchronous gate before awaiting.
+            if let Err(error) = check_session_authority(st, &control.fence.app, &control.slot) {
+                return std::task::Poll::Ready(Err(error));
+            }
             match st.deliver_payload(&control.fence, || {
                 control.check_slot(st)?;
                 Ok(send.as_mut().poll(cx))
@@ -331,6 +339,17 @@ pub(crate) async fn session_send(st: &DesktopState, control: SessionControl, com
         }),
     )
     .await?
+}
+
+fn check_session_authority(st: &DesktopState, app: &Arc<anvil_app::App>, slot: &SessionSlot) -> R<()> {
+    let authority = slot.authority.lock().clone();
+    if let Some(authority) = authority
+        && let Err(error) = st.check_context_authority(app, authority.as_ref())
+    {
+        slot.cancel.cancel();
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Signal the admitted slot/token synchronously under the epoch gate, then
@@ -942,6 +961,46 @@ mod tests {
                 finish_slot(&slot).await;
                 remove_slot(&st, &execution_id, &slot);
             }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn catalogue_change_refuses_cached_session_controls_and_integrity_tears_down() {
+        for tamper in [false, true] {
+            let root = TempRoot::new();
+            let st = DesktopState::new(root.0.clone());
+            let (app, _) = create(&st, "catalogue-session");
+            st.set_app_since(app, st.epoch()).unwrap();
+            let fence = st.admit_payload().unwrap();
+            let ws = fence.app.create_workspace("workspace").unwrap();
+            let ctx = fence
+                .app
+                .build_context(None, &ws.meta.id, Some(RequestSpec::http("GET", "https://example.invalid/")), &Default::default())
+                .unwrap();
+            let execution_id = Id::new().to_string();
+            let (slot, _peer) = open_tcp(&st, &fence, &execution_id, None).await;
+            *slot.authority.lock() = Some(ctx.secrets);
+            let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
+            session_send(&st, control, SessionCommand::SendText { text: "before".into() }).await.unwrap();
+            if tamper {
+                let raw = rusqlite::Connection::open(fence.app.dir.join(anvil_storage::store::DB_FILE)).unwrap();
+                raw.execute("DELETE FROM objects WHERE kind=?1", [anvil_storage::kind::APP_SETTINGS]).unwrap();
+            } else {
+                fence.app.create_workspace("unrelated autosave").unwrap();
+            }
+            let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
+            let error = session_send(&st, control, SessionCommand::SendText { text: "must not enqueue".into() }).await.unwrap_err();
+            assert!(slot.cancel.is_cancelled());
+            if tamper {
+                assert!(fence.app.is_locked());
+                assert!(st.admit_payload().is_err());
+            } else {
+                assert!(error.contains("configuration changed"));
+                assert!(!fence.app.is_locked());
+                assert!(st.admit_payload().is_ok());
+            }
+            finish_slot(&slot).await;
+            remove_slot(&st, &execution_id, &slot);
         }
     }
 

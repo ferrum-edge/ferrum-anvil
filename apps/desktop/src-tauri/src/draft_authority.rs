@@ -474,6 +474,7 @@ pub(crate) async fn send_draft(
     if cancel.is_cancelled() {
         return Err(CANCELED.into());
     }
+    st.check_context_authority(app, ctx.secrets.as_ref())?;
     let out = app.engine.execute(&ctx, events, cancel.clone()).await;
     if !record_history {
         return Ok(out);

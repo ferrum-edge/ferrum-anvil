@@ -52,6 +52,7 @@ winapi-util.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+hmac.workspace = true
 tempfile.workspace = true
 anvil-contract.workspace = true
 # Fault injection in the import atomicity tests (a trigger that fails a write).

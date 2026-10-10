@@ -67,7 +67,7 @@ pub enum IdentityPolicyError {
     #[error("the identity binding of this profile was changed outside Anvil; unlock with the recovery key and link the account again")]
     BindingTampered,
     #[error(
-        "POLICY_ENROLLMENT_REQUIRED: this legacy profile has no authenticated identity policy; use recovery or explicitly enroll a replacement policy and rotate its key"
+        "POLICY_ENROLLMENT_REQUIRED: this legacy profile needs canonical policy enrollment and key rotation before active use; preserve a verified linked policy, or explicitly replace unknown policy"
     )]
     PolicyEnrollmentRequired,
 }
@@ -287,6 +287,7 @@ impl App {
         if self.is_locked() {
             return Err(AppError::Locked);
         }
+        ctx.secrets.validate_context().map_err(AppError::Invalid)?;
         let auth = anvil_identity::authorize_api(&self.engine, ctx, opener, observer, flow, cancel).await?;
         if self.is_locked() {
             let _ = anvil_identity::api_oauth::sign_out(&self.engine, ctx);

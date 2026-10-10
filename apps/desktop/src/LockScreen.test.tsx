@@ -99,7 +99,7 @@ describe("legacy policy enrollment", () => {
     expect(invoke).not.toHaveBeenCalledWith("profile_enroll_unlinked", expect.anything());
     fireEvent.change(screen.getByLabelText("New passphrase"), { target: { value: "replacement passphrase" } });
     fireEvent.change(screen.getByLabelText("Repeat new passphrase"), { target: { value: "replacement passphrase" } });
-    fireEvent.click(screen.getByRole("button", { name: "Replace unknown policy and rotate…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Enroll policy and rotate…" }));
     await screen.findByText("Policy enrolled and encryption key rotated. Unlock with your new passphrase.");
     expect(invoke).toHaveBeenCalledWith("profile_enroll_unlinked", {
       profileId: "k1", passphrase: null, recoveryKey: null, newPassphrase: "replacement passphrase",
@@ -119,7 +119,7 @@ describe("legacy policy enrollment", () => {
     await screen.findByRole("heading", { name: "Enroll legacy policy" });
     fireEvent.change(screen.getByLabelText("New passphrase"), { target: { value: "replacement passphrase" } });
     fireEvent.change(screen.getByLabelText("Repeat new passphrase"), { target: { value: "replacement passphrase" } });
-    fireEvent.click(screen.getByRole("button", { name: "Replace unknown policy and rotate…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Enroll policy and rotate…" }));
     await screen.findByText("POLICY_ENROLLMENT_REQUIRED: Not done: it was not confirmed in the system dialog.");
     expect(onUnlocked).not.toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: "Enroll legacy policy" })).toBeTruthy();

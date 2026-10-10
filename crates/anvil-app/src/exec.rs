@@ -61,6 +61,7 @@ pub struct ResolvedSecrets {
     variables: HashMap<(usize, usize), SecretRef>,
     /// Looks up a reference not prefetched, including deferred OAuth credentials.
     store: StoreSecrets,
+    authority: Option<String>,
 }
 
 impl ResolvedSecrets {
@@ -70,6 +71,7 @@ impl ResolvedSecrets {
         parts: &[serde_json::Value],
         variables: HashMap<(usize, usize), SecretRef>,
         prefetch_variables: bool,
+        authority: Option<String>,
     ) -> ResolvedSecrets {
         let mut refs = HashSet::new();
         parts.iter().for_each(|p| collect_secret_refs(p, &mut refs));
@@ -81,19 +83,20 @@ impl ResolvedSecrets {
             let v = store.resolve(&r);
             resolved.insert(r, v);
         }
-        ResolvedSecrets { resolved: Mutex::new(resolved), variables, store }
+        ResolvedSecrets { resolved: Mutex::new(resolved), variables, store, authority }
     }
 }
 
 impl SecretResolver for ResolvedSecrets {
+    fn validate_context(&self) -> std::result::Result<(), String> {
+        crate::blocking_in_place(|| self.store.store.check_protected_authority(&self.authority)).map_err(|e| e.to_string())
+    }
     fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
         self.variables.get(&(layer, variable)).cloned()
     }
 
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
-        if self.store.store.is_locked() {
-            return Err("Anvil is locked".into());
-        }
+        self.validate_context()?;
         let mut resolved = self.resolved.lock();
         match resolved.get(r) {
             Some(v) => v.clone(),
@@ -197,10 +200,12 @@ pub struct StoreAttachments {
     /// Linked files chosen on this device (see `anvil_app::linked_files`);
     /// any other linked file is refused, never read.
     pub linked: Vec<String>,
+    pub authority: Option<String>,
 }
 
 impl AttachmentResolver for StoreAttachments {
     fn load(&self, a: &AttachmentRef) -> std::result::Result<Bytes, String> {
+        crate::blocking_in_place(|| self.app_store.check_protected_authority(&self.authority)).map_err(|e| e.to_string())?;
         match a {
             AttachmentRef::Stored { sha256, file_name, .. } => self
                 .index
@@ -300,6 +305,8 @@ impl App {
         // one that starts after it, while a delete before this point leaves
         // nothing to read. A workspace restored with the same id afterwards
         // is not affected: its contexts are built after the delete.
+        crate::profiles::ProfileManager::require_enrolled_policy(&self.header)?;
+        let authority = self.store.protected_authority()?;
         let epoch = self.engine.context_epoch(&ws_id.to_string());
         if let Some(d) = &draft {
             refuse_linked_files(d)?;
@@ -422,7 +429,7 @@ impl App {
             integrations: self.integrations(ws_id)?,
             // Replaced below, once the context has passed its checks.
             secrets: Arc::new(StoreSecrets { store: self.store.clone(), workspace: *ws_id }),
-            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
+            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked, authority: authority.clone() }),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
             seed: opts.seed,
@@ -454,7 +461,8 @@ impl App {
         self.check_token_files(&ctx.effective_auth().1)?;
         let parts = secret_parts(&ctx)?;
         let prefetch_variables = !oauth_needs_deferral(&ctx, &ctx.effective_auth().1);
-        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts, deferred_variables, prefetch_variables));
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts, deferred_variables, prefetch_variables, authority.clone()));
+        self.store.check_protected_authority(&authority)?;
         Ok(ctx)
     }
 

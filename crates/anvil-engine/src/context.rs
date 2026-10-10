@@ -19,6 +19,13 @@ use zeroize::Zeroizing;
 pub trait SecretResolver: Send + Sync {
     fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String>;
 
+    /// Storage-backed contexts revalidate their captured local authority at
+    /// admission and before returning cached material. In-memory contexts
+    /// (standalone runner/load workers) have no live profile authority.
+    fn validate_context(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// A vault variable retained by the context builder until endpoint validation.
     /// Indices identify the original layers and entries; later run layers still win.
     fn variable_secret(&self, _layer: usize, _variable: usize) -> Option<SecretRef> {
@@ -34,6 +41,9 @@ struct RetainedVariableSecrets {
 }
 
 impl SecretResolver for RetainedVariableSecrets {
+    fn validate_context(&self) -> Result<(), String> {
+        self.source.validate_context()
+    }
     fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
         self.source.resolve(reference)
     }

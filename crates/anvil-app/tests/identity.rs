@@ -203,7 +203,11 @@ async fn edited_hint_cannot_switch_the_policy_off_and_recovery_repairs_it_by_rot
     assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).is_err());
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_ok());
     let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).unwrap();
+    let authenticated_digest = edited["header"]["rotation"]["binding_digest"].clone();
     let app = App::open(dir.clone(), h, key).unwrap();
+    app.create_workspace("recovery inspection").unwrap();
+    assert_eq!(state(&dir)["header"]["rotation"]["binding_digest"], authenticated_digest);
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).is_err(), "ordinary catalogue writes must not bless missing policy");
     assert!(
         app.rotate_data_key(THIRD, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).is_err(),
         "implicit rotation cannot legitimize missing authenticated policy"
@@ -256,12 +260,18 @@ async fn restoring_someone_elses_backup_keeps_the_local_identity() {
     idp.set_subject("fixture-user-bob", None);
     let (b_dir, _) = profile(root.path(), "bob");
     link(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
-    let before = state(&b_dir);
+    let mut before = state(&b_dir);
     let (h, key) = ProfileManager::unlock_with_fresh_login(&b_dir, Unlock::Passphrase(SECOND), sign_in(&p).await).unwrap();
     let bob = App::open(b_dir.clone(), h, key).unwrap();
     bob.restore(&backup, Some("backup passphrase"), ConflictPolicy::Merge).unwrap();
     assert!(bob.find_workspace("Alice's work").is_ok());
-    assert_eq!(state(&b_dir), before);
+    let mut after = state(&b_dir);
+    // Import changes the record catalogue, preserving all unlock/linked policy.
+    for s in [&mut before, &mut after] {
+        s["header"].as_object_mut().unwrap().remove("protection_mac");
+        s["header"]["rotation"].as_object_mut().unwrap().remove("manifest_root");
+    }
+    assert_eq!(after, before);
     assert_eq!(ProfileManager::unlock_requirements(&b_dir).unwrap().linked.unwrap().subject, "fixture-user-bob");
 }
 
@@ -630,10 +640,10 @@ async fn authentic_old_policy_replay_cannot_open_current_ciphertext() {
     stale.create_workspace("before").unwrap();
     let unlinked = state(&dir);
     let (_, replacement) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, SECOND).unwrap();
-    let committed = state(&dir);
     let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await).unwrap();
     let current = App::open(dir.clone(), h, key).unwrap();
     current.create_workspace("after").unwrap();
+    let committed = state(&dir);
     assert!(stale.create_workspace("stale writer").is_err());
     replace_state(&dir, &unlinked);
     assert!(

@@ -28,7 +28,7 @@ pub(crate) fn read_on(conn: &Connection) -> Result<Option<State>, VaultError> {
     }
     let canary: Option<String> =
         conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional().map_err(db)?;
-    if state.is_none() && canary.as_deref().is_some_and(|c| c.starts_with("rotated-v1:")) {
+    if state.is_none() && canary.as_deref().is_some_and(|c| c.starts_with("rotated-v1:") || c.starts_with(crate::manifest::CANARY)) {
         return Err(VaultError::Header("the rotated profile's canonical key state is missing".into()));
     }
     Ok(state)

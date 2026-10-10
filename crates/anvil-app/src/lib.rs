@@ -88,6 +88,19 @@ pub struct App {
 impl App {
     pub fn open(dir: PathBuf, header: ProfileHeader, key: Key) -> Result<App> {
         let store = Arc::new(Store::open(&dir, key)?);
+        Self::open_with_store(dir, header, store)
+    }
+
+    /// Explicit credential rotation; no active context may use a pre-catalogue header.
+    pub fn open_for_rotation(dir: PathBuf, header: ProfileHeader, key: Key) -> Result<App> {
+        let store = Arc::new(Store::open_for_rotation(&dir, key)?);
+        Self::open_with_store(dir, header, store)
+    }
+
+    fn open_with_store(dir: PathBuf, header: ProfileHeader, store: Arc<Store>) -> Result<App> {
+        if header.rotation.as_ref().is_some_and(|p| p.manifest_root.is_some()) {
+            store.require_protected_records();
+        }
         let confined_token_files = Arc::new(AtomicBool::new(false));
         let load_runs = Arc::default();
         let app = App { header, dir, store, engine: Arc::new(Engine::new()), confined_token_files, load_runs };

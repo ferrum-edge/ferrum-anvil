@@ -78,7 +78,7 @@ fn explicit_recovery_input_rotates_a_fresh_login_profile_offline_and_retains_pol
         &format!("{OLD}\n{NEW}\n"),
     );
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("fresh"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("POLICY_ENROLLMENT_REQUIRED"));
     let missing_confirmation = cli(root.path(), &["profile", "rotate-key", "--new-passphrase-stdin", "--recovery-key-stdin"], "");
     assert!(!missing_confirmation.status.success());
     assert_eq!(vault::read_header(&dir).unwrap().key_check, h.key_check);

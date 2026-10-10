@@ -225,6 +225,7 @@ impl DesktopState {
     }
 
     fn set_app_since_with(&self, app: App, seen: u64, published: impl FnOnce(&Arc<App>)) -> Result<(), String> {
+        anvil_app::profiles::ProfileManager::require_enrolled_policy(&app.header).map_err(crate::commands::e)?;
         app.confine_token_files();
         let _transition = self.transition.lock();
         if self.key_change.load(Ordering::SeqCst) {
@@ -327,6 +328,20 @@ impl DesktopState {
         self.app.read().as_ref().is_some_and(|a| Arc::ptr_eq(a, app))
     }
 
+    /// Run storage authority checks outside the payload gate. Corruption
+    /// closes the whole native lifecycle; an ordinary edit merely stales a context.
+    pub(crate) fn check_context_authority(
+        &self,
+        app: &Arc<App>,
+        authority: &dyn anvil_engine::context::SecretResolver,
+    ) -> Result<(), String> {
+        let result = authority.validate_context();
+        if result.is_err() && app.is_locked() {
+            self.lock_integrity_if_current(app);
+        }
+        result
+    }
+
     /// Capture the unlocked profile/epoch under shared delivery access.
     /// No synchronous guard survives into async work.
     pub fn admit_payload(&self) -> Result<PayloadFence, String> {
@@ -408,6 +423,28 @@ impl DesktopState {
 
     fn lock_with(&self, after_fence: impl FnOnce()) {
         let _transition = self.transition.lock();
+        self.lock_under_transition(after_fence);
+    }
+
+    pub(crate) fn lock_integrity_if_current(&self, expected: &Arc<App>) {
+        let _transition = self.transition.lock();
+        if !expected.is_locked() || !self.is_current(expected) || !*self.payload_gate.read() {
+            return;
+        }
+        self.lock_under_transition(|| {});
+    }
+
+    /// A failed background read must not lock a subsequently opened profile.
+    pub(crate) fn lock_if_current(&self, expected: &Arc<App>) -> bool {
+        let _transition = self.transition.lock();
+        if !self.is_current(expected) || !*self.payload_gate.read() {
+            return false;
+        }
+        self.lock_under_transition(|| {});
+        true
+    }
+
+    fn lock_under_transition(&self, after_fence: impl FnOnce()) {
         let mut delivery = self.payload_gate.write();
         // An enqueue completes before this boundary or fails afterwards,
         // including after unlock. No new admission during key/cache cleanup.
@@ -747,6 +784,26 @@ pub(crate) mod tests {
     fn reopen(dir: &std::path::Path) -> App {
         let (header, key) = ProfileManager::unlock(dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
         App::open(dir.to_path_buf(), header, key).unwrap()
+    }
+
+    #[test]
+    fn a_background_policy_read_of_an_old_profile_cannot_lock_its_replacement() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let (a, _) = create(&st, "A");
+        st.set_app_since(a, st.epoch()).unwrap();
+        let reading = st.app().unwrap();
+        let (b, _) = create(&st, "B");
+        st.set_app_since(b, st.epoch()).unwrap();
+        let current = st.app().unwrap();
+        let epoch = st.epoch();
+        assert!(!st.lock_if_current(&reading));
+        assert_eq!(st.epoch(), epoch);
+        assert!(!current.is_locked());
+        assert!(*st.payload_gate.read());
+        assert!(st.lock_if_current(&current));
+        assert!(current.is_locked());
+        assert!(!*st.payload_gate.read());
     }
 
     #[test]
