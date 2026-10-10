@@ -207,16 +207,29 @@ struct Echo {
     url: String,
     task: tokio::task::JoinHandle<()>,
 }
+async fn read_request_head(stream: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut head = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = stream.read(&mut buffer).await.unwrap();
+        assert!(count > 0, "fixture request ended before its header");
+        head.extend_from_slice(&buffer[..count]);
+        assert!(head.len() <= 65536, "fixture request header exceeded its bound");
+        if head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            break;
+        }
+    }
+}
 impl Echo {
     async fn start() -> Self {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buffer = [0; 8192];
-                let _ = stream.read(&mut buffer).await.unwrap();
+                read_request_head(&mut stream).await;
                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
             }
         });
@@ -469,7 +482,7 @@ async fn scenario_source_changes_refuse_later_steps_and_unrelated_writes_do_not(
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     for relevant in [false, true] {
         let (_root, app) = app();
         let app = Arc::new(app);
@@ -495,8 +508,7 @@ async fn scenario_source_changes_refuse_later_steps_and_unrelated_writes_do_not(
         let server = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buffer = [0; 8192];
-                stream.read(&mut buffer).await.unwrap();
+                read_request_head(&mut stream).await;
                 if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                     if relevant {
                         changing.update_scenario(scenario_change.clone()).unwrap();
