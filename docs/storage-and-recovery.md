@@ -684,10 +684,18 @@ through an explicitly chosen authentic checkpoint or portable backup rather than
 certifying the damaged current database. Damaged revision payloads can still be
 enumerated for deliberate removal without returning their contents.
 
-Cached request contexts revalidate actual protected rows and their captured root
-before preparation, cached-secret or linked-file access, and native session sends.
-Any object/secret edit, including an unrelated autosave, stales older contexts:
-rebuild the request or reopen the session. A legitimate edit does not relock the
+Cached request contexts verify all actual protected rows before preparation,
+cached-secret or linked-file access, and native session sends. Their ephemeral
+dependency proof captures configuration and permission inputs in one consistent
+read transaction, including absent selections and ordered gateway candidates.
+A relevant object, credential or permission change stales an older context:
+rebuild the request or reopen the session. Saving another request or workspace,
+unused environment/TLS/proxy/secret rows, or a collection-run report does not
+interrupt unrelated contexts. Gateway candidate membership/order is relevant;
+whole-row comparison also treats an unchanged relevant row saved again as a
+change. No field-level semantic comparison is claimed. Relevant load-plan and
+dataset inputs remain checked through worker admission, and scenario inputs
+remain checked by frozen run contexts. A legitimate edit does not relock the
 profile. Integrity failure at an authority preflight locks it; the idle-lock loop
 also locks on unreadable settings instead of applying defaults. Material already
 handed to an admitted external worker, copied plaintext and completed network

@@ -50,7 +50,7 @@ fn name(table: &str, kind: &str, id: &str) -> String {
     serde_json::to_string(&[table, kind, id]).expect("string array serializes")
 }
 pub(crate) struct Manifest {
-    entries: BTreeMap<String, Entry>,
+    pub(crate) entries: BTreeMap<String, Entry>,
     pub dirty: bool,
 }
 impl Manifest {

@@ -221,37 +221,76 @@ impl App {
     /// Freeze every request the plan references (same preparation as Send)
     /// and resolve the dataset.
     pub fn load_job(&self, p: &LoadPlan) -> Result<LoadJob> {
-        let authority = self.store.protected_authority()?;
-        self.check_plan_requests(p)?;
-        let opts = SendOptions { environment: p.environment_id, ..Default::default() };
-        let mut requests = HashMap::new();
-        for id in Self::plan_requests(p) {
-            let ctx = self.build_context(Some(id), &p.workspace_id, None, &opts)?;
-            requests.insert(id, ctx);
-        }
-        let dataset = match p.dataset_id {
-            Some(did) => Some(self.load_dataset(&p.workspace_id, &did)?),
-            None => None,
-        };
-        self.store.check_protected_authority(&authority)?;
-        Ok(LoadJob { requests, dataset })
+        self.load_job_with_authority(p).map(|(job, _)| job)
     }
 
-    fn load_dataset(&self, ws: &Id, id: &Id) -> Result<Dataset> {
-        let d = self.datasets(ws)?.into_iter().find(|d| d.meta.id == *id).ok_or_else(|| AppError::NotFound(format!("dataset {id}")))?;
-        let bytes = match &d.attachment {
-            AttachmentRef::Stored { sha256, .. } => {
-                self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("dataset attachment {sha256}")))?
+    /// A stored plan and its authenticated observation, before registration.
+    pub fn load_plan_with_authority(&self, id: &Id) -> Result<(LoadPlan, crate::exec::AppContextAuthority)> {
+        self.read_context(|read| {
+            let plan = read.get(kind::LOAD_PLAN, id)?.ok_or_else(|| AppError::NotFound(format!("load plan {id}")))?;
+            Ok((plan, self.context_authority(read)))
+        })
+    }
+
+    fn load_job_with_authority(&self, p: &LoadPlan) -> Result<(LoadJob, crate::exec::AppContextAuthority)> {
+        let (mut requests, source, stored, authority) = self.read_context(|read| {
+            // A caller may provide an explicitly acknowledged draft plan.
+            // Native saved-plan callers retain their earlier exact observation.
+            read.depend_object(kind::LOAD_PLAN, &p.id);
+            let opts = SendOptions { environment: p.environment_id, ..Default::default() };
+            let mut requests = HashMap::new();
+            for id in Self::plan_requests(p) {
+                requests.insert(id, self.build_context_in(read, Some(id), &p.workspace_id, None, &opts)?);
             }
-            AttachmentRef::LinkedFile { path } => self.read_linked_dataset(d.meta.id, path, FilePurpose::Dataset.max_read_bytes())?,
+            let (source, stored) = match p.dataset_id {
+                Some(id) => {
+                    let d: anvil_domain::workspace::Dataset = read
+                        .get(kind::DATASET, &id)?
+                        .filter(|d: &anvil_domain::workspace::Dataset| d.workspace_id == p.workspace_id)
+                        .ok_or_else(|| AppError::NotFound(format!("dataset {id}")))?;
+                    let bytes = match &d.attachment {
+                        AttachmentRef::Stored { sha256, .. } => Some(
+                            crate::exec::attachment_for(read, sha256)?
+                                .ok_or_else(|| AppError::NotFound(format!("dataset attachment {sha256}")))?,
+                        ),
+                        AttachmentRef::LinkedFile { path } => {
+                            crate::exec::linked_permission(read, crate::linked_files::LinkedFileReferrer::Dataset { id }, path)?;
+                            None
+                        }
+                    };
+                    (Some(d), bytes)
+                }
+                None => (None, None),
+            };
+            Ok((requests, source, stored, self.context_authority(read)))
+        })?;
+        authority.check()?;
+        let dataset = match source {
+            Some(d) => {
+                let bytes = match (stored, &d.attachment) {
+                    (Some(bytes), _) => bytes,
+                    (None, AttachmentRef::LinkedFile { path }) => {
+                        crate::linked_files::read_bound_file(path, FilePurpose::Dataset.max_read_bytes(), "dataset")?
+                    }
+                    _ => return Err(AppError::NotFound("dataset attachment".into())),
+                };
+                let format = match d.format {
+                    DomainDatasetFormat::Csv => DatasetFormat::Csv,
+                    DomainDatasetFormat::Json => DatasetFormat::Json,
+                };
+                Some(
+                    Dataset::parse(format, bytes)
+                        .and_then(|ds| ds.with_sensitive_columns(d.sensitive_columns))
+                        .map_err(|e| AppError::Invalid(e.to_string()))?,
+                )
+            }
+            None => None,
         };
-        let fmt = match d.format {
-            DomainDatasetFormat::Csv => DatasetFormat::Csv,
-            DomainDatasetFormat::Json => DatasetFormat::Json,
-        };
-        Dataset::parse(fmt, bytes)
-            .and_then(|ds| ds.with_sensitive_columns(d.sensitive_columns.clone()))
-            .map_err(|e| AppError::Invalid(e.to_string()))
+        authority.check()?;
+        for ctx in requests.values_mut() {
+            crate::exec::guard_context(ctx, &authority);
+        }
+        Ok((LoadJob { requests, dataset }, authority))
     }
 
     /// Classify the plan's requests into one load unit (LOAD-013) without
@@ -423,18 +462,22 @@ impl App {
     /// referenced requests only). `acknowledged` must come from an explicit
     /// user confirmation of the preflight.
     pub fn worker_job(&self, p: &LoadPlan, acknowledged: bool) -> Result<WorkerJob> {
+        self.worker_job_with_authority(p, acknowledged).map(|(worker, _)| worker)
+    }
+
+    /// Producer proof remains local; it is never serialized into a detached worker.
+    pub fn worker_job_with_authority(&self, p: &LoadPlan, acknowledged: bool) -> Result<(WorkerJob, crate::exec::AppContextAuthority)> {
         if !acknowledged {
             return Err(AppError::Invalid("a load run needs explicit confirmation of its destination and planned load".into()));
         }
         if !p.trusted {
             return Err(AppError::Invalid("imported load plans must be reviewed and saved before they can run".into()));
         }
-        let authority = self.store.protected_authority()?;
-        let job = self.load_job(p)?;
+        let (job, authority) = self.load_job_with_authority(p)?;
         let options = RunOptions { acknowledged, ..RunOptions::default() };
         let worker = WorkerJob::from_load_job(p, &job, options).map_err(|e| AppError::Invalid(e.to_string()))?;
-        self.store.check_protected_authority(&authority)?;
-        Ok(worker)
+        authority.check()?;
+        Ok((worker, authority))
     }
 
     /// Save a report into its plan's workspace. Refused once that workspace

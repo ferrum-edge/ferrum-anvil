@@ -796,13 +796,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn actual_full_engine_queue_is_interrupted_by_cancel_and_lock() {
-        for how in ["cancel", "lock"] {
+    async fn actual_full_engine_queue_rechecks_scoped_authority_after_waiting() {
+        for how in ["cancel", "lock", "relevant", "unrelated"] {
             let root = TempRoot::new();
             let st = Arc::new(DesktopState::new(root.0.clone()));
             let (app, _) = create(&st, "queue");
             st.set_app_since(app, st.epoch()).unwrap();
             let fence = st.admit_payload().unwrap();
+            let workspace = fence.app.create_workspace("queue workspace").unwrap();
+            let context = fence
+                .app
+                .build_context(None, &workspace.meta.id, Some(RequestSpec::http("GET", "https://example.invalid/")), &Default::default())
+                .unwrap();
             let execution_id = Id::new().to_string();
             let (entered_tx, entered_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel();
@@ -817,6 +822,8 @@ mod tests {
                 }
             });
             let (slot, _peer) = open_tcp(&st, &fence, &execution_id, Some(sink)).await;
+            *slot.authority.lock() = Some(context.secrets);
+            let mut released_for_edit = false;
             let proof = async {
                 entered_rx.recv_timeout(BOUND).map_err(|err| format!("the real consumer must enter its barrier: {err}"))?;
                 for _ in 0..256 {
@@ -841,8 +848,11 @@ mod tests {
                         polled
                     })
                     .await;
-                    if sent != Err(crate::commands::CANCELED.into()) {
-                        return Err(format!("the blocked send must settle as CANCELED, got {sent:?}"));
+                    match how {
+                        "unrelated" if sent.is_ok() => {}
+                        "relevant" if sent.as_ref().is_err_and(|e| e.contains("configuration changed")) => {}
+                        "cancel" | "lock" if sent == Err(crate::commands::CANCELED.into()) => {}
+                        _ => return Err(format!("the blocked send must obey the {how} fence, got {sent:?}")),
                     }
                     Ok::<_, String>(())
                 };
@@ -855,9 +865,19 @@ mod tests {
                     }
                     if how == "cancel" {
                         session_cancel(&st, cancel).await?;
-                    } else {
+                    } else if how == "lock" {
                         st.lock();
                         slot.abort().await;
+                    } else {
+                        if how == "relevant" {
+                            fence.app.save_workspace(workspace.clone()).map_err(|e| e.to_string())?;
+                        } else {
+                            fence.app.create_workspace("unrelated autosave").map_err(|e| e.to_string())?;
+                        }
+                        // The capacity wake causes a NEW production poll after
+                        // the edit, which must recheck before enqueueing.
+                        release_tx.send(()).map_err(|e| e.to_string())?;
+                        released_for_edit = true;
                     }
                     // Lock also spawns an aborter. Tokio's fair mutex may
                     // reserve the next guard for it after our abort returns.
@@ -871,10 +891,10 @@ mod tests {
             let settled = tokio::time::timeout(BOUND, proof).await;
             // Preserve a failed proof until the blocked consumer is released
             // and its real engine task has been joined, including on timeout.
-            let released = release_tx.send(());
+            let released = if released_for_edit { Ok(()) } else { release_tx.send(()) };
             finish_slot(&slot).await;
             remove_slot(&st, &execution_id, &slot);
-            settled.expect("cancel must release a send waiting on the real bounded queue").expect("the cancellation proof must hold");
+            settled.expect("the send waiting on the real bounded queue must settle").expect("the production admission proof must hold");
             released.expect("release the stalled real consumer");
             assert_eq!(*consumer_release.lock(), Some(Ok(())), "the consumer must stay blocked until the proof settles: {how}");
         }
@@ -966,7 +986,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn catalogue_change_refuses_cached_session_controls_and_integrity_tears_down() {
-        for tamper in [false, true] {
+        for change in ["unrelated", "relevant", "tamper"] {
             let root = TempRoot::new();
             let st = DesktopState::new(root.0.clone());
             let (app, _) = create(&st, "catalogue-session");
@@ -982,16 +1002,27 @@ mod tests {
             *slot.authority.lock() = Some(ctx.secrets);
             let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
             session_send(&st, control, SessionCommand::SendText { text: "before".into() }).await.unwrap();
-            if tamper {
+            if change == "tamper" {
                 let raw = rusqlite::Connection::open(fence.app.dir.join(anvil_storage::store::DB_FILE)).unwrap();
                 raw.execute("DELETE FROM objects WHERE kind=?1", [anvil_storage::kind::APP_SETTINGS]).unwrap();
+            } else if change == "relevant" {
+                fence.app.save_workspace(ws.clone()).unwrap();
             } else {
                 fence.app.create_workspace("unrelated autosave").unwrap();
             }
             let control = admit_control(&st, fence.clone(), &execution_id, &slot.attempt_id).unwrap();
-            let error = session_send(&st, control, SessionCommand::SendText { text: "must not enqueue".into() }).await.unwrap_err();
+            let sent = session_send(&st, control, SessionCommand::SendText { text: "after edit".into() }).await;
+            if change == "unrelated" {
+                sent.unwrap();
+                assert!(!slot.cancel.is_cancelled());
+                assert!(!fence.app.is_locked());
+                finish_slot(&slot).await;
+                remove_slot(&st, &execution_id, &slot);
+                continue;
+            }
+            let error = sent.unwrap_err();
             assert!(slot.cancel.is_cancelled());
-            if tamper {
+            if change == "tamper" {
                 assert!(fence.app.is_locked());
                 assert!(st.admit_payload().is_err());
             } else {

@@ -1859,12 +1859,29 @@ impl StoreTx<'_> {
 /// Read-only access to an open transaction: from [`Store::read_consistently`]
 /// or [`StoreTx::as_read`]. It has no operation that writes.
 pub struct StoreRead<'a> {
-    store: &'a Store,
-    conn: &'a Connection,
-    manifest: &'a RefCell<Option<crate::manifest::Manifest>>,
+    pub(crate) store: &'a Store,
+    pub(crate) conn: &'a Connection,
+    pub(crate) manifest: &'a RefCell<Option<crate::manifest::Manifest>>,
 }
 
 impl StoreRead<'_> {
+    pub(crate) fn context_restore_epoch(&self) -> u64 {
+        self.store.restores.load(Ordering::SeqCst)
+    }
+
+    pub fn get_workspace_secret(&self, id: &Id, ws: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
+        self.records()?.get_workspace_secret(id, ws)
+    }
+
+    pub(crate) fn verify_context_snapshot(&self) -> Result<()> {
+        if let Some(m) = self.manifest.borrow().as_ref() {
+            m.verify_all(self.conn)?;
+        }
+        if let Some(s) = crate::rotation::read_on(self.conn).map_err(|_| StoreError::Integrity)? {
+            crate::vault::verify_rotation_binding(&s.header, &self.store.key()?, &s.binding).map_err(|_| StoreError::Integrity)?;
+        }
+        Ok(())
+    }
     fn records(&self) -> Result<Records<'_>> {
         Ok(Records { key: self.store.key()?, conn: self.conn, manifest: Some(self.manifest) })
     }

@@ -68,28 +68,6 @@ impl App {
         }
         Ok(())
     }
-
-    /// Refuse an auth setting that would read a token file that is not
-    /// bound, when token files are confined.
-    pub(crate) fn check_token_files(&self, auth: &AuthConfig) -> Result<()> {
-        if !self.confined_token_files.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        let mut paths = Vec::new();
-        jwt_svid_files(auth, &mut paths);
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let bound = self.token_file_bindings()?;
-        for p in paths {
-            if !bound.iter().any(|b| b.path == p.trim()) {
-                return Err(AppError::Invalid(
-                    "the JWT-SVID token file was not chosen with Choose… on this device; choose it in the auth settings".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 /// The canonical path of a regular file the user picked in the native
@@ -130,7 +108,7 @@ fn literal(path: &Path, what: &str) -> Result<String> {
 }
 
 /// Paths of every JWT-SVID `file` source in an auth setting.
-fn jwt_svid_files<'a>(auth: &'a AuthConfig, out: &mut Vec<&'a str>) {
+pub(crate) fn jwt_svid_files<'a>(auth: &'a AuthConfig, out: &mut Vec<&'a str>) {
     match auth {
         AuthConfig::JwtSvid { config } => {
             if let JwtSvidSource::File { path } = &config.source {

@@ -83,11 +83,12 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     // of its workspace (or a lock) from then on stops it.
     let preparing = app.clone();
     let prepared = anvil_app::off_runtime(move || {
-        let authority = preparing.store.protected_authority()?;
-        let plan = preparing.load_plan(&plan_id)?;
+        let (plan, plan_authority) = preparing.load_plan_with_authority(&plan_id)?;
         let run = preparing.register_load_run(&plan.workspace_id)?;
-        let job = preparing.worker_job(&plan, acknowledged)?;
-        preparing.store.check_protected_authority(&authority)?;
+        plan_authority.check()?;
+        let (job, authority) = preparing.worker_job_with_authority(&plan, acknowledged)?;
+        plan_authority.check()?;
+        let authority = [plan_authority, authority];
         Ok((run, job, authority))
     })
     .await;
@@ -103,8 +104,13 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     if run.workspace_deleted().is_cancelled() {
         return Err(WORKSPACE_DELETED.into());
     }
-    let checking = app.clone();
-    let checked = anvil_app::off_runtime(move || checking.store.check_protected_authority(&authority).map_err(AppError::from)).await;
+    let checked = anvil_app::off_runtime(move || {
+        for proof in authority {
+            proof.check()?;
+        }
+        Ok(())
+    })
+    .await;
     if checked.is_err() && app.is_locked() {
         st.lock_integrity_if_current(&app);
     }

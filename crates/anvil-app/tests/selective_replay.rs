@@ -40,9 +40,9 @@ fn cached_secrets_are_refused_after_edit_or_external_replay() {
     let request = app.create_request(&ws.meta.id, None, "request", spec).unwrap();
     let ctx = app.build_context(Some(request.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
     assert_eq!(ctx.secrets.resolve(&secret).unwrap().as_str(), "original");
-    // Legitimate unrelated edits stale existing contexts, without relocking.
+    // Legitimate unrelated edits preserve cached contexts, without relocking.
     app.create_workspace("other workspace").unwrap();
-    assert!(ctx.secrets.validate_context().unwrap_err().contains("configuration changed"));
+    ctx.secrets.validate_context().unwrap();
     assert!(!app.is_locked());
     let fresh = app.build_context(Some(request.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
     let raw = Connection::open(app.dir.join(DB_FILE)).unwrap();

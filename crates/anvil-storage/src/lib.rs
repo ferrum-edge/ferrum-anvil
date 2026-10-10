@@ -6,6 +6,7 @@
 //!   durable migrations, history retention and restore checkpoints;
 //! * [`crypto`] — XChaCha20-Poly1305 envelopes and Argon2id derivation.
 
+mod context_authority;
 pub mod crypto;
 mod manifest;
 mod profile_lock;
@@ -13,6 +14,7 @@ pub mod rotation;
 pub mod store;
 pub mod vault;
 
+pub use context_authority::{ContextAuthority, ContextRead};
 pub use crypto::{KdfParams, Key};
 pub use store::{Store, StoreError, StoreRead, StoreTx, kind};
 pub use vault::{ProfileHeader, VaultError};
