@@ -4,6 +4,13 @@
 
 ### Changed
 
+- Password changes, keychain conversion and identity-policy mutations now rotate
+  the local data key and re-encrypt active data, with replacement recovery-key
+  acknowledgment before commit. New profiles authenticate explicit policy state;
+  missing legacy policy requires deliberate enrollment. Offline portable backups
+  remain compatible; complete authentic local snapshot rollback is not prevented.
+
+
 - Update the desktop E2E Tauri service to 1.5.0, whose supported WebdriverIO
   dependencies use patched deepmerge-ts 8.0.2. This removes the development-only
   GHSA-ggr8-5vv4-36mx dependency exception without overriding deepmerge-ts across

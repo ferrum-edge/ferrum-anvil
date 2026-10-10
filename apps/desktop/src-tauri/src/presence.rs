@@ -249,19 +249,47 @@ fn profile_name(st: &DesktopState) -> R<String> {
 /// Replace the passphrase of the open profile, once the user confirmed it
 /// natively or just unlocked it with the recovery key.
 pub(crate) async fn change_passphrase(st: &DesktopState, presence: &impl Presence, new_passphrase: String, kdf: KdfParams) -> R<()> {
+    let new_passphrase = zeroize::Zeroizing::new(new_passphrase);
+    if new_passphrase.chars().count() < 8 {
+        return Err("the passphrase needs at least 8 characters".into());
+    }
     let now = st.epoch();
     let seen = if st.presence.take_recovery_reauth(now) {
         now
     } else {
         let message = format!(
-            "Change the passphrase of the profile “{}”? From now on only the new passphrase (or the recovery key) unlocks it.\n\nOnly continue if you asked for this change yourself.",
+            "Change the passphrase of the profile “{}”? Anvil will rotate its encryption key and re-encrypt all active data. The old passphrase and recovery key will stop opening active data. Historical copies remain historical. Close older Anvil builds first.\n\nOnly continue if you asked for this change yourself.",
             profile_name(st)?
         );
         let prompt = Prompt { title: "Change the profile passphrase", message, ok: "Change passphrase" };
         confirm(st, presence, prompt).await?
     };
-    let app = fenced(st, seen)?;
-    anvil_app::off_runtime(move || app.change_passphrase(&new_passphrase, kdf)).await.map_err(e)
+    let recovery = acknowledge_replacement(st, presence, seen).await?;
+    let change = st.begin_key_change(seen)?;
+    anvil_app::off_runtime(move || {
+        let guard = change;
+        guard.app.change_passphrase(&new_passphrase, &recovery, kdf)
+    })
+    .await
+    .map(|_| ())
+    .map_err(e)
+}
+
+/// Display and acknowledge the replacement in a backend-owned dialog before
+/// any ciphertext changes. Recovery reauthentication never skips this step.
+async fn acknowledge_replacement(st: &DesktopState, presence: &impl Presence, seen: u64) -> R<anvil_storage::vault::RotationRecoveryKey> {
+    fenced(st, seen)?;
+    let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
+    let message = format!(
+        "Save this NEW recovery key offline before continuing:\n\n{}\n\nIt replaces your previous recovery key. Confirm only after checking your saved record. Cancel leaves your credentials and data unchanged. You will need the new passphrase or this key to reopen Anvil.",
+        recovery.as_str()
+    );
+    let acknowledged =
+        confirm(st, presence, Prompt { title: "Save the replacement recovery key", message, ok: "Saved — rotate key" }).await?;
+    if acknowledged != seen {
+        return Err("LOCKED".into());
+    }
+    Ok(recovery)
 }
 
 /// Protect the open OS-keychain profile with a passphrase instead, once the
@@ -272,14 +300,24 @@ pub(crate) async fn convert_to_passphrase(
     new_passphrase: String,
     kdf: KdfParams,
 ) -> R<KeychainConversion> {
+    let new_passphrase = zeroize::Zeroizing::new(new_passphrase);
+    if new_passphrase.chars().count() < 8 {
+        return Err("the passphrase needs at least 8 characters".into());
+    }
     let message = format!(
         "Protect the profile “{}” with a passphrase instead of the OS keychain? From now on only the new passphrase (or the new recovery key) unlocks it.\n\nOnly continue if you asked for this change yourself.",
         profile_name(st)?
     );
     let prompt = Prompt { title: "Set a profile passphrase", message, ok: "Set passphrase" };
     let seen = confirm(st, presence, prompt).await?;
-    let app = fenced(st, seen)?;
-    anvil_app::off_runtime(move || app.convert_to_passphrase(&new_passphrase, kdf)).await.map_err(e)
+    let recovery = acknowledge_replacement(st, presence, seen).await?;
+    let change = st.begin_key_change(seen)?;
+    anvil_app::off_runtime(move || {
+        let guard = change;
+        guard.app.convert_to_passphrase(&new_passphrase, &recovery, kdf)
+    })
+    .await
+    .map_err(e)
 }
 
 /// Lift the device-identity seal of `ws`, once the user confirmed it
@@ -535,6 +573,11 @@ mod tests {
         ProfileManager::unlock(dir, Unlock::Passphrase(passphrase)).is_ok()
     }
 
+    fn reopen(st: &DesktopState, dir: &std::path::Path, passphrase: &str) {
+        let (h, key) = ProfileManager::unlock(dir, Unlock::Passphrase(passphrase)).unwrap();
+        st.set_app_since(App::open(dir.to_path_buf(), h, key).unwrap(), st.epoch()).unwrap();
+    }
+
     #[tokio::test]
     async fn a_passphrase_change_is_refused_unless_confirmed_natively() {
         let (_root, st, dir) = opened();
@@ -547,7 +590,7 @@ mod tests {
 
         let yes = Answer::yes();
         change_passphrase(&st, &yes, NEW_PASSPHRASE.into(), KdfParams::testing()).await.unwrap();
-        assert_eq!(yes.times(), 1);
+        assert_eq!(yes.times(), 2, "intent and replacement recovery acknowledgment");
         assert!(yes.asked.lock()[0].contains("“P”"), "the dialog names the profile");
         assert!(opens_with(&dir, NEW_PASSPHRASE));
     }
@@ -557,12 +600,32 @@ mod tests {
         let (_root, st, dir) = opened();
         let yes = Answer::yes();
         change_passphrase(&st, &yes, NEW_PASSPHRASE.into(), KdfParams::testing()).await.unwrap();
+        reopen(&st, &dir, NEW_PASSPHRASE);
         // An earlier answer authorizes nothing more.
         let no = Answer::no();
         let r = change_passphrase(&st, &no, PASSPHRASE.into(), KdfParams::testing()).await;
         assert_eq!(r, Err(NOT_CONFIRMED.to_string()));
         assert_eq!(no.times(), 1);
         assert!(opens_with(&dir, NEW_PASSPHRASE));
+    }
+
+    #[tokio::test]
+    async fn refusing_the_replacement_recovery_dialog_leaves_the_epoch_and_data_unchanged() {
+        struct IntentOnly(std::sync::atomic::AtomicUsize);
+        impl Presence for IntentOnly {
+            fn confirm(&self, _: Prompt) -> impl Future<Output = bool> + Send {
+                let yes = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                async move { yes }
+            }
+        }
+        let (_root, st, dir) = opened();
+        let seen = st.epoch();
+        let presence = IntentOnly(std::sync::atomic::AtomicUsize::new(0));
+        assert_eq!(change_passphrase(&st, &presence, NEW_PASSPHRASE.into(), KdfParams::testing()).await, Err(NOT_CONFIRMED.into()));
+        assert_eq!(st.epoch(), seen);
+        assert!(st.app().is_ok());
+        assert!(opens_with(&dir, PASSPHRASE));
+        assert!(!opens_with(&dir, NEW_PASSPHRASE));
     }
 
     #[tokio::test]
@@ -583,18 +646,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_recovery_unlock_authorizes_one_passphrase_change_in_its_epoch() {
+    async fn recovery_reauthentication_never_skips_replacement_acknowledgment() {
         let (_root, st, dir) = opened();
         st.presence.recovery_unlocked(st.epoch());
         let no = Answer::no();
-        change_passphrase(&st, &no, NEW_PASSPHRASE.into(), KdfParams::testing()).await.unwrap();
-        assert_eq!(no.times(), 0, "the recovery key was the proof");
-        assert!(opens_with(&dir, NEW_PASSPHRASE));
-        // Used up: the next change is asked about, and refused here.
-        let r = change_passphrase(&st, &no, PASSPHRASE.into(), KdfParams::testing()).await;
-        assert_eq!(r, Err(NOT_CONFIRMED.to_string()));
+        assert_eq!(change_passphrase(&st, &no, NEW_PASSPHRASE.into(), KdfParams::testing()).await, Err(NOT_CONFIRMED.into()));
+        assert_eq!(no.times(), 1, "replacement credential still needs acknowledgment");
+        assert!(opens_with(&dir, PASSPHRASE));
+        st.presence.recovery_unlocked(st.epoch());
+        let yes = Answer::yes();
+        change_passphrase(&st, &yes, NEW_PASSPHRASE.into(), KdfParams::testing()).await.unwrap();
+        assert_eq!(yes.times(), 1, "recovery proof replaces intent only");
+        assert!(st.app().is_err());
+        reopen(&st, &dir, NEW_PASSPHRASE);
+        let no = Answer::no();
+        assert_eq!(change_passphrase(&st, &no, PASSPHRASE.into(), KdfParams::testing()).await, Err(NOT_CONFIRMED.into()));
         assert_eq!(no.times(), 1);
-        assert!(opens_with(&dir, NEW_PASSPHRASE));
     }
 
     #[tokio::test]

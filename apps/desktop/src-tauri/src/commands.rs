@@ -10,7 +10,7 @@ use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, Pending
 use anvil_app::cleanup::{RemovedRevisions, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
-use anvil_app::profiles::Unlock;
+use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
@@ -172,6 +172,7 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
         // profile keeps the epoch, publishing another one moves it on by one.
         let epoch = if let Some(a) = open
             && a.header.profile_id == header.profile_id
+            && a.header.key_check == header.key_check
         {
             st.unlock_since(&a, key, seen)?;
             seen
@@ -194,21 +195,80 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
     .await
 }
 
-/// Re-wrap the data key under a new passphrase (the app must be unlocked;
-/// passphrase profiles only), once the user confirmed it in a native dialog
-/// or just unlocked with the recovery key (see `crate::presence`); otherwise
-/// [`crate::presence::NOT_CONFIRMED`]. Its outcome is reported even after a
-/// lock that landed during the key derivation: it says which passphrase
-/// opens the profile now.
+/// Owner-directed migration of an unknown historical missing policy. Neither
+/// renderer consent nor possession of a provider proof authorizes this reset.
 #[tauri::command]
-pub async fn profile_change_passphrase(st: State<'_, DesktopState>, window: Window, new_passphrase: String) -> R<()> {
-    crate::presence::change_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await
+pub async fn profile_enroll_unlinked(
+    handle: AppHandle,
+    window: Window,
+    profile_id: String,
+    passphrase: Option<String>,
+    recovery_key: Option<String>,
+    new_passphrase: String,
+) -> R<()> {
+    let passphrase = passphrase.map(zeroize::Zeroizing::new);
+    let recovery_key = recovery_key.map(zeroize::Zeroizing::new);
+    let new_passphrase = zeroize::Zeroizing::new(new_passphrase);
+    if new_passphrase.chars().count() < 8 {
+        return Err("the passphrase needs at least 8 characters".into());
+    }
+    use crate::presence::{NOT_CONFIRMED, Presence, Prompt};
+    let st = handle.state::<DesktopState>();
+    if st.app().is_ok() {
+        return Err("Lock the profile before legacy enrollment".into());
+    }
+    let seen = st.epoch();
+    let profile = st.profiles.find(&profile_id).map_err(e)?;
+    let presence = NativePresence(window);
+    let message = format!(
+        "The legacy profile “{}” has no authenticated identity policy. Anvil cannot determine whether it was never linked or its policy was deleted. Continue only if you intend to replace that unknown historical policy with an UNLINKED policy. Anvil will rotate and re-encrypt all active data, replace the recovery key, and require the new passphrase. Close older builds first. Historical restores remain available; complete rollback of trusted local state cannot be detected offline.",
+        crate::presence::shown(&profile.display_name)
+    );
+    if !presence.confirm(Prompt { title: "Replace unknown legacy policy", message, ok: "Replace and rotate" }).await {
+        return Err(NOT_CONFIRMED.into());
+    }
+    if st.epoch() != seen {
+        return Err("LOCKED".into());
+    }
+    let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
+    let message = format!(
+        "Save this NEW recovery key offline:\n\n{}\n\nCheck your saved record before confirming. Cancel leaves the profile unchanged.",
+        recovery.as_str()
+    );
+    if !presence.confirm(Prompt { title: "Save replacement recovery key", message, ok: "Saved — enroll policy" }).await {
+        return Err(NOT_CONFIRMED.into());
+    }
+    let guard = st.begin_policy_enrollment(seen)?;
+    anvil_app::off_runtime(move || {
+        let _guard = guard;
+        let how = match (&passphrase, &recovery_key) {
+            (Some(p), _) => Unlock::Passphrase(p),
+            (None, Some(r)) => Unlock::RecoveryKey(r),
+            (None, None) => Unlock::Keychain,
+        };
+        ProfileManager::enroll_unlinked_policy(
+            &profile.dir,
+            how,
+            anvil_app::profiles::PolicyRotation { new_passphrase: &new_passphrase, recovery: &recovery, kdf: KdfParams::interactive() },
+        )
+    })
+    .await
+    .map_err(e)
+}
+
+/// Rotate all active ciphertext and credentials after native intent and
+/// replacement-recovery acknowledgment. Success requires reopening a new App.
+#[tauri::command]
+pub async fn profile_change_passphrase(st: State<'_, DesktopState>, window: Window, handle: AppHandle, new_passphrase: String) -> R<()> {
+    let out = crate::presence::change_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await;
+    if st.app().is_err() {
+        let _ = handle.emit("locked", ());
+    }
+    out
 }
 
 #[derive(Serialize)]
 pub struct Converted {
-    /// Shown once; never stored.
-    pub recovery_key: String,
     /// False if the OS credential store kept the old entry; it no longer
     /// unlocks the profile and removal is retried at the next unlock.
     pub keychain_entry_removed: bool,
@@ -217,14 +277,21 @@ pub struct Converted {
 /// Protect an OS-keychain profile with a passphrase instead (the app must be
 /// unlocked), once the user confirmed it in a native dialog (see
 /// `crate::presence`). Afterwards the keychain no longer opens it. The
-/// outcome is returned even after a lock that landed during the key
-/// derivation, but the UI has then switched to the lock screen and drops it:
-/// the new recovery key is never shown and is lost, which exposes nothing,
-/// and the new passphrase still opens the profile.
+/// replacement recovery key is saved in the native dialog before commit.
+/// The desktop closes payload delivery before re-encryption and remains locked.
 #[tauri::command]
-pub async fn profile_convert_to_passphrase(st: State<'_, DesktopState>, window: Window, new_passphrase: String) -> R<Converted> {
-    let c = crate::presence::convert_to_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await?;
-    Ok(Converted { recovery_key: c.recovery_key.to_string(), keychain_entry_removed: c.keychain_entry_removed })
+pub async fn profile_convert_to_passphrase(
+    st: State<'_, DesktopState>,
+    window: Window,
+    handle: AppHandle,
+    new_passphrase: String,
+) -> R<Converted> {
+    let out = crate::presence::convert_to_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await;
+    if st.app().is_err() {
+        let _ = handle.emit("locked", ());
+    }
+    let c = out?;
+    Ok(Converted { keychain_entry_removed: c.keychain_entry_removed })
 }
 
 #[tauri::command]

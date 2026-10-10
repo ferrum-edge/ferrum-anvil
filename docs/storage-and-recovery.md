@@ -103,14 +103,13 @@ Every unlock verifies it once the data key is obtained:
 - A keychain header never carries a passphrase or recovery wrap, so one
   without a MAC that does is refused too.
 
-Headers and keychain entries from earlier builds have neither the MAC nor
-the tag. They still open, and get both at their next successful unlock (the
-MAC first, then the tag); such a header is trusted as found at its first
-unlock on this build. One gap remains until the entry is gone: a keychain
-entry left over from a conversion done by an earlier build holds the
-untagged key. If the credential store refuses both to delete and to
-overwrite it (step 3 below), a header edited back to keychain mode, with its
-MAC and both wraps removed, still opens from it.
+Headers and keychain entries from earlier builds may lack the MAC or tag.
+An authenticated existing identity policy must still verify before ordinary
+unlock. Missing legacy policy requires explicit owner enrollment and rotation;
+see [deliberate local key rotation](#deliberate-local-key-rotation). Enrolled
+profiles refuse missing canonical state or an unauthenticated policy. A retired
+keychain entry can still recover an old raw profile copy, but cannot decrypt
+ciphertext under the replacement key.
 
 The header is plaintext, so its Argon2id costs and salts are checked before
 any derivation runs, against the same bounds as a bundle's or backup's
@@ -122,47 +121,26 @@ wrapped with costs outside them.
 
 Settings → *Require an unlock passphrase* converts an unlocked keychain
 profile to passphrase protection (*Change unlock passphrase* is for
-passphrase profiles only). The data key does not change, so nothing is
-re-encrypted. In order:
+passphrase profiles only). It generates an independent data key and re-encrypts
+all active encrypted payloads. Save and acknowledge the replacement recovery
+key in the native dialog before commit. The ciphertext, canonical wrapped
+header, policy and canary commit together in a FULL-synchronous SQLite
+transaction; success locks the profile so it must reopen with the new credential.
 
-1. A header from an earlier build gets its MAC, and the keychain entry is
-   tagged if it is not yet. If the credential store refuses, the conversion
-   stops; nothing has changed beyond the MAC, which any unlock on this build
-   also writes.
-2. The header is rewritten atomically with the passphrase wrap, a wrap for a
-   **new recovery key** (shown once) and the passphrase mode with its MAC.
-   From here on the keychain no longer opens the profile.
-   - The rewrite reads the header on disk under an advisory lock on
-     `profile.lock` in the profile directory, which every header writer
-     takes, and the header must still verify under the data key.
-   - The writer syncs its own temporary file (named after its process and a
-     random suffix), renames it over the header, then flushes the directory
-     (`fsync` on macOS, Linux and the BSDs; `FlushFileBuffers` on a directory
-     handle on Windows). The directory flush is best effort: a file system
-     that refuses it (some FUSE and SMB mounts) is logged, not treated as a
-     failure, because the new header is already in place.
-   - A temporary file older than ten minutes, left by a writer that stopped
-     before the rename, is removed by the next writer holding the lock.
-3. The keychain entry is removed and its account name dropped from the
-   header.
-   - If the credential store refuses the delete, the header keeps the account
-     name and the entry is overwritten with a marker that holds no key. If the
-     app stops between the two steps, the header keeps the account name too.
-   - Until the old entry is gone, removal is retried after each successful
-     unlock. The retry edits the header as it is on disk, under the same
-     lock, so a passphrase changed meanwhile by another process is kept. An
-     entry that holds a different key is left alone. Each retry may raise the
-     credential store's own permission prompt.
-   - Settings lists such a leftover entry (service `com.ferrumedge.anvil`,
-     account `profile-<id>`) so it can also be removed by hand. While the
-     entry still holds the key (the store refused the overwrite too, or the
-     app stopped before the delete), a copy of the header saved before the
-     conversion is still a valid keychain header for it. Removing the entry
-     is what fully ends keychain access.
+The matching retired OS credential is removed after commit. Cleanup denial
+leaves a retryable entry and does not undo the committed rotation. Retry is
+serialized across supported Anvil processes and preserves an unrelated entry
+whose key differs when checked. Settings identifies leftovers by service
+`com.ferrumedge.anvil` and account `profile-<id>` for manual removal. An old
+header and retained OS entry may recover historical data; their old key cannot
+decrypt the replacement ciphertext. External OS-tool credential changes are
+outside Anvil's profile fence.
 
-`crates/anvil-storage/tests/keychain_conversion.rs` and
-`crates/anvil-app/tests/keychain_conversion.rs` cover this with
-keyring-core's in-memory mock credential store.
+See [deliberate local key rotation](#deliberate-local-key-rotation) for atomicity,
+crash recovery, supported process coordination and historical restore limits.
+`crates/anvil-app/tests/key_rotation.rs` covers conversion and cleanup retry;
+`crates/anvil-storage/tests/os_keychain.rs` exercises the real credential store
+in hosted platform CI.
 
 A linked provider identity is **not** an unlock method; see
 [identity.md](identity.md).
@@ -566,10 +544,136 @@ overwrite an object, history record or load report stored in a different
 workspace from the one the backup gives it, or a secret stored here under a
 different owner; Merge keeps those.
 
+## Deliberate local key rotation
+
+Changing the unlock passphrase in Settings, after recovery unlock, or converting
+from the OS keychain rotates the data key and re-encrypts every active encrypted
+payload. Save and check the replacement recovery key displayed by the native
+dialog **before** confirming the rotation. Cancellation leaves storage unchanged.
+Anvil locks afterwards; reopen with the new passphrase or saved recovery key.
+Choose a fresh passphrase that you have never used for this profile. Rotation
+rejects the current passphrase; choosing a previously compromised historical
+passphrase would authorize that secret again against the new header.
+The old password and recovery credential cannot decrypt later ciphertext.
+A portable Anvil backup retains its independent export password.
+
+To revoke an old local unlock credential for active and future ciphertext,
+close every desktop window, CLI worker and older Anvil build first. Keep a
+trusted encrypted portable backup for historical recovery, and enough free
+disk space for SQLite's transaction/WAL. Then run:
+
+```sh
+anvil --profile PROFILE --passphrase-stdin profile rotate-key \
+  --confirm-rotation --new-passphrase-stdin
+```
+
+Enter the current password on the first stdin line and a new password of at
+least eight characters, different from the current one, on the second. Neither
+is supplied on the command line. For an OS-keychain profile, omit `--passphrase-stdin`; the matching
+accessible OS credential unlocks it, and stdin supplies only the new password.
+For a linked profile that requires fresh provider login, use its offline
+recovery key instead: omit `--passphrase-stdin` and add
+`--recovery-key-stdin` to `profile rotate-key`. Enter the current recovery key
+on the first line and the new password on the second. Rotation retains the
+linked policy, so normal unlock afterward still requires fresh login. If the
+binding is corrupt, repair it using recovery unlock before rotating.
+
+Do not pipe the command's output into a log: before changing any credentials,
+it shows the **new recovery key**. Store it safely offline, then copy it from
+that saved record onto the next stdin line to acknowledge it. Output failure,
+EOF or a mismatched acknowledgment aborts before rotation. After confirmation,
+reopen the profile. The old password,
+old recovery key and old keychain entry cannot decrypt the rotated active
+ciphertext. Keychain profiles become passphrase profiles; cleanup of the old
+entry is retried on unlock if the OS refuses it. Cleanup is serialized across
+Anvil processes and leaves a replacement entry whose key does not match when
+checked. Credential changes made concurrently by external OS tools are outside
+Anvil's file fence.
+
+Rotation authenticates and re-encrypts every active encrypted SQLite payload:
+all object kinds (including local device/file bindings), revisions, secrets,
+attachments, history and response bodies, load reports, and the key canary.
+It also re-encrypts a linked-login binding. Existing blob IDs stay stable, so
+saved attachments and response-body references stay intact; newly attached
+identical content can receive a different ID after rotation. A damaged row
+that cannot authenticate aborts rotation without changing the committed
+profile. Repair or explicitly remove that row with the existing recovery tools
+before retrying; rotation never silently drops it.
+
+The new wrapped header, authenticated identity presence/absence, and rotated
+ciphertext commit together in one SQLite transaction with `synchronous=FULL`.
+After rotation, the database's `local_key_state_v1` metadata is authoritative;
+legacy `profile.json` and `identity.json` sidecars are historical copies and
+are ignored for current policy. Interrupted work before commit leaves the old
+credentials usable; after commit, the new password discovers the new header
+from the database even if the process exited before reporting success. No
+new key is stored wrapped under the old data key. The replacement recovery
+key is delivered and acknowledged before commit; if the process exits after
+commit but before reporting success, that saved key remains the supported
+offline unlock path, including profiles requiring fresh provider login.
+
+Supported processes hold a mandatory shared file fence for data operations;
+rotation holds its exclusive counterpart. Stale handles check the current
+canary and cannot write using the old key. **Older already-open builds do not
+understand this fence and must be closed before rotation.** Schema 4 refuses
+their later opens. Rotation does not revoke plaintext or keys already copied
+into another process's memory. Filesystems without the required file locks
+are refused rather than running an unfenced rotation.
+
+Normal encrypted exports, backups and imports keep their existing formats
+and independent password; they do not transfer this device's keys or identity
+policy. A pre-rotation raw database checkpoint uses the old data key and is
+refused by the current profile. Recover that historical data in an isolated
+copy of its matching historical profile and use a portable export/import.
+A same-key checkpoint created after rotation can restore historical data,
+while the checkpoint API preserves the current unlock header and identity
+policy.
+
+New profiles enroll an explicit authenticated unlinked policy during creation.
+For a legacy profile, missing `identity.json` is ambiguous: it may mean never
+linked or a deleted policy. Ordinary unlock and implicit rotation fail closed.
+Use a trusted historical recovery copy, or deliberately enroll a replacement
+unlinked policy from the lock screen. The backend asks for native consent and
+requires saving a new recovery key before re-encrypting the data. Keychain-only
+profiles become passphrase profiles. CLI enrollment is equally explicit:
+
+```sh
+anvil --profile PROFILE --passphrase-stdin profile enroll-policy \
+  --confirm-replace-unknown-policy --new-passphrase-stdin
+```
+
+Supply the old secret, new passphrase and saved replacement recovery-key
+acknowledgment on consecutive stdin lines. For an OS-keychain profile omit
+`--passphrase-stdin`; for recovery use `--recovery-key-stdin` on `enroll-policy`.
+Enrollment is an owner decision replacing unknown historical policy, not proof
+that the profile was never linked. Missing canonical state on an already enrolled
+profile is refused; it cannot silently reenroll.
+
+Linking, unlinking, and changes to the fresh-login requirement also rotate the
+data key atomically with the new policy. App-service callers supply a new
+passphrase and pre-delivered, acknowledged recovery credential through
+`PolicyRotation`. An authentic older weaker policy has an older key and fails
+against the current ciphertext canary. Stale application handles cannot write.
+
+**Limits:** rotation does not erase historical raw files, checkpoints, WAL/free
+page remnants or independently encrypted portable backups. An owner can recover
+historical data with its matching historical credentials and export/import it.
+An authentic historical database contains the wrapped header, policy and canary.
+Replaying all trusted freshness-authority state can select historical-key state,
+including by restoring those metadata rows with old startup/settings rows or
+discarding newer ciphertext. This does not require replacing every database byte.
+Historical deleted secrets and permissive settings may return; a same-epoch
+snapshot also remains restorable. Old keys cannot decrypt newer-key ciphertext.
+No independent monotonic
+authority exists in this offline design. This is not complete-profile or
+complete-machine antirollback protection. Recovery intentionally bypasses online
+provider login; explicit unlink/repair rotates the key rather than changing policy
+under an unchanged key. No mandatory online service is introduced.
+
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION` (currently 3). Migrations run forward at open and at
+  `DB_SCHEMA_VERSION` (currently 4). Migrations run forward at open and at
   unlock, each step in one write transaction with the version bump that
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its
@@ -623,6 +727,9 @@ different owner; Merge keeps those.
     authenticates each request once however many revisions it has.
   - Earlier builds refuse a schema 3 database, and a full backup made from
     one, as newer. See [Going back to an earlier build](#going-back-to-an-earlier-build).
+- **Database schema 4** declares support for local key rotation and makes
+  earlier builds refuse the database. The migration changes no ciphertext;
+  rotation is a separate explicit operation, never automatic.
 - Before a step that seals the rows of an existing database again (schema 2
   and schema 3), the database is copied as it is into the profile's
   `checkpoints` folder as `<time>-before-schema-<version>.db`, the same kind of

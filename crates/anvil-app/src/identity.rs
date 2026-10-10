@@ -8,7 +8,8 @@
 //! from the last few minutes before a passphrase/keychain unlock; the
 //! recovery key remains the offline path (docs/identity.md).
 //!
-//! The binding lives beside the profile header in `identity.json`: a
+//! New profiles keep the binding and its authenticated presence in the
+//! canonical SQLite key state. Historical legacy profiles used `identity.json`: a
 //! plaintext hint (provider, subject, policy — no e-mail) that lets the lock
 //! screen and the pre-unlock check work, plus the full binding sealed with
 //! the profile's data key. After the key is unwrapped the sealed copy is
@@ -17,7 +18,9 @@
 //! This is an application-enforced policy, not cryptography: whoever holds
 //! the passphrase and the files can decrypt them with other tools.
 //!
-//! Imports and backups never carry this file, so restoring someone else's
+//! Missing legacy policy requires explicit enrollment; policy mutations rotate
+//! the data key and require saving a replacement recovery credential first.
+//! Imports and backups never carry local policy, so restoring someone else's
 //! backup cannot replace the local linked identity.
 //!
 //! **Target-API identity.** [`App::oauth_sign_in`] runs the interactive
@@ -63,6 +66,10 @@ pub enum IdentityPolicyError {
     NotLinked,
     #[error("the identity binding of this profile was changed outside Anvil; unlock with the recovery key and link the account again")]
     BindingTampered,
+    #[error(
+        "POLICY_ENROLLMENT_REQUIRED: this legacy profile has no authenticated identity policy; use recovery or explicitly enroll a replacement policy and rotate its key"
+    )]
+    PolicyEnrollmentRequired,
 }
 
 /// What the lock screen can know before unlocking (no e-mail, no secrets).
@@ -131,6 +138,10 @@ fn aad(h: &ProfileHeader) -> Vec<u8> {
 /// The plaintext binding, if any. A present but unreadable file is treated
 /// as tampering, never as "not linked".
 pub(crate) fn read_binding(dir: &Path) -> Result<Option<BindingFile>> {
+    let _guard = anvil_storage::rotation::profile_data_guard(dir)?;
+    if let Some(binding) = anvil_storage::rotation::binding(dir)? {
+        return binding.map(serde_json::from_value).transpose().map_err(|_| IdentityPolicyError::BindingTampered.into());
+    }
     let p = path(dir);
     let bytes = match std::fs::read(&p) {
         Ok(b) => b,
@@ -160,8 +171,7 @@ pub(crate) fn verify_binding(f: &BindingFile, h: &ProfileHeader, dek: &Key) -> R
     Ok(linked)
 }
 
-fn write_binding(dir: &Path, h: &ProfileHeader, dek: &Key, linked: &LinkedIdentity) -> Result<()> {
-    let sealed = hex::encode(crypto::seal(dek, &aad(h), &serde_json::to_vec(linked)?));
+pub(crate) fn sealed_binding(h: &ProfileHeader, key: &Key, linked: &LinkedIdentity) -> Result<serde_json::Value> {
     let f = BindingFile {
         format: FORMAT.into(),
         version: VERSION,
@@ -169,20 +179,46 @@ fn write_binding(dir: &Path, h: &ProfileHeader, dek: &Key, linked: &LinkedIdenti
         subject: linked.subject.clone(),
         require_fresh_login: linked.require_fresh_login,
         linked_at: linked.linked_at,
-        sealed,
+        sealed: hex::encode(crypto::seal(key, &aad(h), &serde_json::to_vec(linked)?)),
     };
-    let tmp = dir.join(format!("{IDENTITY_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&f)?)?;
-    std::fs::rename(tmp, path(dir))?;
-    Ok(())
+    Ok(serde_json::to_value(f)?)
 }
 
-pub(crate) fn remove_binding(dir: &Path) -> Result<()> {
-    match std::fs::remove_file(path(dir)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+/// Prepare the policy for the same atomic commit as its new data key.
+pub(crate) fn rotate_binding(
+    h: &ProfileHeader,
+    old: &Key,
+    new: &Key,
+    canonical: Option<Option<serde_json::Value>>,
+    dir: &Path,
+) -> std::result::Result<Option<serde_json::Value>, anvil_storage::VaultError> {
+    let bad = || anvil_storage::VaultError::Header("the linked identity must be repaired with the recovery key before rotation".into());
+    if let Some(value) = &canonical {
+        anvil_storage::vault::verify_rotation_binding(h, old, value)?;
     }
+    let binding: Option<BindingFile> = match canonical {
+        Some(value) => value.map(serde_json::from_value).transpose().map_err(|_| bad())?,
+        None => match std::fs::read(path(dir)) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|_| bad())?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anvil_storage::VaultError::Header(
+                    "POLICY_ENROLLMENT_REQUIRED: explicitly enroll the unknown legacy policy before rotation".into(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        },
+    };
+    let Some(mut binding) = binding else {
+        return Ok(None);
+    };
+    if binding.format != FORMAT || binding.version != VERSION {
+        return Err(bad());
+    }
+    verify_binding(&binding, h, old).map_err(|_| bad())?;
+    let env = hex::decode(&binding.sealed).map_err(|_| bad())?;
+    let pt = crypto::open(old, &aad(h), &env).map_err(|_| bad())?;
+    binding.sealed = hex::encode(crypto::seal(new, &aad(h), &pt));
+    Ok(Some(serde_json::to_value(binding).map_err(|_| bad())?))
 }
 
 /// A proof counts only for the linked provider and subject, and only while fresh.
@@ -203,25 +239,6 @@ pub(crate) fn check_fresh(proof: &VerifiedIdentity, now: DateTime<Utc>) -> Resul
 
 pub(crate) fn hint(dir: &Path) -> Result<Option<IdentityHint>> {
     Ok(read_binding(dir)?.map(|f| f.hint()))
-}
-
-pub(crate) fn link(
-    dir: &Path,
-    h: &ProfileHeader,
-    dek: &Key,
-    proof: &VerifiedIdentity,
-    require_fresh_login: bool,
-    now: DateTime<Utc>,
-) -> Result<LinkedIdentity> {
-    let linked = LinkedIdentity {
-        provider: proof.provider().to_string(),
-        subject: proof.subject().to_string(),
-        email: proof.email().map(str::to_string),
-        linked_at: now,
-        require_fresh_login,
-    };
-    write_binding(dir, h, dek, &linked)?;
-    Ok(linked)
 }
 
 /// Application-login providers known to this build and their availability

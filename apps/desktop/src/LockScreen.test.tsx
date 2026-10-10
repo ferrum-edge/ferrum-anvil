@@ -83,3 +83,45 @@ describe("launch", () => {
     expect(onUnlocked).not.toHaveBeenCalled();
   });
 });
+
+describe("legacy policy enrollment", () => {
+  it("keeps a keychain profile locked until explicit native enrollment completes and then asks for the new passphrase", async () => {
+    let enrolled = false;
+    backend([], {
+      profiles_list: () => [{ profile_id: "k1", display_name: "Local", protection: enrolled ? "passphrase" : "os_keychain" }],
+      profile_unlock: () => { throw new Error("POLICY_ENROLLMENT_REQUIRED: policy is unknown"); },
+      profile_enroll_unlinked: () => { enrolled = true; },
+    });
+    const onUnlocked = vi.fn();
+    render(<LockScreen onUnlocked={onUnlocked} />);
+    await screen.findByRole("heading", { name: "Enroll legacy policy" });
+    expect(onUnlocked).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("profile_enroll_unlinked", expect.anything());
+    fireEvent.change(screen.getByLabelText("New passphrase"), { target: { value: "replacement passphrase" } });
+    fireEvent.change(screen.getByLabelText("Repeat new passphrase"), { target: { value: "replacement passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Replace unknown policy and rotate…" }));
+    await screen.findByText("Policy enrolled and encryption key rotated. Unlock with your new passphrase.");
+    expect(invoke).toHaveBeenCalledWith("profile_enroll_unlinked", {
+      profileId: "k1", passphrase: null, recoveryKey: null, newPassphrase: "replacement passphrase",
+    });
+    expect(screen.getByLabelText("Passphrase")).toBeTruthy();
+    expect(onUnlocked).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Recovery key")).toBeNull();
+  });
+
+  it("keeps native enrollment refusal on the consent screen without unlocking", async () => {
+    backend([{ profile_id: "k1", display_name: "Local", protection: "os_keychain" }], {
+      profile_unlock: () => { throw new Error("POLICY_ENROLLMENT_REQUIRED: policy is unknown"); },
+      profile_enroll_unlinked: () => { throw new Error("NOT_CONFIRMED"); },
+    });
+    const onUnlocked = vi.fn();
+    render(<LockScreen onUnlocked={onUnlocked} />);
+    await screen.findByRole("heading", { name: "Enroll legacy policy" });
+    fireEvent.change(screen.getByLabelText("New passphrase"), { target: { value: "replacement passphrase" } });
+    fireEvent.change(screen.getByLabelText("Repeat new passphrase"), { target: { value: "replacement passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Replace unknown policy and rotate…" }));
+    await screen.findByText("POLICY_ENROLLMENT_REQUIRED: Not done: it was not confirmed in the system dialog.");
+    expect(onUnlocked).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Enroll legacy policy" })).toBeTruthy();
+  });
+});

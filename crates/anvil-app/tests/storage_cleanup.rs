@@ -592,7 +592,13 @@ fn a_damaged_revision_under_the_schema_3_seal_is_removed_once_confirmed() {
 #[test]
 fn revisions_the_schema_3_migration_left_are_removable_only_when_they_do_not_authenticate() {
     let root = tempfile::tempdir().unwrap();
-    let (app, key) = new_app_with_key(root.path());
+    // Use an actual legacy header, not an enrolled profile whose schema floor
+    // must reject downgrades. This tests storage migration; explicit policy
+    // enrollment is covered independently in policy_enrollment.rs.
+    let dir = root.path().join("legacy cleanup");
+    let legacy = anvil_storage::vault::create_passphrase_profile(&dir, "cleanup", PASSPHRASE, KdfParams::testing()).unwrap();
+    let key = legacy.dek.clone();
+    let app = App::open(dir, legacy.header, legacy.dek).unwrap();
     let ws = app.create_workspace("W").unwrap().meta.id;
     let elsewhere = app.create_workspace("Elsewhere").unwrap().meta.id;
     let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
@@ -628,7 +634,8 @@ fn revisions_the_schema_3_migration_left_are_removable_only_when_they_do_not_aut
     db.execute("UPDATE meta SET value='2' WHERE key='schema_version'", []).unwrap();
     drop(db);
 
-    let (h, dek) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASSPHRASE)).unwrap();
+    let h = anvil_storage::vault::read_header(&dir).unwrap();
+    let dek = anvil_storage::vault::unlock_with_passphrase(&h, PASSPHRASE).unwrap();
     let app = App::open(dir, h, dek).unwrap();
     let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
     let left: String = db.query_row("SELECT value FROM meta WHERE key='revisions_left_at_v3'", [], |r| r.get(0)).unwrap();

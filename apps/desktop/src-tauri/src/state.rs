@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -117,6 +117,7 @@ pub struct DesktopState {
     /// Serializes full lock, unlock and publication operations, including
     /// cleanup outside the delivery gate. Callbacks never acquire this mutex.
     transition: Mutex<()>,
+    key_change: Arc<AtomicBool>,
     /// Distinguishes stateless spec approvals from earlier desktop processes.
     pub(crate) review_session: Id,
     /// Running executions (for cancel and lock-time stop).
@@ -154,6 +155,24 @@ pub struct DesktopState {
     pub clock_probe: Mutex<(Instant, SystemTime)>,
 }
 
+pub(crate) struct KeyChange {
+    pub app: Arc<App>,
+    active: Arc<AtomicBool>,
+}
+impl Drop for KeyChange {
+    fn drop(&mut self) {
+        self.app.lock();
+        self.active.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) struct EnrollmentChange(Arc<AtomicBool>);
+impl Drop for EnrollmentChange {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 impl DesktopState {
     pub fn new(root: std::path::PathBuf) -> Self {
         DesktopState {
@@ -162,6 +181,7 @@ impl DesktopState {
             lock_epoch: AtomicU64::new(0),
             payload_gate: RwLock::new(false),
             transition: Mutex::new(()),
+            key_change: Arc::new(AtomicBool::new(false)),
             review_session: Id::new(),
             running: Arc::new(Mutex::new(HashMap::new())),
             imports: Arc::new(Mutex::new(HashMap::new())),
@@ -207,6 +227,10 @@ impl DesktopState {
     fn set_app_since_with(&self, app: App, seen: u64, published: impl FnOnce(&Arc<App>)) -> Result<(), String> {
         app.confine_token_files();
         let _transition = self.transition.lock();
+        if self.key_change.load(Ordering::SeqCst) {
+            app.lock();
+            return Err("LOCKED".into());
+        }
         let mut delivery = self.payload_gate.write();
         if self.lock_epoch.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
             drop(delivery);
@@ -239,7 +263,10 @@ impl DesktopState {
         let _transition = self.transition.lock();
         let mut delivery = self.payload_gate.write();
         let current = self.app.read();
-        if self.epoch() != seen || !current.as_ref().is_some_and(|a| std::ptr::eq(a.as_ref(), app)) {
+        if self.key_change.load(Ordering::SeqCst)
+            || self.epoch() != seen
+            || !current.as_ref().is_some_and(|a| std::ptr::eq(a.as_ref(), app))
+        {
             return Err("LOCKED".into());
         }
         let out = app.unlock_if(key, || self.epoch() == seen).map_err(crate::commands::e);
@@ -262,6 +289,37 @@ impl DesktopState {
             Some(_) => Err("LOCKED".into()),
             None => Err("NO_PROFILE".into()),
         }
+    }
+
+    /// Close payload delivery before a credential rotation starts. Keep the
+    /// old key available only to the admitted blocking worker; deny unlock and
+    /// profile publication until that worker has locked it, including on error.
+    pub(crate) fn begin_key_change(&self, seen: u64) -> Result<KeyChange, String> {
+        let _transition = self.transition.lock();
+        let mut delivery = self.payload_gate.write();
+        if !*delivery || self.epoch() != seen || self.key_change.load(Ordering::SeqCst) {
+            return Err("LOCKED".into());
+        }
+        let app = self.app.read().as_ref().filter(|a| !a.is_locked()).ok_or("LOCKED")?.clone();
+        self.key_change.store(true, Ordering::SeqCst);
+        *delivery = false;
+        self.lock_epoch.fetch_add(1, Ordering::SeqCst);
+        self.file_grants.revoke_all();
+        drop(delivery);
+        self.stop_work();
+        Ok(KeyChange { app, active: self.key_change.clone() })
+    }
+
+    pub(crate) fn begin_policy_enrollment(&self, seen: u64) -> Result<EnrollmentChange, String> {
+        let _transition = self.transition.lock();
+        let mut delivery = self.payload_gate.write();
+        if *delivery || self.epoch() != seen || self.key_change.load(Ordering::SeqCst) {
+            return Err("LOCKED".into());
+        }
+        self.key_change.store(true, Ordering::SeqCst);
+        self.lock_epoch.fetch_add(1, Ordering::SeqCst);
+        *delivery = false;
+        Ok(EnrollmentChange(self.key_change.clone()))
     }
 
     /// Whether `app` is still the open profile (unlocked or not).

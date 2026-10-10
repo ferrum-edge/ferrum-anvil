@@ -37,7 +37,7 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -172,6 +172,29 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ProfileCmd {
     List,
+    /// Replace an unknown legacy missing policy with explicit unlinked policy.
+    /// This owner decision rotates the data key and all local credentials.
+    EnrollPolicy {
+        #[arg(long)]
+        confirm_replace_unknown_policy: bool,
+        #[arg(long)]
+        new_passphrase_stdin: bool,
+        #[arg(long, conflicts_with = "passphrase_stdin")]
+        recovery_key_stdin: bool,
+    },
+    /// Re-encrypt active data with a new key and replace all local unlock credentials.
+    /// Close older Anvil builds first. Historical copies stay readable historically.
+    RotateKey {
+        /// Confirm rotation, replacement of the recovery key, and closing older builds.
+        #[arg(long)]
+        confirm_rotation: bool,
+        /// Read the new passphrase from stdin, after the old one if --passphrase-stdin is used.
+        #[arg(long)]
+        new_passphrase_stdin: bool,
+        /// Read the current recovery key from stdin first (offline, including fresh-login profiles).
+        #[arg(long, conflicts_with = "passphrase_stdin")]
+        recovery_key_stdin: bool,
+    },
     Create {
         name: String,
         /// Store the data key in the OS credential store instead of a passphrase.
@@ -517,18 +540,28 @@ fn passphrase(from_stdin: bool, env: &str) -> Result<Option<Zeroizing<String>>> 
 }
 
 fn open_app(cli: &Cli) -> Result<App> {
+    open_app_for_rotation(cli, false)
+}
+
+fn open_app_for_rotation(cli: &Cli, recovery_key_stdin: bool) -> Result<App> {
     let root = cli.data_dir.clone().unwrap_or_else(anvil_storage::default_data_dir);
     let pm = ProfileManager::new(&root);
     let summary = match &cli.profile {
         Some(p) => pm.find(p)?,
         None => pm.list().into_iter().next().ok_or_else(|| anyhow!("no profile exists; run `anvil profile create <name>`"))?,
     };
-    let (header, key) = match summary.protection {
-        anvil_domain::workspace::ProtectionMode::OsKeychain => ProfileManager::unlock(&summary.dir, Unlock::Keychain)?,
-        anvil_domain::workspace::ProtectionMode::Passphrase => {
-            let p = passphrase(cli.passphrase_stdin, "ANVIL_PASSPHRASE")?
-                .ok_or_else(|| anyhow!("profile '{}' is locked: pass --passphrase-stdin or set ANVIL_PASSPHRASE", summary.display_name))?;
-            ProfileManager::unlock(&summary.dir, Unlock::Passphrase(&p))?
+    let (header, key) = if recovery_key_stdin {
+        let recovery = passphrase(true, "ANVIL_RECOVERY_KEY")?.ok_or_else(|| anyhow!("provide the current recovery key on stdin"))?;
+        ProfileManager::unlock(&summary.dir, Unlock::RecoveryKey(&recovery))?
+    } else {
+        match summary.protection {
+            anvil_domain::workspace::ProtectionMode::OsKeychain => ProfileManager::unlock(&summary.dir, Unlock::Keychain)?,
+            anvil_domain::workspace::ProtectionMode::Passphrase => {
+                let p = passphrase(cli.passphrase_stdin, "ANVIL_PASSPHRASE")?.ok_or_else(|| {
+                    anyhow!("profile '{}' is locked: pass --passphrase-stdin or set ANVIL_PASSPHRASE", summary.display_name)
+                })?;
+                ProfileManager::unlock(&summary.dir, Unlock::Passphrase(&p))?
+            }
         }
     };
     Ok(App::open(summary.dir, header, key)?)
@@ -755,6 +788,85 @@ async fn run(cli: Cli) -> Result<i32> {
             let root = cli.data_dir.clone().unwrap_or_else(anvil_storage::default_data_dir);
             let pm = ProfileManager::new(&root);
             match cmd {
+                ProfileCmd::EnrollPolicy { confirm_replace_unknown_policy, new_passphrase_stdin, recovery_key_stdin } => {
+                    if !confirm_replace_unknown_policy || !new_passphrase_stdin {
+                        bail!(
+                            "close older Anvil builds, then supply --confirm-replace-unknown-policy --new-passphrase-stdin; this replaces an unknown historical identity policy with an unlinked policy and rotates all credentials"
+                        );
+                    }
+                    let summary = match &cli.profile {
+                        Some(p) => pm.find(p)?,
+                        None => pm.list().into_iter().next().ok_or_else(|| anyhow!("no profile exists"))?,
+                    };
+                    let old = if *recovery_key_stdin {
+                        passphrase(true, "ANVIL_RECOVERY_KEY")?
+                    } else if summary.protection == anvil_domain::workspace::ProtectionMode::Passphrase {
+                        passphrase(cli.passphrase_stdin, "ANVIL_PASSPHRASE")?
+                    } else {
+                        None
+                    };
+                    let how = if *recovery_key_stdin {
+                        Unlock::RecoveryKey(old.as_deref().ok_or_else(|| anyhow!("provide the current recovery key"))?)
+                    } else if summary.protection == anvil_domain::workspace::ProtectionMode::Passphrase {
+                        Unlock::Passphrase(old.as_deref().ok_or_else(|| anyhow!("provide the current passphrase"))?)
+                    } else {
+                        Unlock::Keychain
+                    };
+                    let new = passphrase(true, "ANVIL_NEW_PASSPHRASE")?.ok_or_else(|| anyhow!("provide the new passphrase"))?;
+                    let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
+                    {
+                        let mut out = std::io::stdout().lock();
+                        writeln!(out, "NEW RECOVERY KEY (save offline before enrollment): {}", recovery.as_str())?;
+                        writeln!(out, "Copy the key from your saved record onto the next stdin line. Enrollment has not committed.")?;
+                        out.flush()?;
+                    }
+                    if passphrase(true, "")?.as_ref().map(|s| s.as_str()) != Some(recovery.as_str()) {
+                        bail!("recovery acknowledgment did not match; nothing committed");
+                    }
+                    ProfileManager::enroll_unlinked_policy(
+                        &summary.dir,
+                        how,
+                        anvil_app::profiles::PolicyRotation { new_passphrase: &new, recovery: &recovery, kdf: KdfParams::interactive() },
+                    )?;
+                    writeln!(
+                        std::io::stdout().lock(),
+                        "Explicit unlinked policy enrolled and data key rotated. Historical data remains historical; complete trusted-state rollback is not prevented."
+                    )?;
+                    return Ok(0);
+                }
+                ProfileCmd::RotateKey { confirm_rotation, new_passphrase_stdin, recovery_key_stdin } => {
+                    if !confirm_rotation || !new_passphrase_stdin {
+                        bail!(
+                            "close every older Anvil build, then supply --confirm-rotation --new-passphrase-stdin; rotation replaces the recovery key, locks the profile, and leaves old backups historical"
+                        );
+                    }
+                    let app = open_app_for_rotation(&cli, *recovery_key_stdin)?;
+                    let new = passphrase(true, "ANVIL_NEW_PASSPHRASE")?.ok_or_else(|| anyhow!("provide the new passphrase on stdin"))?;
+                    let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
+                    {
+                        let mut out = std::io::stdout().lock();
+                        writeln!(out, "NEW RECOVERY KEY (save offline before rotation): {}", recovery.as_str())?;
+                        writeln!(
+                            out,
+                            "Copy the key from your saved record onto the next stdin line to acknowledge it. Rotation has not committed."
+                        )?;
+                        out.flush()?;
+                    }
+                    let acknowledgment = passphrase(true, "")?.ok_or_else(|| anyhow!("acknowledge the saved recovery key on stdin"))?;
+                    if acknowledgment.as_str() != recovery.as_str() {
+                        bail!("recovery key acknowledgment did not match; rotation was not committed");
+                    }
+                    let rotated = app.rotate_data_key(&new, &recovery, KdfParams::interactive())?;
+                    writeln!(
+                        std::io::stdout().lock(),
+                        "Local data key rotated. Reopen with the new passphrase or new recovery key. Old raw copies remain historical; full snapshot rollback is not prevented."
+                    )?;
+                    if !rotated.keychain_entry_removed {
+                        eprintln!(
+                            "The old OS credential entry could not be removed; removal is retried at unlock. It cannot decrypt the rotated database."
+                        );
+                    }
+                }
                 ProfileCmd::List => {
                     for p in pm.list() {
                         println!("{}  {:?}  {}  {}", p.profile_id, p.protection, p.display_name, p.dir.display());

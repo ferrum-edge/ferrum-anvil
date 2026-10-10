@@ -19,6 +19,8 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
   const [busy, setBusy] = useState(false);
   const [recovery, setRecovery] = useState<string | null>(null);
   const [resetStep, setResetStep] = useState(false);
+  const [enrollmentPass, setEnrollmentPass] = useState("");
+  const [enrollmentRepeat, setEnrollmentRepeat] = useState("");
 
   useEffect(() => {
     api.profiles().then(async (p) => {
@@ -91,6 +93,30 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
     }
   }
 
+  if (error?.includes("POLICY_ENROLLMENT_REQUIRED")) {
+    return <div className="lock"><form className="lock-card" onSubmit={async (e) => {
+      e.preventDefault();
+      if (enrollmentPass.length < 8 || enrollmentPass !== enrollmentRepeat) return setError("POLICY_ENROLLMENT_REQUIRED: enter the same new passphrase twice (at least 8 characters).");
+      setBusy(true);
+      try {
+        if (resetStep) await api.lock();
+        await api.enrollUnlinkedPolicy(selected, current?.protection === "os_keychain" || mode === "recovery" ? null : secret, mode === "recovery" ? secret : null, enrollmentPass);
+        setProfiles(await api.profiles()); setSecret(""); setEnrollmentPass(""); setEnrollmentRepeat(""); setResetStep(false); setMode("unlock");
+        setError("Policy enrolled and encryption key rotated. Unlock with your new passphrase.");
+      } catch (e) { setError(`POLICY_ENROLLMENT_REQUIRED: ${(e as Error).message}`); }
+      finally { setBusy(false); }
+    }}>
+      <h1>Enroll legacy policy</h1>
+      <p className="lock-sub">This profile has no authenticated policy. Anvil cannot tell whether it was never linked or its policy was deleted. If you intend to replace that unknown policy with an unlinked policy, confirm the native dialogs and save the replacement recovery key. Enrollment re-encrypts active data. You may instead restore trusted historical data or use recovery.</p>
+      {current?.protection !== "os_keychain" && <label className="lbl">{mode === "recovery" ? "Current recovery key" : "Current passphrase"}<input className="field" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} /></label>}
+      <label className="lbl">New passphrase<input className="field" type="password" value={enrollmentPass} onChange={(e) => setEnrollmentPass(e.target.value)} autoComplete="new-password" /></label>
+      <label className="lbl">Repeat new passphrase<input className="field" type="password" value={enrollmentRepeat} onChange={(e) => setEnrollmentRepeat(e.target.value)} autoComplete="new-password" /></label>
+      <div className="bad-box" role="alert">{error}</div>
+      <button className="btn primary" disabled={busy} type="submit">Replace unknown policy and rotate…</button>
+      <button className="btn ghost" type="button" disabled={busy} onClick={() => setError(null)}>Back</button>
+    </form></div>;
+  }
+
   if (resetStep) {
     return (
       <div className="lock">
@@ -105,7 +131,9 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
               await api.changePassphrase(secret);
               setSecret("");
               setPass2("");
-              props.onUnlocked();
+              setResetStep(false);
+              setMode("unlock");
+              setError("Encryption key rotated. Unlock with the new passphrase or saved replacement recovery key.");
             } catch (err) {
               setError(String((err as Error).message));
             }
@@ -117,7 +145,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
             </span>
             <h1>Set a new passphrase</h1>
           </div>
-          <p className="lock-sub">You unlocked with the recovery key. Choose a new passphrase; your recovery key keeps working.</p>
+          <p className="lock-sub">Choose a new passphrase. Anvil will rotate the encryption key and re-encrypt active data. Save the replacement recovery key in the native dialog first. The old passphrase and recovery key stop opening active data; historical backups remain historical.</p>
           <label className="lbl">
             New passphrase
             <input className="field" type="password" autoFocus value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" />

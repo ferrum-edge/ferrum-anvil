@@ -36,6 +36,8 @@ const LOCK_FILE: &str = "profile.lock";
 /// Service name of the profiles' OS credential store entries.
 pub const KEYCHAIN_SERVICE: &str = "com.ferrumedge.anvil";
 const PASSPHRASE_LABEL: &[u8] = b"anvil-dek-passphrase-v1";
+const ROTATED_PASSPHRASE_LABEL: &[u8] = b"anvil-dek-passphrase-rotated-v1";
+const ROTATED_RECOVERY_LABEL: &[u8] = b"anvil-dek-recovery-rotated-v1";
 const RECOVERY_LABEL: &[u8] = b"anvil-dek-recovery-v1";
 const PROTECTION_MAC_LABEL: &[u8] = b"anvil-profile-protection-v1";
 /// Prefix of a keychain entry written for a header with a protection MAC.
@@ -43,6 +45,8 @@ const PROTECTION_MAC_LABEL: &[u8] = b"anvil-profile-protection-v1";
 /// a header without a MAC; a tagged one never does.
 #[cfg(feature = "os-keychain")]
 const KEYCHAIN_SECRET_TAG: &[u8] = b"anvil-dek-v2:";
+#[cfg(feature = "os-keychain")]
+const ENROLLED_KEYCHAIN_TAG: &[u8] = b"anvil-dek-enrolled-v1:";
 /// Prefix of the marker that replaces a converted profile's entry when the
 /// credential store refuses to delete it: followed by the profile's key
 /// check, it holds no key and opens nothing.
@@ -108,6 +112,76 @@ pub struct ProfileHeader {
     /// earlier builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection_mac: Option<String>,
+    /// Present after deliberate rotation. Its distinct wrap and MAC domains
+    /// prevent downgrading an enrolled header to legacy sidecar semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<RotationPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotationPolicy {
+    pub binding_digest: String,
+    /// Key check of a retired OS credential, retained only for cleanup.
+    pub retired_key_check: Option<String>,
+}
+fn passphrase_label(h: &ProfileHeader) -> &'static [u8] {
+    if h.rotation.is_some() { ROTATED_PASSPHRASE_LABEL } else { PASSPHRASE_LABEL }
+}
+fn recovery_label(h: &ProfileHeader) -> &'static [u8] {
+    if h.rotation.is_some() { ROTATED_RECOVERY_LABEL } else { RECOVERY_LABEL }
+}
+pub(crate) fn bind_rotation(h: &mut ProfileHeader, key: &Key, binding: &Option<serde_json::Value>) {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(binding).expect("JSON value serializes");
+    h.rotation.as_mut().expect("rotated header").binding_digest = hex::encode(Sha256::digest(bytes));
+    h.protection_mac = Some(protection_mac(key, h));
+}
+pub(crate) fn check_current(current: &ProfileHeader, expected: &ProfileHeader, key: &Key) -> Result<(), VaultError> {
+    if current.profile_id != expected.profile_id {
+        return Err(VaultError::HeaderTampered);
+    }
+    require_profile_key(current, key)?;
+    check_protection_mac(current, key)
+}
+/// A randomly generated replacement credential, available before rotation.
+/// Callers must deliver it and obtain acknowledgment before committing rotation.
+/// It is deliberately not constructible from an arbitrary weak password.
+pub struct RotationRecoveryKey(Zeroizing<String>);
+impl RotationRecoveryKey {
+    pub fn generate() -> Self {
+        Self(Zeroizing::new(format_recovery_key(&crypto::random_bytes(20))))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+/// Stage new independent wraps using the already delivered recovery credential.
+pub(crate) fn rotated_header(
+    h: &ProfileHeader,
+    key: &Key,
+    passphrase: &str,
+    recovery: &RotationRecoveryKey,
+    kdf: KdfParams,
+) -> Result<ProfileHeader, VaultError> {
+    if h.protection == ProtectionMode::Passphrase && unlock_with_passphrase(h, passphrase).is_ok() {
+        return Err(VaultError::Header("choose a passphrase different from the current one".into()));
+    }
+    if h.recovery_wrap.is_some() && unlock_with_recovery(h, recovery.as_str()).is_ok() {
+        return Err(VaultError::Header("rotation requires a new recovery credential".into()));
+    }
+    let mut next = h.clone();
+    next.protection = ProtectionMode::Passphrase;
+    next.key_check = key_check(key);
+    next.rotation = Some(RotationPolicy {
+        binding_digest: String::new(),
+        retired_key_check: h
+            .keychain_account
+            .as_ref()
+            .map(|_| h.rotation.as_ref().and_then(|p| p.retired_key_check.clone()).unwrap_or_else(|| h.key_check.clone())),
+    });
+    next.passphrase_wrap = Some(wrap_with_passphrase(key, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
+    next.recovery_wrap = Some(wrap_with_passphrase(key, &normalize_recovery(recovery.as_str()), kdf, ROTATED_RECOVERY_LABEL)?);
+    Ok(next)
 }
 
 fn key_check(k: &Key) -> String {
@@ -140,6 +214,15 @@ fn protection_mac_state(dek: &Key, h: &ProfileHeader) -> hmac::Hmac<sha2::Sha256
     };
     let key = protection_mac_key(dek);
     let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+    if h.rotation.is_some() {
+        // Authenticate all new policy/header fields, including wraps and
+        // keychain cleanup identity, in a domain legacy MACs cannot satisfy.
+        let mut sealed = h.clone();
+        sealed.protection_mac = None;
+        m.update(b"anvil-rotated-profile-header-v1");
+        m.update(&serde_json::to_vec(&sealed).expect("header serializes"));
+        return m;
+    }
     for part in [PROTECTION_MAC_LABEL, h.profile_id.as_bytes(), mode, h.key_check.as_bytes()] {
         m.update(&(part.len() as u64).to_be_bytes());
         m.update(part);
@@ -155,13 +238,28 @@ fn protection_mac(dek: &Key, h: &ProfileHeader) -> String {
 
 /// A header's protection MAC, when it has one, must be `dek`'s MAC of it.
 /// Headers written by earlier builds have none until [`upgrade_header`].
-fn check_protection_mac(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+pub(crate) fn check_protection_mac(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
     use hmac::Mac;
     let Some(mac) = h.protection_mac.as_deref() else {
-        return Ok(());
+        // The rotated wrap domain enrolls this header permanently. Only
+        // legacy wraps may lack a protection MAC and be upgraded on unlock.
+        return if h.rotation.is_some() { Err(VaultError::HeaderTampered) } else { Ok(()) };
     };
     let tag = hex::decode(mac).map_err(|_| VaultError::HeaderTampered)?;
     protection_mac_state(dek, h).verify_slice(&tag).map_err(|_| VaultError::HeaderTampered)
+}
+
+/// Authenticate the presence/absence of the canonical identity policy.
+pub fn verify_rotation_binding(h: &ProfileHeader, key: &Key, binding: &Option<serde_json::Value>) -> Result<(), VaultError> {
+    if let Some(policy) = &h.rotation {
+        let mut expected = h.clone();
+        bind_rotation(&mut expected, key, binding);
+        if expected.rotation.as_ref().map(|p| &p.binding_digest) != Some(&policy.binding_digest) {
+            return Err(VaultError::HeaderTampered);
+        }
+        check_protection_mac(h, key)?;
+    }
+    Ok(())
 }
 
 /// A keychain header never carries a passphrase or recovery wrap. One
@@ -245,26 +343,26 @@ pub fn header_path(dir: &Path) -> PathBuf {
 }
 
 pub fn read_header(dir: &Path) -> Result<ProfileHeader, VaultError> {
+    let _lock = crate::profile_lock::shared(dir)?;
+    read_header_unlocked(dir)
+}
+pub(crate) fn read_header_unlocked(dir: &Path) -> Result<ProfileHeader, VaultError> {
+    if let Some(state) = crate::rotation::read(dir)? {
+        return Ok(state.header);
+    }
     let text = std::fs::read_to_string(header_path(dir)).map_err(|e| VaultError::Header(e.to_string()))?;
-    serde_json::from_str(&text).map_err(|e| VaultError::Header(e.to_string()))
+    let h: ProfileHeader = serde_json::from_str(&text).map_err(|e| VaultError::Header(e.to_string()))?;
+    if h.rotation.is_some() {
+        return Err(VaultError::Header("the rotated profile's canonical key state is missing".into()));
+    }
+    Ok(h)
 }
 
 /// Atomically replace the header, under the profile's header lock.
 pub fn write_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
-    let _lock = lock_header(dir);
+    let _data_lock = crate::profile_lock::shared(dir)?;
+    let _lock = open_locked(dir)?;
     replace_header(dir, h)
-}
-
-/// Take the advisory lock that serialises header writers across processes;
-/// it is released when the returned file is dropped. Best effort: on a file
-/// system without locks the header is still replaced atomically. Once held,
-/// temporary files abandoned by earlier writers are removed.
-fn lock_header(dir: &Path) -> Option<std::fs::File> {
-    let lock = open_locked(dir).inspect_err(|e| tracing::warn!(dir = %dir.display(), error = %e, "profile header lock unavailable")).ok();
-    if lock.is_some() {
-        remove_stale_temporaries(dir);
-    }
-    lock
 }
 
 /// Remove `profile.json.<pid>.<random>.tmp` files older than
@@ -295,6 +393,7 @@ fn open_locked(dir: &Path) -> std::io::Result<std::fs::File> {
     std::fs::create_dir_all(dir)?;
     let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE))?;
     f.lock()?;
+    remove_stale_temporaries(dir);
     Ok(f)
 }
 
@@ -302,8 +401,9 @@ fn open_locked(dir: &Path) -> std::io::Result<std::fs::File> {
 /// between the read and the write. `edit` returns whether it changed
 /// anything; the result is the header as it now is on disk.
 fn update_header(dir: &Path, edit: impl FnOnce(&mut ProfileHeader) -> Result<bool, VaultError>) -> Result<ProfileHeader, VaultError> {
-    let _lock = lock_header(dir);
-    let mut h = read_header(dir)?;
+    let _data_lock = crate::profile_lock::shared(dir)?;
+    let _lock = open_locked(dir)?;
+    let mut h = read_header_unlocked(dir)?;
     if edit(&mut h)? {
         replace_header(dir, &h)?;
     }
@@ -317,6 +417,25 @@ fn update_header(dir: &Path, edit: impl FnOnce(&mut ProfileHeader) -> Result<boo
 /// sync is best effort: some file systems (FUSE, SMB) refuse it, and failing
 /// there would report an error for a header that was in fact written.
 fn replace_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
+    if let Some(mut state) = crate::rotation::read(dir)? {
+        if h.rotation.is_none() || state.header.key_check != h.key_check {
+            return Err(VaultError::HeaderTampered);
+        }
+        let mut conn = rusqlite::Connection::open(dir.join(crate::store::DB_FILE)).map_err(|e| VaultError::Header(e.to_string()))?;
+        conn.busy_timeout(crate::store::BUSY_TIMEOUT).map_err(|e| VaultError::Header(e.to_string()))?;
+        conn.execute_batch("PRAGMA synchronous=FULL;").map_err(|e| VaultError::Header(e.to_string()))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| VaultError::Header(e.to_string()))?;
+        state = crate::rotation::read_on(&tx)?.ok_or(VaultError::HeaderTampered)?;
+        if state.header.key_check != h.key_check
+            || state.header.rotation.as_ref().map(|p| &p.binding_digest) != h.rotation.as_ref().map(|p| &p.binding_digest)
+        {
+            return Err(VaultError::HeaderTampered);
+        }
+        state.header = h.clone();
+        crate::rotation::write_on(&tx, &state)?;
+        tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
+        return Ok(());
+    }
     let bytes = serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{PROFILE_FILE}.{}.{}.tmp", std::process::id(), hex::encode(crypto::random_bytes(8))));
@@ -394,16 +513,55 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
         protection_mac: None,
+        rotation: None,
     };
     header.protection_mac = Some(protection_mac(&dek, &header));
     write_header(dir, &header)?;
     Ok(CreatedProfile { header, dek, recovery_key: Some(Zeroizing::new(recovery)) })
 }
 
+/// Product creation enrolls explicit authenticated unlinked policy before it
+/// reports success. The legacy factory remains for reading historical formats.
+pub fn create_enrolled_passphrase_profile(
+    dir: &Path,
+    display_name: &str,
+    passphrase: &str,
+    kdf: KdfParams,
+) -> Result<CreatedProfile, VaultError> {
+    let mut created = create_passphrase_profile(dir, display_name, passphrase, kdf)?;
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None });
+    created.header.passphrase_wrap = Some(wrap_with_passphrase(&created.dek, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
+    let recovery = created.recovery_key.as_ref().expect("passphrase creation provides recovery");
+    created.header.recovery_wrap = Some(wrap_with_passphrase(&created.dek, &normalize_recovery(recovery), kdf, ROTATED_RECOVERY_LABEL)?);
+    initialize_policy(dir, &mut created.header, &created.dek)?;
+    Ok(created)
+}
+
+fn initialize_policy(dir: &Path, header: &mut ProfileHeader, key: &Key) -> Result<(), VaultError> {
+    // Only creation calls this with a fresh random profile directory. No
+    // historical policy may be inferred by this initialization path.
+    let store = crate::Store::open(dir, Key::from_bytes(key.as_bytes())?).map_err(|e| VaultError::Header(e.to_string()))?;
+    drop(store);
+    let _guard = crate::profile_lock::exclusive(dir)?;
+    let mut conn = rusqlite::Connection::open(dir.join(crate::store::DB_FILE)).map_err(|e| VaultError::Header(e.to_string()))?;
+    conn.execute_batch("PRAGMA synchronous=FULL;").map_err(|e| VaultError::Header(e.to_string()))?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| VaultError::Header(e.to_string()))?;
+    if crate::rotation::read_on(&tx)?.is_some() {
+        return Err(VaultError::HeaderTampered);
+    }
+    bind_rotation(header, key, &None);
+    crate::rotation::write_on(&tx, &crate::rotation::State { header: header.clone(), binding: None })?;
+    let env = crypto::seal(key, b"anvil/v2/rotated-canary", b"ok");
+    tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(env))])
+        .map_err(|e| VaultError::Header(e.to_string()))?;
+    tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
+    Ok(())
+}
+
 pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key, VaultError> {
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.passphrase_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
-    let k = unwrap_with_passphrase(w, passphrase, PASSPHRASE_LABEL)?;
+    let k = unwrap_with_passphrase(w, passphrase, passphrase_label(h))?;
     require_profile_key(h, &k)?;
     check_protection_mac(h, &k)?;
     Ok(k)
@@ -412,7 +570,7 @@ pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key
 pub fn unlock_with_recovery(h: &ProfileHeader, recovery: &str) -> Result<Key, VaultError> {
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.recovery_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
-    let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), RECOVERY_LABEL)?;
+    let k = unwrap_with_passphrase(w, &normalize_recovery(recovery), recovery_label(h))?;
     require_profile_key(h, &k)?;
     check_protection_mac(h, &k)?;
     Ok(k)
@@ -464,7 +622,7 @@ pub fn change_passphrase(dir: &Path, h: &mut ProfileHeader, dek: &Key, new_passp
     require_protection(h, ProtectionMode::Passphrase)?;
     require_profile_key(h, dek)?;
     check_protection_mac(h, dek)?;
-    let wrap = wrap_with_passphrase(dek, new_passphrase, kdf, PASSPHRASE_LABEL)?;
+    let wrap = wrap_with_passphrase(dek, new_passphrase, kdf, passphrase_label(h))?;
     *h = rewrite_header(dir, h, dek, ProtectionMode::Passphrase, |next| {
         next.passphrase_wrap = Some(wrap);
         Ok(())
@@ -483,8 +641,9 @@ fn rewrite_header(
     mode: ProtectionMode,
     edit: impl FnOnce(&mut ProfileHeader) -> Result<(), VaultError>,
 ) -> Result<ProfileHeader, VaultError> {
-    let _lock = lock_header(dir);
-    let mut next = read_header(dir)?;
+    let _data_lock = crate::profile_lock::shared(dir)?;
+    let _lock = open_locked(dir)?;
+    let mut next = read_header_unlocked(dir)?;
     if next.profile_id != h.profile_id {
         return Err(VaultError::Header("the profile header on disk belongs to another profile".into()));
     }
@@ -499,7 +658,6 @@ fn rewrite_header(
 }
 
 /// Result of [`convert_keychain_to_passphrase`].
-#[cfg(feature = "os-keychain")]
 pub struct KeychainConversion {
     /// The new recovery key. Shown to the user once; never stored.
     pub recovery_key: Zeroizing<String>,
@@ -571,8 +729,54 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
     let Some(account) = h.keychain_account.clone() else {
         return Ok(());
     };
+    if h.rotation.is_some() {
+        // Rotated cleanup requires the new key and the authenticated,
+        // serialized canonical-state path below.
+        return Err(VaultError::Header("rotated cleanup requires the current data key".into()));
+    }
     delete_retired_entry(h, &account)?;
     forget_keychain_account(dir, h, &account)
+}
+
+/// Retry retirement after rotation, authenticating the metadata update with
+/// the new key. Never delete an unrelated replacement credential.
+pub fn retire_rotated_keychain(dir: &Path, h: &mut ProfileHeader, key: &Key) -> Result<(), VaultError> {
+    #[cfg(feature = "os-keychain")]
+    {
+        let _data_lock = crate::profile_lock::shared(dir)?;
+        let _header_lock = open_locked(dir)?;
+        let mut current = read_header_unlocked(dir)?;
+        check_current(&current, h, key)?;
+        let Some(account) = current.keychain_account.clone() else {
+            *h = current;
+            return Ok(());
+        };
+        let mut retired = current.clone();
+        retired.key_check = current.rotation.as_ref().and_then(|p| p.retired_key_check.clone()).ok_or(VaultError::HeaderTampered)?;
+        // Serializes all cooperating rotated cleanup clients. OS tools that
+        // replace credentials outside Anvil are outside this file fence.
+        delete_retired_entry(&retired, &account)?;
+        current.keychain_account = None;
+        current.rotation.as_mut().ok_or(VaultError::HeaderTampered)?.retired_key_check = None;
+        current.protection_mac = Some(protection_mac(key, &current));
+        if let Err(e) = replace_header(dir, &current) {
+            // Removal succeeded even if forgetting its name failed. Next
+            // unlock retries the metadata update without losing the key.
+            tracing::warn!(error = %e, "retired credential removed but cleanup metadata still needs an update");
+        } else {
+            *h = current;
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "os-keychain"))]
+    {
+        let _ = (dir, key);
+        if h.keychain_account.is_some() {
+            Err(VaultError::KeychainUnavailable("this build has no OS credential store".into()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Maps a keyring error to a vault error. The user refusing access (the OS
@@ -675,6 +879,9 @@ fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
 /// The key in a keychain secret, and whether the secret is tagged.
 #[cfg(feature = "os-keychain")]
 fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
+    if let Some(raw) = secret.strip_prefix(ENROLLED_KEYCHAIN_TAG) {
+        return Ok((Key::from_bytes(raw)?, true));
+    }
     match secret.strip_prefix(KEYCHAIN_SECRET_TAG) {
         Some(key) => Ok((Key::from_bytes(key)?, true)),
         None => Ok((Key::from_bytes(secret)?, false)),
@@ -755,10 +962,29 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
         key_check: key_check(&dek),
         created_at: chrono::Utc::now(),
         protection_mac: None,
+        rotation: None,
     };
     header.protection_mac = Some(protection_mac(&dek, &header));
     write_header(dir, &header)?;
     Ok(CreatedProfile { header, dek, recovery_key: None })
+}
+
+#[cfg(feature = "os-keychain")]
+pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
+    let mut created = create_keychain_profile(dir, display_name)?;
+    let entry = keychain_entry(created.header.keychain_account.as_deref().expect("keychain account"))?;
+    let secret = Zeroizing::new([ENROLLED_KEYCHAIN_TAG, created.dek.as_bytes().as_slice()].concat());
+    // Tag first: an interrupted enrollment fails closed and contains no user
+    // data. The creator has not published the profile yet.
+    entry.set_secret(&secret).map_err(|e| keychain_error(&e))?;
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None });
+    initialize_policy(dir, &mut created.header, &created.dek)?;
+    Ok(created)
+}
+
+#[cfg(not(feature = "os-keychain"))]
+pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
+    create_keychain_profile(dir, display_name)
 }
 
 /// Unlock a keychain profile. An entry written by an earlier build is
@@ -779,6 +1005,9 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
         return Err(VaultError::WrongProtection("the OS keychain"));
     }
     let (k, tagged) = parse_keychain_secret(&secret)?;
+    if secret.starts_with(ENROLLED_KEYCHAIN_TAG) && h.rotation.is_none() {
+        return Err(VaultError::HeaderTampered);
+    }
     require_profile_key(h, &k)?;
     // A tagged entry was written with a MAC'd header: one without a MAC was
     // edited, e.g. to reopen a converted profile from its leftover entry.
@@ -802,6 +1031,11 @@ pub fn delete_keychain_entry(h: &ProfileHeader) -> Result<(), VaultError> {
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
     entry.delete_credential().map_err(|e| keychain_error(&e))
+}
+
+/// Check an App's immutable key identity before reusing its grants/session.
+pub fn check_app_key(h: &ProfileHeader, key: &Key) -> Result<(), VaultError> {
+    require_profile_key(h, key)
 }
 
 #[cfg(test)]
