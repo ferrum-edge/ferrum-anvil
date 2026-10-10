@@ -367,11 +367,13 @@ release page once.
     gtk 0.19+ (glib ≥ 0.20).
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E
-  tooling (WebdriverIO 9.30.1, pinned exactly by `@wdio/tauri-service` 1.4.0)
-  carries a high-severity advisory in `deepmerge-ts` 7.1.6 (`serialize-javascript`
-  is overridden to the fixed 7.0.5); it runs only on developer machines and CI against
-  local fixtures and is never shipped. Revisit when the Tauri service moves to
-  a fixed WebdriverIO. An npm `overrides` entry moves WebdriverIO's
+  tooling uses `@wdio/tauri-service` 1.5.0 with its supported WebdriverIO 9.31.9
+  dependencies alongside the selected 9.32.0 runner. Both dependency paths use
+  `deepmerge-ts` 8.0.2, removing the former development-only 7.1.6 exception for
+  GHSA-ggr8-5vv4-36mx; no major-version override of `deepmerge-ts` is needed.
+  `serialize-javascript` remains overridden to the fixed 7.0.5. E2E tooling runs
+  only on developer machines and CI against local fixtures and is never shipped.
+  An npm `overrides` entry moves WebdriverIO's
   `@puppeteer/browsers` to 3.x, which no longer depends on `extract-zip`
   (WebdriverIO v9 still declares `^2.2.0`; its v10 line adopts `^3`). Drop the
   override once WebdriverIO depends on `@puppeteer/browsers` 3.x itself.
