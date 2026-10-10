@@ -3,7 +3,7 @@
 //! database or the UI; it receives a frozen snapshot.
 
 use crate::ContextEpoch;
-use crate::vars::VarLayer;
+use crate::vars::{VarEntry, VarLayer};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
@@ -23,6 +23,24 @@ pub trait SecretResolver: Send + Sync {
     /// Indices identify the original layers and entries; later run layers still win.
     fn variable_secret(&self, _layer: usize, _variable: usize) -> Option<SecretRef> {
         None
+    }
+}
+
+/// Translate filtered entries back to the immediate source resolver's indices.
+/// Keeping the source resolver also preserves its lock, ownership and snapshot checks.
+struct RetainedVariableSecrets {
+    source: Arc<dyn SecretResolver>,
+    variables: Vec<Vec<usize>>,
+}
+
+impl SecretResolver for RetainedVariableSecrets {
+    fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
+        self.source.resolve(reference)
+    }
+
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+        let original = *self.variables.get(layer)?.get(variable)?;
+        self.source.variable_secret(layer, original)
     }
 }
 
@@ -84,6 +102,7 @@ pub struct ExecutionContext {
     pub settings_layers: Vec<(String, SettingsOverrides)>,
     /// Ordered outer → inner: workspace, folders…, request. The innermost non-`Inherit` wins.
     pub auth_layers: Vec<(String, AuthConfig)>,
+    /// Use [`Self::retain_variables`] to remove entries without changing their vault bindings.
     pub var_layers: Vec<VarLayer>,
     pub tls_profiles: Vec<TlsProfile>,
     pub proxy_profiles: Vec<ProxyProfile>,
@@ -115,6 +134,33 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Remove variables while preserving each retained entry's deferred vault identity.
+    /// Layers (including empty ones) keep their positions. Repeated filtering composes
+    /// with the previous mapping; entries appended afterward have no retained binding.
+    pub fn retain_variables(&mut self, mut keep: impl FnMut(&VarEntry) -> bool) {
+        let mut variables = Vec::with_capacity(self.var_layers.len());
+        let mut changed = false;
+        for layer in &mut self.var_layers {
+            let mut retained = Vec::with_capacity(layer.vars.len());
+            let mut original = 0;
+            layer.vars.retain(|entry| {
+                let index = original;
+                original += 1;
+                if keep(entry) {
+                    retained.push(index);
+                    true
+                } else {
+                    changed = true;
+                    false
+                }
+            });
+            variables.push(retained);
+        }
+        if changed {
+            self.secrets = Arc::new(RetainedVariableSecrets { source: self.secrets.clone(), variables });
+        }
+    }
+
     /// Minimal context for a standalone request (CLI / tests).
     pub fn standalone(spec: RequestSpec) -> Self {
         let settings = spec.settings.clone();
