@@ -1054,9 +1054,11 @@ impl Store {
     /// Deliberately replace the data key, wrapped header, and linked policy
     /// in one durable SQLite commit. The successful store is left locked;
     /// reopen the App to refresh its immutable capability identity.
+    /// The caller must save and acknowledge `recovery` before invoking this.
     pub fn rotate_data_key<F>(
         &self,
         passphrase: &str,
+        recovery: &crate::vault::RotationRecoveryKey,
         kdf: crate::KdfParams,
         prepare_binding: F,
     ) -> std::result::Result<crate::vault::KeychainConversion, crate::vault::VaultError>
@@ -1088,7 +1090,7 @@ impl Store {
         vault::check_current(&h, &h, &key)?;
         let new_key = Key::random();
         let binding = prepare_binding(&h, &key, &new_key, state.map(|s| s.binding))?;
-        let (mut next, recovery_key) = vault::rotated_header(&h, &new_key, passphrase, kdf)?;
+        let mut next = vault::rotated_header(&h, &new_key, passphrase, recovery, kdf)?;
         vault::bind_rotation(&mut next, &new_key, &binding);
         // Abort on the first unauthenticatable row. Do not retain old-key
         // ciphertext, and do not reinterpret legacy residual payloads.
@@ -1108,7 +1110,7 @@ impl Store {
         // unlock discovers the new wrapped key directly from the database.
         let keychain_entry_removed =
             if next.keychain_account.is_some() { vault::retire_rotated_keychain(&self.dir, &mut next, &new_key).is_ok() } else { true };
-        Ok(vault::KeychainConversion { recovery_key, keychain_entry_removed })
+        Ok(vault::KeychainConversion { recovery_key: zeroize::Zeroizing::new(recovery.as_str().to_string()), keychain_entry_removed })
     }
 
     pub fn dir(&self) -> &Path {

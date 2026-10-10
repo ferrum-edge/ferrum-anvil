@@ -595,8 +595,11 @@ on the first line and the new password on the second. Rotation retains the
 linked policy, so normal unlock afterward still requires fresh login. If the
 binding is corrupt, repair it using recovery unlock before rotating.
 
-Do not pipe the command's output into a log: it shows the **new recovery key
-once**. Store it safely offline, then reopen the profile. The old password,
+Do not pipe the command's output into a log: before changing any credentials,
+it shows the **new recovery key**. Store it safely offline, then copy it from
+that saved record onto the next stdin line to acknowledge it. Output failure,
+EOF or a mismatched acknowledgment aborts before rotation. After confirmation,
+reopen the profile. The old password,
 old recovery key and old keychain entry cannot decrypt the rotated active
 ciphertext. Keychain profiles become passphrase profiles; cleanup of the old
 entry is retried on unlock if the OS refuses it. Cleanup is serialized across
@@ -621,9 +624,10 @@ legacy `profile.json` and `identity.json` sidecars are historical copies and
 are ignored for current policy. Interrupted work before commit leaves the old
 credentials usable; after commit, the new password discovers the new header
 from the database even if the process exited before reporting success. No
-new key is stored wrapped under the old data key. If the process exits before
-showing the new recovery key, the chosen new password still works; rotate
-again if a replacement recovery key is needed.
+new key is stored wrapped under the old data key. The replacement recovery
+key is delivered and acknowledged before commit; if the process exits after
+commit but before reporting success, that saved key remains the supported
+offline unlock path, including profiles requiring fresh provider login.
 
 Supported processes hold a mandatory shared file fence for data operations;
 rotation holds its exclusive counterpart. Stale handles check the current
@@ -645,8 +649,9 @@ policy.
 **Limits:** rotation does not erase historical raw files, checkpoint copies,
 WAL/free-page remnants or independently encrypted portable backups. An owner
 can still recover historical data with its historical credential. A party
-able to restore a complete coherent historical profile/database and any
-needed OS credentials can also roll back that state. Local encryption proves
+able to replay authentic historical unlock/policy metadata under the same
+data key can restore historical policy; a coherent historical profile/database
+and any needed OS credentials can also roll back that state. Local encryption proves
 authenticity, not chronology; this feature provides no complete-machine or
 complete-profile antirollback guarantee and requires no online service.
 Legacy profiles that have not rotated still use sidecar identity policy;

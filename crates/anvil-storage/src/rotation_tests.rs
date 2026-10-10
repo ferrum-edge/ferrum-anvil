@@ -16,7 +16,7 @@ fn profile(dir: &Path) -> (Store, Key, vault::ProfileHeader) {
     (Store::open(dir, c.dek.clone()).unwrap(), c.dek, c.header)
 }
 fn rotate(store: &Store) -> vault::KeychainConversion {
-    store.rotate_data_key(NEW, KdfParams::testing(), |_, _, _, state| Ok(state.flatten())).unwrap()
+    store.rotate_data_key(NEW, &vault::RotationRecoveryKey::generate(), KdfParams::testing(), |_, _, _, state| Ok(state.flatten())).unwrap()
 }
 fn open_new(dir: &Path) -> Store {
     let h = vault::read_header(dir).unwrap();
@@ -117,7 +117,7 @@ fn corruption_aborts_without_committing_a_partial_generation() {
     let blob = seed_every_payload(&store, &old);
     let before = rows(&store.conn().unwrap());
     store.conn().unwrap().execute("UPDATE blobs SET payload=x'00' WHERE id=?1", [&blob]).unwrap();
-    assert!(store.rotate_data_key(NEW, KdfParams::testing(), |_, _, _, _| Ok(None)).is_err());
+    assert!(store.rotate_data_key(NEW, &vault::RotationRecoveryKey::generate(), KdfParams::testing(), |_, _, _, _| Ok(None)).is_err());
     assert!(!store.is_locked());
     assert_eq!(vault::read_header(dir.path()).unwrap().key_check, h.key_check);
     let after = rows(&store.conn().unwrap());

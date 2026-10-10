@@ -141,14 +141,26 @@ pub(crate) fn check_current(current: &ProfileHeader, expected: &ProfileHeader, k
     require_profile_key(current, key)?;
     check_protection_mac(current, key)
 }
-/// Stage a new independent data key and recovery credential. Nothing is written.
+/// A randomly generated replacement credential, available before rotation.
+/// Callers must deliver it and obtain acknowledgment before committing rotation.
+/// It is deliberately not constructible from an arbitrary weak password.
+pub struct RotationRecoveryKey(Zeroizing<String>);
+impl RotationRecoveryKey {
+    pub fn generate() -> Self {
+        Self(Zeroizing::new(format_recovery_key(&crypto::random_bytes(20))))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+/// Stage new independent wraps using the already delivered recovery credential.
 pub(crate) fn rotated_header(
     h: &ProfileHeader,
     key: &Key,
     passphrase: &str,
+    recovery: &RotationRecoveryKey,
     kdf: KdfParams,
-) -> Result<(ProfileHeader, Zeroizing<String>), VaultError> {
-    let recovery = Zeroizing::new(format_recovery_key(&crypto::random_bytes(20)));
+) -> Result<ProfileHeader, VaultError> {
     let mut next = h.clone();
     next.protection = ProtectionMode::Passphrase;
     next.key_check = key_check(key);
@@ -160,8 +172,8 @@ pub(crate) fn rotated_header(
             .map(|_| h.rotation.as_ref().and_then(|p| p.retired_key_check.clone()).unwrap_or_else(|| h.key_check.clone())),
     });
     next.passphrase_wrap = Some(wrap_with_passphrase(key, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
-    next.recovery_wrap = Some(wrap_with_passphrase(key, &normalize_recovery(&recovery), kdf, ROTATED_RECOVERY_LABEL)?);
-    Ok((next, recovery))
+    next.recovery_wrap = Some(wrap_with_passphrase(key, &normalize_recovery(recovery.as_str()), kdf, ROTATED_RECOVERY_LABEL)?);
+    Ok(next)
 }
 
 fn key_check(k: &Key) -> String {
@@ -218,7 +230,7 @@ fn protection_mac(dek: &Key, h: &ProfileHeader) -> String {
 
 /// A header's protection MAC, when it has one, must be `dek`'s MAC of it.
 /// Headers written by earlier builds have none until [`upgrade_header`].
-fn check_protection_mac(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
+pub(crate) fn check_protection_mac(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
     use hmac::Mac;
     let Some(mac) = h.protection_mac.as_deref() else {
         // The rotated wrap domain enrolls this header permanently. Only

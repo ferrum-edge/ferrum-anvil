@@ -285,11 +285,17 @@ impl crate::App {
     /// The new passphrase and new recovery key replace every old local unlock
     /// credential. Portable backups and raw historical copies remain historical.
     /// Success locks this App; reopen it with the new header/key before use.
-    pub fn rotate_data_key(&self, new_passphrase: &str, kdf: KdfParams) -> Result<KeychainConversion> {
+    /// Save and acknowledge `recovery` before calling; success revokes the old one.
+    pub fn rotate_data_key(
+        &self,
+        new_passphrase: &str,
+        recovery: &vault::RotationRecoveryKey,
+        kdf: KdfParams,
+    ) -> Result<KeychainConversion> {
         check_new_passphrase(new_passphrase)?;
-        let result = self
-            .store
-            .rotate_data_key(new_passphrase, kdf, |h, old, new, binding| identity::rotate_binding(h, old, new, binding, &self.dir))?;
+        let result = self.store.rotate_data_key(new_passphrase, recovery, kdf, |h, old, new, binding| {
+            identity::rotate_binding(h, old, new, binding, &self.dir)
+        })?;
         self.lock();
         Ok(result)
     }

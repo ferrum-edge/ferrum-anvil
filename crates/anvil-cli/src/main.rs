@@ -37,7 +37,7 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -786,11 +786,25 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                     let app = open_app_for_rotation(&cli, *recovery_key_stdin)?;
                     let new = passphrase(true, "ANVIL_NEW_PASSPHRASE")?.ok_or_else(|| anyhow!("provide the new passphrase on stdin"))?;
-                    let rotated = app.rotate_data_key(&new, KdfParams::interactive())?;
-                    println!(
+                    let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
+                    {
+                        let mut out = std::io::stdout().lock();
+                        writeln!(out, "NEW RECOVERY KEY (save offline before rotation): {}", recovery.as_str())?;
+                        writeln!(
+                            out,
+                            "Copy the key from your saved record onto the next stdin line to acknowledge it. Rotation has not committed."
+                        )?;
+                        out.flush()?;
+                    }
+                    let acknowledgment = passphrase(true, "")?.ok_or_else(|| anyhow!("acknowledge the saved recovery key on stdin"))?;
+                    if acknowledgment.as_str() != recovery.as_str() {
+                        bail!("recovery key acknowledgment did not match; rotation was not committed");
+                    }
+                    let rotated = app.rotate_data_key(&new, &recovery, KdfParams::interactive())?;
+                    writeln!(
+                        std::io::stdout().lock(),
                         "Local data key rotated. Reopen with the new passphrase or new recovery key. Old raw copies remain historical; full snapshot rollback is not prevented."
-                    );
-                    println!("NEW RECOVERY KEY (shown once; store it offline): {}", rotated.recovery_key.as_str());
+                    )?;
                     if !rotated.keychain_entry_removed {
                         eprintln!(
                             "The old OS credential entry could not be removed; removal is retried at unlock. It cannot decrypt the rotated database."

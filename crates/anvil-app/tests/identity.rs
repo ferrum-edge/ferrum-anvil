@@ -16,8 +16,8 @@ use anvil_fixtures::idp::{IdpFixture, IdpOptions, simulate_browser};
 use anvil_identity::mock::{MockProvider, MockProviderConfig};
 use anvil_identity::{Availability, FlowErrorKind, FlowEvent, FlowOptions, IdentityProvider, NoEvents, VerifiedIdentity};
 use anvil_portability::plan::ConflictPolicy;
-use anvil_storage::KdfParams;
 use anvil_storage::vault::VaultError;
+use anvil_storage::{KdfParams, vault};
 use anvil_transport::recorder::EventCtx;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -619,7 +619,7 @@ async fn rotated_identity_policy_is_canonical_and_recovery_can_repair_it() {
     let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
     let app = App::open(dir.clone(), h, key).unwrap();
     let new = "rotated passphrase 123";
-    let rotated = app.rotate_data_key(new, KdfParams::testing()).unwrap();
+    let rotated = app.rotate_data_key(new, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
     std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
     assert!(matches!(
         ProfileManager::unlock(&dir, Unlock::Passphrase(new)),
@@ -651,6 +651,36 @@ async fn rotated_identity_policy_is_canonical_and_recovery_can_repair_it() {
 }
 
 #[tokio::test]
+async fn stale_authorized_policy_cannot_unlink_or_replace_a_newer_fresh_login_binding() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "policy concurrency");
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false).unwrap();
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let app = App::open(dir.clone(), h, key).unwrap();
+    let new = "policy rotation password";
+    let recovery = vault::RotationRecoveryKey::generate();
+    app.rotate_data_key(new, &recovery, KdfParams::testing()).unwrap();
+    let (authorized, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(new)).unwrap();
+    let prior_binding = anvil_storage::rotation::binding(&dir).unwrap().unwrap();
+    // Another legitimate operation commits fresh-login policy after the
+    // first operation authorized against the non-fresh policy.
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(new), sign_in(&p).await, true).unwrap();
+    let committed = vault::read_header(&dir).unwrap();
+    for replacement in [None, prior_binding] {
+        let err = anvil_storage::rotation::set_binding(&dir, &authorized, &key, replacement).unwrap_err();
+        assert!(err.to_string().contains("authorize"));
+        assert_eq!(vault::read_header(&dir).unwrap().protection_mac, committed.protection_mac);
+        assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_err());
+    }
+    // A newly authorized recovery operation may still remove that policy.
+    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(recovery.as_str()), None).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_ok());
+}
+
+#[tokio::test]
 async fn deleting_rotated_header_mac_cannot_legitimize_an_unlinked_policy() {
     use sha2::Digest;
     anvil_fixtures::init();
@@ -661,7 +691,7 @@ async fn deleting_rotated_header_mac_cannot_legitimize_an_unlinked_policy() {
     ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
     let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
     let app = App::open(dir.clone(), h, key).unwrap();
-    app.rotate_data_key("rotated password 123", KdfParams::testing()).unwrap();
+    app.rotate_data_key("rotated password 123", &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
     let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
     let raw: String = conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
     let mut state: serde_json::Value = serde_json::from_str(&raw).unwrap();

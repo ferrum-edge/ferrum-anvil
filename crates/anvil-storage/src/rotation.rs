@@ -68,6 +68,12 @@ pub fn set_binding(dir: &Path, header: &ProfileHeader, key: &Key, binding: Optio
         return Ok(false);
     };
     crate::vault::check_current(&state.header, header, key)?;
+    // Authorization happened against this authenticated policy snapshot.
+    // A competing link/unlink must force reauthorization, even under the same DEK.
+    crate::vault::check_protection_mac(header, key)?;
+    if state.header.rotation.as_ref().map(|p| &p.binding_digest) != header.rotation.as_ref().map(|p| &p.binding_digest) {
+        return Err(VaultError::Header("identity policy changed; unlock and authorize the operation again".into()));
+    }
     state.binding = binding;
     crate::vault::bind_rotation(&mut state.header, key, &state.binding);
     write_on(&tx, &state)?;
