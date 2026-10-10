@@ -10,7 +10,7 @@ use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, Pending
 use anvil_app::cleanup::{RemovedRevisions, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
-use anvil_app::profiles::Unlock;
+use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
@@ -256,12 +256,8 @@ pub async fn profile_enroll_unlinked(
     .map_err(e)
 }
 
-/// Re-wrap the data key under a new passphrase (the app must be unlocked;
-/// passphrase profiles only), once the user confirmed it in a native dialog
-/// or just unlocked with the recovery key (see `crate::presence`); otherwise
-/// [`crate::presence::NOT_CONFIRMED`]. Its outcome is reported even after a
-/// lock that landed during the key derivation: it says which passphrase
-/// opens the profile now.
+/// Rotate all active ciphertext and credentials after native intent and
+/// replacement-recovery acknowledgment. Success requires reopening a new App.
 #[tauri::command]
 pub async fn profile_change_passphrase(st: State<'_, DesktopState>, window: Window, handle: AppHandle, new_passphrase: String) -> R<()> {
     let out = crate::presence::change_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await;
@@ -281,10 +277,8 @@ pub struct Converted {
 /// Protect an OS-keychain profile with a passphrase instead (the app must be
 /// unlocked), once the user confirmed it in a native dialog (see
 /// `crate::presence`). Afterwards the keychain no longer opens it. The
-/// outcome is returned even after a lock that landed during the key
-/// derivation, but the UI has then switched to the lock screen and drops it:
-/// the new recovery key is never shown and is lost, which exposes nothing,
-/// and the new passphrase still opens the profile.
+/// replacement recovery key is saved in the native dialog before commit.
+/// The desktop closes payload delivery before re-encryption and remains locked.
 #[tauri::command]
 pub async fn profile_convert_to_passphrase(
     st: State<'_, DesktopState>,
