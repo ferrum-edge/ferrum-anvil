@@ -20,14 +20,16 @@ fn recovery_key_then_new_passphrase_keeps_data() {
     let (h, dek) = ProfileManager::unlock(&s.dir, Unlock::RecoveryKey(&recovery)).unwrap();
     let app = App::open(s.dir.clone(), h, dek).unwrap();
     assert_eq!(app.workspace(&ws.meta.id).unwrap().name, "kept");
-    assert!(app.change_passphrase("short", KdfParams::testing()).is_err());
-    app.change_passphrase("brand new passphrase", KdfParams::testing()).unwrap();
+    let replacement = anvil_storage::vault::RotationRecoveryKey::generate();
+    assert!(app.change_passphrase("short", &replacement, KdfParams::testing()).is_err());
+    app.change_passphrase("brand new passphrase", &replacement, KdfParams::testing()).unwrap();
     drop(app);
 
     assert!(ProfileManager::unlock(&s.dir, Unlock::Passphrase("old passphrase 1")).is_err(), "old passphrase no longer unlocks");
     let (h, dek) = ProfileManager::unlock(&s.dir, Unlock::Passphrase("brand new passphrase")).unwrap();
     let app = App::open(s.dir.clone(), h, dek).unwrap();
     assert_eq!(app.workspace(&ws.meta.id).unwrap().name, "kept");
-    // The recovery key still works after the change.
-    assert!(ProfileManager::unlock(&s.dir, Unlock::RecoveryKey(&recovery)).is_ok());
+    // Rotation revokes the historical recovery credential.
+    assert!(ProfileManager::unlock(&s.dir, Unlock::RecoveryKey(&recovery)).is_err());
+    assert!(ProfileManager::unlock(&s.dir, Unlock::RecoveryKey(replacement.as_str())).is_ok());
 }

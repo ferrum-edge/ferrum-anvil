@@ -1535,8 +1535,7 @@ function ChangePassphrase(props: { recovery: string | null; closeRefused: boolea
         </p>
       )}
       <p className="hint">
-        {keychain ? "Converting to a passphrase keeps the data key and creates a recovery key. " : "Changing the unlock passphrase keeps the data key and recovery key. "}
-        To revoke a copied old raw profile header, close Anvil and use the CLI profile rotate-key action to re-encrypt active data and replace the recovery key. Historical backups remain historical.
+        This rotates the encryption key and re-encrypts active data. Save the new recovery key in the native confirmation before committing. The old unlock credentials stop opening active data. Close older builds first; historical backups remain historical. Anvil locks after the change.
       </p>
       <div className="row nowrap">
         <input className="field grow" type="password" aria-label="New passphrase" placeholder="new passphrase" value={a} onChange={(e) => setA(e.target.value)} autoComplete="new-password" />
@@ -1551,7 +1550,6 @@ function ChangePassphrase(props: { recovery: string | null; closeRefused: boolea
               if (keychain) {
                 const r = await api.convertToPassphrase(a);
                 setProtection("passphrase");
-                props.onRecovery(r.recovery_key);
                 setMsg(
                   r.keychain_entry_removed
                     ? "Passphrase set. The OS keychain no longer opens this profile."
@@ -1560,7 +1558,7 @@ function ChangePassphrase(props: { recovery: string | null; closeRefused: boolea
                 loadLeftovers();
               } else {
                 await api.changePassphrase(a);
-                setMsg("Passphrase changed. The recovery key still works.");
+                setMsg("Encryption key rotated. Reopen with the new passphrase or the replacement recovery key saved in the native dialog.");
               }
               setA("");
               setB("");

@@ -72,7 +72,8 @@ describe("unlock passphrase", () => {
     await fillPassphrase();
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("profile_convert_to_passphrase", { newPassphrase: "new passphrase 1" }));
     expect(invoke).not.toHaveBeenCalledWith("profile_change_passphrase", expect.anything());
-    expect((await screen.findByLabelText("Recovery key")).textContent).toBe("AAAA-BBBB");
+    await screen.findByText("Passphrase set. The OS keychain no longer opens this profile.");
+    expect(screen.queryByLabelText("Recovery key")).toBeNull();
   });
 
   it("offers a retry, never a passphrase change, when the mode cannot be read", async () => {
@@ -99,38 +100,18 @@ describe("unlock passphrase", () => {
     render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Change unlock passphrase…" }));
     await fillPassphrase();
-    await screen.findByText("Passphrase changed. The recovery key still works.");
+    await screen.findByText("Encryption key rotated. Reopen with the new passphrase or the replacement recovery key saved in the native dialog.");
     expect(invoke).toHaveBeenCalledWith("profile_change_passphrase", { newPassphrase: "new passphrase 1" });
     expect(invoke).not.toHaveBeenCalledWith("profile_convert_to_passphrase", expect.anything());
   });
 
-  it("keeps the recovery key on screen until it is confirmed stored", async () => {
-    backend({
-      app_status: () => status("os_keychain"),
-      profile_convert_to_passphrase: () => ({ recovery_key: "AAAA-BBBB", keychain_entry_removed: true }),
-    });
-    const onClose = vi.fn();
-    const onSaved = vi.fn();
-    render(<SettingsDialog onClose={onClose} onSaved={onSaved} />);
+  it("reports native refusal without presenting an unsaved replacement", async () => {
+    backend({ app_status: () => status("os_keychain"), profile_convert_to_passphrase: () => { throw "NOT_CONFIRMED"; } });
+    render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Require an unlock passphrase…" }));
     await fillPassphrase();
-    await screen.findByLabelText("Recovery key");
-
-    // Neither the close button, Escape nor saving the settings closes it.
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    fireEvent.keyDown(window, { key: "Escape" });
-    backend({ app_status: () => status("passphrase"), settings_save: () => null });
-    const saves = screen.getAllByRole("button", { name: "Save" });
-    fireEvent.click(saves[saves.length - 1]);
-    await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert").textContent).toMatch(/Store the recovery key before closing Settings/);
-    expect(screen.getByLabelText("Recovery key").textContent).toBe("AAAA-BBBB");
-
-    fireEvent.click(screen.getByRole("button", { name: "I stored it safely" }));
+    await screen.findByText(/NOT_CONFIRMED|not confirmed|declined/i);
     expect(screen.queryByLabelText("Recovery key")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("lists a keychain entry the credential store kept", async () => {

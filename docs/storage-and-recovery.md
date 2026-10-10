@@ -568,11 +568,13 @@ different owner; Merge keeps those.
 
 ## Deliberate local key rotation
 
-Changing the unlock passphrase in Settings (or after recovery unlock) only
-rewraps the existing data key. The recovery key stays valid. A copied old raw
-`profile.json` plus its correct old password can still recover that unchanged
-key and decrypt later copied ciphertext. This is different from a portable
-Anvil backup, which has its own independent export password.
+Changing the unlock passphrase in Settings, after recovery unlock, or converting
+from the OS keychain rotates the data key and re-encrypts every active encrypted
+payload. Save and check the replacement recovery key displayed by the native
+dialog **before** confirming the rotation. Cancellation leaves storage unchanged.
+Anvil locks afterwards; reopen with the new passphrase or saved recovery key.
+The old password and recovery credential cannot decrypt later ciphertext.
+A portable Anvil backup retains its independent export password.
 
 To revoke an old local unlock credential for active and future ciphertext,
 close every desktop window, CLI worker and older Anvil build first. Keep a
@@ -646,19 +648,43 @@ A same-key checkpoint created after rotation can restore historical data,
 while the checkpoint API preserves the current unlock header and identity
 policy.
 
-**Limits:** rotation does not erase historical raw files, checkpoint copies,
-WAL/free-page remnants or independently encrypted portable backups. An owner
-can still recover historical data with its historical credential. A party
-able to replay authentic historical unlock/policy metadata under the same
-data key can restore historical policy; a coherent historical profile/database
-and any needed OS credentials can also roll back that state. Local encryption proves
-authenticity, not chronology; this feature provides no complete-machine or
-complete-profile antirollback guarantee and requires no online service.
-Legacy profiles that have not rotated still use sidecar identity policy;
-a missing legacy `identity.json` is treated as unlinked. Rotated profiles bind
-identity presence/absence in their authenticated canonical header, so deleting
-the old sidecar cannot disable fresh-login policy. Offline recovery remains
-an intentional bypass and can explicitly remove/relink the account.
+New profiles enroll an explicit authenticated unlinked policy during creation.
+For a legacy profile, missing `identity.json` is ambiguous: it may mean never
+linked or a deleted policy. Ordinary unlock and implicit rotation fail closed.
+Use a trusted historical recovery copy, or deliberately enroll a replacement
+unlinked policy from the lock screen. The backend asks for native consent and
+requires saving a new recovery key before re-encrypting the data. Keychain-only
+profiles become passphrase profiles. CLI enrollment is equally explicit:
+
+```sh
+anvil --profile PROFILE --passphrase-stdin profile enroll-policy \
+  --confirm-replace-unknown-policy --new-passphrase-stdin
+```
+
+Supply the old secret, new passphrase and saved replacement recovery-key
+acknowledgment on consecutive stdin lines. For an OS-keychain profile omit
+`--passphrase-stdin`; for recovery use `--recovery-key-stdin` on `enroll-policy`.
+Enrollment is an owner decision replacing unknown historical policy, not proof
+that the profile was never linked. Missing canonical state on an already enrolled
+profile is refused; it cannot silently reenroll.
+
+Linking, unlinking, and changes to the fresh-login requirement also rotate the
+data key atomically with the new policy. App-service callers supply a new
+passphrase and pre-delivered, acknowledged recovery credential through
+`PolicyRotation`. An authentic older weaker policy has an older key and fails
+against the current ciphertext canary. Stale application handles cannot write.
+
+**Limits:** rotation does not erase historical raw files, checkpoints, WAL/free
+page remnants or independently encrypted portable backups. An owner can recover
+historical data with its matching historical credentials and export/import it.
+A complete authentic historical database contains the wrapped header, policy,
+canary and historical ciphertext; restoring all of those trusted local resources
+can roll the profile back, including deleted secrets and permissive settings.
+A same-epoch complete snapshot also remains restorable. No independent monotonic
+authority exists in this offline design. This is not complete-profile or
+complete-machine antirollback protection. Recovery intentionally bypasses online
+provider login; explicit unlink/repair rotates the key rather than changing policy
+under an unchanged key. No mandatory online service is introduced.
 
 ## Schema versions and migration
 

@@ -172,26 +172,27 @@ No mode implies cloud synchronization, and no mode needs a Ferrum account.
 
 ### Where the binding is stored
 
-`<profile dir>/identity.json`, next to `profile.json`:
+New profiles store the wrapped header and identity policy in the database's
+canonical `local_key_state_v1` record. Its authenticated header binds policy
+presence/absence, while the full identity (including e-mail) is sealed under the
+data key. A plaintext hint supports the pre-unlock provider check. Editing or
+deleting canonical policy fails ordinary unlock; deleting a historical sidecar
+has no effect.
 
-- a plaintext **hint** (provider, subject, policy, link time; no e-mail) so the
-  lock screen can say "Sign in with … required" before unlocking;
-- a **sealed** copy of the full binding (including e-mail), encrypted with
-  XChaCha20-Poly1305 under the profile's data key, with the profile id as
-  associated data.
+Legacy profiles used `<profile dir>/identity.json`. A present legacy binding is
+verified against its sealed copy. A missing legacy binding is ambiguous and
+blocks ordinary unlock until the owner explicitly chooses policy enrollment or
+uses recovery. Enrollment replaces unknown policy, rotates all encrypted data,
+and requires a saved replacement recovery credential. It does not infer that the
+profile was never linked. See [local key rotation](storage-and-recovery.md#deliberate-local-key-rotation).
 
-The pre-unlock check uses the hint. After the key is unwrapped, the sealed copy
-is authoritative: if the hint was edited (for example to switch the policy off
-or to change the subject) or the file is unreadable, passphrase/keychain unlock
-fails with `BindingTampered`. The recovery key still unlocks and can remove the
-binding so it can be linked again. For a legacy profile, `profile.json` (the key wraps) is never touched by linking.
-After [deliberate key rotation](storage-and-recovery.md#deliberate-local-key-rotation),
-the wrapped header and binding live together in the database. Linking/unlinking
-atomically updates the binding and the header's authenticated presence/absence;
-the historical sidecar is ignored. Deleting that sidecar cannot disable a
-rotated profile's fresh-login policy. Missing legacy sidecars still mean unlinked.
-A complete authentic historical database/profile can still be replayed; this
-local policy is not a trusted freshness authority.
+Every link, unlink, or fresh-login-policy change establishes a new encryption
+key epoch and new recovery credential, atomically with the new policy. Callers
+must obtain acknowledgment of that recovery credential before committing and
+supply the new passphrase using `PolicyRotation`. OS-keychain profiles convert to
+passphrase protection. Authentic older metadata cannot unlock later ciphertext
+with its old key. A complete authentic historical database/profile remains
+restorable; this local policy is not an independent freshness authority.
 
 Linking asks for the local unlock secret again. Under the fresh-login policy,
 switching the policy for the same account needs a fresh proof of that account.

@@ -45,6 +45,8 @@ const PROTECTION_MAC_LABEL: &[u8] = b"anvil-profile-protection-v1";
 /// a header without a MAC; a tagged one never does.
 #[cfg(feature = "os-keychain")]
 const KEYCHAIN_SECRET_TAG: &[u8] = b"anvil-dek-v2:";
+#[cfg(feature = "os-keychain")]
+const ENROLLED_KEYCHAIN_TAG: &[u8] = b"anvil-dek-enrolled-v1:";
 /// Prefix of the marker that replaces a converted profile's entry when the
 /// credential store refuses to delete it: followed by the profile's key
 /// check, it holds no key and opens nothing.
@@ -161,6 +163,9 @@ pub(crate) fn rotated_header(
     recovery: &RotationRecoveryKey,
     kdf: KdfParams,
 ) -> Result<ProfileHeader, VaultError> {
+    if h.recovery_wrap.is_some() && unlock_with_recovery(h, recovery.as_str()).is_ok() {
+        return Err(VaultError::Header("rotation requires a new recovery credential".into()));
+    }
     let mut next = h.clone();
     next.protection = ProtectionMode::Passphrase;
     next.key_check = key_check(key);
@@ -512,6 +517,44 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
     Ok(CreatedProfile { header, dek, recovery_key: Some(Zeroizing::new(recovery)) })
 }
 
+/// Product creation enrolls explicit authenticated unlinked policy before it
+/// reports success. The legacy factory remains for reading historical formats.
+pub fn create_enrolled_passphrase_profile(
+    dir: &Path,
+    display_name: &str,
+    passphrase: &str,
+    kdf: KdfParams,
+) -> Result<CreatedProfile, VaultError> {
+    let mut created = create_passphrase_profile(dir, display_name, passphrase, kdf)?;
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None });
+    created.header.passphrase_wrap = Some(wrap_with_passphrase(&created.dek, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
+    let recovery = created.recovery_key.as_ref().expect("passphrase creation provides recovery");
+    created.header.recovery_wrap = Some(wrap_with_passphrase(&created.dek, &normalize_recovery(recovery), kdf, ROTATED_RECOVERY_LABEL)?);
+    initialize_policy(dir, &mut created.header, &created.dek)?;
+    Ok(created)
+}
+
+fn initialize_policy(dir: &Path, header: &mut ProfileHeader, key: &Key) -> Result<(), VaultError> {
+    // Only creation calls this with a fresh random profile directory. No
+    // historical policy may be inferred by this initialization path.
+    let store = crate::Store::open(dir, Key::from_bytes(key.as_bytes())?).map_err(|e| VaultError::Header(e.to_string()))?;
+    drop(store);
+    let _guard = crate::profile_lock::exclusive(dir)?;
+    let mut conn = rusqlite::Connection::open(dir.join(crate::store::DB_FILE)).map_err(|e| VaultError::Header(e.to_string()))?;
+    conn.execute_batch("PRAGMA synchronous=FULL;").map_err(|e| VaultError::Header(e.to_string()))?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| VaultError::Header(e.to_string()))?;
+    if crate::rotation::read_on(&tx)?.is_some() {
+        return Err(VaultError::HeaderTampered);
+    }
+    bind_rotation(header, key, &None);
+    crate::rotation::write_on(&tx, &crate::rotation::State { header: header.clone(), binding: None })?;
+    let env = crypto::seal(key, b"anvil/v2/rotated-canary", b"ok");
+    tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(env))])
+        .map_err(|e| VaultError::Header(e.to_string()))?;
+    tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
+    Ok(())
+}
+
 pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key, VaultError> {
     require_protection(h, ProtectionMode::Passphrase)?;
     let w = h.passphrase_wrap.as_ref().ok_or(VaultError::WrongSecret)?;
@@ -833,6 +876,9 @@ fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
 /// The key in a keychain secret, and whether the secret is tagged.
 #[cfg(feature = "os-keychain")]
 fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
+    if let Some(raw) = secret.strip_prefix(ENROLLED_KEYCHAIN_TAG) {
+        return Ok((Key::from_bytes(raw)?, true));
+    }
     match secret.strip_prefix(KEYCHAIN_SECRET_TAG) {
         Some(key) => Ok((Key::from_bytes(key)?, true)),
         None => Ok((Key::from_bytes(secret)?, false)),
@@ -920,6 +966,24 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
     Ok(CreatedProfile { header, dek, recovery_key: None })
 }
 
+#[cfg(feature = "os-keychain")]
+pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
+    let mut created = create_keychain_profile(dir, display_name)?;
+    let entry = keychain_entry(created.header.keychain_account.as_deref().expect("keychain account"))?;
+    let secret = Zeroizing::new([ENROLLED_KEYCHAIN_TAG, created.dek.as_bytes().as_slice()].concat());
+    // Tag first: an interrupted enrollment fails closed and contains no user
+    // data. The creator has not published the profile yet.
+    entry.set_secret(&secret).map_err(|e| keychain_error(&e))?;
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None });
+    initialize_policy(dir, &mut created.header, &created.dek)?;
+    Ok(created)
+}
+
+#[cfg(not(feature = "os-keychain"))]
+pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
+    create_keychain_profile(dir, display_name)
+}
+
 /// Unlock a keychain profile. An entry written by an earlier build is
 /// tagged here once its header has a protection MAC (best effort; retried
 /// at each unlock).
@@ -938,6 +1002,9 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
         return Err(VaultError::WrongProtection("the OS keychain"));
     }
     let (k, tagged) = parse_keychain_secret(&secret)?;
+    if secret.starts_with(ENROLLED_KEYCHAIN_TAG) && h.rotation.is_none() {
+        return Err(VaultError::HeaderTampered);
+    }
     require_profile_key(h, &k)?;
     // A tagged entry was written with a MAC'd header: one without a MAC was
     // edited, e.g. to reopen a converted profile from its leftover entry.

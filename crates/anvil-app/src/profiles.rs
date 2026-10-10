@@ -50,6 +50,15 @@ pub enum Unlock<'a> {
     Keychain,
 }
 
+/// Policy mutations create a new encryption epoch. Deliver and acknowledge the
+/// replacement recovery credential before invoking them; they also convert an
+/// OS-keychain-only profile to explicit passphrase protection.
+pub struct PolicyRotation<'a> {
+    pub new_passphrase: &'a str,
+    pub recovery: &'a vault::RotationRecoveryKey,
+    pub kdf: KdfParams,
+}
+
 impl ProfileManager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         ProfileManager { root: root.into() }
@@ -97,7 +106,7 @@ impl ProfileManager {
             return Err(AppError::Invalid("the unlock passphrase must have at least 8 characters".into()));
         }
         let dir = self.profiles_dir().join(uuid::Uuid::now_v7().to_string());
-        let c = vault::create_passphrase_profile(&dir, display_name, passphrase, kdf)?;
+        let c = vault::create_enrolled_passphrase_profile(&dir, display_name, passphrase, kdf)?;
         let s = ProfileSummary {
             profile_id: c.header.profile_id.clone(),
             display_name: c.header.display_name.clone(),
@@ -111,7 +120,7 @@ impl ProfileManager {
 
     pub fn create_keychain(&self, display_name: &str) -> Result<(ProfileSummary, Key)> {
         let dir = self.profiles_dir().join(uuid::Uuid::now_v7().to_string());
-        let c = vault::create_keychain_profile(&dir, display_name)?;
+        let c = vault::create_enrolled_keychain_profile(&dir, display_name)?;
         let s = ProfileSummary {
             profile_id: c.header.profile_id.clone(),
             display_name: c.header.display_name.clone(),
@@ -157,6 +166,16 @@ impl ProfileManager {
         proof: Option<&VerifiedIdentity>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(ProfileHeader, Key)> {
+        Self::unlock_checked_policy(dir, how, proof, now, false)
+    }
+
+    fn unlock_checked_policy(
+        dir: &Path,
+        how: Unlock<'_>,
+        proof: Option<&VerifiedIdentity>,
+        now: chrono::DateTime<chrono::Utc>,
+        enroll_missing: bool,
+    ) -> Result<(ProfileHeader, Key)> {
         let mut h = vault::read_header(dir)?;
         let recovery = matches!(how, Unlock::RecoveryKey(_));
         let binding = match identity::read_binding(dir) {
@@ -165,6 +184,9 @@ impl ProfileManager {
             Err(e) if !recovery => return Err(e),
             Err(_) => None,
         };
+        if !recovery && !enroll_missing && h.rotation.is_none() && binding.is_none() {
+            return Err(IdentityPolicyError::PolicyEnrollmentRequired.into());
+        }
         // Gate before the key is unwrapped, from the plaintext hint.
         if !recovery {
             match (&binding, proof) {
@@ -192,6 +214,7 @@ impl ProfileManager {
             let canonical = anvil_storage::rotation::binding(dir)?.ok_or(vault::VaultError::HeaderTampered)?;
             vault::verify_rotation_binding(&h, &k, &canonical)?;
         }
+        anvil_storage::Store::verify_profile_key(dir, &k)?;
         // A header written by an earlier build gets its protection MAC (and
         // a keychain profile's entry its tag) now that the key is proven.
         vault::upgrade_header(dir, &mut h, &k).ok();
@@ -225,8 +248,14 @@ impl ProfileManager {
     /// the local unlock secret again (`how`); when the current binding
     /// demands a fresh sign-in, the proof must be for that same account —
     /// replacing it needs the recovery key (or unlinking first).
-    pub fn link_identity(dir: &Path, how: Unlock<'_>, proof: VerifiedIdentity, require_fresh_login: bool) -> Result<LinkedIdentity> {
-        Self::link_identity_at(dir, how, proof, require_fresh_login, chrono::Utc::now())
+    pub fn link_identity(
+        dir: &Path,
+        how: Unlock<'_>,
+        proof: VerifiedIdentity,
+        require_fresh_login: bool,
+        rotation: PolicyRotation<'_>,
+    ) -> Result<LinkedIdentity> {
+        Self::link_identity_at(dir, how, proof, require_fresh_login, chrono::Utc::now(), rotation)
     }
 
     pub fn link_identity_at(
@@ -235,6 +264,7 @@ impl ProfileManager {
         proof: VerifiedIdentity,
         require_fresh_login: bool,
         now: chrono::DateTime<chrono::Utc>,
+        rotation: PolicyRotation<'_>,
     ) -> Result<LinkedIdentity> {
         identity::check_fresh(&proof, now)?;
         let recovery = matches!(how, Unlock::RecoveryKey(_));
@@ -247,25 +277,71 @@ impl ProfileManager {
             }
             _ => Self::unlock_checked(dir, how, None, now)?,
         };
-        identity::link(dir, &h, &k, &proof, require_fresh_login, now)
+        check_new_passphrase(rotation.new_passphrase)?;
+        let linked = LinkedIdentity {
+            provider: proof.provider().to_string(),
+            subject: proof.subject().to_string(),
+            email: proof.email().map(str::to_string),
+            require_fresh_login,
+            linked_at: now,
+        };
+        let store = anvil_storage::Store::open(dir, k)?;
+        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, new, _| {
+            if current.protection_mac != h.protection_mac {
+                return Err(vault::VaultError::HeaderTampered);
+            }
+            identity::sealed_binding(current, new, &linked).map(Some).map_err(|e| vault::VaultError::Header(e.to_string()))
+        })?;
+        Ok(linked)
     }
 
     /// Remove the linked identity. Under a fresh-login policy this needs a
     /// fresh proof for the linked account, or the recovery key.
-    pub fn unlink_identity(dir: &Path, how: Unlock<'_>, proof: Option<VerifiedIdentity>) -> Result<()> {
+    pub fn unlink_identity(dir: &Path, how: Unlock<'_>, proof: Option<VerifiedIdentity>, rotation: PolicyRotation<'_>) -> Result<()> {
         let recovery = matches!(how, Unlock::RecoveryKey(_));
         let current = identity::read_binding(dir).or_else(|e| if recovery { Ok(None) } else { Err(e) })?;
         if current.is_none() && !recovery {
             return Err(IdentityPolicyError::NotLinked.into());
         }
         let (h, key) = Self::unlock_checked(dir, how, proof.as_ref(), chrono::Utc::now())?;
-        identity::remove_binding(dir, &h, &key)
+        Self::rotate_policy(dir, h, key, rotation)
+    }
+
+    /// Explicit owner decision for an unknown historical policy. A local secret
+    /// proves key possession, not the lost policy's history. Callers must obtain
+    /// native/CLI consent to replace that unknown policy before invoking this.
+    pub fn enroll_unlinked_policy(dir: &Path, how: Unlock<'_>, rotation: PolicyRotation<'_>) -> Result<()> {
+        let h = vault::read_header(dir)?;
+        if h.rotation.is_some() || identity::read_binding(dir)?.is_some() {
+            return Err(AppError::Invalid("this profile already has a policy; authorize an unlink instead".into()));
+        }
+        let (h, key) = Self::unlock_checked_policy(dir, how, None, chrono::Utc::now(), true)?;
+        if h.rotation.is_some() || identity::read_binding(dir)?.is_some() {
+            return Err(AppError::Invalid("policy enrollment changed; authorize the current policy explicitly".into()));
+        }
+        Self::rotate_policy(dir, h, key, rotation)
+    }
+
+    fn rotate_policy(dir: &Path, h: ProfileHeader, key: Key, rotation: PolicyRotation<'_>) -> Result<()> {
+        check_new_passphrase(rotation.new_passphrase)?;
+        let store = anvil_storage::Store::open(dir, key)?;
+        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, _, _| {
+            if current.protection_mac != h.protection_mac {
+                return Err(vault::VaultError::HeaderTampered);
+            }
+            Ok(None)
+        })?;
+        Ok(())
     }
 
     /// The full linked identity (with e-mail), verified against its sealed
     /// copy. Needs the unlocked data key.
     pub fn linked_identity(dir: &Path, key: &Key) -> Result<Option<LinkedIdentity>> {
         let h = vault::read_header(dir)?;
+        if h.rotation.is_some() {
+            let binding = anvil_storage::rotation::binding(dir)?.ok_or(vault::VaultError::HeaderTampered)?;
+            vault::verify_rotation_binding(&h, key, &binding)?;
+        }
         match identity::read_binding(dir)? {
             Some(b) => Ok(Some(identity::verify_binding(&b, &h, key)?)),
             None => Ok(None),
@@ -300,41 +376,38 @@ impl crate::App {
         Ok(result)
     }
 
-    /// Set a new unlock passphrase on a passphrase profile (e.g. after
-    /// unlocking with the recovery key). Re-wraps the existing data key;
-    /// nothing is re-encrypted and the recovery key stays valid. An
-    /// OS-keychain profile is refused: see [`crate::App::convert_to_passphrase`].
-    ///
-    /// The read here only picks the message for the wrong mode: the header
-    /// rewritten is read and checked again under the header lock
-    /// ([`vault::change_passphrase`]).
-    pub fn change_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<()> {
+    /// Replace the passphrase and recovery credential by rotating every
+    /// active ciphertext. Save and acknowledge `recovery` before calling.
+    /// Success locks this App; reopening refreshes its key identity.
+    pub fn change_passphrase(
+        &self,
+        new_passphrase: &str,
+        recovery: &vault::RotationRecoveryKey,
+        kdf: KdfParams,
+    ) -> Result<KeychainConversion> {
         check_new_passphrase(new_passphrase)?;
-        let mut h = vault::read_header(&self.dir)?;
+        let h = vault::read_header(&self.dir)?;
         if h.protection != ProtectionMode::Passphrase {
             return Err(AppError::Invalid("this profile uses the OS keychain; convert it to passphrase protection instead".into()));
         }
-        self.store.with_key(|k| vault::change_passphrase(&self.dir, &mut h, k, new_passphrase, kdf))??;
-        Ok(())
+        self.rotate_data_key(new_passphrase, recovery, kdf)
     }
 
-    /// Convert an OS-keychain profile to passphrase protection. Returns the
-    /// new recovery key (shown once). Afterwards the profile unlocks only
-    /// with the passphrase or recovery key, and its keychain entry is
-    /// removed; if the credential store refuses, removal is retried at each
-    /// unlock until the entry is removed (see
-    /// [`ProfileSummary::leftover_keychain_entry`]). A passphrase profile is
-    /// refused, as is a conversion whose keychain entry the credential store
-    /// refuses to tag first (nothing is changed then). As in
-    /// [`crate::App::change_passphrase`], the header rewritten is read and
-    /// checked under the header lock.
-    pub fn convert_to_passphrase(&self, new_passphrase: &str, kdf: KdfParams) -> Result<KeychainConversion> {
+    /// Convert an OS-keychain profile by rotating every active ciphertext.
+    /// Save and acknowledge `recovery` first. Success locks this App. Credential
+    /// cleanup failure does not roll back the durable rotation; it is reported
+    /// and retried on unlock, and the old OS key cannot decrypt current data.
+    pub fn convert_to_passphrase(
+        &self,
+        new_passphrase: &str,
+        recovery: &vault::RotationRecoveryKey,
+        kdf: KdfParams,
+    ) -> Result<KeychainConversion> {
         check_new_passphrase(new_passphrase)?;
-        let mut h = vault::read_header(&self.dir)?;
+        let h = vault::read_header(&self.dir)?;
         if h.protection != ProtectionMode::OsKeychain {
             return Err(AppError::Invalid("this profile already uses a passphrase; change it instead".into()));
         }
-        let conversion = self.store.with_key(|k| vault::convert_keychain_to_passphrase(&self.dir, &mut h, k, new_passphrase, kdf))??;
-        Ok(conversion)
+        self.rotate_data_key(new_passphrase, recovery, kdf)
     }
 }

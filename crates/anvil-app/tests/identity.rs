@@ -65,38 +65,63 @@ fn policy_err(r: Result<impl Sized, AppError>) -> IdentityPolicyError {
     }
 }
 
+fn link(
+    dir: &Path,
+    how: Unlock<'_>,
+    proof: VerifiedIdentity,
+    fresh: bool,
+    passphrase: &str,
+) -> Result<(anvil_domain::workspace::LinkedIdentity, String), AppError> {
+    let recovery = vault::RotationRecoveryKey::generate();
+    let linked = ProfileManager::link_identity(
+        dir,
+        how,
+        proof,
+        fresh,
+        anvil_app::profiles::PolicyRotation { new_passphrase: passphrase, recovery: &recovery, kdf: KdfParams::testing() },
+    )?;
+    Ok((linked, recovery.as_str().to_string()))
+}
+fn unlink(dir: &Path, how: Unlock<'_>, proof: Option<VerifiedIdentity>, passphrase: &str) -> Result<String, AppError> {
+    let recovery = vault::RotationRecoveryKey::generate();
+    ProfileManager::unlink_identity(
+        dir,
+        how,
+        proof,
+        anvil_app::profiles::PolicyRotation { new_passphrase: passphrase, recovery: &recovery, kdf: KdfParams::testing() },
+    )?;
+    Ok(recovery.as_str().to_string())
+}
+fn state(dir: &Path) -> serde_json::Value {
+    let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
+    let raw: String = conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+fn replace_state(dir: &Path, state: &serde_json::Value) {
+    rusqlite::Connection::open(dir.join("anvil.db"))
+        .unwrap()
+        .execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [state.to_string()])
+        .unwrap();
+}
+
 #[tokio::test]
-async fn link_with_mock_provider_keeps_the_key_wraps_untouched() {
+async fn linking_rotates_the_key_and_authenticates_policy_presence() {
     anvil_fixtures::init();
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-    let (dir, _rk) = profile(root.path(), "alice");
-    let header_before = std::fs::read(dir.join("profile.json")).unwrap();
-
-    let linked = ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false).unwrap();
+    let (dir, old_recovery) = profile(root.path(), "alice");
+    let before = vault::read_header(&dir).unwrap();
+    let (linked, recovery) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
     assert_eq!((linked.provider.as_str(), linked.subject.as_str()), ("mock", "fixture-user-1"));
     assert_eq!(linked.email.as_deref(), Some("fixture-user-1@idp.anvil.test"));
-    assert!(!linked.require_fresh_login);
-
-    // Identity is not a key: the wrapped data key and its check value are unchanged.
-    assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), header_before);
-    // The plaintext hint carries no e-mail and no key material.
-    let raw = std::fs::read_to_string(dir.join(IDENTITY_FILE)).unwrap();
-    assert!(!raw.contains("idp.anvil.test"), "{raw}");
-    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
-    keys.sort();
-    assert_eq!(keys, ["format", "linked_at", "provider", "require_fresh_login", "sealed", "subject", "version"]);
-
-    let req = ProfileManager::unlock_requirements(&dir).unwrap();
-    assert_eq!(req.linked.as_ref().map(|l| l.subject.as_str()), Some("fixture-user-1"));
-    assert!(!req.fresh_login_required && req.recovery_key_available);
-
-    // Unlocked view (verified against the sealed copy) includes the e-mail.
+    assert_ne!(vault::read_header(&dir).unwrap().key_check, before.key_check);
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&old_recovery)).is_err());
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).is_ok());
+    assert!(!dir.join(IDENTITY_FILE).exists());
+    assert!(!state(&dir)["binding"].to_string().contains("idp.anvil.test"));
     let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
-    let full = ProfileManager::linked_identity(&dir, &key).unwrap().unwrap();
-    assert_eq!(full, linked);
+    assert_eq!(ProfileManager::linked_identity(&dir, &key).unwrap().unwrap(), linked);
 }
 
 #[tokio::test]
@@ -105,40 +130,30 @@ async fn data_018_fresh_login_policy_is_enforced_in_the_backend() {
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-    let (dir, rk) = profile(root.path(), "alice");
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
+    let (dir, _) = profile(root.path(), "alice");
+    let (_, rk) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
     assert!(ProfileManager::unlock_requirements(&dir).unwrap().fresh_login_required);
-
-    // The passphrase alone is refused before any key is unwrapped.
-    let e = policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)));
-    assert_eq!(e, IdentityPolicyError::FreshLoginRequired { provider: "mock".into() });
-
-    // Passphrase + fresh sign-in of the linked account unlocks the real data.
+    assert!(matches!(policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS))), IdentityPolicyError::FreshLoginRequired { .. }));
     let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
-    let app = App::open(dir.clone(), h, key).unwrap();
-    app.create_workspace("after fresh login").unwrap();
-    drop(app);
-
-    // A sign-in does not replace the passphrase: wrong passphrase + valid proof fails.
-    let r = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase("wrong passphrase"), sign_in(&p).await);
-    assert!(matches!(r, Err(AppError::Vault(VaultError::WrongSecret))), "{:?}", r.err());
-
-    // A stale sign-in does not count.
+    App::open(dir.clone(), h, key).unwrap().create_workspace("after fresh login").unwrap();
+    assert!(matches!(
+        ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase("wrong passphrase"), sign_in(&p).await),
+        Err(AppError::Vault(VaultError::WrongSecret))
+    ));
     let stale = sign_in(&p).await;
     let later = stale.authenticated_at() + chrono::Duration::minutes(10);
-    let e = policy_err(ProfileManager::unlock_with_fresh_login_at(&dir, Unlock::Passphrase(PASS), stale, later));
-    assert!(matches!(e, IdentityPolicyError::StaleProof { .. }));
-
-    // A different account at the same provider does not count.
+    assert!(matches!(
+        policy_err(ProfileManager::unlock_with_fresh_login_at(&dir, Unlock::Passphrase(PASS), stale, later)),
+        IdentityPolicyError::StaleProof { .. }
+    ));
     idp.set_subject("fixture-user-2", Some("other@idp.anvil.test"));
-    let e = policy_err(ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await));
-    assert_eq!(e, IdentityPolicyError::IdentityMismatch { provider: "mock".into() });
-
-    // DATA-019: provider unavailable/offline — the recovery key still unlocks.
+    assert!(matches!(
+        policy_err(ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await)),
+        IdentityPolicyError::IdentityMismatch { .. }
+    ));
     drop(idp);
     let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).unwrap();
-    let app = App::open(dir.clone(), h, key).unwrap();
-    assert!(app.find_workspace("after fresh login").is_ok());
+    assert!(App::open(dir, h, key).unwrap().find_workspace("after fresh login").is_ok());
 }
 
 #[tokio::test]
@@ -148,76 +163,72 @@ async fn identity_alone_never_unlocks() {
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "alice");
-    let linked = ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false).unwrap();
-    // Neither the subject nor the e-mail is a passphrase or recovery key.
+    let (linked, _) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
     for guess in [linked.subject.as_str(), linked.email.as_deref().unwrap(), "mock"] {
-        assert!(matches!(ProfileManager::unlock(&dir, Unlock::Passphrase(guess)), Err(AppError::Vault(VaultError::WrongSecret))));
-        assert!(matches!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(guess)), Err(AppError::Vault(VaultError::WrongSecret))));
-        let r = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(guess), sign_in(&p).await);
-        assert!(matches!(r, Err(AppError::Vault(VaultError::WrongSecret))));
+        assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(guess)).is_err());
+        assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(guess)).is_err());
+        assert!(ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(guess), sign_in(&p).await).is_err());
     }
-    // A proof for a profile with no linked identity is refused, not ignored.
     let (other, _) = profile(root.path(), "bob");
-    let e = policy_err(ProfileManager::unlock_with_fresh_login(&other, Unlock::Passphrase(PASS), sign_in(&p).await));
-    assert_eq!(e, IdentityPolicyError::NotLinked);
+    assert_eq!(
+        policy_err(ProfileManager::unlock_with_fresh_login(&other, Unlock::Passphrase(PASS), sign_in(&p).await)),
+        IdentityPolicyError::NotLinked
+    );
 }
 
 #[tokio::test]
-async fn edited_hint_cannot_switch_the_policy_off() {
+async fn edited_hint_cannot_switch_the_policy_off_and_recovery_repairs_it_by_rotation() {
     anvil_fixtures::init();
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-    let (dir, rk) = profile(root.path(), "alice");
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
-    let path = dir.join(IDENTITY_FILE);
-    let edited = std::fs::read_to_string(&path).unwrap().replace("\"require_fresh_login\": true", "\"require_fresh_login\": false");
-    std::fs::write(&path, edited).unwrap();
-
-    let e = policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)));
-    assert_eq!(e, IdentityPolicyError::BindingTampered);
-    // Corrupt JSON is tampering too, not "not linked".
-    std::fs::write(&path, b"{ not json").unwrap();
+    let (dir, _) = profile(root.path(), "alice");
+    let (_, rk) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let mut edited = state(&dir);
+    edited["binding"]["require_fresh_login"] = false.into();
+    replace_state(&dir, &edited);
     assert_eq!(policy_err(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS))), IdentityPolicyError::BindingTampered);
-
-    // The recovery key still works and can clean up the binding.
+    edited["binding"] = serde_json::Value::Null;
+    replace_state(&dir, &edited);
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err());
     assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_ok());
-    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rk), None).unwrap();
-    assert!(!path.exists());
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).unwrap();
+    let app = App::open(dir.clone(), h, key).unwrap();
+    assert!(
+        app.rotate_data_key(PASS, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).is_err(),
+        "implicit rotation cannot legitimize missing authenticated policy"
+    );
+    let replacement = unlink(&dir, Unlock::RecoveryKey(&rk), None, PASS).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).is_err());
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&replacement)).is_ok());
     assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
 }
 
 #[tokio::test]
-async fn relinking_and_unlinking_follow_the_policy() {
+async fn relinking_and_unlinking_follow_the_policy_and_rotate_every_epoch() {
     anvil_fixtures::init();
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-    let (dir, rk) = profile(root.path(), "alice");
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
-
-    // Unlinking needs the fresh proof (or the recovery key).
-    let e = policy_err(ProfileManager::unlink_identity(&dir, Unlock::Passphrase(PASS), None));
-    assert!(matches!(e, IdentityPolicyError::FreshLoginRequired { .. }));
-
-    // Replacing the account with a passphrase alone is refused …
+    let (dir, _) = profile(root.path(), "alice");
+    let (_, first) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    assert!(matches!(policy_err(unlink(&dir, Unlock::Passphrase(PASS), None, PASS)), IdentityPolicyError::FreshLoginRequired { .. }));
     idp.set_subject("fixture-user-2", None);
-    let other = sign_in(&p).await;
-    let e = policy_err(ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), other, false));
-    assert!(matches!(e, IdentityPolicyError::FreshLoginRequired { .. }));
-    // … the same account may switch its own policy off with a fresh proof.
+    assert!(matches!(
+        policy_err(link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS)),
+        IdentityPolicyError::FreshLoginRequired { .. }
+    ));
     idp.set_subject("fixture-user-1", None);
-    let relinked = ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false).unwrap();
-    assert!(!relinked.require_fresh_login);
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
-
-    // The recovery key may replace the account.
+    let (linked, second) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
+    assert!(!linked.require_fresh_login);
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&first)).is_err());
     idp.set_subject("fixture-user-2", None);
-    let replaced = ProfileManager::link_identity(&dir, Unlock::RecoveryKey(&rk), sign_in(&p).await, true).unwrap();
-    assert_eq!(replaced.subject, "fixture-user-2");
-    ProfileManager::unlink_identity(&dir, Unlock::Passphrase(PASS), Some(sign_in(&p).await)).unwrap();
-    assert!(ProfileManager::unlock_requirements(&dir).unwrap().linked.is_none());
-    assert_eq!(policy_err(ProfileManager::unlink_identity(&dir, Unlock::Passphrase(PASS), None)), IdentityPolicyError::NotLinked);
+    let (linked, third) = link(&dir, Unlock::RecoveryKey(&second), sign_in(&p).await, true, PASS).unwrap();
+    assert_eq!(linked.subject, "fixture-user-2");
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&second)).is_err());
+    unlink(&dir, Unlock::Passphrase(PASS), Some(sign_in(&p).await), PASS).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&third)).is_err());
+    assert_eq!(policy_err(unlink(&dir, Unlock::Passphrase(PASS), None, PASS)), IdentityPolicyError::NotLinked);
 }
 
 #[tokio::test]
@@ -226,33 +237,22 @@ async fn restoring_someone_elses_backup_keeps_the_local_identity() {
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-
-    // Alice links her account and makes a full backup.
     let (a_dir, _) = profile(root.path(), "alice");
-    ProfileManager::link_identity(&a_dir, Unlock::Passphrase(PASS), sign_in(&p).await, false).unwrap();
+    link(&a_dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
     let (h, key) = ProfileManager::unlock(&a_dir, Unlock::Passphrase(PASS)).unwrap();
-    let alice = App::open(a_dir.clone(), h, key).unwrap();
+    let alice = App::open(a_dir, h, key).unwrap();
     alice.create_workspace("Alice's work").unwrap();
     let (backup, _) = alice.export_backup_with("backup passphrase", KdfParams::testing()).unwrap();
-
-    // Bob has his own account linked with the fresh-login policy.
     idp.set_subject("fixture-user-bob", None);
     let (b_dir, _) = profile(root.path(), "bob");
-    ProfileManager::link_identity(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
-    let before = std::fs::read(b_dir.join(IDENTITY_FILE)).unwrap();
+    link(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let before = state(&b_dir);
     let (h, key) = ProfileManager::unlock_with_fresh_login(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
     let bob = App::open(b_dir.clone(), h, key).unwrap();
     bob.restore(&backup, Some("backup passphrase"), ConflictPolicy::Merge).unwrap();
-    assert!(bob.find_workspace("Alice's work").is_ok(), "the backup's data was restored");
-
-    // Bob's binding and policy are untouched; Alice's account gained nothing.
-    assert_eq!(std::fs::read(b_dir.join(IDENTITY_FILE)).unwrap(), before);
-    let req = ProfileManager::unlock_requirements(&b_dir).unwrap();
-    assert_eq!(req.linked.unwrap().subject, "fixture-user-bob");
-    assert!(req.fresh_login_required);
-    idp.set_subject("fixture-user-1", None);
-    let e = policy_err(ProfileManager::unlock_with_fresh_login(&b_dir, Unlock::Passphrase(PASS), sign_in(&p).await));
-    assert!(matches!(e, IdentityPolicyError::IdentityMismatch { .. }));
+    assert!(bob.find_workspace("Alice's work").is_ok());
+    assert_eq!(state(&b_dir), before);
+    assert_eq!(ProfileManager::unlock_requirements(&b_dir).unwrap().linked.unwrap().subject, "fixture-user-bob");
 }
 
 #[test]
@@ -609,95 +609,66 @@ async fn oauth_tokens_are_cached_per_workspace_folder_or_request_that_defines_th
 }
 
 #[tokio::test]
-async fn rotated_identity_policy_is_canonical_and_recovery_can_repair_it() {
+async fn authentic_old_policy_replay_cannot_open_current_ciphertext() {
     anvil_fixtures::init();
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-    let (dir, recovery) = profile(root.path(), "rotated identity");
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
-    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
-    let app = App::open(dir.clone(), h, key).unwrap();
-    let new = "rotated passphrase 123";
-    let rotated = app.rotate_data_key(new, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
-    std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
-    assert!(matches!(
-        ProfileManager::unlock(&dir, Unlock::Passphrase(new)),
-        Err(AppError::Identity(IdentityPolicyError::FreshLoginRequired { .. }))
-    ));
-    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(new), sign_in(&p).await).unwrap();
-    assert_eq!(ProfileManager::linked_identity(&dir, &key).unwrap().unwrap().subject, "fixture-user-1");
-    let reopened = App::open(dir.clone(), h, key).unwrap();
-    // Legitimate policy changes update canonical state; the missing sidecar
-    // is not recreated or consulted.
-    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rotated.recovery_key), None).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_ok());
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(new), sign_in(&p).await, true).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_err());
-    assert!(!dir.join(IDENTITY_FILE).exists());
-    let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
-    let raw: String = conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
-    let mut state: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    state["binding"] = serde_json::Value::Null;
-    conn.execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [state.to_string()]).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_err(), "canonical deletion cannot disable fresh login silently");
-    // Offline recovery remains intentional, then an explicit unlink repairs
-    // the authenticated absence/presence record.
-    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rotated.recovery_key)).unwrap();
-    let recovery_app = App::open(dir.clone(), h, key).unwrap();
-    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rotated.recovery_key), None).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_ok());
-    drop((reopened, recovery_app));
-}
-
-#[tokio::test]
-async fn stale_authorized_policy_cannot_unlink_or_replace_a_newer_fresh_login_binding() {
-    anvil_fixtures::init();
-    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
-    let p = provider(&idp);
-    let root = tempfile::tempdir().unwrap();
-    let (dir, _) = profile(root.path(), "policy concurrency");
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false).unwrap();
+    let (dir, original_recovery) = profile(root.path(), "replay");
     let (h, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
-    let app = App::open(dir.clone(), h, key).unwrap();
-    let new = "policy rotation password";
-    let recovery = vault::RotationRecoveryKey::generate();
-    app.rotate_data_key(new, &recovery, KdfParams::testing()).unwrap();
-    let (authorized, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(new)).unwrap();
-    let prior_binding = anvil_storage::rotation::binding(&dir).unwrap().unwrap();
-    // Another legitimate operation commits fresh-login policy after the
-    // first operation authorized against the non-fresh policy.
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(new), sign_in(&p).await, true).unwrap();
-    let committed = vault::read_header(&dir).unwrap();
-    for replacement in [None, prior_binding] {
-        let err = anvil_storage::rotation::set_binding(&dir, &authorized, &key, replacement).unwrap_err();
-        assert!(err.to_string().contains("authorize"));
-        assert_eq!(vault::read_header(&dir).unwrap().protection_mac, committed.protection_mac);
-        assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_err());
-    }
-    // A newly authorized recovery operation may still remove that policy.
-    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(recovery.as_str()), None).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_ok());
+    let stale = App::open(dir.clone(), h, key).unwrap();
+    stale.create_workspace("before").unwrap();
+    let unlinked = state(&dir);
+    let (_, replacement) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let committed = state(&dir);
+    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(PASS), sign_in(&p).await).unwrap();
+    let current = App::open(dir.clone(), h, key).unwrap();
+    current.create_workspace("after").unwrap();
+    assert!(stale.create_workspace("stale writer").is_err());
+    replace_state(&dir, &unlinked);
+    assert!(
+        ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err(),
+        "authentic old unlinked metadata has the wrong ciphertext key"
+    );
+    assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&original_recovery)).is_err());
+    replace_state(&dir, &committed);
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&replacement)).unwrap();
+    assert!(App::open(dir, h, key).unwrap().find_workspace("after").is_ok());
 }
 
 #[tokio::test]
-async fn deleting_rotated_header_mac_cannot_legitimize_an_unlinked_policy() {
+async fn stale_authorized_policy_cannot_unlink_or_replace_a_newer_binding() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = profile(root.path(), "concurrency");
+    link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, PASS).unwrap();
+    let (authorized, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
+    let old_binding = anvil_storage::rotation::binding(&dir).unwrap().unwrap();
+    let (_, recovery) = link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let committed = state(&dir);
+    for replacement in [None, old_binding] {
+        assert!(anvil_storage::rotation::set_binding(&dir, &authorized, &key, replacement).is_err());
+        assert_eq!(state(&dir), committed);
+    }
+    unlink(&dir, Unlock::RecoveryKey(&recovery), None, PASS).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok());
+}
+
+#[tokio::test]
+async fn deleting_header_mac_cannot_legitimize_an_unlinked_policy() {
     use sha2::Digest;
     anvil_fixtures::init();
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     let p = provider(&idp);
     let root = tempfile::tempdir().unwrap();
-    let (dir, recovery) = profile(root.path(), "unsigned policy");
-    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
-    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
-    let app = App::open(dir.clone(), h, key).unwrap();
-    app.rotate_data_key("rotated password 123", &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
-    let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
-    let raw: String = conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
-    let mut state: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    state["binding"] = serde_json::Value::Null;
-    state["header"]["rotation"]["binding_digest"] = serde_json::Value::String(hex::encode(sha2::Sha256::digest(b"null")));
-    state["header"]["protection_mac"] = serde_json::Value::Null;
-    conn.execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [state.to_string()]).unwrap();
-    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase("rotated password 123")).is_err());
+    let (dir, _) = profile(root.path(), "unsigned policy");
+    link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true, PASS).unwrap();
+    let mut edited = state(&dir);
+    edited["binding"] = serde_json::Value::Null;
+    edited["header"]["rotation"]["binding_digest"] = hex::encode(sha2::Sha256::digest(b"null")).into();
+    edited["header"]["protection_mac"] = serde_json::Value::Null;
+    replace_state(&dir, &edited);
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_err());
 }

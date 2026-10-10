@@ -57,14 +57,14 @@ pub fn binding(dir: &Path) -> Result<Option<Option<Value>>, VaultError> {
     let _lock = crate::profile_lock::shared(dir)?;
     Ok(read(dir)?.map(|s| s.binding))
 }
-/// Change an enrolled identity and its authenticated presence together.
+/// Refuse same-key policy publication. Policy changes require full key rotation.
 pub fn set_binding(dir: &Path, header: &ProfileHeader, key: &Key, binding: Option<Value>) -> Result<bool, VaultError> {
     let _lock = crate::profile_lock::shared(dir)?;
     let mut conn = Connection::open(dir.join(DB_FILE)).map_err(db)?;
     conn.busy_timeout(crate::store::BUSY_TIMEOUT).map_err(db)?;
     conn.execute_batch("PRAGMA synchronous=FULL;").map_err(db)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db)?;
-    let Some(mut state) = read_on(&tx)? else {
+    let Some(state) = read_on(&tx)? else {
         return Ok(false);
     };
     crate::vault::check_current(&state.header, header, key)?;
@@ -74,11 +74,8 @@ pub fn set_binding(dir: &Path, header: &ProfileHeader, key: &Key, binding: Optio
     if state.header.rotation.as_ref().map(|p| &p.binding_digest) != header.rotation.as_ref().map(|p| &p.binding_digest) {
         return Err(VaultError::Header("identity policy changed; unlock and authorize the operation again".into()));
     }
-    state.binding = binding;
-    crate::vault::bind_rotation(&mut state.header, key, &state.binding);
-    write_on(&tx, &state)?;
-    tx.commit().map_err(db)?;
-    Ok(true)
+    let _ = binding;
+    Err(VaultError::Header("identity changes require encryption-key rotation".into()))
 }
 
 /// Hold the cooperative data fence across a legacy sidecar operation, so

@@ -140,6 +140,7 @@ pub fn run() {
             commands::profiles_list,
             commands::profile_create,
             commands::profile_unlock,
+            commands::profile_enroll_unlinked,
             commands::app_lock,
             commands::profile_change_passphrase,
             commands::profile_convert_to_passphrase,

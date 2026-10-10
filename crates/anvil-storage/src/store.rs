@@ -1025,6 +1025,23 @@ fn reseal_all(conn: &Connection, old: &Key, new: &Key) -> Result<()> {
 }
 
 impl Store {
+    /// Authenticate the current ciphertext epoch before unlock performs any
+    /// header upgrade or credential-store cleanup. An authentic historical
+    /// metadata row cannot authorize current data encrypted with a newer key.
+    pub fn verify_profile_key(dir: &Path, key: &Key) -> Result<()> {
+        let _guard = crate::profile_lock::shared(dir)?;
+        let path = dir.join(DB_FILE);
+        if !path.exists() {
+            return Ok(());
+        }
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        if !check_canary(&conn, key)? {
+            return Err(StoreError::Integrity);
+        }
+        Ok(())
+    }
+
     /// Open (or create) the store in `dir`, applying pending migrations.
     pub fn open(dir: &Path, key: Key) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
