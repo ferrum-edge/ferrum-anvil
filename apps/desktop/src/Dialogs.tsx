@@ -1534,6 +1534,10 @@ function ChangePassphrase(props: { recovery: string | null; closeRefused: boolea
           This profile is opened by the OS keychain. With a passphrase, only the passphrase or a new recovery key opens it, and its key is removed from the OS keychain.
         </p>
       )}
+      <p className="hint">
+        {keychain ? "Converting to a passphrase keeps the data key and creates a recovery key. " : "Changing the unlock passphrase keeps the data key and recovery key. "}
+        To revoke a copied old raw profile header, close Anvil and use the CLI profile rotate-key action to re-encrypt active data and replace the recovery key. Historical backups remain historical.
+      </p>
       <div className="row nowrap">
         <input className="field grow" type="password" aria-label="New passphrase" placeholder="new passphrase" value={a} onChange={(e) => setA(e.target.value)} autoComplete="new-password" />
         <input className="field grow" type="password" aria-label="Repeat passphrase" placeholder="repeat" value={b} onChange={(e) => setB(e.target.value)} autoComplete="new-password" />

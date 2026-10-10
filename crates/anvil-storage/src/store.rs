@@ -50,7 +50,7 @@ pub const DB_FILE: &str = "anvil.db";
 /// before failing with `SQLITE_BUSY`.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
-pub const DB_SCHEMA_VERSION: i64 = 3;
+pub const DB_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -201,6 +201,22 @@ pub struct Store {
     /// Checkpoint restores run on `conn`, which rewrite the database without
     /// a change SQLite counts (see [`ChangeMarker`]).
     restores: AtomicU64,
+}
+
+struct ConnectionGuard<'a> {
+    conn: MutexGuard<'a, Connection>,
+    _data_lock: std::fs::File,
+}
+impl std::ops::Deref for ConnectionGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+impl std::ops::DerefMut for ConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
 }
 
 /// What a connection can tell of the writes to its database: one taken in a
@@ -516,6 +532,8 @@ const MIGRATIONS: &[Migration] = &[
     // v3 — request revisions bind their workspace and request, history
     // records the response body they reference.
     Migration::RecordBindings,
+    // v4 — older builds must not open a database supporting local rotation.
+    Migration::Sql("SELECT 1;"),
 ];
 
 /// How many rows a step that seals rows again reads at a time, so it never
@@ -719,8 +737,21 @@ fn seal_history_bodies(conn: &Connection, key: &Key) -> Result<u64> {
 fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
     let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
     let Some(c) = canary else { return Ok(false) };
-    let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
-    crypto::open(key, b"anvil/v1/canary", &env).map_err(|_| StoreError::Integrity)?;
+    if let Some(c) = c.strip_prefix("rotated-v1:") {
+        if stored_schema_version(conn)? < 4 {
+            return Err(StoreError::Integrity);
+        }
+        let state = crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.ok_or(StoreError::Integrity)?;
+        crate::vault::check_current(&state.header, &state.header, key).map_err(|_| StoreError::Integrity)?;
+        let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
+        crypto::open(key, b"anvil/v2/rotated-canary", &env).map_err(|_| StoreError::Integrity)?;
+    } else {
+        if crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.is_some() {
+            return Err(StoreError::Integrity);
+        }
+        let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
+        crypto::open(key, b"anvil/v1/canary", &env).map_err(|_| StoreError::Integrity)?;
+    }
     Ok(true)
 }
 
@@ -728,6 +759,16 @@ fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
 /// without one gets one sealed with `key`.
 fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
     if !check_canary(conn, key)? {
+        // A missing canary in an existing populated or enrolled store is
+        // corruption, never an invitation to enroll an attacker-selected key.
+        if crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.is_some() {
+            return Err(StoreError::Integrity);
+        }
+        for table in ["objects", "secrets", "blobs", "history", "load_reports"] {
+            if has_table(conn, table)? && conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| r.get::<_, bool>(0))? {
+                return Err(StoreError::Integrity);
+            }
+        }
         let env = crypto::seal(key, b"anvil/v1/canary", b"ok");
         conn.execute("INSERT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
     }
@@ -871,19 +912,123 @@ fn check_not_set_back(conn: &Connection, key: &Key) -> Result<()> {
 /// Copy the database `src` over the one on `conn`, then check `key` against
 /// the copy and migrate it. The checkpoint `src` is itself the copy a
 /// migration would keep, so it takes none.
-fn restore_on(conn: &mut Connection, src: &Connection, key: &Key) -> Result<()> {
-    {
+fn restore_on(conn: &mut Connection, src: &Connection, key: &Key, dir: &Path) -> Result<()> {
+    let current = crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?;
+    if let Some(state) = current {
+        // A disk-backed ciphertext staging copy keeps large checkpoints from
+        // exhausting memory, and preserves current credentials before the
+        // backup API's atomic destination commit. No plaintext/key bridge.
+        let staging = StagedDatabase::create(dir)?;
+        let mut staged = Connection::open(&staging.path)?;
+        staged.execute_batch("PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;")?;
+        {
+            let backup = rusqlite::backup::Backup::new(src, &mut staged)?;
+            backup.run_to_completion(256, Duration::from_millis(0), None)?;
+        }
+        crate::rotation::write_on(&staged, &state).map_err(|_| StoreError::Integrity)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&staged, conn)?;
+            backup.run_to_completion(256, Duration::from_millis(0), None)?;
+        }
+    } else {
         let backup = rusqlite::backup::Backup::new(src, conn)?;
         backup.run_to_completion(256, Duration::from_millis(0), None)?;
     }
     verify_key_on(conn, key)?;
     migrate_on(conn, key, None)
 }
+struct StagedDatabase {
+    path: PathBuf,
+}
+impl StagedDatabase {
+    fn create(dir: &Path) -> Result<Self> {
+        let path = dir.join(format!("checkpoint-restore.{}.tmp", hex::encode(crypto::random_bytes(16))));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&path)?;
+        Ok(Self { path })
+    }
+}
+impl Drop for StagedDatabase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Reseal every persisted ciphertext payload, retaining metadata and blob ids.
+fn reseal_all(conn: &Connection, old: &Key, new: &Key) -> Result<()> {
+    for table in ["objects", "secrets", "blobs", "history", "load_reports"] {
+        let mut after: Option<i64> = None;
+        loop {
+            let query = match table {
+                "objects" => "SELECT rowid,id,kind,NULL,payload FROM objects WHERE (?1 IS NULL OR rowid>?1) ORDER BY rowid LIMIT ?2",
+                "secrets" => {
+                    "SELECT rowid,id,NULL,workspace_id,payload FROM secrets WHERE (?1 IS NULL OR rowid>?1) ORDER BY rowid LIMIT ?2"
+                }
+                "history" => "SELECT rowid,id,NULL,body_blob,payload FROM history WHERE (?1 IS NULL OR rowid>?1) ORDER BY rowid LIMIT ?2",
+                "blobs" => "SELECT rowid,id,NULL,NULL,payload FROM blobs WHERE (?1 IS NULL OR rowid>?1) ORDER BY rowid LIMIT ?2",
+                _ => "SELECT rowid,id,NULL,NULL,payload FROM load_reports WHERE (?1 IS NULL OR rowid>?1) ORDER BY rowid LIMIT ?2",
+            };
+            let rows = {
+                let mut st = conn.prepare(query)?;
+                st.query_map(params![after, MIGRATION_BATCH], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Vec<u8>>(4)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for (rowid, id, kind, owner, env) in rows {
+                let primary = match table {
+                    "objects" if kind.as_deref() == Some(kind::REVISION) => revision_aad(&id),
+                    "objects" => aad(table, kind.as_deref().ok_or(StoreError::Integrity)?, &id),
+                    "secrets" => secret_aad(&id, owner.as_deref()),
+                    "history" => history_aad(&id, owner.as_deref()),
+                    "blobs" => aad(table, "blob", &id),
+                    _ => aad(table, "report", &id),
+                };
+                let legacy = match table {
+                    "objects" if kind.as_deref() == Some(kind::REVISION) => Some(aad(table, kind::REVISION, &id)),
+                    "secrets" => Some(aad(table, "secret", &id)),
+                    "history" => Some(aad(table, "record", &id)),
+                    _ => None,
+                };
+                let (data, pt) = match crypto::open(old, &primary, &env) {
+                    Ok(pt) => (primary, pt),
+                    Err(_) => {
+                        let data = legacy.ok_or(StoreError::Integrity)?;
+                        let pt = crypto::open(old, &data, &env).map_err(|_| StoreError::Integrity)?;
+                        (data, pt)
+                    }
+                };
+                let resealed = crypto::seal(new, &data, &pt);
+                conn.execute(&format!("UPDATE {table} SET payload=?1 WHERE rowid=?2"), params![resealed, rowid])?;
+                after = Some(rowid);
+                #[cfg(test)]
+                rotation_tests::crash_point("after-first-row");
+            }
+        }
+    }
+    Ok(())
+}
 
 impl Store {
     /// Open (or create) the store in `dir`, applying pending migrations.
     pub fn open(dir: &Path, key: Key) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
+        let _data_lock = crate::profile_lock::shared(dir)?;
         let mut conn = Connection::open(dir.join(DB_FILE))?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch(
@@ -904,6 +1049,66 @@ impl Store {
             key: RwLock::new(Some(key)),
             restores: AtomicU64::new(0),
         })
+    }
+
+    /// Deliberately replace the data key, wrapped header, and linked policy
+    /// in one durable SQLite commit. The successful store is left locked;
+    /// reopen the App to refresh its immutable capability identity.
+    pub fn rotate_data_key<F>(
+        &self,
+        passphrase: &str,
+        kdf: crate::KdfParams,
+        prepare_binding: F,
+    ) -> std::result::Result<crate::vault::KeychainConversion, crate::vault::VaultError>
+    where
+        F: FnOnce(
+            &crate::vault::ProfileHeader,
+            &Key,
+            &Key,
+            Option<Option<serde_json::Value>>,
+        ) -> std::result::Result<Option<serde_json::Value>, crate::vault::VaultError>,
+    {
+        use crate::vault::{self, VaultError};
+        if *self.tx_owner.lock() == Some(std::thread::current().id()) {
+            return Err(VaultError::Header("rotation cannot run inside a store transaction".into()));
+        }
+        let mut conn = self.conn.lock();
+        let _data_lock = crate::profile_lock::exclusive(&self.dir)?;
+        let key = self.key().map_err(|e| VaultError::Header(e.to_string()))?;
+        end_transaction(&conn, Ok(())).map_err(|e| VaultError::Header(e.to_string()))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| VaultError::Header(e.to_string()))?;
+        if !check_canary(&tx, &key).map_err(|e| VaultError::Header(e.to_string()))? {
+            return Err(VaultError::HeaderTampered);
+        }
+        let state = crate::rotation::read_on(&tx)?;
+        let h = match &state {
+            Some(s) => s.header.clone(),
+            None => vault::read_header_unlocked(&self.dir)?,
+        };
+        vault::check_current(&h, &h, &key)?;
+        let new_key = Key::random();
+        let binding = prepare_binding(&h, &key, &new_key, state.map(|s| s.binding))?;
+        let (mut next, recovery_key) = vault::rotated_header(&h, &new_key, passphrase, kdf)?;
+        vault::bind_rotation(&mut next, &new_key, &binding);
+        // Abort on the first unauthenticatable row. Do not retain old-key
+        // ciphertext, and do not reinterpret legacy residual payloads.
+        reseal_all(&tx, &key, &new_key).map_err(|e| VaultError::Header(e.to_string()))?;
+        crate::rotation::write_on(&tx, &crate::rotation::State { header: next.clone(), binding })?;
+        let env = crypto::seal(&new_key, b"anvil/v2/rotated-canary", b"ok");
+        tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(env))])
+            .map_err(|e| VaultError::Header(e.to_string()))?;
+        #[cfg(test)]
+        rotation_tests::crash_point("before-commit");
+        tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
+        #[cfg(test)]
+        rotation_tests::crash_point("after-commit");
+        *self.key.write() = None;
+        drop(_data_lock);
+        // Historical sidecars are deliberately not a publication bridge:
+        // unlock discovers the new wrapped key directly from the database.
+        let keychain_entry_removed =
+            if next.keychain_account.is_some() { vault::retire_rotated_keychain(&self.dir, &mut next, &new_key).is_ok() } else { true };
+        Ok(vault::KeychainConversion { recovery_key, keychain_entry_removed })
     }
 
     pub fn dir(&self) -> &Path {
@@ -930,7 +1135,7 @@ impl Store {
     /// read only once the connection is held, so a call that raced a failed
     /// [`Store::restore_checkpoint`], which locks the store under that hold,
     /// fails with `Locked` instead of writing with the key it read before.
-    fn sealing(&self) -> Result<(MutexGuard<'_, Connection>, Key)> {
+    fn sealing(&self) -> Result<(ConnectionGuard<'_>, Key)> {
         let conn = self.conn()?;
         let key = self.key()?;
         Ok((conn, key))
@@ -940,7 +1145,7 @@ impl Store {
     /// [`Store::sealing`], whether the store is locked is read only once the
     /// connection is held, so a call that raced a failed
     /// [`Store::restore_checkpoint`] never writes to the database it copied.
-    fn writing(&self) -> Result<MutexGuard<'_, Connection>> {
+    fn writing(&self) -> Result<ConnectionGuard<'_>> {
         let conn = self.conn()?;
         if self.is_locked() {
             return Err(StoreError::Locked);
@@ -951,15 +1156,25 @@ impl Store {
     /// The connection for one ordinary operation. It waits for a transaction
     /// open on another thread to finish, so it never runs inside a
     /// transaction it does not own.
-    fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+    fn conn(&self) -> Result<ConnectionGuard<'_>> {
         if *self.tx_owner.lock() == Some(std::thread::current().id()) {
             return Err(StoreError::TransactionActive);
         }
         let conn = self.conn.lock();
+        let data_lock = crate::profile_lock::shared(&self.dir)?;
         // A transaction still open here was left by a failed rollback and
         // belongs to no caller: end it rather than run inside it.
         end_transaction(&conn, Ok(()))?;
-        Ok(conn)
+        let held_key = self.key.read().clone();
+        if let Some(key) = held_key {
+            // The shared file fence prevents rotation between this check and
+            // the last SQL statement, including writes without encryption.
+            if !matches!(check_canary(&conn, &key), Ok(true)) {
+                *self.key.write() = None;
+                return Err(StoreError::Locked);
+            }
+        }
+        Ok(ConnectionGuard { conn, _data_lock: data_lock })
     }
 
     pub fn is_locked(&self) -> bool {
@@ -969,7 +1184,7 @@ impl Store {
     /// Run `f` with the unlocked data key (for re-wrapping it under a new
     /// passphrase). Fails while locked; the key never leaves the backend.
     pub fn with_key<R>(&self, f: impl FnOnce(&Key) -> R) -> Result<R> {
-        let k = self.key()?;
+        let (_conn, k) = self.sealing()?;
         Ok(f(&k))
     }
 
@@ -1056,8 +1271,7 @@ impl Store {
     }
 
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.object_meta(kind)
     }
 
@@ -1070,16 +1284,14 @@ impl Store {
 
     /// Returns (label, value).
     pub fn get_secret(&self, id: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.get_secret(id)
     }
 
     /// Returns (label, value) of secret `id` only if workspace `ws` owns it;
     /// `None` for a secret another workspace, or none, owns.
     pub fn get_workspace_secret(&self, id: &Id, ws: &Id) -> Result<Option<(String, Zeroizing<String>)>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.get_workspace_secret(id, ws)
     }
 
@@ -1130,8 +1342,7 @@ impl Store {
     }
 
     pub fn get_blob(&self, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.get_blob(id)
     }
 
@@ -1157,14 +1368,12 @@ impl Store {
     }
 
     pub fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.list_history(workspace_id, request_id, Some(limit))
     }
 
     pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.get_history(id)
     }
 
@@ -1217,14 +1426,12 @@ impl Store {
 
     /// Load report `id`, checked against the workspace it seals.
     pub fn get_load_report<T: DeserializeOwned>(&self, id: &Id) -> Result<Option<T>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.get_load_report(id)
     }
 
     pub fn list_load_reports<T: DeserializeOwned>(&self, workspace_id: Option<&Id>) -> Result<Vec<T>> {
-        let key = self.key()?;
-        let conn = self.conn()?;
+        let (conn, key) = self.sealing()?;
         Records { key, conn: &conn }.list_load_reports(workspace_id)
     }
 
@@ -1295,6 +1502,7 @@ impl Store {
     /// same hold of the connection as the copy. A copy or migration that
     /// fails leaves the store locked.
     pub fn restore_checkpoint(&self, path: &Path) -> Result<()> {
+        let mut conn = self.writing()?;
         let key = self.key()?;
         let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let found = stored_schema_version(&src)?;
@@ -1303,11 +1511,9 @@ impl Store {
         }
         check_canary(&src, &key)?;
         check_not_set_back(&src, &key)?;
-        let mut conn = self.conn()?;
-        // Locked meanwhile (another restore failed): nothing is copied.
-        let _ = self.key()?;
+        // The current key is held under the shared rotation fence.
         self.restores.fetch_add(1, Ordering::SeqCst);
-        let r = restore_on(&mut conn, &src, &key);
+        let r = restore_on(&mut conn, &src, &key, &self.dir);
         if r.is_err() {
             *self.key.write() = None;
         }
@@ -2201,3 +2407,7 @@ impl Records<'_> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+#[path = "rotation_tests.rs"]
+mod rotation_tests;

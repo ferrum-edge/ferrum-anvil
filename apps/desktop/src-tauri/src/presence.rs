@@ -254,7 +254,7 @@ pub(crate) async fn change_passphrase(st: &DesktopState, presence: &impl Presenc
         now
     } else {
         let message = format!(
-            "Change the passphrase of the profile “{}”? From now on only the new passphrase (or the recovery key) unlocks it.\n\nOnly continue if you asked for this change yourself.",
+            "Change the passphrase of the profile “{}”? The current profile header will accept the new passphrase (or the recovery key). This keeps the data key: a copied old raw header and its password can still decrypt later copied ciphertext. To revoke those, close Anvil and use profile rotate-key in the CLI.\n\nOnly continue if you asked for this change yourself.",
             profile_name(st)?
         );
         let prompt = Prompt { title: "Change the profile passphrase", message, ok: "Change passphrase" };

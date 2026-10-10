@@ -188,6 +188,10 @@ impl ProfileManager {
         {
             identity::verify_binding(b, &h, &k)?;
         }
+        if !recovery && h.rotation.is_some() {
+            let canonical = anvil_storage::rotation::binding(dir)?.ok_or(vault::VaultError::HeaderTampered)?;
+            vault::verify_rotation_binding(&h, &k, &canonical)?;
+        }
         // A header written by an earlier build gets its protection MAC (and
         // a keychain profile's entry its tag) now that the key is proven.
         vault::upgrade_header(dir, &mut h, &k).ok();
@@ -195,7 +199,11 @@ impl ProfileManager {
         // passphrase. It no longer unlocks anything; removing it is retried
         // at each unlock until it is gone.
         if h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some() {
-            vault::retire_keychain_entry(dir, &mut h).ok();
+            if h.rotation.is_some() {
+                vault::retire_rotated_keychain(dir, &mut h, &k).ok();
+            } else {
+                vault::retire_keychain_entry(dir, &mut h).ok();
+            }
         }
         Ok((h, k))
     }
@@ -250,8 +258,8 @@ impl ProfileManager {
         if current.is_none() && !recovery {
             return Err(IdentityPolicyError::NotLinked.into());
         }
-        Self::unlock_checked(dir, how, proof.as_ref(), chrono::Utc::now())?;
-        identity::remove_binding(dir)
+        let (h, key) = Self::unlock_checked(dir, how, proof.as_ref(), chrono::Utc::now())?;
+        identity::remove_binding(dir, &h, &key)
     }
 
     /// The full linked identity (with e-mail), verified against its sealed
@@ -273,6 +281,19 @@ fn check_new_passphrase(p: &str) -> Result<()> {
 }
 
 impl crate::App {
+    /// Deliberately rotate the local data key and re-encrypt all active data.
+    /// The new passphrase and new recovery key replace every old local unlock
+    /// credential. Portable backups and raw historical copies remain historical.
+    /// Success locks this App; reopen it with the new header/key before use.
+    pub fn rotate_data_key(&self, new_passphrase: &str, kdf: KdfParams) -> Result<KeychainConversion> {
+        check_new_passphrase(new_passphrase)?;
+        let result = self
+            .store
+            .rotate_data_key(new_passphrase, kdf, |h, old, new, binding| identity::rotate_binding(h, old, new, binding, &self.dir))?;
+        self.lock();
+        Ok(result)
+    }
+
     /// Set a new unlock passphrase on a passphrase profile (e.g. after
     /// unlocking with the recovery key). Re-wraps the existing data key;
     /// nothing is re-encrypted and the recovery key stays valid. An

@@ -184,8 +184,14 @@ The pre-unlock check uses the hint. After the key is unwrapped, the sealed copy
 is authoritative: if the hint was edited (for example to switch the policy off
 or to change the subject) or the file is unreadable, passphrase/keychain unlock
 fails with `BindingTampered`. The recovery key still unlocks and can remove the
-binding so it can be linked again. `profile.json` (the key wraps) is never
-touched by linking.
+binding so it can be linked again. For a legacy profile, `profile.json` (the key wraps) is never touched by linking.
+After [deliberate key rotation](storage-and-recovery.md#deliberate-local-key-rotation),
+the wrapped header and binding live together in the database. Linking/unlinking
+atomically updates the binding and the header's authenticated presence/absence;
+the historical sidecar is ignored. Deleting that sidecar cannot disable a
+rotated profile's fresh-login policy. Missing legacy sidecars still mean unlinked.
+A complete authentic historical database/profile can still be replayed; this
+local policy is not a trusted freshness authority.
 
 Linking asks for the local unlock secret again. Under the fresh-login policy,
 switching the policy for the same account needs a fresh proof of that account.

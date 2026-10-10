@@ -172,6 +172,7 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
         // profile keeps the epoch, publishing another one moves it on by one.
         let epoch = if let Some(a) = open
             && a.header.profile_id == header.profile_id
+            && a.header.key_check == header.key_check
         {
             st.unlock_since(&a, key, seen)?;
             seen

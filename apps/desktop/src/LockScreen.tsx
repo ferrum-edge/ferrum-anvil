@@ -117,7 +117,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
             </span>
             <h1>Set a new passphrase</h1>
           </div>
-          <p className="lock-sub">You unlocked with the recovery key. Choose a new passphrase; your recovery key keeps working.</p>
+          <p className="lock-sub">You unlocked with the recovery key. Choose a new passphrase; your recovery key and data key keep working. To revoke a copied raw header and its old password, use the CLI profile rotate-key action afterward.</p>
           <label className="lbl">
             New passphrase
             <input className="field" type="password" autoFocus value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="new-password" />

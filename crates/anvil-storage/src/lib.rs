@@ -7,6 +7,8 @@
 //! * [`crypto`] — XChaCha20-Poly1305 envelopes and Argon2id derivation.
 
 pub mod crypto;
+mod profile_lock;
+pub mod rotation;
 pub mod store;
 pub mod vault;
 

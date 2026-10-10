@@ -566,10 +566,99 @@ overwrite an object, history record or load report stored in a different
 workspace from the one the backup gives it, or a secret stored here under a
 different owner; Merge keeps those.
 
+## Deliberate local key rotation
+
+Changing the unlock passphrase in Settings (or after recovery unlock) only
+rewraps the existing data key. The recovery key stays valid. A copied old raw
+`profile.json` plus its correct old password can still recover that unchanged
+key and decrypt later copied ciphertext. This is different from a portable
+Anvil backup, which has its own independent export password.
+
+To revoke an old local unlock credential for active and future ciphertext,
+close every desktop window, CLI worker and older Anvil build first. Keep a
+trusted encrypted portable backup for historical recovery, and enough free
+disk space for SQLite's transaction/WAL. Then run:
+
+```sh
+anvil --profile PROFILE --passphrase-stdin profile rotate-key \
+  --confirm-rotation --new-passphrase-stdin
+```
+
+Enter the current password on the first stdin line and a new password of at
+least eight characters on the second. Neither is supplied on the command
+line. For an OS-keychain profile, omit `--passphrase-stdin`; the matching
+accessible OS credential unlocks it, and stdin supplies only the new password.
+For a linked profile that requires fresh provider login, use its offline
+recovery key instead: omit `--passphrase-stdin` and add
+`--recovery-key-stdin` to `profile rotate-key`. Enter the current recovery key
+on the first line and the new password on the second. Rotation retains the
+linked policy, so normal unlock afterward still requires fresh login. If the
+binding is corrupt, repair it using recovery unlock before rotating.
+
+Do not pipe the command's output into a log: it shows the **new recovery key
+once**. Store it safely offline, then reopen the profile. The old password,
+old recovery key and old keychain entry cannot decrypt the rotated active
+ciphertext. Keychain profiles become passphrase profiles; cleanup of the old
+entry is retried on unlock if the OS refuses it. Cleanup is serialized across
+Anvil processes and leaves a replacement entry whose key does not match when
+checked. Credential changes made concurrently by external OS tools are outside
+Anvil's file fence.
+
+Rotation authenticates and re-encrypts every active encrypted SQLite payload:
+all object kinds (including local device/file bindings), revisions, secrets,
+attachments, history and response bodies, load reports, and the key canary.
+It also re-encrypts a linked-login binding. Existing blob IDs stay stable, so
+saved attachments and response-body references stay intact; newly attached
+identical content can receive a different ID after rotation. A damaged row
+that cannot authenticate aborts rotation without changing the committed
+profile. Repair or explicitly remove that row with the existing recovery tools
+before retrying; rotation never silently drops it.
+
+The new wrapped header, authenticated identity presence/absence, and rotated
+ciphertext commit together in one SQLite transaction with `synchronous=FULL`.
+After rotation, the database's `local_key_state_v1` metadata is authoritative;
+legacy `profile.json` and `identity.json` sidecars are historical copies and
+are ignored for current policy. Interrupted work before commit leaves the old
+credentials usable; after commit, the new password discovers the new header
+from the database even if the process exited before reporting success. No
+new key is stored wrapped under the old data key. If the process exits before
+showing the new recovery key, the chosen new password still works; rotate
+again if a replacement recovery key is needed.
+
+Supported processes hold a mandatory shared file fence for data operations;
+rotation holds its exclusive counterpart. Stale handles check the current
+canary and cannot write using the old key. **Older already-open builds do not
+understand this fence and must be closed before rotation.** Schema 4 refuses
+their later opens. Rotation does not revoke plaintext or keys already copied
+into another process's memory. Filesystems without the required file locks
+are refused rather than running an unfenced rotation.
+
+Normal encrypted exports, backups and imports keep their existing formats
+and independent password; they do not transfer this device's keys or identity
+policy. A pre-rotation raw database checkpoint uses the old data key and is
+refused by the current profile. Recover that historical data in an isolated
+copy of its matching historical profile and use a portable export/import.
+A same-key checkpoint created after rotation can restore historical data,
+while the checkpoint API preserves the current unlock header and identity
+policy.
+
+**Limits:** rotation does not erase historical raw files, checkpoint copies,
+WAL/free-page remnants or independently encrypted portable backups. An owner
+can still recover historical data with its historical credential. A party
+able to restore a complete coherent historical profile/database and any
+needed OS credentials can also roll back that state. Local encryption proves
+authenticity, not chronology; this feature provides no complete-machine or
+complete-profile antirollback guarantee and requires no online service.
+Legacy profiles that have not rotated still use sidecar identity policy;
+a missing legacy `identity.json` is treated as unlinked. Rotated profiles bind
+identity presence/absence in their authenticated canonical header, so deleting
+the old sidecar cannot disable fresh-login policy. Offline recovery remains
+an intentional bypass and can explicitly remove/relink the account.
+
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION` (currently 3). Migrations run forward at open and at
+  `DB_SCHEMA_VERSION` (currently 4). Migrations run forward at open and at
   unlock, each step in one write transaction with the version bump that
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its
@@ -623,6 +712,9 @@ different owner; Merge keeps those.
     authenticates each request once however many revisions it has.
   - Earlier builds refuse a schema 3 database, and a full backup made from
     one, as newer. See [Going back to an earlier build](#going-back-to-an-earlier-build).
+- **Database schema 4** declares support for local key rotation and makes
+  earlier builds refuse the database. The migration changes no ciphertext;
+  rotation is a separate explicit operation, never automatic.
 - Before a step that seals the rows of an existing database again (schema 2
   and schema 3), the database is copied as it is into the profile's
   `checkpoints` folder as `<time>-before-schema-<version>.db`, the same kind of

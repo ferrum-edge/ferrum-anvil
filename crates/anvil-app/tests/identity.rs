@@ -607,3 +607,67 @@ async fn oauth_tokens_are_cached_per_workspace_folder_or_request_that_defines_th
     assert_ne!(r1, r2);
     assert_ne!(r1, a1);
 }
+
+#[tokio::test]
+async fn rotated_identity_policy_is_canonical_and_recovery_can_repair_it() {
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, recovery) = profile(root.path(), "rotated identity");
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
+    let app = App::open(dir.clone(), h, key).unwrap();
+    let new = "rotated passphrase 123";
+    let rotated = app.rotate_data_key(new, KdfParams::testing()).unwrap();
+    std::fs::remove_file(dir.join(IDENTITY_FILE)).unwrap();
+    assert!(matches!(
+        ProfileManager::unlock(&dir, Unlock::Passphrase(new)),
+        Err(AppError::Identity(IdentityPolicyError::FreshLoginRequired { .. }))
+    ));
+    let (h, key) = ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(new), sign_in(&p).await).unwrap();
+    assert_eq!(ProfileManager::linked_identity(&dir, &key).unwrap().unwrap().subject, "fixture-user-1");
+    let reopened = App::open(dir.clone(), h, key).unwrap();
+    // Legitimate policy changes update canonical state; the missing sidecar
+    // is not recreated or consulted.
+    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rotated.recovery_key), None).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_ok());
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(new), sign_in(&p).await, true).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_err());
+    assert!(!dir.join(IDENTITY_FILE).exists());
+    let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
+    let raw: String = conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
+    let mut state: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    state["binding"] = serde_json::Value::Null;
+    conn.execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [state.to_string()]).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_err(), "canonical deletion cannot disable fresh login silently");
+    // Offline recovery remains intentional, then an explicit unlink repairs
+    // the authenticated absence/presence record.
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rotated.recovery_key)).unwrap();
+    let recovery_app = App::open(dir.clone(), h, key).unwrap();
+    ProfileManager::unlink_identity(&dir, Unlock::RecoveryKey(&rotated.recovery_key), None).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(new)).is_ok());
+    drop((reopened, recovery_app));
+}
+
+#[tokio::test]
+async fn deleting_rotated_header_mac_cannot_legitimize_an_unlinked_policy() {
+    use sha2::Digest;
+    anvil_fixtures::init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (dir, recovery) = profile(root.path(), "unsigned policy");
+    ProfileManager::link_identity(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, true).unwrap();
+    let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
+    let app = App::open(dir.clone(), h, key).unwrap();
+    app.rotate_data_key("rotated password 123", KdfParams::testing()).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
+    let raw: String = conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
+    let mut state: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    state["binding"] = serde_json::Value::Null;
+    state["header"]["rotation"]["binding_digest"] = serde_json::Value::String(hex::encode(sha2::Sha256::digest(b"null")));
+    state["header"]["protection_mac"] = serde_json::Value::Null;
+    conn.execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [state.to_string()]).unwrap();
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase("rotated password 123")).is_err());
+}

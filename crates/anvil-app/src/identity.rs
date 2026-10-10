@@ -131,6 +131,10 @@ fn aad(h: &ProfileHeader) -> Vec<u8> {
 /// The plaintext binding, if any. A present but unreadable file is treated
 /// as tampering, never as "not linked".
 pub(crate) fn read_binding(dir: &Path) -> Result<Option<BindingFile>> {
+    let _guard = anvil_storage::rotation::profile_data_guard(dir)?;
+    if let Some(binding) = anvil_storage::rotation::binding(dir)? {
+        return binding.map(serde_json::from_value).transpose().map_err(|_| IdentityPolicyError::BindingTampered.into());
+    }
     let p = path(dir);
     let bytes = match std::fs::read(&p) {
         Ok(b) => b,
@@ -161,6 +165,7 @@ pub(crate) fn verify_binding(f: &BindingFile, h: &ProfileHeader, dek: &Key) -> R
 }
 
 fn write_binding(dir: &Path, h: &ProfileHeader, dek: &Key, linked: &LinkedIdentity) -> Result<()> {
+    let _guard = anvil_storage::rotation::profile_data_guard(dir)?;
     let sealed = hex::encode(crypto::seal(dek, &aad(h), &serde_json::to_vec(linked)?));
     let f = BindingFile {
         format: FORMAT.into(),
@@ -171,18 +176,59 @@ fn write_binding(dir: &Path, h: &ProfileHeader, dek: &Key, linked: &LinkedIdenti
         linked_at: linked.linked_at,
         sealed,
     };
-    let tmp = dir.join(format!("{IDENTITY_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&f)?)?;
+    if anvil_storage::rotation::set_binding(dir, h, dek, Some(serde_json::to_value(&f)?))? {
+        return Ok(());
+    }
+    let tmp = dir.join(format!("{IDENTITY_FILE}.{}.tmp", hex::encode(crypto::random_bytes(8))));
+    let bytes = serde_json::to_vec_pretty(&f)?;
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     std::fs::rename(tmp, path(dir))?;
     Ok(())
 }
 
-pub(crate) fn remove_binding(dir: &Path) -> Result<()> {
+pub(crate) fn remove_binding(dir: &Path, h: &ProfileHeader, key: &Key) -> Result<()> {
+    let _guard = anvil_storage::rotation::profile_data_guard(dir)?;
+    if anvil_storage::rotation::set_binding(dir, h, key, None)? {
+        return Ok(());
+    }
     match std::fs::remove_file(path(dir)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Prepare the policy for the same atomic commit as its new data key.
+pub(crate) fn rotate_binding(
+    h: &ProfileHeader,
+    old: &Key,
+    new: &Key,
+    canonical: Option<Option<serde_json::Value>>,
+    dir: &Path,
+) -> std::result::Result<Option<serde_json::Value>, anvil_storage::VaultError> {
+    let bad = || anvil_storage::VaultError::Header("the linked identity must be repaired with the recovery key before rotation".into());
+    let binding: Option<BindingFile> = match canonical {
+        Some(value) => value.map(serde_json::from_value).transpose().map_err(|_| bad())?,
+        None => match std::fs::read(path(dir)) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|_| bad())?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        },
+    };
+    let Some(mut binding) = binding else {
+        return Ok(None);
+    };
+    if binding.format != FORMAT || binding.version != VERSION {
+        return Err(bad());
+    }
+    verify_binding(&binding, h, old).map_err(|_| bad())?;
+    let env = hex::decode(&binding.sealed).map_err(|_| bad())?;
+    let pt = crypto::open(old, &aad(h), &env).map_err(|_| bad())?;
+    binding.sealed = hex::encode(crypto::seal(new, &aad(h), &pt));
+    Ok(Some(serde_json::to_value(binding).map_err(|_| bad())?))
 }
 
 /// A proof counts only for the linked provider and subject, and only while fresh.
