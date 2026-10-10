@@ -34,10 +34,15 @@ fn rotation_replaces_recovery_and_retains_portable_backup_restore() {
     target.restore(&portable, Some("portable backup password"), ConflictPolicy::Replace).unwrap();
     assert_eq!(target.workspace(&ws.meta.id).unwrap().name, "historical workspace");
     let (fresh, _) = app(root.path(), "post rotation target");
+    let target_header = vault::read_header(&fresh.dir).unwrap();
     let after = reopened.export_backup_with("portable backup password", KdfParams::testing()).unwrap().0;
     fresh.restore(&after, Some("portable backup password"), ConflictPolicy::Replace).unwrap();
     assert_eq!(fresh.workspace(&ws.meta.id).unwrap().name, "historical workspace");
-    assert!(vault::read_header(&fresh.dir).unwrap().rotation.is_none(), "exports do not transfer local unlock/key policy");
+    assert_eq!(
+        serde_json::to_value(vault::read_header(&fresh.dir).unwrap()).unwrap(),
+        serde_json::to_value(target_header).unwrap(),
+        "exports do not transfer local unlock/key policy"
+    );
     // The deliberate operation is repeatable, with no old-key bridge.
     let result2 = reopened.rotate_data_key("third passphrase 789", &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
     assert!(ProfileManager::unlock(&source.dir, Unlock::RecoveryKey(&result.recovery_key)).is_err());

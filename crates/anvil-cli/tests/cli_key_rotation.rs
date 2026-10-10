@@ -30,9 +30,14 @@ fn cli(root: &std::path::Path, flags: &[&str], input: &str) -> Output {
 }
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, vault::ProfileHeader, String) {
     let root = tempfile::tempdir().unwrap();
-    let (s, old, rk) = ProfileManager::new(root.path()).create_passphrase("rotation", OLD, KdfParams::testing()).unwrap();
-    let h = vault::read_header(&s.dir).unwrap();
-    let app = App::open(s.dir.clone(), h.clone(), old.clone()).unwrap();
+    // This fixture is an authentic historical profile, before canonical
+    // policy enrollment. New product profiles ignore legacy sidecar bindings.
+    let dir = root.path().join("profiles").join("legacy");
+    let created = vault::create_passphrase_profile(&dir, "rotation", OLD, KdfParams::testing()).unwrap();
+    let h = created.header;
+    let old = created.dek;
+    let rk = created.recovery_key.unwrap();
+    let app = App::open(dir.clone(), h.clone(), old.clone()).unwrap();
     app.create_workspace("kept").unwrap();
     drop(app);
     // A valid persisted legacy binding fixture. No provider proof is forged:
@@ -49,8 +54,8 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, vault::ProfileHeader, St
     let hex: String = sealed.iter().map(|b| format!("{b:02x}")).collect();
     let binding = serde_json::json!({"format":"anvil-identity-binding", "version":1,"provider":linked.provider,
         "subject":linked.subject,"linked_at":linked.linked_at,"require_fresh_login":true,"sealed":hex});
-    std::fs::write(s.dir.join("identity.json"), serde_json::to_vec(&binding).unwrap()).unwrap();
-    (root, s.dir, h, rk.to_string())
+    std::fs::write(dir.join("identity.json"), serde_json::to_vec(&binding).unwrap()).unwrap();
+    (root, dir, h, rk.to_string())
 }
 const FLAGS: &[&str] = &["profile", "rotate-key", "--confirm-rotation", "--new-passphrase-stdin", "--recovery-key-stdin"];
 fn delivered_key(child: &mut Child, old_recovery: &str) -> (BufReader<std::process::ChildStdout>, String) {
@@ -136,4 +141,47 @@ fn post_commit_output_loss_retains_acknowledged_linked_offline_recovery() {
     assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(NEW)).is_err());
     let (header, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
     assert_eq!(App::open(dir, header, key).unwrap().workspaces().unwrap()[0].name, "kept");
+}
+
+#[test]
+fn explicit_legacy_enrollment_requires_saved_recovery_confirmation_before_commit() {
+    const ENROLL: &[&str] =
+        &["--passphrase-stdin", "profile", "enroll-policy", "--confirm-replace-unknown-policy", "--new-passphrase-stdin"];
+    for outcome in ["eof", "mismatch", "saved", "output_lost_after_ack"] {
+        let (root, dir, h, old_recovery) = fixture();
+        std::fs::remove_file(dir.join("identity.json")).unwrap();
+        assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(OLD)).is_err());
+        let mut child = spawn(root.path(), ENROLL);
+        child.stdin.as_mut().unwrap().write_all(format!("{OLD}\n{NEW}\n").as_bytes()).unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let recovery = line.split(": ").nth(1).unwrap().trim().to_string();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.contains("Enrollment has not committed"));
+        assert_eq!(vault::read_header(&dir).unwrap().key_check, h.key_check);
+        if outcome != "output_lost_after_ack" {
+            child.stdout = Some(reader.into_inner());
+        } else {
+            drop(reader);
+        }
+        if outcome != "eof" {
+            let ack = if outcome == "mismatch" { "incorrect saved record" } else { &recovery };
+            child.stdin.as_mut().unwrap().write_all(format!("{ack}\n").as_bytes()).unwrap();
+        }
+        drop(child.stdin.take());
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.success(), outcome == "saved", "{outcome}: {}", String::from_utf8_lossy(&out.stderr));
+        if matches!(outcome, "eof" | "mismatch") {
+            assert_eq!(vault::read_header(&dir).unwrap().key_check, h.key_check);
+            assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&old_recovery)).is_ok());
+        } else {
+            assert_ne!(vault::read_header(&dir).unwrap().key_check, h.key_check);
+            assert!(ProfileManager::unlock(&dir, Unlock::RecoveryKey(&old_recovery)).is_err());
+            assert!(!ProfileManager::unlock_requirements(&dir).unwrap().fresh_login_required);
+            let (header, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&recovery)).unwrap();
+            assert_eq!(App::open(dir, header, key).unwrap().workspaces().unwrap()[0].name, "kept");
+        }
+    }
 }

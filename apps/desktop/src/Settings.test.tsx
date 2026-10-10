@@ -1,7 +1,7 @@
 // Settings → unlock passphrase: a keychain profile is converted, a passphrase
 // profile changes its passphrase, and neither is offered before the profile's
-// mode is known. The recovery key shown by a conversion stays until the user
-// confirms they stored it, and a keychain entry the store kept is listed.
+// mode is known. Native dialogs acknowledge replacement recovery before
+// commit, and a keychain entry the store kept is listed.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -60,7 +60,7 @@ describe("unlock passphrase", () => {
     const statusReply = new Promise((resolve) => (resolveStatus = resolve));
     backend({
       app_status: () => statusReply,
-      profile_convert_to_passphrase: () => ({ recovery_key: "AAAA-BBBB", keychain_entry_removed: true }),
+      profile_convert_to_passphrase: () => ({ keychain_entry_removed: true }),
     });
     render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
     const pending = (await screen.findByRole("button", { name: "Unlock passphrase…" })) as HTMLButtonElement;
@@ -122,7 +122,7 @@ describe("unlock passphrase", () => {
       profiles_list: () => profiles,
       profile_convert_to_passphrase: () => {
         profiles = [{ ...converted, leftover_keychain_entry: { service: "com.ferrumedge.anvil", account: "profile-k1" } }];
-        return { recovery_key: "AAAA-BBBB", keychain_entry_removed: false };
+        return { keychain_entry_removed: false };
       },
     });
     render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
