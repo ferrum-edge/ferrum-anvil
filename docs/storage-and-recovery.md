@@ -677,10 +677,13 @@ against the current ciphertext canary. Stale application handles cannot write.
 **Limits:** rotation does not erase historical raw files, checkpoints, WAL/free
 page remnants or independently encrypted portable backups. An owner can recover
 historical data with its matching historical credentials and export/import it.
-A complete authentic historical database contains the wrapped header, policy,
-canary and historical ciphertext; restoring all of those trusted local resources
-can roll the profile back, including deleted secrets and permissive settings.
-A same-epoch complete snapshot also remains restorable. No independent monotonic
+An authentic historical database contains the wrapped header, policy and canary.
+Replaying all trusted freshness-authority state can select historical-key state,
+including by restoring those metadata rows with old startup/settings rows or
+discarding newer ciphertext. This does not require replacing every database byte.
+Historical deleted secrets and permissive settings may return; a same-epoch
+snapshot also remains restorable. Old keys cannot decrypt newer-key ciphertext.
+No independent monotonic
 authority exists in this offline design. This is not complete-profile or
 complete-machine antirollback protection. Recovery intentionally bypasses online
 provider login; explicit unlink/repair rotates the key rather than changing policy

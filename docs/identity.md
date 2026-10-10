@@ -191,8 +191,10 @@ key epoch and new recovery credential, atomically with the new policy. Callers
 must obtain acknowledgment of that recovery credential before committing and
 supply the new passphrase using `PolicyRotation`. OS-keychain profiles convert to
 passphrase protection. Authentic older metadata cannot unlock later ciphertext
-with its old key. A complete authentic historical database/profile remains
-restorable; this local policy is not an independent freshness authority.
+with its old key. Restoring all trusted freshness-authority state can select historical policy,
+including metadata/canary replay with old startup rows or erasure of newer data.
+This need not replace every database byte; old keys cannot decrypt newer-key
+ciphertext. This local policy is not an independent freshness authority.
 
 Linking asks for the local unlock secret again. Under the fresh-login policy,
 switching the policy for the same account needs a fresh proof of that account.
