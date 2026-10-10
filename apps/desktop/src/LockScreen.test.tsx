@@ -120,7 +120,7 @@ describe("legacy policy enrollment", () => {
     fireEvent.change(screen.getByLabelText("New passphrase"), { target: { value: "replacement passphrase" } });
     fireEvent.change(screen.getByLabelText("Repeat new passphrase"), { target: { value: "replacement passphrase" } });
     fireEvent.click(screen.getByRole("button", { name: "Replace unknown policy and rotate…" }));
-    await screen.findByText("POLICY_ENROLLMENT_REQUIRED: NOT_CONFIRMED");
+    await screen.findByText("POLICY_ENROLLMENT_REQUIRED: Not done: it was not confirmed in the system dialog.");
     expect(onUnlocked).not.toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: "Enroll legacy policy" })).toBeTruthy();
   });
