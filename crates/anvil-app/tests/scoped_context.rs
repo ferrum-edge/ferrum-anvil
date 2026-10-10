@@ -383,6 +383,23 @@ fn worker_admission_keeps_plan_dataset_and_request_dependencies_without_global_r
     let (_, authority) = app.worker_job_with_authority(&current, true).unwrap();
     app.save_request(request).unwrap();
     assert!(authority.check().is_err());
+    // Saved-plan producers retain the original observation through preparation.
+    // A new proof of the present row must not bless an older selected workload.
+    for delete in [false, true] {
+        let current = app.save_load_plan(current.clone()).unwrap();
+        let (observed, observation) = app.load_plan_with_authority(&current.id).unwrap();
+        app.load_preflight(&observed).unwrap();
+        if delete {
+            app.delete_load_plan(&current.id).unwrap();
+        } else {
+            let mut changed = current.clone();
+            changed.workload = Workload::Iterations { iterations: 2, concurrency: 1 };
+            app.save_load_plan(changed).unwrap();
+        }
+        let (_, present) = app.worker_job_with_authority(&observed, true).unwrap();
+        present.check().unwrap();
+        assert!(observation.check().unwrap_err().to_string().contains("configuration changed"));
+    }
 }
 
 #[test]

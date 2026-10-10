@@ -235,19 +235,25 @@ impl App {
     fn load_job_with_authority(&self, p: &LoadPlan) -> Result<(LoadJob, crate::exec::AppContextAuthority)> {
         let (mut requests, source, stored, authority) = self.read_context(|read| {
             // A caller may provide an explicitly acknowledged draft plan.
-            // Native saved-plan callers retain their earlier exact observation.
+            // Saved-plan callers retain their earlier exact observation.
             read.depend_object(kind::LOAD_PLAN, &p.id);
             let opts = SendOptions { environment: p.environment_id, ..Default::default() };
             let mut requests = HashMap::new();
             for id in Self::plan_requests(p) {
+                let r: anvil_domain::workspace::RequestDefinition =
+                    read.get(kind::REQUEST, &id)?.ok_or_else(|| AppError::NotFound(format!("request {id}")))?;
+                if r.workspace_id != p.workspace_id {
+                    return Err(AppError::Invalid(format!("request '{}' in this load plan belongs to another workspace", r.name)));
+                }
                 requests.insert(id, self.build_context_in(read, Some(id), &p.workspace_id, None, &opts)?);
             }
             let (source, stored) = match p.dataset_id {
                 Some(id) => {
-                    let d: anvil_domain::workspace::Dataset = read
-                        .get(kind::DATASET, &id)?
-                        .filter(|d: &anvil_domain::workspace::Dataset| d.workspace_id == p.workspace_id)
-                        .ok_or_else(|| AppError::NotFound(format!("dataset {id}")))?;
+                    let d: anvil_domain::workspace::Dataset =
+                        read.get(kind::DATASET, &id)?.ok_or_else(|| AppError::NotFound(format!("dataset {id}")))?;
+                    if d.workspace_id != p.workspace_id {
+                        return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+                    }
                     let bytes = match &d.attachment {
                         AttachmentRef::Stored { sha256, .. } => Some(
                             crate::exec::attachment_for(read, sha256)?

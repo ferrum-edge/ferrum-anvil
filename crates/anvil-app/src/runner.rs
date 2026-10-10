@@ -135,10 +135,10 @@ impl App {
             let scenario: Scenario = read.get(kind::SCENARIO, scenario_id)?.ok_or_else(|| AppError::NotFound("scenario".into()))?;
             let (source, stored) = match (dataset.is_some(), scenario.dataset_id) {
                 (false, Some(id)) => {
-                    let d: Dataset = read
-                        .get(kind::DATASET, &id)?
-                        .filter(|d: &Dataset| d.workspace_id == scenario.workspace_id)
-                        .ok_or_else(|| AppError::NotFound("dataset".into()))?;
+                    let d: Dataset = read.get(kind::DATASET, &id)?.ok_or_else(|| AppError::NotFound("dataset".into()))?;
+                    if d.workspace_id != scenario.workspace_id {
+                        return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+                    }
                     let stored = match &d.attachment {
                         anvil_domain::request::AttachmentRef::Stored { sha256, .. } => Some(
                             crate::exec::attachment_for(read, sha256)?
