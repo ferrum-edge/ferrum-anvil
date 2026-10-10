@@ -263,8 +263,8 @@ impl Run {
             if !visible.is_empty() {
                 ctx.var_layers.push(VarLayer { label: "extracted (this iteration)".into(), vars: visible });
             }
-            for layer in &mut ctx.var_layers {
-                layer.vars.retain(|entry| !unavailable_extractions.contains(&(scope, entry.name.clone())));
+            if !unavailable_extractions.is_empty() {
+                ctx.retain_variables(|entry| !unavailable_extractions.contains(&(scope, entry.name.clone())));
             }
             for n in self.secrets.names() {
                 if !ctx.redaction_names.iter().any(|x| x.eq_ignore_ascii_case(n)) {

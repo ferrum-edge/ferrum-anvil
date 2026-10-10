@@ -6,8 +6,10 @@ use anvil_app::App;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
 use anvil_domain::assertions::{Extraction, ExtractionSource};
-use anvil_domain::request::{KeyValue, RequestSpec};
+use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
+use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::runner::*;
+use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::{DatasetFormat, Meta, Scenario, ScenarioStep, Variable};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
@@ -36,6 +38,117 @@ fn history_text(app: &App, ws: &anvil_domain::Id) -> String {
         }
     }
     out
+}
+
+#[tokio::test]
+async fn oversized_extractions_preserve_deferred_vault_variable_bindings() {
+    anvil_fixtures::init();
+    for multiple_layers in [false, true] {
+        let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let app = new_app(root.path(), "vault-bindings");
+        let mut ws = app.create_workspace("Vault bindings").unwrap();
+        let removed_value = "removed-vault-canary-928374";
+        let kept_value = "retained-vault-canary-615243";
+        let also_kept_value = "other-retained-vault-canary-417263";
+        let removed = app.set_secret(&ws.meta.id, "removed", removed_value).unwrap();
+        let kept = app.set_secret(&ws.meta.id, "kept", kept_value).unwrap();
+        let also_kept = app.set_secret(&ws.meta.id, "also kept", also_kept_value).unwrap();
+        let vault = |name: &str, secret: &anvil_domain::secret::SecretRef| Variable {
+            name: name.into(),
+            value: SensitiveValue::Secret { secret: secret.clone() },
+            secret: true,
+            enabled: true,
+            description: String::new(),
+        };
+        ws.variables = vec![vault("session", &removed), Variable::plain("label", "public")];
+        if multiple_layers {
+            ws.variables.insert(1, vault("also_removed", &removed));
+            ws.variables.push(vault("kept", &kept));
+            ws.variables.push(vault("also_kept", &also_kept));
+            let env = app
+                .create_environment(
+                    &ws.meta.id,
+                    "active",
+                    vec![
+                        vault("session", &removed),
+                        Variable::plain("also_removed", "outer fallback"),
+                        vault("kept", &kept),
+                        vault("also_kept", &also_kept),
+                        Variable::plain("label", "environment-public"),
+                    ],
+                )
+                .unwrap();
+            ws.active_environment_id = Some(env.meta.id);
+        }
+        app.save_workspace(ws.clone()).unwrap();
+
+        let mut trigger = RequestSpec::http("POST", &f.url("/echo"));
+        trigger.body =
+            Body::Raw { text: "x".repeat(anvil_engine::MAX_SENSITIVE_EXTRACTION_BYTES + 1), content_type: Some("text/plain".into()) };
+        for name in if multiple_layers { vec!["session", "also_removed"] } else { vec!["session"] } {
+            trigger.extractions.push(Extraction {
+                variable: name.into(),
+                source: ExtractionSource::JsonPath { path: "$.body".into() },
+                sensitive: true,
+            });
+        }
+        let trigger = app.create_request(&ws.meta.id, None, "Oversized extraction", trigger).unwrap();
+        let mut use_vars = RequestSpec::http("GET", &f.url("/echo"));
+        use_vars.auth = AuthConfig::OAuth2 {
+            config: OAuth2Config {
+                grant: OAuthGrant::ClientCredentials,
+                token_url: f.url("/oauth/token"),
+                authorization_url: String::new(),
+                client_id: "anvil-client".into(),
+                client_secret: SensitiveValue::template("anvil-secret"),
+                scope: String::new(),
+                audience: String::new(),
+                client_auth: OAuthClientAuth::RequestBody,
+                token_cache_id: None,
+                refresh_skew_secs: 30,
+            },
+        };
+        use_vars.headers.push(KeyValue::new("X-Label", "{{label}}"));
+        if multiple_layers {
+            use_vars.headers.push(KeyValue::new("X-Kept", "{{kept}}"));
+            use_vars.headers.push(KeyValue::new("X-Also-Kept", "{{also_kept}}"));
+        }
+        let use_vars = app.create_request(&ws.meta.id, None, "Retained variables", use_vars).unwrap();
+        let mut scenario = app
+            .create_scenario(&ws.meta.id, "Continue after extraction failure", vec![step(trigger.meta.id), step(use_vars.meta.id)])
+            .unwrap();
+        scenario.stop_on_failure = false;
+        scenario.iterations = 2;
+        app.update_scenario(scenario.clone()).unwrap();
+
+        let report = app.run_scenario(&scenario.meta.id, RunSettings::default(), CancellationToken::new()).await.unwrap();
+        assert_eq!(report.iterations.len(), 2);
+        for iteration in &report.iterations {
+            assert_eq!(iteration.steps[0].status, RunStepStatus::Failed, "the oversized extraction must trigger filtering");
+            assert_eq!(iteration.steps[1].status, RunStepStatus::Passed, "retained variables must remain usable: {report:#?}");
+        }
+        let headers = f.log.last_request_headers().unwrap();
+        let label = if multiple_layers { "environment-public" } else { "public" };
+        assert!(headers.iter().any(|(name, value)| name == "x-label" && value == label), "{headers:?}");
+        assert!(!headers.iter().any(|(_, value)| value == removed_value), "removed vault value reached the peer");
+        if multiple_layers {
+            for (name, expected) in [("x-kept", kept_value), ("x-also-kept", also_kept_value)] {
+                assert!(headers.iter().any(|(header, value)| header == name && value == expected), "{headers:?}");
+            }
+        }
+        let stored = history_text(&app, &ws.meta.id) + &anvil_runner::to_json(&report);
+        assert!(!stored.contains(removed_value), "removed vault secret was retained in history or the report");
+        // Captured response bodies retain the peer's bytes. Verify the normal
+        // exact-value redaction contract on the structured execution records.
+        for history in app.store.list_history(Some(&ws.meta.id), None, 10).unwrap() {
+            let (record, _) = app.store.get_history::<serde_json::Value>(&history.id).unwrap().unwrap();
+            let record = record.to_string();
+            assert!(!record.contains(kept_value), "legitimate vault substitutions must still be redacted");
+            assert!(!record.contains(also_kept_value), "other legitimate vault substitutions must still be redacted");
+        }
+        assert!(stored.contains(label), "the ordinary variable remains public");
+    }
 }
 
 #[tokio::test]
