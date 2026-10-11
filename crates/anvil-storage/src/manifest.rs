@@ -217,7 +217,7 @@ impl Catalogue {
         conn.execute_batch(CREATE_TABLE)?;
         conn.execute("DELETE FROM catalogue", [])?;
         {
-            let mut st = conn.prepare("INSERT INTO catalogue(name, entry) VALUES(?1, ?2)")?;
+            let mut st = conn.prepare("INSERT OR ABORT INTO catalogue(name, entry) VALUES(?1, ?2)")?;
             for (name, e) in &self.entries {
                 st.execute(params![name, e.encode()])?;
             }
@@ -231,7 +231,7 @@ fn publish_root(conn: &Connection, key: &Key, state: &mut rotation::State, root:
     vault::bind_manifest_root(&mut state.header, key, root.clone()).map_err(|_| StoreError::Integrity)?;
     rotation::write_on(conn, state).map_err(|_| StoreError::Integrity)?;
     let env = crypto::seal(key, b"anvil/v3/manifest-canary", root.as_bytes());
-    conn.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("{CANARY}{}", hex::encode(env))])?;
+    conn.execute("UPDATE OR ABORT meta SET value=?1 WHERE key='key_canary'", [format!("{CANARY}{}", hex::encode(env))])?;
     Ok(())
 }
 
@@ -375,8 +375,9 @@ impl Manifest {
     pub fn publish(self, conn: &Connection, key: &Key, state: &mut rotation::State) -> Result<(Arc<Catalogue>, String)> {
         let Self { mut base, changes, .. } = self;
         {
-            let mut upsert = conn
-                .prepare_cached("INSERT INTO catalogue(name, entry) VALUES(?1, ?2) ON CONFLICT(name) DO UPDATE SET entry=excluded.entry")?;
+            let mut upsert = conn.prepare_cached(
+                "INSERT OR ABORT INTO catalogue(name, entry) VALUES(?1, ?2) ON CONFLICT(name) DO UPDATE SET entry=excluded.entry",
+            )?;
             let mut delete = conn.prepare_cached("DELETE FROM catalogue WHERE name=?1")?;
             for (n, change) in &changes {
                 match change {

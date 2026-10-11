@@ -233,6 +233,111 @@ fn externally_installed_foreign_key_cascades_cannot_delete_untracked_records() {
 }
 
 #[test]
+fn schema_replace_cannot_delete_a_secret_outside_the_upsert_target() {
+    let (dir, store, _) = profile();
+    let (workspace, victim, new) = (Id::new(), Id::new(), Id::new());
+    store.put_secret(&victim, Some(&workspace), "victim", "kept").unwrap();
+    raw(&dir)
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE secrets RENAME TO old_secrets;
+             CREATE TABLE secrets (id TEXT PRIMARY KEY, workspace_id TEXT UNIQUE ON CONFLICT REPLACE,
+                 updated_at INTEGER NOT NULL, payload BLOB NOT NULL);
+             INSERT INTO secrets SELECT * FROM old_secrets;
+             DROP TABLE old_secrets;
+             COMMIT;",
+        )
+        .unwrap();
+    store.protected_authority().unwrap();
+    // Updating the intended id still works; a conflict on a different
+    // schema-controlled key must not silently remove that id.
+    store.put_secret(&victim, Some(&workspace), "victim", "updated").unwrap();
+    let authority = store.protected_authority().unwrap();
+    assert!(store.put_secret(&new, Some(&workspace), "new", "rejected").is_err());
+    assert_eq!(store.protected_authority().unwrap(), authority);
+    assert_eq!(store.get_secret(&victim).unwrap().unwrap().1.as_str(), "updated");
+    assert!(store.get_secret(&new).unwrap().is_none());
+    store.put_secret(&new, Some(&Id::new()), "new", "allowed").unwrap();
+    store.protected_authority().unwrap();
+}
+
+#[test]
+fn schema_replace_cannot_delete_an_object_outside_the_upsert_target() {
+    let (dir, store, _) = profile();
+    let (victim, new) = (Id::new(), Id::new());
+    put_file(&store, &victim, "kept");
+    raw(&dir)
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE objects RENAME TO old_objects;
+             CREATE TABLE objects (kind TEXT NOT NULL, id TEXT NOT NULL, workspace_id TEXT, parent_id TEXT,
+                 sort_key REAL NOT NULL DEFAULT 0 UNIQUE ON CONFLICT REPLACE,
+                 updated_at INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(kind,id));
+             INSERT INTO objects SELECT * FROM old_objects;
+             DROP TABLE old_objects;
+             COMMIT;",
+        )
+        .unwrap();
+    store.protected_authority().unwrap();
+    put_file(&store, &victim, "updated");
+    let authority = store.protected_authority().unwrap();
+    let value = json!({"id":new,"path":"rejected","bound_at":chrono::Utc::now()});
+    assert!(store.put(kind::TOKEN_FILE, &new, None, None, 0.0, &value).is_err());
+    assert_eq!(store.protected_authority().unwrap(), authority);
+    assert_eq!(store.get::<Value>(kind::TOKEN_FILE, &victim).unwrap().unwrap()["path"], "updated");
+    assert!(store.get::<Value>(kind::TOKEN_FILE, &new).unwrap().is_none());
+}
+
+#[test]
+fn schema_replace_during_catalogue_publication_rolls_back_the_record_write() {
+    let (dir, store, key) = profile();
+    let (victim, new) = (Id::new(), Id::new());
+    store.put_secret(&victim, None, "victim", "kept").unwrap();
+    let c = raw(&dir);
+    c.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE catalogue RENAME TO old_catalogue;
+         CREATE TABLE catalogue (name TEXT PRIMARY KEY, entry TEXT NOT NULL,
+             collision INTEGER GENERATED ALWAYS AS (0) VIRTUAL UNIQUE ON CONFLICT REPLACE) WITHOUT ROWID;
+         INSERT INTO catalogue(name,entry) SELECT name,entry FROM old_catalogue;
+         DROP TABLE old_catalogue;
+         COMMIT;",
+    )
+    .unwrap();
+    let authority = store.protected_authority().unwrap();
+    assert!(store.put_secret(&new, None, "new", "rejected").is_err());
+    assert_eq!(store.protected_authority().unwrap(), authority);
+    assert_eq!(store.get_secret(&victim).unwrap().unwrap().1.as_str(), "kept");
+    assert!(store.get_secret(&new).unwrap().is_none());
+    let count: i64 = c.query_row("SELECT COUNT(*) FROM catalogue", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1);
+    Store::open(dir.path(), key).unwrap().protected_authority().unwrap();
+}
+
+#[test]
+fn schema_replace_cannot_remove_authority_metadata_during_a_note_write() {
+    let (dir, store, _) = profile();
+    let c = raw(&dir);
+    c.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE meta RENAME TO old_meta;
+         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL UNIQUE ON CONFLICT REPLACE);
+         INSERT INTO meta SELECT * FROM old_meta;
+         DROP TABLE old_meta;
+         COMMIT;",
+    )
+    .unwrap();
+    let authority = store.protected_authority().unwrap();
+    let value: String = c.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
+    assert!(store.atomically(|tx| tx.put_note("collision", &value)).is_err());
+    assert_eq!(store.protected_authority().unwrap(), authority);
+    let retained: String = c.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
+    assert_eq!(retained, value);
+    store.atomically(|tx| tx.put_note("normal", "unique note value")).unwrap();
+    store.protected_authority().unwrap();
+}
+
+#[test]
 fn many_own_writes_keep_the_cached_catalogue_and_rows_exact() {
     let (dir, store, key) = profile();
     let second = Store::open(dir.path(), key.clone()).unwrap();

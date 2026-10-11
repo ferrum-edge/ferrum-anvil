@@ -615,6 +615,8 @@ fn data_version(conn: &Connection) -> Result<i64> {
 /// schema must not turn our catalogue-tracked writes into additional writes
 /// that leave `data_version` unchanged on this connection. Connection-level
 /// settings also cover schema installed after open or copied by a restore.
+/// Protected-row, catalogue and authority writes also specify `OR ABORT`:
+/// disabling triggers does not disable schema-level `ON CONFLICT REPLACE`.
 fn disable_schema_writes(conn: &Connection) -> Result<()> {
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, false)?;
@@ -654,7 +656,7 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
             continue;
         };
         let env = crypto::seal(key, &v2, &pt);
-        conn.execute("UPDATE secrets SET payload=?1 WHERE id=?2", params![env, id])?;
+        conn.execute("UPDATE OR ABORT secrets SET payload=?1 WHERE id=?2", params![env, id])?;
     }
     record_left(conn, "secrets_left_at_v2", left)?;
     Ok(left)
@@ -665,7 +667,7 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
 fn record_left(conn: &Connection, name: &str, left: u64) -> Result<()> {
     if left > 0 {
         conn.execute(
-            "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT OR ABORT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![name, left.to_string()],
         )?;
     } else {
@@ -732,7 +734,7 @@ fn seal_revision_owners(conn: &Connection, key: &Key) -> Result<u64> {
                 }
                 Err(e) => return Err(e),
             };
-            conn.execute("UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3", params![env, kind::REVISION, id])?;
+            conn.execute("UPDATE OR ABORT objects SET payload=?1 WHERE kind=?2 AND id=?3", params![env, kind::REVISION, id])?;
         }
     }
     record_left(conn, "revisions_left_at_v3", left)?;
@@ -842,7 +844,7 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
             }
         }
         let env = crypto::seal(key, b"anvil/v1/canary", b"ok");
-        conn.execute("INSERT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
+        conn.execute("INSERT OR ABORT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
     }
     Ok(())
 }
@@ -932,7 +934,7 @@ fn migrate_on(conn: &mut Connection, key: &Key, profile: Option<&Path>, owner_re
             ],
         };
         tx.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT OR ABORT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![v.to_string()],
         )?;
         tx.commit()?;
@@ -1117,7 +1119,7 @@ fn reseal_all(conn: &Connection, old: &Key, new: &Key) -> Result<()> {
                     }
                 };
                 let resealed = crypto::seal(new, &data, &pt);
-                conn.execute(&format!("UPDATE {table} SET payload=?1 WHERE rowid=?2"), params![resealed, rowid])?;
+                conn.execute(&format!("UPDATE OR ABORT {table} SET payload=?1 WHERE rowid=?2"), params![resealed, rowid])?;
                 after = Some(rowid);
                 #[cfg(test)]
                 rotation_tests::crash_point("after-first-row");
@@ -1252,7 +1254,7 @@ impl Store {
         // ciphertext, and do not reinterpret legacy residual payloads.
         reseal_all(&tx, &key, &new_key).map_err(|e| VaultError::Header(e.to_string()))?;
         let mut state = crate::rotation::State { header: next.clone(), binding };
-        tx.execute("UPDATE meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
+        tx.execute("UPDATE OR ABORT meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
             .map_err(|e| VaultError::Header(e.to_string()))?;
         crate::manifest::Catalogue::capture(&tx)
             .and_then(|m| m.publish_full(&tx, &new_key, &mut state))
@@ -1922,7 +1924,7 @@ impl StoreTx<'_> {
     pub fn put_note(&self, name: &str, value: &str) -> Result<()> {
         let _ = self.store.key()?;
         self.tx.execute(
-            "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT OR ABORT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![format!("{NOTE_PREFIX}{name}"), value],
         )?;
         Ok(())
@@ -2308,7 +2310,7 @@ impl Records<'_> {
             crypto::seal(&self.key, &aad("objects", kind, &id_s), &json)
         };
         self.conn.execute(
-            "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
+            "INSERT OR ABORT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(kind,id) DO UPDATE SET workspace_id=excluded.workspace_id, parent_id=excluded.parent_id, sort_key=excluded.sort_key, updated_at=excluded.updated_at, payload=excluded.payload",
             params![
                 kind,
@@ -2535,7 +2537,7 @@ impl Records<'_> {
         let owner = workspace_id.map(|w| w.to_string());
         let env = crypto::seal(&self.key, &secret_aad(&id_s, owner.as_deref()), &payload);
         self.conn.execute(
-            "INSERT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
+            "INSERT OR ABORT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
             params![id_s, owner, chrono::Utc::now().timestamp_millis(), env],
         )?;
         self.remember(crate::manifest::Entry::new("secrets", "", &id_s, owner.as_deref(), None, &env))?;
@@ -2617,7 +2619,10 @@ impl Records<'_> {
     }
 
     fn pin_blob(&self, id: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
+        self.conn.execute(
+            "INSERT OR ABORT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING",
+            params![format!("pin:{id}"), id],
+        )?;
         Ok(())
     }
 

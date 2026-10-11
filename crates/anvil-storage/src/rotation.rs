@@ -47,8 +47,11 @@ fn db(e: rusqlite::Error) -> VaultError {
 }
 pub(crate) fn write_on(conn: &Connection, state: &State) -> Result<(), VaultError> {
     let text = serde_json::to_string(state).map_err(|e| VaultError::Header(e.to_string()))?;
-    conn.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![STATE, text])
-        .map_err(db)?;
+    conn.execute(
+        "INSERT OR ABORT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![STATE, text],
+    )
+    .map_err(db)?;
     Ok(())
 }
 /// Canonical binding after rotation. Outer None means a legacy sidecar profile;
