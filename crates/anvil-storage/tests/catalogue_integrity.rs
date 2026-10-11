@@ -182,6 +182,57 @@ fn catalogue_rows_rolled_back_with_their_record_are_refused() {
 }
 
 #[test]
+fn externally_installed_triggers_cannot_change_other_records_during_own_writes() {
+    let (dir, store, key) = profile();
+    let victim = Id::new();
+    store.put_secret(&victim, None, "victim", "kept").unwrap();
+    let c = raw(&dir);
+    c.execute_batch(&format!("CREATE TRIGGER delete_victim AFTER INSERT ON secrets BEGIN DELETE FROM secrets WHERE id='{}'; END;", victim))
+        .unwrap();
+    // Warm verification after the foreign schema commit, then exercise the
+    // exact own-connection write that used to retain an incorrect cache.
+    store.protected_authority().unwrap();
+    store.put_secret(&Id::new(), None, "new", "value").unwrap();
+    store.protected_authority().unwrap();
+    assert_eq!(store.get_secret(&victim).unwrap().unwrap().1.as_str(), "kept");
+    let reopened = Store::open(dir.path(), key).unwrap();
+    reopened.put_secret(&Id::new(), None, "reopened", "value").unwrap();
+    reopened.protected_authority().unwrap();
+    assert_eq!(reopened.get_secret(&victim).unwrap().unwrap().1.as_str(), "kept");
+    // The trigger remains on disk and can still act on a foreign connection;
+    // those commits must invalidate verification and fail closed.
+    c.execute(
+        "INSERT INTO secrets SELECT ?1, workspace_id, updated_at, payload FROM secrets WHERE id=?2",
+        params![Id::new().to_string(), victim.to_string()],
+    )
+    .unwrap();
+    assert!(matches!(reopened.protected_authority(), Err(StoreError::Integrity)));
+}
+
+#[test]
+fn externally_installed_foreign_key_cascades_cannot_delete_untracked_records() {
+    let (dir, store, _) = profile();
+    let (parent, victim) = (Id::new(), Id::new());
+    store.put_secret(&parent, None, "parent", "value").unwrap();
+    store.put_secret(&victim, Some(&parent), "victim", "kept").unwrap();
+    raw(&dir)
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE secrets RENAME TO old_secrets;
+             CREATE TABLE secrets (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES secrets(id) ON DELETE CASCADE,
+                 updated_at INTEGER NOT NULL, payload BLOB NOT NULL);
+             INSERT INTO secrets SELECT * FROM old_secrets;
+             DROP TABLE old_secrets;
+             COMMIT;",
+        )
+        .unwrap();
+    store.protected_authority().unwrap();
+    store.delete_secret(&parent).unwrap();
+    store.protected_authority().unwrap();
+    assert_eq!(store.get_secret(&victim).unwrap().unwrap().1.as_str(), "kept");
+}
+
+#[test]
 fn many_own_writes_keep_the_cached_catalogue_and_rows_exact() {
     let (dir, store, key) = profile();
     let second = Store::open(dir.path(), key.clone()).unwrap();

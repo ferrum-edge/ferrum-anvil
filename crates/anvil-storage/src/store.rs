@@ -31,7 +31,7 @@
 use crate::crypto::{self, Key};
 use anvil_domain::Id;
 use parking_lot::{Mutex, MutexGuard, RwLock};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, config::DbConfig, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -611,6 +611,16 @@ fn data_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
 }
 
+/// The application schema has no triggers or foreign keys. A raw writer's
+/// schema must not turn our catalogue-tracked writes into additional writes
+/// that leave `data_version` unchanged on this connection. Connection-level
+/// settings also cover schema installed after open or copied by a restore.
+fn disable_schema_writes(conn: &Connection) -> Result<()> {
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, false)?;
+    Ok(())
+}
+
 /// The schema version recorded in `meta` (0 for a new database).
 pub(crate) fn stored_schema_version(conn: &Connection) -> Result<i64> {
     let v = conn.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).optional()?;
@@ -997,6 +1007,7 @@ fn restore_on(conn: &mut Connection, src: &Connection, key: &Key, dir: &Path) ->
         // backup API's atomic destination commit. No plaintext/key bridge.
         let staging = StagedDatabase::create(dir)?;
         let mut staged = Connection::open(&staging.path)?;
+        disable_schema_writes(&staged)?;
         staged.execute_batch("PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;")?;
         {
             let backup = rusqlite::backup::Backup::new(src, &mut staged)?;
@@ -1149,10 +1160,9 @@ impl Store {
         std::fs::create_dir_all(dir)?;
         let _data_lock = crate::profile_lock::shared(dir)?;
         let mut conn = Connection::open(dir.join(DB_FILE))?;
+        disable_schema_writes(&conn)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;",
-        )?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
         let found = stored_schema_version(&conn)?;
         if found > DB_SCHEMA_VERSION {
