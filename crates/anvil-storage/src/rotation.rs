@@ -151,7 +151,10 @@ fn scrub_locked(dir: &Path, conn: &Connection, header: &ProfileHeader, key: &Key
     // rotation, then empty the WAL. No supported reader holds a snapshot.
     let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0)).map_err(db)?;
     if busy != 0 {
-        tracing::warn!(dir = %dir.display(), "the WAL could not be fully checkpointed after rotation");
+        // SQLite reports a blocked checkpoint as a successful PRAGMA with
+        // a nonzero status. Keep the old sidecar as the unfinished-scrub
+        // marker so the next unlock retries after the reader releases it.
+        return Err(VaultError::Header("the WAL could not be fully checkpointed after rotation; cleanup remains pending".into()));
     }
     for path in superseded_files(dir, header, key)? {
         match std::fs::remove_file(&path) {
