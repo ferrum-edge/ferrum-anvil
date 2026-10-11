@@ -200,6 +200,7 @@ fn checkpoints_keep_current_unlock_policy_and_reject_pre_rotation_key() {
     store.put_blob(b"old data").unwrap();
     let old_checkpoint = store.checkpoint("old").unwrap();
     rotate(&store);
+    assert!(!old_checkpoint.exists(), "a checkpoint sealed with the old key is removed after the commit");
     let reopened = open_new(dir.path());
     assert!(reopened.restore_checkpoint(&old_checkpoint).is_err());
     let checkpoint = reopened.checkpoint("rotated").unwrap();
@@ -240,6 +241,13 @@ fn abrupt_process_exit_has_only_old_or_new_committed_generation() {
         let h = vault::read_header(dir.path()).unwrap();
         let password = if stage == "after-commit" { NEW } else { OLD };
         let key = vault::unlock_with_passphrase(&h, password).unwrap();
+        if stage == "after-commit" {
+            // The process died before the scrub: the sidecar still wraps the
+            // old key, and is ignored. The next unlock's retry removes it.
+            assert!(vault::unlock_with_passphrase(&sidecar(dir.path()), OLD).is_ok());
+            crate::rotation::scrub_superseded(dir.path(), &key).unwrap();
+            assert_scrubbed(dir.path());
+        }
         let reopened = Store::open(dir.path(), key).unwrap();
         assert_eq!(reopened.get_blob(&blob).unwrap().unwrap().as_slice(), b"attachment marker");
         assert_eq!(rows(&reopened.conn().unwrap()).len(), 10);
@@ -333,4 +341,66 @@ fn authenticated_legacy_residual_rows_are_resealed_without_becoming_readable() {
         };
         assert!(crypto::open(&new, &current_ad, &env).is_err());
     }
+}
+
+fn sidecar(dir: &Path) -> vault::ProfileHeader {
+    serde_json::from_slice(&std::fs::read(vault::header_path(dir)).unwrap()).unwrap()
+}
+fn assert_scrubbed(dir: &Path) {
+    let canonical = vault::read_header(dir).unwrap();
+    let file = sidecar(dir);
+    assert_eq!(file.key_check, canonical.key_check, "the sidecar names only the current key");
+    assert_eq!(serde_json::to_value(&file.passphrase_wrap).unwrap(), serde_json::to_value(&canonical.passphrase_wrap).unwrap());
+    assert_eq!(serde_json::to_value(&file.recovery_wrap).unwrap(), serde_json::to_value(&canonical.recovery_wrap).unwrap());
+    assert!(vault::unlock_with_passphrase(&file, OLD).is_err(), "the old passphrase opens nothing on disk");
+}
+
+#[test]
+fn rotation_scrubs_old_key_material_outside_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, old, old_header) = profile(dir.path());
+    store.put_blob(b"pre-rotation data").unwrap();
+    let old_checkpoint = store.checkpoint("before").unwrap();
+    let staging = dir.path().join("checkpoint-restore.0123.tmp");
+    std::fs::write(&staging, b"interrupted restore copy").unwrap();
+    let unrelated = dir.path().join("checkpoints").join("notes.txt");
+    std::fs::write(&unrelated, b"not a checkpoint").unwrap();
+    // The sidecar holds wraps of the old key under the old passphrase and
+    // recovery key: with disk access they would open the old checkpoint.
+    assert_eq!(vault::unlock_with_passphrase(&sidecar(dir.path()), OLD).unwrap().as_bytes(), old.as_bytes());
+    rotate(&store);
+    assert_scrubbed(dir.path());
+    let raw = std::fs::read_to_string(vault::header_path(dir.path())).unwrap();
+    for wrap in [&old_header.passphrase_wrap, &old_header.recovery_wrap] {
+        assert!(!raw.contains(&wrap.as_ref().unwrap().envelope), "no old wrap is left in the sidecar");
+    }
+    assert!(!old_checkpoint.exists() && !staging.exists());
+    assert!(unrelated.exists(), "only checkpoints sealed with another key are removed");
+    let wal = dir.path().join(format!("{DB_FILE}-wal"));
+    assert!(!wal.exists() || std::fs::metadata(&wal).unwrap().len() == 0, "pre-rotation WAL frames are gone");
+    // A checkpoint under the new key is kept by later scrubs.
+    let reopened = open_new(dir.path());
+    let current = reopened.checkpoint("after").unwrap();
+    let key = vault::unlock_with_passphrase(&vault::read_header(dir.path()).unwrap(), NEW).unwrap();
+    crate::rotation::scrub_superseded(dir.path(), &key).unwrap();
+    assert!(current.exists());
+    // The stale key never drives a scrub.
+    std::fs::copy(&current, dir.path().join("checkpoints").join("copy.db")).unwrap();
+    crate::rotation::scrub_superseded(dir.path(), &old).unwrap();
+    assert!(current.exists());
+}
+
+#[test]
+fn a_legacy_checkpoint_left_by_an_unfinished_scrub_is_removed_at_the_next_unlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _, _) = profile(dir.path());
+    store.put_blob(b"pre-rotation data").unwrap();
+    let saved = store.checkpoint("before").unwrap();
+    let kept = std::fs::read(&saved).unwrap();
+    rotate(&store);
+    // As if the process had died before the scrub reached it.
+    std::fs::write(&saved, &kept).unwrap();
+    let key = vault::unlock_with_passphrase(&vault::read_header(dir.path()).unwrap(), NEW).unwrap();
+    crate::rotation::scrub_superseded(dir.path(), &key).unwrap();
+    assert!(!saved.exists());
 }

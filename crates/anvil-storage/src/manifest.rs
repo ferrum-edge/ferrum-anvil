@@ -398,7 +398,7 @@ impl Manifest {
 /// key canary, without reading the catalogue itself: `None` for a profile
 /// with no catalogue authority (legacy or pre-catalogue). O(1).
 pub(crate) fn authenticated_root(conn: &Connection, key: &Key) -> Result<Option<String>> {
-    let state = rotation::read_on(conn).map_err(|_| StoreError::Integrity)?;
+    let state = rotation::read_checked(conn)?;
     let root = state.as_ref().and_then(|s| s.header.rotation.as_ref()).and_then(|p| p.manifest_root.clone());
     let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
     let Some(root) = root else {
@@ -441,7 +441,7 @@ pub(crate) fn load(conn: &Connection, key: &Key) -> Result<Option<(String, Catal
 pub(crate) fn convert_legacy(conn: &Connection, key: &Key) -> Result<()> {
     let text: Option<String> = conn.query_row("SELECT value FROM meta WHERE key=?1", [LEGACY_META], |r| r.get(0)).optional()?;
     let Some(text) = text else { return Ok(()) };
-    let mut state = rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.ok_or(StoreError::Integrity)?;
+    let mut state = rotation::read_checked(conn)?.ok_or(StoreError::Integrity)?;
     let root = state.header.rotation.as_ref().and_then(|p| p.manifest_root.clone()).ok_or(StoreError::Integrity)?;
     vault::check_current(&state.header, &state.header, key).map_err(|_| StoreError::Integrity)?;
     let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;

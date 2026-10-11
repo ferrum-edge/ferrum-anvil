@@ -90,8 +90,13 @@ pub enum StoreError {
         /// The error the transaction was already failing with, if any.
         original: Option<Box<StoreError>>,
     },
+    /// Another connection or process held the database or the profile's
+    /// key-change fence past the bounded wait. Nothing was changed and the
+    /// store keeps its key; the operation may be retried.
+    #[error("the profile is busy; try again ({0})")]
+    Busy(String),
     #[error("database: {0}")]
-    Db(#[from] rusqlite::Error),
+    Db(rusqlite::Error),
     #[error("serialization: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("io: {0}")]
@@ -99,6 +104,54 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Lock contention is [`StoreError::Busy`]; every other SQLite failure stays
+/// [`StoreError::Db`].
+impl From<rusqlite::Error> for StoreError {
+    fn from(e: rusqlite::Error) -> Self {
+        match e.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => StoreError::Busy(e.to_string()),
+            _ => StoreError::Db(e),
+        }
+    }
+}
+
+impl StoreError {
+    /// Evidence that the held key no longer matches the profile or that its
+    /// protected state was altered: the only failures that lock the store.
+    fn is_integrity_evidence(&self) -> bool {
+        matches!(self, StoreError::Integrity | StoreError::ObjectIntegrity { .. })
+    }
+
+    /// An operational failure (contention, I/O, a full disk, an interrupted
+    /// statement) that changed nothing and may succeed when retried. The store
+    /// keeps its key.
+    pub fn is_retryable(&self) -> bool {
+        use rusqlite::ErrorCode as C;
+        match self {
+            StoreError::Busy(_) | StoreError::Io(_) => true,
+            StoreError::Db(e) => {
+                matches!(
+                    e.sqlite_error_code(),
+                    Some(C::SystemIoFailure | C::DiskFull | C::OperationInterrupted | C::CannotOpen | C::OutOfMemory)
+                )
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The shared key-change fence of the profile in `dir` (see `profile_lock`),
+/// its bounded wait running out reported as [`StoreError::Busy`].
+fn data_fence(dir: &Path) -> Result<std::fs::File> {
+    crate::profile_lock::shared(dir)
+        .map_err(|e| if crate::profile_lock::is_busy(&e) { StoreError::Busy(e.to_string()) } else { StoreError::Io(e) })
+}
+
+/// How often [`Store::conn`] retries its key check when SQLite reports
+/// contention after its own busy timeout, and the first pause between tries.
+const PREFLIGHT_RETRIES: u32 = 3;
+const PREFLIGHT_BACKOFF: Duration = Duration::from_millis(25);
 
 fn because(cause: &Option<rusqlite::Error>) -> String {
     cause.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
@@ -805,7 +858,7 @@ fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
         if stored_schema_version(conn)? < 4 {
             return Err(StoreError::Integrity);
         }
-        let state = crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.ok_or(StoreError::Integrity)?;
+        let state = crate::rotation::read_checked(conn)?.ok_or(StoreError::Integrity)?;
         crate::vault::check_current(&state.header, &state.header, key).map_err(|_| StoreError::Integrity)?;
         if state.header.rotation.as_ref().is_some_and(|p| p.manifest_root.is_some()) {
             return Err(StoreError::Integrity);
@@ -814,7 +867,7 @@ fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
         crypto::open(key, b"anvil/v2/rotated-canary", &env).map_err(|_| StoreError::Integrity)?;
     } else {
         let _ = crate::manifest::authenticated_root(conn, key)?;
-        if crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.is_some() {
+        if crate::rotation::read_checked(conn)?.is_some() {
             return Err(StoreError::Integrity);
         }
         let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
@@ -835,7 +888,7 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
     if !check_canary(conn, key)? {
         // A missing canary in an existing populated or enrolled store is
         // corruption, never an invitation to enroll an attacker-selected key.
-        if crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?.is_some() {
+        if crate::rotation::read_checked(conn)?.is_some() {
             return Err(StoreError::Integrity);
         }
         for table in ["objects", "secrets", "blobs", "history", "load_reports"] {
@@ -914,7 +967,7 @@ fn migrate_on(conn: &mut Connection, key: &Key, profile: Option<&Path>, owner_re
             }
             Migration::SecretOwners => vec![(reseal_secret_owners(&tx, key)?, "vault secrets that did not decrypt were left unchanged")],
             Migration::Manifest => {
-                if let Some(mut state) = crate::rotation::read_on(&tx).map_err(|_| StoreError::Integrity)? {
+                if let Some(mut state) = crate::rotation::read_checked(&tx)? {
                     if !owner_restore {
                         return Err(StoreError::PolicyEnrollmentRequired);
                     }
@@ -1002,7 +1055,7 @@ fn check_not_set_back(conn: &Connection, key: &Key) -> Result<()> {
 /// the copy and migrate it. The checkpoint `src` is itself the copy a
 /// migration would keep, so it takes none.
 fn restore_on(conn: &mut Connection, src: &Connection, key: &Key, dir: &Path) -> Result<()> {
-    let current = crate::rotation::read_on(conn).map_err(|_| StoreError::Integrity)?;
+    let current = crate::rotation::read_checked(conn)?;
     if let Some(state) = current {
         // A disk-backed ciphertext staging copy keeps large checkpoints from
         // exhausting memory, and preserves current credentials before the
@@ -1129,12 +1182,37 @@ fn reseal_all(conn: &Connection, old: &Key, new: &Key) -> Result<()> {
     Ok(())
 }
 
+/// Re-encrypt every payload on `tx` from `old` to `new` and publish the
+/// rotated header `next` (bound to `binding`) with a new catalogue, all in
+/// `tx`. `next` becomes the header as published.
+fn prepare_rotation(
+    tx: &Transaction<'_>,
+    old: &Key,
+    new: &Key,
+    next: &mut crate::vault::ProfileHeader,
+    binding: Option<serde_json::Value>,
+) -> std::result::Result<(), crate::vault::VaultError> {
+    use crate::vault::VaultError;
+    crate::vault::bind_rotation(next, new, &binding);
+    // Abort on the first unauthenticatable row. Do not retain old-key
+    // ciphertext, and do not reinterpret legacy residual payloads.
+    reseal_all(tx, old, new).map_err(|e| VaultError::Header(e.to_string()))?;
+    let mut state = crate::rotation::State { header: next.clone(), binding };
+    tx.execute("UPDATE OR ABORT meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
+        .map_err(|e| VaultError::Header(e.to_string()))?;
+    crate::manifest::Catalogue::capture(tx)
+        .and_then(|m| m.publish_full(tx, new, &mut state))
+        .map_err(|e| VaultError::Header(e.to_string()))?;
+    *next = state.header;
+    Ok(())
+}
+
 impl Store {
     /// Authenticate the current ciphertext epoch before unlock performs any
     /// header upgrade or credential-store cleanup. An authentic historical
     /// metadata row cannot authorize current data encrypted with a newer key.
     pub fn verify_profile_key(dir: &Path, key: &Key) -> Result<()> {
-        let _guard = crate::profile_lock::shared(dir)?;
+        let _guard = data_fence(dir)?;
         let path = dir.join(DB_FILE);
         if !path.exists() {
             return Ok(());
@@ -1160,7 +1238,9 @@ impl Store {
 
     fn open_inner(dir: &Path, key: Key, rotation_only: bool) -> Result<Store> {
         std::fs::create_dir_all(dir)?;
-        let _data_lock = crate::profile_lock::shared(dir)?;
+        // A file system without lock support is refused here, once, with an
+        // error saying so, rather than at every later operation.
+        let _data_lock = data_fence(dir)?;
         let mut conn = Connection::open(dir.join(DB_FILE))?;
         disable_schema_writes(&conn)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -1172,9 +1252,8 @@ impl Store {
         }
         // The key is checked before a migration re-seals anything with it.
         verify_key_on(&conn, &key)?;
-        let pre_catalogue = crate::rotation::read_on(&conn)
-            .map_err(|_| StoreError::Integrity)?
-            .is_some_and(|s| s.header.rotation.as_ref().is_none_or(|p| p.manifest_root.is_none()));
+        let pre_catalogue =
+            crate::rotation::read_checked(&conn)?.is_some_and(|s| s.header.rotation.as_ref().is_none_or(|p| p.manifest_root.is_none()));
         if pre_catalogue && !rotation_only {
             return Err(StoreError::PolicyEnrollmentRequired);
         }
@@ -1184,7 +1263,7 @@ impl Store {
         let snapshot = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let loaded = crate::manifest::load(&snapshot, &key)?;
         let manifest_required = loaded.is_some();
-        if !rotation_only && !manifest_required && crate::rotation::read_on(&snapshot).map_err(|_| StoreError::Integrity)?.is_some() {
+        if !rotation_only && !manifest_required && crate::rotation::read_checked(&snapshot)?.is_some() {
             return Err(StoreError::PolicyEnrollmentRequired);
         }
         let data_version = data_version(&snapshot)?;
@@ -1203,9 +1282,12 @@ impl Store {
     }
 
     /// Deliberately replace the data key, wrapped header, and linked policy
-    /// in one durable SQLite commit. The successful store is left locked;
-    /// reopen the App to refresh its immutable capability identity.
-    /// The caller must save and acknowledge `recovery` before invoking this.
+    /// in one durable SQLite commit. The new key is wrapped by `passphrase`
+    /// and `recovery`; a keychain profile becomes a passphrase profile (use
+    /// [`Store::rotate_keychain_data_key`] to keep it in the keychain). The
+    /// successful store is left locked; reopen the App to refresh its
+    /// immutable capability identity. The caller must save and acknowledge
+    /// `recovery` before invoking this.
     pub fn rotate_data_key<F>(
         &self,
         passphrase: &str,
@@ -1213,6 +1295,58 @@ impl Store {
         kdf: crate::KdfParams,
         prepare_binding: F,
     ) -> std::result::Result<crate::vault::KeychainConversion, crate::vault::VaultError>
+    where
+        F: FnOnce(
+            &crate::vault::ProfileHeader,
+            &Key,
+            &Key,
+            Option<Option<serde_json::Value>>,
+        ) -> std::result::Result<Option<serde_json::Value>, crate::vault::VaultError>,
+    {
+        let target = crate::vault::RotationTarget::Passphrase { passphrase, recovery, kdf };
+        let keychain_entry_removed = self.rotate_to(target, prepare_binding)?;
+        Ok(crate::vault::KeychainConversion {
+            recovery_key: zeroize::Zeroizing::new(recovery.as_str().to_string()),
+            keychain_entry_removed,
+        })
+    }
+
+    /// [`Store::rotate_data_key`] for an OS-keychain profile that stays one:
+    /// the new key is stored in a new OS credential-store entry before the
+    /// commit, and the old entry is retired after it. A passphrase profile is
+    /// refused. There is no recovery key, as for any keychain profile.
+    pub fn rotate_keychain_data_key<F>(
+        &self,
+        prepare_binding: F,
+    ) -> std::result::Result<crate::vault::KeychainRotation, crate::vault::VaultError>
+    where
+        F: FnOnce(
+            &crate::vault::ProfileHeader,
+            &Key,
+            &Key,
+            Option<Option<serde_json::Value>>,
+        ) -> std::result::Result<Option<serde_json::Value>, crate::vault::VaultError>,
+    {
+        let keychain_entry_removed = self.rotate_to(crate::vault::RotationTarget::Keychain, prepare_binding)?;
+        Ok(crate::vault::KeychainRotation { keychain_entry_removed })
+    }
+
+    /// Rotate to `target`. Returns whether every retired credential-store
+    /// entry is gone.
+    ///
+    /// Crash safety: the new wrapped header (or the name of the new keychain
+    /// entry, written before the commit) commits with the re-encrypted data.
+    /// Before the commit the old credentials keep working; after it, unlock
+    /// reads the new header from the database. Old-key material outside the
+    /// database (the `profile.json` sidecar's wraps, checkpoints sealed with
+    /// an earlier key, WAL frames) is scrubbed only after the commit, so an
+    /// interruption there can never cost the new key; the scrub is retried at
+    /// the next unlock ([`crate::rotation::scrub_superseded`]).
+    fn rotate_to<F>(
+        &self,
+        target: crate::vault::RotationTarget<'_>,
+        prepare_binding: F,
+    ) -> std::result::Result<bool, crate::vault::VaultError>
     where
         F: FnOnce(
             &crate::vault::ProfileHeader,
@@ -1248,31 +1382,39 @@ impl Store {
         vault::check_current(&h, &h, &key)?;
         let new_key = Key::random();
         let binding = prepare_binding(&h, &key, &new_key, state.map(|s| s.binding))?;
-        let mut next = vault::rotated_header(&h, &new_key, passphrase, recovery, kdf)?;
-        vault::bind_rotation(&mut next, &new_key, &binding);
-        // Abort on the first unauthenticatable row. Do not retain old-key
-        // ciphertext, and do not reinterpret legacy residual payloads.
-        reseal_all(&tx, &key, &new_key).map_err(|e| VaultError::Header(e.to_string()))?;
-        let mut state = crate::rotation::State { header: next.clone(), binding };
-        tx.execute("UPDATE OR ABORT meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
-            .map_err(|e| VaultError::Header(e.to_string()))?;
-        crate::manifest::Catalogue::capture(&tx)
-            .and_then(|m| m.publish_full(&tx, &new_key, &mut state))
-            .map_err(|e| VaultError::Header(e.to_string()))?;
-        next = state.header;
+        let keychain = matches!(target, vault::RotationTarget::Keychain);
+        let mut next = match target {
+            vault::RotationTarget::Passphrase { passphrase, recovery, kdf } => {
+                vault::rotated_header(&h, &new_key, passphrase, recovery, kdf)?
+            }
+            vault::RotationTarget::Keychain => vault::rotated_keychain_header(&h, &new_key)?,
+        };
+        if let Err(e) = prepare_rotation(&tx, &key, &new_key, &mut next, binding) {
+            // Nothing committed: the staged keychain entry protects nothing.
+            if keychain {
+                vault::discard_staged_keychain(&next);
+            }
+            return Err(e);
+        }
         #[cfg(test)]
         rotation_tests::crash_point("before-commit");
+        // A failed commit keeps a staged keychain entry: a commit reported as
+        // failed may still be found durable when the database is reopened,
+        // and then that entry is the only copy of the key.
         tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
         #[cfg(test)]
         rotation_tests::crash_point("after-commit");
         *self.key.write() = None;
         self.forget_catalogue();
+        // Still under the exclusive fence: no supported process reads or
+        // checkpoints meanwhile.
+        crate::rotation::scrub_after_commit(&self.dir, &conn, &next, &new_key);
+        drop(conn);
         drop(_data_lock);
         // Historical sidecars are deliberately not a publication bridge:
         // unlock discovers the new wrapped key directly from the database.
-        let keychain_entry_removed =
-            if next.keychain_account.is_some() { vault::retire_rotated_keychain(&self.dir, &mut next, &new_key).is_ok() } else { true };
-        Ok(vault::KeychainConversion { recovery_key: zeroize::Zeroizing::new(recovery.as_str().to_string()), keychain_entry_removed })
+        let retired = next.rotation.as_ref().is_some_and(|p| !p.retired_keychain.is_empty());
+        Ok(if retired { vault::retire_rotated_keychain(&self.dir, &mut next, &new_key).is_ok() } else { true })
     }
 
     pub fn dir(&self) -> &Path {
@@ -1320,31 +1462,64 @@ impl Store {
     /// The connection for one ordinary operation. It waits for a transaction
     /// open on another thread to finish, so it never runs inside a
     /// transaction it does not own.
+    ///
+    /// While unlocked it first checks the held key against the database's
+    /// canary and catalogue, under the shared key-change fence. Only evidence
+    /// that the key no longer opens this profile, or that its protected state
+    /// was altered, drops the key (`Locked`). Contention is retried a few
+    /// times; it and every other operational failure (I/O, a full disk, the
+    /// fence's bounded wait) keep the key and are returned for the caller to
+    /// retry ([`StoreError::is_retryable`]). Nothing runs on the connection
+    /// unless the check passed.
     fn conn(&self) -> Result<ConnectionGuard<'_>> {
         if *self.tx_owner.lock() == Some(std::thread::current().id()) {
             return Err(StoreError::TransactionActive);
         }
         let conn = self.conn.lock();
-        let data_lock = crate::profile_lock::shared(&self.dir)?;
+        let data_lock = data_fence(&self.dir)?;
         // A transaction still open here was left by a failed rollback and
         // belongs to no caller: end it rather than run inside it.
         end_transaction(&conn, Ok(()))?;
         let held_key = self.key.read().clone();
         if let Some(key) = held_key {
-            // The shared file fence prevents rotation between this check and
-            // the last SQL statement, including writes without encryption.
-            conn.execute_batch("BEGIN DEFERRED")?;
-            let valid = check_canary(&conn, &key).and_then(|valid| {
-                self.check_manifest_requirement(&conn, &key)?;
-                Ok(valid)
-            });
-            conn.execute_batch("ROLLBACK")?;
-            if !matches!(valid, Ok(true)) {
-                *self.key.write() = None;
-                return Err(StoreError::Locked);
+            let mut pause = PREFLIGHT_BACKOFF;
+            let mut retries = 0;
+            loop {
+                match self.check_held_key(&conn, &key) {
+                    Ok(()) => break,
+                    Err(e) if e.is_integrity_evidence() => {
+                        *self.key.write() = None;
+                        return Err(StoreError::Locked);
+                    }
+                    Err(StoreError::Busy(_)) if retries < PREFLIGHT_RETRIES => {
+                        retries += 1;
+                        std::thread::sleep(pause);
+                        pause *= 2;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
         Ok(ConnectionGuard { conn, _data_lock: data_lock })
+    }
+
+    /// The held key still opens the database on `conn` and its catalogue is
+    /// still required where it was. The shared file fence held by the caller
+    /// prevents rotation between this check and the operation's last
+    /// statement, including writes without encryption.
+    fn check_held_key(&self, conn: &Connection, key: &Key) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fault) = availability_tests::PREFLIGHT_FAULT.with_borrow_mut(|f| f.pop()) {
+            return Err(fault);
+        }
+        conn.execute_batch("BEGIN DEFERRED")?;
+        let checked = check_canary(conn, key).and_then(|valid| {
+            self.check_manifest_requirement(conn, key)?;
+            // A canary missing from a store opened with a key was removed.
+            if valid { Ok(()) } else { Err(StoreError::Integrity) }
+        });
+        let ended = end_transaction(conn, Ok(()));
+        checked.and(ended)
     }
 
     fn check_manifest_requirement(&self, conn: &Connection, key: &Key) -> Result<()> {
@@ -1425,7 +1600,7 @@ impl Store {
             if let Some(m) = read.manifest.borrow().as_ref() {
                 self.verify_rows(read.conn, m)?;
             }
-            let state = crate::rotation::read_on(read.conn).map_err(|_| StoreError::Integrity)?;
+            let state = crate::rotation::read_checked(read.conn)?;
             if let Some(s) = &state {
                 crate::vault::verify_rotation_binding(&s.header, &self.key()?, &s.binding).map_err(|_| StoreError::Integrity)?;
             }
@@ -1730,7 +1905,7 @@ impl Store {
                     let Some(manifest) = manifest.filter(|m| m.dirty()) else {
                         return tx.tx.commit().map(|()| r).map_err(StoreError::from);
                     };
-                    let mut state = crate::rotation::read_on(&tx.tx).map_err(|_| StoreError::Integrity)?.ok_or(StoreError::Integrity)?;
+                    let mut state = crate::rotation::read_checked(&tx.tx)?.ok_or(StoreError::Integrity)?;
                     // Take the cache out, so the published catalogue is
                     // updated in place; it is put back only once committed.
                     let cached = self.catalogue.lock().take();
@@ -2003,7 +2178,7 @@ impl StoreRead<'_> {
         if let Some(m) = self.manifest.borrow().as_ref() {
             self.store.verify_rows(self.conn, m)?;
         }
-        if let Some(s) = crate::rotation::read_on(self.conn).map_err(|_| StoreError::Integrity)? {
+        if let Some(s) = crate::rotation::read_checked(self.conn)? {
             crate::vault::verify_rotation_binding(&s.header, &self.store.key()?, &s.binding).map_err(|_| StoreError::Integrity)?;
         }
         Ok(())
@@ -2822,3 +2997,7 @@ impl Records<'_> {
 #[cfg(test)]
 #[path = "rotation_tests.rs"]
 mod rotation_tests;
+
+#[cfg(test)]
+#[path = "availability_tests.rs"]
+mod availability_tests;

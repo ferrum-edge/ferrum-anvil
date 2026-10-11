@@ -620,6 +620,7 @@ dependencies = [
  "hmac 0.13.0",
  "keyring",
  "keyring-core",
+ "libc",
  "parking_lot",
  "rand 0.10.3",
  "rusqlite",

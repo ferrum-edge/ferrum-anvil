@@ -570,7 +570,13 @@ anvil --profile PROFILE --passphrase-stdin profile rotate-key \
 Enter the current password on the first stdin line and a new password of at
 least eight characters, different from the current one, on the second. Neither
 is supplied on the command line. For an OS-keychain profile, omit `--passphrase-stdin`; the matching
-accessible OS credential unlocks it, and stdin supplies only the new password.
+accessible OS credential unlocks it, and stdin supplies only the new password,
+which converts the profile to passphrase protection. To keep an OS-keychain
+profile in the keychain, also omit `--new-passphrase-stdin`
+(`anvil --profile PROFILE profile rotate-key --confirm-rotation`): the new key
+is stored in a new OS credential entry before the commit, the old entry is
+retired after it, and there is no recovery key to save, as for any keychain
+profile.
 For a linked profile that requires fresh provider login, use its offline
 recovery key instead: omit `--passphrase-stdin` and add
 `--recovery-key-stdin` to `profile rotate-key`. Enter the current recovery key
@@ -584,8 +590,9 @@ that saved record onto the next stdin line to acknowledge it. Output failure,
 EOF or a mismatched acknowledgment aborts before rotation. After confirmation,
 reopen the profile. The old password,
 old recovery key and old keychain entry cannot decrypt the rotated active
-ciphertext. Keychain profiles become passphrase profiles; cleanup of the old
-entry is retried on unlock if the OS refuses it. Cleanup is serialized across
+ciphertext. A keychain profile given a new passphrase becomes a passphrase
+profile; one rotated without it stays in the keychain under a new entry. Either
+way, cleanup of the old entry is retried on unlock if the OS refuses it. Cleanup is serialized across
 Anvil processes and leaves a replacement entry whose key does not match when
 checked. Credential changes made concurrently by external OS tools are outside
 Anvil's file fence.
@@ -617,14 +624,59 @@ rotation holds its exclusive counterpart. Stale handles check the current
 canary and cannot write using the old key. **Older already-open builds do not
 understand this fence and must be closed before rotation.** Schema 4 refuses
 their later opens. Rotation does not revoke plaintext or keys already copied
-into another process's memory. Filesystems without the required file locks
-are refused rather than running an unfenced rotation.
+into another process's memory. A profile on a file system without the
+required file locks is refused when it is opened, with an error naming the
+missing lock support, rather than running an unfenced rotation.
+
+Waiting for the fence is bounded (15 seconds). An operation that meets a
+longer rotation in another process fails with a retryable "profile is busy"
+error (`StoreError::Busy`) instead of hanging. Before every operation an
+unlocked store re-checks its key against the database's canary and catalogue.
+Only evidence against the key locks the profile: a canary or catalogue that
+does not authenticate under it, a missing canary or catalogue, or a rotated
+key. SQLite contention (after the 5-second busy timeout and a few short
+retries), I/O errors, a full disk and the fence's bounded wait keep the key
+and are returned to the caller, which may retry
+(`StoreError::is_retryable`); nothing runs unless the check passed.
 
 Normal encrypted exports, backups and imports keep their existing formats
 and independent password; they do not transfer this device's keys or identity
-policy. A pre-rotation raw database checkpoint uses the old data key and is
-refused by the current profile. Recover that historical data in an isolated
-copy of its matching historical profile and use a portable export/import.
+policy.
+
+Once the rotation has committed, still under the exclusive fence, Anvil removes
+the old key material it keeps outside the canonical state, so the old password
+or recovery key plus disk access cannot decrypt a pre-rotation copy left in the
+profile directory:
+
+- `profile.json` is atomically replaced (synced temporary file, rename,
+  directory sync) with the committed header, so it no longer holds passphrase
+  or recovery wraps of the old key. It is never read for unlock once the
+  canonical state exists.
+- Checkpoints in `checkpoints/` sealed with another key are deleted, as are
+  interrupted checkpoint-restore staging copies. A checkpoint whose key cannot
+  be told (unreadable, or without a canary) and other files are kept.
+  Checkpoints taken after the rotation are kept.
+- The WAL is checkpointed with `TRUNCATE`, so the database file's pages from
+  before the rotation are overwritten with the committed ones and the WAL holds
+  no earlier frames (`secure_delete` already zeroes freed pages).
+- A legacy `identity.json`, sealed under the old key, is deleted once the
+  policy is canonical.
+
+The scrub runs only after the commit and never touches the canonical state,
+so an interruption cannot cost the new key: unlock reads the new header from
+the database whatever `profile.json` holds. If the process stops between the
+commit and the scrub, the old material stays until the next unlock with the
+current key, which repeats the scrub (`profile.json` is rewritten last, so a
+sidecar still holding other wraps marks an unfinished scrub). Deleted files
+are unlinked, not securely erased: SSDs and copy-on-write file systems such as
+APFS can keep freed blocks, so treat the old credential as compromised for any
+copy of the profile made before the rotation (backups, snapshots, Time Machine)
+and rely on full-disk encryption for freed blocks.
+
+Pre-rotation checkpoints are deleted rather than re-encrypted: under the new
+key they would only let a restore bring back data the owner rotated away from,
+and the current profile already refused them. Keep a portable backup, or a copy
+outside the profile directory, before rotating if the history matters.
 A same-key checkpoint created after rotation can restore historical data,
 while the checkpoint API preserves the current unlock header and identity
 policy.
@@ -635,7 +687,7 @@ linked or a deleted policy. Ordinary unlock and implicit rotation fail closed.
 Use a trusted historical recovery copy, or deliberately enroll a replacement
 unlinked policy from the lock screen. The backend asks for native consent and
 requires saving a new recovery key before re-encrypting the data. Keychain-only
-profiles become passphrase profiles. CLI enrollment is equally explicit:
+profiles enrolled this way become passphrase profiles. CLI enrollment is equally explicit:
 
 ```sh
 anvil --profile PROFILE --passphrase-stdin profile enroll-policy \
@@ -650,9 +702,11 @@ that the profile was never linked. Missing canonical state on an already enrolle
 profile is refused; it cannot silently reenroll.
 
 Linking, unlinking, and changes to the fresh-login requirement also rotate the
-data key atomically with the new policy. App-service callers supply a new
-passphrase and pre-delivered, acknowledged recovery credential through
-`PolicyRotation`. An authentic older weaker policy has an older key and fails
+data key atomically with the new policy. App-service callers choose the new
+protection with `PolicyRotation`: `Passphrase` takes a new passphrase and a
+pre-delivered, acknowledged recovery credential (an OS-keychain profile then
+becomes a passphrase profile); `Keychain` keeps an OS-keychain profile in the
+keychain under a new entry. An authentic older weaker policy has an older key and fails
 against the current ciphertext canary. Stale application handles cannot write.
 
 ### Authenticated current records

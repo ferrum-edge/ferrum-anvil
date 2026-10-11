@@ -155,6 +155,26 @@ pub(crate) fn read_binding(dir: &Path) -> Result<Option<BindingFile>> {
     Ok(Some(f))
 }
 
+/// Remove the legacy `identity.json` sidecar once the policy is canonical in
+/// the database: it is never read again, and its sealed copy is under the
+/// key of the rotation that made the policy canonical. Best effort, retried
+/// at each unlock.
+pub(crate) fn remove_legacy_sidecar(dir: &Path) {
+    let removed = (|| -> Result<()> {
+        let _guard = anvil_storage::rotation::profile_data_guard(dir)?;
+        if anvil_storage::rotation::binding(dir)?.is_none() {
+            return Ok(());
+        }
+        match std::fs::remove_file(path(dir)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    })();
+    if let Err(e) = removed {
+        tracing::warn!(dir = %dir.display(), error = %e, "the legacy identity sidecar could not be removed yet");
+    }
+}
+
 /// Open the sealed copy with the data key and require the plaintext hint to
 /// match it field for field.
 pub(crate) fn verify_binding(f: &BindingFile, h: &ProfileHeader, dek: &Key) -> Result<LinkedIdentity> {

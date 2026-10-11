@@ -36,7 +36,10 @@ pub struct KeychainEntryName {
 }
 
 fn leftover_keychain_entry(h: &ProfileHeader) -> Option<KeychainEntryName> {
-    let account = h.keychain_account.as_ref().filter(|_| h.protection == ProtectionMode::Passphrase)?;
+    let account = match &h.rotation {
+        Some(policy) => &policy.retired_keychain.first()?.account,
+        None => h.keychain_account.as_ref().filter(|_| h.protection == ProtectionMode::Passphrase)?,
+    };
     Some(KeychainEntryName { service: vault::KEYCHAIN_SERVICE.into(), account: account.clone() })
 }
 
@@ -50,13 +53,46 @@ pub enum Unlock<'a> {
     Keychain,
 }
 
-/// Policy mutations create a new encryption epoch. Deliver and acknowledge the
-/// replacement recovery credential before invoking them; they also convert an
-/// OS-keychain-only profile to explicit passphrase protection.
-pub struct PolicyRotation<'a> {
-    pub new_passphrase: &'a str,
-    pub recovery: &'a vault::RotationRecoveryKey,
-    pub kdf: KdfParams,
+/// Policy mutations create a new encryption epoch, protected as chosen here.
+pub enum PolicyRotation<'a> {
+    /// A new passphrase and replacement recovery credential. Deliver and
+    /// acknowledge the recovery credential before invoking the mutation. An
+    /// OS-keychain profile becomes a passphrase profile.
+    Passphrase { new_passphrase: &'a str, recovery: &'a vault::RotationRecoveryKey, kdf: KdfParams },
+    /// OS-keychain profiles only: the new key goes to a new OS credential-store
+    /// entry and the profile stays keychain-protected (no recovery key).
+    Keychain,
+}
+
+impl PolicyRotation<'_> {
+    fn check(&self) -> Result<()> {
+        match self {
+            PolicyRotation::Passphrase { new_passphrase, .. } => check_new_passphrase(new_passphrase),
+            PolicyRotation::Keychain => Ok(()),
+        }
+    }
+
+    /// Rotate `store` to this protection, preparing the new policy with `prepare`.
+    fn rotate<F>(&self, store: &anvil_storage::Store, prepare: F) -> Result<()>
+    where
+        F: FnOnce(
+            &ProfileHeader,
+            &Key,
+            &Key,
+            Option<Option<serde_json::Value>>,
+        ) -> std::result::Result<Option<serde_json::Value>, vault::VaultError>,
+    {
+        match self {
+            PolicyRotation::Passphrase { new_passphrase, recovery, kdf } => {
+                store.rotate_data_key(new_passphrase, recovery, *kdf, prepare)?;
+            }
+            PolicyRotation::Keychain => {
+                store.rotate_keychain_data_key(prepare)?;
+            }
+        }
+        identity::remove_legacy_sidecar(store.dir());
+        Ok(())
+    }
 }
 
 impl ProfileManager {
@@ -218,15 +254,21 @@ impl ProfileManager {
         // A header written by an earlier build gets its protection MAC (and
         // a keychain profile's entry its tag) now that the key is proven.
         vault::upgrade_header(dir, &mut h, &k).ok();
-        // A keychain entry left over from converting this profile to a
-        // passphrase. It no longer unlocks anything; removing it is retried
-        // at each unlock until it is gone.
-        if h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some() {
-            if h.rotation.is_some() {
-                vault::retire_rotated_keychain(dir, &mut h, &k).ok();
-            } else {
-                vault::retire_keychain_entry(dir, &mut h).ok();
+        // Keychain entries left over from converting this profile to a
+        // passphrase or from rotations. They no longer unlock anything;
+        // removing them is retried at each unlock until they are gone.
+        if h.rotation.as_ref().is_some_and(|p| !p.retired_keychain.is_empty()) {
+            vault::retire_rotated_keychain(dir, &mut h, &k).ok();
+        } else if h.rotation.is_none() && h.protection == ProtectionMode::Passphrase && h.keychain_account.is_some() {
+            vault::retire_keychain_entry(dir, &mut h).ok();
+        }
+        // Old-key material a rotation interrupted before its scrub left on
+        // disk (sidecar wraps, checkpoints, the legacy identity sidecar).
+        if h.rotation.is_some() {
+            if let Err(e) = anvil_storage::rotation::scrub_superseded(dir, &k) {
+                tracing::warn!(dir = %dir.display(), error = %e, "old-key material after rotation could not be removed yet");
             }
+            identity::remove_legacy_sidecar(dir);
         }
         Ok((h, k))
     }
@@ -277,7 +319,7 @@ impl ProfileManager {
             }
             _ => Self::unlock_checked_policy(dir, how, None, now, true)?,
         };
-        check_new_passphrase(rotation.new_passphrase)?;
+        rotation.check()?;
         let linked = LinkedIdentity {
             provider: proof.provider().to_string(),
             subject: proof.subject().to_string(),
@@ -286,7 +328,7 @@ impl ProfileManager {
             linked_at: now,
         };
         let store = anvil_storage::Store::open_for_rotation(dir, k)?;
-        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, new, _| {
+        rotation.rotate(&store, |current, _, new, _| {
             if !same_authorized_policy_header(current, &h) {
                 return Err(vault::VaultError::HeaderTampered);
             }
@@ -329,9 +371,9 @@ impl ProfileManager {
             return Err(AppError::Invalid("this profile is already enrolled".into()));
         }
         let linked = identity::verify_binding(&binding, &h, &key)?;
-        check_new_passphrase(rotation.new_passphrase)?;
+        rotation.check()?;
         let store = anvil_storage::Store::open_for_rotation(dir, key)?;
-        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, new, _| {
+        rotation.rotate(&store, |current, _, new, _| {
             if !same_authorized_policy_header(current, &h) {
                 return Err(vault::VaultError::HeaderTampered);
             }
@@ -359,9 +401,9 @@ impl ProfileManager {
     }
 
     fn rotate_policy(dir: &Path, h: ProfileHeader, key: Key, rotation: PolicyRotation<'_>, require_unlinked: bool) -> Result<()> {
-        check_new_passphrase(rotation.new_passphrase)?;
+        rotation.check()?;
         let store = anvil_storage::Store::open_for_rotation(dir, key)?;
-        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, old, _, binding| {
+        rotation.rotate(&store, |current, old, _, binding| {
             if !same_authorized_policy_header(current, &h) {
                 return Err(vault::VaultError::HeaderTampered);
             }
@@ -416,6 +458,25 @@ impl crate::App {
             identity::rotate_binding(h, old, new, binding, &self.dir)
         })?;
         self.lock();
+        identity::remove_legacy_sidecar(&self.dir);
+        Ok(result)
+    }
+
+    /// Rotate the data key of an OS-keychain profile and keep it in the
+    /// keychain: the new key goes to a new OS credential-store entry before
+    /// the commit and the old entry is retired after it (retried at unlock if
+    /// the OS refuses). Old OS entries, raw copies and checkpoints cannot
+    /// decrypt the rotated data. A passphrase profile is refused; there is no
+    /// recovery key. Success locks this App; reopen it before use.
+    pub fn rotate_keychain_data_key(&self) -> Result<vault::KeychainRotation> {
+        let h = vault::read_header(&self.dir)?;
+        if h.protection != ProtectionMode::OsKeychain {
+            return Err(AppError::Invalid("this profile uses a passphrase; change the passphrase instead".into()));
+        }
+        let result =
+            self.store.rotate_keychain_data_key(|h, old, new, binding| identity::rotate_binding(h, old, new, binding, &self.dir))?;
+        self.lock();
+        identity::remove_legacy_sidecar(&self.dir);
         Ok(result)
     }
 
@@ -525,7 +586,7 @@ mod manifest_enrollment_tests {
                 dir.path(),
                 Unlock::RecoveryKey(created.recovery_key.as_deref().unwrap()),
                 None,
-                PolicyRotation { new_passphrase: "second passphrase", recovery: &first, kdf: KdfParams::testing() },
+                PolicyRotation::Passphrase { new_passphrase: "second passphrase", recovery: &first, kdf: KdfParams::testing() },
             )
             .unwrap();
             let (h, key) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(first.as_str())).unwrap();
@@ -536,7 +597,7 @@ mod manifest_enrollment_tests {
                 dir.path(),
                 Unlock::RecoveryKey(first.as_str()),
                 None,
-                PolicyRotation { new_passphrase: "third passphrase", recovery: &next, kdf: KdfParams::testing() },
+                PolicyRotation::Passphrase { new_passphrase: "third passphrase", recovery: &next, kdf: KdfParams::testing() },
             );
             if lose_binding {
                 assert!(enrolled.is_err(), "enrollment must not discard the authenticated linked-policy commitment");
@@ -547,7 +608,7 @@ mod manifest_enrollment_tests {
                     dir.path(),
                     Unlock::RecoveryKey(first.as_str()),
                     None,
-                    PolicyRotation { new_passphrase: "third passphrase", recovery: &next, kdf: KdfParams::testing() },
+                    PolicyRotation::Passphrase { new_passphrase: "third passphrase", recovery: &next, kdf: KdfParams::testing() },
                 )
                 .unwrap();
                 let (h, _) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(next.as_str())).unwrap();
@@ -587,7 +648,7 @@ mod manifest_enrollment_tests {
             dir.path(),
             Unlock::RecoveryKey(&old_recovery),
             None,
-            PolicyRotation { new_passphrase: "replacement passphrase", recovery: &recovery, kdf: KdfParams::testing() },
+            PolicyRotation::Passphrase { new_passphrase: "replacement passphrase", recovery: &recovery, kdf: KdfParams::testing() },
         )
         .unwrap();
         let (h, k) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(recovery.as_str())).unwrap();
