@@ -617,8 +617,20 @@ rotation holds its exclusive counterpart. Stale handles check the current
 canary and cannot write using the old key. **Older already-open builds do not
 understand this fence and must be closed before rotation.** Schema 4 refuses
 their later opens. Rotation does not revoke plaintext or keys already copied
-into another process's memory. Filesystems without the required file locks
-are refused rather than running an unfenced rotation.
+into another process's memory. A profile on a file system without the
+required file locks is refused when it is opened, with an error naming the
+missing lock support, rather than running an unfenced rotation.
+
+Waiting for the fence is bounded (15 seconds). An operation that meets a
+longer rotation in another process fails with a retryable "profile is busy"
+error (`StoreError::Busy`) instead of hanging. Before every operation an
+unlocked store re-checks its key against the database's canary and catalogue.
+Only evidence against the key locks the profile: a canary or catalogue that
+does not authenticate under it, a missing canary or catalogue, or a rotated
+key. SQLite contention (after the 5-second busy timeout and a few short
+retries), I/O errors, a full disk and the fence's bounded wait keep the key
+and are returned to the caller, which may retry
+(`StoreError::is_retryable`); nothing runs unless the check passed.
 
 Normal encrypted exports, backups and imports keep their existing formats
 and independent password; they do not transfer this device's keys or identity

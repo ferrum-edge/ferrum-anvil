@@ -1,7 +1,7 @@
 //! The wrapped key header and identity policy commit with rotated ciphertext.
 //! This protects future ciphertext, not replay of a complete historical database.
 use crate::{
-    Key,
+    Key, StoreError,
     store::DB_FILE,
     vault::{ProfileHeader, VaultError},
 };
@@ -15,23 +15,48 @@ pub(crate) struct State {
     pub header: ProfileHeader,
     pub binding: Option<Value>,
 }
-pub(crate) fn read_on(conn: &Connection) -> Result<Option<State>, VaultError> {
-    let exists: bool =
-        conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')", [], |r| r.get(0)).map_err(db)?;
+/// Why the canonical key state could not be read: the database failed (which
+/// may be transient), or what it holds is not valid key state.
+enum ReadError {
+    Db(rusqlite::Error),
+    Invalid(VaultError),
+}
+impl From<rusqlite::Error> for ReadError {
+    fn from(e: rusqlite::Error) -> Self {
+        ReadError::Db(e)
+    }
+}
+fn read_raw(conn: &Connection) -> Result<Option<State>, ReadError> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')", [], |r| r.get(0))?;
     if !exists {
         return Ok(None);
     }
-    let text: Option<String> = conn.query_row("SELECT value FROM meta WHERE key=?1", [STATE], |r| r.get(0)).optional().map_err(db)?;
-    let state: Option<State> = text.map(|text| serde_json::from_str(&text).map_err(|e| VaultError::Header(e.to_string()))).transpose()?;
+    let text: Option<String> = conn.query_row("SELECT value FROM meta WHERE key=?1", [STATE], |r| r.get(0)).optional()?;
+    let state: Option<State> =
+        text.map(|text| serde_json::from_str(&text).map_err(|e| ReadError::Invalid(VaultError::Header(e.to_string())))).transpose()?;
     if state.as_ref().is_some_and(|s| s.header.rotation.is_none()) {
-        return Err(VaultError::HeaderTampered);
+        return Err(ReadError::Invalid(VaultError::HeaderTampered));
     }
-    let canary: Option<String> =
-        conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional().map_err(db)?;
+    let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
     if state.is_none() && canary.as_deref().is_some_and(|c| c.starts_with("rotated-v1:") || c.starts_with(crate::manifest::CANARY)) {
-        return Err(VaultError::Header("the rotated profile's canonical key state is missing".into()));
+        return Err(ReadError::Invalid(VaultError::Header("the rotated profile's canonical key state is missing".into())));
     }
     Ok(state)
+}
+pub(crate) fn read_on(conn: &Connection) -> Result<Option<State>, VaultError> {
+    read_raw(conn).map_err(|e| match e {
+        ReadError::Db(e) => db(e),
+        ReadError::Invalid(e) => e,
+    })
+}
+/// [`read_on`] for the store: a database failure is returned as one (busy,
+/// I/O), so it is never taken for evidence of tampering; invalid key state is
+/// [`StoreError::Integrity`].
+pub(crate) fn read_checked(conn: &Connection) -> Result<Option<State>, StoreError> {
+    read_raw(conn).map_err(|e| match e {
+        ReadError::Db(e) => StoreError::from(e),
+        ReadError::Invalid(_) => StoreError::Integrity,
+    })
 }
 pub(crate) fn read(dir: &Path) -> Result<Option<State>, VaultError> {
     let path = dir.join(DB_FILE);

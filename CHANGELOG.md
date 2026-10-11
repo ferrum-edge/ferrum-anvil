@@ -62,6 +62,15 @@
 
 ### Fixed
 
+- A transient storage error no longer locks an unlocked profile. The per-operation
+  key check drops the key only on evidence against it (a canary or catalogue that
+  does not authenticate, or a rotated key); SQLite contention, I/O errors and a
+  full disk keep the key and return a retryable error (`StoreError::Busy` for
+  contention). Waiting for the profile's key-change fence is bounded at 15 seconds
+  with a "profile is busy" error instead of waiting forever, and a file system
+  without file locks is refused once, when the profile is opened, with an error
+  naming it.
+
 - The GW-020-BUDGET lab scenario waits up to three seconds for the gateway's
   budget-rejection log entry, and reports a clear timeout if it never appears
   (#352). PROTO-022 DTLS recovery retries a lost datagram up to three times

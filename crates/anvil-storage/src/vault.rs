@@ -401,9 +401,7 @@ fn remove_stale_temporaries(dir: &Path) {
 }
 
 fn open_locked(dir: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::create_dir_all(dir)?;
-    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE))?;
-    f.lock()?;
+    let f = crate::profile_lock::exclusive_named(dir, LOCK_FILE)?;
     remove_stale_temporaries(dir);
     Ok(f)
 }

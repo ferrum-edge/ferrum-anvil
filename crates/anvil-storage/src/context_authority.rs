@@ -43,7 +43,7 @@ impl<'a, 'b> ContextRead<'a, 'b> {
         if read.manifest.borrow().is_none() {
             return Err(StoreError::PolicyEnrollmentRequired);
         }
-        let state = crate::rotation::read_on(read.conn).map_err(|_| StoreError::Integrity)?;
+        let state = crate::rotation::read_checked(read.conn)?;
         let generation = match state {
             Some(s) => serde_json::json!([
                 s.header.profile_id,
