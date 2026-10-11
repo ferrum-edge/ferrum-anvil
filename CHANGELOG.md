@@ -86,6 +86,11 @@
   with a "profile is busy" error instead of waiting forever, and a file system
   without file locks is refused once, when the profile is opened, with an error
   naming it.
+- A request whose JWT-SVID auth is acquired from the Workload API, a value or a
+  file again resolves the context's deferred vault variables. The resolver that
+  carries the acquired token did not forward vault-variable bindings, so such a
+  request failed with an unresolved variable. `SecretResolver` methods no longer
+  have default implementations, so a wrapping resolver must forward each one.
 
 - The GW-020-BUDGET lab scenario waits up to three seconds for the gateway's
   budget-rejection log entry, and reports a clear timeout if it never appears

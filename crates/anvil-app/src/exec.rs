@@ -38,6 +38,12 @@ pub struct StoreSecrets {
 }
 
 impl SecretResolver for StoreSecrets {
+    fn validate_context(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+    fn variable_secret(&self, _layer: usize, _variable: usize) -> Option<SecretRef> {
+        None
+    }
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
         match self.store.get_workspace_secret(&r.id, &self.workspace) {
             Ok(Some((_, v))) => Ok(v),

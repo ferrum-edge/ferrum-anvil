@@ -16,21 +16,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+/// Resolves the vault secrets an execution context references.
+///
+/// No method has a default: a resolver that wraps another must decide how to
+/// forward each one, so adding a method cannot silently drop what the wrapped
+/// resolver answers (deferred vault variables, live context authority).
 pub trait SecretResolver: Send + Sync {
     fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String>;
 
     /// Storage-backed contexts revalidate their captured local authority at
     /// admission and before returning cached material. In-memory contexts
-    /// (standalone runner/load workers) have no live profile authority.
-    fn validate_context(&self) -> Result<(), String> {
-        Ok(())
-    }
+    /// (standalone runner/load workers) have no live profile authority and
+    /// return `Ok(())`.
+    fn validate_context(&self) -> Result<(), String>;
 
     /// A vault variable retained by the context builder until endpoint validation.
     /// Indices identify the original layers and entries; later run layers still win.
-    fn variable_secret(&self, _layer: usize, _variable: usize) -> Option<SecretRef> {
-        None
-    }
+    /// Resolvers that retain none return `None`.
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef>;
 }
 
 /// Translate filtered entries back to the immediate source resolver's indices.
@@ -63,6 +66,12 @@ pub trait AttachmentResolver: Send + Sync {
 pub struct MemorySecrets(pub HashMap<Id, Zeroizing<String>>);
 
 impl SecretResolver for MemorySecrets {
+    fn validate_context(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn variable_secret(&self, _layer: usize, _variable: usize) -> Option<SecretRef> {
+        None
+    }
     fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String> {
         self.0.get(&r.id).cloned().ok_or_else(|| format!("secret '{}' is not available in this vault", r.label))
     }

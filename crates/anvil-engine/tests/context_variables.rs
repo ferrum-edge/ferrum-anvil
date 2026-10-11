@@ -10,6 +10,10 @@ use zeroize::Zeroizing;
 struct IndexedSecrets(HashMap<(usize, usize), SecretRef>);
 
 impl SecretResolver for IndexedSecrets {
+    fn validate_context(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
         self.0.get(&(layer, variable)).cloned()
     }
