@@ -185,6 +185,9 @@ fn resolve_token_endpoint(config: &OAuth2Config, ctx: &ExecutionContext, r: &Res
 /// are prepared. HTTP and every session entry point use this gate before effects.
 /// Acquisition uses the same endpoint expansion, including dynamic helper state.
 pub fn validate_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(), TransportFailure> {
+    ctx.secrets
+        .validate_context()
+        .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("profile"))?;
     let (_, auth) = ctx.effective_auth();
     let config = auth
         .oauth_profile()
@@ -629,6 +632,7 @@ pub async fn redeem_authorization_code(
     redirect_uri: &str,
     cancel: &CancellationToken,
 ) -> Result<TokenSummary, AuthError> {
+    ctx.secrets.validate_context().map_err(AuthError::Invalid)?;
     require_token_endpoint_route(&target.resolved.token_url, ctx, &target.settings, false).map_err(AuthError::Invalid)?;
     // `generation` was taken before this check: a delete that is not seen
     // here clears the workspace's tokens after it, and the store is refused.

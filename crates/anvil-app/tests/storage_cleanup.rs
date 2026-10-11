@@ -30,6 +30,15 @@ fn new_app_with_key(root: &std::path::Path) -> (App, Key) {
     (App::open(s.dir, h, dek.clone()).unwrap(), dek)
 }
 
+/// Historical pre-catalogue fixture: raw future-format ciphertext below
+/// predates enrollment. A current enrolled writer must publish its catalogue
+/// in the same transaction instead of transplanting ciphertext behind it.
+fn legacy_app_with_key(root: &std::path::Path) -> (App, anvil_storage::Key) {
+    let dir = root.join("legacy-future-format");
+    let created = anvil_storage::vault::create_passphrase_profile(&dir, "historical", PASSPHRASE, KdfParams::testing()).unwrap();
+    (App::open(dir, created.header, created.dek.clone()).unwrap(), created.dek)
+}
+
 /// Close `app` and open its profile again, as a restart does.
 fn reopen(app: App) -> App {
     let dir = app.dir.clone();
@@ -518,7 +527,7 @@ fn causes(app: &App) -> Vec<(String, Undecodable)> {
 #[test]
 fn a_revision_a_newer_anvil_may_have_written_is_listed_but_kept() {
     let root = tempfile::tempdir().unwrap();
-    let (app, key) = new_app_with_key(root.path());
+    let (app, key) = legacy_app_with_key(root.path());
     let ws = app.create_workspace("W").unwrap().meta.id;
     let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
     let revision = r.revision_id.unwrap();
@@ -540,7 +549,7 @@ fn a_revision_a_newer_anvil_may_have_written_is_listed_but_kept() {
 #[test]
 fn a_revision_a_newer_anvil_sealed_under_the_schema_3_seal_is_listed_but_kept() {
     let root = tempfile::tempdir().unwrap();
-    let (app, key) = new_app_with_key(root.path());
+    let (app, key) = legacy_app_with_key(root.path());
     let ws = app.create_workspace("W").unwrap().meta.id;
     let r = app.create_request(&ws, None, "r", RequestSpec::http("GET", "http://127.0.0.1:9/")).unwrap();
     let revision = r.revision_id.unwrap();

@@ -64,6 +64,7 @@ pub async fn oauth_sign_in(
         let _ = h2.emit("oauth-flow", SignInEvent { attempt: a2.clone(), event });
     };
     let opener = |url: &str| open_in_browser(url);
+    st.check_context_authority(&app, ctx.secrets.as_ref())?;
     let res = app.oauth_sign_in_with(&ctx, &opener, &observer, &FlowOptions::default(), pending.token()).await;
     drop(pending);
     res.map_err(e)

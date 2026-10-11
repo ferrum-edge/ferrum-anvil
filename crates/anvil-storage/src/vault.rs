@@ -123,6 +123,8 @@ pub struct RotationPolicy {
     pub binding_digest: String,
     /// Key check of a retired OS credential, retained only for cleanup.
     pub retired_key_check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_root: Option<String>,
 }
 fn passphrase_label(h: &ProfileHeader) -> &'static [u8] {
     if h.rotation.is_some() { ROTATED_PASSPHRASE_LABEL } else { PASSPHRASE_LABEL }
@@ -135,6 +137,14 @@ pub(crate) fn bind_rotation(h: &mut ProfileHeader, key: &Key, binding: &Option<s
     let bytes = serde_json::to_vec(binding).expect("JSON value serializes");
     h.rotation.as_mut().expect("rotated header").binding_digest = hex::encode(Sha256::digest(bytes));
     h.protection_mac = Some(protection_mac(key, h));
+}
+/// Catalogue writes preserve the already authenticated policy digest.
+/// Rebinding caller-supplied policy belongs only to creation/rotation.
+pub(crate) fn bind_manifest_root(h: &mut ProfileHeader, key: &Key, root: String) -> Result<(), VaultError> {
+    check_protection_mac(h, key)?;
+    h.rotation.as_mut().ok_or(VaultError::HeaderTampered)?.manifest_root = Some(root);
+    h.protection_mac = Some(protection_mac(key, h));
+    Ok(())
 }
 pub(crate) fn check_current(current: &ProfileHeader, expected: &ProfileHeader, key: &Key) -> Result<(), VaultError> {
     if current.profile_id != expected.profile_id {
@@ -174,6 +184,7 @@ pub(crate) fn rotated_header(
     next.key_check = key_check(key);
     next.rotation = Some(RotationPolicy {
         binding_digest: String::new(),
+        manifest_root: None,
         retired_key_check: h
             .keychain_account
             .as_ref()
@@ -428,6 +439,8 @@ fn replace_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
         state = crate::rotation::read_on(&tx)?.ok_or(VaultError::HeaderTampered)?;
         if state.header.key_check != h.key_check
             || state.header.rotation.as_ref().map(|p| &p.binding_digest) != h.rotation.as_ref().map(|p| &p.binding_digest)
+            || state.header.rotation.as_ref().and_then(|p| p.manifest_root.as_ref())
+                != h.rotation.as_ref().and_then(|p| p.manifest_root.as_ref())
         {
             return Err(VaultError::HeaderTampered);
         }
@@ -529,7 +542,7 @@ pub fn create_enrolled_passphrase_profile(
     kdf: KdfParams,
 ) -> Result<CreatedProfile, VaultError> {
     let mut created = create_passphrase_profile(dir, display_name, passphrase, kdf)?;
-    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None });
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None, manifest_root: None });
     created.header.passphrase_wrap = Some(wrap_with_passphrase(&created.dek, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
     let recovery = created.recovery_key.as_ref().expect("passphrase creation provides recovery");
     created.header.recovery_wrap = Some(wrap_with_passphrase(&created.dek, &normalize_recovery(recovery), kdf, ROTATED_RECOVERY_LABEL)?);
@@ -549,11 +562,10 @@ fn initialize_policy(dir: &Path, header: &mut ProfileHeader, key: &Key) -> Resul
     if crate::rotation::read_on(&tx)?.is_some() {
         return Err(VaultError::HeaderTampered);
     }
-    bind_rotation(header, key, &None);
-    crate::rotation::write_on(&tx, &crate::rotation::State { header: header.clone(), binding: None })?;
-    let env = crypto::seal(key, b"anvil/v2/rotated-canary", b"ok");
-    tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(env))])
-        .map_err(|e| VaultError::Header(e.to_string()))?;
+    let mut state = crate::rotation::State { header: header.clone(), binding: None };
+    bind_rotation(&mut state.header, key, &None);
+    crate::manifest::Manifest::capture(&tx).and_then(|m| m.publish(&tx, key, &mut state)).map_err(|e| VaultError::Header(e.to_string()))?;
+    *header = state.header;
     tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
     Ok(())
 }
@@ -977,7 +989,7 @@ pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Resul
     // Tag first: an interrupted enrollment fails closed and contains no user
     // data. The creator has not published the profile yet.
     entry.set_secret(&secret).map_err(|e| keychain_error(&e))?;
-    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None });
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None, manifest_root: None });
     initialize_policy(dir, &mut created.header, &created.dek)?;
     Ok(created)
 }

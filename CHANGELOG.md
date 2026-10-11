@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Cached execution contexts now retain authenticated dependency proofs: relevant
+  configuration, credential and permission changes refuse their next checked
+  use, while unrelated saves and collection-run reports preserve them. Full
+  profile integrity verification remains required, including unrelated tampering.
+
 - Password changes, keychain conversion and identity-policy mutations now rotate
   the local data key and re-encrypt active data, with replacement recovery-key
   acknowledgment before commit. New profiles authenticate explicit policy state;

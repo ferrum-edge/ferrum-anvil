@@ -82,13 +82,20 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     // is registered with the profile before its job is prepared, so a delete
     // of its workspace (or a lock) from then on stops it.
     let preparing = app.clone();
-    let (run, job) = anvil_app::off_runtime(move || {
-        let plan = preparing.load_plan(&plan_id)?;
+    let prepared = anvil_app::off_runtime(move || {
+        let (plan, plan_authority) = preparing.load_plan_with_authority(&plan_id)?;
         let run = preparing.register_load_run(&plan.workspace_id)?;
-        Ok((run, preparing.worker_job(&plan, acknowledged)?))
+        plan_authority.check()?;
+        let (job, authority) = preparing.worker_job_with_authority(&plan, acknowledged)?;
+        plan_authority.check()?;
+        let authority = [plan_authority, authority];
+        Ok((run, job, authority))
     })
-    .await
-    .map_err(e)?;
+    .await;
+    if prepared.is_err() && app.is_locked() {
+        st.lock_integrity_if_current(&app);
+    }
+    let (run, job, authority) = prepared.map_err(e)?;
     // A lock or a workspace delete that landed while the job was prepared
     // stopped this run: its job, secrets and all, is not handed to a worker.
     if entry.lock_token().is_cancelled() || run.locked().is_cancelled() {
@@ -97,6 +104,17 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     if run.workspace_deleted().is_cancelled() {
         return Err(WORKSPACE_DELETED.into());
     }
+    let checked = anvil_app::off_runtime(move || {
+        for proof in authority {
+            proof.check()?;
+        }
+        Ok(())
+    })
+    .await;
+    if checked.is_err() && app.is_locked() {
+        st.lock_integrity_if_current(&app);
+    }
+    checked.map_err(e)?;
     let exe = std::env::current_exe().map_err(|x| x.to_string())?;
     let mut controller = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await.map_err(|x| x.to_string())?;
     let run_key = entry.key().to_string();

@@ -125,20 +125,58 @@ impl App {
             return Err(AppError::Locked);
         }
         let (app, scenario_id, dataset) = (self.shared(), *scenario_id, settings.dataset.clone());
-        let plan = prepare(&cancel, move || app.scenario_plan(&scenario_id, dataset)).await?;
-        self.run_plan(plan, settings, cancel).await
+        let (plan, authority) = prepare(&cancel, move || app.scenario_plan(&scenario_id, dataset)).await?;
+        self.run_plan_guarded(plan, settings, cancel, Some(authority)).await
     }
 
     /// The plan of a saved scenario, with `dataset` in place of its own.
-    fn scenario_plan(&self, scenario_id: &Id, dataset: Option<RunDataset>) -> Result<RunPlan> {
-        let s = self.scenario(scenario_id)?;
-        let dataset = match (dataset, s.dataset_id) {
+    fn scenario_plan(&self, scenario_id: &Id, dataset: Option<RunDataset>) -> Result<(RunPlan, crate::exec::AppContextAuthority)> {
+        let (scenario, source, stored, names, authority) = self.read_context(|read| {
+            let scenario: Scenario = read.get(kind::SCENARIO, scenario_id)?.ok_or_else(|| AppError::NotFound("scenario".into()))?;
+            let (source, stored) = match (dataset.is_some(), scenario.dataset_id) {
+                (false, Some(id)) => {
+                    let d: Dataset = read.get(kind::DATASET, &id)?.ok_or_else(|| AppError::NotFound("dataset".into()))?;
+                    if d.workspace_id != scenario.workspace_id {
+                        return Err(AppError::Invalid("the dataset belongs to another workspace".into()));
+                    }
+                    let stored = match &d.attachment {
+                        anvil_domain::request::AttachmentRef::Stored { sha256, .. } => Some(
+                            crate::exec::attachment_for(read, sha256)?
+                                .ok_or_else(|| AppError::NotFound(format!("the data of dataset '{}'", d.name)))?,
+                        ),
+                        anvil_domain::request::AttachmentRef::LinkedFile { path } => {
+                            crate::exec::linked_permission(read, crate::linked_files::LinkedFileReferrer::Dataset { id }, path)?;
+                            None
+                        }
+                    };
+                    (Some(d), stored)
+                }
+                _ => (None, None),
+            };
+            let requests: Vec<anvil_domain::workspace::RequestDefinition> = read.candidates(kind::REQUEST, Some(&scenario.workspace_id))?;
+            let names: HashMap<_, _> = requests.into_iter().map(|r| (r.meta.id, r.name)).collect();
+            Ok((scenario, source, stored, names, self.context_authority(read)))
+        })?;
+        authority.check()?;
+        let dataset = match (dataset, source) {
             (Some(d), _) => Some(d),
-            (None, Some(did)) => Some(self.run_dataset(&self.workspace_dataset(&s.workspace_id, &did)?)?),
-            (None, None) => None,
+            (None, Some(d)) => {
+                let bytes = match (stored, &d.attachment) {
+                    (Some(bytes), _) => bytes,
+                    (None, anvil_domain::request::AttachmentRef::LinkedFile { path }) => {
+                        crate::linked_files::read_bound_file(path, crate::file_grants::FilePurpose::Dataset.max_read_bytes(), "dataset")?
+                    }
+                    _ => return Err(AppError::NotFound("dataset attachment".into())),
+                };
+                Some(RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))?)
+            }
+            _ => None,
         };
-        let names = self.request_names(&s.workspace_id)?;
-        Ok(RunPlan::from_scenario(&s, &|id| names.get(id).cloned().unwrap_or_else(|| format!("missing request {id}")), dataset))
+        authority.check()?;
+        Ok((
+            RunPlan::from_scenario(&scenario, &|id| names.get(id).cloned().unwrap_or_else(|| format!("missing request {id}")), dataset),
+            authority,
+        ))
     }
 
     /// Ad-hoc run of every request in a folder subtree (`None` = the whole
@@ -149,25 +187,78 @@ impl App {
             return Err(AppError::Locked);
         }
         let (app, ws, dataset) = (self.shared(), *ws, settings.dataset.clone());
-        let plan = prepare(&cancel, move || app.folder_plan(&ws, folder, dataset)).await?;
-        self.run_plan(plan, settings, cancel).await
+        let (plan, authority) = prepare(&cancel, move || app.folder_plan(&ws, folder, dataset)).await?;
+        self.run_plan_guarded(plan, settings, cancel, Some(authority)).await
     }
 
     /// The plan of an ad-hoc folder run, with `dataset`.
-    fn folder_plan(&self, ws: &Id, folder: Option<Id>, dataset: Option<RunDataset>) -> Result<RunPlan> {
-        let requests = self.folder_run_requests(ws, folder)?;
-        if requests.is_empty() {
-            return Err(AppError::Invalid(format!("folder '{}' contains no requests", self.folder_path(ws, folder)?)));
-        }
-        let mut plan = RunPlan::folder(*ws, folder, &self.folder_path(ws, folder)?, requests);
-        plan.dataset = dataset;
-        Ok(plan)
+    fn folder_plan(&self, ws: &Id, folder: Option<Id>, dataset: Option<RunDataset>) -> Result<(RunPlan, crate::exec::AppContextAuthority)> {
+        self.read_context(|read| {
+            let _: anvil_domain::workspace::Workspace =
+                read.get(kind::WORKSPACE, ws)?.ok_or_else(|| AppError::NotFound("workspace".into()))?;
+            let ancestors = crate::exec::folders_for(read, ws, folder)?;
+            let path = if folder.is_none() { "/".into() } else { ancestors.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/") };
+            fn flatten(
+                read: &anvil_storage::ContextRead<'_, '_>,
+                ws: &Id,
+                parent: Option<Id>,
+                depth: usize,
+                out: &mut Vec<(Id, String)>,
+            ) -> Result<()> {
+                if depth > 64 {
+                    return Ok(());
+                }
+                let folders: Vec<anvil_domain::workspace::Folder> =
+                    read.query(kind::FOLDER, Some(ws), &[("/parent_id".into(), serde_json::to_value(parent)?)])?;
+                for f in folders {
+                    flatten(read, ws, Some(f.meta.id), depth + 1, out)?;
+                }
+                let requests: Vec<anvil_domain::workspace::RequestDefinition> =
+                    read.query(kind::REQUEST, Some(ws), &[("/folder_id".into(), serde_json::to_value(parent)?)])?;
+                out.extend(requests.into_iter().map(|r| (r.meta.id, r.name)));
+                Ok(())
+            }
+            let mut requests = vec![];
+            flatten(read, ws, folder, 0, &mut requests)?;
+            if requests.is_empty() {
+                return Err(AppError::Invalid(format!("folder '{path}' contains no requests")));
+            }
+            let mut plan = RunPlan::folder(*ws, folder, &path, requests);
+            plan.dataset = dataset;
+            Ok((plan, self.context_authority(read)))
+        })
     }
 
     /// Run a prepared plan against this workspace's store.
     pub async fn run_plan(&self, plan: RunPlan, settings: RunSettings, cancel: CancellationToken) -> Result<RunReport> {
+        self.run_plan_guarded(plan, settings, cancel, None).await
+    }
+
+    async fn run_plan_guarded(
+        &self,
+        plan: RunPlan,
+        settings: RunSettings,
+        cancel: CancellationToken,
+        source_authority: Option<crate::exec::AppContextAuthority>,
+    ) -> Result<RunReport> {
         let (app, environment, seed) = (self.shared(), settings.environment, settings.seed);
-        let (plan, steps, notes) = prepare(&cancel, move || app.run_steps(plan, environment, seed)).await?;
+        let (plan, mut steps, notes) = prepare(&cancel, move || {
+            if let Some(proof) = &source_authority {
+                proof.check()?;
+            }
+            let (plan, mut steps, notes) = app.run_steps(plan, environment, seed)?;
+            if let Some(proof) = &source_authority {
+                proof.check()?;
+                for (_, ctx) in steps.values_mut().filter_map(|built| built.as_mut().ok()) {
+                    crate::exec::guard_context(ctx, proof);
+                }
+            }
+            Ok((plan, steps, notes))
+        })
+        .await?;
+        for (_, ctx) in steps.values_mut().filter_map(|built| built.as_mut().ok()) {
+            ctx.secrets.validate_context().map_err(AppError::Invalid)?;
+        }
         let provider = AppProvider { app: self, steps, record_history: settings.record_history };
         let run_opts = RunOptions {
             iterations: settings.iterations,
@@ -201,48 +292,67 @@ impl App {
     /// Name the plan's environment (`environment`, else the workspace's
     /// active one) and snapshot every request it runs.
     fn run_steps(&self, mut plan: RunPlan, environment: Option<Id>, seed: Option<u64>) -> Result<(RunPlan, Steps, Vec<String>)> {
-        let ws = self.workspace(&plan.workspace_id)?;
-        let selected_env = environment.or(ws.active_environment_id);
-        let environments = self.environments(&ws.meta.id)?;
-        let mut notes = Vec::new();
-        let env = match selected_env {
-            Some(eid) => match environments.iter().find(|e| e.meta.id == eid) {
-                Some(env) => Some(env),
-                None if environment == Some(eid) => return Err(AppError::NotFound("environment".into())),
-                None => {
-                    notes.push("The workspace's selected environment no longer exists; no environment was used.".into());
-                    None
-                }
-            },
-            None => None,
-        };
-        if let Some(env) = env {
-            plan.environment_id = Some(env.meta.id);
-            plan.environment_name = Some(env.name.clone());
-        }
-        // Snapshot every request once: the run uses a frozen environment and
-        // request state even if they are edited while it runs.
-        let env_id = env.map(|env| env.meta.id);
-        let opts = SendOptions { environment: env_id, seed, ..Default::default() };
-        let mut steps = HashMap::new();
-        for st in plan.steps.iter().filter(|s| s.enabled) {
-            if steps.contains_key(&st.request_id) {
-                continue;
-            }
-            let built = match self.request(&st.request_id) {
-                Ok(r) if r.workspace_id != ws.meta.id => Err(format!("request '{}' belongs to another workspace", r.name)),
-                Ok(r) => match self.build_context(Some(r.meta.id), &ws.meta.id, None, &opts) {
-                    Ok(ctx) => Ok((r.name.clone(), ctx)),
-                    Err(AppError::Locked) => return Err(AppError::Locked),
-                    Err(e) => Err(format!("request '{}' cannot be prepared: {e}", r.name)),
-                },
-                Err(AppError::Locked) => return Err(AppError::Locked),
-                Err(AppError::NotFound(_)) => Err(format!("request {} no longer exists", st.request_id)),
-                Err(e) => Err(e.to_string()),
+        self.read_context(|read| {
+            let ws = read
+                .get::<anvil_domain::workspace::Workspace>(kind::WORKSPACE, &plan.workspace_id)?
+                .ok_or_else(|| AppError::NotFound("workspace".into()))?;
+            let selected_env = environment.or(ws.active_environment_id);
+            let environments: Vec<anvil_domain::workspace::Environment> = match selected_env {
+                Some(id) => read
+                    .get::<anvil_domain::workspace::Environment>(kind::ENVIRONMENT, &id)?
+                    .filter(|e| e.workspace_id == ws.meta.id)
+                    .into_iter()
+                    .collect(),
+                None => vec![],
             };
-            steps.insert(st.request_id, built);
-        }
-        Ok((plan, steps, notes))
+            let mut notes = Vec::new();
+            let env = match selected_env {
+                Some(eid) => match environments.iter().find(|e| e.meta.id == eid) {
+                    Some(env) => Some(env),
+                    None if environment == Some(eid) => return Err(AppError::NotFound("environment".into())),
+                    None => {
+                        notes.push("The workspace's selected environment no longer exists; no environment was used.".into());
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(env) = env {
+                plan.environment_id = Some(env.meta.id);
+                plan.environment_name = Some(env.name.clone());
+            }
+            // Snapshot every request once: the run uses a frozen environment and
+            // request state. Relevant later edits refuse subsequent checked use.
+            let env_id = env.map(|env| env.meta.id);
+            let opts = SendOptions { environment: env_id, seed, ..Default::default() };
+            let mut steps = HashMap::new();
+            for st in plan.steps.iter().filter(|s| s.enabled) {
+                if steps.contains_key(&st.request_id) {
+                    continue;
+                }
+                let built = match read
+                    .get::<anvil_domain::workspace::RequestDefinition>(kind::REQUEST, &st.request_id)
+                    .map_err(AppError::from)
+                    .and_then(|r| r.ok_or_else(|| AppError::NotFound("request".into())))
+                {
+                    Ok(r) if r.workspace_id != ws.meta.id => Err(format!("request '{}' belongs to another workspace", r.name)),
+                    Ok(r) => match self.build_context_in(read, Some(r.meta.id), &ws.meta.id, None, &opts) {
+                        Ok(ctx) => Ok((r.name.clone(), ctx)),
+                        Err(AppError::Locked) => return Err(AppError::Locked),
+                        Err(e) => Err(format!("request '{}' cannot be prepared: {e}", r.name)),
+                    },
+                    Err(AppError::Locked) => return Err(AppError::Locked),
+                    Err(AppError::NotFound(_)) => Err(format!("request {} no longer exists", st.request_id)),
+                    Err(e) => Err(e.to_string()),
+                };
+                steps.insert(st.request_id, built);
+            }
+            let authority = self.context_authority(read);
+            for (_, ctx) in steps.values_mut().filter_map(|built| built.as_mut().ok()) {
+                crate::exec::guard_context(ctx, &authority);
+            }
+            Ok((plan, steps, notes))
+        })
     }
 
     /// Requests of a folder subtree in tree order, as `(id, name)`.
@@ -309,10 +419,6 @@ impl App {
             parent = Some(found);
         }
         Ok(parent)
-    }
-
-    fn request_names(&self, ws: &Id) -> Result<HashMap<Id, String>> {
-        Ok(self.requests(ws)?.into_iter().map(|r| (r.meta.id, r.name)).collect())
     }
 
     // ------------------------------------------------------------ reports

@@ -184,7 +184,7 @@ impl ProfileManager {
             Err(e) if !recovery => return Err(e),
             Err(_) => None,
         };
-        if !recovery && !enroll_missing && h.rotation.is_none() && binding.is_none() {
+        if !recovery && !enroll_missing && !has_current_records(&h) {
             return Err(IdentityPolicyError::PolicyEnrollmentRequired.into());
         }
         // Gate before the key is unwrapped, from the plaintext hint.
@@ -273,9 +273,9 @@ impl ProfileManager {
             // Re-linking the same account (e.g. toggling the policy): the new
             // proof is also the fresh proof the current policy asks for.
             Some(b) if !recovery && b.provider() == proof.provider() && b.subject() == proof.subject() => {
-                Self::unlock_checked(dir, how, Some(&proof), now)?
+                Self::unlock_checked_policy(dir, how, Some(&proof), now, true)?
             }
-            _ => Self::unlock_checked(dir, how, None, now)?,
+            _ => Self::unlock_checked_policy(dir, how, None, now, true)?,
         };
         check_new_passphrase(rotation.new_passphrase)?;
         let linked = LinkedIdentity {
@@ -285,9 +285,9 @@ impl ProfileManager {
             require_fresh_login,
             linked_at: now,
         };
-        let store = anvil_storage::Store::open(dir, k)?;
+        let store = anvil_storage::Store::open_for_rotation(dir, k)?;
         store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, new, _| {
-            if current.protection_mac != h.protection_mac {
+            if !same_authorized_policy_header(current, &h) {
                 return Err(vault::VaultError::HeaderTampered);
             }
             identity::sealed_binding(current, new, &linked).map(Some).map_err(|e| vault::VaultError::Header(e.to_string()))
@@ -303,8 +303,41 @@ impl ProfileManager {
         if current.is_none() && !recovery {
             return Err(IdentityPolicyError::NotLinked.into());
         }
-        let (h, key) = Self::unlock_checked(dir, how, proof.as_ref(), chrono::Utc::now())?;
-        Self::rotate_policy(dir, h, key, rotation)
+        let (h, key) = Self::unlock_checked_policy(dir, how, proof.as_ref(), chrono::Utc::now(), true)?;
+        Self::rotate_policy(dir, h, key, rotation, false)
+    }
+
+    /// Active product use requires canonical policy. Historical low-level
+    /// recovery and explicit rotation remain available.
+    pub fn require_enrolled_policy(header: &ProfileHeader) -> Result<()> {
+        if !has_current_records(header) {
+            return Err(IdentityPolicyError::PolicyEnrollmentRequired.into());
+        }
+        Ok(())
+    }
+
+    /// Rotate a legacy profile while preserving its verified surviving policy.
+    /// Missing policy requires explicit unlinked enrollment. Fresh-login
+    /// policy needs its fresh proof or recovery credential.
+    pub fn enroll_legacy_policy(dir: &Path, how: Unlock<'_>, proof: Option<&VerifiedIdentity>, rotation: PolicyRotation<'_>) -> Result<()> {
+        let binding = identity::read_binding(dir)?;
+        let Some(binding) = binding else {
+            return Self::enroll_unlinked_policy(dir, how, rotation);
+        };
+        let (h, key) = Self::unlock_checked_policy(dir, how, proof, chrono::Utc::now(), true)?;
+        if has_current_records(&h) {
+            return Err(AppError::Invalid("this profile is already enrolled".into()));
+        }
+        let linked = identity::verify_binding(&binding, &h, &key)?;
+        check_new_passphrase(rotation.new_passphrase)?;
+        let store = anvil_storage::Store::open_for_rotation(dir, key)?;
+        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, new, _| {
+            if !same_authorized_policy_header(current, &h) {
+                return Err(vault::VaultError::HeaderTampered);
+            }
+            identity::sealed_binding(current, new, &linked).map(Some).map_err(|e| vault::VaultError::Header(e.to_string()))
+        })?;
+        Ok(())
     }
 
     /// Explicit owner decision for an unknown historical policy. A local secret
@@ -312,22 +345,32 @@ impl ProfileManager {
     /// native/CLI consent to replace that unknown policy before invoking this.
     pub fn enroll_unlinked_policy(dir: &Path, how: Unlock<'_>, rotation: PolicyRotation<'_>) -> Result<()> {
         let h = vault::read_header(dir)?;
-        if h.rotation.is_some() || identity::read_binding(dir)?.is_some() {
+        if has_current_records(&h) || identity::read_binding(dir)?.is_some() {
             return Err(AppError::Invalid("this profile already has a policy; authorize an unlink instead".into()));
         }
         let (h, key) = Self::unlock_checked_policy(dir, how, None, chrono::Utc::now(), true)?;
-        if h.rotation.is_some() || identity::read_binding(dir)?.is_some() {
+        if has_current_records(&h) || identity::read_binding(dir)?.is_some() {
             return Err(AppError::Invalid("policy enrollment changed; authorize the current policy explicitly".into()));
         }
-        Self::rotate_policy(dir, h, key, rotation)
+        // Recovery proves key possession but does not authorize enrollment to
+        // discard an authenticated commitment to a missing linked policy.
+        vault::verify_rotation_binding(&h, &key, &None)?;
+        Self::rotate_policy(dir, h, key, rotation, true)
     }
 
-    fn rotate_policy(dir: &Path, h: ProfileHeader, key: Key, rotation: PolicyRotation<'_>) -> Result<()> {
+    fn rotate_policy(dir: &Path, h: ProfileHeader, key: Key, rotation: PolicyRotation<'_>, require_unlinked: bool) -> Result<()> {
         check_new_passphrase(rotation.new_passphrase)?;
-        let store = anvil_storage::Store::open(dir, key)?;
-        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, _, _, _| {
-            if current.protection_mac != h.protection_mac {
+        let store = anvil_storage::Store::open_for_rotation(dir, key)?;
+        store.rotate_data_key(rotation.new_passphrase, rotation.recovery, rotation.kdf, |current, old, _, binding| {
+            if !same_authorized_policy_header(current, &h) {
                 return Err(vault::VaultError::HeaderTampered);
+            }
+            if require_unlinked {
+                let binding = binding.flatten();
+                if binding.is_some() {
+                    return Err(vault::VaultError::HeaderTampered);
+                }
+                vault::verify_rotation_binding(current, old, &binding)?;
             }
             Ok(None)
         })?;
@@ -409,5 +452,153 @@ impl crate::App {
             return Err(AppError::Invalid("this profile already uses a passphrase; change it instead".into()));
         }
         self.rotate_data_key(new_passphrase, recovery, kdf)
+    }
+}
+
+/// Catalogue commits may change only the root and enclosing MAC without
+/// changing the identity/credential snapshot already authorized by the owner.
+fn has_current_records(h: &ProfileHeader) -> bool {
+    h.rotation.as_ref().is_some_and(|p| p.manifest_root.is_some())
+}
+
+fn same_authorized_policy_header(current: &ProfileHeader, expected: &ProfileHeader) -> bool {
+    let canonical = |h: &ProfileHeader| {
+        let mut h = h.clone();
+        h.protection_mac = None;
+        if let Some(policy) = h.rotation.as_mut() {
+            policy.manifest_root = None;
+        }
+        serde_json::to_value(h).expect("header serializes")
+    };
+    canonical(current) == canonical(expected)
+}
+#[cfg(test)]
+mod manifest_enrollment_tests {
+    use super::*;
+    /// Authentic schema-4 header/canary fixture using its synthetic owner key.
+    fn pre_catalogue(dir: &Path, key: &Key, lose_binding: bool) {
+        use hmac::{KeyInit, Mac};
+        let mut conn = rusqlite::Connection::open(dir.join(anvil_storage::store::DB_FILE)).unwrap();
+        let tx = conn.transaction().unwrap();
+        let text: String = tx.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get(0)).unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut h: ProfileHeader = serde_json::from_value(state["header"].clone()).unwrap();
+        h.rotation.as_mut().unwrap().manifest_root = None;
+        h.protection_mac = None;
+        let mut extract = hmac::Hmac::<sha2::Sha256>::new_from_slice(&[0u8; 32]).unwrap();
+        extract.update(key.as_bytes());
+        let mut expand = hmac::Hmac::<sha2::Sha256>::new_from_slice(&extract.finalize().into_bytes()).unwrap();
+        expand.update(b"anvil-profile-protection-v1");
+        expand.update(&[1]);
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&expand.finalize().into_bytes()).unwrap();
+        mac.update(b"anvil-rotated-profile-header-v1");
+        mac.update(&serde_json::to_vec(&h).unwrap());
+        h.protection_mac = Some(hex::encode(mac.finalize().into_bytes()));
+        state["header"] = serde_json::to_value(h).unwrap();
+        if lose_binding {
+            state["binding"] = serde_json::Value::Null;
+        }
+        tx.execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [state.to_string()]).unwrap();
+        let canary = anvil_storage::crypto::seal(key, b"anvil/v2/rotated-canary", b"ok");
+        tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(canary))]).unwrap();
+        tx.execute("UPDATE meta SET value='4' WHERE key='schema_version'", []).unwrap();
+        tx.execute("DELETE FROM meta WHERE key='protected_records_v1'", []).unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn pre_catalogue_recovery_enrollment_preserves_policy_or_refuses_its_missing_binding() {
+        for lose_binding in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let created = vault::create_passphrase_profile(dir.path(), "legacy", "original passphrase", KdfParams::testing()).unwrap();
+            let linked = LinkedIdentity {
+                provider: "test-provider".into(),
+                subject: "test-subject".into(),
+                email: None,
+                require_fresh_login: true,
+                linked_at: chrono::Utc::now(),
+            };
+            let binding = identity::sealed_binding(&created.header, &created.dek, &linked).unwrap();
+            std::fs::write(dir.path().join("identity.json"), serde_json::to_vec(&binding).unwrap()).unwrap();
+            let first = vault::RotationRecoveryKey::generate();
+            ProfileManager::enroll_legacy_policy(
+                dir.path(),
+                Unlock::RecoveryKey(created.recovery_key.as_deref().unwrap()),
+                None,
+                PolicyRotation { new_passphrase: "second passphrase", recovery: &first, kdf: KdfParams::testing() },
+            )
+            .unwrap();
+            let (h, key) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(first.as_str())).unwrap();
+            pre_catalogue(dir.path(), &key, lose_binding);
+            assert!(ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(first.as_str())).is_ok());
+            let next = vault::RotationRecoveryKey::generate();
+            let enrolled = ProfileManager::enroll_legacy_policy(
+                dir.path(),
+                Unlock::RecoveryKey(first.as_str()),
+                None,
+                PolicyRotation { new_passphrase: "third passphrase", recovery: &next, kdf: KdfParams::testing() },
+            );
+            if lose_binding {
+                assert!(enrolled.is_err(), "enrollment must not discard the authenticated linked-policy commitment");
+                assert_eq!(vault::read_header(dir.path()).unwrap().key_check, h.key_check);
+                assert!(vault::read_header(dir.path()).unwrap().rotation.unwrap().manifest_root.is_none());
+                // Explicit offline recovery unlink has a distinct owner contract.
+                ProfileManager::unlink_identity(
+                    dir.path(),
+                    Unlock::RecoveryKey(first.as_str()),
+                    None,
+                    PolicyRotation { new_passphrase: "third passphrase", recovery: &next, kdf: KdfParams::testing() },
+                )
+                .unwrap();
+                let (h, _) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(next.as_str())).unwrap();
+                ProfileManager::require_enrolled_policy(&h).unwrap();
+                assert!(identity::read_binding(dir.path()).unwrap().is_none());
+            } else {
+                enrolled.unwrap();
+                let (h, key) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(next.as_str())).unwrap();
+                let actual = identity::verify_binding(&identity::read_binding(dir.path()).unwrap().unwrap(), &h, &key).unwrap();
+                assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(&linked).unwrap());
+            }
+            assert!(ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(first.as_str())).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_linked_recovery_enrollment_preserves_verified_fresh_login_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let created = vault::create_passphrase_profile(dir.path(), "legacy", "original passphrase", KdfParams::testing()).unwrap();
+        let linked = LinkedIdentity {
+            provider: "test-provider".into(),
+            subject: "test-subject".into(),
+            email: None,
+            require_fresh_login: true,
+            linked_at: chrono::Utc::now(),
+        };
+        let binding = identity::sealed_binding(&created.header, &created.dek, &linked).unwrap();
+        std::fs::write(dir.path().join("identity.json"), serde_json::to_vec(&binding).unwrap()).unwrap();
+        let old_recovery = created.recovery_key.unwrap();
+        let error = match ProfileManager::unlock(dir.path(), Unlock::Passphrase("original passphrase")) {
+            Err(e) => e,
+            Ok(_) => panic!("legacy active unlock must refuse"),
+        };
+        assert!(error.to_string().contains("POLICY_ENROLLMENT_REQUIRED"));
+        let recovery = vault::RotationRecoveryKey::generate();
+        ProfileManager::enroll_legacy_policy(
+            dir.path(),
+            Unlock::RecoveryKey(&old_recovery),
+            None,
+            PolicyRotation { new_passphrase: "replacement passphrase", recovery: &recovery, kdf: KdfParams::testing() },
+        )
+        .unwrap();
+        let (h, k) = ProfileManager::unlock(dir.path(), Unlock::RecoveryKey(recovery.as_str())).unwrap();
+        ProfileManager::require_enrolled_policy(&h).unwrap();
+        let actual = identity::verify_binding(&identity::read_binding(dir.path()).unwrap().unwrap(), &h, &k).unwrap();
+        assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(linked).unwrap());
+        let error = match ProfileManager::unlock(dir.path(), Unlock::Passphrase("replacement passphrase")) {
+            Err(e) => e,
+            Ok(_) => panic!("fresh policy must remain enforced"),
+        };
+        assert!(error.to_string().contains("fresh"));
+        assert!(h.rotation.unwrap().manifest_root.is_some());
     }
 }

@@ -980,7 +980,14 @@ async fn a_secret_moved_into_another_workspace_on_disk_does_not_resolve_there() 
     let sql = "UPDATE secrets SET workspace_id=?1 WHERE id=?2";
     let moved = db.execute(sql, rusqlite::params![other.meta.id.to_string(), token.id.to_string()]);
     assert_eq!(moved.unwrap(), 1);
-    refused_auth(&a, &other.meta.id, &request.meta.id).await;
+    // Enrolled profiles now refuse the tampered authority before preparing
+    // auth, rather than producing an unresolved-credential history record.
+    assert!(
+        a.send(Some(request.meta.id), &other.meta.id, None, SendOptions::default(), EventCtx::none(), CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(a.is_locked());
 }
 
 #[test]

@@ -131,7 +131,7 @@ fn get(store: &Store, id: &Id) -> Result<Option<Value>, StoreError> {
 fn a_new_database_is_at_current_schema_and_seals_revision_owners() {
     let (dir, dek) = profile();
     let store = Store::open(dir.path(), dek).unwrap();
-    assert_eq!(DB_SCHEMA_VERSION, 4);
+    assert_eq!(DB_SCHEMA_VERSION, 5);
     assert_eq!(stored_version(dir.path()), DB_SCHEMA_VERSION.to_string());
     let ws = workspace(&store);
     let request = request(&store, ws);

@@ -172,9 +172,10 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ProfileCmd {
     List,
-    /// Replace an unknown legacy missing policy with explicit unlinked policy.
-    /// This owner decision rotates the data key and all local credentials.
+    /// Enroll a pre-catalogue profile and rotate all local credentials.
+    /// Preserve authenticated policy; replace unknown missing policy with unlinked policy.
     EnrollPolicy {
+        /// Confirm replacing unknown historical policy if none authenticates.
         #[arg(long)]
         confirm_replace_unknown_policy: bool,
         #[arg(long)]
@@ -540,10 +541,14 @@ fn passphrase(from_stdin: bool, env: &str) -> Result<Option<Zeroizing<String>>> 
 }
 
 fn open_app(cli: &Cli) -> Result<App> {
-    open_app_for_rotation(cli, false)
+    open_app_inner(cli, false, false)
 }
 
 fn open_app_for_rotation(cli: &Cli, recovery_key_stdin: bool) -> Result<App> {
+    open_app_inner(cli, recovery_key_stdin, true)
+}
+
+fn open_app_inner(cli: &Cli, recovery_key_stdin: bool, rotation_only: bool) -> Result<App> {
     let root = cli.data_dir.clone().unwrap_or_else(anvil_storage::default_data_dir);
     let pm = ProfileManager::new(&root);
     let summary = match &cli.profile {
@@ -564,7 +569,12 @@ fn open_app_for_rotation(cli: &Cli, recovery_key_stdin: bool) -> Result<App> {
             }
         }
     };
-    Ok(App::open(summary.dir, header, key)?)
+    if rotation_only {
+        Ok(App::open_for_rotation(summary.dir, header, key)?)
+    } else {
+        ProfileManager::require_enrolled_policy(&header)?;
+        Ok(App::open(summary.dir, header, key)?)
+    }
 }
 
 fn kv(h: &str) -> Result<KeyValue> {
@@ -791,7 +801,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 ProfileCmd::EnrollPolicy { confirm_replace_unknown_policy, new_passphrase_stdin, recovery_key_stdin } => {
                     if !confirm_replace_unknown_policy || !new_passphrase_stdin {
                         bail!(
-                            "close older Anvil builds, then supply --confirm-replace-unknown-policy --new-passphrase-stdin; this replaces an unknown historical identity policy with an unlinked policy and rotates all credentials"
+                            "close older Anvil builds, then supply --confirm-replace-unknown-policy --new-passphrase-stdin; enrollment rotates all credentials, preserves authenticated identity policy, and replaces unknown missing policy with unlinked policy"
                         );
                     }
                     let summary = match &cli.profile {
@@ -823,14 +833,15 @@ async fn run(cli: Cli) -> Result<i32> {
                     if passphrase(true, "")?.as_ref().map(|s| s.as_str()) != Some(recovery.as_str()) {
                         bail!("recovery acknowledgment did not match; nothing committed");
                     }
-                    ProfileManager::enroll_unlinked_policy(
+                    ProfileManager::enroll_legacy_policy(
                         &summary.dir,
                         how,
+                        None,
                         anvil_app::profiles::PolicyRotation { new_passphrase: &new, recovery: &recovery, kdf: KdfParams::interactive() },
                     )?;
                     writeln!(
                         std::io::stdout().lock(),
-                        "Explicit unlinked policy enrolled and data key rotated. Historical data remains historical; complete trusted-state rollback is not prevented."
+                        "Historical policy enrolled and data key rotated; authenticated identity policy is preserved. Historical data remains historical; complete trusted-state rollback is not prevented."
                     )?;
                     return Ok(0);
                 }

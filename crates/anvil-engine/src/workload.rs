@@ -137,7 +137,11 @@ struct EphemeralSecrets {
 }
 
 impl SecretResolver for EphemeralSecrets {
+    fn validate_context(&self) -> Result<(), String> {
+        self.inner.validate_context()
+    }
     fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String> {
+        self.validate_context()?;
         match self.values.get(&r.id) {
             Some(v) => Ok(v.clone()),
             None => self.inner.resolve(r),

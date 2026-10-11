@@ -493,15 +493,13 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
                 };
                 let p = plan(&app, ws.meta.id, spec);
                 let ctx = context(&app, &p);
-                // A genuinely prefetched vault value survives deletion from
-                // storage. A deferred reference must consult the real vault.
-                app.store.delete_secret(&secret.id).unwrap();
-                let resolved = ctx.secrets.resolve(&secret);
                 if prefetched {
-                    assert_eq!(resolved.unwrap().as_str(), "original-vault-value");
-                } else {
-                    assert!(resolved.is_err(), "unvalidated credential was prefetched: {endpoint}");
+                    assert_eq!(ctx.secrets.resolve(&secret).unwrap().as_str(), "original-vault-value");
                 }
+                // Revocation stales the whole context, including cached values.
+                app.store.delete_secret(&secret.id).unwrap();
+                assert!(ctx.secrets.resolve(&secret).is_err(), "revoked credential context survived: {endpoint}");
+                assert!(!app.is_locked());
             }
         }
     }
@@ -623,6 +621,10 @@ async fn app_and_worker_producer_check_ineligible_issuers_before_nested_vault_va
                 // direct reference through the spec or mixed effective auth.
                 app.store.delete_secret(&credential.id).unwrap();
                 assert!(ctx.secrets.resolve(&credential).is_err(), "credential was prefetched before eligibility");
+                // Rebuild after the edit to exercise endpoint eligibility
+                // independently of the newly tested stale-context refusal.
+                job = app.load_job(&p).unwrap();
+                let ctx = job.requests.get_mut(&p.chain[0]).unwrap();
                 let reads = Arc::new(Mutex::new(Vec::new()));
                 ctx.secrets = Arc::new(CountedSecrets { inner: ctx.secrets.clone(), reads: reads.clone() });
                 let output = send(ctx).await;
@@ -841,7 +843,7 @@ fn ordinary_vault_variables_keep_their_snapshot_and_layer_errors_do_not_quote_na
 }
 
 #[test]
-fn worker_serializes_the_issuer_snapshot_that_passed_eligibility_even_if_the_vault_changes() {
+fn worker_refuses_an_issuer_context_changed_during_eligibility() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Issuer snapshot").unwrap();
@@ -863,9 +865,9 @@ fn worker_serializes_the_issuer_snapshot_that_passed_eligibility_even_if_the_vau
         workspace: ws.meta.id,
         issuer: issuer.clone(),
     });
-    let wire = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap();
-    assert_eq!(wire.requests[0].var_layers[0].vars[0].value.expose(), "https://issuer.example.test/token");
-    assert!(!serde_json::to_string(&wire).unwrap().contains("changed-issuer-canary"));
+    let error = anvil_load::WorkerJob::from_load_job(&p, &job, anvil_load::RunOptions::default()).unwrap_err();
+    assert!(!error.to_string().contains("canary"));
+    assert!(!app.is_locked());
     assert_eq!(
         app.worker_job(&p, true).unwrap_err().to_string(),
         "invalid load plan: the OAuth token endpoint requires HTTPS or literal-loopback HTTP",

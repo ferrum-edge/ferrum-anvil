@@ -55,20 +55,6 @@ impl App {
         self.workspace(ws)?;
         Ok(self.store.delete(kind::DEVICE_IDENTITY_SEAL, ws)?)
     }
-
-    /// Refuse, while `ws` is sealed, a request context that would present
-    /// this device's workload identity: auth that draws its JWT-SVID, or a
-    /// TLS profile that presents its X.509-SVID.
-    pub(crate) fn check_device_identity(&self, ws: &Workspace, ctx: &ExecutionContext) -> Result<()> {
-        let presents = uses_device_identity(&ctx.effective_auth().1) || presents_device_svid(ctx);
-        if presents && self.device_identity_sealed(&ws.meta.id)? {
-            return Err(AppError::Invalid(format!(
-                "a bundle import or backup restore wrote into workspace '{}', so its requests do not use this device's workload identity (JWT-SVID or X.509-SVID); to allow it on this device, choose Allow on this device in the workspace settings' Auth tab, or run `anvil workspace allow-device-identity {}`",
-                ws.name, ws.meta.id
-            )));
-        }
-        Ok(())
-    }
 }
 
 /// Seal every workspace in `workspaces`, inside the import's or restore's
@@ -118,4 +104,15 @@ pub(crate) fn selected_tls_profiles(ctx: &ExecutionContext) -> impl Iterator<Ite
     let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
     let selected = [settings.tls_profile_id, proxy.and_then(|p| p.tls_profile_id)];
     ctx.tls_profiles.iter().filter(move |p| selected.contains(&Some(p.id)))
+}
+
+pub(crate) fn check_sealed_device_identity(ws: &Workspace, ctx: &ExecutionContext, sealed: bool) -> Result<()> {
+    let presents = uses_device_identity(&ctx.effective_auth().1) || presents_device_svid(ctx);
+    if presents && sealed {
+        return Err(AppError::Invalid(format!(
+            "a bundle import or backup restore wrote into workspace '{}', so its requests do not use this device's workload identity (JWT-SVID or X.509-SVID); to allow it on this device, choose Allow on this device in the workspace settings' Auth tab, or run `anvil workspace allow-device-identity {}`",
+            ws.name, ws.meta.id
+        )));
+    }
+    Ok(())
 }

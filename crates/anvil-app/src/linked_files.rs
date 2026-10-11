@@ -31,7 +31,7 @@
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::request::{AttachmentRef, RequestSpec};
+use anvil_domain::request::AttachmentRef;
 use anvil_domain::workspace::{Dataset, RequestDefinition, RequestRevision};
 use anvil_storage::StoreTx;
 use anvil_storage::store::kind;
@@ -205,23 +205,6 @@ impl App {
         })
     }
 
-    /// The linked files `spec` names, refusing any that was not chosen on
-    /// this device for `referrer` (always, without one).
-    pub(crate) fn bound_linked_files(&self, referrer: Option<LinkedFileReferrer>, spec: &RequestSpec) -> Result<Vec<String>> {
-        let mut paths = Vec::new();
-        linked_paths(&serde_json::to_value(spec)?, &mut paths);
-        if let Some(p) = paths.first() {
-            let Some(referrer) = referrer else {
-                return Err(unbound(p, "request"));
-            };
-            let bound = self.linked_file_bindings()?;
-            for p in &paths {
-                refuse_unbound(&bound, referrer, p)?;
-            }
-        }
-        Ok(paths)
-    }
-
     /// Read the linked file of a dataset, refusing it unless it was chosen
     /// on this device for that dataset.
     pub(crate) fn read_linked_dataset(&self, id: Id, path: &str, max: u64) -> Result<Vec<u8>> {
@@ -305,7 +288,7 @@ fn not_named(path: &str, referrer: LinkedFileReferrer) -> AppError {
     AppError::Invalid(format!("the {} does not name the linked file '{path}', so it cannot be relocated", referrer.noun()))
 }
 
-fn refuse_unbound(bound: &[LinkedFileBinding], referrer: LinkedFileReferrer, path: &str) -> Result<()> {
+pub(crate) fn refuse_unbound(bound: &[LinkedFileBinding], referrer: LinkedFileReferrer, path: &str) -> Result<()> {
     if bound.iter().any(|b| b.referrer == referrer && b.path == path) {
         return Ok(());
     }
@@ -372,7 +355,7 @@ pub(crate) fn read_bound_file(path: &str, max: u64, what: &str) -> Result<Vec<u8
 }
 
 /// Paths of every linked file referenced anywhere in a serialized spec.
-fn linked_paths(v: &serde_json::Value, out: &mut Vec<String>) {
+pub(crate) fn linked_paths(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::Object(o) => {
             if o.get("kind").and_then(|k| k.as_str()) == Some("linked_file") {

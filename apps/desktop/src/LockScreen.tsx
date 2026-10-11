@@ -107,12 +107,12 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: string | nu
       finally { setBusy(false); }
     }}>
       <h1>Enroll legacy policy</h1>
-      <p className="lock-sub">This profile has no authenticated policy. Anvil cannot tell whether it was never linked or its policy was deleted. If you intend to replace that unknown policy with an unlinked policy, confirm the native dialogs and save the replacement recovery key. Enrollment re-encrypts active data. You may instead restore trusted historical data or use recovery.</p>
+      <p className="lock-sub">This pre-catalogue profile needs key rotation and authenticated current records before active use. Enrollment preserves a surviving verified linked policy; if its policy is missing, explicitly confirm replacement with an unlinked policy. Save the replacement recovery key in the native dialog. A fresh-login policy needs its provider proof or the current recovery key. Historical data remains recoverable.</p>
       {current?.protection !== "os_keychain" && <label className="lbl">{mode === "recovery" ? "Current recovery key" : "Current passphrase"}<input className="field" type="password" value={secret} onChange={(e) => setSecret(e.target.value)} /></label>}
       <label className="lbl">New passphrase<input className="field" type="password" value={enrollmentPass} onChange={(e) => setEnrollmentPass(e.target.value)} autoComplete="new-password" /></label>
       <label className="lbl">Repeat new passphrase<input className="field" type="password" value={enrollmentRepeat} onChange={(e) => setEnrollmentRepeat(e.target.value)} autoComplete="new-password" /></label>
       <div className="bad-box" role="alert">{error}</div>
-      <button className="btn primary" disabled={busy} type="submit">Replace unknown policy and rotate…</button>
+      <button className="btn primary" disabled={busy} type="submit">Enroll policy and rotate…</button>
       <button className="btn ghost" type="button" disabled={busy} onClick={() => setError(null)}>Back</button>
     </form></div>;
   }

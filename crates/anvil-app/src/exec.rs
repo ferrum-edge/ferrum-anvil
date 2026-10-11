@@ -10,19 +10,22 @@ use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationKind;
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
+use anvil_domain::settings::AppSettings;
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
+use anvil_domain::workspace::{Environment, Folder, RequestDefinition, Workspace};
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::{AttachmentResolver, ExecutionContext, SecretResolver};
 use anvil_engine::oauth_http::require_token_endpoint_route;
 use anvil_engine::vars::{DEFERRED_SECRET_VALUE, VarEntry, VarLayer};
-use anvil_storage::Store;
+use anvil_storage::{ContextAuthority, ContextRead, Store, kind};
 use anvil_transport::recorder::EventCtx;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -61,38 +64,86 @@ pub struct ResolvedSecrets {
     variables: HashMap<(usize, usize), SecretRef>,
     /// Looks up a reference not prefetched, including deferred OAuth credentials.
     store: StoreSecrets,
+    authority: AppContextAuthority,
 }
 
+/// Captures App state alongside the authenticated storage capability.
+#[derive(Clone)]
+pub struct AppContextAuthority {
+    store: Arc<Store>,
+    scope: ContextAuthority,
+    confinement: Arc<AtomicBool>,
+    confined: bool,
+}
+impl AppContextAuthority {
+    pub fn check(&self) -> anvil_storage::store::Result<()> {
+        self.store.check_context(&self.scope)?;
+        if self.confinement.load(Ordering::SeqCst) != self.confined {
+            return Err(anvil_storage::StoreError::StaleAuthority);
+        }
+        Ok(())
+    }
+    fn resolve(&self, ws: &Id, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
+        if self.confinement.load(Ordering::SeqCst) != self.confined {
+            self.check().map_err(|e| e.to_string())?;
+        }
+        // Validate AND read in the same snapshot. A deferred resolver must not
+        // repair an old context with a credential from a later configuration.
+        self.store
+            .read_context(|read| {
+                read.check(&self.scope)?;
+                Ok(resolve_secret(read, ws, r))
+            })
+            .map_err(|e| e.to_string())?
+    }
+}
+fn resolve_secret(read: &ContextRead<'_, '_>, ws: &Id, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
+    match read.get_workspace_secret(&r.id, ws) {
+        Ok(Some((_, value))) => Ok(value),
+        Ok(None) => {
+            Err("the secret is not in this workspace's vault (it may belong to another workspace or not have been imported)".into())
+        }
+        Err(anvil_storage::StoreError::Locked) => Err("Anvil is locked".into()),
+        Err(_) => Err("could not read the workspace vault".into()),
+    }
+}
 impl ResolvedSecrets {
-    /// Look up every secret named in `parts` (see [`secret_parts`]).
     fn lookup(
         store: StoreSecrets,
+        read: &ContextRead<'_, '_>,
         parts: &[serde_json::Value],
         variables: HashMap<(usize, usize), SecretRef>,
         prefetch_variables: bool,
+        authority: AppContextAuthority,
     ) -> ResolvedSecrets {
         let mut refs = HashSet::new();
         parts.iter().for_each(|p| collect_secret_refs(p, &mut refs));
         if prefetch_variables {
             refs.extend(variables.values().cloned());
         }
-        let mut resolved = HashMap::new();
-        for r in refs {
-            let v = store.resolve(&r);
-            resolved.insert(r, v);
-        }
-        ResolvedSecrets { resolved: Mutex::new(resolved), variables, store }
+        let resolved = refs
+            .into_iter()
+            .map(|r| {
+                let v = resolve_secret(read, &store.workspace, &r);
+                (r, v)
+            })
+            .collect();
+        ResolvedSecrets { resolved: Mutex::new(resolved), variables, store, authority }
     }
 }
 
 impl SecretResolver for ResolvedSecrets {
+    fn validate_context(&self) -> std::result::Result<(), String> {
+        crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())
+    }
     fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
         self.variables.get(&(layer, variable)).cloned()
     }
 
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
-        if self.store.store.is_locked() {
-            return Err("Anvil is locked".into());
+        self.validate_context()?;
+        if !self.authority.scope.includes_secret(&r.id) {
+            return Err("the credential is not part of this execution context".into());
         }
         let mut resolved = self.resolved.lock();
         match resolved.get(r) {
@@ -101,7 +152,7 @@ impl SecretResolver for ResolvedSecrets {
                 // Freeze the first deferred outcome too: producer validation
                 // and subsequent wire materialization must see the same vault
                 // value, even if the stored issuer changes between them.
-                let value = crate::blocking_in_place(|| self.store.resolve(r));
+                let value = crate::blocking_in_place(|| self.authority.resolve(&self.store.workspace, r));
                 resolved.insert(r.clone(), value.clone());
                 value
             }
@@ -123,7 +174,7 @@ fn secret_parts(ctx: &ExecutionContext) -> Result<Vec<serde_json::Value>> {
     let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
     let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
     let tls: Vec<_> = selected_tls_profiles(ctx).collect();
-    let integration = settings.integration_profile_id.and_then(|id| ctx.integrations.iter().find(|i| i.id == id));
+    let integration = &ctx.integrations;
     let mut spec = ctx.spec.clone();
     // Only effective auth is used. Inactive request auth must not cause an
     // OAuth credential to be fetched through the spec's duplicate reference.
@@ -192,15 +243,16 @@ fn collect_secret_refs(v: &serde_json::Value, out: &mut HashSet<SecretRef>) {
 }
 
 pub struct StoreAttachments {
-    pub app_store: Arc<Store>,
     pub index: std::collections::HashMap<String, Vec<u8>>,
     /// Linked files chosen on this device (see `anvil_app::linked_files`);
     /// any other linked file is refused, never read.
     pub linked: Vec<String>,
+    pub authority: AppContextAuthority,
 }
 
 impl AttachmentResolver for StoreAttachments {
     fn load(&self, a: &AttachmentRef) -> std::result::Result<Bytes, String> {
+        crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())?;
         match a {
             AttachmentRef::Stored { sha256, file_name, .. } => self
                 .index
@@ -215,7 +267,12 @@ impl AttachmentResolver for StoreAttachments {
     }
 }
 
-fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver, defer: bool) -> Result<(VarLayer, Vec<(usize, SecretRef)>)> {
+fn layer(
+    label: String,
+    vars: &[Variable],
+    secrets: &impl Fn(&SecretRef) -> std::result::Result<Zeroizing<String>, String>,
+    defer: bool,
+) -> Result<(VarLayer, Vec<(usize, SecretRef)>)> {
     let mut out = Vec::new();
     let mut deferred = Vec::new();
     for v in vars.iter().filter(|v| v.enabled) {
@@ -229,7 +286,7 @@ fn layer(label: String, vars: &[Variable], secrets: &dyn SecretResolver, defer: 
                     deferred.push((out.len(), secret.clone()));
                     DEFERRED_SECRET_VALUE.to_string()
                 } else {
-                    secrets.resolve(secret).map(|z| z.to_string()).map_err(|_| {
+                    secrets(secret).map(|z| z.to_string()).map_err(|_| {
                         AppError::Invalid(
                             "could not resolve a secret variable; it may be missing or not in this workspace's vault; check the vault and active variables"
                                 .into(),
@@ -295,20 +352,45 @@ impl App {
         draft: Option<RequestSpec>,
         opts: &SendOptions,
     ) -> Result<ExecutionContext> {
+        let ctx = self.read_context(|read| self.build_context_in(read, request_id, ws_id, draft, opts))?;
+        ctx.secrets.validate_context().map_err(AppError::Invalid)?;
+        Ok(ctx)
+    }
+
+    pub(crate) fn read_context<T>(&self, f: impl FnOnce(&ContextRead<'_, '_>) -> Result<T>) -> Result<T> {
+        let result = self.store.read_context(|read| Ok(f(read)))?;
+        if matches!(&result, Err(AppError::Store(anvil_storage::StoreError::Integrity))) {
+            self.store.lock();
+        }
+        result
+    }
+
+    pub(crate) fn build_context_in(
+        &self,
+        read: &ContextRead<'_, '_>,
+        request_id: Option<Id>,
+        ws_id: &Id,
+        draft: Option<RequestSpec>,
+        opts: &SendOptions,
+    ) -> Result<ExecutionContext> {
         // Taken before anything is read for the workspace: a delete of it
         // from here on (or a lock) fences an execution of this context, even
         // one that starts after it, while a delete before this point leaves
         // nothing to read. A workspace restored with the same id afterwards
         // is not affected: its contexts are built after the delete.
+        crate::profiles::ProfileManager::require_enrolled_policy(&self.header)?;
+        let confined = self.confined_token_files.load(Ordering::SeqCst);
         let epoch = self.engine.context_epoch(&ws_id.to_string());
         if let Some(d) = &draft {
             refuse_linked_files(d)?;
         }
-        let ws = self.workspace(ws_id)?;
+        let ws = read.get::<Workspace>(kind::WORKSPACE, ws_id)?.ok_or_else(|| AppError::NotFound("workspace".into()))?;
         let (req, spec) = match (request_id, draft) {
-            (Some(id), Some(d)) => (Some(self.request(&id)?), d),
+            (Some(id), Some(d)) => {
+                (Some(read.get::<RequestDefinition>(kind::REQUEST, &id)?.ok_or_else(|| AppError::NotFound("request".into()))?), d)
+            }
             (Some(id), None) => {
-                let r = self.request(&id)?;
+                let r = read.get::<RequestDefinition>(kind::REQUEST, &id)?.ok_or_else(|| AppError::NotFound("request".into()))?;
                 let s = r.spec.clone();
                 (Some(r), s)
             }
@@ -323,15 +405,15 @@ impl App {
             return Err(AppError::Invalid(format!("request '{}' is not in this workspace", r.name)));
         }
         let referrer = req.as_ref().map(|r| LinkedFileReferrer::Request { id: r.meta.id });
-        let linked = self.bound_linked_files(referrer, &spec)?;
-        let chain = self.folder_chain(ws_id, req.as_ref().and_then(|r| r.folder_id))?;
+        let linked = linked_for(read, referrer, &spec)?;
+        let chain = folders_for(read, ws_id, req.as_ref().and_then(|r| r.folder_id))?;
         // The innermost import root; unless the user opened it to the
         // workspace, nothing outside it resolves under it.
         let root = chain.iter().rposition(|f| f.import_root);
         let sealed = root.filter(|&i| !chain[i].use_workspace_scope);
         let inner = &chain[sealed.unwrap_or(0)..];
-        let settings = self.settings()?;
-        let secrets = StoreSecrets { store: self.store.clone(), workspace: *ws_id };
+        let settings: AppSettings = read.get(kind::APP_SETTINGS, &crate::settings_id())?.unwrap_or_default();
+        let secrets = |r: &SecretRef| resolve_secret(read, ws_id, r);
         let mut settings_layers = vec![("app".to_string(), settings.defaults.clone()), ("workspace".to_string(), ws.settings.clone())];
         for f in &chain {
             settings_layers.push((format!("folder:{}", f.name), f.settings.clone()));
@@ -380,7 +462,10 @@ impl App {
             add_layer(format!("folder:{}", f.name), &f.variables)?;
         }
         let selected_env = opts.environment.or(ws.active_environment_id);
-        let environments = self.environments(ws_id)?;
+        let environments: Vec<Environment> = match selected_env {
+            Some(eid) => read.get::<Environment>(kind::ENVIRONMENT, &eid)?.filter(|e| e.workspace_id == *ws_id).into_iter().collect(),
+            None => vec![],
+        };
         let env_id = match selected_env {
             Some(eid) if environments.iter().any(|env| env.meta.id == eid) => Some(eid),
             Some(eid) if opts.environment == Some(eid) => {
@@ -403,11 +488,11 @@ impl App {
         let mut index = std::collections::HashMap::new();
         let spec_json = serde_json::to_value(&spec)?;
         collect_attachments(&spec_json, &mut |sha| {
-            if let Ok(Some(b)) = self.get_attachment(sha) {
+            if let Ok(Some(b)) = attachment_for(read, sha) {
                 index.insert(sha.to_string(), b);
             }
         });
-        let settings_app = self.settings()?;
+        let settings_app = &settings;
         let mut ctx = ExecutionContext {
             workspace_id: Some(*ws_id),
             request_id: req.as_ref().map(|r| r.meta.id),
@@ -417,12 +502,12 @@ impl App {
             settings_layers,
             auth_layers,
             var_layers,
-            tls_profiles: self.tls_profiles(ws_id)?,
-            proxy_profiles: self.proxy_profiles(ws_id)?,
-            integrations: self.integrations(ws_id)?,
+            tls_profiles: read.candidates(kind::TLS_PROFILE, Some(ws_id))?,
+            proxy_profiles: read.candidates(kind::PROXY_PROFILE, Some(ws_id))?,
+            integrations: read.query(kind::INTEGRATION, Some(ws_id), &[])?,
             // Replaced below, once the context has passed its checks.
             secrets: Arc::new(StoreSecrets { store: self.store.clone(), workspace: *ws_id }),
-            attachments: Arc::new(StoreAttachments { app_store: self.store.clone(), index, linked }),
+            attachments: Arc::new(anvil_engine::context::MemoryAttachments::default()),
             isolation: ws_id.to_string(),
             send_anyway: opts.send_anyway,
             seed: opts.seed,
@@ -436,7 +521,8 @@ impl App {
         // token where the import or restore said: a passphrase proves nothing
         // about who made a backup. It is paused under the same seal as this
         // device's workload identity, until the user allows the workspace.
-        if self.device_identity_sealed(ws_id)? {
+        let device_sealed = read.get::<crate::device_identity::DeviceIdentitySeal>(kind::DEVICE_IDENTITY_SEAL, ws_id)?.is_some();
+        if device_sealed {
             let mut paused = false;
             for i in &mut ctx.integrations {
                 let IntegrationKind::FerrumGateway { detail, .. } = &mut i.kind;
@@ -450,11 +536,55 @@ impl App {
             refuse_device_identity(&ctx.effective_auth().1)?;
             refuse_unbound_client_identity(&ctx)?;
         }
-        self.check_device_identity(&ws, &ctx)?;
-        self.check_token_files(&ctx.effective_auth().1)?;
+        crate::device_identity::check_sealed_device_identity(&ws, &ctx, device_sealed)?;
+        token_files_for(read, &ctx.effective_auth().1, confined)?;
+        // Retain point absence for every selected profile, including missing
+        // TLS/proxy ids. Unused candidate rows are not dependencies.
+        let selected = anvil_engine::settings::resolve(&ctx.settings_layers);
+        if let Some(id) = selected.proxy_profile_id {
+            read.depend_object(kind::PROXY_PROFILE, &id);
+        }
+        if let Some(id) = selected.tls_profile_id {
+            read.depend_object(kind::TLS_PROFILE, &id);
+        }
+        if let Some(proxy) = selected.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id))
+            && let Some(id) = proxy.tls_profile_id
+        {
+            read.depend_object(kind::TLS_PROFILE, &id);
+        }
+        let mut dependency_refs = HashSet::new();
+        let mut active_spec = ctx.spec.clone();
+        active_spec.auth = AuthConfig::None;
+        for part in [
+            serde_json::to_value(active_spec)?,
+            serde_json::to_value(ctx.effective_auth().1)?,
+            serde_json::to_value(selected_tls_profiles(&ctx).collect::<Vec<_>>())?,
+            serde_json::to_value(selected.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id)))?,
+            serde_json::to_value(&ctx.integrations)?,
+        ] {
+            collect_secret_refs(&part, &mut dependency_refs);
+        }
+        dependency_refs.extend(deferred_variables.values().cloned());
+        for r in dependency_refs {
+            read.depend_secret(&r.id);
+        }
         let parts = secret_parts(&ctx)?;
         let prefetch_variables = !oauth_needs_deferral(&ctx, &ctx.effective_auth().1);
-        ctx.secrets = Arc::new(ResolvedSecrets::lookup(secrets, &parts, deferred_variables, prefetch_variables));
+        let authority = AppContextAuthority {
+            store: self.store.clone(),
+            scope: read.finish(),
+            confinement: self.confined_token_files.clone(),
+            confined,
+        };
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(
+            StoreSecrets { store: self.store.clone(), workspace: *ws_id },
+            read,
+            &parts,
+            deferred_variables,
+            prefetch_variables,
+            authority.clone(),
+        ));
+        ctx.attachments = Arc::new(StoreAttachments { index, linked, authority });
         Ok(ctx)
     }
 
@@ -602,5 +732,107 @@ pub(crate) fn collect_attachments(v: &serde_json::Value, f: &mut dyn FnMut(&str)
         }
         serde_json::Value::Array(a) => a.iter().for_each(|x| collect_attachments(x, f)),
         _ => {}
+    }
+}
+
+pub(crate) fn folders_for(read: &ContextRead<'_, '_>, ws: &Id, mut id: Option<Id>) -> Result<Vec<Folder>> {
+    let mut chain = vec![];
+    while let Some(current) = id {
+        let folder: Folder = read.get(kind::FOLDER, &current)?.ok_or_else(|| AppError::NotFound("folder".into()))?;
+        if folder.workspace_id != *ws {
+            return Err(AppError::Invalid(format!("folder '{}' is not in this workspace", folder.name)));
+        }
+        id = folder.parent_id;
+        chain.push(folder);
+        if chain.len() > 256 {
+            return Err(AppError::Invalid("folder ancestry is too deep or cyclic".into()));
+        }
+    }
+    chain.reverse();
+    Ok(chain)
+}
+fn linked_for(read: &ContextRead<'_, '_>, referrer: Option<LinkedFileReferrer>, spec: &RequestSpec) -> Result<Vec<String>> {
+    let mut paths = vec![];
+    crate::linked_files::linked_paths(&serde_json::to_value(spec)?, &mut paths);
+    for path in &paths {
+        let Some(referrer) = referrer else {
+            refuse_linked_files(spec)?;
+            unreachable!("linked file draft refused");
+        };
+        linked_permission(read, referrer, path)?;
+    }
+    Ok(paths)
+}
+pub(crate) fn linked_permission(read: &ContextRead<'_, '_>, referrer: LinkedFileReferrer, path: &str) -> Result<()> {
+    let bindings =
+        read.query(kind::LINKED_FILE, None, &[("/referrer".into(), serde_json::to_value(referrer)?), ("/path".into(), path.into())])?;
+    crate::linked_files::refuse_unbound(&bindings, referrer, path)
+}
+fn token_files_for(read: &ContextRead<'_, '_>, auth: &AuthConfig, confined: bool) -> Result<()> {
+    if !confined {
+        return Ok(());
+    }
+    let mut paths = vec![];
+    crate::token_files::jwt_svid_files(auth, &mut paths);
+    for path in paths {
+        let bound: Vec<crate::token_files::TokenFileBinding> =
+            read.query(kind::TOKEN_FILE, None, &[("/path".into(), path.trim().into())])?;
+        if bound.is_empty() {
+            return Err(AppError::Invalid(
+                "the JWT-SVID token file was not chosen with Choose… on this device; choose it in the auth settings".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+pub(crate) fn attachment_for(read: &ContextRead<'_, '_>, sha: &str) -> Result<Option<Vec<u8>>> {
+    let index: Option<serde_json::Value> = read.get(kind::IMPORT_SOURCE, &crate::workspace::attachment_index_id(sha))?;
+    let Some(key) = index.as_ref().and_then(|index| index.get("blob")).and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    Ok(read.get_blob(key)?.map(|bytes| bytes.to_vec()))
+}
+
+impl App {
+    pub(crate) fn context_authority(&self, read: &ContextRead<'_, '_>) -> AppContextAuthority {
+        AppContextAuthority {
+            store: self.store.clone(),
+            scope: read.finish(),
+            confinement: self.confined_token_files.clone(),
+            confined: self.confined_token_files.load(Ordering::SeqCst),
+        }
+    }
+}
+/// Additional producer dependencies (plan/dataset) survive context clones and
+/// the engine's retained/ephemeral resolver wrappers.
+pub(crate) fn guard_context(ctx: &mut ExecutionContext, authority: &AppContextAuthority) {
+    ctx.secrets = Arc::new(GuardedSecrets { inner: ctx.secrets.clone(), authority: authority.clone() });
+    ctx.attachments = Arc::new(GuardedAttachments { inner: ctx.attachments.clone(), authority: authority.clone() });
+}
+struct GuardedSecrets {
+    inner: Arc<dyn SecretResolver>,
+    authority: AppContextAuthority,
+}
+impl SecretResolver for GuardedSecrets {
+    fn validate_context(&self) -> std::result::Result<(), String> {
+        crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())?;
+        self.inner.validate_context()
+    }
+    fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
+        self.validate_context()?;
+        self.inner.resolve(r)
+    }
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+        self.inner.variable_secret(layer, variable)
+    }
+}
+struct GuardedAttachments {
+    inner: Arc<dyn AttachmentResolver>,
+    authority: AppContextAuthority,
+}
+impl AttachmentResolver for GuardedAttachments {
+    fn load(&self, attachment: &AttachmentRef) -> std::result::Result<Bytes, String> {
+        crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())?;
+        self.inner.load(attachment)
     }
 }

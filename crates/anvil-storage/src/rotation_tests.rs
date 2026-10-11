@@ -23,6 +23,38 @@ fn open_new(dir: &Path) -> Store {
     let k = vault::unlock_with_passphrase(&h, NEW).unwrap();
     Store::open(dir, k).unwrap()
 }
+
+#[test]
+fn catalogue_downgrade_between_connection_preflight_and_record_snapshot_is_refused() {
+    for behavior in [TransactionBehavior::Deferred, TransactionBehavior::Immediate] {
+        let dir = tempfile::tempdir().unwrap();
+        let c = vault::create_enrolled_passphrase_profile(dir.path(), "rotation", OLD, KdfParams::testing()).unwrap();
+        let store = Store::open(dir.path(), c.dek.clone()).unwrap();
+        let secret = Id::new();
+        store.put_secret(&secret, None, "label", "current").unwrap();
+        // Pass the connection preflight, then replay authority using a raw
+        // SQLite writer that does not participate in the app's file fence.
+        let mut guarded = store.writing().unwrap();
+        {
+            let control = store.begin_records(&mut guarded, behavior).unwrap();
+            assert_eq!(control.get_secret(&secret).unwrap().unwrap().1.as_str(), "current");
+            control.tx.rollback().unwrap();
+        }
+        let mut raw = Connection::open(dir.path().join(DB_FILE)).unwrap();
+        let tx = raw.transaction().unwrap();
+        let mut historical = crate::rotation::read_on(&tx).unwrap().unwrap();
+        historical.header.rotation.as_mut().unwrap().manifest_root = None;
+        vault::bind_rotation(&mut historical.header, &c.dek, &historical.binding);
+        crate::rotation::write_on(&tx, &historical).unwrap();
+        let env = crypto::seal(&c.dek, b"anvil/v2/rotated-canary", b"ok");
+        tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(env))]).unwrap();
+        tx.execute("UPDATE meta SET value='4' WHERE key='schema_version'", []).unwrap();
+        tx.execute("DELETE FROM meta WHERE key='protected_records_v1'", []).unwrap();
+        tx.commit().unwrap();
+        assert!(matches!(store.begin_records(&mut guarded, behavior), Err(StoreError::Integrity)));
+    }
+}
+
 fn rows(conn: &Connection) -> Vec<(String, Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
     for table in ["objects", "secrets", "blobs", "history", "load_reports"] {

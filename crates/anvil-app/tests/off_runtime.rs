@@ -107,10 +107,11 @@ fn a_context_looks_up_its_workspace_secrets_when_built_and_fails_them_closed_onc
     assert!(refused.contains("not in this workspace's vault"), "{refused}");
 
     let ctx = app.build_context(None, &ws.meta.id, Some(bearer(&mine)), &SendOptions::default()).unwrap();
-    // Looked up when the context was built: deleting it from the store now
-    // does not reach the context.
-    app.store.delete_secret(&mine.id).unwrap();
     assert_eq!(ctx.secrets.resolve(&mine).unwrap().as_str(), "mine-value");
+    // A protected edit stales even the prefetched snapshot.
+    app.store.delete_secret(&mine.id).unwrap();
+    assert!(ctx.secrets.resolve(&mine).unwrap_err().contains("configuration changed"));
+    assert!(!app.is_locked());
     // Once the profile locks, the context's secrets fail closed.
     app.lock();
     assert_eq!(ctx.secrets.resolve(&mine).unwrap_err(), "Anvil is locked");
@@ -129,8 +130,9 @@ fn a_context_looks_up_only_the_secrets_of_the_profiles_its_settings_select() {
     let ctx = app.build_context(None, &ws.meta.id, Some(spec), &SendOptions::default()).unwrap();
     // Only the selected proxy's password was looked up when the context was
     // built; the other profile's is looked up if it is used, and is gone by then.
+    assert_eq!(ctx.secrets.resolve(&used).unwrap().as_str(), "used-value");
     app.store.delete_secret(&used.id).unwrap();
     app.store.delete_secret(&unused.id).unwrap();
-    assert_eq!(ctx.secrets.resolve(&used).unwrap().as_str(), "used-value");
+    assert!(ctx.secrets.resolve(&used).unwrap_err().contains("configuration changed"));
     assert!(ctx.secrets.resolve(&unused).is_err());
 }

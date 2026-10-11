@@ -655,13 +655,71 @@ passphrase and pre-delivered, acknowledged recovery credential through
 `PolicyRotation`. An authentic older weaker policy has an older key and fails
 against the current ciphertext canary. Stale application handles cannot write.
 
+### Authenticated current records
+
+Schema 5 records the expected presence, owner/parent indexes, ordering metadata
+and ciphertext digest of every object and vault secret. The catalogue root is
+MAC-authenticated in the canonical wrapped header and coupled to the key canary.
+A protected write or delete publishes its catalogue changes in the same SQLite
+transaction. Reads refuse older authentic ciphertext, resurrected deleted rows,
+missing expected rows (including deny records), and altered ownership or order
+while the current local authority is retained. Ordinary edits require no new
+passphrase, recovery key or network access and do not reseal blobs or history.
+
+Pre-catalogue canonical and legacy profiles must explicitly rotate and enroll
+before active use; opening a historical schema-4 authority cannot silently
+certify selectively mixed rows. An already enrolled open handle permanently
+requires catalogue authority, including after lock/unlock. Enrollment before
+active use is required even after recovery unlock. A surviving verified linked
+policy is preserved. Enrollment refuses a missing or unreadable policy committed
+by the canonical header; repair requires a separately authorized recovery unlink
+through the profile service. Only unknown missing legacy policy permits consent
+to unlinked enrollment. A fresh-login
+policy needs a fresh provider proof through the profile service or its recovery
+credential. Low-level historical recovery and rotation remain available offline.
+The transition cannot establish the
+freshness of data already replayed before enrollment. An enrolled profile never
+silently recreates a missing catalogue. Corrupt authority refuses access; recover
+through an explicitly chosen authentic checkpoint or portable backup rather than
+certifying the damaged current database. Damaged revision payloads can still be
+enumerated for deliberate removal without returning their contents.
+
+Cached request contexts verify all actual protected rows before preparation,
+cached-secret or linked-file access, and native session sends. Their ephemeral
+dependency proof captures configuration and permission inputs in one consistent
+read transaction, including absent selections and ordered gateway candidates.
+A relevant object, credential or permission change stales an older context:
+rebuild the request or reopen the session. Saving another request or workspace,
+unused environment/TLS/proxy/secret rows, or a collection-run report does not
+interrupt unrelated contexts. Gateway candidate membership/order is relevant;
+whole-row comparison also treats an unchanged relevant row saved again as a
+change. No field-level semantic comparison is claimed. Relevant load-plan and
+dataset inputs remain checked through worker admission, and scenario inputs
+remain checked by frozen run contexts. A legitimate edit does not relock the
+profile. Integrity failure at an authority preflight locks it; the idle-lock loop
+also locks on unreadable settings instead of applying defaults. Material already
+handed to an admitted external worker, copied plaintext and completed network
+effects cannot be withdrawn retroactively.
+
+Portable exports omit this local catalogue. Explicit import/restore rebuilds
+entries inside its existing transaction. A raw checkpoint is checked against its
+own catalogue before staging; deliberate restoration rebuilds the staged
+catalogue under the current credentials and linked policy before the atomic live
+replacement. Its historical data is an intentional owner choice.
+
+Catalogue publication serializes metadata proportional to the number of protected
+records once per transaction, hashing only newly written payloads. Authority
+preflight additionally hashes all protected ciphertext. It does not re-encrypt
+all profile bytes. Large profiles therefore incur catalogue and preflight work;
+this is not a constant-time or incremental-tree design.
+
 **Limits:** rotation does not erase historical raw files, checkpoints, WAL/free
 page remnants or independently encrypted portable backups. An owner can recover
 historical data with its matching historical credentials and export/import it.
-An authentic historical database contains the wrapped header, policy and canary.
-Replaying all trusted freshness-authority state can select historical-key state,
-including by restoring those metadata rows with old startup/settings rows or
-discarding newer ciphertext. This does not require replacing every database byte.
+An authentic historical database contains the wrapped header, policy, catalogue
+and coupled canary. Replaying all trusted freshness-authority state can select historical-key state,
+including by restoring those authority rows and matching historical protected
+records, and discarding newer protected state. This does not require replacing every database byte.
 Historical deleted secrets and permissive settings may return; a same-epoch
 snapshot also remains restorable. Old keys cannot decrypt newer-key ciphertext.
 No independent monotonic
@@ -673,7 +731,7 @@ under an unchanged key. No mandatory online service is introduced.
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION` (currently 4). Migrations run forward at open and at
+  `DB_SCHEMA_VERSION` (currently 5). Migrations run forward at open and at
   unlock, each step in one write transaction with the version bump that
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its
@@ -730,14 +788,19 @@ under an unchanged key. No mandatory online service is introduced.
 - **Database schema 4** declares support for local key rotation and makes
   earlier builds refuse the database. The migration changes no ciphertext;
   rotation is a separate explicit operation, never automatic.
-- Before a step that seals the rows of an existing database again (schema 2
-  and schema 3), the database is copied as it is into the profile's
+- **Database schema 5** adds the authenticated live object/secret catalogue
+  for enrolled profiles and makes earlier builds refuse the database. Legacy
+  profiles establish it when explicitly enrolling/rotating their policy.
+- Before a schema migration that seals rows (schemas 2 and 3), the database is copied as it is into the profile's
   `checkpoints` folder as `<time>-before-schema-<version>.db`, the same kind of
   checkpoint an import takes. If that copy cannot be written (for example,
   the disk is full), the migration does not run and the profile does not
   open or unlock; free space and try again. A new profile has nothing to copy
   and takes none, and restoring a checkpoint takes none, since the
   checkpoint is itself the earlier copy.
+- Explicit catalogue enrollment rotates the data key and advances to schema 5
+  in the same atomic transaction. It does not automatically save an old-key
+  checkpoint; the owner should retain a deliberate backup for historical recovery.
 - The history table is indexed by the response body each record references,
   so releasing a replaced body and retention find a blob's uses without a
   scan. The index has no schema version of its own: it is created, where

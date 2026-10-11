@@ -99,14 +99,26 @@ pub fn run() {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     let st = handle.state::<DesktopState>();
-                    let open = st.app.read().as_ref().filter(|a| !a.is_locked()).cloned();
-                    let (idle_minutes, lock_on_sleep, unlocked) = match open {
+                    let open = st.app.read().as_ref().cloned();
+                    let (idle_minutes, lock_on_sleep, owner) = match open {
                         Some(a) => {
+                            if a.is_locked() {
+                                st.lock_integrity_if_current(&a);
+                                continue;
+                            }
                             // Read on a blocking thread: the store may be held by a long transaction.
-                            let s = anvil_app::off_runtime(move || a.settings()).await.unwrap_or_default();
-                            (s.lock.idle_minutes, s.lock.lock_on_os_lock, true)
+                            let reading = a.clone();
+                            match anvil_app::off_runtime(move || reading.settings()).await {
+                                Ok(s) => (s.lock.idle_minutes, s.lock.lock_on_os_lock, Some(a)),
+                                Err(_) => {
+                                    if st.lock_if_current(&a) {
+                                        let _ = handle.emit("locked", "profile integrity");
+                                    }
+                                    continue;
+                                }
+                            }
                         }
-                        None => (0, false, false),
+                        None => (0, false, None),
                     };
                     let suspended = {
                         let mut p = st.clock_probe.lock();
@@ -115,12 +127,9 @@ pub fn run() {
                         *p = (Instant::now(), SystemTime::now());
                         wall > mono + Duration::from_secs(30)
                     };
-                    if !unlocked {
-                        continue;
-                    }
+                    let Some(owner) = owner else { continue };
                     let idle_hit = st.idle_lock_due(idle_minutes);
-                    if idle_hit || (suspended && lock_on_sleep) {
-                        st.lock();
+                    if (idle_hit || (suspended && lock_on_sleep)) && st.lock_if_current(&owner) {
                         let _ = handle.emit("locked", if idle_hit { "idle" } else { "suspend" });
                     }
                 }

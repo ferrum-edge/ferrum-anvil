@@ -253,7 +253,13 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
         }
         LoadCmd::Run { workspace, plan, i_am_authorized, json, html, csv } => {
             let ws = app.find_workspace(workspace)?.meta.id;
-            let p = find_plan(app, &ws, plan)?;
+            let selected = find_plan(app, &ws, plan)?;
+            // Re-read the selected saved plan and capture its proof together.
+            // The earlier selector result supplies only an ID, never workload.
+            let (p, plan_authority) = app.load_plan_with_authority(&selected.id)?;
+            if p.workspace_id != ws {
+                bail!("the load plan belongs to another workspace");
+            }
             let pre = app.load_preflight(&p)?;
             eprintln!("destinations: {}", pre.destinations.join(", "));
             eprintln!("workload: {}", pre.workload);
@@ -267,8 +273,11 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 );
                 return Ok(3);
             }
-            let job = app.worker_job(&p, true)?;
+            plan_authority.check()?;
+            let (job, job_authority) = app.worker_job_with_authority(&p, true)?;
             let exe = std::env::current_exe()?;
+            plan_authority.check()?;
+            job_authority.check()?;
             let mut c = anvil_load::LoadController::spawn_mode(&exe, Some(LOAD_WORKER_FLAG), &job).await?;
             let cancel = tokio_util::sync::CancellationToken::new();
             let c2 = cancel.clone();

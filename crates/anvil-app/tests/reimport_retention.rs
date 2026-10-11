@@ -27,6 +27,15 @@ fn open() -> (tempfile::TempDir, App) {
     (root, app)
 }
 
+/// These raw-metadata fixtures exercise intentional low-level historical
+/// recovery. Enrolled active profiles reject the same edits at the catalogue.
+fn open_historical() -> (tempfile::TempDir, App) {
+    let root = tempfile::tempdir().unwrap();
+    let c = anvil_storage::vault::create_passphrase_profile(root.path(), "historical", PASSPHRASE, KdfParams::testing()).unwrap();
+    let app = App::open(root.path().to_path_buf(), c.header, c.dek).unwrap();
+    (root, app)
+}
+
 fn db(app: &App) -> Connection {
     Connection::open(app.dir.join(DB_FILE)).unwrap()
 }
@@ -223,7 +232,7 @@ fn orphan(app: &App) -> (Id, Id, AttachmentRef, Vec<u8>) {
 
 #[test]
 fn old_orphan_metadata_cannot_route_revision_data_and_backup_retains_its_imported_file() {
-    let (_root, app) = open();
+    let (_root, app) = open_historical();
     let (request_id, revision_id, attachment, bytes) = orphan(&app);
     let other = app.create_workspace("Other").unwrap().meta.id;
     let live = app.create_request(&other, None, "live", RequestSpec::http("GET", "https://other.invalid/")).unwrap();
@@ -286,7 +295,7 @@ fn old_orphan_metadata_cannot_route_revision_data_and_backup_retains_its_importe
 
 #[test]
 fn deleting_a_workspace_cannot_drop_an_orphans_references_using_a_forged_owner_index() {
-    let (_root, app) = open();
+    let (_root, app) = open_historical();
     let (_request_id, revision_id, attachment, bytes) = orphan(&app);
     let foreign = app.create_workspace("Foreign").unwrap().meta.id;
     db(&app)

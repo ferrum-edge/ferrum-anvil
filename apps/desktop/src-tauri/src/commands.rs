@@ -166,6 +166,7 @@ pub async fn profile_unlock(handle: AppHandle, profile_id: String, passphrase: O
             (None, None) => Unlock::Keychain,
         };
         let (header, key) = anvil_app::profiles::ProfileManager::unlock(&p.dir, how).map_err(e)?;
+        ProfileManager::require_enrolled_policy(&header).map_err(e)?;
         // Not held across the unlock: a lock waits on no store work of this one.
         let open = st.app.read().clone();
         // The lock epoch the profile is now open in: unlocking the open
@@ -215,16 +216,32 @@ pub async fn profile_enroll_unlinked(
     use crate::presence::{NOT_CONFIRMED, Presence, Prompt};
     let st = handle.state::<DesktopState>();
     if st.app().is_ok() {
-        return Err("Lock the profile before legacy enrollment".into());
+        return Err("Lock the profile before policy enrollment".into());
     }
     let seen = st.epoch();
     let profile = st.profiles.find(&profile_id).map_err(e)?;
     let presence = NativePresence(window);
+    let linked = anvil_app::profiles::ProfileManager::unlock_requirements(&profile.dir).map_err(e)?.linked.is_some();
+    let known = anvil_storage::vault::read_header(&profile.dir).map_err(|x| e(x.into()))?.rotation.is_some();
+    let policy_choice = if linked {
+        "Preserve the surviving verified linked identity and its fresh-login requirement. Fresh-login policy needs its provider proof or recovery credential; an unreadable binding is refused."
+    } else if known {
+        "Preserve the historical identity policy if it authenticates. A missing or unreadable bound policy is refused; enrollment cannot replace it."
+    } else {
+        "No authenticated identity policy survives. Continue only if you intend to replace that unknown historical policy with an UNLINKED policy."
+    };
     let message = format!(
-        "The legacy profile “{}” has no authenticated identity policy. Anvil cannot determine whether it was never linked or its policy was deleted. Continue only if you intend to replace that unknown historical policy with an UNLINKED policy. Anvil will rotate and re-encrypt all active data, replace the recovery key, and require the new passphrase. Close older builds first. Historical restores remain available; complete rollback of trusted local state cannot be detected offline.",
+        "The historical profile “{}” {policy_choice} Anvil will rotate and re-encrypt all active data, replace the recovery key, and require the new passphrase. Close older builds first. Historical restores remain available; complete rollback of trusted local state cannot be detected offline.",
         crate::presence::shown(&profile.display_name)
     );
-    if !presence.confirm(Prompt { title: "Replace unknown legacy policy", message, ok: "Replace and rotate" }).await {
+    if !presence
+        .confirm(Prompt {
+            title: if linked || known { "Enroll verified historical policy" } else { "Replace unknown legacy policy" },
+            message,
+            ok: if linked || known { "Preserve and rotate" } else { "Replace and rotate" },
+        })
+        .await
+    {
         return Err(NOT_CONFIRMED.into());
     }
     if st.epoch() != seen {
@@ -246,9 +263,10 @@ pub async fn profile_enroll_unlinked(
             (None, Some(r)) => Unlock::RecoveryKey(r),
             (None, None) => Unlock::Keychain,
         };
-        ProfileManager::enroll_unlinked_policy(
+        ProfileManager::enroll_legacy_policy(
             &profile.dir,
             how,
+            None,
             anvil_app::profiles::PolicyRotation { new_passphrase: &new_passphrase, recovery: &recovery, kdf: KdfParams::interactive() },
         )
     })
