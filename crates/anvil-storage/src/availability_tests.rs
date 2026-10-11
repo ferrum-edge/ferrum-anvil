@@ -105,8 +105,8 @@ fn integrity_evidence_locks_the_store() {
     for attack in [
         // The canary no longer opens under the held key.
         "UPDATE meta SET value='rotated-v1:00' WHERE key='key_canary'",
-        // The catalogue the handle requires disappeared.
-        "DELETE FROM meta WHERE key='protected_records_v1'",
+        // The schema 6 catalogue the handle requires disappeared.
+        "DROP TABLE catalogue",
         // The canary was removed.
         "DELETE FROM meta WHERE key='key_canary'",
     ] {

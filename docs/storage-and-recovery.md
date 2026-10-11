@@ -712,10 +712,15 @@ against the current ciphertext canary. Stale application handles cannot write.
 ### Authenticated current records
 
 Schema 5 records the expected presence, owner/parent indexes, ordering metadata
-and ciphertext digest of every object and vault secret. The catalogue root is
-MAC-authenticated in the canonical wrapped header and coupled to the key canary.
+and ciphertext digest of every object and vault secret; schema 6 keeps one
+`catalogue` row per entry. Entries fall into 1024 buckets by a hash of their
+table, kind and id; each bucket has a SHA-256 digest over its entries in order,
+and the catalogue root is a digest over all bucket digests. The root is
+MAC-authenticated in the canonical wrapped header and coupled to the key canary,
+so a changed, removed, added or swapped entry no longer reproduces it.
 A protected write or delete publishes its catalogue changes in the same SQLite
-transaction. Reads refuse older authentic ciphertext, resurrected deleted rows,
+transaction: it writes only its own entries and rehashes the buckets they fall
+in and the root. Reads refuse older authentic ciphertext, resurrected deleted rows,
 missing expected rows (including deny records), and altered ownership or order
 while the current local authority is retained. Ordinary edits require no new
 passphrase, recovery key or network access and do not reseal blobs or history.
@@ -739,7 +744,15 @@ certifying the damaged current database. Damaged revision payloads can still be
 enumerated for deliberate removal without returning their contents.
 
 Cached request contexts verify all actual protected rows before preparation,
-cached-secret or linked-file access, and native session sends. Their ephemeral
+cached-secret or linked-file access, and native session sends. The open store
+keeps the catalogue and the outcome of that row verification in memory, keyed
+by the authenticated root and SQLite's `data_version`, which changes whenever
+another connection (another Anvil process, or any raw SQLite writer) commits.
+While only this store has written since, its own catalogue-tracked writes keep
+both current and a check costs one header MAC, one canary open and the context's
+own dependencies. After any other commit, a checkpoint restore, rotation or a
+migration, the catalogue is read and checked against its root, and every
+protected row is compared with it again, before the next context relies on them. Their ephemeral
 dependency proof captures configuration and permission inputs in one consistent
 read transaction, including absent selections and ordered gateway candidates.
 A relevant object, credential or permission change stales an older context:
@@ -756,16 +769,20 @@ handed to an admitted external worker, copied plaintext and completed network
 effects cannot be withdrawn retroactively.
 
 Portable exports omit this local catalogue. Explicit import/restore rebuilds
-entries inside its existing transaction. A raw checkpoint is checked against its
-own catalogue before staging; deliberate restoration rebuilds the staged
-catalogue under the current credentials and linked policy before the atomic live
-replacement. Its historical data is an intentional owner choice.
+entries inside its existing transaction. Restoring a raw checkpoint into an
+enrolled profile requires the checkpoint to carry its own catalogue authority
+under the current key, and its rows are checked against that catalogue before
+staging; a checkpoint without one is refused rather than having whatever rows it
+holds certified. Deliberate restoration rebuilds the staged catalogue under the
+current credentials and linked policy before the atomic live replacement. Its
+historical data is an intentional owner choice.
 
-Catalogue publication serializes metadata proportional to the number of protected
-records once per transaction, hashing only newly written payloads. Authority
-preflight additionally hashes all protected ciphertext. It does not re-encrypt
-all profile bytes. Large profiles therefore incur catalogue and preflight work;
-this is not a constant-time or incremental-tree design.
+A write costs its own entries plus one bucket and the root (1024 digests),
+independent of profile size. Opening a profile reads and checks the whole
+catalogue once; the first context check after open, and after another
+connection's commit, additionally hashes all protected ciphertext. Both are
+O(profile) and are then kept until something outside this store changes the
+database.
 
 **Limits:** rotation does not erase historical raw files, checkpoints, WAL/free
 page remnants or independently encrypted portable backups. An owner can recover
@@ -845,7 +862,13 @@ under an unchanged key. No mandatory online service is introduced.
 - **Database schema 5** adds the authenticated live object/secret catalogue
   for enrolled profiles and makes earlier builds refuse the database. Legacy
   profiles establish it when explicitly enrolling/rotating their policy.
-- Before a schema migration that seals rows (schemas 2 and 3), the database is copied as it is into the profile's
+- **Database schema 6** moves the catalogue of an enrolled profile from one
+  JSON text in `meta` into the `catalogue` table under a bucketed root, so a
+  write no longer rewrites and rehashes the whole catalogue. The text must
+  still reproduce its authenticated root, or the profile does not open. A
+  `before-schema-6` checkpoint is taken first. Profiles without a catalogue
+  are unchanged.
+- Before a schema migration that seals rows or converts the catalogue (schemas 2, 3 and 6), the database is copied as it is into the profile's
   `checkpoints` folder as `<time>-before-schema-<version>.db`, the same kind of
   checkpoint an import takes. If that copy cannot be written (for example,
   the disk is full), the migration does not run and the profile does not

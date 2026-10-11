@@ -64,7 +64,7 @@ impl<'a, 'b> ContextRead<'a, 'b> {
         })
     }
     fn entry(&self, name: &str) -> Option<Entry> {
-        self.read.manifest.borrow().as_ref().and_then(|m| m.entries.get(name).cloned())
+        self.read.manifest.borrow().as_ref().and_then(|m| m.get(name).cloned())
     }
     pub fn finish(&self) -> ContextAuthority {
         self.authority.borrow().clone()

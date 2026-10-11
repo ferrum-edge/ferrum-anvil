@@ -31,7 +31,7 @@
 use crate::crypto::{self, Key};
 use anvil_domain::Id;
 use parking_lot::{Mutex, MutexGuard, RwLock};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, config::DbConfig, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -39,6 +39,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::ThreadId;
 use std::time::Duration;
@@ -51,7 +52,7 @@ pub const DB_FILE: &str = "anvil.db";
 /// before failing with `SQLITE_BUSY`.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Current on-disk schema version. Increase only with a migration below.
-pub const DB_SCHEMA_VERSION: i64 = 5;
+pub const DB_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -228,8 +229,9 @@ pub struct RowMeta {
 
 /// Every table the migrations create, besides SQLite's own. Full backups
 /// (`anvil_app::backup`) classify each one as carried or device-bound, and a
-/// test fails when a table is added without that decision.
-pub const TABLES: &[&str] = &["meta", "objects", "secrets", "blobs", "history", "load_reports"];
+/// test fails when a table is added without that decision. `catalogue`
+/// exists only in a profile with catalogue authority.
+pub const TABLES: &[&str] = &["meta", "objects", "secrets", "blobs", "history", "load_reports", "catalogue"];
 
 /// A decrypted vault secret with its owner (`None` for profile-level).
 pub struct SecretRecord {
@@ -261,6 +263,26 @@ pub struct Store {
     restores: AtomicU64,
     /// An enrolled handle never accepts a pre-catalogue downgrade.
     manifest_required: AtomicBool,
+    /// The catalogue last verified against its authenticated root, while
+    /// no other connection has committed since (see
+    /// [`Store::verified_catalogue`]).
+    catalogue: Mutex<Option<CatalogueCache>>,
+}
+
+/// A verified catalogue and the database state it was verified in: its
+/// authenticated root and this connection's `PRAGMA data_version`, which
+/// changes whenever another connection (another `Store`, or any other
+/// SQLite writer) commits. This connection's own commits leave
+/// `data_version` as it is; each one that changes the catalogue replaces
+/// the cache with the catalogue it published. Restores, rotation and
+/// migrations on this connection clear it.
+struct CatalogueCache {
+    root: String,
+    data_version: i64,
+    catalogue: Arc<crate::manifest::Catalogue>,
+    /// Every stored protected row was compared with `catalogue` in this
+    /// state; only this connection's catalogue-tracked writes happened since.
+    rows_verified: bool,
 }
 
 struct ConnectionGuard<'a> {
@@ -574,7 +596,11 @@ enum Migration {
     /// Seal every request revision with its owner under [`revision_aad`], and
     /// every history record with its response body under [`history_aad`] (v3).
     RecordBindings,
+    /// Certify the protected-record catalogue (v5); only owner restoration
+    /// may enroll historical rotated state.
     Manifest,
+    /// Move a v5 catalogue into its own table under a bucketed root (v6).
+    Catalogue,
 }
 
 impl Migration {
@@ -596,6 +622,8 @@ const MIGRATIONS: &[Migration] = &[
     // v4 — older builds must not open a database supporting local rotation.
     Migration::Sql("SELECT 1;"),
     Migration::Manifest,
+    // v6 — the catalogue is stored per entry and updated incrementally.
+    Migration::Catalogue,
 ];
 
 /// How many rows a step that seals rows again reads at a time, so it never
@@ -630,6 +658,24 @@ const BASELINE: &str = r#"
 /// earlier builds of the same schema still read the database and its backups.
 const HISTORY_BODY_INDEX: &str = "CREATE INDEX IF NOT EXISTS history_body_blob ON history(body_blob);";
 
+/// This connection's `PRAGMA data_version`: changes when another connection
+/// commits, never for this connection's own commits.
+fn data_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+}
+
+/// The application schema has no triggers or foreign keys. A raw writer's
+/// schema must not turn our catalogue-tracked writes into additional writes
+/// that leave `data_version` unchanged on this connection. Connection-level
+/// settings also cover schema installed after open or copied by a restore.
+/// Protected-row, catalogue and authority writes also specify `OR ABORT`:
+/// disabling triggers does not disable schema-level `ON CONFLICT REPLACE`.
+fn disable_schema_writes(conn: &Connection) -> Result<()> {
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, false)?;
+    Ok(())
+}
+
 /// The schema version recorded in `meta` (0 for a new database).
 pub(crate) fn stored_schema_version(conn: &Connection) -> Result<i64> {
     let v = conn.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).optional()?;
@@ -663,7 +709,7 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
             continue;
         };
         let env = crypto::seal(key, &v2, &pt);
-        conn.execute("UPDATE secrets SET payload=?1 WHERE id=?2", params![env, id])?;
+        conn.execute("UPDATE OR ABORT secrets SET payload=?1 WHERE id=?2", params![env, id])?;
     }
     record_left(conn, "secrets_left_at_v2", left)?;
     Ok(left)
@@ -674,7 +720,7 @@ fn reseal_secret_owners(conn: &Connection, key: &Key) -> Result<u64> {
 fn record_left(conn: &Connection, name: &str, left: u64) -> Result<()> {
     if left > 0 {
         conn.execute(
-            "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT OR ABORT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![name, left.to_string()],
         )?;
     } else {
@@ -741,7 +787,7 @@ fn seal_revision_owners(conn: &Connection, key: &Key) -> Result<u64> {
                 }
                 Err(e) => return Err(e),
             };
-            conn.execute("UPDATE objects SET payload=?1 WHERE kind=?2 AND id=?3", params![env, kind::REVISION, id])?;
+            conn.execute("UPDATE OR ABORT objects SET payload=?1 WHERE kind=?2 AND id=?3", params![env, kind::REVISION, id])?;
         }
     }
     record_left(conn, "revisions_left_at_v3", left)?;
@@ -806,9 +852,9 @@ fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
     let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
     let Some(c) = canary else { return Ok(false) };
     if c.starts_with(crate::manifest::CANARY) {
-        crate::manifest::load(conn, key)?.ok_or(StoreError::Integrity)?;
+        crate::manifest::authenticated_root(conn, key)?.ok_or(StoreError::Integrity)?;
     } else if let Some(c) = c.strip_prefix("rotated-v1:") {
-        let _ = crate::manifest::load(conn, key)?;
+        let _ = crate::manifest::authenticated_root(conn, key)?;
         if stored_schema_version(conn)? < 4 {
             return Err(StoreError::Integrity);
         }
@@ -820,7 +866,7 @@ fn check_canary(conn: &Connection, key: &Key) -> Result<bool> {
         let env = hex::decode(c).map_err(|_| StoreError::Integrity)?;
         crypto::open(key, b"anvil/v2/rotated-canary", &env).map_err(|_| StoreError::Integrity)?;
     } else {
-        let _ = crate::manifest::load(conn, key)?;
+        let _ = crate::manifest::authenticated_root(conn, key)?;
         if crate::rotation::read_checked(conn)?.is_some() {
             return Err(StoreError::Integrity);
         }
@@ -851,7 +897,7 @@ fn verify_key_on(conn: &Connection, key: &Key) -> Result<()> {
             }
         }
         let env = crypto::seal(key, b"anvil/v1/canary", b"ok");
-        conn.execute("INSERT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
+        conn.execute("INSERT OR ABORT INTO meta(key, value) VALUES('key_canary', ?1)", params![hex::encode(env)])?;
     }
     Ok(())
 }
@@ -927,8 +973,12 @@ fn migrate_on(conn: &mut Connection, key: &Key, profile: Option<&Path>, owner_re
                     }
                     // Only explicit owner restoration may enroll historical state.
                     // Already enrolled profiles never recreate missing authority.
-                    crate::manifest::Manifest::capture(&tx)?.publish(&tx, key, &mut state)?;
+                    crate::manifest::Catalogue::capture(&tx)?.publish_full(&tx, key, &mut state)?;
                 }
+                Vec::new()
+            }
+            Migration::Catalogue => {
+                crate::manifest::convert_legacy(&tx, key)?;
                 Vec::new()
             }
             Migration::RecordBindings => vec![
@@ -937,7 +987,7 @@ fn migrate_on(conn: &mut Connection, key: &Key, profile: Option<&Path>, owner_re
             ],
         };
         tx.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT OR ABORT INTO meta(key, value) VALUES('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![v.to_string()],
         )?;
         tx.commit()?;
@@ -955,7 +1005,7 @@ fn migrate_on(conn: &mut Connection, key: &Key, profile: Option<&Path>, owner_re
     Ok(())
 }
 
-fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+pub(crate) fn has_table(conn: &Connection, name: &str) -> Result<bool> {
     let sql = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)";
     Ok(conn.query_row(sql, params![name], |r| r.get::<_, bool>(0))?)
 }
@@ -1012,19 +1062,27 @@ fn restore_on(conn: &mut Connection, src: &Connection, key: &Key, dir: &Path) ->
         // backup API's atomic destination commit. No plaintext/key bridge.
         let staging = StagedDatabase::create(dir)?;
         let mut staged = Connection::open(&staging.path)?;
+        disable_schema_writes(&staged)?;
         staged.execute_batch("PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;")?;
         {
             let backup = rusqlite::backup::Backup::new(src, &mut staged)?;
             backup.run_to_completion(256, Duration::from_millis(0), None)?;
         }
         verify_key_on(&staged, key)?;
-        migrate_on(&mut staged, key, None, true)?;
-        if let Some(m) = crate::manifest::load(&staged, key)? {
-            m.verify_all(&staged)?;
+        // An enrolled profile takes only a checkpoint that carries its own
+        // catalogue authority under this key, checked against its own rows.
+        // A copy without one (for instance an early same-key database with
+        // rows from other states added) would otherwise have whatever rows
+        // it holds certified below.
+        if crate::manifest::authenticated_root(&staged, key)?.is_none() {
+            return Err(StoreError::Integrity);
         }
+        migrate_on(&mut staged, key, None, true)?;
+        let (_, catalogue) = crate::manifest::load(&staged, key)?.ok_or(StoreError::Integrity)?;
+        catalogue.verify_rows(&staged)?;
         let tx = staged.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut state = state;
-        crate::manifest::Manifest::capture(&tx)?.publish(&tx, key, &mut state)?;
+        crate::manifest::Catalogue::capture(&tx)?.publish_full(&tx, key, &mut state)?;
         tx.commit()?;
         {
             let backup = rusqlite::backup::Backup::new(&staged, conn)?;
@@ -1114,7 +1172,7 @@ fn reseal_all(conn: &Connection, old: &Key, new: &Key) -> Result<()> {
                     }
                 };
                 let resealed = crypto::seal(new, &data, &pt);
-                conn.execute(&format!("UPDATE {table} SET payload=?1 WHERE rowid=?2"), params![resealed, rowid])?;
+                conn.execute(&format!("UPDATE OR ABORT {table} SET payload=?1 WHERE rowid=?2"), params![resealed, rowid])?;
                 after = Some(rowid);
                 #[cfg(test)]
                 rotation_tests::crash_point("after-first-row");
@@ -1140,9 +1198,11 @@ fn prepare_rotation(
     // ciphertext, and do not reinterpret legacy residual payloads.
     reseal_all(tx, old, new).map_err(|e| VaultError::Header(e.to_string()))?;
     let mut state = crate::rotation::State { header: next.clone(), binding };
-    tx.execute("UPDATE meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
+    tx.execute("UPDATE OR ABORT meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
         .map_err(|e| VaultError::Header(e.to_string()))?;
-    crate::manifest::Manifest::capture(tx).and_then(|m| m.publish(tx, new, &mut state)).map_err(|e| VaultError::Header(e.to_string()))?;
+    crate::manifest::Catalogue::capture(tx)
+        .and_then(|m| m.publish_full(tx, new, &mut state))
+        .map_err(|e| VaultError::Header(e.to_string()))?;
     *next = state.header;
     Ok(())
 }
@@ -1182,10 +1242,9 @@ impl Store {
         // error saying so, rather than at every later operation.
         let _data_lock = data_fence(dir)?;
         let mut conn = Connection::open(dir.join(DB_FILE))?;
+        disable_schema_writes(&conn)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;",
-        )?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
         let found = stored_schema_version(&conn)?;
         if found > DB_SCHEMA_VERSION {
@@ -1202,11 +1261,15 @@ impl Store {
             migrate_on(&mut conn, &key, Some(dir), false)?;
         }
         let snapshot = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let manifest_required = crate::manifest::load(&snapshot, &key)?.is_some();
+        let loaded = crate::manifest::load(&snapshot, &key)?;
+        let manifest_required = loaded.is_some();
         if !rotation_only && !manifest_required && crate::rotation::read_checked(&snapshot)?.is_some() {
             return Err(StoreError::PolicyEnrollmentRequired);
         }
+        let data_version = data_version(&snapshot)?;
         snapshot.rollback()?;
+        let cache =
+            loaded.map(|(root, catalogue)| CatalogueCache { root, data_version, catalogue: Arc::new(catalogue), rows_verified: false });
         Ok(Store {
             dir: dir.to_path_buf(),
             conn: Mutex::new(conn),
@@ -1214,6 +1277,7 @@ impl Store {
             key: RwLock::new(Some(key)),
             restores: AtomicU64::new(0),
             manifest_required: AtomicBool::new(manifest_required),
+            catalogue: Mutex::new(cache),
         })
     }
 
@@ -1307,8 +1371,8 @@ impl Store {
         if manifest.is_none() && self.manifest_required.load(Ordering::SeqCst) {
             return Err(VaultError::HeaderTampered);
         }
-        if let Some(manifest) = manifest {
-            manifest.verify_all(&tx).map_err(|e| VaultError::Header(e.to_string()))?;
+        if let Some((_, catalogue)) = manifest {
+            catalogue.verify_rows(&tx).map_err(|e| VaultError::Header(e.to_string()))?;
         }
         let state = crate::rotation::read_on(&tx)?;
         let h = match &state {
@@ -1341,6 +1405,7 @@ impl Store {
         #[cfg(test)]
         rotation_tests::crash_point("after-commit");
         *self.key.write() = None;
+        self.forget_catalogue();
         // Still under the exclusive fence: no supported process reads or
         // checkpoints meanwhile.
         crate::rotation::scrub_after_commit(&self.dir, &conn, &next, &new_key);
@@ -1458,7 +1523,55 @@ impl Store {
     }
 
     fn check_manifest_requirement(&self, conn: &Connection, key: &Key) -> Result<()> {
-        self.require_manifest(crate::manifest::load(conn, key)?.is_some())
+        self.require_manifest(self.verified_catalogue(conn, key)?.is_some())
+    }
+
+    /// The catalogue authenticated in the snapshot of the transaction open
+    /// on `conn` (one is opened for the check when none is): `None` for a
+    /// profile without catalogue authority. Authenticating the root costs
+    /// one header MAC and one canary open. The catalogue itself is read and
+    /// checked against that root only when it is not cached for this root
+    /// and `data_version`, i.e. after another connection committed, or on
+    /// first use. A catalogue that does not reproduce its root fails with
+    /// `Integrity` and is not cached.
+    fn verified_catalogue(&self, conn: &Connection, key: &Key) -> Result<Option<crate::manifest::Manifest>> {
+        if conn.is_autocommit() {
+            let tx = conn.unchecked_transaction()?;
+            let result = self.verified_catalogue(&tx, key);
+            tx.rollback()?;
+            return result;
+        }
+        let Some(root) = crate::manifest::authenticated_root(conn, key)? else { return Ok(None) };
+        let data_version = data_version(conn)?;
+        let mut cache = self.catalogue.lock();
+        if let Some(c) = cache.as_ref().filter(|c| c.root == root && c.data_version == data_version) {
+            return Ok(Some(crate::manifest::Manifest::new(c.catalogue.clone(), root, data_version)));
+        }
+        *cache = None;
+        let catalogue = Arc::new(crate::manifest::Catalogue::load(conn, &root)?);
+        *cache = Some(CatalogueCache { root: root.clone(), data_version, catalogue: catalogue.clone(), rows_verified: false });
+        Ok(Some(crate::manifest::Manifest::new(catalogue, root, data_version)))
+    }
+
+    /// Compare every stored protected row with the catalogue of `m`, unless
+    /// that was already done in the state `m` began in and `m` changed
+    /// nothing since. O(profile) the first time after open, a restore, or a
+    /// commit by another connection; O(1) otherwise.
+    fn verify_rows(&self, conn: &Connection, m: &crate::manifest::Manifest) -> Result<()> {
+        let matches = |c: &CatalogueCache| c.root == m.root && c.data_version == m.data_version && !m.dirty();
+        if self.catalogue.lock().as_ref().is_some_and(|c| matches(c) && c.rows_verified) {
+            return Ok(());
+        }
+        m.verify_rows(conn)?;
+        if let Some(c) = self.catalogue.lock().as_mut().filter(|c| matches(c)) {
+            c.rows_verified = true;
+        }
+        Ok(())
+    }
+
+    /// Drop the cached catalogue: the next use reads and verifies it again.
+    fn forget_catalogue(&self) {
+        *self.catalogue.lock() = None;
     }
 
     fn require_manifest(&self, present: bool) -> Result<()> {
@@ -1485,7 +1598,7 @@ impl Store {
     pub fn protected_authority(&self) -> Result<Option<String>> {
         let result = self.read_consistently(|read| {
             if let Some(m) = read.manifest.borrow().as_ref() {
-                m.verify_all(read.conn)?;
+                self.verify_rows(read.conn, m)?;
             }
             let state = crate::rotation::read_checked(read.conn)?;
             if let Some(s) = &state {
@@ -1540,7 +1653,11 @@ impl Store {
         let r = self.conn().and_then(|mut conn| {
             verify_key_on(&conn, &key)?;
             self.check_manifest_requirement(&conn, &key)?;
+            let before = stored_schema_version(&conn)?;
             migrate_on(&mut conn, &key, Some(&self.dir), false)?;
+            if stored_schema_version(&conn)? != before {
+                self.forget_catalogue();
+            }
             let mut k = self.key.write();
             if !gate() {
                 return Ok(false);
@@ -1784,11 +1901,21 @@ impl Store {
             let tx = self.begin_records(&mut conn, behavior)?;
             match f(&tx) {
                 Ok(r) => {
-                    if let Some(manifest) = tx.manifest.borrow().as_ref().filter(|m| m.dirty) {
-                        let mut state = crate::rotation::read_checked(&tx.tx)?.ok_or(StoreError::Integrity)?;
-                        manifest.publish(&tx.tx, &self.key()?, &mut state)?;
-                    }
-                    tx.tx.commit().map(|()| r).map_err(StoreError::from)
+                    let manifest = tx.manifest.borrow_mut().take();
+                    let Some(manifest) = manifest.filter(|m| m.dirty()) else {
+                        return tx.tx.commit().map(|()| r).map_err(StoreError::from);
+                    };
+                    let mut state = crate::rotation::read_checked(&tx.tx)?.ok_or(StoreError::Integrity)?;
+                    // Take the cache out, so the published catalogue is
+                    // updated in place; it is put back only once committed.
+                    let cached = self.catalogue.lock().take();
+                    let rows_verified = !manifest.reverify
+                        && cached.is_some_and(|c| c.root == manifest.root && c.data_version == manifest.data_version && c.rows_verified);
+                    let data_version = manifest.data_version;
+                    let (catalogue, root) = manifest.publish(&tx.tx, &self.key()?, &mut state)?;
+                    tx.tx.commit()?;
+                    *self.catalogue.lock() = Some(CatalogueCache { root, data_version, catalogue, rows_verified });
+                    Ok(r)
                 }
                 Err(e) => {
                     // A failed rollback is caught and reported just below.
@@ -1804,7 +1931,7 @@ impl Store {
 
     fn begin_records<'c>(&'c self, conn: &'c mut Connection, behavior: TransactionBehavior) -> Result<StoreTx<'c>> {
         let sql_tx = conn.transaction_with_behavior(behavior)?;
-        let manifest = crate::manifest::load(&sql_tx, &self.key()?)?;
+        let manifest = self.verified_catalogue(&sql_tx, &self.key()?)?;
         // Check in the same snapshot as the records, not only the earlier
         // connection preflight: a raw writer may change authority between them.
         self.require_manifest(manifest.is_some())?;
@@ -1839,7 +1966,9 @@ impl Store {
         check_not_set_back(&src, &key)?;
         // The current key is held under the shared rotation fence.
         self.restores.fetch_add(1, Ordering::SeqCst);
+        self.forget_catalogue();
         let r = restore_on(&mut conn, &src, &key, &self.dir);
+        self.forget_catalogue();
         if r.is_err() {
             *self.key.write() = None;
         }
@@ -1970,7 +2099,7 @@ impl StoreTx<'_> {
     pub fn put_note(&self, name: &str, value: &str) -> Result<()> {
         let _ = self.store.key()?;
         self.tx.execute(
-            "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT OR ABORT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![format!("{NOTE_PREFIX}{name}"), value],
         )?;
         Ok(())
@@ -2047,7 +2176,7 @@ impl StoreRead<'_> {
 
     pub(crate) fn verify_context_snapshot(&self) -> Result<()> {
         if let Some(m) = self.manifest.borrow().as_ref() {
-            m.verify_all(self.conn)?;
+            self.store.verify_rows(self.conn, m)?;
         }
         if let Some(s) = crate::rotation::read_checked(self.conn)? {
             crate::vault::verify_rotation_binding(&s.header, &self.store.key()?, &s.binding).map_err(|_| StoreError::Integrity)?;
@@ -2356,7 +2485,7 @@ impl Records<'_> {
             crypto::seal(&self.key, &aad("objects", kind, &id_s), &json)
         };
         self.conn.execute(
-            "INSERT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
+            "INSERT OR ABORT INTO objects(kind,id,workspace_id,parent_id,sort_key,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(kind,id) DO UPDATE SET workspace_id=excluded.workspace_id, parent_id=excluded.parent_id, sort_key=excluded.sort_key, updated_at=excluded.updated_at, payload=excluded.payload",
             params![
                 kind,
@@ -2574,14 +2703,16 @@ impl Records<'_> {
         Ok(rows)
     }
 
+    /// Store `value` under `id`, replacing any secret stored there. The old
+    /// row is not read: nothing of it is kept, so a damaged one can be
+    /// overwritten with a new value as it can be deleted.
     fn put_secret(&self, id: &Id, workspace_id: Option<&Id>, label: &str, value: &str) -> Result<()> {
-        let _ = self.get_secret(id)?;
         let payload = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"label": label, "value": value}))?);
         let id_s = id.to_string();
         let owner = workspace_id.map(|w| w.to_string());
         let env = crypto::seal(&self.key, &secret_aad(&id_s, owner.as_deref()), &payload);
         self.conn.execute(
-            "INSERT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
+            "INSERT OR ABORT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
             params![id_s, owner, chrono::Utc::now().timestamp_millis(), env],
         )?;
         self.remember(crate::manifest::Entry::new("secrets", "", &id_s, owner.as_deref(), None, &env))?;
@@ -2663,7 +2794,10 @@ impl Records<'_> {
     }
 
     fn pin_blob(&self, id: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING", params![format!("pin:{id}"), id])?;
+        self.conn.execute(
+            "INSERT OR ABORT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO NOTHING",
+            params![format!("pin:{id}"), id],
+        )?;
         Ok(())
     }
 

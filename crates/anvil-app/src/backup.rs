@@ -127,6 +127,7 @@ pub const TABLES: &[(&str, &str)] = &[
     ("history", "every execution record with its stored response body"),
     ("load_reports", "every load report"),
     ("meta", "not carried: the schema version, key check, blob pins and notes (the last storage cleanup) belong to this database"),
+    ("catalogue", "not carried: the authenticated record catalogue is this database's; a restore rebuilds it for the rows it writes"),
 ];
 
 const KEYCHAIN_NOTE: &str =

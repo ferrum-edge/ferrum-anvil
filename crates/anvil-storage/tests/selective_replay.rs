@@ -89,7 +89,7 @@ fn missing_catalogue_is_never_reinitialized_and_rotation_refuses_replay() {
     raw.execute("DELETE FROM secrets WHERE id=?1", [id.to_string()]).unwrap();
     let recovery = vault::RotationRecoveryKey::generate();
     assert!(store.rotate_data_key("replacement", &recovery, KdfParams::testing(), |_, _, _, binding| Ok(binding.flatten())).is_err());
-    raw.execute("DELETE FROM meta WHERE key='protected_records_v1'", []).unwrap();
+    raw.execute("DELETE FROM catalogue", []).unwrap();
     assert!(store.get_secret(&id).is_err());
     assert!(Store::open(dir.path(), key).is_err());
 }

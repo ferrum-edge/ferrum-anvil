@@ -1,6 +1,8 @@
 //! Production imports, revision deletion, backup and attachment retention.
 //! SQL-only metadata edits never authorize legacy revision data or routing.
 
+mod faults;
+
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::specs::{SpecImported, SpecTarget};
@@ -200,12 +202,7 @@ fn a_late_reimport_failure_rolls_back_added_requests_cascade_revisions_and_blob_
     let removed = with_attachment(named(&app, &done.workspace_id, "removed"), &attachment);
     let removed = app.save_request(removed).unwrap();
     let before = inventory(&app);
-    db(&app)
-        .execute_batch(
-            "CREATE TRIGGER refuse_source_write BEFORE INSERT ON objects
-             WHEN NEW.kind='spec_source' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
-        )
-        .unwrap();
+    faults::deny_payload_writes(&db(&app), "objects", "kind = 'spec_source'");
     let approval = ReimportApproval { delete: vec![removed.meta.id], ..Default::default() };
     let v2 = collection(&["kept", "added"], 2);
     assert!(matches!(app.spec_reimport_apply(&done.import_id, &v2, "v2.json", &approval), Err(AppError::Store(StoreError::Db(_)))));

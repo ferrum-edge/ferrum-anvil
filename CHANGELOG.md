@@ -4,6 +4,14 @@
 
 ### Changed
 
+- Record-integrity checks now cost what an operation touches instead of the
+  profile size. The protected-record catalogue is stored per entry under a
+  bucketed authenticated root (database schema 6), so a write updates only its
+  entries; the open store keeps the verified catalogue and row verification
+  until another connection commits. Restoring a checkpoint into an enrolled
+  profile now requires the checkpoint's own catalogue authority, and a damaged
+  vault secret can be overwritten with a new value.
+
 - Cached execution contexts now retain authenticated dependency proofs: relevant
   configuration, credential and permission changes refuse their next checked
   use, while unrelated saves and collection-run reports preserve them. Full

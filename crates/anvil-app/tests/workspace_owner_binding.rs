@@ -1,6 +1,8 @@
 //! Renderer-reachable App saves and explicit moves exercise the production
 //! storage guards. No desktop command/state changes are needed for this gate.
 
+mod faults;
+
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
@@ -243,12 +245,7 @@ fn request_save_cannot_use_another_requests_revision_and_failure_rolls_back_new_
     assert!(matches!(app.save_request(substituted), Err(AppError::Store(StoreError::Ownership))));
     assert_eq!(snapshot(&app), original);
 
-    db(&app)
-        .execute_batch(
-            "CREATE TRIGGER refuse_request_write BEFORE UPDATE ON objects
-             WHEN NEW.kind='request' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
-        )
-        .unwrap();
+    faults::deny_payload_writes(&db(&app), "objects", "kind = 'request'");
     let changed = RequestDefinition { spec: RequestSpec::http("POST", "https://changed.invalid/"), ..first };
     assert!(matches!(app.save_request(changed), Err(AppError::Store(StoreError::Db(_)))));
     assert_eq!(snapshot(&app), original, "new revision and parent update must roll back together");
