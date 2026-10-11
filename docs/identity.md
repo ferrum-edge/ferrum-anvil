@@ -189,8 +189,10 @@ profile was never linked. See [local key rotation](storage-and-recovery.md#delib
 Every link, unlink, or fresh-login-policy change establishes a new encryption
 key epoch and new recovery credential, atomically with the new policy. Callers
 must obtain acknowledgment of that recovery credential before committing and
-supply the new passphrase using `PolicyRotation`. OS-keychain profiles convert to
-passphrase protection. Authentic older metadata cannot unlock later ciphertext
+supply the new passphrase using `PolicyRotation::Passphrase`, which converts an
+OS-keychain profile to passphrase protection. `PolicyRotation::Keychain` instead
+keeps an OS-keychain profile in the keychain: the new key goes to a new OS
+credential entry, with no recovery credential, and the old entry is retired. Authentic older metadata cannot unlock later ciphertext
 with its old key. Restoring all trusted freshness-authority state can select historical policy,
 including replay of the header, catalogue and coupled canary with matching
 historical protected rows or erasure of newer protected state.

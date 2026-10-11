@@ -72,3 +72,36 @@ fn enrolled_keychain_profile_rotates_and_retires_its_real_os_entry() {
     let reopened = anvil_storage::Store::open(dir.path(), new_key).unwrap();
     assert_eq!(reopened.get_secret(&id).unwrap().unwrap().1.as_str(), "synthetic rotation marker");
 }
+
+#[test]
+#[ignore = "touches synthetic real OS credential entries; CI runs it with --ignored"]
+fn enrolled_keychain_profile_rotates_into_a_new_real_os_entry() {
+    struct Cleanup(std::path::PathBuf, vault::ProfileHeader);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = vault::delete_keychain_entry(&self.1);
+            if let Ok(h) = vault::read_header(&self.0) {
+                let _ = vault::delete_keychain_entry(&h);
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    vault::create_enrolled_keychain_profile(dir.path(), "ci keychain rotation").unwrap();
+    let old = vault::read_header(dir.path()).unwrap();
+    let _cleanup = Cleanup(dir.path().to_path_buf(), old.clone());
+    let old_key = vault::unlock_with_keychain(&old).unwrap();
+    let historical_key = anvil_storage::Key::from_bytes(old_key.as_bytes()).unwrap();
+    let store = anvil_storage::Store::open(dir.path(), old_key).unwrap();
+    let id = anvil_domain::Id::new();
+    store.put_secret(&id, None, "preserved", "synthetic keychain rotation marker").unwrap();
+    let result = store.rotate_keychain_data_key(|_, _, _, binding| Ok(binding.flatten())).unwrap();
+    assert!(result.keychain_entry_removed);
+    let current = vault::read_header(dir.path()).unwrap();
+    assert_eq!(current.protection, ProtectionMode::OsKeychain);
+    assert_ne!(current.keychain_account, old.keychain_account);
+    assert!(vault::unlock_with_keychain(&old).is_err(), "the old entry is gone");
+    assert!(anvil_storage::Store::open(dir.path(), historical_key).is_err());
+    let new_key = vault::unlock_with_keychain(&current).expect("the new key comes back from the OS credential store");
+    let reopened = anvil_storage::Store::open(dir.path(), new_key).unwrap();
+    assert_eq!(reopened.get_secret(&id).unwrap().unwrap().1.as_str(), "synthetic keychain rotation marker");
+}

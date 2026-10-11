@@ -170,7 +170,7 @@ impl Manifest {
 }
 
 pub(crate) fn load(conn: &Connection, key: &Key) -> Result<Option<Manifest>> {
-    let state = rotation::read_on(conn).map_err(|_| StoreError::Integrity)?;
+    let state = rotation::read_checked(conn)?;
     let root = state.as_ref().and_then(|s| s.header.rotation.as_ref()).and_then(|p| p.manifest_root.as_deref());
     let canary: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='key_canary'", [], |r| r.get(0)).optional()?;
     let Some(root) = root else {

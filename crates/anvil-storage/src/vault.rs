@@ -14,6 +14,11 @@
 //!   removed (retried at each unlock until it is gone if the credential
 //!   store refuses, and overwritten with a marker that opens nothing
 //!   meanwhile).
+//! * A key rotation (see [`crate::Store::rotate_data_key`]) wraps the new key
+//!   under a new passphrase and recovery key, or, for a keychain profile that
+//!   stays one ([`crate::Store::rotate_keychain_data_key`]), stores it in a
+//!   new credential-store entry before the commit. Entries holding earlier
+//!   keys are recorded in the authenticated header and retired after it.
 //! * The header's protection mode is authenticated by a MAC under a key
 //!   derived from the DEK and checked at every unlock, so editing
 //!   `profile.json` cannot turn a converted profile back into a keychain one
@@ -121,10 +126,34 @@ pub struct ProfileHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RotationPolicy {
     pub binding_digest: String,
-    /// Key check of a retired OS credential, retained only for cleanup.
-    pub retired_key_check: Option<String>,
+    /// OS credential-store entries holding earlier data keys, retained only
+    /// until they are removed (retried at each unlock).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_keychain: Vec<RetiredKeychainEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_root: Option<String>,
+}
+
+/// An OS credential-store entry a rotation replaced. It is removed only
+/// while it still holds the key with this key check (or the marker that
+/// replaced it), so an unrelated entry under the same name survives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetiredKeychainEntry {
+    pub account: String,
+    pub key_check: String,
+}
+
+/// The entries a rotation away from `h` retires: those `h` still has to
+/// remove, and the entry `h` names (the live key of a keychain profile, or a
+/// legacy conversion's leftover, both holding `h`'s key).
+fn retiring(h: &ProfileHeader) -> Vec<RetiredKeychainEntry> {
+    let mut retired = h.rotation.as_ref().map(|p| p.retired_keychain.clone()).unwrap_or_default();
+    if let Some(account) = &h.keychain_account
+        && !retired.iter().any(|r| &r.account == account)
+    {
+        retired.push(RetiredKeychainEntry { account: account.clone(), key_check: h.key_check.clone() });
+    }
+    retired
 }
 fn passphrase_label(h: &ProfileHeader) -> &'static [u8] {
     if h.rotation.is_some() { ROTATED_PASSPHRASE_LABEL } else { PASSPHRASE_LABEL }
@@ -165,6 +194,23 @@ impl RotationRecoveryKey {
         &self.0
     }
 }
+/// What protects the data key after a rotation.
+pub enum RotationTarget<'a> {
+    /// A new passphrase and a replacement recovery key the caller delivered
+    /// and had acknowledged. A keychain profile becomes a passphrase profile.
+    Passphrase { passphrase: &'a str, recovery: &'a RotationRecoveryKey, kdf: KdfParams },
+    /// A new OS credential-store entry. Keychain profiles only.
+    Keychain,
+}
+
+/// Result of [`crate::Store::rotate_keychain_data_key`].
+pub struct KeychainRotation {
+    /// False when the OS credential store did not remove the old entry. It
+    /// cannot decrypt the rotated data either way, and removal is retried at
+    /// each unlock ([`retire_rotated_keychain`]).
+    pub keychain_entry_removed: bool,
+}
+
 /// Stage new independent wraps using the already delivered recovery credential.
 pub(crate) fn rotated_header(
     h: &ProfileHeader,
@@ -182,17 +228,52 @@ pub(crate) fn rotated_header(
     let mut next = h.clone();
     next.protection = ProtectionMode::Passphrase;
     next.key_check = key_check(key);
-    next.rotation = Some(RotationPolicy {
-        binding_digest: String::new(),
-        manifest_root: None,
-        retired_key_check: h
-            .keychain_account
-            .as_ref()
-            .map(|_| h.rotation.as_ref().and_then(|p| p.retired_key_check.clone()).unwrap_or_else(|| h.key_check.clone())),
-    });
+    next.keychain_account = None;
+    next.rotation = Some(RotationPolicy { binding_digest: String::new(), manifest_root: None, retired_keychain: retiring(h) });
     next.passphrase_wrap = Some(wrap_with_passphrase(key, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
     next.recovery_wrap = Some(wrap_with_passphrase(key, &normalize_recovery(recovery.as_str()), kdf, ROTATED_RECOVERY_LABEL)?);
     Ok(next)
+}
+
+/// Stage a keychain-protected header for `key`, for a keychain profile that
+/// stays one: `key` is stored, tagged as enrolled, in a new credential-store
+/// entry under a new account, so the entry the committed header names is
+/// untouched until the rotation commits; it is then retired like any other.
+/// A rotation that stops before its commit removes the new entry
+/// ([`discard_staged_keychain`]). Keychain headers carry no passphrase or
+/// recovery wrap.
+#[cfg(feature = "os-keychain")]
+pub(crate) fn rotated_keychain_header(h: &ProfileHeader, key: &Key) -> Result<ProfileHeader, VaultError> {
+    require_protection(h, ProtectionMode::OsKeychain)?;
+    let account = format!("profile-{}-{}", h.profile_id, hex::encode(crypto::random_bytes(8)));
+    let secret = Zeroizing::new([ENROLLED_KEYCHAIN_TAG, key.as_bytes().as_slice()].concat());
+    keychain_entry(&account)?.set_secret(&secret).map_err(|e| keychain_error(&e))?;
+    let mut next = h.clone();
+    next.key_check = key_check(key);
+    next.passphrase_wrap = None;
+    next.recovery_wrap = None;
+    next.keychain_account = Some(account);
+    next.rotation = Some(RotationPolicy { binding_digest: String::new(), manifest_root: None, retired_keychain: retiring(h) });
+    Ok(next)
+}
+
+#[cfg(not(feature = "os-keychain"))]
+pub(crate) fn rotated_keychain_header(_h: &ProfileHeader, _key: &Key) -> Result<ProfileHeader, VaultError> {
+    Err(VaultError::KeychainUnavailable("this build has no OS credential store".into()))
+}
+
+/// Remove the entry [`rotated_keychain_header`] staged for a rotation that
+/// did not reach its commit. Best effort: an entry left behind holds a key
+/// that encrypts nothing.
+pub(crate) fn discard_staged_keychain(staged: &ProfileHeader) {
+    #[cfg(feature = "os-keychain")]
+    if let Some(account) = &staged.keychain_account
+        && let Err(e) = delete_retired_entry(&staged.key_check, account)
+    {
+        tracing::warn!(error = %e, "an abandoned rotation's new keychain entry could not be removed; it holds no key in use");
+    }
+    #[cfg(not(feature = "os-keychain"))]
+    let _ = staged;
 }
 
 fn key_check(k: &Key) -> String {
@@ -401,9 +482,7 @@ fn remove_stale_temporaries(dir: &Path) {
 }
 
 fn open_locked(dir: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::create_dir_all(dir)?;
-    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE))?;
-    f.lock()?;
+    let f = crate::profile_lock::exclusive_named(dir, LOCK_FILE)?;
     remove_stale_temporaries(dir);
     Ok(f)
 }
@@ -449,6 +528,32 @@ fn replace_header(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
         tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
         return Ok(());
     }
+    write_header_file(dir, h)
+}
+
+/// Replace `profile.json` with `h` once `h` is the committed canonical header
+/// in the database, under the header lock. The sidecar is then never read
+/// for unlock; this replaces the wraps of earlier keys it still held.
+pub(crate) fn write_header_sidecar(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
+    let _lock = open_locked(dir)?;
+    write_header_file(dir, h)
+}
+
+/// Whether the `profile.json` sidecar holds the same key material as the
+/// canonical header `h` (a missing sidecar holds none).
+pub(crate) fn sidecar_matches(dir: &Path, h: &ProfileHeader) -> bool {
+    let material = |h: &ProfileHeader| {
+        serde_json::to_value((&h.protection, &h.key_check, &h.passphrase_wrap, &h.recovery_wrap, &h.keychain_account)).ok()
+    };
+    match std::fs::read(header_path(dir)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+        Ok(bytes) => serde_json::from_slice::<ProfileHeader>(&bytes).is_ok_and(|file| material(&file) == material(h)),
+    }
+}
+
+/// Atomically replace `profile.json` with `h` (see [`replace_header`]).
+fn write_header_file(dir: &Path, h: &ProfileHeader) -> Result<(), VaultError> {
     let bytes = serde_json::to_vec_pretty(h).map_err(|e| VaultError::Header(e.to_string()))?;
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{PROFILE_FILE}.{}.{}.tmp", std::process::id(), hex::encode(crypto::random_bytes(8))));
@@ -542,7 +647,7 @@ pub fn create_enrolled_passphrase_profile(
     kdf: KdfParams,
 ) -> Result<CreatedProfile, VaultError> {
     let mut created = create_passphrase_profile(dir, display_name, passphrase, kdf)?;
-    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None, manifest_root: None });
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_keychain: Vec::new(), manifest_root: None });
     created.header.passphrase_wrap = Some(wrap_with_passphrase(&created.dek, passphrase, kdf, ROTATED_PASSPHRASE_LABEL)?);
     let recovery = created.recovery_key.as_ref().expect("passphrase creation provides recovery");
     created.header.recovery_wrap = Some(wrap_with_passphrase(&created.dek, &normalize_recovery(recovery), kdf, ROTATED_RECOVERY_LABEL)?);
@@ -567,7 +672,9 @@ fn initialize_policy(dir: &Path, header: &mut ProfileHeader, key: &Key) -> Resul
     crate::manifest::Manifest::capture(&tx).and_then(|m| m.publish(&tx, key, &mut state)).map_err(|e| VaultError::Header(e.to_string()))?;
     *header = state.header;
     tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
-    Ok(())
+    // The sidecar written before enrollment wraps the key in the legacy
+    // domain; keep only the canonical header's wraps on disk.
+    write_header_sidecar(dir, header)
 }
 
 pub fn unlock_with_passphrase(h: &ProfileHeader, passphrase: &str) -> Result<Key, VaultError> {
@@ -724,7 +831,7 @@ pub fn convert_keychain_to_passphrase(
     let Some(account) = h.keychain_account.clone() else {
         return Ok(KeychainConversion { recovery_key: recovery, keychain_entry_removed: true });
     };
-    let keychain_entry_removed = delete_retired_entry(h, &account).is_ok();
+    let keychain_entry_removed = delete_retired_entry(&h.key_check, &account).is_ok();
     if keychain_entry_removed && let Err(e) = forget_keychain_account(dir, h, &account) {
         tracing::warn!(dir = %dir.display(), error = %e, "the old keychain entry was removed but the header still names it");
     }
@@ -746,30 +853,42 @@ pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), Va
         // serialized canonical-state path below.
         return Err(VaultError::Header("rotated cleanup requires the current data key".into()));
     }
-    delete_retired_entry(h, &account)?;
+    delete_retired_entry(&h.key_check, &account)?;
     forget_keychain_account(dir, h, &account)
 }
 
-/// Retry retirement after rotation, authenticating the metadata update with
-/// the new key. Never delete an unrelated replacement credential.
+/// Remove the credential-store entries rotations retired (see
+/// [`RotationPolicy::retired_keychain`]), then forget those that are gone,
+/// authenticating the header update with the current key. An entry that no
+/// longer holds its retired key is not this profile's and is only forgotten.
+/// The first refusal is returned after every entry was tried; the rest stay
+/// recorded and are retried at the next unlock.
 pub fn retire_rotated_keychain(dir: &Path, h: &mut ProfileHeader, key: &Key) -> Result<(), VaultError> {
-    #[cfg(feature = "os-keychain")]
-    {
-        let _data_lock = crate::profile_lock::shared(dir)?;
-        let _header_lock = open_locked(dir)?;
-        let mut current = read_header_unlocked(dir)?;
-        check_current(&current, h, key)?;
-        let Some(account) = current.keychain_account.clone() else {
-            *h = current;
-            return Ok(());
-        };
-        let mut retired = current.clone();
-        retired.key_check = current.rotation.as_ref().and_then(|p| p.retired_key_check.clone()).ok_or(VaultError::HeaderTampered)?;
-        // Serializes all cooperating rotated cleanup clients. OS tools that
-        // replace credentials outside Anvil are outside this file fence.
-        delete_retired_entry(&retired, &account)?;
-        current.keychain_account = None;
-        current.rotation.as_mut().ok_or(VaultError::HeaderTampered)?.retired_key_check = None;
+    let _data_lock = crate::profile_lock::shared(dir)?;
+    let _header_lock = open_locked(dir)?;
+    let mut current = read_header_unlocked(dir)?;
+    check_current(&current, h, key)?;
+    let retired = current.rotation.as_ref().ok_or(VaultError::HeaderTampered)?.retired_keychain.clone();
+    if retired.is_empty() {
+        *h = current;
+        return Ok(());
+    }
+    let mut refused = None;
+    let mut left = Vec::new();
+    for entry in retired.iter() {
+        // Serializes all cooperating cleanup clients. OS tools that replace
+        // credentials outside Anvil are outside this file fence.
+        #[cfg(feature = "os-keychain")]
+        let removed = delete_retired_entry(&entry.key_check, &entry.account);
+        #[cfg(not(feature = "os-keychain"))]
+        let removed: Result<(), VaultError> = Err(VaultError::KeychainUnavailable("this build has no OS credential store".into()));
+        if let Err(e) = removed {
+            refused.get_or_insert(e);
+            left.push(entry.clone());
+        }
+    }
+    if left.len() < retired.len() {
+        current.rotation.as_mut().ok_or(VaultError::HeaderTampered)?.retired_keychain = left;
         current.protection_mac = Some(protection_mac(key, &current));
         if let Err(e) = replace_header(dir, &current) {
             // Removal succeeded even if forgetting its name failed. Next
@@ -778,17 +897,8 @@ pub fn retire_rotated_keychain(dir: &Path, h: &mut ProfileHeader, key: &Key) -> 
         } else {
             *h = current;
         }
-        Ok(())
     }
-    #[cfg(not(feature = "os-keychain"))]
-    {
-        let _ = (dir, key);
-        if h.keychain_account.is_some() {
-            Err(VaultError::KeychainUnavailable("this build has no OS credential store".into()))
-        } else {
-            Ok(())
-        }
-    }
+    refused.map_or(Ok(()), Err)
 }
 
 /// Maps a keyring error to a vault error. The user refusing access (the OS
@@ -814,7 +924,7 @@ fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
 /// of the header saved before the conversion cannot unlock from it; the
 /// removal is still reported as failed and retried.
 #[cfg(feature = "os-keychain")]
-fn delete_retired_entry(h: &ProfileHeader, account: &str) -> Result<(), VaultError> {
+fn delete_retired_entry(key_check_of_entry: &str, account: &str) -> Result<(), VaultError> {
     let entry = keychain_entry(account)?;
     let unavailable = |e: keyring_core::Error| keychain_error(&e);
     let secret = match entry.get_secret() {
@@ -822,8 +932,8 @@ fn delete_retired_entry(h: &ProfileHeader, account: &str) -> Result<(), VaultErr
         Err(keyring_core::Error::NoEntry) => return Ok(()),
         Err(e) => return Err(unavailable(e)),
     };
-    let retired = retired_secret(&h.key_check);
-    let holds_key = parse_keychain_secret(&secret).is_ok_and(|(k, _)| key_check(&k) == h.key_check);
+    let retired = retired_secret(key_check_of_entry);
+    let holds_key = parse_keychain_secret(&secret).is_ok_and(|(k, _)| key_check(&k) == key_check_of_entry);
     if !holds_key && secret.as_slice() != retired.as_slice() {
         return Ok(());
     }
@@ -989,7 +1099,7 @@ pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Resul
     // Tag first: an interrupted enrollment fails closed and contains no user
     // data. The creator has not published the profile yet.
     entry.set_secret(&secret).map_err(|e| keychain_error(&e))?;
-    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_key_check: None, manifest_root: None });
+    created.header.rotation = Some(RotationPolicy { binding_digest: String::new(), retired_keychain: Vec::new(), manifest_root: None });
     initialize_policy(dir, &mut created.header, &created.dek)?;
     Ok(created)
 }
@@ -1207,6 +1317,35 @@ mod tests {
         assert!(matches!(r, Err(VaultError::KeychainUnavailable(_))));
         assert_eq!(std::fs::read(header_path(dir.path())).unwrap(), before, "nothing was written");
         assert_eq!(unlock_with_keychain(&read_header(dir.path()).unwrap()).unwrap().as_bytes(), created.dek.as_bytes());
+    }
+
+    #[cfg(feature = "os-keychain")]
+    #[test]
+    fn a_keychain_rotation_stages_a_new_entry_and_discards_it_if_it_stops_before_commit() {
+        mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        create_enrolled_keychain_profile(dir.path(), "staged").unwrap();
+        let h = read_header(dir.path()).unwrap();
+        let old_account = h.keychain_account.clone().unwrap();
+        let new = Key::random();
+        let staged = rotated_keychain_header(&h, &new).unwrap();
+        let account = staged.keychain_account.clone().unwrap();
+        assert_ne!(account, old_account, "the committed entry is untouched until the commit");
+        assert_eq!(staged.protection, ProtectionMode::OsKeychain);
+        assert!(staged.passphrase_wrap.is_none() && staged.recovery_wrap.is_none());
+        assert_eq!(
+            staged.rotation.as_ref().unwrap().retired_keychain,
+            vec![RetiredKeychainEntry { account: old_account.clone(), key_check: h.key_check.clone() }]
+        );
+        let secret = keychain_entry(&account).unwrap().get_secret().unwrap();
+        assert!(secret.starts_with(ENROLLED_KEYCHAIN_TAG), "staged as an enrolled entry");
+        discard_staged_keychain(&staged);
+        assert!(matches!(keychain_entry(&account).unwrap().get_secret(), Err(keyring_core::Error::NoEntry)));
+        assert!(unlock_with_keychain(&h).is_ok(), "the committed entry still unlocks");
+        // A passphrase header has no keychain to rotate into.
+        let p = tempfile::tempdir().unwrap();
+        let c = create_passphrase_profile(p.path(), "passphrase", "pw", KdfParams::testing()).unwrap();
+        assert!(matches!(rotated_keychain_header(&c.header, &new), Err(VaultError::WrongProtection(_))));
     }
 
     #[cfg(feature = "os-keychain")]

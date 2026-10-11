@@ -82,7 +82,7 @@ fn link(
         how,
         proof,
         fresh,
-        anvil_app::profiles::PolicyRotation { new_passphrase: passphrase, recovery: &recovery, kdf: KdfParams::testing() },
+        anvil_app::profiles::PolicyRotation::Passphrase { new_passphrase: passphrase, recovery: &recovery, kdf: KdfParams::testing() },
     )?;
     Ok((linked, recovery.as_str().to_string()))
 }
@@ -92,7 +92,7 @@ fn unlink(dir: &Path, how: Unlock<'_>, proof: Option<VerifiedIdentity>, passphra
         dir,
         how,
         proof,
-        anvil_app::profiles::PolicyRotation { new_passphrase: passphrase, recovery: &recovery, kdf: KdfParams::testing() },
+        anvil_app::profiles::PolicyRotation::Passphrase { new_passphrase: passphrase, recovery: &recovery, kdf: KdfParams::testing() },
     )?;
     Ok(recovery.as_str().to_string())
 }
@@ -691,4 +691,52 @@ async fn deleting_header_mac_cannot_legitimize_an_unlinked_policy() {
     edited["header"]["protection_mac"] = serde_json::Value::Null;
     replace_state(&dir, &edited);
     assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).is_err());
+}
+
+#[tokio::test]
+async fn policy_changes_can_keep_a_keychain_profile_in_the_keychain() {
+    anvil_fixtures::init();
+    static MOCK: std::sync::Once = std::sync::Once::new();
+    MOCK.call_once(|| keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap()));
+    assert!(keyring_core::get_default_store().unwrap().as_any().is::<keyring_core::mock::Store>());
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let p = provider(&idp);
+    let root = tempfile::tempdir().unwrap();
+    let (s, key) = ProfileManager::new(root.path()).create_keychain("keychain identity").unwrap();
+    let before = vault::read_header(&s.dir).unwrap();
+    App::open(s.dir.clone(), before.clone(), key).unwrap().create_workspace("kept").unwrap();
+    let entry = |account: &str| keyring_core::Entry::new(vault::KEYCHAIN_SERVICE, account).unwrap();
+    let linked =
+        ProfileManager::link_identity(&s.dir, Unlock::Keychain, sign_in(&p).await, false, anvil_app::profiles::PolicyRotation::Keychain)
+            .unwrap();
+    let h = vault::read_header(&s.dir).unwrap();
+    assert_eq!(h.protection, anvil_domain::workspace::ProtectionMode::OsKeychain, "the profile stays in the keychain");
+    assert_ne!(h.key_check, before.key_check, "linking still rotated the key");
+    assert!(h.passphrase_wrap.is_none() && h.recovery_wrap.is_none());
+    assert_ne!(h.keychain_account, before.keychain_account);
+    assert!(matches!(entry(before.keychain_account.as_deref().unwrap()).get_secret(), Err(keyring_core::Error::NoEntry)));
+    assert!(vault::unlock_with_keychain(&before).is_err());
+    let (h, key) = ProfileManager::unlock(&s.dir, Unlock::Keychain).unwrap();
+    assert_eq!(ProfileManager::linked_identity(&s.dir, &key).unwrap().unwrap(), linked);
+    let app = App::open(s.dir.clone(), h.clone(), key).unwrap();
+    assert_eq!(app.workspaces().unwrap().len(), 1);
+    drop(app);
+    ProfileManager::unlink_identity(&s.dir, Unlock::Keychain, None, anvil_app::profiles::PolicyRotation::Keychain).unwrap();
+    let after = vault::read_header(&s.dir).unwrap();
+    assert_eq!(after.protection, anvil_domain::workspace::ProtectionMode::OsKeychain);
+    assert_ne!(after.key_check, h.key_check);
+    assert!(matches!(entry(h.keychain_account.as_deref().unwrap()).get_secret(), Err(keyring_core::Error::NoEntry)));
+    let (_, key) = ProfileManager::unlock(&s.dir, Unlock::Keychain).unwrap();
+    assert!(ProfileManager::linked_identity(&s.dir, &key).unwrap().is_none());
+    // A keychain rotation is refused for a passphrase profile.
+    let (dir, _) = profile(root.path(), "passphrase");
+    let refused = ProfileManager::link_identity(
+        &dir,
+        Unlock::Passphrase(PASS),
+        sign_in(&p).await,
+        false,
+        anvil_app::profiles::PolicyRotation::Keychain,
+    );
+    assert!(matches!(refused, Err(AppError::Vault(VaultError::WrongProtection(_)))));
+    assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).is_ok(), "nothing changed");
 }

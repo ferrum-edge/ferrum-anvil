@@ -267,7 +267,11 @@ pub async fn profile_enroll_unlinked(
             &profile.dir,
             how,
             None,
-            anvil_app::profiles::PolicyRotation { new_passphrase: &new_passphrase, recovery: &recovery, kdf: KdfParams::interactive() },
+            anvil_app::profiles::PolicyRotation::Passphrase {
+                new_passphrase: &new_passphrase,
+                recovery: &recovery,
+                kdf: KdfParams::interactive(),
+            },
         )
     })
     .await

@@ -24,7 +24,7 @@ fn missing_legacy_policy_blocks_normal_unlock_and_implicit_rotation() {
     let refusal = ProfileManager::enroll_unlinked_policy(
         &dir,
         Unlock::Passphrase(OLD),
-        PolicyRotation { new_passphrase: OLD, recovery: &replacement, kdf: KdfParams::testing() },
+        PolicyRotation::Passphrase { new_passphrase: OLD, recovery: &replacement, kdf: KdfParams::testing() },
     )
     .unwrap_err();
     assert!(refusal.to_string().contains("different from the current"));
@@ -33,7 +33,7 @@ fn missing_legacy_policy_blocks_normal_unlock_and_implicit_rotation() {
     ProfileManager::enroll_unlinked_policy(
         &dir,
         Unlock::Passphrase(OLD),
-        PolicyRotation { new_passphrase: NEW, recovery: &replacement, kdf: KdfParams::testing() },
+        PolicyRotation::Passphrase { new_passphrase: NEW, recovery: &replacement, kdf: KdfParams::testing() },
     )
     .unwrap();
     assert!(Store::open(&dir, historical_key).is_err());
@@ -56,7 +56,11 @@ fn new_profiles_cannot_silently_lose_authenticated_policy() {
         ProfileManager::enroll_unlinked_policy(
             &s.dir,
             Unlock::Passphrase(OLD),
-            PolicyRotation { new_passphrase: NEW, recovery: &vault::RotationRecoveryKey::generate(), kdf: KdfParams::testing() }
+            PolicyRotation::Passphrase {
+                new_passphrase: NEW,
+                recovery: &vault::RotationRecoveryKey::generate(),
+                kdf: KdfParams::testing()
+            }
         )
         .is_err(),
         "missing enrolled state must not reenroll silently"
@@ -82,9 +86,14 @@ fn complete_authentic_local_snapshot_restore_is_an_explicit_offline_boundary() {
     let (s, key, recovery) = ProfileManager::new(root.path()).create_passphrase("historical", OLD, KdfParams::testing()).unwrap();
     let app = App::open(s.dir.clone(), vault::read_header(&s.dir).unwrap(), key).unwrap();
     app.create_workspace("historical").unwrap();
-    let snapshot = app.store.checkpoint("owner historical snapshot").unwrap();
+    let checkpoint = app.store.checkpoint("owner historical snapshot").unwrap();
+    // The owner keeps a copy outside the profile: rotation removes the
+    // profile's own checkpoints sealed with the old key.
+    let snapshot = root.path().join("owner historical snapshot.db");
+    std::fs::copy(&checkpoint, &snapshot).unwrap();
     app.change_passphrase(NEW, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
     drop(app);
+    assert!(!checkpoint.exists());
     // Deliberate external replacement restores *all* trusted profile state,
     // including the authentic canonical header/policy and its canary.
     std::fs::copy(snapshot, s.dir.join("anvil.db")).unwrap();
