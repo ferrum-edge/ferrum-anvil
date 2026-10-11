@@ -819,7 +819,10 @@ impl SecretResolver for GuardedSecrets {
         self.inner.validate_context()
     }
     fn resolve(&self, r: &SecretRef) -> std::result::Result<Zeroizing<String>, String> {
-        self.validate_context()?;
+        crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())?;
+        // Every storage-backed resolver validates its own context when it
+        // resolves (wrappers delegate to theirs), so validating `inner` here
+        // as well would only check the same context twice per lookup.
         self.inner.resolve(r)
     }
     fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {

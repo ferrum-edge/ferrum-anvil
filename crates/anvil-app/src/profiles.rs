@@ -502,7 +502,7 @@ mod manifest_enrollment_tests {
         let canary = anvil_storage::crypto::seal(key, b"anvil/v2/rotated-canary", b"ok");
         tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(canary))]).unwrap();
         tx.execute("UPDATE meta SET value='4' WHERE key='schema_version'", []).unwrap();
-        tx.execute("DELETE FROM meta WHERE key='protected_records_v1'", []).unwrap();
+        tx.execute_batch("DROP TABLE catalogue").unwrap();
         tx.commit().unwrap();
     }
 

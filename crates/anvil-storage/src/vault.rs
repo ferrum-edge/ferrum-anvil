@@ -564,7 +564,9 @@ fn initialize_policy(dir: &Path, header: &mut ProfileHeader, key: &Key) -> Resul
     }
     let mut state = crate::rotation::State { header: header.clone(), binding: None };
     bind_rotation(&mut state.header, key, &None);
-    crate::manifest::Manifest::capture(&tx).and_then(|m| m.publish(&tx, key, &mut state)).map_err(|e| VaultError::Header(e.to_string()))?;
+    crate::manifest::Catalogue::capture(&tx)
+        .and_then(|m| m.publish_full(&tx, key, &mut state))
+        .map_err(|e| VaultError::Header(e.to_string()))?;
     *header = state.header;
     tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
     Ok(())

@@ -49,7 +49,7 @@ fn catalogue_downgrade_between_connection_preflight_and_record_snapshot_is_refus
         let env = crypto::seal(&c.dek, b"anvil/v2/rotated-canary", b"ok");
         tx.execute("UPDATE meta SET value=?1 WHERE key='key_canary'", [format!("rotated-v1:{}", hex::encode(env))]).unwrap();
         tx.execute("UPDATE meta SET value='4' WHERE key='schema_version'", []).unwrap();
-        tx.execute("DELETE FROM meta WHERE key='protected_records_v1'", []).unwrap();
+        tx.execute_batch("DROP TABLE catalogue").unwrap();
         tx.commit().unwrap();
         assert!(matches!(store.begin_records(&mut guarded, behavior), Err(StoreError::Integrity)));
     }
