@@ -62,6 +62,22 @@
 
 ### Fixed
 
+- Key rotation removes the old key's material it kept outside the database once
+  the rotation commits: `profile.json` no longer holds passphrase and recovery
+  wraps of the old key, checkpoints sealed with an earlier key and interrupted
+  restore copies are deleted, the WAL is truncated, and a legacy `identity.json`
+  is deleted. An interrupted scrub never risks the new key (unlock reads the
+  committed database) and is repeated at the next unlock. Pre-rotation
+  checkpoints are no longer kept in the profile; keep a portable backup first.
+
+- An OS-keychain profile can now rotate its data key and stay keychain-protected:
+  `anvil profile rotate-key --confirm-rotation` without `--new-passphrase-stdin`,
+  `App::rotate_keychain_data_key` and `PolicyRotation::Keychain` (identity link,
+  unlink and enrollment) store the new key in a new OS credential entry before the
+  commit and retire the old entry after it. Previously every rotation converted the
+  profile to passphrase protection. `PolicyRotation` is now an enum and retired
+  credentials are recorded as `RotationPolicy::retired_keychain`.
+
 - A transient storage error no longer locks an unlocked profile. The per-operation
   key check drops the key only on evidence against it (a canary or catalogue that
   does not authenticate, or a rotated key); SQLite contention, I/O errors and a

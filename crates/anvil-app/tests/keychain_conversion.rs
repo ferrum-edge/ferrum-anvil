@@ -89,8 +89,77 @@ fn enrolled_os_credential_refuses_a_legacy_header_downgrade() {
     let root = tempfile::tempdir().unwrap();
     let (s, _) = ProfileManager::new(root.path()).create_keychain("enrolled").unwrap();
     let h = vault::read_header(&s.dir).unwrap();
-    let legacy: vault::ProfileHeader = serde_json::from_slice(&std::fs::read(vault::header_path(&s.dir)).unwrap()).unwrap();
+    let sidecar: vault::ProfileHeader = serde_json::from_slice(&std::fs::read(vault::header_path(&s.dir)).unwrap()).unwrap();
+    assert!(sidecar.rotation.is_some(), "enrollment leaves no legacy-domain header on disk");
+    let mut legacy = h.clone();
+    legacy.rotation = None;
     assert!(h.rotation.is_some());
     assert!(vault::unlock_with_keychain(&legacy).is_err(), "enrolled credential cannot authorize old header domain");
     assert!(ProfileManager::unlock(&s.dir, Unlock::Keychain).is_ok());
+}
+
+/// After a conversion whose old entry the OS refused to remove, a canonical
+/// header edited back to keychain mode and naming that entry does not unlock
+/// from it, and nothing is sealed or retired by the attempt.
+#[test]
+fn a_leftover_entry_does_not_reopen_a_header_edited_back_to_keychain_mode() {
+    mock_store();
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, dek) = pm.create_keychain("Local").unwrap();
+    let old = vault::read_header(&s.dir).unwrap();
+    let account = old.keychain_account.clone().unwrap();
+    let app = App::open(s.dir.clone(), old.clone(), dek).unwrap();
+    entry(&account)
+        .as_any()
+        .downcast_ref::<keyring_core::mock::Cred>()
+        .unwrap()
+        .set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
+    assert!(!app.convert_to_passphrase(PASS, &RotationRecoveryKey::generate(), KdfParams::testing()).unwrap().keychain_entry_removed);
+    drop(app);
+    let left = entry(&account).get_secret().expect("the old entry was left behind");
+    let state = |dir: &std::path::Path| -> serde_json::Value {
+        let conn = rusqlite::Connection::open(dir.join("anvil.db")).unwrap();
+        serde_json::from_str(
+            &conn.query_row("SELECT value FROM meta WHERE key='local_key_state_v1'", [], |r| r.get::<_, String>(0)).unwrap(),
+        )
+        .unwrap()
+    };
+    let replace = |dir: &std::path::Path, v: &serde_json::Value| {
+        rusqlite::Connection::open(dir.join("anvil.db"))
+            .unwrap()
+            .execute("UPDATE meta SET value=?1 WHERE key='local_key_state_v1'", [v.to_string()])
+            .unwrap();
+    };
+    let original = state(&s.dir);
+    let edits: [&dyn Fn(&mut serde_json::Value); 4] = [
+        // Flipped mode naming the old entry, current key check and MAC.
+        &|h| {
+            h["protection"] = "os_keychain".into();
+            h["keychain_account"] = account.clone().into();
+        },
+        // ... and the old key's check, so the entry's key matches.
+        &|h| h["key_check"] = old.key_check.clone().into(),
+        // ... without the MAC, like an earlier build's header.
+        &|h| {
+            h.as_object_mut().unwrap().remove("protection_mac");
+        },
+        // ... without the wraps either.
+        &|h| {
+            let o = h.as_object_mut().unwrap();
+            o.remove("passphrase_wrap");
+            o.remove("recovery_wrap");
+        },
+    ];
+    let mut edited = original.clone();
+    for edit in edits {
+        edit(&mut edited["header"]);
+        replace(&s.dir, &edited);
+        assert!(ProfileManager::unlock(&s.dir, Unlock::Keychain).is_err(), "{edited}");
+        assert_eq!(state(&s.dir), edited, "nothing was sealed");
+        assert_eq!(entry(&account).get_secret().unwrap(), left, "nothing was unlocked, so nothing was retired");
+    }
+    replace(&s.dir, &original);
+    assert!(ProfileManager::unlock(&s.dir, Unlock::Passphrase(PASS)).is_ok());
+    assert!(matches!(entry(&account).get_secret(), Err(keyring_core::Error::NoEntry)), "the leftover is retired at unlock");
 }

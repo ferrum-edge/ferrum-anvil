@@ -1124,6 +1124,29 @@ fn reseal_all(conn: &Connection, old: &Key, new: &Key) -> Result<()> {
     Ok(())
 }
 
+/// Re-encrypt every payload on `tx` from `old` to `new` and publish the
+/// rotated header `next` (bound to `binding`) with a new catalogue, all in
+/// `tx`. `next` becomes the header as published.
+fn prepare_rotation(
+    tx: &Transaction<'_>,
+    old: &Key,
+    new: &Key,
+    next: &mut crate::vault::ProfileHeader,
+    binding: Option<serde_json::Value>,
+) -> std::result::Result<(), crate::vault::VaultError> {
+    use crate::vault::VaultError;
+    crate::vault::bind_rotation(next, new, &binding);
+    // Abort on the first unauthenticatable row. Do not retain old-key
+    // ciphertext, and do not reinterpret legacy residual payloads.
+    reseal_all(tx, old, new).map_err(|e| VaultError::Header(e.to_string()))?;
+    let mut state = crate::rotation::State { header: next.clone(), binding };
+    tx.execute("UPDATE meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
+        .map_err(|e| VaultError::Header(e.to_string()))?;
+    crate::manifest::Manifest::capture(tx).and_then(|m| m.publish(tx, new, &mut state)).map_err(|e| VaultError::Header(e.to_string()))?;
+    *next = state.header;
+    Ok(())
+}
+
 impl Store {
     /// Authenticate the current ciphertext epoch before unlock performs any
     /// header upgrade or credential-store cleanup. An authentic historical
@@ -1195,9 +1218,12 @@ impl Store {
     }
 
     /// Deliberately replace the data key, wrapped header, and linked policy
-    /// in one durable SQLite commit. The successful store is left locked;
-    /// reopen the App to refresh its immutable capability identity.
-    /// The caller must save and acknowledge `recovery` before invoking this.
+    /// in one durable SQLite commit. The new key is wrapped by `passphrase`
+    /// and `recovery`; a keychain profile becomes a passphrase profile (use
+    /// [`Store::rotate_keychain_data_key`] to keep it in the keychain). The
+    /// successful store is left locked; reopen the App to refresh its
+    /// immutable capability identity. The caller must save and acknowledge
+    /// `recovery` before invoking this.
     pub fn rotate_data_key<F>(
         &self,
         passphrase: &str,
@@ -1205,6 +1231,58 @@ impl Store {
         kdf: crate::KdfParams,
         prepare_binding: F,
     ) -> std::result::Result<crate::vault::KeychainConversion, crate::vault::VaultError>
+    where
+        F: FnOnce(
+            &crate::vault::ProfileHeader,
+            &Key,
+            &Key,
+            Option<Option<serde_json::Value>>,
+        ) -> std::result::Result<Option<serde_json::Value>, crate::vault::VaultError>,
+    {
+        let target = crate::vault::RotationTarget::Passphrase { passphrase, recovery, kdf };
+        let keychain_entry_removed = self.rotate_to(target, prepare_binding)?;
+        Ok(crate::vault::KeychainConversion {
+            recovery_key: zeroize::Zeroizing::new(recovery.as_str().to_string()),
+            keychain_entry_removed,
+        })
+    }
+
+    /// [`Store::rotate_data_key`] for an OS-keychain profile that stays one:
+    /// the new key is stored in a new OS credential-store entry before the
+    /// commit, and the old entry is retired after it. A passphrase profile is
+    /// refused. There is no recovery key, as for any keychain profile.
+    pub fn rotate_keychain_data_key<F>(
+        &self,
+        prepare_binding: F,
+    ) -> std::result::Result<crate::vault::KeychainRotation, crate::vault::VaultError>
+    where
+        F: FnOnce(
+            &crate::vault::ProfileHeader,
+            &Key,
+            &Key,
+            Option<Option<serde_json::Value>>,
+        ) -> std::result::Result<Option<serde_json::Value>, crate::vault::VaultError>,
+    {
+        let keychain_entry_removed = self.rotate_to(crate::vault::RotationTarget::Keychain, prepare_binding)?;
+        Ok(crate::vault::KeychainRotation { keychain_entry_removed })
+    }
+
+    /// Rotate to `target`. Returns whether every retired credential-store
+    /// entry is gone.
+    ///
+    /// Crash safety: the new wrapped header (or the name of the new keychain
+    /// entry, written before the commit) commits with the re-encrypted data.
+    /// Before the commit the old credentials keep working; after it, unlock
+    /// reads the new header from the database. Old-key material outside the
+    /// database (the `profile.json` sidecar's wraps, checkpoints sealed with
+    /// an earlier key, WAL frames) is scrubbed only after the commit, so an
+    /// interruption there can never cost the new key; the scrub is retried at
+    /// the next unlock ([`crate::rotation::scrub_superseded`]).
+    fn rotate_to<F>(
+        &self,
+        target: crate::vault::RotationTarget<'_>,
+        prepare_binding: F,
+    ) -> std::result::Result<bool, crate::vault::VaultError>
     where
         F: FnOnce(
             &crate::vault::ProfileHeader,
@@ -1240,30 +1318,38 @@ impl Store {
         vault::check_current(&h, &h, &key)?;
         let new_key = Key::random();
         let binding = prepare_binding(&h, &key, &new_key, state.map(|s| s.binding))?;
-        let mut next = vault::rotated_header(&h, &new_key, passphrase, recovery, kdf)?;
-        vault::bind_rotation(&mut next, &new_key, &binding);
-        // Abort on the first unauthenticatable row. Do not retain old-key
-        // ciphertext, and do not reinterpret legacy residual payloads.
-        reseal_all(&tx, &key, &new_key).map_err(|e| VaultError::Header(e.to_string()))?;
-        let mut state = crate::rotation::State { header: next.clone(), binding };
-        tx.execute("UPDATE meta SET value=?1 WHERE key='schema_version'", [DB_SCHEMA_VERSION.to_string()])
-            .map_err(|e| VaultError::Header(e.to_string()))?;
-        crate::manifest::Manifest::capture(&tx)
-            .and_then(|m| m.publish(&tx, &new_key, &mut state))
-            .map_err(|e| VaultError::Header(e.to_string()))?;
-        next = state.header;
+        let keychain = matches!(target, vault::RotationTarget::Keychain);
+        let mut next = match target {
+            vault::RotationTarget::Passphrase { passphrase, recovery, kdf } => {
+                vault::rotated_header(&h, &new_key, passphrase, recovery, kdf)?
+            }
+            vault::RotationTarget::Keychain => vault::rotated_keychain_header(&h, &new_key)?,
+        };
+        if let Err(e) = prepare_rotation(&tx, &key, &new_key, &mut next, binding) {
+            // Nothing committed: the staged keychain entry protects nothing.
+            if keychain {
+                vault::discard_staged_keychain(&next);
+            }
+            return Err(e);
+        }
         #[cfg(test)]
         rotation_tests::crash_point("before-commit");
+        // A failed commit keeps a staged keychain entry: a commit reported as
+        // failed may still be found durable when the database is reopened,
+        // and then that entry is the only copy of the key.
         tx.commit().map_err(|e| VaultError::Header(e.to_string()))?;
         #[cfg(test)]
         rotation_tests::crash_point("after-commit");
         *self.key.write() = None;
+        // Still under the exclusive fence: no supported process reads or
+        // checkpoints meanwhile.
+        crate::rotation::scrub_after_commit(&self.dir, &conn, &next, &new_key);
+        drop(conn);
         drop(_data_lock);
         // Historical sidecars are deliberately not a publication bridge:
         // unlock discovers the new wrapped key directly from the database.
-        let keychain_entry_removed =
-            if next.keychain_account.is_some() { vault::retire_rotated_keychain(&self.dir, &mut next, &new_key).is_ok() } else { true };
-        Ok(vault::KeychainConversion { recovery_key: zeroize::Zeroizing::new(recovery.as_str().to_string()), keychain_entry_removed })
+        let retired = next.rotation.as_ref().is_some_and(|p| !p.retired_keychain.is_empty());
+        Ok(if retired { vault::retire_rotated_keychain(&self.dir, &mut next, &new_key).is_ok() } else { true })
     }
 
     pub fn dir(&self) -> &Path {

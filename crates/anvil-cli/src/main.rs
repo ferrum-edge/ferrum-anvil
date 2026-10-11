@@ -190,6 +190,7 @@ enum ProfileCmd {
         #[arg(long)]
         confirm_rotation: bool,
         /// Read the new passphrase from stdin, after the old one if --passphrase-stdin is used.
+        /// An OS-keychain profile that omits it stays in the keychain, under a new entry.
         #[arg(long)]
         new_passphrase_stdin: bool,
         /// Read the current recovery key from stdin first (offline, including fresh-login profiles).
@@ -837,7 +838,11 @@ async fn run(cli: Cli) -> Result<i32> {
                         &summary.dir,
                         how,
                         None,
-                        anvil_app::profiles::PolicyRotation { new_passphrase: &new, recovery: &recovery, kdf: KdfParams::interactive() },
+                        anvil_app::profiles::PolicyRotation::Passphrase {
+                            new_passphrase: &new,
+                            recovery: &recovery,
+                            kdf: KdfParams::interactive(),
+                        },
                     )?;
                     writeln!(
                         std::io::stdout().lock(),
@@ -846,12 +851,32 @@ async fn run(cli: Cli) -> Result<i32> {
                     return Ok(0);
                 }
                 ProfileCmd::RotateKey { confirm_rotation, new_passphrase_stdin, recovery_key_stdin } => {
-                    if !confirm_rotation || !new_passphrase_stdin {
+                    let keychain = !new_passphrase_stdin
+                        && !recovery_key_stdin
+                        && match &cli.profile {
+                            Some(p) => pm.find(p).ok(),
+                            None => pm.list().into_iter().next(),
+                        }
+                        .is_some_and(|s| s.protection == anvil_domain::workspace::ProtectionMode::OsKeychain);
+                    if !confirm_rotation || !(*new_passphrase_stdin || keychain) {
                         bail!(
-                            "close every older Anvil build, then supply --confirm-rotation --new-passphrase-stdin; rotation replaces the recovery key, locks the profile, and leaves old backups historical"
+                            "close every older Anvil build, then supply --confirm-rotation --new-passphrase-stdin (an OS-keychain profile omits --new-passphrase-stdin to stay in the keychain); rotation replaces the recovery key, locks the profile, and leaves old backups historical"
                         );
                     }
                     let app = open_app_for_rotation(&cli, *recovery_key_stdin)?;
+                    if keychain {
+                        let rotated = app.rotate_keychain_data_key()?;
+                        writeln!(
+                            std::io::stdout().lock(),
+                            "Local data key rotated into a new OS keychain entry; the profile stays keychain-protected. Old raw copies remain historical; full snapshot rollback is not prevented."
+                        )?;
+                        if !rotated.keychain_entry_removed {
+                            eprintln!(
+                                "The old OS credential entry could not be removed; removal is retried at unlock. It cannot decrypt the rotated database."
+                            );
+                        }
+                        return Ok(0);
+                    }
                     let new = passphrase(true, "ANVIL_NEW_PASSPHRASE")?.ok_or_else(|| anyhow!("provide the new passphrase on stdin"))?;
                     let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
                     {

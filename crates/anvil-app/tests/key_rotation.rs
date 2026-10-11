@@ -99,7 +99,7 @@ fn keychain_rotation_commits_new_passphrase_key_then_retires_old_entry() {
     assert!(matches!(keyring_core::Entry::new(vault::KEYCHAIN_SERVICE, &account).unwrap().get_secret(), Err(keyring_core::Error::NoEntry)));
     let (h, k) = ProfileManager::unlock(&s.dir, Unlock::Passphrase(NEW)).unwrap();
     assert!(h.keychain_account.is_none());
-    assert!(h.rotation.as_ref().unwrap().retired_key_check.is_none());
+    assert!(h.rotation.as_ref().unwrap().retired_keychain.is_empty());
     assert_eq!(App::open(s.dir, h, k).unwrap().workspace(&ws.meta.id).unwrap().name, "kept");
 }
 
@@ -134,4 +134,70 @@ fn keychain_cleanup_denial_is_retryable_and_unrelated_replacements_survive() {
             assert!(matches!(entry.get_secret(), Err(keyring_core::Error::NoEntry)));
         }
     }
+}
+
+#[test]
+fn keychain_rotation_can_keep_the_profile_in_the_keychain() {
+    mock_store();
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, k) = pm.create_keychain("stays in keychain").unwrap();
+    let old = vault::read_header(&s.dir).unwrap();
+    let old_key = anvil_storage::Key::from_bytes(k.as_bytes()).unwrap();
+    let old_account = old.keychain_account.clone().unwrap();
+    let source = App::open(s.dir.clone(), old.clone(), k).unwrap();
+    let ws = source.create_workspace("kept").unwrap();
+    let checkpoint = source.store.checkpoint("before").unwrap();
+    let rotated = source.rotate_keychain_data_key().unwrap();
+    assert!(rotated.keychain_entry_removed && source.is_locked());
+    let h = vault::read_header(&s.dir).unwrap();
+    assert_eq!(h.protection, anvil_domain::workspace::ProtectionMode::OsKeychain);
+    assert!(h.passphrase_wrap.is_none() && h.recovery_wrap.is_none(), "a keychain header carries no wraps");
+    assert_ne!(h.keychain_account.as_deref(), Some(old_account.as_str()), "the new key is in a new entry");
+    assert!(h.rotation.as_ref().unwrap().retired_keychain.is_empty());
+    assert!(matches!(
+        keyring_core::Entry::new(vault::KEYCHAIN_SERVICE, &old_account).unwrap().get_secret(),
+        Err(keyring_core::Error::NoEntry)
+    ));
+    assert!(vault::unlock_with_keychain(&old).is_err());
+    assert!(anvil_storage::Store::open(&s.dir, old_key).is_err(), "the old key cannot read the rotated data");
+    assert!(!checkpoint.exists(), "the old-key checkpoint was removed");
+    assert_eq!(pm.find(&s.profile_id).unwrap().protection, anvil_domain::workspace::ProtectionMode::OsKeychain);
+    let (h, k) = ProfileManager::unlock(&s.dir, Unlock::Keychain).unwrap();
+    let reopened = App::open(s.dir.clone(), h, k).unwrap();
+    assert_eq!(reopened.workspace(&ws.meta.id).unwrap().name, "kept");
+    // A passphrase profile is refused, and converting stays available.
+    assert!(reopened.rotate_keychain_data_key().is_ok());
+    let (h, k) = ProfileManager::unlock(&s.dir, Unlock::Keychain).unwrap();
+    let again = App::open(s.dir.clone(), h, k).unwrap();
+    let recovery = vault::RotationRecoveryKey::generate();
+    again.convert_to_passphrase(NEW, &recovery, KdfParams::testing()).unwrap();
+    let (h, k) = ProfileManager::unlock(&s.dir, Unlock::Passphrase(NEW)).unwrap();
+    assert!(h.keychain_account.is_none());
+    assert!(matches!(App::open(s.dir.clone(), h, k).unwrap().rotate_keychain_data_key(), Err(anvil_app::AppError::Invalid(_))));
+}
+
+#[test]
+fn a_refused_old_keychain_entry_is_retired_at_the_next_unlock() {
+    mock_store();
+    let root = tempfile::tempdir().unwrap();
+    let pm = ProfileManager::new(root.path());
+    let (s, k) = pm.create_keychain("retire later").unwrap();
+    let old = vault::read_header(&s.dir).unwrap();
+    let account = old.keychain_account.clone().unwrap();
+    let entry = keyring_core::Entry::new(vault::KEYCHAIN_SERVICE, &account).unwrap();
+    let app = App::open(s.dir.clone(), old.clone(), k).unwrap();
+    entry
+        .as_any()
+        .downcast_ref::<keyring_core::mock::Cred>()
+        .unwrap()
+        .set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("test store unavailable"))));
+    assert!(!app.rotate_keychain_data_key().unwrap().keychain_entry_removed);
+    assert_eq!(pm.find(&s.profile_id).unwrap().leftover_keychain_entry.unwrap().account, account);
+    let old_key = vault::unlock_with_keychain(&old).unwrap();
+    assert!(anvil_storage::Store::open(&s.dir, old_key).is_err(), "the retained entry cannot decrypt new data");
+    let (h, _) = ProfileManager::unlock(&s.dir, Unlock::Keychain).unwrap();
+    assert!(h.rotation.as_ref().unwrap().retired_keychain.is_empty());
+    assert!(matches!(entry.get_secret(), Err(keyring_core::Error::NoEntry)));
+    assert!(pm.find(&s.profile_id).unwrap().leftover_keychain_entry.is_none());
 }
