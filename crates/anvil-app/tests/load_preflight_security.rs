@@ -127,6 +127,10 @@ struct CountedSecrets {
 }
 
 impl SecretResolver for CountedSecrets {
+    fn validate_context(&self) -> Result<(), String> {
+        self.inner.validate_context()
+    }
+
     fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
         self.reads.lock().unwrap().push(reference.id);
         self.inner.resolve(reference)
@@ -145,6 +149,10 @@ struct ReplaceIssuerAfterRead {
 }
 
 impl SecretResolver for ReplaceIssuerAfterRead {
+    fn validate_context(&self) -> Result<(), String> {
+        self.inner.validate_context()
+    }
+
     fn resolve(&self, reference: &SecretRef) -> Result<Zeroizing<String>, String> {
         let value = self.inner.resolve(reference)?;
         if reference.id == self.issuer.id {

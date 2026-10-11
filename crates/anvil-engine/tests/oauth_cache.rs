@@ -704,6 +704,10 @@ mod preparation_order {
     }
 
     impl SecretResolver for DeferredSecrets {
+        fn validate_context(&self) -> Result<(), String> {
+            Ok(())
+        }
+
         fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
             self.variables.get(&(layer, variable)).cloned()
         }

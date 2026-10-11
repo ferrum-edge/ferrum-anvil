@@ -140,6 +140,9 @@ impl SecretResolver for EphemeralSecrets {
     fn validate_context(&self) -> Result<(), String> {
         self.inner.validate_context()
     }
+    fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+        self.inner.variable_secret(layer, variable)
+    }
     fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String> {
         self.validate_context()?;
         match self.values.get(&r.id) {
@@ -1024,6 +1027,43 @@ pub async fn probe(endpoint: &str, audience: Option<&str>, timeout: Duration) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A context whose JWT-SVID was installed as an ephemeral secret must
+    /// still resolve the deferred vault variables of the context it wraps.
+    #[test]
+    fn ephemeral_secrets_keep_deferred_vault_variable_bindings() {
+        struct Deferred(SecretRef, std::sync::atomic::AtomicUsize);
+        impl SecretResolver for Deferred {
+            fn validate_context(&self) -> Result<(), String> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn variable_secret(&self, layer: usize, variable: usize) -> Option<SecretRef> {
+                ((layer, variable) == (0, 0)).then(|| self.0.clone())
+            }
+            fn resolve(&self, r: &SecretRef) -> Result<Zeroizing<String>, String> {
+                if r.id == self.0.id { Ok(Zeroizing::new("vault-value".into())) } else { Err("not in this vault".into()) }
+            }
+        }
+        let binding = SecretRef { id: Id::new(), label: "api-key".into() };
+        let inner = Arc::new(Deferred(binding.clone(), Default::default()));
+        let mut values = Ephemeral::new();
+        let token = ephemeral(&mut values, "SPIFFE JWT-SVID", Zeroizing::new("jwt-svid".into()));
+        let wrapped: Arc<dyn SecretResolver> = Arc::new(EphemeralSecrets { inner: inner.clone(), values });
+        assert_eq!(wrapped.variable_secret(0, 0).map(|r| r.id), Some(binding.id));
+        assert!(wrapped.variable_secret(0, 1).is_none());
+        wrapped.validate_context().unwrap();
+        assert_eq!(inner.1.load(std::sync::atomic::Ordering::SeqCst), 1, "context validation reaches the wrapped resolver");
+        use crate::vars::{VarEntry, VarLayer};
+        let layers = vec![VarLayer {
+            label: "environment".into(),
+            vars: vec![VarEntry { name: "key".into(), value: String::new(), secret: true, literal: false }],
+        }];
+        let r = Resolver::new(layers, None).with_secrets(wrapped.clone());
+        assert_eq!(r.resolve("{{key}}", "test").unwrap(), "vault-value");
+        let SensitiveValue::Secret { secret } = token else { panic!("the token is an ephemeral secret") };
+        assert_eq!(wrapped.resolve(&secret).unwrap().as_str(), "jwt-svid");
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("anvil-token-file-{}-{name}", Id::new()))
