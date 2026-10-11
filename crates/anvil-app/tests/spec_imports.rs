@@ -3,6 +3,8 @@
 //! import into an existing workspace keeps the source's own scope instead of
 //! picking up the destination workspace's auth.
 
+mod faults;
+
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
@@ -170,18 +172,6 @@ fn inventory(app: &App) -> Vec<String> {
     out
 }
 
-/// Make the next write that matches `when` fail inside SQLite.
-fn fail_writes(app: &App, table: &str, when: &str) {
-    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
-    let trigger = format!("CREATE TRIGGER injected_failure BEFORE INSERT ON {table} WHEN {when}");
-    db.execute_batch(&format!("{trigger} BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")).unwrap();
-}
-
-fn allow_writes(app: &App) {
-    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
-    db.execute_batch("DROP TRIGGER IF EXISTS injected_failure;").unwrap();
-}
-
 fn targets(app: &App) -> Vec<(&'static str, SpecTarget)> {
     let ws = app.create_workspace("Existing").unwrap();
     vec![("existing workspace", into(&ws.meta.id)), ("new workspace", SpecTarget::NewWorkspace)]
@@ -215,9 +205,9 @@ fn an_import_that_fails_storing_its_source_file_writes_nothing() {
         // New bytes each time, so the source file is a new blob.
         let bytes = format!("curl https://example.invalid/health/{i}").into_bytes();
         let before = inventory(&app);
-        fail_writes(&app, "blobs", "1");
+        faults::deny_payload_writes(&rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap(), "blobs", "1");
         assert!(app.spec_import(&bytes, "source.txt", &ImportOptions::default(), target.clone()).is_err(), "{label}");
-        allow_writes(&app);
+        faults::allow_payload_writes(&rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap(), "blobs");
         assert_eq!(inventory(&app), before, "{label}: no folder, workspace, attachment index or blob is left behind");
         let done = import(&app, &bytes, target);
         assert_eq!(app.requests(&done.workspace_id).unwrap().len(), 1, "{label}");
@@ -231,10 +221,10 @@ fn an_import_that_fails_writing_its_objects_writes_nothing() {
     for (label, target) in targets(&app) {
         let before = inventory(&app);
         // The source record is the last object written.
-        fail_writes(&app, "objects", "NEW.kind = 'spec_source'");
+        faults::deny_payload_writes(&rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap(), "objects", "kind = 'spec_source'");
         let bytes = COLLECTION.as_bytes();
         assert!(app.spec_import(bytes, "echo.json", &ImportOptions::default(), target.clone()).is_err(), "{label}");
-        allow_writes(&app);
+        faults::allow_payload_writes(&rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap(), "objects");
         assert_eq!(inventory(&app), before, "{label}: every write of the import was rolled back");
         let done = app.spec_import(bytes, "echo.json", &ImportOptions::default(), target).unwrap();
         assert_eq!(app.requests(&done.workspace_id).unwrap().len(), 3, "{label}");
