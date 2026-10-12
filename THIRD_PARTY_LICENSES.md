@@ -16,11 +16,11 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-717 Rust crates, 4 npm packages.
+713 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
-| MIT OR Apache-2.0 | 320 |
+| MIT OR Apache-2.0 | 316 |
 | MIT | 154 |
 | Apache-2.0 OR MIT | 112 |
 | MIT/Apache-2.0 | 35 |
@@ -66,7 +66,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (717)
+## Rust crates (713)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -116,7 +116,6 @@ the modified file under MPL-2.0.
 | base64 | 0.22.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
 | base64 | 0.23.1 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
 | base64ct | 1.8.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
-| beef | 0.5.2 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/beef |
 | bit-set | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-set |
 | bit-vec | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
 | bit-vec | 0.9.1 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
@@ -388,11 +387,8 @@ the modified file under MPL-2.0.
 | litrs | 1.0.0 | MIT OR Apache-2.0 | https://github.com/LukasKalbertodt/litrs |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
-| logos | 0.15.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
 | logos | 0.16.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
-| logos-codegen | 0.15.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
 | logos-codegen | 0.16.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
-| logos-derive | 0.15.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
 | logos-derive | 0.16.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
 | lru-slab | 0.1.3 | MIT OR Apache-2.0 OR Zlib | https://github.com/Ralith/lru-slab |
 | markup5ever | 0.38.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
@@ -501,8 +497,8 @@ the modified file under MPL-2.0.
 | prost-derive | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | prost-reflect | 0.16.5 | MIT OR Apache-2.0 | https://github.com/andrewhickman/prost-reflect |
 | prost-types | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
-| protox | 0.9.1 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
-| protox-parse | 0.9.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
+| protox | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
+| protox-parse | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
 | psl | 2.1.238 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
 | psl-types | 2.0.11 | MIT/Apache-2.0 | https://github.com/addr-rs/psl-types |
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
