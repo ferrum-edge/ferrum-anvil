@@ -100,6 +100,24 @@ pub struct Inserted {
     pub token_secrets: Vec<String>,
 }
 
+/// Byte offset just past the `>` closing the start tag at the start of
+/// `tag`, skipping `>` characters inside single- or double-quoted attribute
+/// values (a literal `>` is legal there). `None` when no unquoted `>` exists.
+fn start_tag_end(tag: &str) -> Option<usize> {
+    let bytes = tag.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b'>' => return Some(i + 1),
+            None => {}
+        }
+    }
+    None
+}
+
 /// Insert a fresh Security header into the SOAP envelope.
 pub fn insert_security(
     body: &[u8],
@@ -161,11 +179,12 @@ pub fn insert_security_token(
     let qual = |local: &str| if prefix.is_empty() { local.to_string() } else { format!("{prefix}:{local}") };
     let mut out = String::with_capacity(text.len() + header_xml.len() + 64);
     if let Some(header) = env.children().find(|n| n.is_element() && n.tag_name().name() == "Header") {
-        // Insert right after the Header start tag.
+        // Insert right after the Header start tag. The tag may carry quoted
+        // attribute values containing a literal `>`, so the boundary scan
+        // must be quote-aware rather than taking the first `>`.
         let range = header.range();
-        let start_tag_end = text[range.start..range.end]
-            .find('>')
-            .map(|i| range.start + i + 1)
+        let start_tag_end = start_tag_end(&text[range.start..range.end])
+            .map(|i| range.start + i)
             .ok_or_else(|| AuthError::Invalid("malformed Header".into()))?;
         if text[range.start..start_tag_end].ends_with("/>") {
             out.push_str(&text[..range.start]);
@@ -186,6 +205,9 @@ pub fn insert_security_token(
         out.push_str(&format!("<{}>{header_xml}</{}>", qual("Header"), qual("Header")));
         out.push_str(&text[at..]);
     }
+    // The splice is textual; never return a rewrite that no longer parses.
+    roxmltree::Document::parse_with_options(&out, opts)
+        .map_err(|e| AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")))?;
     Ok(Inserted { body: out.into_bytes(), token_secrets })
 }
 
@@ -198,6 +220,27 @@ mod tests {
         let nonce = hex::decode("746573742d6e6f6e63652d3132333435").unwrap();
         assert_eq!(password_digest(&nonce, "2026-01-01T00:00:00.000Z", "secret123"), "lbfI40Phe5aULmg1VUCQQo+Of+4=");
         assert_eq!(password_digest(&nonce, "2026-01-01T00:00:00Z", "secret123"), "Vwk1Tx9Lm4QOBwZQ9VxrVM4/irM=");
+    }
+
+    #[test]
+    fn inserts_into_header_with_quoted_greater_than_attribute() {
+        // A literal `>` inside a quoted Header attribute value is legal XML
+        // and must not be mistaken for the start-tag boundary.
+        for note in [r#"x:note="a>b""#, "x:note='a>b'"] {
+            let env = format!(
+                r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:x="urn:x"><soap:Header {note}></soap:Header><soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body></soap:Envelope>"#
+            );
+            let out = insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordDigest, Some(300), None, Utc::now())
+                .unwrap();
+            let s = String::from_utf8(out).unwrap();
+            let doc = roxmltree::Document::parse(&s).unwrap();
+            let header =
+                doc.descendants().find(|n| n.is_element() && n.tag_name().name() == "Header").expect("Header survives the rewrite");
+            assert!(
+                header.children().any(|n| n.is_element() && n.tag_name().name() == "Security"),
+                "Security is a child of Header in: {s}"
+            );
+        }
     }
 
     #[test]

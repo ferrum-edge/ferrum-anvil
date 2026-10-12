@@ -1170,6 +1170,33 @@ async fn grpc_web_error_status_trailers_only_and_http_trailers_are_distinguished
 }
 
 #[tokio::test]
+async fn grpc_header_status_followed_by_data_is_never_terminal_success() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let url = format!("grpc://{}", f.addr);
+    // grpc-status: 0 in the initial headers, then real message DATA and a
+    // clean EOF with no terminal status: not a trailers-only response, so
+    // the provisional header status must be discarded in both encodings.
+    for wire in [GrpcWire::GrpcWeb, GrpcWire::GrpcWebText] {
+        let c = with_metadata(
+            grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"m"}"#], wire, HttpVersionPolicy::Auto),
+            "x-fixture-grpc-web",
+            "header-status-then-data",
+        );
+        let o = run(&e, &c).await;
+        assert!(
+            f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_web_header_status_then_data".into() }),
+            "{wire:?}"
+        );
+        assert_eq!(web_status(&o), (Some(200), None, GrpcStatusSource::Missing), "{wire:?}");
+        assert_eq!(o.record.outcome.transport, TransportState::Incomplete, "{wire:?}");
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{wire:?}: a discarded header status is never success");
+        assert_eq!(previews(&o, Direction::Received, "grpc_message").len(), 1, "{wire:?}: the message is kept");
+    }
+}
+
+#[tokio::test]
 async fn grpc_web_without_a_trailer_frame_is_incomplete_never_success() {
     init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();

@@ -36,7 +36,7 @@ pub mod report;
 pub mod schedule;
 pub mod worker;
 
-pub use compare::{Comparison, compare};
+pub use compare::{Comparison, compare, distinct_failed_units};
 pub use controller::LoadController;
 pub use dataset::{Dataset, DatasetFormat, DatasetLimits};
 pub use executor::{LoadJob, LoadRun, Progress, ProgressSink, RunOptions, validate_plan};

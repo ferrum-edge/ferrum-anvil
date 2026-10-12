@@ -96,11 +96,21 @@ fn failure_ratio(r: &LoadReport) -> f64 {
     if finished == 0 {
         return 0.0;
     }
+    distinct_failed_units(q, r.latency_failure.count) as f64 / finished as f64
+}
+
+/// How many finished units failed, counting each unit once however many ways
+/// it failed. `application_failures` and `assertion_failures` are overlapping
+/// subsets of `completed`, so they must never be summed into a failure total.
+/// The failure-latency distribution records exactly one entry per failed
+/// non-timeout unit, which makes the union recoverable from the aggregates;
+/// the subset counters bound it against internally inconsistent input.
+pub fn distinct_failed_units(requests: &anvil_domain::load::RequestCounts, latency_failure_count: u64) -> u64 {
+    let q = requests;
     let base = q.transport_failures + q.timeouts;
     let lower = base + q.application_failures.max(q.assertion_failures);
     let upper = base + q.completed.min(q.application_failures + q.assertion_failures);
-    let failed = (r.latency_failure.count + q.timeouts).min(upper).max(lower);
-    failed as f64 / finished as f64
+    (latency_failure_count + q.timeouts).min(upper).max(lower)
 }
 
 /// How datagram exchanges travelled: direct, or the tunnel kind (empty for
@@ -473,6 +483,30 @@ mod tests {
         let per_unit = if finished == 0 { 0.0 } else { failed as f64 / finished as f64 };
         assert_eq!(per_unit, want, "fixture");
         assert_eq!(failure_ratio(&with_units(sample_report(), units)), want);
+    }
+
+    #[test]
+    fn distinct_failed_units_counts_assertion_only_and_overlapping_failures() {
+        // The exported counter the CLI progress line and saved-report
+        // summaries use: assertion-only failures count, overlapping
+        // application+assertion failures count once, canceled never count.
+        let cases: &[(&[SendObservation], u64)] = &[
+            (&[obs(Terminal::Completed, false, true)], 1),
+            (&[obs(Terminal::Completed, true, true), obs(Terminal::Completed, false, false)], 1),
+            (
+                &[
+                    obs(Terminal::TransportFailure, false, false),
+                    obs(Terminal::Timeout, false, false),
+                    obs(Terminal::Completed, false, true),
+                    obs(Terminal::Canceled, false, false),
+                ],
+                3,
+            ),
+        ];
+        for (units, want) in cases {
+            let r = with_units(sample_report(), units);
+            assert_eq!(distinct_failed_units(&r.requests, r.latency_failure.count), *want);
+        }
     }
 
     #[test]

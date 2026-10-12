@@ -314,6 +314,39 @@ async fn proto_020_udp_icmp_unreachable_is_recorded_as_such() {
 }
 
 #[tokio::test]
+async fn udp_pre_canceled_attempt_sends_nothing() {
+    init();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let plan = |payload: &str| udp::UdpPlan {
+        host: "127.0.0.1".into(),
+        port: echo.addr.port(),
+        dns: DnsConfig::default(),
+        timeouts: timeouts(),
+        datagrams: vec![Bytes::from(payload.to_string().into_bytes())],
+        response_window_ms: 300,
+        max_datagrams: 10,
+        display_url: format!("udp://{}", echo.addr),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+    };
+    // Positive control: an uncanceled attempt is sent and echoed.
+    let live = Id::new().to_string();
+    let out = udp::run(&plan(&live), &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert!(matches!(&out.status, ProtocolStatus::Udp { datagrams_received: 1, .. }), "{:?}", out.status);
+    // Pre-canceled: setup itself is guarded, so nothing reaches the listener.
+    let dead = Id::new().to_string();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let out = udp::run(&plan(&dead), &EventCtx::none(), &cancel, None).await;
+    let f = out.attempts[0].observation.failure.as_ref().unwrap();
+    assert_eq!(f.kind, FailureKind::Canceled);
+    assert_eq!(out.attempts[0].observation.dispatch, DispatchState::NotDispatched);
+    let received = echo.log.entries().iter().filter(|e| matches!(e.event, anvil_fixtures::GroundTruth::DatagramReceived { .. })).count();
+    assert_eq!(received, 1, "only the uncanceled datagram arrived");
+}
+
+#[tokio::test]
 async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
     init();
     let silent = streams::udp("127.0.0.1:0", UdpMode::Silent).await.unwrap();

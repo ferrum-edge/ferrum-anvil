@@ -325,7 +325,7 @@ export function LoadView(props: {
               </div>
               <div className="hist-line">
                 <span className="hist-meta">
-                  {r.achieved_rate_per_sec.toFixed(1)} {UNIT_WORDS[r.unit]?.[1] ?? "requests"}/s · p95 {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed
+                  {r.achieved_rate_per_sec.toFixed(1)} iterations/s · p95 {r.p95_us === null ? "— (no successes)" : fmtUs(r.p95_us)} · {r.failures} failed {UNIT_WORDS[r.unit]?.[1] ?? "units"}
                 </span>
                 <span className="hist-when">{fmtAgo(Date.parse(r.started_at))}</span>
               </div>
@@ -998,12 +998,16 @@ function LivePanel(props: { live: { runKey: string; planName: string; progress: 
       {p && c && (
         <>
           <div className="cards">
-            <Card label="Achieved rate" value={`${p.snapshot.achieved_rate_per_sec.toFixed(1)}/s`} sub={p.snapshot.offered_rate_per_sec != null ? `offered ${p.snapshot.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
+            <Card label="Achieved rate (iterations/s)" value={`${p.snapshot.achieved_rate_per_sec.toFixed(1)}/s`} sub={p.snapshot.offered_rate_per_sec != null ? `offered ${p.snapshot.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
             <Card label="In flight" value={String(p.in_flight)} />
             <Card label="Iterations started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped` : undefined} />
             {u && <Card label={`${cap(many)} completed`} value={String(u.completed)} sub={`${u.started} started`} />}
             {u && (
-              <Card label={`Failed ${many}`} value={String(u.transport_failures + u.timeouts + u.application_failures)} bad={u.transport_failures + u.timeouts + u.application_failures > 0} />
+              // Distinct failed units: the failure-latency distribution holds
+              // one entry per failed non-timeout unit (assertion-only failures
+              // included), so this never double-counts the overlapping
+              // application/assertion subsets.
+              <Card label={`Failed ${many}`} value={String(p.snapshot.latency_failure.count + u.timeouts)} bad={p.snapshot.latency_failure.count + u.timeouts > 0} />
             )}
             {p.snapshot.latency_success.count === 0 ? (
               <Card label="p95 (success)" value="—" sub={`no successful ${many} yet`} />
@@ -1147,7 +1151,7 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
         </div>
       </div>
       <div className="cards">
-        <Card label="Achieved rate" value={`${r.achieved_rate_per_sec.toFixed(1)}/s`} sub={r.offered_rate_per_sec != null ? `offered ${r.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
+        <Card label="Achieved rate (iterations/s)" value={`${r.achieved_rate_per_sec.toFixed(1)}/s`} sub={r.offered_rate_per_sec != null ? `offered ${r.offered_rate_per_sec.toFixed(1)}/s` : undefined} />
         <Card label="Iterations started" value={String(c.started)} sub={c.dropped ? `${c.dropped} dropped (in-flight cap)` : undefined} />
         <Card label={`${cap(many)} started`} value={String(u.started)} />
         <Card label={`${cap(many)} completed`} value={String(u.completed)} />

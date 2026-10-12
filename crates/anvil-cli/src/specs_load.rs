@@ -298,7 +298,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                                 p.elapsed_secs,
                                 k.started,
                                 k.completed,
-                                k.transport_failures + k.timeouts + k.application_failures,
+                                anvil_load::distinct_failed_units(k, p.snapshot.latency_failure.count),
                                 p.snapshot.achieved_rate_per_sec,
                                 us_or_none(p.snapshot.latency_success.count, p.snapshot.latency_success.p95_us)
                             );

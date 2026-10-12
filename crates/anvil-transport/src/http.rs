@@ -632,8 +632,12 @@ fn pool_key(plan: &HttpPlan) -> String {
     let tls = plan.tls.as_ref().map(|t| t.fingerprint.clone()).unwrap_or_default();
     let dns = crate::dns::pool_key(&plan.dns);
     let header = plan.proxy_header.as_ref().map(|h| h.pool_key()).unwrap_or_default();
+    // The response-header budget is fixed into Hyper's parser settings at
+    // handshake time (`max_header_list_size` / `max_buf_size`), so a pooled
+    // sender must only be reused for the same effective budget — include it
+    // in the key (as the H3 and pooled-gRPC keys already do).
     format!(
-        "{}|{}://{}:{}|{}|{}|{:?}|{}|pp:{}",
+        "{}|{}://{}:{}|{}|{}|{:?}|{}|pp:{}|rh:{}",
         plan.isolation,
         if plan.https { "https" } else { "http" },
         plan.host.to_ascii_lowercase(),
@@ -642,7 +646,8 @@ fn pool_key(plan: &HttpPlan) -> String {
         tls,
         plan.version,
         crate::certs::sha256_hex(dns.as_bytes()),
-        header
+        header,
+        plan.limits.max_response_header_bytes
     )
 }
 

@@ -108,6 +108,9 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
 
 /// Resolve and open a UDP socket associated with the destination. Records
 /// DNS (or not-applicable) and marks the TCP connect phase not applicable.
+/// Setup is part of the whole attempt: it races `cancel` and the attempt's
+/// total deadline, and the DNS budget never exceeds the time the total
+/// deadline leaves for it.
 pub(crate) async fn open_socket(
     rec: &mut Recorder,
     host: &str,
@@ -115,11 +118,36 @@ pub(crate) async fn open_socket(
     dns_cfg: &DnsConfig,
     timeouts: &Timeouts,
     protocol: &str,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
 ) -> Result<(UdpSocket, SocketAddr, ConnectionObservation), (TransportFailure, ConnectionObservation)> {
     let mut cobs = crate::connector::blank_observation(crate::connector::next_connection_id());
     cobs.protocol = Some(protocol.to_string());
     let dns_idx = rec.start(Phase::Dns);
-    let res = match dns::resolve(host, port, dns_cfg, timeouts.dns_ms.map(Duration::from_millis)).await {
+    if cancel.is_cancelled() {
+        rec.finish(dns_idx, PhaseStatus::Failed);
+        return Err((TransportFailure::new(Phase::Dns, FailureKind::Canceled, "canceled before the UDP socket was set up"), cobs));
+    }
+    let dns_budget = match (timeouts.dns_ms.map(Duration::from_millis), total_deadline) {
+        (Some(d), Some(at)) => Some(d.min(at.saturating_duration_since(Instant::now()))),
+        (d, _) => d,
+    };
+    let res = tokio::select! {
+        r = dns::resolve(host, port, dns_cfg, dns_budget) => r,
+        _ = cancel.cancelled() => {
+            rec.finish(dns_idx, PhaseStatus::Failed);
+            return Err((TransportFailure::new(Phase::Dns, FailureKind::Canceled, "canceled while resolving the UDP destination"), cobs));
+        }
+        _ = sleep_until_opt(total_deadline) => {
+            rec.finish(dns_idx, PhaseStatus::TimedOut);
+            return Err((
+                TransportFailure::new(Phase::Dns, FailureKind::TotalTimeout, "the total deadline elapsed while resolving the UDP destination")
+                    .with_deadline(timeouts.total_ms),
+                cobs,
+            ));
+        }
+    };
+    let res = match res {
         Ok(r) => r,
         Err(f) => {
             rec.finish(dns_idx, if f.kind == FailureKind::DnsTimeout { PhaseStatus::TimedOut } else { PhaseStatus::Failed });
@@ -163,24 +191,42 @@ pub(crate) async fn open_socket(
     Ok((sock, addr, cobs))
 }
 
+enum SendStep {
+    Done(std::io::Result<usize>),
+    Canceled,
+    Deadline,
+}
+
+/// One datagram send raced against cancellation and the attempt deadline.
+async fn guarded_send(sock: &UdpSocket, w: &[u8], cancel: &CancellationToken, total_deadline: Option<Instant>) -> SendStep {
+    tokio::select! {
+        r = sock.send(w) => SendStep::Done(r),
+        _ = cancel.cancelled() => SendStep::Canceled,
+        _ = sleep_until_opt(total_deadline) => SendStep::Deadline,
+    }
+}
+
 pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
     let interactive = commands.is_some();
     let mut rec = Recorder::new(0, events.clone());
     events.emit(ExecutionEvent::AttemptStarted { execution_id: events.execution_id, attempt: 0 });
     let mut obs = new_attempt(0, AttemptReason::Initial, "UDP", &plan.display_url);
     let mut facts = SessionFacts::default();
-    let (sock, addr, cobs) = match open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "udp").await {
-        Ok(x) => x,
-        Err((f, cobs)) => {
-            obs.connection = Some(cobs);
-            return SessionOutput::single(
-                fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
-                None,
-                ProtocolStatus::None,
-                facts,
-            );
-        }
-    };
+    // The total deadline bounds the whole attempt, socket setup included.
+    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
+    let (sock, addr, cobs) =
+        match open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "udp", cancel, total_deadline).await {
+            Ok(x) => x,
+            Err((f, cobs)) => {
+                obs.connection = Some(cobs);
+                return SessionOutput::single(
+                    fail_attempt(rec, obs, f, DispatchState::NotDispatched, events),
+                    None,
+                    ProtocolStatus::None,
+                    facts,
+                );
+            }
+        };
     obs.connection = Some(cobs);
     let mut env = match start_envelope(plan.envelope.as_ref(), &sock, addr, plan.redact.clone()) {
         Ok(e) => e,
@@ -202,32 +248,63 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
     let mut tally = PayloadTally::default();
-    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
     for d in &plan.datagrams {
         let w = wire(&mut env, d);
-        match sock.send(&w).await {
-            Ok(_) => {
+        // Scripted sends (and the connection-refused retry) race the same
+        // guards as the receive loop: a canceled or expired attempt
+        // dispatches nothing further.
+        match guarded_send(&sock, &w, cancel, total_deadline).await {
+            SendStep::Done(Ok(_)) => {
                 sent += 1;
                 tally.sent(d);
                 tr.data(Direction::Sent, "datagram", d);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            SendStep::Done(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 facts.icmp_port_unreachable = true;
                 tr.note("icmp_port_unreachable", "the OS reported ICMP port unreachable for the destination before this datagram was sent");
                 // The error is consumed by this call; retry once so the datagram is still offered.
-                if sock.send(&w).await.is_ok() {
-                    sent += 1;
-                    tally.sent(d);
-                    tr.data(Direction::Sent, "datagram", d);
+                match guarded_send(&sock, &w, cancel, total_deadline).await {
+                    SendStep::Done(Ok(_)) => {
+                        sent += 1;
+                        tally.sent(d);
+                        tr.data(Direction::Sent, "datagram", d);
+                    }
+                    SendStep::Canceled => {
+                        failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange was canceled"));
+                        break;
+                    }
+                    SendStep::Deadline => {
+                        failure = Some(
+                            TransportFailure::new(
+                                Phase::Session,
+                                FailureKind::TotalTimeout,
+                                "the total deadline elapsed during the UDP exchange",
+                            )
+                            .with_deadline(plan.timeouts.total_ms),
+                        );
+                        break;
+                    }
+                    SendStep::Done(Err(_)) => {}
                 }
             }
-            Err(e) => {
+            SendStep::Done(Err(e)) => {
                 let mut f =
                     TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed, format!("sending a datagram failed: {e}"));
                 f.io_error_kind = Some(format!("{:?}", e.kind()));
                 f.os_error_code = e.raw_os_error();
                 failure = Some(f);
+                break;
+            }
+            SendStep::Canceled => {
+                failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange was canceled"));
+                break;
+            }
+            SendStep::Deadline => {
+                failure = Some(
+                    TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, "the total deadline elapsed during the UDP exchange")
+                        .with_deadline(plan.timeouts.total_ms),
+                );
                 break;
             }
         }
