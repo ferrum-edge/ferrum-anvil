@@ -111,6 +111,7 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
 /// Setup is part of the whole attempt: it races `cancel` and the attempt's
 /// total deadline, and the DNS budget never exceeds the time the total
 /// deadline leaves for it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn open_socket(
     rec: &mut Recorder,
     host: &str,
