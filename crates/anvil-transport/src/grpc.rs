@@ -2063,7 +2063,11 @@ async fn exchange(
                 last_progress = Instant::now();
                 if fr.is_data() {
                     let d = fr.into_data().unwrap_or_default();
-                    saw_response_data = true;
+                    // An empty DATA frame carries no message: a trailers-only
+                    // response whose body stream is empty stays trailers-only.
+                    if !d.is_empty() {
+                        saw_response_data = true;
+                    }
                     wire += d.len() as u64;
                     let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
                     captured.extend_from_slice(&d[..d.len().min(room)]);
