@@ -206,8 +206,11 @@ pub fn insert_security_token(
         out.push_str(&text[at..]);
     }
     // The splice is textual; never return a rewrite that no longer parses.
-    roxmltree::Document::parse_with_options(&out, opts)
-        .map_err(|e| AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")))?;
+    roxmltree::Document::parse_with_options(
+        &out,
+        roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_ENVELOPE_NODES, ..Default::default() },
+    )
+    .map_err(|e| AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")))?;
     Ok(Inserted { body: out.into_bytes(), token_secrets })
 }
 
