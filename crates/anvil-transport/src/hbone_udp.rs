@@ -433,12 +433,14 @@ impl HboneChannel {
     /// handles lets h2 send GOAWAY and close the connection. Returns the
     /// channel facts and the connection bytes written and read while the
     /// tunnel was open.
-    pub async fn close(self, abort: bool) -> (HboneDatagramChannel, u64, u64) {
+    /// Each linger waits at most `CLOSE_LINGER` and never past `deadline`
+    /// (the attempt's remaining budget).
+    pub async fn close(self, abort: bool, deadline: Option<Instant>) -> (HboneDatagramChannel, u64, u64) {
         let HboneChannel { mut tx, mut rx, sender, conn, stats, before, facts, stream_open, send_closed, .. } = self;
         if abort {
             tx.send_reset(h2::Reason::CANCEL);
         } else if send_closed.is_none() && tx.send_data(Bytes::new(), true).is_ok() && stream_open {
-            let _ = tokio::time::timeout(CLOSE_LINGER, async {
+            let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(cleanup_bound(CLOSE_LINGER, deadline)), async {
                 while let Some(Ok(d)) = rx.data().await {
                     let _ = rx.flow_control().release_capacity(d.len());
                 }
@@ -448,7 +450,7 @@ impl HboneChannel {
         let (written, read) = (stats.bytes_written().saturating_sub(before.0), stats.bytes_read().saturating_sub(before.1));
         drop((tx, rx, sender));
         let mut conn = conn;
-        if tokio::time::timeout(CLOSE_LINGER, &mut conn).await.is_err() {
+        if tokio::time::timeout_at(tokio::time::Instant::from_std(cleanup_bound(CLOSE_LINGER, deadline)), &mut conn).await.is_err() {
             conn.abort();
         }
         (facts, written, read)
@@ -706,16 +708,28 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
 
     for d in &plan.datagrams {
-        tokio::select! {
-            _ = send_recorded(&mut chan, &mut tr, d) => {}
-            _ = sleep_until_opt(total_deadline) => {
-                failure = Some(TransportFailure::new(Phase::Session, FailureKind::TotalTimeout,
-                    "the total deadline elapsed while sending datagrams into the HBONE tunnel").with_deadline(plan.timeouts.total_ms));
+        // `guarded` checks cancellation, then the deadline, before the send:
+        // a canceled or expired attempt hands nothing more to the tunnel.
+        match guarded(send_recorded(&mut chan, &mut tr, d), cancel, total_deadline).await {
+            Ok(()) => {}
+            Err(Interrupted::Deadline) => {
+                failure = Some(
+                    TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::TotalTimeout,
+                        "the total deadline elapsed while sending datagrams into the HBONE tunnel",
+                    )
+                    .with_deadline(plan.timeouts.total_ms),
+                );
                 chan.set_closed_by(ClosedBy::Timeout);
                 break;
             }
-            _ = cancel.cancelled() => {
-                failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange through the HBONE tunnel was canceled"));
+            Err(Interrupted::Canceled) => {
+                failure = Some(TransportFailure::new(
+                    Phase::Session,
+                    FailureKind::Canceled,
+                    "the UDP exchange through the HBONE tunnel was canceled",
+                ));
                 chan.set_closed_by(ClosedBy::Client);
                 break;
             }
@@ -733,12 +747,19 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     }
     'session: while failure.is_none() {
         let window_deadline = if interactive { None } else { Some(window_end) };
+        // Cancellation, the total deadline and the response window first (in
+        // that order); inbound records and commands then share a fair select.
         let ev = tokio::select! {
-            i = chan.recv() => Ev::In(i),
-            c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
-            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
-            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            biased;
             _ = cancel.cancelled() => Ev::Canceled,
+            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
+            ev = async {
+                tokio::select! {
+                    i = chan.recv() => Ev::In(i),
+                    c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
+                }
+            } => ev,
         };
         match ev {
             Ev::In(Inbound::Datagram(p)) => {
@@ -808,7 +829,7 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
 
     // ---- end of the tunnel ----
     let aborted = matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled | FailureKind::TotalTimeout));
-    let (channel, written, read) = chan.close(aborted).await;
+    let (channel, written, read) = chan.close(aborted, total_deadline).await;
     let sent = channel.records_sent;
     if facts.repeated_datagrams > 0 {
         facts.notes.push(format!(

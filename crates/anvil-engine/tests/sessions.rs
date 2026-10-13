@@ -846,6 +846,27 @@ async fn proto_017_reflection_denied_but_local_proto_works() {
     assert_eq!(stream(&o).received_count, 2);
 }
 
+/// Reflection that answers `grpc-status: 0` in its headers, then descriptor
+/// data and a clean end with no trailers, has no terminal status: the schema
+/// is not accepted and the method is not called (#367's header-status rule,
+/// applied to reflection).
+#[tokio::test]
+async fn reflection_header_status_followed_by_data_is_not_success() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let mut c = grpc_ctx(&format!("grpc://{}", f.addr), "Unary", GrpcMode::Unary, &[r#"{"message":"r"}"#], false);
+    c.spec.grpc.as_mut().unwrap().metadata = vec![KeyValue::new("x-fixture-reflection-header-status", "1")];
+    let o = run(&e, &c).await;
+    assert!(
+        f.log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: "grpc_reflection_header_status_then_data".into() })
+    );
+    let r = finding(&o, "grpc.reflection_unavailable");
+    assert!(r.explanation.contains("ended without a grpc-status"), "{}", r.explanation);
+    assert_eq!(o.record.outcome.dispatch, DispatchState::NotDispatched, "the method call was not sent");
+    assert!(!f.log.requests().iter().any(|(_, p)| p == "/anvil.lab.v1.Echo/Unary"));
+}
+
 // ------------------------------------------------------------ gRPC over HTTP/3
 
 #[tokio::test]
