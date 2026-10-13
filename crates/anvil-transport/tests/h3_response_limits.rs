@@ -512,13 +512,20 @@ async fn a_refusal_body_held_open_or_trickled_stops_at_the_total_deadline() {
         timed(masque::run(&udp_through(short_budget_tunnel(held.addr, 30_000)), &events, &cancel, None)).await,
         timed(masque::run(&udp_through(short_budget_tunnel(dripped.addr, 1_000)), &events, &cancel, None)).await,
         timed(dtls::run(&dtls_through(short_budget_tunnel(held.addr, 30_000)), &events, &cancel, None)).await,
+        timed(dtls::run(&dtls_through(short_budget_tunnel(dripped.addr, 1_000)), &events, &cancel, None)).await,
     ];
     for (out, elapsed) in &runs {
-        let o = &out.attempts[0].observation;
+        let a = &out.attempts[0];
+        let o = &a.observation;
         let f = o.failure.as_ref().expect("the proxy refused");
-        assert_eq!(f.kind, FailureKind::MasqueRefused, "{f:?}");
+        assert_eq!((f.kind, f.phase), (FailureKind::TotalTimeout, Phase::ResponseBody), "{f:?}");
+        assert_eq!(f.deadline_ms, Some(800));
         assert_eq!(f.status, Some(503), "the refusal status is kept");
-        assert!(o.bytes.response_body_wire.unwrap_or(0) >= 1, "the captured refusal body is kept");
+        let r = a.response.as_ref().expect("the refusal response is kept");
+        assert_eq!(r.status, 503);
+        assert_eq!(r.body.completeness, BodyCompleteness::Incomplete);
+        assert!(a.body.starts_with(b"x"), "the captured refusal body is kept: {:?}", a.body);
+        assert_eq!(o.phase(Phase::ResponseBody).map(|p| p.status), Some(PhaseStatus::TimedOut));
         assert!(out.facts.notes.iter().any(|n| n.contains("refusal body")), "{:?}", out.facts.notes);
         assert!(*elapsed < WITHIN_BUDGET, "the refusal body ran past the total deadline: {elapsed:?}");
     }

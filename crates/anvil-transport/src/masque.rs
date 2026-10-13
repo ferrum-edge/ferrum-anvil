@@ -948,14 +948,28 @@ pub(crate) async fn open(
             ));
         }
         close_quic(&quic);
-        let mut f = TransportFailure::new(
-            Phase::ProtocolHandshake,
-            FailureKind::MasqueRefused,
-            format!(
-                "the MASQUE proxy answered the CONNECT-UDP request for {} with HTTP {status}; no tunnel was opened and no datagram was sent",
-                plan.target
-            ),
-        );
+        // A refusal whose body outlived the total deadline is a timeout (with
+        // the refusal's status, headers and captured body kept as evidence).
+        let mut f = if deadline_hit {
+            TransportFailure::new(
+                Phase::ResponseBody,
+                FailureKind::TotalTimeout,
+                format!(
+                    "the MASQUE proxy refused the CONNECT-UDP request for {} with HTTP {status}, and the total deadline elapsed while its refusal body was still being read; no tunnel was opened and no datagram was sent",
+                    plan.target
+                ),
+            )
+            .with_deadline(plan.timeouts.total_ms)
+        } else {
+            TransportFailure::new(
+                Phase::ProtocolHandshake,
+                FailureKind::MasqueRefused,
+                format!(
+                    "the MASQUE proxy answered the CONNECT-UDP request for {} with HTTP {status}; no tunnel was opened and no datagram was sent",
+                    plan.target
+                ),
+            )
+        };
         f.status = Some(status);
         obs.bytes.response_body_wire = Some(wire);
         let captured = captured.freeze();
