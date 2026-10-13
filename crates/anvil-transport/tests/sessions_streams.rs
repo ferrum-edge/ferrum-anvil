@@ -393,6 +393,133 @@ async fn udp_cancel_after_setup_beats_a_queued_interactive_send() {
     assert_eq!(received, 0, "no queued command was sent after cancellation");
 }
 
+fn udp_plan(port: u16, response_window_ms: u64, max_datagrams: u32, datagrams: Vec<Bytes>) -> udp::UdpPlan {
+    udp::UdpPlan {
+        host: "127.0.0.1".into(),
+        port,
+        dns: DnsConfig::default(),
+        timeouts: timeouts(),
+        datagrams,
+        response_window_ms,
+        max_datagrams,
+        display_url: format!("udp://127.0.0.1:{port}"),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+    }
+}
+
+/// A peer that keeps sending cannot hold the exchange open past its
+/// response window: window expiry is checked before another receive.
+#[tokio::test]
+async fn udp_response_window_ends_a_busy_receiver() {
+    init();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = peer.local_addr().unwrap().port();
+    let flood = tokio::spawn(async move {
+        let mut buf = [0u8; 64];
+        let (_, client) = peer.recv_from(&mut buf).await.unwrap();
+        loop {
+            if peer.send_to(b"flood", client).await.is_err() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let started = std::time::Instant::now();
+    let out =
+        udp::run(&udp_plan(port, 300, 10_000_000, vec![Bytes::from_static(b"go")]), &EventCtx::none(), &CancellationToken::new(), None)
+            .await;
+    let elapsed = started.elapsed();
+    flood.abort();
+    assert!(out.attempts[0].observation.failure.is_none(), "{:?}", out.attempts[0].observation.failure);
+    assert!(elapsed < std::time::Duration::from_secs(5), "the window did not end the exchange: {elapsed:?}");
+}
+
+/// A command queue that is kept full does not starve reply capture.
+#[tokio::test]
+async fn udp_sustained_commands_do_not_starve_replies() {
+    use anvil_domain::events::SessionCommand;
+    init();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let producer = tokio::spawn(async move {
+        for i in 0..2_000 {
+            if tx.send(SessionCommand::SendText { text: format!("m{i}") }).await.is_err() {
+                return;
+            }
+        }
+        let _ = tx.send(SessionCommand::Close { code: 1000, reason: String::new() }).await;
+    });
+    let out = udp::run(&udp_plan(echo.addr.port(), 300, 100_000, vec![]), &EventCtx::none(), &CancellationToken::new(), Some(rx)).await;
+    producer.abort();
+    match &out.status {
+        ProtocolStatus::Udp { datagrams_sent, datagrams_received, .. } => {
+            assert!(*datagrams_sent > 0);
+            assert!(*datagrams_received > 0, "replies were captured while commands kept arriving");
+        }
+        s => panic!("{s:?}"),
+    }
+}
+
+/// After a completed handshake, the total deadline ends the exchange as a
+/// TotalTimeout even while the response window is still open, and no
+/// close_notify is written after it.
+#[tokio::test]
+async fn dtls_total_deadline_ends_the_application_exchange() {
+    init();
+    let f = anvil_fixtures::dtls::serve(
+        "127.0.0.1:0",
+        anvil_fixtures::dtls::DtlsServerOptions {
+            cert_pem: pki().server.cert.clone(),
+            key_pem: pki().server.key.clone(),
+            client_ca_pem: None,
+        },
+    )
+    .await
+    .unwrap();
+    let prepared = Arc::new(
+        tls::prepare(&TlsSettings {
+            verify: true,
+            use_system_roots: false,
+            extra_roots_pem: vec![pki().ca.cert.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let mut t = timeouts();
+    t.total_ms = Some(1_500);
+    let plan = dtls::DtlsPlan {
+        host: "127.0.0.1".into(),
+        port: f.addr.port(),
+        dns: DnsConfig::default(),
+        timeouts: t,
+        tls: prepared,
+        identity: None,
+        datagrams: vec![Bytes::from_static(b"hi")],
+        response_window_ms: 10_000,
+        max_datagrams: 10,
+        display_url: format!("dtls://{}", f.addr),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+        masque: None,
+        hbone: None,
+    };
+    let started = std::time::Instant::now();
+    let out = dtls::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    let elapsed = started.elapsed();
+    let o = &out.attempts[0].observation;
+    assert_eq!(o.phase(Phase::DtlsHandshake).unwrap().status, PhaseStatus::Completed);
+    let fl = o.failure.as_ref().expect("the total deadline ends the exchange");
+    assert_eq!(fl.kind, FailureKind::TotalTimeout);
+    assert_eq!(fl.phase, Phase::Session);
+    assert_eq!(fl.deadline_ms, Some(1_500));
+    assert!(elapsed < std::time::Duration::from_millis(2_500), "{elapsed:?}");
+    let transcript = out.transcript.as_ref().unwrap();
+    assert!(!transcript.messages.iter().any(|m| m.kind == "close_notify"), "no close_notify after the deadline");
+}
+
 #[tokio::test]
 async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
     init();

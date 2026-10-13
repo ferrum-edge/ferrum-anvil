@@ -330,15 +330,21 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     }
     while failure.is_none() {
         let window_deadline = if interactive { None } else { Some(window_end) };
-        // Biased: cancellation, then the total deadline, end the exchange
-        // before a queued command or a received datagram is handled.
+        // Cancellation, the total deadline and the response window end the
+        // exchange before anything else is handled (in that order); queued
+        // commands and received datagrams then share a fair select, so
+        // neither can starve the other.
         let ev = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ev::Canceled,
             _ = sleep_until_opt(total_deadline) => Ev::Deadline,
-            c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
-            r = sock.recv(&mut buf) => Ev::Recv(r),
             _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
+            ev = async {
+                tokio::select! {
+                    r = sock.recv(&mut buf) => Ev::Recv(r),
+                    c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
+                }
+            } => ev,
         };
         match ev {
             Ev::Recv(Ok(n)) => {

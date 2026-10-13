@@ -995,13 +995,22 @@ async fn exchange<C: DatagramChannel>(
     }
     while failure.is_none() && !inbox.peer_closed && !path_ended && inbox.received < plan.max_datagrams as u64 {
         let window_deadline = if interactive { None } else { Some(window_end) };
+        // Cancellation, the total deadline and the response window end the
+        // exchange before anything else is handled (in that order), so an
+        // expired attempt never reports completion; inbound datagrams, timers
+        // and commands then share a fair select.
         let ev = tokio::select! {
-            i = chan.recv() => Ev::In(i),
-            _ = sleep_until_opt(next_timeout) => Ev::Timer,
-            c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
-            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
-            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            biased;
             _ = cancel.cancelled() => Ev::Canceled,
+            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
+            ev = async {
+                tokio::select! {
+                    i = chan.recv() => Ev::In(i),
+                    _ = sleep_until_opt(next_timeout) => Ev::Timer,
+                    c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
+                }
+            } => ev,
         };
         match ev {
             Ev::In(Inbound::Datagram(d)) => {
@@ -1087,11 +1096,14 @@ async fn exchange<C: DatagramChannel>(
         }
     }
     // Graceful close_notify (not retransmitted per RFC 6347 §4.2.7), within
-    // its own short bound: the path may not be taking datagrams.
-    if !inbox.peer_closed && !path_ended && dtls.close().is_ok() {
+    // its own short bound and never past the attempt's total deadline: the
+    // path may not be taking datagrams. A canceled or expired attempt sends
+    // nothing more.
+    let expired = failure.as_ref().is_some_and(|f| matches!(f.kind, FailureKind::Canceled | FailureKind::TotalTimeout));
+    if !expired && !inbox.peer_closed && !path_ended && dtls.close().is_ok() {
         let outs = drain(&mut dtls, &mut next_timeout);
-        let closed = tokio::time::timeout(CLOSE_NOTIFY_WRITE, send_all(chan, &outs, &mut notes, facts)).await;
-        match closed {
+        let bound = earliest(Some(Instant::now() + CLOSE_NOTIFY_WRITE), total_deadline);
+        match guarded(send_all(chan, &outs, &mut notes, facts), cancel, bound).await {
             Ok(Ok(())) => tr.control(Direction::Sent, "close_notify", b""),
             Ok(Err(_)) => {}
             // Not taken within its bound: it may have been partly written.

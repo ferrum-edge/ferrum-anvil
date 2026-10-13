@@ -1283,21 +1283,32 @@ mod tests {
     use super::*;
 
     /// A begin that waits for the ledger across a bucket boundary is
-    /// counted in the bucket it actually changed the in-flight count in.
+    /// counted in the bucket it actually changed the in-flight count in. The
+    /// bucket source is a controlled clock, so the ordering is deterministic.
     #[test]
     fn a_begin_delayed_by_the_ledger_lock_is_timestamped_when_it_counts() {
+        use std::sync::atomic::{AtomicU64, Ordering};
         let ledger = Mutex::new(LedgerState::default());
-        let t0 = Instant::now() - Duration::from_millis(400);
-        let bucket_of = move |at: Instant| at.saturating_duration_since(t0).as_secs();
+        let clock = AtomicU64::new(0);
+        let bucket_of = |_: Instant| clock.load(Ordering::SeqCst);
         // One send in flight from bucket 0.
         ledger_begin_send(&ledger, true, bucket_of);
         assert_eq!(ledger.lock().peaks.get(&0), Some(&1));
         std::thread::scope(|s| {
-            // Another task holds the ledger past the bucket boundary while a
-            // second send is starting.
+            // Another task holds the ledger while a second send is starting;
+            // the clock moves to bucket 1 before the ledger is released.
             let held = ledger.lock();
-            let second = s.spawn(|| ledger_begin_send(&ledger, true, bucket_of));
-            std::thread::sleep(Duration::from_millis(800));
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let second = s.spawn(|| {
+                ready_tx.send(()).unwrap();
+                ledger_begin_send(&ledger, true, bucket_of);
+            });
+            ready_rx.recv().unwrap();
+            // Give the contender time to block on the ledger (a pre-lock
+            // timestamp would read bucket 0 here); a correct implementation
+            // passes however long this takes.
+            std::thread::sleep(Duration::from_millis(100));
+            clock.store(1, Ordering::SeqCst);
             drop(held);
             second.join().unwrap();
         });
