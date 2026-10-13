@@ -100,6 +100,24 @@ pub struct Inserted {
     pub token_secrets: Vec<String>,
 }
 
+/// Byte offset just past the `>` closing the start tag at the start of
+/// `tag`, skipping `>` characters inside single- or double-quoted attribute
+/// values (a literal `>` is legal there). `None` when no unquoted `>` exists.
+fn start_tag_end(tag: &str) -> Option<usize> {
+    let bytes = tag.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b'>' => return Some(i + 1),
+            None => {}
+        }
+    }
+    None
+}
+
 /// Insert a fresh Security header into the SOAP envelope.
 pub fn insert_security(
     body: &[u8],
@@ -161,11 +179,12 @@ pub fn insert_security_token(
     let qual = |local: &str| if prefix.is_empty() { local.to_string() } else { format!("{prefix}:{local}") };
     let mut out = String::with_capacity(text.len() + header_xml.len() + 64);
     if let Some(header) = env.children().find(|n| n.is_element() && n.tag_name().name() == "Header") {
-        // Insert right after the Header start tag.
+        // Insert right after the Header start tag. The tag may carry quoted
+        // attribute values containing a literal `>`, so the boundary scan
+        // must be quote-aware rather than taking the first `>`.
         let range = header.range();
-        let start_tag_end = text[range.start..range.end]
-            .find('>')
-            .map(|i| range.start + i + 1)
+        let start_tag_end = start_tag_end(&text[range.start..range.end])
+            .map(|i| range.start + i)
             .ok_or_else(|| AuthError::Invalid("malformed Header".into()))?;
         if text[range.start..start_tag_end].ends_with("/>") {
             out.push_str(&text[..range.start]);
@@ -186,6 +205,22 @@ pub fn insert_security_token(
         out.push_str(&format!("<{}>{header_xml}</{}>", qual("Header"), qual("Header")));
         out.push_str(&text[at..]);
     }
+    // The splice is textual; never return a rewrite that no longer parses.
+    // The rewrite holds content the scan above never saw (a configured SAML
+    // assertion, and the Security header's declarations in the envelope's
+    // scope), so it is bounded the same way before this parse.
+    check_xml_limits(&out, &ENVELOPE_XML_LIMITS)
+        .map_err(|e| AuthError::Invalid(format!("WS-Security envelope is too complex to parse safely: {e}")))?;
+    roxmltree::Document::parse_with_options(
+        &out,
+        roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_ENVELOPE_NODES, ..Default::default() },
+    )
+    .map_err(|e| match e {
+        roxmltree::Error::NodesLimitReached => {
+            AuthError::Invalid(format!("WS-Security envelope is too complex to parse safely: more than {MAX_ENVELOPE_NODES} nodes"))
+        }
+        e => AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")),
+    })?;
     Ok(Inserted { body: out.into_bytes(), token_secrets })
 }
 
@@ -198,6 +233,27 @@ mod tests {
         let nonce = hex::decode("746573742d6e6f6e63652d3132333435").unwrap();
         assert_eq!(password_digest(&nonce, "2026-01-01T00:00:00.000Z", "secret123"), "lbfI40Phe5aULmg1VUCQQo+Of+4=");
         assert_eq!(password_digest(&nonce, "2026-01-01T00:00:00Z", "secret123"), "Vwk1Tx9Lm4QOBwZQ9VxrVM4/irM=");
+    }
+
+    #[test]
+    fn inserts_into_header_with_quoted_greater_than_attribute() {
+        // A literal `>` inside a quoted Header attribute value is legal XML
+        // and must not be mistaken for the start-tag boundary.
+        for note in [r#"x:note="a>b""#, "x:note='a>b'"] {
+            let env = format!(
+                r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:x="urn:x"><soap:Header {note}></soap:Header><soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body></soap:Envelope>"#
+            );
+            let out = insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordDigest, Some(300), None, Utc::now())
+                .unwrap();
+            let s = String::from_utf8(out).unwrap();
+            let doc = roxmltree::Document::parse(&s).unwrap();
+            let header =
+                doc.descendants().find(|n| n.is_element() && n.tag_name().name() == "Header").expect("Header survives the rewrite");
+            assert!(
+                header.children().any(|n| n.is_element() && n.tag_name().name() == "Security"),
+                "Security is a child of Header in: {s}"
+            );
+        }
     }
 
     #[test]
@@ -297,6 +353,43 @@ mod tests {
             assert!(out.contains("<soap:Header><wsse:Security"), "{}", &out[..200]);
             assert!(out.ends_with("</soap:Body></soap:Envelope>"));
         }
+    }
+
+    fn insert_with_saml(env: &str, saml: &str) -> Result<Vec<u8>, AuthError> {
+        insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordText, Some(300), Some(saml), Utc::now())
+    }
+
+    /// The rewritten envelope is bounded before it is parsed again: a SAML
+    /// assertion the original scan never saw cannot add unbounded attribute
+    /// or namespace work (#384), while an ordinary assertion is embedded.
+    #[test]
+    fn refuses_a_saml_assertion_that_makes_the_envelope_too_complex() {
+        let started = std::time::Instant::now();
+        let env = envelope(16, "<m:Ping>1</m:Ping>");
+        let attrs: String = (0..300).map(|i| format!(" a{i}=\"\"")).collect();
+        let assertions = [
+            (format!(r#"<saml:Assertion xmlns:saml="urn:s"{attrs}>x</saml:Assertion>"#), "more than 256 attributes on one element"),
+            (
+                format!(r#"<saml:Assertion xmlns:saml="urn:s">{}</saml:Assertion>"#, nested_namespaces(200)),
+                "more than 128 namespace declarations in scope of one element",
+            ),
+        ];
+        for (saml, why) in &assertions {
+            let e = insert_with_saml(&env, saml).expect_err(why).to_string();
+            assert!(e.starts_with("WS-Security envelope is too complex to parse safely: "), "{e}");
+            assert!(e.contains(why), "{e}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+
+        // Controls: an ordinary assertion and none at all are both inserted.
+        let saml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">ok</saml:Assertion>"#;
+        let out = String::from_utf8(insert_with_saml(&env, saml).unwrap()).unwrap();
+        roxmltree::Document::parse(&out).unwrap();
+        assert!(out.contains(saml), "{out}");
+        assert!(insert(&env).is_ok());
+        // A malformed assertion is still refused as malformed, not embedded.
+        let e = insert_with_saml(&env, "<saml:Assertion xmlns:saml=\"urn:s\">").unwrap_err().to_string();
+        assert!(e.starts_with("rewritten SOAP envelope is not well-formed XML"), "{e}");
     }
 
     /// The most namespace work the limits allow inside an envelope that

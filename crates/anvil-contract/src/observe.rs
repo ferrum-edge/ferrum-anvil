@@ -171,6 +171,17 @@ pub fn split_url(url: &str) -> (Option<String>, String) {
 }
 
 pub fn percent_decode(s: &str) -> String {
+    percent_decode_with_plus(s, true)
+}
+
+/// Percent-decode a URL **path** segment. Unlike form/query decoding, a
+/// literal `+` in a path is a plus sign, not a space (only `%20` is a space
+/// and only `%2B`/`+` is a plus), so path matching must not conflate them.
+pub fn percent_decode_path(s: &str) -> String {
+    percent_decode_with_plus(s, false)
+}
+
+fn percent_decode_with_plus(s: &str, plus_is_space: bool) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -183,7 +194,7 @@ pub fn percent_decode(s: &str) -> String {
             i += 3;
             continue;
         }
-        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        out.push(if plus_is_space && b[i] == b'+' { b' ' } else { b[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()

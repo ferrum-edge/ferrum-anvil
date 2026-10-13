@@ -198,6 +198,9 @@ struct LedgerState {
     warmup: Ledger,
     /// Timeline bucket → peak sends in flight.
     peaks: BTreeMap<u64, u64>,
+    /// The last bucket a send begin/end event landed in; buckets between two
+    /// events had a constant in-flight count (see `note_peak`).
+    last_peak_bucket: Option<u64>,
     /// Abort-rule window: (second, finished sends, failed sends).
     ring: VecDeque<(u64, u64, u64)>,
 }
@@ -205,6 +208,34 @@ struct LedgerState {
 impl LedgerState {
     fn side(&mut self, measured: bool) -> &mut Ledger {
         if measured { &mut self.measured } else { &mut self.warmup }
+    }
+
+    fn send_in_flight_total(&self) -> u64 {
+        self.measured.send_in_flight + self.warmup.send_in_flight
+    }
+
+    /// Record a send begin/end event in `bucket`. `held` is the in-flight
+    /// count that stayed constant across every bucket since the previous
+    /// event (no event happened in them, so nothing started or finished);
+    /// `peak` is the highest count reached within `bucket` itself. Without
+    /// the carry, a slow send spanning empty buckets would vanish from the
+    /// timeline peaks of the buckets it was in flight during.
+    fn note_peak(&mut self, bucket: u64, held: u64, peak: u64) {
+        if bucket >= MAX_TIMELINE_BUCKETS {
+            return;
+        }
+        if let Some(last) = self.last_peak_bucket {
+            for k in last + 1..bucket {
+                let p = self.peaks.entry(k).or_default();
+                *p = (*p).max(held);
+            }
+        }
+        let p = self.peaks.entry(bucket).or_default();
+        *p = (*p).max(peak);
+        // An event can land in a bucket before the latest one (its instant
+        // was read before it took the ledger); the carry resumes from the
+        // latest bucket either way.
+        self.last_peak_bucket = Some(self.last_peak_bucket.map_or(bucket, |last| last.max(bucket)));
     }
 }
 
@@ -418,15 +449,12 @@ impl Shared {
         let now = Instant::now();
         {
             let mut l = self.ledger.lock();
+            let held = l.send_in_flight_total();
             let s = l.side(measured);
             s.requests.started += 1;
             s.send_in_flight += 1;
-            let total = l.measured.send_in_flight + l.warmup.send_in_flight;
-            let b = self.bucket_of(now);
-            if b < MAX_TIMELINE_BUCKETS {
-                let p = l.peaks.entry(b).or_default();
-                *p = (*p).max(total);
-            }
+            let total = l.send_in_flight_total();
+            l.note_peak(self.bucket_of(now), held, total);
         }
         let mut sh = self.shard(slot).lock();
         self.with_bucket(&mut sh, now, |b| b.started += 1);
@@ -440,6 +468,10 @@ impl Shared {
         let mut sh = self.shard(slot).lock();
         {
             let mut l = self.ledger.lock();
+            // The ending send was in flight up to now: carry the pre-decrement
+            // total through every bucket it spanned and into this one.
+            let held = l.send_in_flight_total();
+            l.note_peak(self.bucket_of(now), held, held);
             let s = l.side(measured);
             s.send_in_flight -= 1;
             let r = &mut s.requests;
@@ -528,10 +560,11 @@ impl Shared {
                 merged.entry(k).or_default().merge(v);
             }
         }
-        let peaks = {
+        let (peaks, last_peak_bucket, in_flight_now) = {
             let mut l = self.ledger.lock();
             let keep = l.peaks.split_off(&upto);
-            std::mem::replace(&mut l.peaks, keep)
+            let taken = std::mem::replace(&mut l.peaks, keep);
+            (taken, l.last_peak_bucket, l.send_in_flight_total())
         };
         let q = |h: &Option<Histogram<u64>>, p: f64| h.as_ref().map(|h| h.value_at_quantile(p)).unwrap_or(0);
         // Rare late records for already-finalized buckets: counts only.
@@ -554,7 +587,13 @@ impl Shared {
                 dropped: acc.dropped,
                 p50_us: q(&acc.success, 0.5),
                 p99_us: q(&acc.success, 0.99),
-                in_flight: peaks.get(&idx).copied().unwrap_or(0),
+                // Buckets after the last begin/end event still hold the sends
+                // that event left in flight; they end in a later bucket.
+                in_flight: peaks.get(&idx).copied().unwrap_or(if last_peak_bucket.is_some_and(|last| idx > last) {
+                    in_flight_now
+                } else {
+                    0
+                }),
                 warmup: Duration::from_secs(second) < self.warmup,
                 p99_schedule_lag_us: q(&acc.lag, 0.99),
             });
@@ -1232,6 +1271,29 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_peak_carries_a_slow_send_across_empty_buckets() {
+        // One send begins in bucket 0 (in flight 0 -> 1) and ends in bucket 2
+        // (still 1 in flight just before it ends): every bucket it spanned
+        // must report a peak of 1, not [1, 0, 0].
+        let mut l = LedgerState::default();
+        l.note_peak(0, 0, 1);
+        l.note_peak(2, 1, 1);
+        assert_eq!(l.peaks.get(&0), Some(&1));
+        assert_eq!(l.peaks.get(&1), Some(&1));
+        assert_eq!(l.peaks.get(&2), Some(&1));
+        // A later burst in a single bucket raises only that bucket.
+        l.note_peak(4, 0, 3);
+        assert_eq!(l.peaks.get(&3), Some(&0));
+        assert_eq!(l.peaks.get(&4), Some(&3));
+        // A late event for an earlier bucket does not move the carry back.
+        l.note_peak(3, 2, 2);
+        assert_eq!(l.last_peak_bucket, Some(4));
+        l.note_peak(6, 1, 1);
+        assert_eq!(l.peaks.get(&5), Some(&1));
+        assert_eq!(l.peaks.get(&4), Some(&3));
+    }
 
     #[test]
     fn slot_engines_keep_small_connection_pools() {

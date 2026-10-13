@@ -70,6 +70,27 @@
 
 ### Fixed
 
+- Load and transport correctness fixes (#365–#374, #384):
+  - Load failure counts in desktop live progress, CLI progress and saved-report
+    summaries include assertion-only failures and count each failed unit once;
+    the saved-report rate is labelled iterations/s.
+  - Timeline `peak_in_flight` carries sends still in flight across buckets with
+    no begin/end event.
+  - Held load reports are kept after a retryable storage error at unlock flush
+    instead of being discarded.
+  - Contract drift path matching keeps a literal `+` as a plus (form/query
+    decoding is unchanged).
+  - WS-Security insertion finds the Header start tag with a quote-aware scan and
+    bounds and re-parses the rewritten envelope, including a configured SAML
+    assertion, before sending it.
+  - A gRPC `grpc-status` from initial headers is discarded when message data
+    follows without a terminal status.
+  - Direct UDP setup, scripted sends and the ICMP retry observe cancellation and
+    the total deadline.
+  - HTTP/1.1 and HTTP/2 pooled connections are keyed by the response-header
+    budget.
+  - `docs/load.md` names the actual MASQUE refusal (`masque_through_proxy`).
+
 - Key rotation removes the old key's material it kept outside the database once
   the rotation commits: `profile.json` no longer holds passphrase and recovery
   wraps of the old key, checkpoints sealed with an earlier key and interrupted

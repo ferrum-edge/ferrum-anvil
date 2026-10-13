@@ -14,6 +14,9 @@
 //! Response shapes, chosen by the `x-fixture-grpc-web` request header:
 //! * absent — messages, then a trailer frame (flag `0x80`) with the status;
 //! * `trailers-only` — no body; `grpc-status`/`grpc-message` in the headers;
+//! * `header-status-then-data` — `grpc-status: 0` in the headers, then
+//!   message frames and a clean end with no terminal status (invalid: a
+//!   header status is terminal only for a genuine trailers-only answer);
 //! * `no-trailer-frame` — messages, then a clean end with no status anywhere;
 //! * `extra-trailer-frame` — messages, the trailer frame, then a second
 //!   trailer frame with `grpc-status: 2` (invalid framing);
@@ -148,6 +151,11 @@ fn plan(path: &str, headers: &HeaderMap, body: &[u8], log: &GroundTruthLog) -> R
         "trailers-only" => {
             log.push(GroundTruth::FaultApplied { fault: "grpc_web_trailers_only".into() });
             r.header_status = Some((status, message));
+        }
+        "header-status-then-data" => {
+            log.push(GroundTruth::FaultApplied { fault: "grpc_web_header_status_then_data".into() });
+            r.header_status = Some((0, String::new()));
+            r.chunks = replies.into_iter().map(encode).collect();
         }
         "no-trailer-frame" => {
             log.push(GroundTruth::FaultApplied { fault: "grpc_web_no_trailer_frame".into() });

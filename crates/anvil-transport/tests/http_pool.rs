@@ -225,6 +225,27 @@ async fn global_idle_cap_closes_the_longest_idle_connection_first() {
 }
 
 #[tokio::test]
+async fn a_changed_response_header_budget_gets_a_fresh_connection() {
+    init();
+    let t = HttpTransport::new();
+    let o = origin(None).await;
+    // The header budget is fixed into the parser at handshake time, so the
+    // pooled sender must not serve a plan with a different budget.
+    let first = run(&t, &plan(&o.url)).await;
+    assert!(!reused(&first));
+    let same = run(&t, &plan(&o.url)).await;
+    assert!(reused(&same), "an unchanged plan reuses the pooled connection");
+    assert_eq!(conn_id(&same), conn_id(&first));
+
+    let mut lower = plan(&o.url);
+    lower.limits.max_response_header_bytes = Limits::default().max_response_header_bytes / 2;
+    let fresh = run(&t, &lower).await;
+    assert!(!reused(&fresh), "a lowered header budget must not inherit the old parser settings");
+    assert_ne!(conn_id(&fresh), conn_id(&first));
+    assert_eq!(o.accepted(), 2);
+}
+
+#[tokio::test]
 async fn a_key_whose_last_connection_left_the_pool_is_removed() {
     init();
     let t = HttpTransport::new();

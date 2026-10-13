@@ -1918,6 +1918,11 @@ async fn exchange(
     let mut trailers: Vec<HeaderEntry> = vec![];
     let mut trailers_received = false;
     let mut term = Terminal { code: None, message: None, source: GrpcStatusSource::Missing };
+    // A grpc-status read from the initial headers is only terminal for a
+    // genuine trailers-only response (no message DATA at all). Once any
+    // response DATA arrives, that provisional status must not survive a
+    // missing terminal status; see the invalidation before finalization.
+    let mut saw_response_data = false;
     let mut encoding: Option<String> = None;
     let mut content_type: Option<String> = None;
     let mut failure: Option<TransportFailure> = None;
@@ -2058,6 +2063,11 @@ async fn exchange(
                 last_progress = Instant::now();
                 if fr.is_data() {
                     let d = fr.into_data().unwrap_or_default();
+                    // An empty DATA frame carries no message: a trailers-only
+                    // response whose body stream is empty stays trailers-only.
+                    if !d.is_empty() {
+                        saw_response_data = true;
+                    }
                     wire += d.len() as u64;
                     let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
                     captured.extend_from_slice(&d[..d.len().min(room)]);
@@ -2309,6 +2319,18 @@ async fn exchange(
                 None => PhaseStatus::Completed,
             },
         );
+    }
+    // A header-carried status followed by response DATA but no terminal
+    // trailers/trailer frame is not a trailers-only response: the call has
+    // no terminal status, so it must not keep the headers' provisional one.
+    if term.source == GrpcStatusSource::TrailersOnly && saw_response_data {
+        facts.notes.push(
+            "the response headers carried a grpc-status but message data followed with no terminal status in trailers; the header status applies only to a trailers-only response and was discarded"
+                .into(),
+        );
+        term.code = None;
+        term.message = None;
+        term.source = GrpcStatusSource::Missing;
     }
     if let Some(code) = term.code {
         let msg = term.message.clone().unwrap_or_default();

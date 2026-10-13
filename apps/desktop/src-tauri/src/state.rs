@@ -408,9 +408,15 @@ impl DesktopState {
         };
         let vault = VaultId::of(&app);
         for r in self.pending_load_reports.take_for(&vault) {
-            // Locked again meanwhile: held for the next unlock.
-            if let Err(AppError::Locked) = app.save_load_report(&r) {
-                self.pending_load_reports.push(vault.clone(), r);
+            match app.save_load_report(&r) {
+                Ok(()) => {}
+                // The workspace is gone: the report can never be saved, so
+                // it is dropped deliberately rather than held forever.
+                Err(AppError::NotFound(_)) => {}
+                // Locked again meanwhile, or a storage failure that may be
+                // transient: keep the report held for the next unlock/flush
+                // instead of silently discarding it.
+                Err(_) => self.pending_load_reports.push(vault.clone(), r),
             }
         }
     }

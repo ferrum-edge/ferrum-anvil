@@ -16,7 +16,7 @@
 
 use crate::locate::ptr;
 use crate::model::{OperationRef, PathItem, read_paths};
-use crate::observe::{percent_decode, split_url};
+use crate::observe::{percent_decode_path, split_url};
 use crate::spec::Spec;
 use regex::Regex;
 use serde_json::Value;
@@ -91,7 +91,7 @@ fn parse_segments(path: &str) -> Vec<Seg> {
         .filter(|s| !s.is_empty())
         .map(|s| {
             if !s.contains('{') {
-                return Seg::Lit(percent_decode(s));
+                return Seg::Lit(percent_decode_path(s));
             }
             if s.starts_with('{') && s.ends_with('}') && s.matches('{').count() == 1 {
                 return Seg::Param;
@@ -388,7 +388,7 @@ impl<'a> Router<'a> {
 
     /// Whether `base` (observed segments) is a declared server base path.
     pub fn base_declared(&self, base: &str) -> bool {
-        let segs: Vec<String> = base.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+        let segs: Vec<String> = base.split('/').filter(|s| !s.is_empty()).map(percent_decode_path).collect();
         self.bases.iter().any(|b| b.strict.len() == segs.len() && b.strict.iter().zip(&segs).all(|(s, r)| s.matches(r)))
     }
 
@@ -404,7 +404,7 @@ impl<'a> Router<'a> {
 
     pub fn route(&self, method: &str, url: &str, hint: Option<&str>) -> Route {
         let (_, path) = split_url(url);
-        let segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+        let segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode_path).collect();
         let method = method.to_ascii_lowercase();
         // (template score, base length, template index, base).
         let mut best: Option<(usize, usize, usize, String)> = None;
@@ -546,6 +546,23 @@ mod tests {
             Route::Method { template, base } => format!("method {template} @{base}"),
             Route::Path { base } => format!("path @{base}"),
         }
+    }
+
+    #[test]
+    fn literal_plus_in_path_is_not_a_space() {
+        // `/a+b` (literal plus) and `/a b` (space) are distinct paths; only
+        // `%2B` decodes to a plus and only `%20` to a space in a path.
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{
+                "/a+b":{"get":{"operationId":"plusPath"}},
+                "/a b":{"get":{"operationId":"spacePath"}}
+              }}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/a+b", None)), "plusPath @");
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/a%2Bb", None)), "plusPath @");
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/a%20b", None)), "spacePath @");
     }
 
     #[test]

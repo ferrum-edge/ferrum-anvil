@@ -634,7 +634,9 @@ Observations that shaped the implementation:
 * **LOAD-012** (optional JMeter adapter) is not implemented.
 * **Refused protocol combinations** (table above): gRPC-Web client-streaming
   and bidirectional streams, gRPC with server reflection, SSE with
-  reconnection, UDP through MASQUE, HTTP/gRPC through HBONE in persistent
+  reconnection, UDP/DTLS through MASQUE while another proxy profile also
+  routes the request (`masque_through_proxy`; direct MASQUE tunnels are
+  supported), HTTP/gRPC through HBONE in persistent
   mode, and mixed-protocol plans. Native client-streaming and bidirectional
   gRPC are supported load units (`grpc_client_stream`, `grpc_bidi_stream`);
   only their gRPC-Web forms are refused (gRPC-Web has no client stream).

@@ -549,13 +549,16 @@ async fn run_direct(
     let early = |rec: Recorder, obs: AttemptObservation, f: TransportFailure, facts: SessionFacts| {
         SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, ProtocolStatus::None, facts)
     };
-    let (sock, addr, cobs) = match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls").await {
-        Ok(x) => x,
-        Err((f, cobs)) => {
-            obs.connection = Some(cobs);
-            return early(rec, obs, f, facts);
-        }
-    };
+    // Cancellation guards setup here too; the DTLS total deadline is applied
+    // by the handshake/session guards below, as before.
+    let (sock, addr, cobs) =
+        match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls", cancel, None).await {
+            Ok(x) => x,
+            Err((f, cobs)) => {
+                obs.connection = Some(cobs);
+                return early(rec, obs, f, facts);
+            }
+        };
     obs.connection = Some(cobs);
     let env = match crate::udp::start_envelope(plan.envelope.as_ref(), &sock, addr, plan.redact.clone()) {
         Ok(e) => e,

@@ -97,7 +97,10 @@ pub struct LoadReportSummary {
     pub completion: anvil_domain::load::RunCompletion,
     pub partial: bool,
     pub achieved_rate_per_sec: f64,
+    /// Iterations started (a multi-step iteration counts once).
     pub started: u64,
+    /// Distinct failed protocol units (each failed send counts once, however
+    /// many ways it failed; see `anvil_load::distinct_failed_units`).
     pub failures: u64,
     /// p95 of successful units; `None` when no unit succeeded.
     pub p95_us: Option<u64>,
@@ -511,7 +514,11 @@ impl App {
                 partial: r.partial,
                 achieved_rate_per_sec: r.achieved_rate_per_sec,
                 started: r.counts.started,
-                failures: r.counts.transport_failures + r.counts.timeouts + r.counts.application_failures,
+                // Distinct failed protocol units (a unit that fails both an
+                // application check and an assertion counts once). This is a
+                // per-unit denominator, unlike `started`/`achieved_rate_per_sec`
+                // above, which count iterations.
+                failures: anvil_load::distinct_failed_units(&r.requests, r.latency_failure.count),
                 p95_us: (r.latency_success.count > 0).then_some(r.latency_success.p95_us),
                 unit: r.protocol_metrics.as_ref().map(|m| m.unit).unwrap_or_default(),
             })
