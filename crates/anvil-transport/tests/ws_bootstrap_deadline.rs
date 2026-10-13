@@ -172,6 +172,38 @@ fn assert_rejection_deadline(out: &SessionOutput, elapsed: Duration, status: u16
     assert!(elapsed < WITHIN_BUDGET, "the rejected body ran past the total deadline: {elapsed:?}");
 }
 
+/// A peer that never answers QUIC: the HTTP/3 setup ends at the total
+/// deadline (not the 5 s handshake timeout), and with a long budget a
+/// cancel during the same stalled setup ends it as canceled.
+#[tokio::test]
+async fn a_silent_quic_peer_stops_at_the_total_deadline_or_the_cancel() {
+    init();
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = silent.local_addr().unwrap();
+    let (out, elapsed) = timed_run(&plan(addr, WsBootstrap::Http3ExtendedConnect, 30_000)).await;
+    let o = &out.attempts[0].observation;
+    let f = o.failure.as_ref().expect("the setup failed");
+    assert_eq!((f.kind, f.phase), (FailureKind::TotalTimeout, Phase::QuicHandshake), "{f:?}");
+    assert_eq!(f.deadline_ms, Some(TOTAL_MS));
+    assert_eq!(o.dispatch, DispatchState::NotDispatched);
+    assert!(elapsed < WITHIN_BUDGET, "the QUIC setup ran past the total deadline: {elapsed:?}");
+
+    let mut p = plan(addr, WsBootstrap::Http3ExtendedConnect, 30_000);
+    p.timeouts.total_ms = Some(60_000);
+    let cancel = CancellationToken::new();
+    let c = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        c.cancel();
+    });
+    let started = std::time::Instant::now();
+    let out = tokio::time::timeout(GIVE_UP, ws::run(&p, &EventCtx::none(), &cancel, None)).await.expect("the attempt did not end");
+    let f = out.attempts[0].observation.failure.as_ref().expect("the setup was canceled");
+    assert_eq!(f.kind, FailureKind::Canceled, "{f:?}");
+    assert!(started.elapsed() < WITHIN_BUDGET, "the cancel did not end the setup: {:?}", started.elapsed());
+    drop(silent);
+}
+
 #[tokio::test]
 async fn http3_settings_withheld_stop_at_the_total_deadline() {
     init();

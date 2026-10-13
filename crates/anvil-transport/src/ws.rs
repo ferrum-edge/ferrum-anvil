@@ -338,8 +338,6 @@ fn negotiate_extensions(
     }
 }
 
-/// Wait up to `ms` for the HTTP/3 peer's SETTINGS. `Ok(enabled)` says whether
-/// they enable extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 9220 §3).
 /// The `response_body` phase status of a rejected handshake's body read.
 fn rejected_body_phase_status(completeness: BodyCompleteness, deadline_hit: bool) -> PhaseStatus {
     match completeness {
@@ -370,6 +368,8 @@ fn rejected_handshake_failure(rejected: String, deadline_hit: bool, total_ms: Op
     }
 }
 
+/// Wait up to `ms` for the HTTP/3 peer's SETTINGS. `Ok(enabled)` says whether
+/// they enable extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 9220 §3).
 async fn await_h3_settings(send: &crate::h3::SendReq, ms: u64, cancel: &CancellationToken) -> Result<bool, &'static str> {
     use h3::ConnectionState;
     let deadline = Instant::now() + Duration::from_millis(ms);
@@ -502,7 +502,13 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     };
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
-    // ---- QUIC + HTTP/3 connection (within the total deadline) ----
+    // ---- QUIC + HTTP/3 connection: the whole setup (DNS, QUIC, HTTP/3)
+    // races cancellation, then the total deadline ----
+    enum Setup<T> {
+        Done(T),
+        Canceled,
+        Deadline,
+    }
     let connecting = {
         let connect = crate::h3::quic_connect(
             &mut rec,
@@ -517,17 +523,26 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         );
         tokio::select! {
             biased;
-            _ = sleep_until_opt(total_deadline) => None,
-            r = connect => Some(r),
+            _ = cancel.cancelled() => Setup::Canceled,
+            _ = sleep_until_opt(total_deadline) => Setup::Deadline,
+            r = connect => Setup::Done(r),
         }
     };
     let connected = match connecting {
-        Some(Ok(c)) => c,
-        Some(Err((f, cobs))) => {
+        Setup::Done(Ok(c)) => c,
+        Setup::Done(Err((f, cobs))) => {
             obs.connection = cobs;
             return early(rec, obs, f, DispatchState::NotDispatched, facts);
         }
-        None => {
+        Setup::Canceled => {
+            let f = TransportFailure::new(
+                rec.open_phase().unwrap_or(Phase::QuicHandshake),
+                FailureKind::Canceled,
+                "canceled while setting up the QUIC connection",
+            );
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+        Setup::Deadline => {
             let f = TransportFailure::new(
                 rec.open_phase().unwrap_or(Phase::QuicHandshake),
                 FailureKind::TotalTimeout,
