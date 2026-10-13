@@ -206,11 +206,21 @@ pub fn insert_security_token(
         out.push_str(&text[at..]);
     }
     // The splice is textual; never return a rewrite that no longer parses.
+    // The rewrite holds content the scan above never saw (a configured SAML
+    // assertion, and the Security header's declarations in the envelope's
+    // scope), so it is bounded the same way before this parse.
+    check_xml_limits(&out, &ENVELOPE_XML_LIMITS)
+        .map_err(|e| AuthError::Invalid(format!("WS-Security envelope is too complex to parse safely: {e}")))?;
     roxmltree::Document::parse_with_options(
         &out,
         roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_ENVELOPE_NODES, ..Default::default() },
     )
-    .map_err(|e| AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")))?;
+    .map_err(|e| match e {
+        roxmltree::Error::NodesLimitReached => {
+            AuthError::Invalid(format!("WS-Security envelope is too complex to parse safely: more than {MAX_ENVELOPE_NODES} nodes"))
+        }
+        e => AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")),
+    })?;
     Ok(Inserted { body: out.into_bytes(), token_secrets })
 }
 
@@ -343,6 +353,43 @@ mod tests {
             assert!(out.contains("<soap:Header><wsse:Security"), "{}", &out[..200]);
             assert!(out.ends_with("</soap:Body></soap:Envelope>"));
         }
+    }
+
+    fn insert_with_saml(env: &str, saml: &str) -> Result<Vec<u8>, AuthError> {
+        insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordText, Some(300), Some(saml), Utc::now())
+    }
+
+    /// The rewritten envelope is bounded before it is parsed again: a SAML
+    /// assertion the original scan never saw cannot add unbounded attribute
+    /// or namespace work (#384), while an ordinary assertion is embedded.
+    #[test]
+    fn refuses_a_saml_assertion_that_makes_the_envelope_too_complex() {
+        let started = std::time::Instant::now();
+        let env = envelope(16, "<m:Ping>1</m:Ping>");
+        let attrs: String = (0..300).map(|i| format!(" a{i}=\"\"")).collect();
+        let assertions = [
+            (format!(r#"<saml:Assertion xmlns:saml="urn:s"{attrs}>x</saml:Assertion>"#), "more than 256 attributes on one element"),
+            (
+                format!(r#"<saml:Assertion xmlns:saml="urn:s">{}</saml:Assertion>"#, nested_namespaces(200)),
+                "more than 128 namespace declarations in scope of one element",
+            ),
+        ];
+        for (saml, why) in &assertions {
+            let e = insert_with_saml(&env, saml).expect_err(why).to_string();
+            assert!(e.starts_with("WS-Security envelope is too complex to parse safely: "), "{e}");
+            assert!(e.contains(why), "{e}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+
+        // Controls: an ordinary assertion and none at all are both inserted.
+        let saml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">ok</saml:Assertion>"#;
+        let out = String::from_utf8(insert_with_saml(&env, saml).unwrap()).unwrap();
+        roxmltree::Document::parse(&out).unwrap();
+        assert!(out.contains(saml), "{out}");
+        assert!(insert(&env).is_ok());
+        // A malformed assertion is still refused as malformed, not embedded.
+        let e = insert_with_saml(&env, "<saml:Assertion xmlns:saml=\"urn:s\">").unwrap_err().to_string();
+        assert!(e.starts_with("rewritten SOAP envelope is not well-formed XML"), "{e}");
     }
 
     /// The most namespace work the limits allow inside an envelope that

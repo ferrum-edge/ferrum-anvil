@@ -232,7 +232,10 @@ impl LedgerState {
         }
         let p = self.peaks.entry(bucket).or_default();
         *p = (*p).max(peak);
-        self.last_peak_bucket = Some(bucket);
+        // An event can land in a bucket before the latest one (its instant
+        // was read before it took the ledger); the carry resumes from the
+        // latest bucket either way.
+        self.last_peak_bucket = Some(self.last_peak_bucket.map_or(bucket, |last| last.max(bucket)));
     }
 }
 
@@ -1283,6 +1286,12 @@ mod tests {
         // A later burst in a single bucket raises only that bucket.
         l.note_peak(4, 0, 3);
         assert_eq!(l.peaks.get(&3), Some(&0));
+        assert_eq!(l.peaks.get(&4), Some(&3));
+        // A late event for an earlier bucket does not move the carry back.
+        l.note_peak(3, 2, 2);
+        assert_eq!(l.last_peak_bucket, Some(4));
+        l.note_peak(6, 1, 1);
+        assert_eq!(l.peaks.get(&5), Some(&1));
         assert_eq!(l.peaks.get(&4), Some(&3));
     }
 

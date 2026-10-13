@@ -133,8 +133,10 @@ pub(crate) async fn open_socket(
         (Some(d), Some(at)) => Some(d.min(at.saturating_duration_since(Instant::now()))),
         (d, _) => d,
     };
+    // Biased: cancellation, then an expired total deadline, win over a
+    // resolver that is also ready.
     let res = tokio::select! {
-        r = dns::resolve(host, port, dns_cfg, dns_budget) => r,
+        biased;
         _ = cancel.cancelled() => {
             rec.finish(dns_idx, PhaseStatus::Failed);
             return Err((TransportFailure::new(Phase::Dns, FailureKind::Canceled, "canceled while resolving the UDP destination"), cobs));
@@ -147,6 +149,7 @@ pub(crate) async fn open_socket(
                 cobs,
             ));
         }
+        r = dns::resolve(host, port, dns_cfg, dns_budget) => r,
     };
     let res = match res {
         Ok(r) => r,
@@ -199,11 +202,14 @@ enum SendStep {
 }
 
 /// One datagram send raced against cancellation and the attempt deadline.
+/// Biased so a canceled or expired attempt never sends, even when the socket
+/// is ready to.
 async fn guarded_send(sock: &UdpSocket, w: &[u8], cancel: &CancellationToken, total_deadline: Option<Instant>) -> SendStep {
     tokio::select! {
-        r = sock.send(w) => SendStep::Done(r),
+        biased;
         _ = cancel.cancelled() => SendStep::Canceled,
         _ = sleep_until_opt(total_deadline) => SendStep::Deadline,
+        r = sock.send(w) => SendStep::Done(r),
     }
 }
 
