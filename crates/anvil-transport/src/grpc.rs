@@ -1248,10 +1248,15 @@ async fn one_shot(
     out.status = Some(head.status);
     out.version = head.version;
     out.headers = header_entries(&head.headers);
+    // A grpc-status in the response headers is terminal only for a genuine
+    // trailers-only answer (no message data); see the check after the body.
+    let mut header_status = false;
     if let Some(s) = head.headers.get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok()) {
         out.grpc_status = Some(s);
         out.grpc_message = head.headers.get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
+        header_status = true;
     }
+    let mut saw_data = false;
     let mut body = head.body;
     let mut buf = BytesMut::new();
     let mut message_count = 0usize;
@@ -1275,6 +1280,7 @@ async fn one_shot(
             Some(Ok(fr)) => {
                 if fr.is_data() {
                     let data = fr.into_data().unwrap_or_default();
+                    saw_data |= !data.is_empty();
                     match append_reflection_data(&mut buf, &data, budget, &mut message_count, plan.max_message_bytes) {
                         Ok(messages) => out.messages.extend(messages),
                         Err(failure) => {
@@ -1287,6 +1293,7 @@ async fn one_shot(
                     out.trailers = header_entries(&t);
                     out.grpc_status = t.get("grpc-status").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok());
                     out.grpc_message = t.get("grpc-message").and_then(|v| v.to_str().ok()).map(percent_decode);
+                    header_status = false;
                 }
             }
             Some(Err(f)) => {
@@ -1295,6 +1302,12 @@ async fn one_shot(
                 return out;
             }
         }
+    }
+    // Message data followed a header status with no terminal trailers: not a
+    // trailers-only answer, so the call has no status (as in `exchange`).
+    if header_status && saw_data {
+        out.grpc_status = None;
+        out.grpc_message = None;
     }
     out
 }

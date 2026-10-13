@@ -239,6 +239,22 @@ impl LedgerState {
     }
 }
 
+/// Count a send that begins and note its timeline peak. The peak's bucket is
+/// read while the ledger is held, so in-flight transitions reach the
+/// timeline in the order they change the count: an instant read before
+/// taking the lock could land a later transition in an earlier bucket and
+/// leave the bucket it really happened in undercounted.
+fn ledger_begin_send(ledger: &Mutex<LedgerState>, measured: bool, bucket_of: impl Fn(Instant) -> u64) {
+    let mut l = ledger.lock();
+    let bucket = bucket_of(Instant::now());
+    let held = l.send_in_flight_total();
+    let s = l.side(measured);
+    s.requests.started += 1;
+    s.send_in_flight += 1;
+    let total = l.send_in_flight_total();
+    l.note_peak(bucket, held, total);
+}
+
 // ---------------------------------------------------------------- timeline
 
 #[derive(Default)]
@@ -447,15 +463,7 @@ impl Shared {
 
     fn begin_send(&self, slot: usize, measured: bool) {
         let now = Instant::now();
-        {
-            let mut l = self.ledger.lock();
-            let held = l.send_in_flight_total();
-            let s = l.side(measured);
-            s.requests.started += 1;
-            s.send_in_flight += 1;
-            let total = l.send_in_flight_total();
-            l.note_peak(self.bucket_of(now), held, total);
-        }
+        ledger_begin_send(&self.ledger, measured, |at| self.bucket_of(at));
         let mut sh = self.shard(slot).lock();
         self.with_bucket(&mut sh, now, |b| b.started += 1);
     }
@@ -469,9 +477,11 @@ impl Shared {
         {
             let mut l = self.ledger.lock();
             // The ending send was in flight up to now: carry the pre-decrement
-            // total through every bucket it spanned and into this one.
+            // total through every bucket it spanned and into this one. The
+            // peak is timestamped while the ledger is held (see
+            // `ledger_begin_send`).
             let held = l.send_in_flight_total();
-            l.note_peak(self.bucket_of(now), held, held);
+            l.note_peak(self.bucket_of(Instant::now()), held, held);
             let s = l.side(measured);
             s.send_in_flight -= 1;
             let r = &mut s.requests;
@@ -1271,6 +1281,31 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A begin that waits for the ledger across a bucket boundary is
+    /// counted in the bucket it actually changed the in-flight count in.
+    #[test]
+    fn a_begin_delayed_by_the_ledger_lock_is_timestamped_when_it_counts() {
+        let ledger = Mutex::new(LedgerState::default());
+        let t0 = Instant::now() - Duration::from_millis(400);
+        let bucket_of = move |at: Instant| at.saturating_duration_since(t0).as_secs();
+        // One send in flight from bucket 0.
+        ledger_begin_send(&ledger, true, bucket_of);
+        assert_eq!(ledger.lock().peaks.get(&0), Some(&1));
+        std::thread::scope(|s| {
+            // Another task holds the ledger past the bucket boundary while a
+            // second send is starting.
+            let held = ledger.lock();
+            let second = s.spawn(|| ledger_begin_send(&ledger, true, bucket_of));
+            std::thread::sleep(Duration::from_millis(800));
+            drop(held);
+            second.join().unwrap();
+        });
+        let l = ledger.lock();
+        assert_eq!(l.peaks.get(&0), Some(&1));
+        assert_eq!(l.peaks.get(&1), Some(&2), "both sends were in flight in bucket 1");
+        assert_eq!(l.last_peak_bucket, Some(1));
+    }
 
     #[test]
     fn timeline_peak_carries_a_slow_send_across_empty_buckets() {

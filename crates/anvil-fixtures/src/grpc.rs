@@ -228,11 +228,18 @@ pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxB
     let path = req.uri().path().to_string();
     let deny_reflection = reflection_denial(&path, req.headers());
     let set_cookie = req.headers().get("x-fixture-set-cookie").cloned();
+    // Lab-only fault: reflection answers with `grpc-status: 0` in the
+    // response headers, then its messages and a clean end with no trailers
+    // (invalid: a header status is terminal only for a trailers-only answer).
+    let header_status = path.starts_with("/grpc.reflection.") && req.headers().contains_key("x-fixture-reflection-header-status");
     let (tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     let body: FxBody = BodyExt::boxed(StreamBody::new(rx));
     let reader = FrameReader { src: Src::Hyper(req.into_body()), buf: BytesMut::new(), received: BytesMut::new() };
-    tokio::spawn(run(path, reader, tx, log, deny_reflection));
+    tokio::spawn(run(path, reader, tx, log, deny_reflection, header_status));
     let mut resp = Response::builder().status(200).header("content-type", "application/grpc");
+    if header_status {
+        resp = resp.header("grpc-status", "0");
+    }
     if let Some(c) = set_cookie {
         resp = resp.header("set-cookie", c);
     }
@@ -273,7 +280,7 @@ pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTrut
     });
     let (tx, mut rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(32);
     let reader = FrameReader { src: Src::Chan(drx), buf: BytesMut::new(), received: BytesMut::new() };
-    tokio::spawn(run(path, reader, tx, log.clone(), deny_reflection));
+    tokio::spawn(run(path, reader, tx, log.clone(), deny_reflection, false));
     // Response headers wait for the first frame, so an immediate status is a
     // genuine trailers-only answer (one HEADERS frame, then FIN), as real
     // servers send it.
@@ -323,7 +330,7 @@ pub async fn handle_h3(req: http::Request<()>, stream: H3Stream, log: GroundTrut
     let _ = send.finish().await;
 }
 
-async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruthLog, deny_reflection: Option<Denial>) {
+async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruthLog, deny_reflection: Option<Denial>, header_status: bool) {
     let send = |m: Bytes| Ok(Frame::data(m));
     match path.as_str() {
         "/anvil.lab.v1.Echo/Unary" => {
@@ -421,6 +428,10 @@ async fn run(path: String, mut reader: FrameReader, mut tx: Tx, log: GroundTruth
                 }
             }
             log.push(GroundTruth::GrpcBodyReceived { path: path.clone(), body: reader.received.to_vec() });
+            if header_status {
+                log.push(GroundTruth::FaultApplied { fault: "grpc_reflection_header_status_then_data".into() });
+                return;
+            }
             let _ = tx.send(Ok(Frame::trailers(trailers(0, "")))).await;
         }
         _ => {

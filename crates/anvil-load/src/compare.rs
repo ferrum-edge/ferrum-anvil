@@ -357,7 +357,7 @@ pub fn compare(a: &LoadReport, b: &LoadReport) -> Comparison {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::metrics::{Metrics, SendObservation, Terminal};
     use crate::report::tests::sample_report;
@@ -449,13 +449,13 @@ mod tests {
         assert!(deltas.iter().any(|d| d.metric == "tunnels established (ratio)"));
     }
 
-    fn obs(terminal: Terminal, application_failure: bool, assertion_failure: bool) -> SendObservation {
+    pub(crate) fn obs(terminal: Terminal, application_failure: bool, assertion_failure: bool) -> SendObservation {
         SendObservation { terminal, application_failure, assertion_failure, latency_us: 1_000, ..Default::default() }
     }
 
     /// `r` with its send ledger and failure distribution replaced by `units`,
     /// accumulated the way the executor does (`end_send` + `Metrics::record`).
-    fn with_units(mut r: LoadReport, units: &[SendObservation]) -> LoadReport {
+    pub(crate) fn with_units(mut r: LoadReport, units: &[SendObservation]) -> LoadReport {
         let mut m = Metrics::new();
         let mut q = RequestCounts::default();
         for o in units {

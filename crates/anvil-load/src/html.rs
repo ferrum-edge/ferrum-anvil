@@ -582,7 +582,9 @@ pub fn to_html(r: &LoadReport) -> String {
     let (one, many) = unit_words(r);
     let title_many = capitalize(&many);
     let (one_html, title_many_html) = (esc(&one), esc(&title_many));
-    let failed = q.transport_failures + q.timeouts + q.application_failures.max(q.assertion_failures);
+    // Each failed unit once, however many ways it failed (the same count the
+    // summaries and comparisons use).
+    let failed = crate::compare::distinct_failed_units(q, r.latency_failure.count);
     let finished = q.completed + q.transport_failures + q.timeouts;
     let err_pct = if finished > 0 { failed as f64 * 100.0 / finished as f64 } else { 0.0 };
     h.push_str(r#"<div class="tiles">"#);
@@ -861,6 +863,33 @@ mod tests {
         // The policy is intact.
         assert_eq!(html.matches("Content-Security-Policy").count(), 1);
         assert!(html.contains("default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"));
+    }
+
+    /// The failed-units tile counts each failed unit once: disjoint
+    /// application-only and assertion-only failures are two, a unit failing
+    /// both ways is one (#372).
+    #[test]
+    fn failed_units_tile_counts_disjoint_and_overlapping_failures() {
+        use crate::compare::tests::{obs, with_units};
+        use crate::metrics::Terminal;
+        let cases = [
+            (vec![obs(Terminal::Completed, true, false), obs(Terminal::Completed, false, true)], "2 of 2 finished", "100.0 %"),
+            (vec![obs(Terminal::Completed, true, true), obs(Terminal::Completed, false, false)], "1 of 2 finished", "50.0 %"),
+            (
+                vec![
+                    obs(Terminal::TransportFailure, false, false),
+                    obs(Terminal::Completed, false, true),
+                    obs(Terminal::Canceled, false, false),
+                ],
+                "2 of 2 finished",
+                "100.0 %",
+            ),
+        ];
+        for (units, finished, pct) in &cases {
+            let r = with_units(sample_report(), units);
+            let want = tile(&format!("Failed {}", unit_words(&r).1), pct, finished);
+            assert!(to_html(&r).contains(&want), "{want}");
+        }
     }
 
     #[test]

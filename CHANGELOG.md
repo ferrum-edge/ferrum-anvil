@@ -90,6 +90,12 @@
   - HTTP/1.1 and HTTP/2 pooled connections are keyed by the response-header
     budget.
   - `docs/load.md` names the actual MASQUE refusal (`masque_through_proxy`).
+  - Follow-ups: HTML load reports count each failed unit once; server
+    reflection discards a header `grpc-status` followed by data without
+    trailers; interactive UDP sends observe cancellation and the total
+    deadline; timeline peaks are timestamped under the ledger lock; direct DTLS
+    applies one total deadline across DNS, handshake and exchange (and MASQUE
+    and HBONE DTLS no longer restart it after the handshake).
 
 - Key rotation removes the old key's material it kept outside the database once
   the rotation commits: `profile.json` no longer holds passphrase and recovery

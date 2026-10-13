@@ -346,6 +346,53 @@ async fn udp_pre_canceled_attempt_sends_nothing() {
     assert_eq!(received, 1, "only the uncanceled datagram arrived");
 }
 
+/// Cancellation after setup wins over an interactive command that is
+/// already queued: the command's datagram is never sent (#366).
+#[tokio::test]
+async fn udp_cancel_after_setup_beats_a_queued_interactive_send() {
+    use anvil_domain::events::{ExecutionEvent, SessionCommand};
+    init();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let plan = udp::UdpPlan {
+        host: "127.0.0.1".into(),
+        port: echo.addr.port(),
+        dns: DnsConfig::default(),
+        timeouts: timeouts(),
+        datagrams: vec![],
+        response_window_ms: 300,
+        max_datagrams: 10,
+        display_url: format!("udp://{}", echo.addr),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+    };
+    for _ in 0..20 {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(SessionCommand::SendText { text: Id::new().to_string() }).await.unwrap();
+        tx.send(SessionCommand::SendBinaryHex { hex: "00ff".into() }).await.unwrap();
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        // Cancel the moment the exchange phase starts (socket set up, no
+        // datagram sent yet), with both commands already queued.
+        let events = EventCtx {
+            execution_id: Id::new(),
+            sink: Some(Arc::new(move |ev: ExecutionEvent| {
+                if let ExecutionEvent::Phase { phase: Phase::Session, .. } = ev {
+                    c.cancel();
+                }
+            })),
+        };
+        let out = udp::run(&plan, &events, &cancel, Some(rx)).await;
+        let o = &out.attempts[0].observation;
+        assert_eq!(o.failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled));
+        assert_eq!(o.dispatch, DispatchState::NotDispatched);
+        assert!(matches!(&out.status, ProtocolStatus::Udp { datagrams_sent: 0, .. }), "{:?}", out.status);
+        drop(tx);
+    }
+    let received = echo.log.entries().iter().filter(|e| matches!(e.event, anvil_fixtures::GroundTruth::DatagramReceived { .. })).count();
+    assert_eq!(received, 0, "no queued command was sent after cancellation");
+}
+
 #[tokio::test]
 async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
     init();
@@ -388,6 +435,68 @@ async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
     assert_eq!(p.status, PhaseStatus::TimedOut);
     // Ground truth: the handshake datagrams did reach the listener.
     assert!(silent.log.entries().iter().any(|e| matches!(e.event, anvil_fixtures::GroundTruth::DatagramReceived { .. })));
+}
+
+/// The DTLS total deadline bounds the whole attempt: a resolver that never
+/// answers and a listener that never completes the handshake both end at
+/// `total_ms`, well before their own (longer) phase timeouts (#366).
+#[tokio::test]
+async fn dtls_total_deadline_bounds_setup_and_handshake() {
+    use anvil_domain::settings::ResolverMode;
+    init();
+    let silent = streams::udp("127.0.0.1:0", UdpMode::Silent).await.unwrap();
+    let prepared = Arc::new(
+        tls::prepare(&TlsSettings {
+            verify: true,
+            use_system_roots: false,
+            extra_roots_pem: vec![pki().ca.cert.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let plan = |host: &str, dns: DnsConfig| {
+        let mut t = timeouts();
+        t.dns_ms = Some(5_000);
+        t.tls_handshake_ms = Some(5_000);
+        t.total_ms = Some(400);
+        dtls::DtlsPlan {
+            host: host.into(),
+            port: silent.addr.port(),
+            dns,
+            timeouts: t,
+            tls: prepared.clone(),
+            identity: None,
+            datagrams: vec![Bytes::from_static(b"hi")],
+            response_window_ms: 200,
+            max_datagrams: 10,
+            display_url: format!("dtls://{host}:{}", silent.addr.port()),
+            transcript: TranscriptLimits::default(),
+            redact: None,
+            envelope: None,
+            masque: None,
+            hbone: None,
+        }
+    };
+    // Delayed DNS: the configured nameserver never answers.
+    let dns = DnsConfig { resolver: ResolverMode::Custom { nameservers: vec![silent.addr.to_string()] }, ..Default::default() };
+    let started = std::time::Instant::now();
+    let out = dtls::run(&plan("never-answers.anvil.test", dns), &EventCtx::none(), &CancellationToken::new(), None).await;
+    let elapsed = started.elapsed();
+    let f = out.attempts[0].observation.failure.as_ref().unwrap();
+    assert_eq!(f.phase, Phase::Dns, "{f:?}");
+    assert!(matches!(f.kind, FailureKind::TotalTimeout | FailureKind::DnsTimeout), "{f:?}");
+    assert!(elapsed < std::time::Duration::from_millis(2_500), "setup ran past the total deadline: {elapsed:?}");
+    // Delayed handshake: the listener never answers the handshake.
+    let started = std::time::Instant::now();
+    let out = dtls::run(&plan("127.0.0.1", DnsConfig::default()), &EventCtx::none(), &CancellationToken::new(), None).await;
+    let elapsed = started.elapsed();
+    let o = &out.attempts[0].observation;
+    let f = o.failure.as_ref().unwrap();
+    assert_eq!(f.kind, FailureKind::TotalTimeout, "{f:?}");
+    assert_eq!(f.phase, Phase::DtlsHandshake);
+    assert_eq!(f.deadline_ms, Some(400));
+    assert_eq!(o.dispatch, DispatchState::NotDispatched);
+    assert!(elapsed < std::time::Duration::from_millis(2_500), "the handshake ran past the total deadline: {elapsed:?}");
 }
 
 #[tokio::test]

@@ -483,9 +483,11 @@ async fn exchange_in<T: Tunnel>(
     session_notes: &[(&str, String)],
     events: &EventCtx,
     cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
     commands: Option<CommandRx>,
 ) -> (Option<Session>, T::Facts, u64, u64) {
-    let (session, send_interrupted) = exchange(plan, &mut chan, rec, obs, facts, id, session_notes, events, cancel, commands).await;
+    let (session, send_interrupted) =
+        exchange(plan, &mut chan, rec, obs, facts, id, session_notes, events, cancel, total_deadline, commands).await;
     let failure_kind = obs.failure.as_ref().map(|f| f.kind);
     chan.mark_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
     let (tunnel, written, read) = chan.finish_tunnel(send_interrupted).await;
@@ -549,10 +551,11 @@ async fn run_direct(
     let early = |rec: Recorder, obs: AttemptObservation, f: TransportFailure, facts: SessionFacts| {
         SessionOutput::single(fail_attempt(rec, obs, f, DispatchState::NotDispatched, events), None, ProtocolStatus::None, facts)
     };
-    // Cancellation guards setup here too; the DTLS total deadline is applied
-    // by the handshake/session guards below, as before.
+    // One total deadline for the whole attempt: socket setup, handshake and
+    // application exchange all race it (and cancellation).
+    let total_deadline = if commands.is_some() { None } else { deadline_from(plan.timeouts.total_ms) };
     let (sock, addr, cobs) =
-        match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls", cancel, None).await {
+        match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls", cancel, total_deadline).await {
             Ok(x) => x,
             Err((f, cobs)) => {
                 obs.connection = Some(cobs);
@@ -570,7 +573,8 @@ async fn run_direct(
         session_notes.push(("proxy_protocol_envelope", e.summary()));
     }
     let mut chan = SocketChannel::new(sock, env);
-    let (session, _) = exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &session_notes, events, cancel, commands).await;
+    let (session, _) =
+        exchange(plan, &mut chan, &mut rec, &mut obs, &mut facts, &id, &session_notes, events, cancel, total_deadline, commands).await;
     if let (Some(e), Some(c)) = (chan.envelope(), obs.connection.as_mut()) {
         c.proxy_header = Some(e.observation());
     }
@@ -616,7 +620,7 @@ async fn run_tunneled(
     let note = format!("DTLS with {} inside the CONNECT-UDP tunnel through {} (records as {encoding})", m.target, m.proxy_authority);
     let notes = [("tunnel", note)];
     let (session, tunnel, written, read) =
-        exchange_in(plan, chan, &mut rec, &mut obs, &mut facts, &id, &notes, events, cancel, commands).await;
+        exchange_in(plan, chan, &mut rec, &mut obs, &mut facts, &id, &notes, events, cancel, total_deadline, commands).await;
     crate::masque::note_dropped(&mut facts, &tunnel);
     obs.bytes.connection_bytes_written = Some(written);
     obs.bytes.connection_bytes_read = Some(read);
@@ -676,7 +680,7 @@ async fn run_hbone(
     facts.notes.push(note.clone());
     let notes = [("tunnel", note)];
     let (session, channel, written, read) =
-        exchange_in(plan, chan, &mut rec, &mut obs, &mut facts, &id, &notes, events, cancel, commands).await;
+        exchange_in(plan, chan, &mut rec, &mut obs, &mut facts, &id, &notes, events, cancel, total_deadline, commands).await;
     obs.bytes.connection_bytes_written = Some(written);
     obs.bytes.connection_bytes_read = Some(read);
     if let Some(t) = obs.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
@@ -744,6 +748,7 @@ async fn exchange<C: DatagramChannel>(
     session_notes: &[(&str, String)],
     events: &EventCtx,
     cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
     mut commands: Option<CommandRx>,
 ) -> (Option<Session>, bool) {
     let interactive = commands.is_some();
@@ -794,6 +799,18 @@ async fn exchange<C: DatagramChannel>(
         )
         .with_deadline(Some(hs_ms))
     };
+    // The handshake ends at its own deadline or the attempt's total
+    // deadline, whichever comes first, failing as that one.
+    let total_first = total_deadline.is_some_and(|t| t < hs_deadline);
+    let hs_bound = if total_first { total_deadline.unwrap_or(hs_deadline) } else { hs_deadline };
+    let hs_expired = || {
+        if total_first {
+            TransportFailure::new(Phase::DtlsHandshake, FailureKind::TotalTimeout, "the total deadline elapsed during the DTLS handshake")
+                .with_deadline(plan.timeouts.total_ms)
+        } else {
+            hs_timeout()
+        }
+    };
     enum HsEv {
         In(Inbound),
         Timer,
@@ -816,7 +833,7 @@ async fn exchange<C: DatagramChannel>(
             }
         }
         // The flight goes out within the handshake deadline too.
-        if let Err(f) = send_handshake_flight(chan, &outs, &mut notes, facts, cancel, Some(hs_deadline), hs_timeout).await {
+        if let Err(f) = send_handshake_flight(chan, &outs, &mut notes, facts, cancel, Some(hs_bound), hs_expired).await {
             break Err(f);
         }
         if outs.iter().any(|o| matches!(o, Out::Connected)) {
@@ -825,7 +842,7 @@ async fn exchange<C: DatagramChannel>(
         let ev = tokio::select! {
             i = chan.recv() => HsEv::In(i),
             _ = sleep_until_opt(next_timeout) => HsEv::Timer,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(hs_deadline)) => HsEv::Deadline,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(hs_bound)) => HsEv::Deadline,
             _ = cancel.cancelled() => HsEv::Canceled,
         };
         match ev {
@@ -873,7 +890,7 @@ async fn exchange<C: DatagramChannel>(
                     break Err(classify_dimpl(&e, hs_ms));
                 }
             }
-            HsEv::Deadline => break Err(hs_timeout()),
+            HsEv::Deadline => break Err(hs_expired()),
             HsEv::Canceled => {
                 break Err(TransportFailure::new(Phase::DtlsHandshake, FailureKind::Canceled, "canceled during the DTLS handshake"));
             }
@@ -942,7 +959,6 @@ async fn exchange<C: DatagramChannel>(
     let mut inbox = Inbox::default();
     // The path ended: nothing more can be sent through it (no close_notify).
     let mut path_ended = false;
-    let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
     let total_timeout = || {
         TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, "the total deadline elapsed during the DTLS exchange")
             .with_deadline(plan.timeouts.total_ms)
@@ -1252,7 +1268,19 @@ mod tests {
         let mut rec = Recorder::new(0, events.clone());
         let mut obs = new_attempt(0, AttemptReason::Initial, "DTLS", &plan.display_url);
         let mut facts = SessionFacts::default();
-        let run = exchange_in(&plan, path, &mut rec, &mut obs, &mut facts, &id, &[], &events, cancel, None);
+        let run = exchange_in(
+            &plan,
+            path,
+            &mut rec,
+            &mut obs,
+            &mut facts,
+            &id,
+            &[],
+            &events,
+            cancel,
+            deadline_from(plan.timeouts.total_ms),
+            None,
+        );
         let (_, reset, _, _) = tokio::time::timeout(Duration::from_secs(10), run).await.expect("the exchange must end");
         (obs.failure.as_ref().map(|f| f.kind), reset)
     }

@@ -330,12 +330,15 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     }
     while failure.is_none() {
         let window_deadline = if interactive { None } else { Some(window_end) };
+        // Biased: cancellation, then the total deadline, end the exchange
+        // before a queued command or a received datagram is handled.
         let ev = tokio::select! {
-            r = sock.recv(&mut buf) => Ev::Recv(r),
-            c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
-            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
-            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            biased;
             _ = cancel.cancelled() => Ev::Canceled,
+            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
+            r = sock.recv(&mut buf) => Ev::Recv(r),
+            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
         };
         match ev {
             Ev::Recv(Ok(n)) => {
@@ -367,31 +370,48 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                     break;
                 }
             }
-            Ev::Cmd(c) => match c {
-                Some(SessionCommand::SendText { text }) => {
-                    if sock.send(&wire(&mut env, text.as_bytes())).await.is_ok() {
-                        sent += 1;
-                        tally.sent(text.as_bytes());
-                        tr.data(Direction::Sent, "datagram", text.as_bytes());
+            Ev::Cmd(c) => {
+                // Interactive sends race the same guards as scripted ones.
+                let payload = match c {
+                    Some(SessionCommand::SendText { text }) => Some(text.into_bytes()),
+                    Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
+                        Ok(b) => Some(b),
+                        Err(e) => {
+                            tr.note("error", &format!("datagram not sent: {e}"));
+                            None
+                        }
+                    },
+                    Some(SessionCommand::Ping) | Some(SessionCommand::HalfClose) => {
+                        tr.note("unsupported_command", "UDP has no ping or half-close; send a datagram or Close");
+                        None
                     }
-                    window_end = Instant::now() + window;
-                }
-                Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
-                    Ok(b) => {
-                        if sock.send(&wire(&mut env, &b)).await.is_ok() {
+                    Some(SessionCommand::Close { .. }) | None => break,
+                };
+                if let Some(b) = payload {
+                    match guarded_send(&sock, &wire(&mut env, &b), cancel, total_deadline).await {
+                        SendStep::Done(Ok(_)) => {
                             sent += 1;
                             tally.sent(&b);
                             tr.data(Direction::Sent, "datagram", &b);
                         }
-                        window_end = Instant::now() + window;
+                        SendStep::Done(Err(_)) => {}
+                        SendStep::Canceled => {
+                            failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange was canceled"));
+                        }
+                        SendStep::Deadline => {
+                            failure = Some(
+                                TransportFailure::new(
+                                    Phase::Session,
+                                    FailureKind::TotalTimeout,
+                                    "the total deadline elapsed during the UDP exchange",
+                                )
+                                .with_deadline(plan.timeouts.total_ms),
+                            );
+                        }
                     }
-                    Err(e) => tr.note("error", &format!("datagram not sent: {e}")),
-                },
-                Some(SessionCommand::Ping) | Some(SessionCommand::HalfClose) => {
-                    tr.note("unsupported_command", "UDP has no ping or half-close; send a datagram or Close")
+                    window_end = Instant::now() + window;
                 }
-                Some(SessionCommand::Close { .. }) | None => break,
-            },
+            }
             Ev::WindowEnd => break,
             Ev::Deadline => {
                 failure = Some(
