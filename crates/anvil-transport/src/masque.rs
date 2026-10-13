@@ -383,9 +383,12 @@ impl MasqueChannel {
     /// already ended or the session was canceled, then the QUIC connection
     /// closes with `H3_NO_ERROR`. Returns the tunnel facts and the QUIC
     /// connection's UDP bytes written and read while the tunnel was open.
-    pub async fn close(mut self, canceled: bool) -> (MasqueTunnel, u64, u64) {
+    /// The FIN waits at most 500 ms and never past `deadline` (the attempt's
+    /// remaining budget).
+    pub async fn close(mut self, canceled: bool, deadline: Option<Instant>) -> (MasqueTunnel, u64, u64) {
         if self.stream_open && !canceled {
-            let _ = tokio::time::timeout(Duration::from_millis(500), self.tx.finish()).await;
+            let bound = cleanup_bound(Duration::from_millis(500), deadline);
+            let _ = tokio::time::timeout_at(tokio::time::Instant::from_std(bound), self.tx.finish()).await;
         }
         let after = self.quic.stats();
         self.quic.close(H3_NO_ERROR.into(), b"");
@@ -1060,12 +1063,19 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
     }
     while failure.is_none() {
         let window_deadline = if interactive { None } else { Some(window_end) };
+        // Cancellation, the total deadline and the response window first (in
+        // that order); inbound datagrams and commands then share a fair select.
         let ev = tokio::select! {
-            i = chan.recv() => Ev::In(i),
-            c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
-            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
-            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            biased;
             _ = cancel.cancelled() => Ev::Canceled,
+            _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+            _ = sleep_until_opt(window_deadline) => Ev::WindowEnd,
+            ev = async {
+                tokio::select! {
+                    i = chan.recv() => Ev::In(i),
+                    c = next_cmd(&mut commands), if interactive => Ev::Cmd(c),
+                }
+            } => ev,
         };
         match ev {
             Ev::In(Inbound::Datagram(p)) => {
@@ -1146,7 +1156,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
     // A send the tunnel did not take may have left a partial capsule: no FIN
     // follows it.
     let canceled = matches!(failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled)) || interrupted_send;
-    let (tunnel, written, read) = chan.close(canceled).await;
+    let (tunnel, written, read) = chan.close(canceled, total_deadline).await;
     if facts.repeated_datagrams > 0 {
         facts.notes.push(format!(
             "{} received datagram(s) were byte-identical to an earlier received datagram (UDP may duplicate datagrams; the peer may also send identical replies)",

@@ -244,9 +244,9 @@ impl LedgerState {
 /// timeline in the order they change the count: an instant read before
 /// taking the lock could land a later transition in an earlier bucket and
 /// leave the bucket it really happened in undercounted.
-fn ledger_begin_send(ledger: &Mutex<LedgerState>, measured: bool, bucket_of: impl Fn(Instant) -> u64) {
+fn ledger_begin_send(ledger: &Mutex<LedgerState>, measured: bool, sample_bucket: impl Fn() -> u64) {
     let mut l = ledger.lock();
-    let bucket = bucket_of(Instant::now());
+    let bucket = sample_bucket();
     let held = l.send_in_flight_total();
     let s = l.side(measured);
     s.requests.started += 1;
@@ -463,7 +463,7 @@ impl Shared {
 
     fn begin_send(&self, slot: usize, measured: bool) {
         let now = Instant::now();
-        ledger_begin_send(&self.ledger, measured, |at| self.bucket_of(at));
+        ledger_begin_send(&self.ledger, measured, || self.bucket_of(Instant::now()));
         let mut sh = self.shard(slot).lock();
         self.with_bucket(&mut sh, now, |b| b.started += 1);
     }
@@ -1284,15 +1284,16 @@ mod tests {
 
     /// A begin that waits for the ledger across a bucket boundary is
     /// counted in the bucket it actually changed the in-flight count in. The
-    /// bucket source is a controlled clock, so the ordering is deterministic.
+    /// timestamp sampling itself is injected (a controlled clock): sampling it
+    /// before taking the ledger would read bucket 0 here and fail.
     #[test]
     fn a_begin_delayed_by_the_ledger_lock_is_timestamped_when_it_counts() {
         use std::sync::atomic::{AtomicU64, Ordering};
         let ledger = Mutex::new(LedgerState::default());
         let clock = AtomicU64::new(0);
-        let bucket_of = |_: Instant| clock.load(Ordering::SeqCst);
+        let sample_bucket = || clock.load(Ordering::SeqCst);
         // One send in flight from bucket 0.
-        ledger_begin_send(&ledger, true, bucket_of);
+        ledger_begin_send(&ledger, true, sample_bucket);
         assert_eq!(ledger.lock().peaks.get(&0), Some(&1));
         std::thread::scope(|s| {
             // Another task holds the ledger while a second send is starting;
@@ -1302,7 +1303,7 @@ mod tests {
             let shared = &ledger;
             let second = s.spawn(move || {
                 ready_tx.send(()).unwrap();
-                ledger_begin_send(shared, true, bucket_of);
+                ledger_begin_send(shared, true, sample_bucket);
             });
             ready_rx.recv().unwrap();
             // Give the contender time to block on the ledger (a pre-lock

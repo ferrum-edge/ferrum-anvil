@@ -144,6 +144,13 @@ pub async fn guarded<F: Future>(fut: F, cancel: &CancellationToken, deadline: Op
     }
 }
 
+/// The instant a teardown step of at most `max` must end by, never past
+/// `deadline`.
+pub fn cleanup_bound(max: Duration, deadline: Option<Instant>) -> Instant {
+    let own = Instant::now() + max;
+    deadline.map_or(own, |d| d.min(own))
+}
+
 /// The earlier of two optional deadlines.
 pub fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
     match (a, b) {

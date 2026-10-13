@@ -440,7 +440,8 @@ trait Tunnel: DatagramChannel {
     fn mark_closed_by(&mut self, by: ClosedBy);
     /// End the tunnel: finished cleanly, or reset when `reset`. Returns its
     /// evidence and the bytes written and read while it was open.
-    fn finish_tunnel(self, reset: bool) -> impl Future<Output = (Self::Facts, u64, u64)> + Send;
+    /// End the tunnel; teardown never runs past `deadline`.
+    fn finish_tunnel(self, reset: bool, deadline: Option<Instant>) -> impl Future<Output = (Self::Facts, u64, u64)> + Send;
 }
 
 impl Tunnel for crate::masque::MasqueChannel {
@@ -450,8 +451,8 @@ impl Tunnel for crate::masque::MasqueChannel {
         self.set_closed_by(by);
     }
 
-    fn finish_tunnel(self, reset: bool) -> impl Future<Output = (Self::Facts, u64, u64)> + Send {
-        self.close(reset)
+    fn finish_tunnel(self, reset: bool, deadline: Option<Instant>) -> impl Future<Output = (Self::Facts, u64, u64)> + Send {
+        self.close(reset, deadline)
     }
 }
 
@@ -462,8 +463,8 @@ impl Tunnel for crate::hbone_udp::HboneChannel {
         self.set_closed_by(by);
     }
 
-    fn finish_tunnel(self, reset: bool) -> impl Future<Output = (Self::Facts, u64, u64)> + Send {
-        self.close(reset)
+    fn finish_tunnel(self, reset: bool, deadline: Option<Instant>) -> impl Future<Output = (Self::Facts, u64, u64)> + Send {
+        self.close(reset, deadline)
     }
 }
 
@@ -490,7 +491,8 @@ async fn exchange_in<T: Tunnel>(
         exchange(plan, &mut chan, rec, obs, facts, id, session_notes, events, cancel, total_deadline, commands).await;
     let failure_kind = obs.failure.as_ref().map(|f| f.kind);
     chan.mark_closed_by(if failure_kind == Some(FailureKind::TotalTimeout) { ClosedBy::Timeout } else { ClosedBy::Client });
-    let (tunnel, written, read) = chan.finish_tunnel(send_interrupted).await;
+    // Teardown never runs past the attempt's total deadline.
+    let (tunnel, written, read) = chan.finish_tunnel(send_interrupted, total_deadline).await;
     (session, tunnel, written, read)
 }
 
@@ -1251,7 +1253,7 @@ mod tests {
 
         fn mark_closed_by(&mut self, _by: ClosedBy) {}
 
-        async fn finish_tunnel(self, reset: bool) -> (bool, u64, u64) {
+        async fn finish_tunnel(self, reset: bool, _deadline: Option<Instant>) -> (bool, u64, u64) {
             (reset, 0, 0)
         }
     }
