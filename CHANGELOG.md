@@ -70,6 +70,20 @@
 
 ### Fixed
 
+- Browser sign-in (identity and target-API authorization code + PKCE) no longer
+  accepts plain `http` authorization endpoints on the DNS name `localhost`
+  (#391). Like the token endpoint, cleartext now requires a literal loopback
+  address (`127.0.0.0/8`, `::1` or IPv4-mapped loopback); use
+  `http://127.0.0.1:<port>` for a local test issuer. The CI mock provider
+  applies the same rule. See Breaking.
+
+- The loopback sign-in listener no longer lets the first request on its
+  `/callback` path end the attempt (#392). A request without exactly one
+  `state` equal to the attempt's state is ignored (`callback_ignored`) and the
+  attempt keeps waiting for the bound callback, so a local process cannot
+  cancel a pending sign-in. A browser callback with a mismatched state now ends
+  at the timeout instead of with `CallbackRejected`.
+
 - The WebSocket bootstrap stays within the attempt's total deadline: when it
   expires first, the HTTP/2 and HTTP/3 waits for SETTINGS enabling extended
   CONNECT end as `total_timeout`, the HTTP/3 QUIC connection races the
@@ -144,6 +158,12 @@
   budget-rejection log entry, and reports a clear timeout if it never appears
   (#352). PROTO-022 DTLS recovery retries a lost datagram up to three times
   with a short backoff and records the attempt count (#355).
+
+### Breaking
+
+- A browser sign-in authorization URL (and the CI mock provider's endpoints)
+  on `http://localhost` is now refused as a configuration error. Use
+  `http://127.0.0.1:<port>` (or `https`) for a local test issuer (#391).
 
 ## [0.1.5] - 2026-10-08
 

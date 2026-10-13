@@ -4,10 +4,12 @@
 //!   port), so only local processes can reach it and every attempt gets a
 //!   fresh redirect URI;
 //! * accepts exactly one callback on the bound path: the first such request
-//!   is validated against the attempt (origin, path, `state`) and decides
-//!   the attempt; every later or unrelated request (other paths, other Host
-//!   headers such as a DNS-rebinding page, favicon probes) gets a static
-//!   page and is ignored;
+//!   that carries this attempt's `state` is validated against the attempt
+//!   (origin, path, parameters) and decides it; every other request (other
+//!   paths, other Host headers such as a DNS-rebinding page, favicon probes,
+//!   a missing, repeated or wrong `state`, anything after the decision) gets
+//!   a static page and is ignored, so a local process that cannot know the
+//!   state cannot end the attempt;
 //! * answers with fixed HTML — no scripts, no reflected query values — and
 //!   headers that forbid caching, framing, referrers and sniffing;
 //! * stops at the deadline or on cancellation; the port closes when the
@@ -15,7 +17,7 @@
 
 use crate::{FlowError, FlowEvent, FlowObserver};
 use anvil_auth::AuthError;
-use anvil_auth::oauth::{PkceAttempt, validate_callback};
+use anvil_auth::oauth::{PkceAttempt, callback_state_matches, validate_callback};
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::Full;
@@ -153,14 +155,23 @@ impl Shared {
                 Outcome::Ignored("a request for an unexpected path reached the loopback listener"),
             );
         }
+        let target = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        let full = Zeroizing::new(format!("http://{expected_host}{target}"));
+        // Only a request bound to this attempt may decide it. Anything else
+        // on the predictable path (a local process, a page that guessed the
+        // port) is ignored and the attempt keeps waiting.
+        if !callback_state_matches(&self.binding, &full) {
+            return (
+                page(StatusCode::BAD_REQUEST, PAGE_FAILED),
+                Outcome::Ignored("a callback without this attempt's state was ignored; the sign-in is still waiting"),
+            );
+        }
         if self.consumed.swap(true, Ordering::SeqCst) {
             return (
                 page(StatusCode::CONFLICT, PAGE_HANDLED),
                 Outcome::Ignored("a second callback arrived for an attempt that was already decided"),
             );
         }
-        let target = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        let full = Zeroizing::new(format!("http://{expected_host}{target}"));
         match validate_callback(&self.binding, &full) {
             Ok(code) => (page(StatusCode::OK, PAGE_DONE), Outcome::Code(code)),
             Err(AuthError::Acquisition(m)) => {

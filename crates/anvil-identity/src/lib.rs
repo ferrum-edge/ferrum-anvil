@@ -194,21 +194,29 @@ pub(crate) fn failed(observer: &dyn FlowObserver, e: FlowError) -> FlowError {
     e
 }
 
-/// Interactive flows only talk to `https` issuers, except loopback test
-/// issuers over `http`. Codes and verifiers never cross a network in clear.
+/// Whether the URL names a canonical literal loopback address (`127.0.0.0/8`,
+/// `::1` or IPv4-mapped loopback). DNS names, `localhost` included, never
+/// qualify: whether they stay on this host depends on the resolver, not on
+/// the URL. This matches the engine's OAuth token-endpoint policy.
+pub(crate) fn is_literal_loopback(u: &url::Url) -> bool {
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
+        Some(url::Host::Domain(_)) | None => false,
+    }
+}
+
+/// Interactive flows only talk to `https` issuers, except test issuers on a
+/// literal loopback address over `http`. Codes and verifiers never cross a
+/// network in clear.
 pub(crate) fn require_secure_endpoint(label: &str, raw: &str) -> Result<url::Url, FlowError> {
     let u = url::Url::parse(raw).map_err(|e| FlowError::Configuration(format!("{label} is not a valid URL: {e}")))?;
-    let loopback = match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        None => false,
-    };
     match u.scheme() {
         "https" => Ok(u),
-        "http" if loopback => Ok(u),
+        "http" if is_literal_loopback(&u) => Ok(u),
         "http" => Err(FlowError::Configuration(format!(
-            "{label} must use https for a browser sign-in (plain http is accepted only for a loopback test issuer)"
+            "{label} must use https for a browser sign-in (plain http is accepted only for a test issuer on a literal loopback \
+             address such as 127.0.0.1 or [::1]; localhost and other DNS names do not qualify)"
         ))),
         other => Err(FlowError::Configuration(format!("{label} has unsupported scheme '{other}'"))),
     }
@@ -222,8 +230,17 @@ mod tests {
     fn secure_endpoint_policy() {
         assert!(require_secure_endpoint("x", "https://issuer.example/authorize").is_ok());
         assert!(require_secure_endpoint("x", "http://127.0.0.1:9/authorize").is_ok());
-        assert!(require_secure_endpoint("x", "http://localhost:9/authorize").is_ok());
+        assert!(require_secure_endpoint("x", "http://127.8.9.10:9/authorize").is_ok());
         assert!(require_secure_endpoint("x", "http://[::1]:9/authorize").is_ok());
+        assert!(require_secure_endpoint("x", "http://[::ffff:127.0.0.1]:9/authorize").is_ok());
+        assert!(require_secure_endpoint("x", "https://localhost:9/authorize").is_ok());
+        // DNS names never qualify for cleartext, whatever they resolve to (#391).
+        for host in ["localhost", "LOCALHOST", "localhost.", "api.localhost", "127.0.0.1.nip.io"] {
+            let r = require_secure_endpoint("x", &format!("http://{host}:9/authorize"));
+            assert!(matches!(&r, Err(FlowError::Configuration(m)) if m.contains("literal loopback")), "{host}: {r:?}");
+        }
+        assert!(require_secure_endpoint("x", "http://[::ffff:192.0.2.1]:9/authorize").is_err());
+        assert!(require_secure_endpoint("x", "http://0.0.0.0:9/authorize").is_err());
         assert!(require_secure_endpoint("x", "http://issuer.example/authorize").is_err());
         assert!(require_secure_endpoint("x", "javascript:alert(1)").is_err());
     }
