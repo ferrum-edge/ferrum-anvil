@@ -532,6 +532,13 @@ pub async fn run(plan: &DtlsPlan, events: &EventCtx, cancel: &CancellationToken,
     }
 }
 
+/// The attempt's one total deadline, measured from when the attempt started
+/// (`rec.t0`, before identity preparation), so preparation time counts
+/// against the budget. Interactive sessions have none.
+fn attempt_deadline(rec: &Recorder, plan: &DtlsPlan, interactive: bool) -> Option<Instant> {
+    if interactive { None } else { plan.timeouts.total_ms.map(|ms| rec.t0 + Duration::from_millis(ms)) }
+}
+
 struct Identity<'a> {
     identity: &'a DtlsIdentity,
     /// dimpl's ephemeral self-signed certificate (no identity configured).
@@ -555,7 +562,7 @@ async fn run_direct(
     };
     // One total deadline for the whole attempt: socket setup, handshake and
     // application exchange all race it (and cancellation).
-    let total_deadline = if commands.is_some() { None } else { deadline_from(plan.timeouts.total_ms) };
+    let total_deadline = attempt_deadline(&rec, plan, commands.is_some());
     let (sock, addr, cobs) =
         match crate::udp::open_socket(&mut rec, &plan.host, plan.port, &plan.dns, &plan.timeouts, "dtls", cancel, total_deadline).await {
             Ok(x) => x,
@@ -612,7 +619,7 @@ async fn run_tunneled(
     commands: Option<CommandRx>,
 ) -> SessionOutput {
     let mut obs = new_attempt(0, AttemptReason::Initial, "CONNECT", &m.display_url);
-    let total_deadline = if commands.is_some() { None } else { deadline_from(plan.timeouts.total_ms) };
+    let total_deadline = attempt_deadline(&rec, plan, commands.is_some());
     let chan = match crate::masque::open(m, &mut rec, &mut obs, &mut facts, events, cancel, total_deadline).await {
         Ok(c) => c,
         Err(n) => return n.into_output(rec, obs, facts, plan.response_window_ms, events),
@@ -659,7 +666,7 @@ async fn run_hbone(
     commands: Option<CommandRx>,
 ) -> SessionOutput {
     let mut obs = new_attempt(0, AttemptReason::Initial, "DTLS", &plan.display_url);
-    let total_deadline = if commands.is_some() { None } else { deadline_from(plan.timeouts.total_ms) };
+    let total_deadline = attempt_deadline(&rec, plan, commands.is_some());
     let status = |sent: u64, received: u64| ProtocolStatus::Udp {
         datagrams_sent: sent,
         datagrams_received: received,
@@ -820,6 +827,14 @@ async fn exchange<C: DatagramChannel>(
         Canceled,
     }
     let hs: Result<(), TransportFailure> = 'hs: loop {
+        // Cancellation, then the handshake bound, win over anything the
+        // handshake would process next (including certificate output).
+        if cancel.is_cancelled() {
+            break Err(TransportFailure::new(Phase::DtlsHandshake, FailureKind::Canceled, "canceled during the DTLS handshake"));
+        }
+        if Instant::now() >= hs_bound {
+            break Err(hs_expired());
+        }
         let outs = drain(&mut dtls, &mut next_timeout);
         for o in &outs {
             if let Out::PeerCert(der) = o {
@@ -841,11 +856,18 @@ async fn exchange<C: DatagramChannel>(
         if outs.iter().any(|o| matches!(o, Out::Connected)) {
             break Ok(());
         }
+        // Cancellation, then the handshake bound, ahead of a fair select
+        // between inbound records and retransmission timers.
         let ev = tokio::select! {
-            i = chan.recv() => HsEv::In(i),
-            _ = sleep_until_opt(next_timeout) => HsEv::Timer,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(hs_bound)) => HsEv::Deadline,
+            biased;
             _ = cancel.cancelled() => HsEv::Canceled,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(hs_bound)) => HsEv::Deadline,
+            ev = async {
+                tokio::select! {
+                    i = chan.recv() => HsEv::In(i),
+                    _ = sleep_until_opt(next_timeout) => HsEv::Timer,
+                }
+            } => ev,
         };
         match ev {
             HsEv::In(Inbound::Datagram(d)) => {
