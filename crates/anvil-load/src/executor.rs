@@ -1282,38 +1282,24 @@ impl LoadRun {
 mod tests {
     use super::*;
 
-    /// A begin that waits for the ledger across a bucket boundary is
-    /// counted in the bucket it actually changed the in-flight count in. The
-    /// timestamp sampling itself is injected (a controlled clock): sampling it
-    /// before taking the ledger would read bucket 0 here and fail.
+    /// A begin's timeline bucket is sampled while the ledger is held, so a
+    /// begin that waited for the ledger across a bucket boundary counts in
+    /// the bucket it changed the in-flight count in. The sampler asserts the
+    /// ledger is held when it runs: sampling before taking the lock fails.
     #[test]
-    fn a_begin_delayed_by_the_ledger_lock_is_timestamped_when_it_counts() {
+    fn a_begin_samples_its_bucket_while_holding_the_ledger() {
         use std::sync::atomic::{AtomicU64, Ordering};
         let ledger = Mutex::new(LedgerState::default());
         let clock = AtomicU64::new(0);
-        let sample_bucket = || clock.load(Ordering::SeqCst);
+        let sample_bucket = || {
+            assert!(ledger.try_lock().is_none(), "the bucket is sampled while the ledger is held");
+            clock.load(Ordering::SeqCst)
+        };
         // One send in flight from bucket 0.
         ledger_begin_send(&ledger, true, sample_bucket);
-        assert_eq!(ledger.lock().peaks.get(&0), Some(&1));
-        std::thread::scope(|s| {
-            // Another task holds the ledger while a second send is starting;
-            // the clock moves to bucket 1 before the ledger is released.
-            let held = ledger.lock();
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-            let shared = &ledger;
-            let second = s.spawn(move || {
-                ready_tx.send(()).unwrap();
-                ledger_begin_send(shared, true, sample_bucket);
-            });
-            ready_rx.recv().unwrap();
-            // Give the contender time to block on the ledger (a pre-lock
-            // timestamp would read bucket 0 here); a correct implementation
-            // passes however long this takes.
-            std::thread::sleep(Duration::from_millis(100));
-            clock.store(1, Ordering::SeqCst);
-            drop(held);
-            second.join().unwrap();
-        });
+        // The next begin takes the ledger only once the clock is in bucket 1.
+        clock.store(1, Ordering::SeqCst);
+        ledger_begin_send(&ledger, true, sample_bucket);
         let l = ledger.lock();
         assert_eq!(l.peaks.get(&0), Some(&1));
         assert_eq!(l.peaks.get(&1), Some(&2), "both sends were in flight in bucket 1");
