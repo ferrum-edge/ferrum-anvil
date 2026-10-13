@@ -168,7 +168,7 @@ async fn auth_011_pkce_round_trip_then_real_api_request_with_the_token() {
 }
 
 #[tokio::test]
-async fn auth_012_forged_state_is_rejected_without_token_exchange() {
+async fn auth_012_forged_state_is_ignored_without_token_exchange() {
     init();
     let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
     idp.set_behavior(AuthorizeBehavior::ForgeState);
@@ -176,14 +176,59 @@ async fn auth_012_forged_state_is_rejected_without_token_exchange() {
     let ctx = oauth_ctx(&idp);
     let browser = Browser::new(None);
     let events = Events::new();
-    let r = authorize_api(&engine, &ctx, &browser.opener(), &events.observer(), &FlowOptions::default(), &CancellationToken::new()).await;
-    assert!(matches!(&r, Err(FlowError::CallbackRejected(m)) if m.contains("state")), "{r:?}");
+    // A callback without this attempt's state cannot decide it: the attempt
+    // keeps waiting for a bound callback and ends at its deadline (#392).
+    let opts = FlowOptions { timeout: Duration::from_secs(3), ..Default::default() };
+    let r = authorize_api(&engine, &ctx, &browser.opener(), &events.observer(), &opts, &CancellationToken::new()).await;
+    assert!(matches!(&r, Err(FlowError::TimedOut(_))), "{r:?}");
     assert!(idp.grants_seen().is_empty(), "no token exchange after a state mismatch");
     assert!(api_oauth::token_status(&engine, &ctx).unwrap().is_none());
-    assert!(matches!(events.all().last(), Some(FlowEvent::Failed { .. })));
+    let ev = events.all();
+    assert!(ev.iter().any(|e| matches!(e, FlowEvent::CallbackIgnored { reason } if reason.contains("state"))), "{ev:?}");
+    assert!(!ev.contains(&FlowEvent::CallbackAccepted));
+    assert!(matches!(ev.last(), Some(FlowEvent::Failed { kind: anvil_identity::FlowErrorKind::TimedOut, .. })));
     let visit = browser.last_visit().await;
     assert_eq!(visit.final_status, 400);
     assert!(!visit.final_body.contains("forged"), "nothing reflected");
+}
+
+#[tokio::test]
+async fn auth_012_unbound_callbacks_on_the_callback_path_do_not_end_the_attempt() {
+    init();
+    let idp = IdpFixture::start(IdpOptions::default()).await.unwrap();
+    let engine = Engine::new();
+    let ctx = oauth_ctx(&idp);
+    let statuses = Arc::new(Mutex::new(vec![]));
+    let s2 = statuses.clone();
+    // A local process that knows the port but not the state hits the exact
+    // callback path first (#392); then the real browser completes the flow.
+    let opener = move |url: &str| -> Result<(), String> {
+        let u = url::Url::parse(url).unwrap();
+        let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+        let redirect = q["redirect_uri"].clone();
+        let state = q["state"].clone();
+        let (url, s2) = (url.to_string(), s2.clone());
+        tokio::spawn(async move {
+            for query in [
+                "code=stolen&state=forged".to_string(),
+                "code=stolen".to_string(),
+                "error=access_denied".to_string(),
+                format!("code=stolen&state={state}&state=forged"),
+            ] {
+                let (status, _, _) = raw_get(&format!("{redirect}?{query}"), None).await.unwrap();
+                s2.lock().unwrap().push(status);
+            }
+            let _ = simulate_browser(&url, None).await;
+        });
+        Ok(())
+    };
+    let events = Events::new();
+    let auth = authorize_api(&engine, &ctx, &opener, &events.observer(), &FlowOptions::default(), &CancellationToken::new()).await;
+    assert!(auth.is_ok(), "{auth:?}");
+    assert_eq!(*statuses.lock().unwrap(), vec![400, 400, 400, 400]);
+    let ignored = events.all().iter().filter(|e| matches!(e, FlowEvent::CallbackIgnored { reason } if reason.contains("state"))).count();
+    assert_eq!(ignored, 4);
+    assert_eq!(idp.grants_seen(), vec!["authorization_code".to_string()], "only the genuine code was redeemed");
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@
 
 use crate::flow::{AuthorizationRequest, authorize_in_browser};
 use crate::provider::{Availability, IdentityProvider, ProviderInfo, VerifiedIdentity};
-use crate::{BrowserOpener, FlowError, FlowEvent, FlowObserver, FlowOptions, failed, require_secure_endpoint};
+use crate::{BrowserOpener, FlowError, FlowEvent, FlowObserver, FlowOptions, failed, is_literal_loopback, require_secure_endpoint};
 use anvil_auth::oauth::{BoxFut, OAuthResolved, exchange_code};
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, OAuthGrant};
@@ -42,16 +42,12 @@ pub struct MockProvider {
 
 fn loopback_only(label: &str, raw: &str) -> Result<(), FlowError> {
     let u = require_secure_endpoint(label, raw)?;
-    let loopback = match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        None => false,
-    };
-    if loopback {
+    if is_literal_loopback(&u) {
         Ok(())
     } else {
-        Err(FlowError::Configuration(format!("the mock provider only talks to a loopback test issuer; {label} is not local")))
+        Err(FlowError::Configuration(format!(
+            "the mock provider only talks to a test issuer on a literal loopback address; {label} is not one"
+        )))
     }
 }
 
@@ -228,5 +224,11 @@ mod tests {
         let mut remote = cfg(&idp);
         remote.token_endpoint = "https://issuer.example/token".into();
         assert!(matches!(MockProvider::new(remote), Err(FlowError::Configuration(_))));
+        // A DNS name is not a literal loopback, over https or http.
+        for url in ["https://localhost/userinfo", "http://localhost/userinfo"] {
+            let mut named = cfg(&idp);
+            named.userinfo_endpoint = url.into();
+            assert!(matches!(MockProvider::new(named), Err(FlowError::Configuration(_))), "{url}");
+        }
     }
 }

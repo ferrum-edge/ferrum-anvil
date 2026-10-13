@@ -852,6 +852,22 @@ pub fn validate_callback(attempt: &PkceAttempt, callback_url: &str) -> Result<Ze
     q.remove("code").filter(|c| !c.is_empty()).ok_or_else(|| AuthError::Invalid("callback has no authorization code".into()))
 }
 
+/// Whether a callback carries exactly one `state` parameter equal to this
+/// attempt's state. A listener checks this before letting a request decide the
+/// attempt, so a request without the state (any local process can reach the
+/// loopback port) is ignored instead of ending the sign-in.
+/// [`validate_callback`] still performs the full check.
+pub fn callback_state_matches(attempt: &PkceAttempt, callback_url: &str) -> bool {
+    let Ok(got) = url::Url::parse(callback_url) else {
+        return false;
+    };
+    let mut states = got.query_pairs().filter(|(k, _)| k == "state").map(|(_, v)| Zeroizing::new(v.into_owned()));
+    match (states.next(), states.next()) {
+        (Some(state), None) => constant_time_eq(state.as_bytes(), attempt.state.as_bytes()),
+        _ => false,
+    }
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1090,6 +1106,22 @@ mod tests {
         let b = a.binding_only();
         assert!(b.verifier.is_empty());
         assert_eq!(validate_callback(&b, &ok).unwrap().as_str(), "abc");
+    }
+
+    #[test]
+    fn callback_state_matches_only_a_single_exact_state() {
+        let a = new_attempt("http://127.0.0.1:1/cb");
+        let s = &a.state;
+        assert!(callback_state_matches(&a, &format!("http://127.0.0.1:1/cb?code=x&state={s}")));
+        assert!(callback_state_matches(&a, &format!("http://127.0.0.1:1/cb?error=access_denied&state={s}")));
+        assert!(callback_state_matches(&a.binding_only(), &format!("http://127.0.0.1:1/cb?state={s}")));
+        assert!(!callback_state_matches(&a, "http://127.0.0.1:1/cb?code=x"));
+        assert!(!callback_state_matches(&a, "http://127.0.0.1:1/cb?code=x&state=forged"));
+        assert!(!callback_state_matches(&a, "http://127.0.0.1:1/cb?code=x&state="));
+        assert!(!callback_state_matches(&a, &format!("http://127.0.0.1:1/cb?state={s}&state={s}")));
+        assert!(!callback_state_matches(&a, &format!("http://127.0.0.1:1/cb?state={s}&state=forged")));
+        assert!(!callback_state_matches(&a, &format!("http://127.0.0.1:1/cb?code=x&state={s}x")));
+        assert!(!callback_state_matches(&a, "not a url"));
     }
 
     #[test]

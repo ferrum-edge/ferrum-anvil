@@ -89,7 +89,10 @@ Cancellation and invalidation:
    vault secrets. Client-credentials profiles, non-OAuth auth and missing
    authorization URLs are refused as configuration errors.
 2. Requires `https` for the authorization and token URLs. Plain `http` is
-   accepted only for a loopback test issuer (`127.0.0.1`, `::1`, `localhost`).
+   accepted only for a test issuer on a literal loopback address
+   (`127.0.0.0/8`, `::1`, or IPv4-mapped loopback). `localhost` and other DNS
+   names do not qualify for `http`, because whether they stay on this host
+   depends on the resolver; this is the same rule as the token endpoint.
 3. Binds a listener on `127.0.0.1` with an ephemeral port. The redirect URI is
    `http://127.0.0.1:<port>/callback`.
 4. Builds the authorization URL: `response_type=code`, `client_id`,
@@ -102,9 +105,15 @@ Cancellation and invalidation:
    - requests with another `Host` (for example a DNS-rebinding page), another
      path (`/favicon.ico`, probes), or another method get a static page and are
      ignored (`callback_ignored` event);
-   - the first request on the bound path decides the attempt. A `state`
-     mismatch, repeated `code`/`state`/`error` parameters or a missing code end
-     it with `CallbackRejected`; an `error=` answer ends it with
+   - requests on the bound path without exactly one `state` equal to this
+     attempt's state (missing, repeated or wrong) get a static error page and
+     are ignored (`callback_ignored` event). The attempt keeps waiting, so a
+     local process that can reach the port but does not know the state cannot
+     end the sign-in. A browser that returns with a mismatched state therefore
+     ends at the timeout, not immediately;
+   - the first request on the bound path that carries this attempt's state
+     decides the attempt. Repeated `code`/`error` parameters or a missing code
+     end it with `CallbackRejected`; an `error=` answer ends it with
      `AuthorizationDenied`. There is no token exchange in either case;
    - later requests get "already handled".
 7. Answers the browser with fixed HTML: no scripts, no reflected query values,
@@ -312,8 +321,9 @@ The webview only ever sees `IdentitySummary`.
 - **Local processes can reach the loopback listener.** The ephemeral port,
   192-bit `state`, the PKCE verifier (which never leaves the process except to
   the token endpoint), the single decisive callback and the `Host` check limit
-  this. A local process that races the browser with a forged callback can make
-  the attempt fail (the user retries). It cannot get a token from it.
+  this. A callback without the attempt's `state` is ignored, so a local process
+  that does not know the state cannot end or decide the attempt. It cannot get
+  a token from it either.
   Malware able to read the browser or Anvil's memory is out of scope.
 - **Redirect interception** through custom URL schemes does not apply:
   the redirect is loopback only.
