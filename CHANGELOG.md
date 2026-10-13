@@ -70,6 +70,13 @@
 
 ### Fixed
 
+- The WebSocket bootstrap stays within the attempt's total deadline: when it
+  expires first, the HTTP/2 and HTTP/3 waits for SETTINGS enabling extended
+  CONNECT end as `total_timeout`, the HTTP/3 QUIC connection races the
+  deadline, and a rejected handshake's body that is held open or trickled ends
+  the attempt as `total_timeout` with the status, headers and captured body
+  kept (#389).
+
 - The MASQUE (CONNECT-UDP) tunnel bootstrap stays within the attempt's total
   deadline for UDP and DTLS: when the total deadline expires first, waiting for
   the proxy's HTTP/3 SETTINGS ends as `total_timeout`, and a refusal body that

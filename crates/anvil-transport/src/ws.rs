@@ -338,6 +338,36 @@ fn negotiate_extensions(
     }
 }
 
+/// The `response_body` phase status of a rejected handshake's body read.
+fn rejected_body_phase_status(completeness: BodyCompleteness, deadline_hit: bool) -> PhaseStatus {
+    match completeness {
+        BodyCompleteness::Complete => PhaseStatus::Completed,
+        _ if deadline_hit => PhaseStatus::TimedOut,
+        _ => PhaseStatus::Failed,
+    }
+}
+
+/// The failure of a rejected handshake. A rejection whose body was still
+/// being read when the total deadline elapsed is a `TotalTimeout` in
+/// `response_body` (the rejection's status, headers and captured body stay
+/// evidence); otherwise it is `WsHandshakeRejected`.
+fn rejected_handshake_failure(rejected: String, deadline_hit: bool, total_ms: Option<u64>, facts: &mut SessionFacts) -> TransportFailure {
+    if deadline_hit {
+        facts.notes.push(format!(
+            "the total deadline ({} ms) elapsed while reading the rejected handshake's response body; the body is incomplete",
+            total_ms.unwrap_or_default()
+        ));
+        TransportFailure::new(
+            Phase::ResponseBody,
+            FailureKind::TotalTimeout,
+            format!("{rejected}, and the total deadline elapsed while its response body was still being read"),
+        )
+        .with_deadline(total_ms)
+    } else {
+        TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsHandshakeRejected, rejected)
+    }
+}
+
 /// Wait up to `ms` for the HTTP/3 peer's SETTINGS. `Ok(enabled)` says whether
 /// they enable extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 9220 §3).
 async fn await_h3_settings(send: &crate::h3::SendReq, ms: u64, cancel: &CancellationToken) -> Result<bool, &'static str> {
@@ -472,23 +502,53 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     };
     let total_deadline = if interactive { None } else { deadline_from(plan.timeouts.total_ms) };
 
-    // ---- QUIC + HTTP/3 connection ----
-    let connected = match crate::h3::quic_connect(
-        &mut rec,
-        &plan.host,
-        plan.port,
-        &plan.dns,
-        &plan.timeouts,
-        &plan.limits,
-        &tls,
-        crate::h3::client_endpoint,
-        cancel,
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err((f, cobs)) => {
+    // ---- QUIC + HTTP/3 connection: the whole setup (DNS, QUIC, HTTP/3)
+    // races cancellation, then the total deadline ----
+    enum Setup<T> {
+        Done(T),
+        Canceled,
+        Deadline,
+    }
+    let connecting = {
+        let connect = crate::h3::quic_connect(
+            &mut rec,
+            &plan.host,
+            plan.port,
+            &plan.dns,
+            &plan.timeouts,
+            &plan.limits,
+            &tls,
+            crate::h3::client_endpoint,
+            cancel,
+        );
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Setup::Canceled,
+            _ = sleep_until_opt(total_deadline) => Setup::Deadline,
+            r = connect => Setup::Done(r),
+        }
+    };
+    let connected = match connecting {
+        Setup::Done(Ok(c)) => c,
+        Setup::Done(Err((f, cobs))) => {
             obs.connection = cobs;
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+        Setup::Canceled => {
+            let f = TransportFailure::new(
+                rec.open_phase().unwrap_or(Phase::QuicHandshake),
+                FailureKind::Canceled,
+                "canceled while setting up the QUIC connection",
+            );
+            return early(rec, obs, f, DispatchState::NotDispatched, facts);
+        }
+        Setup::Deadline => {
+            let f = TransportFailure::new(
+                rec.open_phase().unwrap_or(Phase::QuicHandshake),
+                FailureKind::TotalTimeout,
+                "total deadline elapsed during the QUIC connection",
+            )
+            .with_deadline(plan.timeouts.total_ms);
             return early(rec, obs, f, DispatchState::NotDispatched, facts);
         }
     };
@@ -496,13 +556,26 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     obs.connection = Some(cobs);
     let close_quic = |quic: &quinn::Connection| quic.close(0x100u32.into(), b""); // H3_NO_ERROR
     let wait_ms = plan.timeouts.response_headers_ms.unwrap_or(5_000).min(5_000);
-    match await_h3_settings(&send, wait_ms, cancel).await {
+    // The total deadline bounds the SETTINGS wait too (cancellation first).
+    let settings = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("canceled"),
+        _ = sleep_until_opt(total_deadline) => Err("total_deadline"),
+        r = await_h3_settings(&send, wait_ms, cancel) => r,
+    };
+    match settings {
         Ok(true) => rec.mark(Phase::ProtocolHandshake, PhaseStatus::Completed, Some("peer enabled extended CONNECT (RFC 9220)")),
         other => {
             let f = match other {
                 Err("canceled") => {
                     TransportFailure::new(Phase::ProtocolHandshake, FailureKind::Canceled, "canceled while waiting for HTTP/3 settings")
                 }
+                Err("total_deadline") => TransportFailure::new(
+                    Phase::ProtocolHandshake,
+                    FailureKind::TotalTimeout,
+                    "the total deadline elapsed while waiting for the HTTP/3 server's SETTINGS; nothing was sent",
+                )
+                .with_deadline(plan.timeouts.total_ms),
                 Ok(_) => TransportFailure::new(
                     Phase::ProtocolHandshake,
                     FailureKind::WsHandshakeRejected,
@@ -546,11 +619,12 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     obs.bytes.request_headers_estimated = true;
     let w_idx = rec.start(Phase::RequestWrite);
     let sent = tokio::select! {
-        r = send.send_request(req) => r.map_err(|e| TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed,
-            format!("sending the HTTP/3 extended CONNECT failed: {e}"))),
+        biased;
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending the extended CONNECT")),
         _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::TotalTimeout,
             "total deadline elapsed while sending the extended CONNECT").with_deadline(plan.timeouts.total_ms)),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending the extended CONNECT")),
+        r = send.send_request(req) => r.map_err(|e| TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteFailed,
+            format!("sending the HTTP/3 extended CONNECT failed: {e}"))),
     };
     let mut stream = match sent {
         Ok(s) => s,
@@ -563,13 +637,14 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     let h_idx = rec.start(Phase::AwaitResponseHeaders);
     let headers_deadline = deadline_from(plan.timeouts.response_headers_ms);
     let resp = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during the WebSocket handshake")),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
+            "total deadline elapsed during the WebSocket handshake").with_deadline(plan.timeouts.total_ms)),
         r = stream.recv_response() => r.map_err(|e| crate::h3::stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
             "the HTTP/3 stream ended before an answer to the extended CONNECT")),
         _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
             "no answer to the WebSocket extended CONNECT before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
-            "total deadline elapsed during the WebSocket handshake").with_deadline(plan.timeouts.total_ms)),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during the WebSocket handshake")),
     };
     let resp = match resp {
         Ok(r) => r,
@@ -600,12 +675,15 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         let mut captured = BytesMut::new();
         let mut wire = 0u64;
         let mut completeness = BodyCompleteness::Complete;
+        let mut deadline_hit = false;
         loop {
             let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(5_000)));
             let chunk = tokio::select! {
-                c = stream.recv_data() => c,
-                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                biased;
                 _ = cancel.cancelled() => { completeness = BodyCompleteness::Canceled; break; }
+                _ = sleep_until_opt(total_deadline) => { completeness = BodyCompleteness::Incomplete; deadline_hit = true; break; }
+                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                c = stream.recv_data() => c,
             };
             match chunk {
                 Ok(Some(mut c)) => {
@@ -626,13 +704,10 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
                 }
             }
         }
-        rec.finish(b_idx, if completeness == BodyCompleteness::Complete { PhaseStatus::Completed } else { PhaseStatus::Failed });
+        rec.finish(b_idx, rejected_body_phase_status(completeness, deadline_hit));
         close_quic(&quic);
-        let mut f = TransportFailure::new(
-            Phase::ProtocolHandshake,
-            FailureKind::WsHandshakeRejected,
-            format!("the server answered the WebSocket extended CONNECT over HTTP/3 with HTTP {status} instead of 200"),
-        );
+        let rejected = format!("the server answered the WebSocket extended CONNECT over HTTP/3 with HTTP {status} instead of 200");
+        let mut f = rejected_handshake_failure(rejected, deadline_hit, plan.timeouts.total_ms, &mut facts);
         f.status = Some(status);
         obs.failure = Some(f);
         obs.bytes.response_body_wire = Some(wire);
@@ -776,11 +851,25 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
     obs.connection = Some(cobs);
     if h2 {
         let wait_ms = plan.timeouts.response_headers_ms.unwrap_or(5_000).min(5_000);
-        match await_extended_connect(extended_connect, wait_ms, cancel).await {
+        // The total deadline bounds the SETTINGS wait too (cancellation first).
+        let settings = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err("canceled"),
+            _ = sleep_until_opt(total_deadline) => Err("total_deadline"),
+            r = await_extended_connect(extended_connect, wait_ms, cancel) => r,
+        };
+        match settings {
             Ok(()) => rec.mark(Phase::ProtocolHandshake, PhaseStatus::Completed, Some("peer enabled extended CONNECT (RFC 8441)")),
             Err(why) => {
                 let f = if why == "canceled" {
                     TransportFailure::new(Phase::ProtocolHandshake, FailureKind::Canceled, "canceled while waiting for HTTP/2 settings")
+                } else if why == "total_deadline" {
+                    TransportFailure::new(
+                        Phase::ProtocolHandshake,
+                        FailureKind::TotalTimeout,
+                        "the total deadline elapsed while waiting for the HTTP/2 peer's SETTINGS; nothing was sent",
+                    )
+                    .with_deadline(plan.timeouts.total_ms)
                 } else {
                     let mut f = TransportFailure::new(
                         Phase::ProtocolHandshake,
@@ -821,12 +910,13 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         if stats.bytes_written() > written_before { DispatchState::MayHaveBeenSent } else { DispatchState::NotDispatched }
     };
     let resp = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during the WebSocket handshake")),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
+            "total deadline elapsed during the WebSocket handshake").with_deadline(plan.timeouts.total_ms)),
         r = sender.send(req) => Ok(r),
         _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
             "no answer to the WebSocket handshake before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
-            "total deadline elapsed during the WebSocket handshake").with_deadline(plan.timeouts.total_ms)),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled during the WebSocket handshake")),
     };
     let resp = match resp {
         Ok(r) => r,
@@ -863,12 +953,15 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
         let mut captured = BytesMut::new();
         let mut wire = 0u64;
         let mut completeness = BodyCompleteness::Complete;
+        let mut deadline_hit = false;
         loop {
             let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(5_000)));
             let f = tokio::select! {
-                f = body.frame() => f,
-                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                biased;
                 _ = cancel.cancelled() => { completeness = BodyCompleteness::Canceled; break; }
+                _ = sleep_until_opt(total_deadline) => { completeness = BodyCompleteness::Incomplete; deadline_hit = true; break; }
+                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                f = body.frame() => f,
             };
             match f {
                 None => break,
@@ -889,16 +982,13 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
                 }
             }
         }
-        rec.finish(b_idx, if completeness == BodyCompleteness::Complete { PhaseStatus::Completed } else { PhaseStatus::Failed });
-        let mut f = TransportFailure::new(
-            Phase::ProtocolHandshake,
-            FailureKind::WsHandshakeRejected,
-            format!(
-                "the server answered the WebSocket {} with HTTP {status} instead of {}",
-                if h2 { "extended CONNECT" } else { "upgrade" },
-                if h2 { "200" } else { "101 Switching Protocols" }
-            ),
+        rec.finish(b_idx, rejected_body_phase_status(completeness, deadline_hit));
+        let rejected = format!(
+            "the server answered the WebSocket {} with HTTP {status} instead of {}",
+            if h2 { "extended CONNECT" } else { "upgrade" },
+            if h2 { "200" } else { "101 Switching Protocols" }
         );
+        let mut f = rejected_handshake_failure(rejected, deadline_hit, plan.timeouts.total_ms, &mut facts);
         f.status = Some(status);
         obs.failure = Some(f);
         obs.bytes.response_body_wire = Some(wire);
