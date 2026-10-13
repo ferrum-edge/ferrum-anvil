@@ -321,8 +321,9 @@ The webview only ever sees `IdentitySummary`.
 - **Local processes can reach the loopback listener.** The ephemeral port,
   192-bit `state`, the PKCE verifier (which never leaves the process except to
   the token endpoint), the single decisive callback and the `Host` check limit
-  this. A local process that races the browser with a forged callback can make
-  the attempt fail (the user retries). It cannot get a token from it.
+  this. A callback without the attempt's `state` is ignored, so a local process
+  that does not know the state cannot end or decide the attempt. It cannot get
+  a token from it either.
   Malware able to read the browser or Anvil's memory is out of scope.
 - **Redirect interception** through custom URL schemes does not apply:
   the redirect is loopback only.

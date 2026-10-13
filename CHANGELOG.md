@@ -75,7 +75,8 @@
   (#391). Like the token endpoint, cleartext now requires a literal loopback
   address (`127.0.0.0/8`, `::1` or IPv4-mapped loopback); use
   `http://127.0.0.1:<port>` for a local test issuer. The CI mock provider
-  applies the same rule. See Breaking.
+  requires a literal loopback address for all its endpoints, over `http` or
+  `https`. See Breaking.
 
 - The loopback sign-in listener no longer lets the first request on its
   `/callback` path end the attempt (#392). A request without exactly one
@@ -161,9 +162,11 @@
 
 ### Breaking
 
-- A browser sign-in authorization URL (and the CI mock provider's endpoints)
-  on `http://localhost` is now refused as a configuration error. Use
-  `http://127.0.0.1:<port>` (or `https`) for a local test issuer (#391).
+- A browser sign-in authorization URL on `http://localhost` is now refused as
+  a configuration error. Use `http://127.0.0.1:<port>`, or `https`, for a local
+  test issuer (#391). The CI mock provider's authorization, token and userinfo
+  endpoints must be on a literal loopback address under either scheme, so
+  `https://localhost` is refused there too.
 
 ## [0.1.5] - 2026-10-08
 

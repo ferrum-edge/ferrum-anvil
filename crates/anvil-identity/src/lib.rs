@@ -153,8 +153,10 @@ pub enum FlowError {
     Canceled,
     #[error("no sign-in response arrived within {} seconds", .0.as_secs())]
     TimedOut(Duration),
-    /// The bound callback failed validation (state mismatch, repeated
-    /// parameters, missing code). No token exchange was performed.
+    /// A callback carrying this attempt's `state` failed validation
+    /// (repeated `code`/`error` parameters, missing code). No token exchange
+    /// was performed. Callbacks without the state are ignored
+    /// ([`FlowEvent::CallbackIgnored`]) and never reach this.
     #[error("{0}")]
     CallbackRejected(String),
     /// The authorization server answered with an OAuth error (e.g. `access_denied`).
