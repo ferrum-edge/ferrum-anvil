@@ -70,6 +70,12 @@
 
 ### Fixed
 
+- The WebSocket bootstrap stays within the attempt's total deadline: the
+  HTTP/2 and HTTP/3 waits for SETTINGS enabling extended CONNECT end as
+  `total_timeout`, the HTTP/3 QUIC connection races the deadline, and a
+  rejected handshake's body that is held open or trickled ends the attempt as
+  `total_timeout` with the status, headers and captured body kept (#389).
+
 - Load and transport correctness fixes (#365–#374, #384):
   - Load failure counts in desktop live progress, CLI progress and saved-report
     summaries include assertion-only failures and count each failed unit once;
