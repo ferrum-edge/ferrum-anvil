@@ -70,6 +70,11 @@
 
 ### Fixed
 
+- The MASQUE (CONNECT-UDP) tunnel bootstrap stays within the attempt's total
+  deadline for UDP and DTLS: waiting for the proxy's HTTP/3 SETTINGS ends as
+  `total_timeout`, and reading a refusal body that is held open or trickled
+  stops at the deadline with the status and captured body kept (#386).
+
 - Load and transport correctness fixes (#365–#374, #384):
   - Load failure counts in desktop live progress, CLI progress and saved-report
     summaries include assertion-only failures and count each failed unit once;

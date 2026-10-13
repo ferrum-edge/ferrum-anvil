@@ -23,7 +23,7 @@ use anvil_transport::http::{AttemptOutput, EarlyDataIntent, HttpPlan};
 use anvil_transport::recorder::{EventCtx, EventFn};
 use anvil_transport::session::TranscriptLimits;
 use anvil_transport::tls::{self, PreparedTls, TlsSettings};
-use anvil_transport::{masque, sse};
+use anvil_transport::{dtls, masque, sse};
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
@@ -412,5 +412,114 @@ async fn trailers_without_the_end_of_the_stream_end_at_the_idle_and_total_deadli
         assert_eq!(out.observation.failure.as_ref().unwrap().deadline_ms, Some(deadline));
         assert_eq!(out.response.as_ref().unwrap().body.completeness, BodyCompleteness::Incomplete);
         assert_eq!(o.nth_stop(n, Duration::from_secs(5)).await, Some(H3_REQUEST_CANCELLED), "{kind:?}");
+    }
+}
+
+// ---- the MASQUE tunnel bootstrap stays within the total deadline (#386) ----
+
+/// A CONNECT-UDP tunnel to `proxy` with a short total budget and long
+/// per-phase timeouts, so only the total deadline can end it promptly.
+fn short_budget_tunnel(proxy: SocketAddr, body_idle_ms: u64) -> masque::MasqueTunnelPlan {
+    let mut t = timeouts();
+    t.response_headers_ms = Some(10_000);
+    t.body_idle_ms = Some(body_idle_ms);
+    t.total_ms = Some(800);
+    masque::MasqueTunnelPlan {
+        proxy_host: proxy.ip().to_string(),
+        proxy_port: proxy.port(),
+        proxy_authority: proxy.to_string(),
+        request_target: "/.well-known/masque/udp/127.0.0.1/9/".into(),
+        target: "127.0.0.1:9".into(),
+        headers: vec![],
+        mode: MasqueDatagramMode::Auto,
+        tls: client_tls(),
+        dns: DnsConfig::default(),
+        timeouts: t,
+        limits: limits(),
+        display_url: format!("https://{proxy}/.well-known/masque/udp/127.0.0.1/9/"),
+    }
+}
+
+fn udp_through(tunnel: masque::MasqueTunnelPlan) -> masque::MasquePlan {
+    masque::MasquePlan {
+        tunnel,
+        datagrams: vec![Bytes::from_static(b"hi")],
+        response_window_ms: 100,
+        max_datagrams: 1,
+        transcript: TranscriptLimits::default(),
+        redact: None,
+    }
+}
+
+fn dtls_through(tunnel: masque::MasqueTunnelPlan) -> dtls::DtlsPlan {
+    dtls::DtlsPlan {
+        host: "127.0.0.1".into(),
+        port: 9,
+        dns: DnsConfig::default(),
+        timeouts: tunnel.timeouts,
+        tls: client_tls(),
+        identity: None,
+        datagrams: vec![Bytes::from_static(b"hi")],
+        response_window_ms: 100,
+        max_datagrams: 1,
+        display_url: "dtls://127.0.0.1:9".into(),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+        masque: Some(tunnel),
+        hbone: None,
+    }
+}
+
+/// Runs `fut` and returns its output with how long it took.
+async fn timed<F: std::future::Future>(fut: F) -> (F::Output, Duration) {
+    let started = std::time::Instant::now();
+    let out = tokio::time::timeout(GIVE_UP, fut).await.expect("the attempt did not end");
+    (out, started.elapsed())
+}
+
+/// Within the budget, with room for setup but far below the per-phase
+/// timeouts (5 s SETTINGS wait, 30 s body idle) the old code waited for.
+const WITHIN_BUDGET: Duration = Duration::from_millis(2_500);
+
+#[tokio::test]
+async fn a_proxy_withholding_settings_stops_at_the_total_deadline() {
+    init();
+    let tls = TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone());
+    let proxy = h3raw::serve_without_settings(tls).await.expect("raw HTTP/3 peer");
+    let (events, cancel) = (EventCtx::none(), CancellationToken::new());
+    let (udp, elapsed) = timed(masque::run(&udp_through(short_budget_tunnel(proxy.addr, 30_000)), &events, &cancel, None)).await;
+    let (dtls, dtls_elapsed) = timed(dtls::run(&dtls_through(short_budget_tunnel(proxy.addr, 30_000)), &events, &cancel, None)).await;
+    for (out, elapsed) in [(&udp, elapsed), (&dtls, dtls_elapsed)] {
+        let f = out.attempts[0].observation.failure.as_ref().expect("the tunnel was not opened");
+        assert_eq!((f.kind, f.phase), (FailureKind::TotalTimeout, Phase::ProtocolHandshake), "{f:?}");
+        assert_eq!(f.deadline_ms, Some(800));
+        assert!(elapsed < WITHIN_BUDGET, "the SETTINGS wait ran past the total deadline: {elapsed:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_body_held_open_or_trickled_stops_at_the_total_deadline() {
+    init();
+    // `:status: 503` (QPACK static entry 28), then one byte of body.
+    let refusal = vec![headers(&[h3raw::indexed(28)]), h3raw::frame(DATA, b"x")];
+    let (events, cancel) = (EventCtx::none(), CancellationToken::new());
+    // Held open: no more bytes, no end (the body-idle timeout is 30 s).
+    let held = origin(vec![answer(&refusal, End::Hold)]).await;
+    // Trickled: a byte every 100 ms keeps resetting a 1 s idle timeout.
+    let dripped = origin(vec![answer(&refusal, End::Drip(Duration::from_millis(100)))]).await;
+    let runs = [
+        timed(masque::run(&udp_through(short_budget_tunnel(held.addr, 30_000)), &events, &cancel, None)).await,
+        timed(masque::run(&udp_through(short_budget_tunnel(dripped.addr, 1_000)), &events, &cancel, None)).await,
+        timed(dtls::run(&dtls_through(short_budget_tunnel(held.addr, 30_000)), &events, &cancel, None)).await,
+    ];
+    for (out, elapsed) in &runs {
+        let o = &out.attempts[0].observation;
+        let f = o.failure.as_ref().expect("the proxy refused");
+        assert_eq!(f.kind, FailureKind::MasqueRefused, "{f:?}");
+        assert_eq!(f.status, Some(503), "the refusal status is kept");
+        assert!(o.bytes.response_body_wire.unwrap_or(0) >= 1, "the captured refusal body is kept");
+        assert!(out.facts.notes.iter().any(|n| n.contains("refusal body")), "{:?}", out.facts.notes);
+        assert!(*elapsed < WITHIN_BUDGET, "the refusal body ran past the total deadline: {elapsed:?}");
     }
 }
