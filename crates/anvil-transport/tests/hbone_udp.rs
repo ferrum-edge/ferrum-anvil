@@ -181,3 +181,31 @@ async fn tunnel_leg_failures_on_the_udp_path_stay_typed_as_the_tunnels() {
     assert!(o.transcript.is_none(), "the session never opened");
     assert!(echo.log.entries().is_empty(), "nothing reached the destination");
 }
+
+/// Cancellation the moment the exchange starts (tunnel open, send credit
+/// available, scripted datagrams pending) hands no record to the tunnel.
+#[tokio::test]
+async fn cancellation_at_session_start_sends_no_record() {
+    use anvil_domain::events::ExecutionEvent;
+    init();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let ep = endpoint(&["h2"], vec![echo.addr.to_string()]).await;
+    let p = plan(echo.addr, proxy(&ep.address()), &[b"one", b"two"]);
+    for _ in 0..10 {
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        let events = EventCtx {
+            execution_id: anvil_domain::Id::new(),
+            sink: Some(Arc::new(move |ev: ExecutionEvent| {
+                if let ExecutionEvent::Phase { phase: Phase::Session, .. } = ev {
+                    c.cancel();
+                }
+            })),
+        };
+        let o = hbone_udp::run(&p, &events, &cancel, None).await;
+        let a = attempt(&o);
+        assert_eq!(a.failure.as_ref().map(|f| f.kind), Some(FailureKind::Canceled), "{:?}", a.failure);
+        assert_eq!(tunnel(&o).datagrams.as_ref().unwrap().records_sent, 0);
+    }
+    assert!(!echo.log.entries().iter().any(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })), "no datagram reached the target");
+}

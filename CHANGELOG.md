@@ -92,8 +92,8 @@
   - `docs/load.md` names the actual MASQUE refusal (`masque_through_proxy`).
   - Follow-ups: HTML load reports count each failed unit once; server
     reflection discards a header `grpc-status` followed by data without
-    trailers; interactive UDP sends observe cancellation and the total
-    deadline; timeline peaks are timestamped under the ledger lock; direct DTLS
+    trailers; interactive UDP sends observe cancellation (scripted UDP,
+    including through HBONE, also observes the total deadline); timeline peaks are timestamped under the ledger lock; direct DTLS
     applies one total deadline across DNS, handshake and exchange (and MASQUE
     and HBONE DTLS no longer restart it after the handshake).
 

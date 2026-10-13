@@ -1299,9 +1299,10 @@ mod tests {
             // the clock moves to bucket 1 before the ledger is released.
             let held = ledger.lock();
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-            let second = s.spawn(|| {
+            let shared = &ledger;
+            let second = s.spawn(move || {
                 ready_tx.send(()).unwrap();
-                ledger_begin_send(&ledger, true, bucket_of);
+                ledger_begin_send(shared, true, bucket_of);
             });
             ready_rx.recv().unwrap();
             // Give the contender time to block on the ledger (a pre-lock

@@ -1107,7 +1107,16 @@ async fn exchange<C: DatagramChannel>(
             Ok(Ok(())) => tr.control(Direction::Sent, "close_notify", b""),
             Ok(Err(_)) => {}
             // Not taken within its bound: it may have been partly written.
-            Err(_) => notes.send_interrupted = true,
+            // Running out of the close bound alone is best effort; cancellation
+            // or the total deadline ending it ends the attempt that way.
+            Err(i) => {
+                notes.send_interrupted = true;
+                if failure.is_none() && matches!(i, Interrupted::Canceled) {
+                    failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the DTLS exchange was canceled"));
+                } else if failure.is_none() && total_deadline.is_some_and(|t| Instant::now() >= t) {
+                    failure = Some(total_timeout());
+                }
+            }
         }
     }
     if facts.repeated_datagrams > 0 {
