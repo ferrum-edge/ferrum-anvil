@@ -143,7 +143,18 @@ impl Drop for RawH3 {
 }
 
 /// Serve `answers` over HTTP/3 on a loopback port.
-pub async fn serve(mut tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::Result<RawH3> {
+pub async fn serve(tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::Result<RawH3> {
+    serve_with(tls, answers, true).await
+}
+
+/// A peer that completes QUIC (ALPN `h3`) but never sends its control
+/// stream or SETTINGS, so a client waiting for them (a MASQUE client
+/// checking extended CONNECT) waits; no request is answered.
+pub async fn serve_without_settings(tls: TlsServerOptions) -> anyhow::Result<RawH3> {
+    serve_with(tls, vec![], false).await
+}
+
+async fn serve_with(mut tls: TlsServerOptions, answers: Vec<Answer>, send_settings: bool) -> anyhow::Result<RawH3> {
     tls.alpn = vec!["h3".into()];
     tls.tls13_only = true;
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_config(&tls)?)?;
@@ -161,6 +172,11 @@ pub async fn serve(mut tls: TlsServerOptions, answers: Vec<Answer>) -> anyhow::R
             tokio::spawn(async move {
                 let Ok(conn) = incoming.await else { return };
                 tokio::spawn(read_client_settings(conn.clone(), adv));
+                if !send_settings {
+                    // Hold the connection open without a control stream.
+                    let _ = conn.closed().await;
+                    return;
+                }
                 // The control stream: its type, then SETTINGS with
                 // SETTINGS_ENABLE_CONNECT_PROTOCOL = 1. It stays open while the
                 // connection is served.

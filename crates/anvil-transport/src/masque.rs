@@ -725,10 +725,27 @@ pub(crate) async fn open(
 
     // ---- the proxy's SETTINGS: nothing is sent before they allow it ----
     let wait_ms = plan.timeouts.response_headers_ms.unwrap_or(5_000).min(5_000);
-    let peer = match crate::h3::await_peer_settings(&send, wait_ms, cancel).await {
+    // The attempt's total deadline bounds this wait too (cancellation, then
+    // the deadline, win over SETTINGS that are ready at the same moment).
+    let settings = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("canceled"),
+        _ = sleep_until_opt(total_deadline) => Err("total_deadline"),
+        r = crate::h3::await_peer_settings(&send, wait_ms, cancel) => r,
+    };
+    let peer = match settings {
         Ok(p) => p,
         Err(why) => {
             close_quic(&quic);
+            if why == "total_deadline" {
+                let f = TransportFailure::new(
+                    Phase::ProtocolHandshake,
+                    FailureKind::TotalTimeout,
+                    "the total deadline elapsed while waiting for the proxy's HTTP/3 SETTINGS; nothing was sent",
+                )
+                .with_deadline(plan.timeouts.total_ms);
+                return Err(not_opened(f, Some(tunnel)));
+            }
             if why == "canceled" {
                 let f = TransportFailure::new(
                     Phase::ProtocolHandshake,
@@ -830,11 +847,12 @@ pub(crate) async fn open(
     let before = quic.stats();
     let w_idx = rec.start(Phase::RequestWrite);
     let sent = tokio::select! {
-        r = send.send_request(req) => r.map_err(|e| crate::h3::stream_failure(&e, Phase::RequestWrite, FailureKind::RequestWriteFailed,
-            "sending the CONNECT-UDP request failed")),
+        biased;
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending the CONNECT-UDP request")),
         _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::TotalTimeout,
             "total deadline elapsed while sending the CONNECT-UDP request").with_deadline(plan.timeouts.total_ms)),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending the CONNECT-UDP request")),
+        r = send.send_request(req) => r.map_err(|e| crate::h3::stream_failure(&e, Phase::RequestWrite, FailureKind::RequestWriteFailed,
+            "sending the CONNECT-UDP request failed")),
     };
     let mut stream = match sent {
         Ok(s) => s,
@@ -851,13 +869,14 @@ pub(crate) async fn open(
     let h_idx = rec.start(Phase::AwaitResponseHeaders);
     let headers_deadline = deadline_from(plan.timeouts.response_headers_ms);
     let resp = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled before the proxy answered")),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
+            "total deadline elapsed before the proxy answered").with_deadline(plan.timeouts.total_ms)),
         r = stream.recv_response() => r.map_err(|e| crate::h3::stream_failure(&e, Phase::AwaitResponseHeaders, FailureKind::ResetBeforeResponse,
             "the proxy ended the CONNECT-UDP stream before answering")),
         _ = sleep_until_opt(headers_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::ResponseHeadersTimeout,
             "the proxy did not answer the CONNECT-UDP request before the response-header deadline").with_deadline(plan.timeouts.response_headers_ms)),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::TotalTimeout,
-            "total deadline elapsed before the proxy answered").with_deadline(plan.timeouts.total_ms)),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::AwaitResponseHeaders, FailureKind::Canceled, "canceled before the proxy answered")),
     };
     let resp = match resp {
         Ok(r) => r,
@@ -882,12 +901,18 @@ pub(crate) async fn open(
         let mut captured = BytesMut::new();
         let mut wire = 0u64;
         let mut completeness = BodyCompleteness::Complete;
+        // The refusal body is evidence, read within the attempt's total
+        // deadline: a body held open or trickled past it stops there, with
+        // the status and what was captured kept.
+        let mut deadline_hit = false;
         loop {
             let idle = deadline_from(plan.timeouts.body_idle_ms.or(Some(5_000)));
             let chunk = tokio::select! {
-                c = stream.recv_data() => c,
-                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                biased;
                 _ = cancel.cancelled() => { completeness = BodyCompleteness::Canceled; break; }
+                _ = sleep_until_opt(total_deadline) => { completeness = BodyCompleteness::Incomplete; deadline_hit = true; break; }
+                _ = sleep_until_opt(idle) => { completeness = BodyCompleteness::Incomplete; break; }
+                c = stream.recv_data() => c,
             };
             match chunk {
                 Ok(Some(mut c)) => {
@@ -908,16 +933,43 @@ pub(crate) async fn open(
                 }
             }
         }
-        rec.finish(b_idx, if completeness == BodyCompleteness::Complete { PhaseStatus::Completed } else { PhaseStatus::Failed });
-        close_quic(&quic);
-        let mut f = TransportFailure::new(
-            Phase::ProtocolHandshake,
-            FailureKind::MasqueRefused,
-            format!(
-                "the MASQUE proxy answered the CONNECT-UDP request for {} with HTTP {status}; no tunnel was opened and no datagram was sent",
-                plan.target
-            ),
+        rec.finish(
+            b_idx,
+            match completeness {
+                BodyCompleteness::Complete => PhaseStatus::Completed,
+                _ if deadline_hit => PhaseStatus::TimedOut,
+                _ => PhaseStatus::Failed,
+            },
         );
+        if deadline_hit {
+            facts.notes.push(format!(
+                "the total deadline ({} ms) elapsed while reading the proxy's refusal body; the body is incomplete",
+                plan.timeouts.total_ms.unwrap_or_default()
+            ));
+        }
+        close_quic(&quic);
+        // A refusal whose body outlived the total deadline is a timeout (with
+        // the refusal's status, headers and captured body kept as evidence).
+        let mut f = if deadline_hit {
+            TransportFailure::new(
+                Phase::ResponseBody,
+                FailureKind::TotalTimeout,
+                format!(
+                    "the MASQUE proxy refused the CONNECT-UDP request for {} with HTTP {status}, and the total deadline elapsed while its refusal body was still being read; no tunnel was opened and no datagram was sent",
+                    plan.target
+                ),
+            )
+            .with_deadline(plan.timeouts.total_ms)
+        } else {
+            TransportFailure::new(
+                Phase::ProtocolHandshake,
+                FailureKind::MasqueRefused,
+                format!(
+                    "the MASQUE proxy answered the CONNECT-UDP request for {} with HTTP {status}; no tunnel was opened and no datagram was sent",
+                    plan.target
+                ),
+            )
+        };
         f.status = Some(status);
         obs.bytes.response_body_wire = Some(wire);
         let captured = captured.freeze();
