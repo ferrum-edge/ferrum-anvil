@@ -83,7 +83,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 tungstenite = { version = "0.30.0", default-features = false, features = ["deflate"] }
 prost = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
-protox = "0.9.1"
+protox = "0.10.0"
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
 dns-lookup = "4.0.1"
 socket2 = "0.6.5"
