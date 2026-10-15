@@ -70,6 +70,13 @@
 
 ### Fixed
 
+- The lab refuses `--scenario` selectors that name no scenario of the selected
+  profile (or of any profile for `run all`) before starting fixtures, instead
+  of reporting an empty run as a success. Explicitly skipped scenarios stay
+  selectable, and the `policy` and `admission` listings now include them. The
+  MCP lab's "did not forward" ground truth now requires zero upstream calls, so
+  a refused call forwarded twice fails.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback
