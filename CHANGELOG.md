@@ -70,6 +70,11 @@
 
 ### Fixed
 
+- Attaching the same file again after a data-key rotation no longer leaves the
+  file's pre-rotation blob pinned with nothing able to release it. The new
+  blob replaces it in the attachment index, and the old one is released in the
+  same transaction.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback
