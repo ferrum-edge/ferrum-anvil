@@ -1073,7 +1073,10 @@ fn late_completion(signal: Late) -> RunCompletion {
 
 /// A user cancel or vault lock that arrives after the schedule ended, while
 /// an iteration's chain is still in flight, halts the chain before its next
-/// step and is reported as the stop reason (not `Completed`).
+/// step and is reported as the stop reason (not `Completed`). The first
+/// step's response arrives before the cancel drain window ends, so it
+/// completes, and only the chain check can keep the second step from
+/// starting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_signal_during_the_graceful_drain_halts_chains_and_is_reported() {
     let _g = serial().await;
@@ -1083,14 +1086,40 @@ async fn a_signal_during_the_graceful_drain_halts_chains_and_is_reported() {
         // One user for one second; its first iteration's first step outlasts the schedule.
         let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a, b]);
         let job = LoadJob {
-            requests: [(a, get(&f.url("/delay-headers/3000"))), (b, get(&f.url("/count/after-signal")))].into_iter().collect(),
+            requests: [(a, get(&f.url("/delay-headers/2000"))), (b, get(&f.url("/count/after-signal")))].into_iter().collect(),
             dataset: None,
         };
-        let (r, _) = run_with_late_signal(p, job, opts(), signal).await;
+        let o = RunOptions { graceful_stop_ms: 10_000, cancel_drain_ms: 4_000, ..opts() };
+        let (r, _) = run_with_late_signal(p, job, o, signal).await;
         assert_balanced(&r);
         assert_eq!(r.completion, late_completion(signal), "{signal:?}: {:?}", r.notes);
+        assert_eq!((r.requests.started, r.requests.completed), (1, 1), "{signal:?}: the first step completed");
+        assert_eq!(r.counts.canceled, 1, "{signal:?}: the iteration was canceled between its steps");
         assert_eq!(f.state.counters.lock().get("after-signal"), None, "{signal:?}: no step started after the signal");
-        assert_eq!(r.requests.started, 1, "{signal:?}");
+    }
+}
+
+/// A run whose cancel or lock token is already set when it starts sends
+/// nothing: iterations check the tokens themselves, so none slips through
+/// before the observer task turns the signal into a stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signal_set_before_iterations_run_sends_nothing() {
+    let _g = serial().await;
+    for signal in [Late::Lock, Late::Cancel] {
+        let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+        let a = Id::new();
+        let p = plan(Workload::Iterations { iterations: 20, concurrency: 4 }, vec![a]);
+        let job = LoadJob { requests: [(a, get(&f.url("/count/early")))].into_iter().collect(), dataset: None };
+        let (cancel, lock) = (CancellationToken::new(), CancellationToken::new());
+        match signal {
+            Late::Cancel => cancel.cancel(),
+            Late::Lock => lock.cancel(),
+        }
+        let r = LoadRun::prepare(p, job, opts()).expect("valid plan").execute_lockable(cancel, lock, None).await;
+        assert_balanced(&r);
+        assert_eq!(r.completion, late_completion(signal), "{signal:?}");
+        assert_eq!(r.requests.started, 0, "{signal:?}");
+        assert_eq!(f.state.counters.lock().get("early"), None, "{signal:?}");
     }
 }
 

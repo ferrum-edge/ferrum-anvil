@@ -428,7 +428,18 @@ impl Shared {
     /// No further chain steps: halted, or the user canceled or the vault
     /// locked (whether or not the observer has recorded it yet).
     fn chains_halted(&self) -> bool {
-        self.halt.is_cancelled() || self.cancel.is_cancelled() || self.lock.is_cancelled()
+        self.halt.is_cancelled() || self.external_stop()
+    }
+
+    /// The user canceled or the vault locked, read from the caller's tokens.
+    fn external_stop(&self) -> bool {
+        self.cancel.is_cancelled() || self.lock.is_cancelled()
+    }
+
+    /// No new iterations: scheduling stopped, or a cancel or lock the
+    /// observer has not turned into `stop` yet.
+    fn admission_stopped(&self) -> bool {
+        self.stop.is_cancelled() || self.external_stop()
     }
 
     fn engine(&self, slot: usize) -> Arc<Engine> {
@@ -745,7 +756,9 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
     let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
     let (mut terminal, mut app, mut assertion) = (Terminal::Completed, false, false);
     for (pos, &si) in steps.iter().enumerate() {
-        if pos > 0 && sh.chains_halted() {
+        // Checked before the first step too: an iteration admitted just
+        // before a cancel or lock (its task not yet run) sends nothing.
+        if sh.chains_halted() {
             terminal = Terminal::Canceled;
             break;
         }
@@ -803,7 +816,7 @@ async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration, tota
         set.spawn(async move {
             loop {
                 let now = Instant::now();
-                if sh.stop.is_cancelled() || now >= end {
+                if sh.admission_stopped() || now >= end {
                     break;
                 }
                 let t = now.duration_since(sh.t0).as_secs_f64();
@@ -850,6 +863,9 @@ async fn drive_open(sh: Arc<Shared>, stages: Vec<Stage>, max_in_flight: usize, t
             _ = tokio::time::sleep_until(at.into()) => {}
         }
         while set.try_join_next().is_some() {}
+        if sh.admission_stopped() {
+            break;
+        }
         let measured = sh.measured_at(at);
         let slot = free.lock().pop();
         match slot {
@@ -881,7 +897,7 @@ async fn drive_iterations(sh: Arc<Shared>, iterations: u64, lanes: usize) -> (In
     for lane in 0..lanes {
         let (sh, claimed) = (sh.clone(), claimed.clone());
         set.spawn(async move {
-            while !sh.stop.is_cancelled() && claimed.fetch_add(1, Ordering::Relaxed) < iterations {
+            while !sh.admission_stopped() && claimed.fetch_add(1, Ordering::Relaxed) < iterations {
                 let measured = sh.measured_at(Instant::now());
                 sh.begin_iteration(measured);
                 run_iteration(&sh, lane, measured).await;
