@@ -70,6 +70,12 @@
 
 ### Fixed
 
+- `app.mcp_tool_error` no longer says the call reached the tool or assigns
+  it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
+  `isError: true` result when the gateway fails or refuses the call it makes for
+  the tool. The error result stays confirmed, scope and owner are unknown, and
+  the finding lists both explanations.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback
