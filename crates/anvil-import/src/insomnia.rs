@@ -21,7 +21,7 @@ use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 64;
