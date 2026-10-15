@@ -463,7 +463,8 @@ fn graphql_json_without_a_query_string_is_sanitized_not_copied_into_the_query() 
 #[test]
 fn a_bare_graphql_query_stays_a_query_when_the_budget_is_spent() {
     // The first request's JSON body spends the embedded-document budget.
-    let big = format!("[{}]", vec!["0"; 40].join(","));
+    // An array of 63 items is 64 nodes: the whole budget.
+    let big = format!("[{}]", vec!["0"; 63].join(","));
     let doc = serde_json::json!({
         "_type": "export",
         "__export_format": 4,
@@ -481,6 +482,25 @@ fn a_bare_graphql_query_stays_a_query_when_the_budget_is_spent() {
         Body::GraphQl { query, .. } => assert_eq!(query, "{ a }"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn graphql_json_that_cannot_be_parsed_is_kept_as_raw_json_with_a_warning() {
+    let deep = format!("{{\"query\":\"q\",\"variables\":{}{}}}", "[".repeat(150), "]".repeat(150));
+    for text in [r#"{"query":"q","variables":{"password":"placeholder-secret",}}"#.to_string(), deep] {
+        let r =
+            v4_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } }));
+        match &r.requests[0].spec.body {
+            Body::Raw { content_type, .. } => assert_eq!(content_type.as_deref(), Some("application/json")),
+            other => panic!("{other:?}"),
+        }
+        assert!(has_at(&r, "body_not_scanned", "/resources/1/body/text"));
+    }
+    // A shorthand query is still a query.
+    let r = v4_request(
+        serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": "{ a { b } }" } }),
+    );
+    assert!(matches!(&r.requests[0].spec.body, Body::GraphQl { query, .. } if query == "{ a { b } }"));
 }
 
 #[test]

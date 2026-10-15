@@ -85,9 +85,13 @@
     too, and a body that repeats a member name is rewritten so an earlier,
     unscanned value does not survive. XML, SOAP, other text and unparsable
     JSON bodies get `body_not_scanned` in every migration format.
-  - An Insomnia GraphQL envelope over the budget, or one without a `query`
-    string, is kept as a raw JSON body instead of becoming the query text; a
-    bare GraphQL query stays a query.
+  - An Insomnia GraphQL envelope over the budget, malformed, or without a
+    `query` string is kept as a raw JSON body instead of becoming the query
+    text; a bare GraphQL query stays a query.
+  - cURL `-G` data with a bare flag (`flag&api_key=…`) becomes one query
+    parameter per segment, so credential-like values are redacted.
+  - An OpenAPI JSON example given as a string is validated as JSON without
+    building it (it used to be parsed in full outside the node budget).
   - Credential-like values in a URL query that is kept verbatim (it has a bare
     `flag` segment, or it is written into an Insomnia URL) are redacted in
     place in cURL, Postman and Insomnia imports, as HAR already did; a kept

@@ -672,10 +672,20 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
             .collect::<Vec<_>>()
             .join(if json { "" } else { "&" });
         if get {
-            for (k, v) in parse_form(&joined)
-                .map(|f| f.into_iter().map(|kv| (kv.name, kv.value)).collect::<Vec<_>>())
-                .unwrap_or_else(|| vec![(joined.clone(), String::new())])
-            {
+            // Pairs become parameters; a segment without `=` (a bare flag)
+            // becomes a parameter of that name, so the credential policy
+            // still sees every `name=value` beside it.
+            let pairs = parse_form(&joined).map(|f| f.into_iter().map(|kv| (kv.name, kv.value)).collect::<Vec<_>>()).unwrap_or_else(|| {
+                joined
+                    .split('&')
+                    .filter(|seg| !seg.is_empty())
+                    .map(|seg| match seg.split_once('=') {
+                        Some((k, v)) => (crate::common::form_decode(k), crate::common::form_decode(v)),
+                        None => (crate::common::form_decode(seg), String::new()),
+                    })
+                    .collect()
+            });
+            for (k, v) in pairs {
                 let (value, sensitive) = maybe_redact(b, &k, &v, "/args", "query");
                 params.push(KeyValue { name: k, value, enabled: true, description: String::new(), sensitive });
             }

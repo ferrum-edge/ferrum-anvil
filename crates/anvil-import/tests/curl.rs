@@ -325,3 +325,12 @@ fn numeric_credentials_and_unscannable_data() {
     let r = curl("curl -H 'Content-Type: application/xml' -d '<a>placeholder-secret</a>' https://example.test");
     assert!(has_at(&r, "body_not_scanned", "/args"));
 }
+
+#[test]
+fn get_data_with_a_bare_flag_keeps_the_credential_policy() {
+    let r = curl("curl -G -d 'flag&api_key=placeholder-secret' https://example.test");
+    let s = &r.requests[0].spec;
+    assert_eq!(param(s, "api_key").map(|p| p.value.as_str()), Some("{{api_key}}"));
+    assert!(param(s, "flag").is_some());
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+}

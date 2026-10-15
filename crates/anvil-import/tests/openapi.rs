@@ -862,3 +862,19 @@ fn operations_under_a_long_path_charge_their_urls_and_pointers() {
     assert!(has(&r, "text_size_limit"));
     assert!(r.requests.len() < 10, "{} requests", r.requests.len());
 }
+
+#[test]
+fn a_stringified_json_example_is_not_expanded_past_the_node_budget() {
+    let big = format!("[{}]", vec!["0"; 500].join(","));
+    let doc = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": { "/a": { "post": {
+            "requestBody": { "content": { "application/json": { "schema": { "type": "array" }, "example": big } } },
+            "responses": { "200": { "description": "ok" } }
+        } } }
+    });
+    let o = anvil_import::ImportOptions { max_nodes: 64, ..opts() };
+    // Imports within the budget: the example string is validated, not built.
+    anvil_import::import(doc.to_string().as_bytes(), &o).unwrap();
+}

@@ -728,6 +728,12 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
             // `operationName`) or a bare GraphQL query. An envelope is parsed
             // under the import's embedded-document budget and taken by value.
             let bare = || Body::GraphQl { query: text.clone(), variables: String::new(), operation_name: None };
+            // A JSON envelope starts with an array or an object key; a GraphQL
+            // query (`{ field }`, `query { … }`) never does.
+            let json_looking = {
+                let t = text.trim_start();
+                t.starts_with('[') || t.strip_prefix('{').is_some_and(|r| matches!(r.trim_start().chars().next(), Some('"' | '}')))
+            };
             let mut envelope = match parse_embedded_json(b, &text) {
                 Ok(parsed) => match parsed.value {
                     Value::Object(m) if m.get("query").is_some_and(Value::is_string) => m,
@@ -746,18 +752,18 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
                         return Body::Raw { text, content_type: Some("application/json".into()) };
                     }
                 },
-                // Over the budget: an envelope (valid JSON, checked without
-                // building it) is kept as raw JSON; anything else is a query.
-                Err(ImportError::LimitExceeded { what, limit }) => {
-                    if serde_json::from_str::<serde::de::IgnoredAny>(&text).is_err() {
-                        return bare();
-                    }
+                // Not parsed (over the budget, too deep, malformed): an
+                // envelope is kept as raw JSON text, unscanned; anything else
+                // is the query itself.
+                Err(e) if json_looking => {
+                    let why = match e {
+                        ImportError::LimitExceeded { what, limit } => format!("exceeds the import limit for {what} ({limit})"),
+                        _ => "could not be parsed".to_string(),
+                    };
                     b.report.warn(
                         "body_not_scanned",
                         &ptr(at, "text"),
-                        format!(
-                            "GraphQL body exceeds the import limit for {what} ({limit}); imported as a raw JSON body and not scanned for credentials"
-                        ),
+                        format!("GraphQL JSON body {why}; imported as a raw JSON body and not scanned for credentials"),
                     );
                     return Body::Raw { text, content_type: Some("application/json".into()) };
                 }
