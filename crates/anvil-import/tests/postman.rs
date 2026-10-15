@@ -212,3 +212,38 @@ fn raw_json_bodies_and_mixed_raw_queries_are_redacted() {
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 2);
 }
+
+fn postman_body(body: serde_json::Value, o: &ImportOptions) -> anvil_import::ImportResult {
+    let doc = serde_json::json!({
+        "info": {"name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [{"name": "r", "request": { "url": "https://x.example.com/a", "method": "POST", "body": body }}]
+    });
+    import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+#[test]
+fn graphql_variables_numeric_credentials_and_unscannable_bodies() {
+    let gql = serde_json::json!({"mode": "graphql", "graphql": {"query": "mutation { login }", "variables": "{\"password\":\"placeholder-secret\",\"pin\":123456}"}});
+    let r = postman_body(gql.clone(), &opts());
+    match &r.requests[0].spec.body {
+        Body::GraphQl { variables, .. } => {
+            let v: serde_json::Value = serde_json::from_str(variables).unwrap();
+            assert_eq!((v["password"].as_str(), v["pin"].as_str()), (Some("{{password}}"), Some("{{pin}}")));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    // Kept as written with include_credentials.
+    let r = postman_body(gql, &ImportOptions { include_credentials: true, ..opts() });
+    match &r.requests[0].spec.body {
+        Body::GraphQl { variables, .. } => assert!(variables.contains("placeholder-secret")),
+        other => panic!("{other:?}"),
+    }
+    // A repeated credential member keeps only its last value.
+    let raw = serde_json::json!({"mode": "raw", "raw": "{\"pin\":1234,\"pin\":\"{{pin}}\"}", "options": {"raw": {"language": "json"}}});
+    let r = postman_body(raw, &opts());
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("1234"));
+    // XML cannot be scanned.
+    let xml = serde_json::json!({"mode": "raw", "raw": "<p>placeholder-secret</p>", "options": {"raw": {"language": "xml"}}});
+    assert!(has(&postman_body(xml, &opts()), "body_not_scanned"));
+}

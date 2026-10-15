@@ -78,10 +78,15 @@
     `body_not_scanned` warning; the GraphQL payload is no longer copied.
   - cURL short-option clusters count against the 10,000-argument limit after
     expansion, not only as shell words.
-  - Postman and Insomnia raw JSON bodies have credential-like members redacted
-    like HAR and cURL bodies (`body_not_scanned` when they cannot be parsed),
+  - Postman and Insomnia raw JSON bodies and Postman/Insomnia GraphQL
+    variables have credential-like members redacted like HAR and cURL bodies,
     and Insomnia form bodies parsed from text have credential-like fields
-    redacted.
+    redacted. Numbers under credential names (`pin`, `otp`, …) are redacted
+    too, and a body that repeats a credential-like member is rewritten so an
+    earlier literal does not survive. XML, SOAP, other text and unparsable
+    JSON bodies get `body_not_scanned` in every migration format.
+  - An Insomnia GraphQL envelope over the budget is kept as a raw JSON body
+    instead of becoming the query text.
   - Credential-like values in a URL query that is kept verbatim (it has a bare
     `flag` segment, or it is written into an Insomnia URL) are redacted in
     place in cURL, Postman and Insomnia imports, as HAR already did; a kept

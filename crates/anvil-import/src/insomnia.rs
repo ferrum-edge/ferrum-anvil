@@ -10,7 +10,7 @@
 use crate::builder::Builder;
 use crate::common::{
     body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact,
-    parse_embedded_json, parse_form, redact_raw_query, scrub_body,
+    parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -683,7 +683,11 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
                     scrub_body(b, &mut body, &ptr(at, "text"));
                     body
                 }
-                None => Body::Raw { text, content_type: mime },
+                None => {
+                    let body = Body::Raw { text, content_type: mime };
+                    warn_unscanned(b, &body, &ptr(at, "text"));
+                    body
+                }
             },
         },
         "multipart/form-data" => {
@@ -722,27 +726,31 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
         "application/graphql" => {
             // Parsed under the import's embedded-document budget and taken
             // by value: the payload is never copied.
-            let parsed: Map<String, Value> = match parse_embedded_json(b, &text) {
-                Ok(Value::Object(m)) => m,
-                Ok(_) => Map::new(),
-                Err(e) => {
-                    if let ImportError::LimitExceeded { what, limit } = e {
-                        b.report.warn(
-                            "body_not_scanned",
-                            &ptr(at, "text"),
-                            format!("GraphQL body exceeds the import limit for {what} ({limit}); imported as query text"),
-                        );
-                    }
-                    Map::new()
+            let mut envelope = match parse_embedded_json(b, &text) {
+                Ok(parsed) => match parsed.value {
+                    Value::Object(m) => m,
+                    _ => Map::new(),
+                },
+                Err(ImportError::LimitExceeded { what, limit }) => {
+                    // Kept as the JSON envelope it is, not re-wrapped as a query.
+                    b.report.warn(
+                        "body_not_scanned",
+                        &ptr(at, "text"),
+                        format!(
+                            "GraphQL body exceeds the import limit for {what} ({limit}); imported as a raw JSON body and not scanned for credentials"
+                        ),
+                    );
+                    return Body::Raw { text, content_type: Some("application/json".into()) };
                 }
+                // Not JSON: the text is the query itself.
+                Err(_) => Map::new(),
             };
-            let query = parsed.get("query").and_then(Value::as_str).unwrap_or(&text).to_string();
-            let variables = match parsed.get("variables") {
-                Some(Value::Null) | None => String::new(),
-                Some(Value::String(s)) => s.clone(),
-                Some(o) => o.to_string(),
+            let query = match envelope.remove("query") {
+                Some(Value::String(q)) => q,
+                _ => text.clone(),
             };
-            let operation_name = parsed.get("operationName").and_then(Value::as_str).map(str::to_string);
+            let variables = scrub_graphql_variables(b, envelope.remove("variables"), &ptr(at, "text/variables"));
+            let operation_name = envelope.get("operationName").and_then(Value::as_str).map(str::to_string);
             Body::GraphQl { query, variables, operation_name }
         }
         _ if str_of(v, "fileName").is_some_and(|f| !f.is_empty()) => {

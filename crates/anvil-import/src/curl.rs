@@ -743,6 +743,8 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
             }
         }
     }
+    // XML, SOAP and other text data cannot be scanned for credentials.
+    crate::common::warn_unscanned(b, &body, "/args#data");
     dedupe_content_type(&mut headers, &body);
     if json && is_json_media(ct.as_deref().unwrap_or("")) {
         headers.retain(|h| !(h.name.eq_ignore_ascii_case("content-type") && h.value == "application/json"));

@@ -42,6 +42,9 @@ impl Limits {
 
 struct Budget {
     remaining: Cell<usize>,
+    /// Whether a map repeated a credential-like key (the later value
+    /// replaced the earlier one, which the tree no longer shows).
+    credential_duplicate: Cell<bool>,
     bytes_remaining: Cell<usize>,
     exhausted: Cell<bool>,
     bytes_exhausted: Cell<bool>,
@@ -183,6 +186,9 @@ impl<'de> Visitor<'de> for Bounded<'_> {
         let mut out = Map::new();
         while let Some(k) = map.next_key_seed(KeySeed(self.budget))? {
             let v = map.next_value_seed(child)?;
+            if out.contains_key(&k) && crate::util::is_credential_name(&k) {
+                self.budget.credential_duplicate.set(true);
+            }
             out.insert(k, v);
         }
         Ok(Value::Object(out))
@@ -271,6 +277,7 @@ fn limit_error(b: &Budget, limits: Limits) -> Option<ImportError> {
 fn new_budget(limits: Limits) -> Budget {
     Budget {
         remaining: Cell::new(limits.max_nodes),
+        credential_duplicate: Cell::new(false),
         bytes_remaining: Cell::new(limits.max_bytes),
         exhausted: Cell::new(false),
         bytes_exhausted: Cell::new(false),
@@ -279,17 +286,26 @@ fn new_budget(limits: Limits) -> Budget {
 }
 
 pub fn parse_json(text: &str, limits: Limits) -> Result<Value, ImportError> {
-    parse_json_counted(text, limits).0
+    parse_json_counted(text, limits).0.map(|p| p.value)
+}
+
+/// A JSON document parsed by [`parse_json_counted`].
+pub struct CountedJson {
+    pub value: Value,
+    /// Whether some object repeated a credential-like key: the tree keeps
+    /// only the last value, so it no longer shows every value the text holds.
+    pub credential_duplicate: bool,
 }
 
 /// [`parse_json`] that also returns the nodes it charged, whether or not the
 /// parse succeeded, so a caller can draw several parses from one budget.
-pub fn parse_json_counted(text: &str, limits: Limits) -> (Result<Value, ImportError>, usize) {
+pub fn parse_json_counted(text: &str, limits: Limits) -> (Result<CountedJson, ImportError>, usize) {
     let budget = new_budget(limits);
     let mut de = serde_json::Deserializer::from_str(text);
     let res = Bounded { budget: &budget, depth: 0 }.deserialize(&mut de).and_then(|v| de.end().map(|_| v));
     let used = limits.max_nodes - budget.remaining.get();
-    let res = res.map_err(|e| {
+    let credential_duplicate = budget.credential_duplicate.get();
+    let res = res.map(|value| CountedJson { value, credential_duplicate }).map_err(|e| {
         limit_error(&budget, limits).unwrap_or_else(|| ImportError::Syntax {
             syntax: "JSON".into(),
             message: e.to_string(),

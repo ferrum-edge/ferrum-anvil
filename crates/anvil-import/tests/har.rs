@@ -186,3 +186,11 @@ fn embedded_json_bodies_share_the_node_budget() {
     assert!(matches!(r.requests[1].spec.body, Body::Raw { .. }));
     assert!(has_at(&r, "body_not_scanned", "/log/entries/1/request/postData/text"));
 }
+
+#[test]
+fn repeated_and_numeric_credential_members_are_redacted() {
+    let r =
+        har_post(serde_json::json!([]), "application/json", r#"{"password":"placeholder-secret","password":"{{password}}","pin":4321}"#);
+    let all = serde_json::to_string(&r.requests).unwrap();
+    assert!(!all.contains("placeholder-secret") && !all.contains("4321"), "{all}");
+}

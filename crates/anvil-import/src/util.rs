@@ -228,6 +228,20 @@ pub fn is_credential_name(name: &str) -> bool {
     CREDENTIAL_PARTS.iter().any(|p| n.contains(p))
 }
 
+/// [`is_credential_name`] for a member holding a number (a PIN, a one-time
+/// code, a numeric API key). A name recognized only by the `token` part is
+/// left out: numbers under such names are counts (`max_tokens`,
+/// `token_count`), not credentials.
+pub fn is_numeric_credential_name(name: &str) -> bool {
+    if !is_credential_name(name) {
+        return false;
+    }
+    let n = name.trim().to_ascii_lowercase();
+    CREDENTIAL_HEADERS.contains(&n.as_str())
+        || CREDENTIAL_EXACT.contains(&n.as_str())
+        || CREDENTIAL_PARTS.iter().filter(|p| **p != "token").any(|p| n.contains(p))
+}
+
 /// True when `v` contains literal text that could be secret material, i.e.
 /// anything besides `{{variable}}` references and an auth-scheme word
 /// (`Bearer {{token}}` carries no literal secret).

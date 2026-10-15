@@ -3,7 +3,9 @@
 //! splitting and dynamic-variable checks.
 
 use crate::builder::Builder;
-use crate::util::{has_literal_secret, is_credential_name, is_json_media, is_xml_media, media_essence, sanitize_var};
+use crate::util::{
+    has_literal_secret, is_credential_name, is_json_media, is_numeric_credential_name, is_xml_media, media_essence, sanitize_var,
+};
 use anvil_domain::request::{Body, KeyValue};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::Variable;
@@ -62,7 +64,8 @@ pub fn maybe_redact(b: &mut Builder, name: &str, value: &str, pointer: &str, wha
     (credential_text(b, value, name, pointer, &format!("{what} {name}")), true)
 }
 
-/// Replace credential-looking string members of a JSON body (recursively).
+/// Replace credential-looking string members of a JSON body (recursively),
+/// and numbers under names that hold numeric credentials (a `pin`, an `otp`).
 pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
     match v {
         Value::Object(m) => {
@@ -73,6 +76,16 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
                 {
                     let new = credential_text(b, s, k, &p, &format!("body field {k}"));
                     *s = new;
+                    continue;
+                }
+                if is_numeric_credential_name(k)
+                    && let Value::Number(n) = child
+                {
+                    let literal = n.to_string();
+                    let new = credential_text(b, &literal, k, &p, &format!("body field {k}"));
+                    if new != literal {
+                        *child = Value::String(new);
+                    }
                     continue;
                 }
                 scrub_json(b, child, &p);
@@ -92,7 +105,7 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
 /// one budget shared by every embedded document of the import, so many small
 /// outer strings cannot expand into far more nodes than
 /// [`ImportOptions::max_nodes`](crate::ImportOptions::max_nodes) allows.
-pub fn parse_embedded_json(b: &mut Builder, text: &str) -> Result<Value, crate::ImportError> {
+pub fn parse_embedded_json(b: &mut Builder, text: &str) -> Result<crate::structured::CountedJson, crate::ImportError> {
     let limits = crate::structured::Limits::for_input(b.embedded_nodes_left, b.opts.max_bytes);
     let (res, used) = crate::structured::parse_json_counted(text, limits);
     b.embedded_nodes_left = b.embedded_nodes_left.saturating_sub(used);
@@ -101,17 +114,28 @@ pub fn parse_embedded_json(b: &mut Builder, text: &str) -> Result<Value, crate::
 
 /// Scan a JSON body's text for credential-like members and replace their
 /// literal values ([`scrub_json`]). The text is rewritten only when something
-/// was redacted. A body that cannot be parsed (or exceeds the import's
-/// embedded-document budget) is kept verbatim with a `body_not_scanned`
-/// warning. Returns whether the body was scanned.
+/// was redacted, or (without `include_credentials`) when an object repeats a
+/// credential-like member: the parsed tree keeps only its last value, and the
+/// text would still hold the earlier ones. A body that cannot be parsed (or
+/// exceeds the import's embedded-document budget) is kept verbatim with a
+/// `body_not_scanned` warning. Returns whether the body was scanned.
 pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> bool {
     match parse_embedded_json(b, text) {
-        Ok(mut v) => {
+        Ok(parsed) => {
+            let mut v = parsed.value;
             // Counted apart from the (capped) list, so a body is rewritten
             // whenever it was scrubbed.
             let before = b.report.redactions_made();
             scrub_json(b, &mut v, pointer);
-            if b.report.redactions_made() > before
+            let collapse = parsed.credential_duplicate && !b.opts.include_credentials;
+            if collapse {
+                b.report.warn(
+                    "json_duplicate_credential",
+                    pointer,
+                    "the JSON body repeats a credential-like member; it was rewritten keeping the last value of each repeated member",
+                );
+            }
+            if (b.report.redactions_made() > before || collapse)
                 && let Ok(t) = serde_json::to_string_pretty(&v)
             {
                 *text = t;
@@ -135,7 +159,8 @@ pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> boo
 
 /// Apply the credential policy to a mapped text body: credential-like JSON
 /// members (unless `include_credentials` is set) and URL-encoded form fields.
-/// Other variants are left as they are.
+/// A non-empty XML, SOAP or other text body cannot be scanned and gets a
+/// `body_not_scanned` warning ([`warn_unscanned`]).
 pub fn scrub_body(b: &mut Builder, body: &mut Body, pointer: &str) {
     match body {
         Body::Json { text } if !text.trim().is_empty() && !b.opts.include_credentials => {
@@ -148,7 +173,48 @@ pub fn scrub_body(b: &mut Builder, body: &mut Body, pointer: &str) {
                 f.sensitive |= sensitive;
             }
         }
-        _ => {}
+        _ => warn_unscanned(b, body, pointer),
+    }
+}
+
+/// `body_not_scanned` for a non-empty body whose kind the credential policy
+/// cannot read (XML, a SOAP envelope, other text), unless credentials are
+/// kept anyway.
+pub fn warn_unscanned(b: &mut Builder, body: &Body, pointer: &str) {
+    if b.opts.include_credentials {
+        return;
+    }
+    let text = match body {
+        Body::Raw { text, .. } | Body::Xml { text } | Body::Soap { envelope: text, .. } => text,
+        _ => return,
+    };
+    if !text.trim().is_empty() {
+        b.report.warn(
+            "body_not_scanned",
+            pointer,
+            "the body is imported verbatim; it was not scanned for credentials (review it before sharing)",
+        );
+    }
+}
+
+/// Apply the credential policy to GraphQL variables (unless
+/// `include_credentials` is set): a JSON object, or a string holding one,
+/// parsed under the embedded-document budget. Returns the variables text.
+pub fn scrub_graphql_variables(b: &mut Builder, variables: Option<Value>, pointer: &str) -> String {
+    match variables {
+        Some(Value::Null) | None => String::new(),
+        Some(Value::String(mut s)) => {
+            if !b.opts.include_credentials && !s.trim().is_empty() {
+                scrub_json_text(b, &mut s, pointer);
+            }
+            s
+        }
+        Some(mut v) => {
+            if !b.opts.include_credentials {
+                scrub_json(b, &mut v, pointer);
+            }
+            v.to_string()
+        }
     }
 }
 

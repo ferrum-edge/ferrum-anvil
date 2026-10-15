@@ -355,7 +355,7 @@ fn raw_json_bodies_and_url_queries_are_redacted() {
 
 #[test]
 fn graphql_payloads_are_parsed_under_the_node_budget() {
-    let variables = format!("[{}]", vec!["0"; 200].join(","));
+    let variables = format!("{{\"ids\":[{}]}}", vec!["0"; 200].join(","));
     let text = format!(r#"{{"query":"{{ a }}","variables":{variables}}}"#);
     let request = serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } });
     let mut request = request;
@@ -371,8 +371,12 @@ fn graphql_payloads_are_parsed_under_the_node_budget() {
     });
     let o = anvil_import::ImportOptions { max_nodes: 64, ..opts() };
     let r = anvil_import::import(doc.to_string().as_bytes(), &o).unwrap();
+    // The envelope is kept as the JSON it is (not re-wrapped as a query).
     match &r.requests[0].spec.body {
-        Body::GraphQl { variables, .. } => assert!(variables.is_empty(), "the oversized payload was not expanded"),
+        Body::Raw { text: kept, content_type } => {
+            assert_eq!(kept, &text);
+            assert_eq!(content_type.as_deref(), Some("application/json"));
+        }
         other => panic!("{other:?}"),
     }
     assert!(has_at(&r, "body_not_scanned", "/resources/1/body/text"));
@@ -388,4 +392,58 @@ fn graphql_payloads_are_parsed_under_the_node_budget() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn graphql_variables_and_numeric_credentials_are_redacted() {
+    let gql = r#"{"query":"mutation { login }","variables":{"user":"u","password":"placeholder-secret","pin":123456}}"#;
+    for r in [
+        v4_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": gql } })),
+        v5_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": gql } })),
+    ] {
+        match &r.requests[0].spec.body {
+            Body::GraphQl { variables, .. } => {
+                let v: serde_json::Value = serde_json::from_str(variables).unwrap();
+                assert_eq!(v["password"], "{{password}}");
+                assert_eq!(v["pin"], "{{pin}}");
+                assert_eq!(v["user"], "u");
+            }
+            other => panic!("{other:?}"),
+        }
+        let all = serde_json::to_string(&r.requests).unwrap();
+        assert!(!all.contains("placeholder-secret") && !all.contains("123456"), "{all}");
+    }
+    // Counts under a `token` name are not credentials.
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/json", "text": r#"{"max_tokens":100,"otp":654321}"# },
+    }));
+    let body = json_body(&r.requests[0].spec);
+    assert_eq!(body["max_tokens"], 100);
+    assert_eq!(body["otp"], "{{otp}}");
+}
+
+#[test]
+fn a_repeated_credential_member_does_not_keep_its_earlier_value() {
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/json", "text": r#"{"password":"placeholder-secret","password":"{{password}}"}"# },
+    }));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert!(has(&r, "json_duplicate_credential"));
+    assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+}
+
+#[test]
+fn unscannable_bodies_are_flagged() {
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/xml", "text": "<login><password>placeholder-secret</password></login>" },
+    }));
+    assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/x-www-form-urlencoded", "text": "flag&password=placeholder-secret" },
+    }));
+    assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
 }

@@ -316,3 +316,12 @@ fn json_data_is_scanned_under_the_node_budget() {
     let r = import(br#"curl --json '{"password":"placeholder-secret"}' https://example.test"#, &o).unwrap();
     assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
 }
+
+#[test]
+fn numeric_credentials_and_unscannable_data() {
+    let r = curl(r#"curl --json '{"pin":123456,"max_tokens":5}' https://example.test"#);
+    let body = json_body(&r.requests[0].spec);
+    assert_eq!((body["pin"].as_str(), body["max_tokens"].as_u64()), (Some("{{pin}}"), Some(5)));
+    let r = curl("curl -H 'Content-Type: application/xml' -d '<a>placeholder-secret</a>' https://example.test");
+    assert!(has_at(&r, "body_not_scanned", "/args"));
+}

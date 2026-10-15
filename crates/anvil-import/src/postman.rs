@@ -9,7 +9,7 @@
 use crate::builder::Builder;
 use crate::common::{
     body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, maybe_redact, redact_raw_query,
-    scrub_body, split_query,
+    scrub_body, scrub_graphql_variables, split_query,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -430,13 +430,10 @@ fn body(b: &mut Builder, v: &Value, at: &str, header_ct: Option<&str>) -> Body {
             Body::None
         }
         "graphql" => {
-            let g = v.get("graphql").cloned().unwrap_or(Value::Null);
-            let query = str_of(&g, "query").unwrap_or("").to_string();
-            let variables = match g.get("variables") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Null) | None => String::new(),
-                Some(other) => other.to_string(),
-            };
+            let g = v.get("graphql");
+            let query = g.and_then(|g| str_of(g, "query")).unwrap_or("").to_string();
+            let variables = g.and_then(|g| g.get("variables")).cloned();
+            let variables = scrub_graphql_variables(b, variables, &ptr(at, "graphql/variables"));
             Body::GraphQl { query, variables, operation_name: None }
         }
         "" => Body::None,
