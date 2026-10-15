@@ -115,8 +115,8 @@ pub fn parse_embedded_json(b: &mut Builder, text: &str) -> Result<crate::structu
 /// Scan a JSON body's text for credential-like members and replace their
 /// literal values ([`scrub_json`]). The text is rewritten only when something
 /// was redacted, or (without `include_credentials`) when an object repeats a
-/// credential-like member: the parsed tree keeps only its last value, and the
-/// text would still hold the earlier ones. A body that cannot be parsed (or
+/// member: the parsed tree keeps only its last value, and the text would
+/// still hold the earlier ones, which were never scanned. A body that cannot be parsed (or
 /// exceeds the import's embedded-document budget) is kept verbatim with a
 /// `body_not_scanned` warning. Returns whether the body was scanned.
 pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> bool {
@@ -127,12 +127,12 @@ pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> boo
             // whenever it was scrubbed.
             let before = b.report.redactions_made();
             scrub_json(b, &mut v, pointer);
-            let collapse = parsed.credential_duplicate && !b.opts.include_credentials;
+            let collapse = parsed.duplicate_keys && !b.opts.include_credentials;
             if collapse {
                 b.report.warn(
-                    "json_duplicate_credential",
+                    "json_duplicate_member",
                     pointer,
-                    "the JSON body repeats a credential-like member; it was rewritten keeping the last value of each repeated member",
+                    "the JSON body repeats a member name; it was rewritten keeping the last value of each repeated member, as most parsers read it",
                 );
             }
             if (b.report.redactions_made() > before || collapse)

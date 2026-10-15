@@ -10,7 +10,7 @@
 use crate::builder::Builder;
 use crate::common::{
     body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact,
-    parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, warn_unscanned,
+    parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, scrub_json, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -724,15 +724,34 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
             Body::Multipart { parts }
         }
         "application/graphql" => {
-            // Parsed under the import's embedded-document budget and taken
-            // by value: the payload is never copied.
+            // The text is a JSON envelope (`query`, `variables`,
+            // `operationName`) or a bare GraphQL query. An envelope is parsed
+            // under the import's embedded-document budget and taken by value.
+            let bare = || Body::GraphQl { query: text.clone(), variables: String::new(), operation_name: None };
             let mut envelope = match parse_embedded_json(b, &text) {
                 Ok(parsed) => match parsed.value {
-                    Value::Object(m) => m,
-                    _ => Map::new(),
+                    Value::Object(m) if m.get("query").is_some_and(Value::is_string) => m,
+                    mut other => {
+                        // JSON, but not an envelope with a query: kept as the
+                        // JSON it is, with the credential policy applied.
+                        if !b.opts.include_credentials {
+                            scrub_json(b, &mut other, &ptr(at, "text"));
+                        }
+                        b.report.warn(
+                            "graphql_envelope_without_query",
+                            &ptr(at, "text"),
+                            "the GraphQL body is JSON without a `query` string; imported as a raw JSON body",
+                        );
+                        let text = serde_json::to_string(&other).unwrap_or_default();
+                        return Body::Raw { text, content_type: Some("application/json".into()) };
+                    }
                 },
+                // Over the budget: an envelope (valid JSON, checked without
+                // building it) is kept as raw JSON; anything else is a query.
                 Err(ImportError::LimitExceeded { what, limit }) => {
-                    // Kept as the JSON envelope it is, not re-wrapped as a query.
+                    if serde_json::from_str::<serde::de::IgnoredAny>(&text).is_err() {
+                        return bare();
+                    }
                     b.report.warn(
                         "body_not_scanned",
                         &ptr(at, "text"),
@@ -742,12 +761,11 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
                     );
                     return Body::Raw { text, content_type: Some("application/json".into()) };
                 }
-                // Not JSON: the text is the query itself.
-                Err(_) => Map::new(),
+                Err(_) => return bare(),
             };
             let query = match envelope.remove("query") {
                 Some(Value::String(q)) => q,
-                _ => text.clone(),
+                _ => String::new(),
             };
             let variables = scrub_graphql_variables(b, envelope.remove("variables"), &ptr(at, "text/variables"));
             let operation_name = envelope.get("operationName").and_then(Value::as_str).map(str::to_string);

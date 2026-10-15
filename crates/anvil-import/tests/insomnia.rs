@@ -430,8 +430,57 @@ fn a_repeated_credential_member_does_not_keep_its_earlier_value() {
         "body": { "mimeType": "application/json", "text": r#"{"password":"placeholder-secret","password":"{{password}}"}"# },
     }));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
-    assert!(has(&r, "json_duplicate_credential"));
+    assert!(has(&r, "json_duplicate_member"));
     assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+}
+
+#[test]
+fn a_repeated_ordinary_member_does_not_keep_an_earlier_nested_credential() {
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/json", "text": r#"{"login":{"password":"placeholder-secret"},"login":{}}"# },
+    }));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert!(has(&r, "json_duplicate_member"));
+}
+
+#[test]
+fn graphql_json_without_a_query_string_is_sanitized_not_copied_into_the_query() {
+    for text in [
+        r#"{"variables":{"password":"placeholder-secret"}}"#,
+        r#"{"query":null,"variables":{"password":"placeholder-secret"}}"#,
+        r#"{"query":7,"variables":{"password":"placeholder-secret"}}"#,
+    ] {
+        let r =
+            v4_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } }));
+        let all = serde_json::to_string(&r.requests).unwrap();
+        assert!(!all.contains("placeholder-secret"), "{text}: {all}");
+        assert!(matches!(r.requests[0].spec.body, Body::Raw { .. }), "{text}");
+        assert!(has(&r, "graphql_envelope_without_query"), "{text}");
+    }
+}
+
+#[test]
+fn a_bare_graphql_query_stays_a_query_when_the_budget_is_spent() {
+    // The first request's JSON body spends the embedded-document budget.
+    let big = format!("[{}]", vec!["0"; 40].join(","));
+    let doc = serde_json::json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [
+            { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+            { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "A", "method": "POST", "url": "https://example.test/a",
+              "body": { "mimeType": "application/json", "text": big } },
+            { "_id": "req_2", "_type": "request", "parentId": "wrk_1", "name": "B", "method": "POST", "url": "https://example.test/g",
+              "body": { "mimeType": "application/graphql", "text": "{ a }" } },
+        ],
+    });
+    let o = anvil_import::ImportOptions { max_nodes: 64, ..opts() };
+    let r = anvil_import::import(doc.to_string().as_bytes(), &o).unwrap();
+    match &req(&r, "insomnia:req_2").spec.body {
+        Body::GraphQl { query, .. } => assert_eq!(query, "{ a }"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
