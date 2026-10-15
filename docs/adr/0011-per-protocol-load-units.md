@@ -38,8 +38,9 @@ denominators, and never a sent datagram counted as delivered.
 Later work defined units for some combinations this decision refused:
 client-streaming and bidirectional gRPC (`grpc_client_stream`,
 `grpc_bidi_stream`), and UDP/DTLS exchanges through a MASQUE (CONNECT-UDP) or
-HBONE datagram tunnel. Streaming over gRPC-Web is still refused, with every
-other call the engine refuses on each send (`grpc_unsupported_combination`),
+HBONE datagram tunnel. Client-streaming and bidirectional gRPC over gRPC-Web
+remain refused (server streaming over gRPC-Web is a `grpc_stream` unit), with
+every other call the engine refuses on each send (`grpc_unsupported_combination`),
 and MASQUE only while a proxy profile routes the request
 (`masque_through_proxy`). The current units and refusals are listed
 in [load.md](../load.md). The rest of this decision stands.
