@@ -297,6 +297,27 @@ struct Shard {
 
 // ------------------------------------------------------------------ shared
 
+/// Record a user cancel or vault lock as the stop reason unless another stop
+/// (an abort rule, or the other signal) came first; it replaces
+/// [`StopReason::ScheduleEnd`].
+fn record_external(reason: &Mutex<Option<StopReason>>, r: StopReason) {
+    let mut g = reason.lock();
+    if matches!(*g, None | Some(StopReason::ScheduleEnd)) {
+        *g = Some(r);
+    }
+}
+
+/// After the cancel/lock observer has stopped: record a signal it may not
+/// have processed yet (it raced the end of the drain), so the report never
+/// says the run completed when it was canceled or the vault locked.
+fn reconcile_external(reason: &Mutex<Option<StopReason>>, cancel: &CancellationToken, lock: &CancellationToken) {
+    if lock.is_cancelled() {
+        record_external(reason, StopReason::Lock);
+    } else if cancel.is_cancelled() {
+        record_external(reason, StopReason::UserCancel);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum StopReason {
     ScheduleEnd,
@@ -436,10 +457,7 @@ impl Shared {
     /// schedule ended, while in-flight iterations drain, replaces
     /// [`StopReason::ScheduleEnd`]: the run did not complete as scheduled.
     fn set_external_reason(&self, r: StopReason) {
-        let mut g = self.reason.lock();
-        if matches!(*g, None | Some(StopReason::ScheduleEnd)) {
-            *g = Some(r);
-        }
+        record_external(&self.reason, r);
     }
 
     fn begin_iteration(&self, measured: bool) {
@@ -894,7 +912,11 @@ async fn join_all_within(set: &mut JoinSet<()>, d: Duration) -> bool {
 /// `halt_wait` after that.
 async fn drain(sh: &Shared, set: &mut JoinSet<()>, first_wait: Duration, halt_wait: Duration) -> usize {
     let mut deadline = tokio::time::Instant::now() + first_wait;
-    let mut halted = sh.halt.is_cancelled();
+    // Not read from `halt`: a halt that came after `first_wait` was chosen
+    // (but before this wait started) must shorten it too. When the halt
+    // already chose `first_wait` (a cancel, lock or abort before the
+    // schedule ended), the clamp changes nothing.
+    let mut halted = false;
     let all_done = loop {
         tokio::select! {
             r = set.join_next() => if r.is_none() { break true },
@@ -1250,6 +1272,7 @@ impl LoadRun {
         let hard_canceled = !pre_hard && sh.hard.is_cancelled();
         link.abort();
         let _ = link.await;
+        reconcile_external(&sh.reason, &cancel, &lock);
         // The final reason: a cancel or lock during the drain replaces the
         // schedule end read above.
         let reason = sh.reason.lock().clone().unwrap_or(StopReason::ScheduleEnd);
@@ -1314,6 +1337,30 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cancel or lock the observer did not process before it was stopped
+    /// is still the run's stop reason; an earlier abort or external reason
+    /// is kept.
+    #[test]
+    fn signals_the_observer_missed_are_reconciled_into_the_stop_reason() {
+        let (cancel, lock) = (CancellationToken::new(), CancellationToken::new());
+        let reason = Mutex::new(Some(StopReason::ScheduleEnd));
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::ScheduleEnd), "no signal: the schedule end stands");
+        lock.cancel();
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::Lock));
+        let reason = Mutex::new(None);
+        cancel.cancel();
+        reconcile_external(&reason, &cancel, &CancellationToken::new());
+        assert_eq!(*reason.lock(), Some(StopReason::UserCancel));
+        let reason = Mutex::new(Some(StopReason::Abort("rule".into())));
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::Abort("rule".into())), "an abort recorded first is kept");
+        let reason = Mutex::new(Some(StopReason::UserCancel));
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::UserCancel), "the first external signal is kept");
+    }
 
     /// A begin's timeline bucket is sampled while the ledger is held, so a
     /// begin that waited for the ledger across a bucket boundary counts in

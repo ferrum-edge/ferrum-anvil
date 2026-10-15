@@ -1059,3 +1059,31 @@ async fn a_lock_during_the_graceful_drain_halts_chains_and_is_reported() {
     assert_eq!(f.state.counters.lock().get("after-lock"), None, "no step started after the lock");
     assert_eq!(r.requests.started, 1);
 }
+
+/// The lock also shortens the rest of the graceful drain to the cancel drain
+/// window: an in-flight send is not given the whole `graceful_stop_ms`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lock_during_the_graceful_drain_shortens_it_to_the_cancel_window() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let a = Id::new();
+    let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a]);
+    let job = LoadJob { requests: [(a, get(&f.url("/delay-headers/12000")))].into_iter().collect(), dataset: None };
+    let o = RunOptions { graceful_stop_ms: 30_000, cancel_drain_ms: 500, ..opts() };
+    let lock = CancellationToken::new();
+    let late = {
+        let lock = lock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_400)).await;
+            lock.cancel();
+        })
+    };
+    let t = Instant::now();
+    let r = LoadRun::prepare(p, job, o).expect("valid plan").execute_lockable(CancellationToken::new(), lock, None).await;
+    late.await.unwrap();
+    // Lock at 1.4 s + 0.5 s cancel drain + the 2 s hard-cancel grace, with
+    // margin; the send itself would take 12 s and the graceful window 30 s.
+    assert!(t.elapsed() < Duration::from_secs(8), "drain not shortened: {:?}", t.elapsed());
+    assert_balanced(&r);
+    assert_eq!(r.completion, RunCompletion::StoppedByLock, "{:?}", r.notes);
+}
