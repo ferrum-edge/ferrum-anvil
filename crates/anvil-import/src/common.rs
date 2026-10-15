@@ -87,6 +87,94 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
     }
 }
 
+/// Parse a JSON document embedded in a string field of the source (a request
+/// body, a GraphQL payload) under the import bounds. Its nodes are charged to
+/// one budget shared by every embedded document of the import, so many small
+/// outer strings cannot expand into far more nodes than
+/// [`ImportOptions::max_nodes`](crate::ImportOptions::max_nodes) allows.
+pub fn parse_embedded_json(b: &mut Builder, text: &str) -> Result<Value, crate::ImportError> {
+    let limits = crate::structured::Limits::for_input(b.embedded_nodes_left, b.opts.max_bytes);
+    let (res, used) = crate::structured::parse_json_counted(text, limits);
+    b.embedded_nodes_left = b.embedded_nodes_left.saturating_sub(used);
+    res
+}
+
+/// Scan a JSON body's text for credential-like members and replace their
+/// literal values ([`scrub_json`]). The text is rewritten only when something
+/// was redacted. A body that cannot be parsed (or exceeds the import's
+/// embedded-document budget) is kept verbatim with a `body_not_scanned`
+/// warning. Returns whether the body was scanned.
+pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> bool {
+    match parse_embedded_json(b, text) {
+        Ok(mut v) => {
+            // Counted apart from the (capped) list, so a body is rewritten
+            // whenever it was scrubbed.
+            let before = b.report.redactions_made();
+            scrub_json(b, &mut v, pointer);
+            if b.report.redactions_made() > before
+                && let Ok(t) = serde_json::to_string_pretty(&v)
+            {
+                *text = t;
+            }
+            true
+        }
+        Err(e) => {
+            let why = match e {
+                crate::ImportError::LimitExceeded { what, limit } => format!("it exceeds the import limit for {what} ({limit})"),
+                _ => "it could not be parsed".to_string(),
+            };
+            b.report.warn(
+                "body_not_scanned",
+                pointer,
+                format!("JSON body was not scanned for credentials: {why}; review it before sharing"),
+            );
+            false
+        }
+    }
+}
+
+/// Apply the credential policy to a mapped text body: credential-like JSON
+/// members (unless `include_credentials` is set) and URL-encoded form fields.
+/// Other variants are left as they are.
+pub fn scrub_body(b: &mut Builder, body: &mut Body, pointer: &str) {
+    match body {
+        Body::Json { text } if !text.trim().is_empty() && !b.opts.include_credentials => {
+            scrub_json_text(b, text, pointer);
+        }
+        Body::FormUrlEncoded { fields } => {
+            for (n, f) in fields.iter_mut().enumerate() {
+                let (value, sensitive) = maybe_redact(b, &f.name, &f.value, &format!("{pointer}#field{n}"), "form field");
+                f.value = value;
+                f.sensitive |= sensitive;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Redact credential-like values in a query string that [`split_query`]
+/// could not turn into pairs (a bare `flag` segment, for instance). Every
+/// segment keeps its exact syntax; only the value of a `name=value` segment
+/// with a credential-like name is replaced. The fragment is kept.
+pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -> String {
+    let no_frag = strip_fragment(url);
+    let fragment = &url[no_frag.len()..];
+    let Some((base, q)) = no_frag.split_once('?') else { return url.to_string() };
+    let segs: Vec<String> = q
+        .split('&')
+        .map(|seg| match seg.split_once('=') {
+            Some((k, v)) if !v.is_empty() && is_credential_name(&query_decode(k)) => {
+                let decoded = query_decode(v);
+                let (nv, _) = maybe_redact(b, &query_decode(k), &decoded, pointer, what);
+                // A kept value keeps its original encoding.
+                if nv == decoded { seg.to_string() } else { format!("{k}={nv}") }
+            }
+            _ => seg.to_string(),
+        })
+        .collect();
+    format!("{base}?{}{fragment}", segs.join("&"))
+}
+
 /// Map a text body to the matching [`Body`] variant by media type. Returns
 /// the body and, when the variant's inferred content type would differ from
 /// `mime`, the explicit `Content-Type` header to keep.

@@ -10,10 +10,10 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, credential, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, query_decode, scrub_json,
-    split_query,
+    body_from_text, credential, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, query_decode, redact_raw_query,
+    scrub_json_text, split_query,
 };
-use crate::util::{is_credential_name, is_json_media, media_essence, ptr, scalar_text, str_of};
+use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{Body, KeyValue, MultipartContent, MultipartPart, RequestSpec};
@@ -97,7 +97,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
         url = format!("{scheme}://{}", &rest[p + 1..]);
     }
     let (base, pairs) = split_query(&url);
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr) } else { base };
+    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { base };
     let params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
@@ -154,23 +154,6 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let name = format!("{method} {}", path.split('?').next().unwrap_or(&path));
     let key = format!("har:{index}:{method} {}", base.split('?').next().unwrap_or(&base));
     b.add_request(folder, &name, &key, spec, rptr);
-}
-
-/// A query kept verbatim (not a plain list of pairs): redact the values of
-/// credential-named segments in place.
-fn redact_raw_query(b: &mut Builder, url: &str, at: &str) -> String {
-    let Some((base, q)) = url.split_once('?') else { return url.to_string() };
-    let segs: Vec<String> = q
-        .split('&')
-        .map(|seg| match seg.split_once('=') {
-            Some((k, v)) if is_credential_name(&query_decode(k)) && !v.is_empty() => {
-                let (nv, _) = maybe_redact(b, &query_decode(k), &query_decode(v), at, "query parameter");
-                format!("{k}={nv}")
-            }
-            _ => seg.to_string(),
-        })
-        .collect();
-    format!("{base}?{}", segs.join("&"))
 }
 
 /// `declared` receives the recorded media type when the body variant cannot
@@ -246,17 +229,13 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String
         return Body::None;
     }
     if is_json_media(&mime) || (mime.is_empty() && text.trim_start().starts_with(['{', '['])) {
-        if let Ok(mut v) = serde_json::from_str::<Value>(&text) {
-            // Counted apart from the (capped) list, so a body is rewritten
-            // whenever it was scrubbed.
-            let before = b.report.redactions_made();
-            scrub_json(b, &mut v, &ptr(at, "text"));
-            let text = if b.report.redactions_made() > before { serde_json::to_string_pretty(&v).unwrap_or(text) } else { text };
+        // Parsed under the import's embedded-document budget, not freely.
+        let mut text = text;
+        if scrub_json_text(b, &mut text, &ptr(at, "text")) {
             let (body, ct) = body_from_text(Some(if mime.is_empty() { "application/json" } else { &mime }), text);
             *declared = ct;
             return body;
         }
-        b.report.warn("body_not_scanned", at, "JSON body could not be parsed; it was not scanned for credentials");
         return Body::Raw { text, content_type: Some(mime) };
     }
     if !b.opts.include_credentials {

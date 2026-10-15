@@ -154,3 +154,35 @@ fn bodies_are_scrubbed_after_the_redaction_list_is_full() {
     let all = serde_json::to_string(&r.requests).unwrap();
     assert!(!all.contains("hunter2-late") && !all.contains("bulk-secret-"), "a secret was kept");
 }
+
+fn har_entries(texts: &[&str], o: &ImportOptions) -> anvil_import::ImportResult {
+    let entries: Vec<serde_json::Value> = texts
+        .iter()
+        .map(|t| {
+            serde_json::json!({ "request": {
+                "method": "POST",
+                "url": "https://example.test/x",
+                "headers": [],
+                "postData": { "mimeType": "application/json", "text": t },
+            } })
+        })
+        .collect();
+    let doc = serde_json::json!({ "log": { "version": "1.2", "entries": entries } });
+    anvil_import::import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+#[test]
+fn embedded_json_bodies_share_the_node_budget() {
+    let o = ImportOptions { max_nodes: 64, ..opts() };
+    // One body larger than the budget is kept as text, not parsed.
+    let big = format!("[{}]", vec!["0"; 200].join(","));
+    let r = har_entries(&[&big], &o);
+    assert!(matches!(r.requests[0].spec.body, Body::Raw { .. }), "{:?}", r.requests[0].spec.body);
+    assert!(has_at(&r, "body_not_scanned", "/log/entries/0/request/postData/text"));
+    // Bodies that each fit draw from one import-wide budget.
+    let half = format!("[{}]", vec!["0"; 40].join(","));
+    let r = har_entries(&[&half, &half], &o);
+    assert!(matches!(r.requests[0].spec.body, Body::Json { .. }));
+    assert!(matches!(r.requests[1].spec.body, Body::Raw { .. }));
+    assert!(has_at(&r, "body_not_scanned", "/log/entries/1/request/postData/text"));
+}

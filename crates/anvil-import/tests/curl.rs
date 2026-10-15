@@ -278,3 +278,41 @@ fn shell_edge_cases() {
     assert!(matches!(import(b"curl 'unterminated", &opts()), Err(ImportError::Syntax { .. })));
     assert!(matches!(import(b"curl -X POST", &opts()), Err(ImportError::Invalid { .. })));
 }
+
+#[test]
+fn short_option_clusters_count_against_the_argument_limit() {
+    // One shell word that expands into more flags than the argument limit.
+    let cmd = format!("curl -{} https://example.test", "s".repeat(20_000));
+    match import(cmd.as_bytes(), &opts()) {
+        Err(ImportError::Syntax { message, .. }) => assert!(message.contains("arguments"), "{message}"),
+        other => panic!("expected the argument limit, got {other:?}"),
+    }
+    // Ordinary clusters still expand.
+    let r = curl("curl -sSL -XPOST https://example.test");
+    assert_eq!(r.requests[0].spec.method, "POST");
+}
+
+#[test]
+fn credentials_in_a_query_with_a_bare_flag_are_redacted_in_place() {
+    let r = curl("curl 'https://example.test/a?flag&api_key=placeholder-secret&page=2#top'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test/a?flag&api_key={{api_key}}&page=2");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert_eq!(r.report.redactions.len(), 1);
+    // Kept verbatim (original encoding) with include_credentials.
+    let o = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://example.test/a?flag&token=a%26b'", &o).unwrap();
+    assert_eq!(r.requests[0].spec.url, "https://example.test/a?flag&token=a%26b");
+}
+
+#[test]
+fn json_data_is_scanned_under_the_node_budget() {
+    let o = ImportOptions { max_nodes: 64, ..opts() };
+    let big = format!("[{}]", vec!["0"; 200].join(","));
+    let cmd = format!("curl -H 'Content-Type: application/json' -d '{big}' https://example.test");
+    let r = import(cmd.as_bytes(), &o).unwrap();
+    assert!(has_at(&r, "body_not_scanned", "/args#json"));
+    // Within the budget, credential members are still redacted.
+    let r = import(br#"curl --json '{"password":"placeholder-secret"}' https://example.test"#, &o).unwrap();
+    assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+}

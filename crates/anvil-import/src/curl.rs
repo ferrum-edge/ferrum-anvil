@@ -10,7 +10,7 @@
 //! `{{VAR}}` placeholders.
 
 use crate::builder::Builder;
-use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, split_query};
+use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, redact_raw_query, split_query};
 use crate::util::is_json_media;
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
@@ -233,7 +233,12 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     let mut follow = false;
     let mut max_redirs: Option<u8> = None;
 
-    let args = expand_clusters(words.iter().map(|w| w.text.clone()).collect());
+    let args = expand_clusters(words.iter().map(|w| w.text.clone()).collect()).map_err(|m| ImportError::Syntax {
+        syntax: "shell".into(),
+        message: m,
+        line: None,
+        column: None,
+    })?;
     let mut i = 1;
     while i < args.len() {
         let at = format!("/args/{}", args[i].1);
@@ -508,10 +513,17 @@ const LONG_WITH_VALUE: &[&str] = &[
 /// Expand short-option clusters (`-sSL`, `-XPOST`, `-H'x: y'`) into
 /// separate arguments, keeping each argument's original index for report
 /// locations. Values of value-taking options are never re-interpreted.
-fn expand_clusters(args: Vec<String>) -> Vec<(String, usize)> {
-    let mut out = vec![];
+///
+/// The expanded list is held to the same [`MAX_ARGS`] limit as the shell
+/// words: one long cluster would otherwise become one argument per flag.
+fn expand_clusters(args: Vec<String>) -> Result<Vec<(String, usize)>, String> {
+    let mut out: Vec<(String, usize)> = vec![];
     let mut i = 0;
+    let too_many = || format!("more than {MAX_ARGS} arguments after expanding short-option clusters");
     while i < args.len() {
+        if out.len() > MAX_ARGS {
+            return Err(too_many());
+        }
         let a = &args[i];
         if i == 0 || !a.starts_with('-') || a == "-" {
             out.push((a.clone(), i));
@@ -524,6 +536,9 @@ fn expand_clusters(args: Vec<String>) -> Vec<(String, usize)> {
         } else {
             let chars: Vec<char> = a[1..].chars().collect();
             for (j, c) in chars.iter().enumerate() {
+                if out.len() > MAX_ARGS {
+                    return Err(too_many());
+                }
                 let f = format!("-{c}");
                 if takes_value(&f) {
                     out.push((f, i));
@@ -541,7 +556,10 @@ fn expand_clusters(args: Vec<String>) -> Vec<(String, usize)> {
         }
         i += 1;
     }
-    out
+    if out.len() > MAX_ARGS {
+        return Err(too_many());
+    }
+    Ok(out)
 }
 
 fn takes_value(flag: &str) -> bool {
@@ -615,6 +633,9 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
         url = format!("{scheme}://{}", &rest[at_pos + 1..]);
     }
     let (base, pairs) = split_query(&url);
+    // A query that is not a plain list of pairs stays in the URL verbatim;
+    // its credential-like values are still redacted in place.
+    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { base };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
@@ -714,15 +735,9 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
                         f.sensitive = sensitive;
                     }
                 }
-                if let Body::Json { text } = &mut bd
-                    && let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text)
-                {
-                    // Counted apart from the (capped) list.
-                    let before = b.report.redactions_made();
-                    crate::common::scrub_json(b, &mut v, "/args#json");
-                    if b.report.redactions_made() > before {
-                        *text = serde_json::to_string_pretty(&v).unwrap_or_default();
-                    }
+                if let Body::Json { text } = &mut bd {
+                    // Parsed under the import's embedded-document budget.
+                    crate::common::scrub_json_text(b, text, "/args#json");
                 }
                 body = bd;
             }

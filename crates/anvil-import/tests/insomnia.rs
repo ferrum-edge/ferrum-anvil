@@ -332,3 +332,60 @@ fn v4_sibling_and_nested_groups_still_import() {
     assert_eq!(r.requests.len(), 2);
     assert!(!has(&r, "orphan_resource"));
 }
+
+#[test]
+fn raw_json_bodies_and_url_queries_are_redacted() {
+    for r in [
+        v4_request(serde_json::json!({
+            "url": "https://example.test/x?flag&api_key=placeholder-secret",
+            "body": { "mimeType": "application/json", "text": r#"{"user":"u","password":"placeholder-secret"}"# },
+        })),
+        v5_request(serde_json::json!({
+            "url": "https://example.test/x?flag&api_key=placeholder-secret",
+            "body": { "mimeType": "application/json", "text": r#"{"user":"u","password":"placeholder-secret"}"# },
+        })),
+    ] {
+        let s = &r.requests[0].spec;
+        assert_eq!(json_body(s)["password"], "{{password}}");
+        assert_eq!(s.url, "https://example.test/x?flag&api_key={{api_key}}");
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+        assert_eq!(r.report.redactions.len(), 2);
+    }
+}
+
+#[test]
+fn graphql_payloads_are_parsed_under_the_node_budget() {
+    let variables = format!("[{}]", vec!["0"; 200].join(","));
+    let text = format!(r#"{{"query":"{{ a }}","variables":{variables}}}"#);
+    let request = serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } });
+    let mut request = request;
+    request["_id"] = "req_1".into();
+    request["_type"] = "request".into();
+    request["parentId"] = "wrk_1".into();
+    request["name"] = "R".into();
+    request["method"] = "POST".into();
+    let doc = serde_json::json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [{ "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" }, request],
+    });
+    let o = anvil_import::ImportOptions { max_nodes: 64, ..opts() };
+    let r = anvil_import::import(doc.to_string().as_bytes(), &o).unwrap();
+    match &r.requests[0].spec.body {
+        Body::GraphQl { variables, .. } => assert!(variables.is_empty(), "the oversized payload was not expanded"),
+        other => panic!("{other:?}"),
+    }
+    assert!(has_at(&r, "body_not_scanned", "/resources/1/body/text"));
+    // Within the budget the payload is split as before.
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/g",
+        "body": { "mimeType": "application/graphql", "text": r#"{"query":"{ a }","variables":{"n":1}}"# },
+    }));
+    match &r.requests[0].spec.body {
+        Body::GraphQl { query, variables, .. } => {
+            assert_eq!(query, "{ a }");
+            assert_eq!(variables, r#"{"n":1}"#);
+        }
+        other => panic!("{other:?}"),
+    }
+}

@@ -70,6 +70,23 @@
 
 ### Fixed
 
+- Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
+  embedded in string fields and apply the credential policy more evenly:
+  - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed
+    with the bounded import parser, and their nodes share one `max_nodes`
+    budget per import. A body that does not fit is kept as text with a
+    `body_not_scanned` warning; the GraphQL payload is no longer copied.
+  - cURL short-option clusters count against the 10,000-argument limit after
+    expansion, not only as shell words.
+  - Postman and Insomnia raw JSON bodies have credential-like members redacted
+    like HAR and cURL bodies (`body_not_scanned` when they cannot be parsed),
+    and Insomnia form bodies parsed from text have credential-like fields
+    redacted.
+  - Credential-like values in a URL query that is kept verbatim (it has a bare
+    `flag` segment, or it is written into an Insomnia URL) are redacted in
+    place in cURL, Postman and Insomnia imports, as HAR already did; a kept
+    value keeps its original encoding.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback

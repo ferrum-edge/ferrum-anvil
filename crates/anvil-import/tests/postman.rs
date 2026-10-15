@@ -194,3 +194,21 @@ fn postman_v20_auth_object_form() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn raw_json_bodies_and_mixed_raw_queries_are_redacted() {
+    let doc = serde_json::json!({
+        "info": {"name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [{"name": "r", "request": {
+            "url": "https://x.example.com/a?flag&api_key=placeholder-secret",
+            "method": "POST",
+            "body": {"mode": "raw", "raw": "{\"user\":\"u\",\"password\":\"placeholder-secret\"}", "options": {"raw": {"language": "json"}}}
+        }}]
+    });
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let s = &r.requests[0].spec;
+    assert_eq!(json_body(s)["password"], "{{password}}");
+    assert_eq!(s.url, "https://x.example.com/a?flag&api_key={{api_key}}");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert_eq!(r.report.redactions.len(), 2);
+}

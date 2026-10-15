@@ -279,17 +279,25 @@ fn new_budget(limits: Limits) -> Budget {
 }
 
 pub fn parse_json(text: &str, limits: Limits) -> Result<Value, ImportError> {
+    parse_json_counted(text, limits).0
+}
+
+/// [`parse_json`] that also returns the nodes it charged, whether or not the
+/// parse succeeded, so a caller can draw several parses from one budget.
+pub fn parse_json_counted(text: &str, limits: Limits) -> (Result<Value, ImportError>, usize) {
     let budget = new_budget(limits);
     let mut de = serde_json::Deserializer::from_str(text);
     let res = Bounded { budget: &budget, depth: 0 }.deserialize(&mut de).and_then(|v| de.end().map(|_| v));
-    res.map_err(|e| {
+    let used = limits.max_nodes - budget.remaining.get();
+    let res = res.map_err(|e| {
         limit_error(&budget, limits).unwrap_or_else(|| ImportError::Syntax {
             syntax: "JSON".into(),
             message: e.to_string(),
             line: Some(e.line()),
             column: Some(e.column()),
         })
-    })
+    });
+    (res, used)
 }
 
 pub fn parse_yaml(text: &str, limits: Limits) -> Result<Value, ImportError> {

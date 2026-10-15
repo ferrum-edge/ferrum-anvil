@@ -8,7 +8,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, maybe_redact, split_query,
+    body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, maybe_redact, redact_raw_query,
+    scrub_body, split_query,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -267,7 +268,15 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
     };
     check_dynamic_vars(b, &raw, &ptr(at, "raw"));
     let (base, raw_pairs) = split_query(&raw);
-    let base = if raw_pairs.is_empty() && query_list.is_some() { base.split('?').next().unwrap_or("").to_string() } else { base };
+    let base = if raw_pairs.is_empty() && query_list.is_some() {
+        base.split('?').next().unwrap_or("").to_string()
+    } else if raw_pairs.is_empty() && base.contains('?') {
+        // A raw query that is not a plain list of pairs stays verbatim; its
+        // credential-like values are still redacted in place.
+        redact_raw_query(b, &base, &ptr(at, "raw"), "query")
+    } else {
+        base
+    };
     let mut params = vec![];
     match query_list {
         Some(list) => {
@@ -372,7 +381,8 @@ fn body(b: &mut Builder, v: &Value, at: &str, header_ct: Option<&str>) -> Body {
                     .to_string(),
                 )
             });
-            let (body, _) = body_from_text(mime.as_deref(), text);
+            let (mut body, _) = body_from_text(mime.as_deref(), text);
+            scrub_body(b, &mut body, &ptr(at, "raw"));
             body
         }
         "urlencoded" => {

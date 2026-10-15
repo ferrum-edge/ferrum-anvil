@@ -9,7 +9,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact, parse_form,
+    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact,
+    parse_embedded_json, parse_form, redact_raw_query, scrub_body,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -561,6 +562,9 @@ fn request(
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     let raw_url = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
+    // A query written into the URL itself is kept verbatim; its
+    // credential-like values are redacted in place.
+    let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = kv_list(b, r.get("parameters"), &ptr(at, "parameters"), "query");
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
@@ -673,7 +677,14 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
     match essence.as_str() {
         "application/x-www-form-urlencoded" => match v.get("params") {
             Some(_) => Body::FormUrlEncoded { fields: kv_list(b, v.get("params"), &ptr(at, "params"), "form field") },
-            None => parse_form(&text).map(|fields| Body::FormUrlEncoded { fields }).unwrap_or(Body::Raw { text, content_type: mime }),
+            None => match parse_form(&text) {
+                Some(fields) => {
+                    let mut body = Body::FormUrlEncoded { fields };
+                    scrub_body(b, &mut body, &ptr(at, "text"));
+                    body
+                }
+                None => Body::Raw { text, content_type: mime },
+            },
         },
         "multipart/form-data" => {
             let mut parts = vec![];
@@ -709,8 +720,22 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
             Body::Multipart { parts }
         }
         "application/graphql" => {
-            let parsed: Map<String, Value> =
-                serde_json::from_str::<Value>(&text).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
+            // Parsed under the import's embedded-document budget and taken
+            // by value: the payload is never copied.
+            let parsed: Map<String, Value> = match parse_embedded_json(b, &text) {
+                Ok(Value::Object(m)) => m,
+                Ok(_) => Map::new(),
+                Err(e) => {
+                    if let ImportError::LimitExceeded { what, limit } = e {
+                        b.report.warn(
+                            "body_not_scanned",
+                            &ptr(at, "text"),
+                            format!("GraphQL body exceeds the import limit for {what} ({limit}); imported as query text"),
+                        );
+                    }
+                    Map::new()
+                }
+            };
             let query = parsed.get("query").and_then(Value::as_str).unwrap_or(&text).to_string();
             let variables = match parsed.get("variables") {
                 Some(Value::Null) | None => String::new(),
@@ -732,7 +757,8 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
         }
         "" if text.is_empty() => Body::None,
         _ => {
-            let (body, ct) = body_from_text(mime.as_deref(), text);
+            let (mut body, ct) = body_from_text(mime.as_deref(), text);
+            scrub_body(b, &mut body, &ptr(at, "text"));
             *declared = ct;
             body
         }

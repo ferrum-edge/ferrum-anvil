@@ -38,6 +38,9 @@ pub(crate) struct Builder<'o> {
     key_suffix: HashMap<String, usize>,
     /// Text bytes the rest of the import may copy.
     text_left: usize,
+    /// Nodes the JSON documents embedded in string fields (request bodies,
+    /// GraphQL payloads) may still parse into, across the whole import.
+    pub embedded_nodes_left: usize,
     pub environments: Vec<Environment>,
     pub report: ImportReport,
     next_sort: HashMap<Option<Id>, f64>,
@@ -77,6 +80,7 @@ impl<'o> Builder<'o> {
             op_keys: HashSet::new(),
             key_suffix: HashMap::new(),
             text_left: opts.max_bytes.saturating_mul(TEXT_BYTES_PER_INPUT_BYTE),
+            embedded_nodes_left: opts.max_nodes,
             environments: vec![],
             report: ImportReport::default(),
             next_sort: HashMap::new(),
