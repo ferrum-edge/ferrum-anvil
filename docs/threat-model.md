@@ -144,7 +144,10 @@ against it).
     known secret value too: a server can reflect a credential into any
     response metadata, not only header values. Header names and content
     codings are compared in any letter case (protocols lowercase them), and
-    so are the warnings, findings and summary that can quote them. The
+    so are the warnings, assertion messages, findings and summary that can
+    quote them. A well-known media type (`application/json`,
+    `text/event-stream`, …) keeps its essence even when a secret is part of
+    that constant, because callers act on it; its parameters are scrubbed. The
     request's own header names and `Content-Type` are scrubbed in the record
     and the effective-request preview. The reason phrase (which the HTTP
     adapters derive from the status code) is scrubbed wherever the record

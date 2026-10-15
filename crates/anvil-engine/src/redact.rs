@@ -107,6 +107,10 @@ pub struct Redactor {
     /// The same patterns compared ignoring ASCII case, for fields a protocol
     /// normalizes (header names, content codings are lowercased).
     any_case: Option<AhoCorasick>,
+    /// The patterns, lowercased, kept only when `any_case` cannot be built,
+    /// so case-insensitive redaction degrades to a slower pass instead of
+    /// silently becoming case-sensitive.
+    any_case_fallback: Vec<String>,
     /// Patterns retained only when the matcher cannot be built, so redaction
     /// degrades to a slower replacement pass instead of silently failing.
     fallback_patterns: Vec<String>,
@@ -115,7 +119,7 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new(secrets: Vec<String>, extra_names: Vec<String>) -> Self {
-        let mut r = Redactor { secrets, matcher: None, any_case: None, fallback_patterns: vec![], extra_names };
+        let mut r = Redactor { secrets, matcher: None, any_case: None, any_case_fallback: vec![], fallback_patterns: vec![], extra_names };
         r.secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         r.reindex();
         r
@@ -158,6 +162,20 @@ impl Redactor {
         }
     }
 
+    /// The patterns [`Redactor::reindex`] builds its matchers from.
+    #[cfg(test)]
+    fn fallback_patterns_for_test(&self) -> Vec<String> {
+        let mut patterns = Vec::new();
+        for s in &self.secrets {
+            patterns.push(s.clone());
+            patterns.push(hex::encode(s));
+            patterns.extend(encoded_forms(s));
+            patterns.extend(json_escaped(s));
+        }
+        sort_longest_first(&mut patterns);
+        patterns
+    }
+
     /// Longest first so overlapping values are fully covered.
     fn reindex(&mut self) {
         sort_longest_first(&mut self.secrets);
@@ -180,6 +198,7 @@ impl Redactor {
                 .build(&patterns)
                 .ok()
         };
+        self.any_case_fallback = if self.any_case.is_none() { patterns.iter().map(|p| p.to_ascii_lowercase()).collect() } else { vec![] };
         self.matcher = if patterns.is_empty() {
             self.fallback_patterns.clear();
             None
@@ -250,11 +269,9 @@ impl Redactor {
     pub fn text_any_case(&self, s: &str) -> String {
         match &self.any_case {
             Some(m) => replace_matches(m, s),
-            None if self.matcher.is_none() && !self.fallback_patterns.is_empty() => {
-                let lower: Vec<String> = self.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
-                fallback_redact(&self.text(&s.to_ascii_lowercase()), &lower)
-            }
-            None => self.text(s),
+            None if !self.any_case_fallback.is_empty() => fallback_redact_any_case(s, &self.any_case_fallback),
+            // No patterns at all.
+            None => s.to_string(),
         }
     }
 
@@ -750,6 +767,28 @@ fn replace_matches(matcher: &AhoCorasick, s: &str) -> String {
     out
 }
 
+/// [`fallback_redact`] ignoring ASCII case (`patterns` are lowercased). ASCII
+/// lowercasing keeps byte offsets, so unmatched text is copied unchanged.
+fn fallback_redact_any_case(text: &str, patterns: &[String]) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        let next = patterns
+            .iter()
+            .filter_map(|pattern| lower[offset..].find(pattern.as_str()).map(|at| (offset + at, pattern.len())))
+            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        let Some((start, len)) = next else {
+            out.push_str(&text[offset..]);
+            break;
+        };
+        out.push_str(&text[offset..start]);
+        out.push_str(REDACTED);
+        offset = start + len;
+    }
+    out
+}
+
 fn fallback_redact(text: &str, patterns: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut offset = 0;
@@ -808,6 +847,27 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    /// Either automaton can fail to build (its size limit); redaction then
+    /// degrades to the fallback passes and stays case-insensitive where it
+    /// should, keeping every byte it does not replace.
+    #[test]
+    fn case_insensitive_redaction_survives_failed_matchers() {
+        use super::*;
+        let secret = "Mixed-Case-Secret-7Q";
+        let text = "x-mixed-case-secret-7q: v; MIXED-CASE-SECRET-7Q and Ünïcode";
+        let expect = format!("x-{REDACTED}: v; {REDACTED} and Ünïcode");
+        let mut r = Redactor::new(vec![secret.into()], vec![]);
+        assert_eq!(r.text_any_case(text), expect);
+        // Only the case-insensitive automaton failed.
+        r.any_case_fallback = r.fallback_patterns_for_test().iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.any_case = None;
+        assert_eq!(r.text_any_case(text), expect);
+        // Both failed.
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.matcher = None;
+        assert_eq!(r.text_any_case(text), expect);
+        assert_eq!(r.text(&format!("a {secret} b")), format!("a {REDACTED} b"));
+    }
     use super::*;
 
     #[test]

@@ -72,6 +72,46 @@ fn refusal_body(r: &Redactor, captured: &str) -> (String, bool) {
     (anvil_transport::session::redact_then_cut(&|s: &str| r.text(s), captured, cut), cut < captured.len())
 }
 
+/// Media types whose exact essence callers act on (event-stream parsing for
+/// MCP, gRPC detection, body rendering). A secret that happens to be part of
+/// such a constant reveals nothing, so the essence is kept; parameters, and
+/// any other essence, are scrubbed.
+const KEPT_ESSENCES: &[&str] = &[
+    "application/json",
+    "application/problem+json",
+    "application/graphql-response+json",
+    "application/xml",
+    "application/soap+xml",
+    "application/x-www-form-urlencoded",
+    "application/octet-stream",
+    "application/grpc",
+    "application/grpc+proto",
+    "application/grpc-web",
+    "application/grpc-web+proto",
+    "application/grpc-web-text",
+    "application/grpc-web-text+proto",
+    "multipart/form-data",
+    "text/event-stream",
+    "text/html",
+    "text/plain",
+    "text/xml",
+];
+
+/// A response `Content-Type` scrubbed of known secrets in any letter case,
+/// keeping a well-known essence ([`KEPT_ESSENCES`]) as it is.
+fn scrub_media_type(redactor: &Redactor, ct: &str) -> String {
+    let (essence, params) = match ct.split_once(';') {
+        Some((e, p)) => (e, Some(p)),
+        None => (ct, None),
+    };
+    let kept = KEPT_ESSENCES.iter().any(|k| essence.trim().eq_ignore_ascii_case(k));
+    let essence = if kept { essence.to_string() } else { redactor.text_any_case(essence) };
+    match params {
+        Some(p) => format!("{essence};{}", redactor.text_any_case(p)),
+        None => essence,
+    }
+}
+
 fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     for a in attempts {
         a.url = r.url(&a.url);
@@ -193,6 +233,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         }
         _ => BodyDecoding::default(),
     };
+    // The decoder quotes the response's content coding, lowercased: scrubbed
+    // in any case before assertions, warnings or the record can repeat it.
+    let decoding_detail = decoding_detail.map(|d| redactor.text_any_case(&d));
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
     let viewed: Option<Bytes> = a.body_view.and_then(|view| view(response.as_ref(), body_for_eval));
     let body_for_eval: &[u8] = viewed.as_deref().unwrap_or(body_for_eval);
@@ -212,8 +255,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.body.decoded_bytes = decoded.as_ref().map(|d| d.len() as u64);
         r.body.decoding = decoding_status;
-        // The decoder quotes the coding lowercased: compared in any case.
-        r.body.decoding_detail = decoding_detail.as_deref().map(|d| redactor.text_any_case(d));
+        r.body.decoding_detail = decoding_detail.clone();
     }
 
     let protocol_status = a.protocol_status_override.clone().unwrap_or_else(|| protocol_status_http(response.as_ref()));
@@ -350,10 +392,14 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let ProtocolStatus::Http { reason: Some(reason), .. } = &mut protocol_status {
         *reason = redactor.text_any_case(reason);
     }
-    // Warnings can quote response metadata a protocol case-folded (a
-    // content coding in a decoding failure).
+    // Warnings and assertion messages can quote response metadata a
+    // protocol case-folded (a content coding in a decoding failure).
     for w in &mut warnings {
         w.message = redactor.text_any_case(&w.message);
+    }
+    let mut assertion_results = assertion_results;
+    for r in &mut assertion_results {
+        r.message = redactor.text_any_case(&r.message);
     }
     redact_attempts(&mut attempts, redactor);
     let mut findings = diagnosis.findings;
@@ -373,8 +419,8 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             }
         };
         scrub(&mut r.reason);
-        scrub(&mut r.body.content_type);
         scrub(&mut r.body.content_encoding);
+        r.body.content_type = r.body.content_type.as_deref().map(|ct| scrub_media_type(redactor, ct));
     }
     let prepared_headers: Vec<HeaderEntry> =
         a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect();

@@ -350,6 +350,15 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     let mut spec = RequestSpec::http("GET", &url);
     spec.headers.push(anvil_domain::request::KeyValue::new("X-Sent-{{reflected}}", "v"));
     spec.headers.push(anvil_domain::request::KeyValue::new("Content-Type", "text/plain;k={{reflected}}"));
+    // A body check reads the decoding failure, which quotes the coding.
+    spec.assertions.push(anvil_domain::assertions::Assertion {
+        enabled: true,
+        label: "body".into(),
+        kind: anvil_domain::assertions::AssertionKind::Body {
+            comparison: anvil_domain::assertions::Comparison::Contains,
+            value: "plain".into(),
+        },
+    });
     let mut c = ExecutionContext::standalone(spec);
     let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true, literal: false }];
     c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
@@ -369,8 +378,33 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     assert!(r.body.content_type.as_deref().is_some_and(|ct| ct.contains(REDACTED)), "{:?}", r.body.content_type);
     assert!(r.body.content_encoding.as_deref().is_some_and(|ce| ce.contains(REDACTED)), "{:?}", r.body.content_encoding);
     assert!(o.record.prepared.headers.iter().any(|h| h.name == format!("X-Sent-{REDACTED}")), "{:?}", o.record.prepared.headers);
+    assert!(!o.record.assertion_results.is_empty());
     let record = serde_json::to_string(&o.record).unwrap();
     assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
+}
+
+/// A response `Content-Type` that a known secret happens to be part of is
+/// kept when it is a well-known media type: callers act on it (an MCP
+/// event stream is parsed by it). Its parameters are still scrubbed.
+#[tokio::test]
+async fn a_well_known_media_type_survives_a_secret_that_is_part_of_it() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http("GET", &f.url("/status/200?ct=text/event-stream;%20x=stream-param-77&body=data"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Word", "{{word}}"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Param", "{{param}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![
+        VarEntry { name: "word".into(), value: "stream".into(), secret: true, literal: false },
+        VarEntry { name: "param".into(), value: "stream-param-77".into(), secret: true, literal: false },
+    ];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    let ct = r.body.content_type.as_deref().unwrap_or_default();
+    assert!(ct.starts_with("text/event-stream;"), "{ct}");
+    assert!(!ct.contains("stream-param-77"), "{ct}");
 }
 
 /// The status line's reason phrase is kept in the response, the protocol
