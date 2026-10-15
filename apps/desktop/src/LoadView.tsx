@@ -146,6 +146,17 @@ type PlanDraft = { plan: LoadPlan; created: boolean };
 type Drafts = Record<string, Record<string, PlanDraft>>;
 
 /** The plan with its list fields normalized; an already normalized plan is returned as is. */
+/** What the backend sets on a save; an edit never changes it. */
+function storedMeta(p: LoadPlan): Pick<LoadPlan, "trusted" | "created_at" | "updated_at"> {
+  return { trusted: p.trusted, created_at: p.created_at, updated_at: p.updated_at };
+}
+
+/** Whether two edits of a plan are the same edit (stored metadata aside). */
+function sameEdit(a: LoadPlan, b: LoadPlan): boolean {
+  const content = (p: LoadPlan) => JSON.stringify({ ...p, trusted: null, created_at: null, updated_at: null });
+  return content(a) === content(b);
+}
+
 function editable(plan: LoadPlan): EditPlan {
   return plan.chain && plan.mix ? (plan as EditPlan) : { ...plan, chain: plan.chain ?? [], mix: plan.mix ?? [] };
 }
@@ -270,7 +281,7 @@ export function LoadView(props: {
   const dropDraft = (ws: string, id: string, only?: LoadPlan) =>
     setDrafts((d) => {
       const own = d[ws];
-      if (!own?.[id] || (only && own[id].plan !== only)) return d;
+      if (!own?.[id] || (only && !sameEdit(own[id].plan, only))) return d;
       return { ...d, [ws]: Object.fromEntries(Object.entries(own).filter(([k]) => k !== id)) };
     });
   /** Selects `s`; an untouched new plan is dropped unless it is the one selected. */
@@ -370,15 +381,20 @@ export function LoadView(props: {
                 // The save response acknowledges this plan before its list
                 // reload finishes. It is no longer a new plan, so Discard
                 // must disappear during that window too.
+                // A draft edited since the save keeps that edit, with the
+                // saved copy's stored metadata.
                 setDrafts((all) => {
                   const own = all[p.workspace_id];
                   const draft = own?.[p.id];
-                  if (!draft?.created) return all;
+                  if (!draft) return all;
+                  const edited = !sameEdit(draft.plan, sent);
+                  if (!draft.created && !edited) return all;
+                  const plan = edited ? { ...draft.plan, ...storedMeta(p) } : draft.plan;
                   return {
                     ...all,
                     [p.workspace_id]: {
                       ...own,
-                      [p.id]: { ...draft, created: false },
+                      [p.id]: { plan, created: false },
                     },
                   };
                 });
@@ -460,10 +476,7 @@ export function PlanEditor(props: {
   onStarted: (runKey: string, name: string) => void;
 }) {
   const [p, setEdit] = useState<EditPlan>(() => editable(props.plan));
-  // The editor's current edit, read when a save lands.
-  const latest = useRef(p);
   const setP = (next: EditPlan) => {
-    latest.current = next;
     setEdit(next);
     props.onChange?.(next);
   };
@@ -517,15 +530,9 @@ export function PlanEditor(props: {
       const saved = await api.saveLoadPlan(sent);
       // Edits typed while the save was on its way stay: only an unchanged
       // editor takes the saved copy; otherwise the edit takes just its stored
-      // metadata, and the view's draft is that same edit, so the next save
-      // of it is recognised as saved.
-      const cur = latest.current;
-      if (cur === sent) {
-        latest.current = editable(saved);
-        setEdit(latest.current);
-      } else {
-        setP({ ...cur, trusted: saved.trusted, created_at: saved.created_at, updated_at: saved.updated_at });
-      }
+      // metadata. The view does the same to its draft (`onSaved`), whether or
+      // not this editor is still shown.
+      setEdit((cur) => (cur === sent ? editable(saved) : { ...cur, ...storedMeta(saved) }));
       props.onSaved(saved, sent);
       return saved;
     } catch (e) {

@@ -1,6 +1,6 @@
 // Management dialogs: environments, connection profiles, export/import and
 // app settings. All persistence happens in Rust.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DiagnosticImport } from "./DiagnosticImport";
 import {
   api,
@@ -54,10 +54,17 @@ export const FERRUM_COMPATIBILITY = [
 
 // ------------------------------------------------------------ environments
 
+/** Whether `a` was saved no earlier than `b` (by `updated_at`). */
+function newer(a: { updated_at: string }, b: { updated_at: string }): boolean {
+  return Date.parse(a.updated_at) >= Date.parse(b.updated_at);
+}
+
 export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () => void; onChanged: () => void }) {
-  // The workspace as last saved here, until the parent's reload brings a newer copy.
+  // The workspace as last saved here, until the parent's reload brings a
+  // newer copy. A copy older than one this dialog saved (a reload that
+  // answers late) is not taken.
   const [workspace, setWorkspace] = useState(props.workspace);
-  useEffect(() => setWorkspace(props.workspace), [props.workspace]);
+  useEffect(() => setWorkspace((cur) => (newer(props.workspace, cur) ? props.workspace : cur)), [props.workspace]);
   const [envs, setEnvs] = useState<Environment[]>([]);
   const [sel, setSel] = useState<string>("__base");
   // Unsaved edits per variable set. A set without one shows its stored values,
@@ -66,9 +73,13 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
   // editor moved on (or came back), puts older values over newer ones.
   const [edits, setEdits] = useState<Record<string, { variables: Variable[]; name: string }>>({});
   const [err, setErr] = useState<string | null>(null);
+  // Only the latest list read is shown: an earlier one that answers late
+  // could predate a save made since.
+  const reads = useRef(0);
   const load = async () => {
+    const n = ++reads.current;
     const e = await api.environments(props.workspace.id);
-    setEnvs(e);
+    if (n === reads.current) setEnvs(e);
     return e;
   };
   useEffect(() => {
@@ -92,6 +103,7 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
         setWorkspace(await api.saveWorkspace({ ...workspace, variables: draft }));
       } else {
         const env = await api.saveEnvironment({ ...selEnv!, name, variables: draft });
+        reads.current++; // a list read already on its way predates this save
         setEnvs((all) => all.map((x) => (x.id === env.id ? env : x)));
       }
       // Saved: the set shows its stored values again, unless edited since.

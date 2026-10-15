@@ -929,6 +929,45 @@ describe("LoadView save", () => {
   });
 });
 
+describe("LoadView save while the plan is reselected", () => {
+  it("keeps an edit made in a new editor after selecting away and back during the save", async () => {
+    const first = deferred<void>();
+    let n = 0;
+    backend({
+      load_plan_save: async (a) => {
+        n++;
+        if (n === 1) await first.promise;
+        return { ...saveInto(a), updated_at: `2026-09-2${6 + n}T00:00:00Z` };
+      },
+    });
+    plans.A = [loadPlan("pa", "A", "Plan A"), loadPlan("pa2", "A", "Plan A2")];
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "v1" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    fireEvent.change(planName(), { target: { value: "v2" } });
+    fireEvent.click(screen.getByText("Plan A2"));
+    expect(planName().value).toBe("Plan A2");
+    fireEvent.click(screen.getByText("v2"));
+    expect(planName().value).toBe("v2");
+    fireEvent.change(planName(), { target: { value: "v3" } });
+    await act(async () => first.resolve());
+    await act(async () => {});
+    expect(planName().value).toBe("v3");
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    expect((calls("load_plan_save")[1].plan as LoadPlan).name).toBe("v3");
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    // Away and back: the saved plan, not an older edit.
+    fireEvent.click(screen.getByText("Plan A2"));
+    fireEvent.click(screen.getByText("v3"));
+    expect(planName().value).toBe("v3");
+  });
+});
+
 describe("LoadView run start", () => {
   const handlers = new Map<string, (ev: { payload: unknown }) => void>();
   const listenMock = listen as unknown as ReturnType<typeof vi.fn>;

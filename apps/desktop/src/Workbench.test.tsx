@@ -1647,4 +1647,94 @@ describe("environments dialog", () => {
     await waitFor(() => expect(calls("environment_save")).toHaveLength(2));
     expect((calls("environment_save")[1].environment as Environment).variables).toEqual(vars("v1"));
   });
+
+  it("ignores an environment list read that answers after a later save", async () => {
+    const vars = (v: string) => [{ name: "token", value: { kind: "template" as const, value: v }, enabled: true }];
+    let stored = { ...environment("e1", "A", "Staging"), variables: vars("v0") } as Environment;
+    const gate = deferred<void>();
+    let hold: Promise<void> | null = null;
+    let saves = 0;
+    backend({
+      environments_list: async () => {
+        // The snapshot is taken when the read starts, as the backend does.
+        const snapshot = stored;
+        const wait = hold;
+        hold = null;
+        if (wait) await wait;
+        return [snapshot];
+      },
+      environment_save: async (a) => {
+        saves++;
+        stored = { ...(a.environment as Environment), updated_at: `2026-01-0${saves + 1}T00:00:00Z` };
+        if (saves === 1) hold = gate.promise;
+        return stored;
+      },
+    });
+    await boot();
+    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "__manage" } });
+    const dialog = await screen.findByRole("dialog", { name: "Environments and variables" });
+    const value = () => within(dialog).getByLabelText("Value") as HTMLInputElement;
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Staging" }));
+    await waitFor(() => expect(value().value).toBe("v0"));
+    fireEvent.change(value(), { target: { value: "v1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("environment_save")).toHaveLength(1));
+    await act(async () => {});
+    // The list read after that save is held with the v1 snapshot; v2 is saved meanwhile.
+    fireEvent.change(value(), { target: { value: "v2" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("environment_save")).toHaveLength(2));
+    await act(async () => {});
+    expect(value().value).toBe("v2");
+    await act(async () => gate.resolve());
+    await act(async () => {});
+    expect(value().value).toBe("v2");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("environment_save")).toHaveLength(3));
+    expect((calls("environment_save")[2].environment as Environment).variables).toEqual(vars("v2"));
+  });
+
+  it("ignores a workspace copy older than the one it saved", async () => {
+    const vars = (v: string) => [{ name: "base", value: { kind: "template" as const, value: v }, enabled: true }];
+    let stored = { ...workspace("A", "One"), variables: vars("v0") } as Workspace;
+    const gate = deferred<void>();
+    let hold: Promise<void> | null = null;
+    let saves = 0;
+    backend({
+      workspaces_list: async () => {
+        const snapshot = stored;
+        const wait = hold;
+        hold = null;
+        if (wait) await wait;
+        return [snapshot, workspace("B", "Two")];
+      },
+      workspace_save: async (a) => {
+        saves++;
+        stored = { ...(a.workspace as Workspace), updated_at: `2026-01-0${saves + 1}T00:00:00Z` };
+        if (saves === 1) hold = gate.promise;
+        return stored;
+      },
+    });
+    await boot();
+    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "__manage" } });
+    const dialog = await screen.findByRole("dialog", { name: "Environments and variables" });
+    const value = () => within(dialog).getByLabelText("Value") as HTMLInputElement;
+    await waitFor(() => expect(value().value).toBe("v0"));
+    fireEvent.change(value(), { target: { value: "v1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(1));
+    // The workbench's workspace read after that save holds the v1 copy.
+    await waitFor(() => expect(hold).toBeNull());
+    fireEvent.change(value(), { target: { value: "v2" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(2));
+    await act(async () => {});
+    expect(value().value).toBe("v2");
+    await act(async () => gate.resolve());
+    await act(async () => {});
+    expect(value().value).toBe("v2");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(3));
+    expect((calls("workspace_save")[2].workspace as Workspace).variables).toEqual(vars("v2"));
+  });
 });
