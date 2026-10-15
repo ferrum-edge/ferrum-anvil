@@ -34,9 +34,13 @@ or assigned an owner at open/unlock.
 Domain kinds are decoded as their declared domain type before data is
 returned. For app-owned kinds, storage decodes their identity projection
 without introducing a storage-to-app dependency. Unknown kinds fail closed.
-Ordering and timestamps remain unauthenticated metadata; inventory APIs still
-expose metadata for cleanup and corruption reporting, and must not be used as
-payload authorization.
+Ordering and timestamps are not part of the AAD. In an enrolled profile the
+record-integrity catalogue authenticates them: each entry records the row's
+sort key and update time beside its owner and parent, and
+`Manifest::check_metadata` refuses a row whose columns differ
+([storage-and-recovery.md](../storage-and-recovery.md#authenticated-current-records)).
+Inventory APIs still expose metadata for cleanup and corruption reporting, and
+must not be used as payload authorization.
 
 `Store::put` takes an immediate write transaction; `StoreTx::put` uses its
 existing one. Each validates the submitted identity, opens and validates any

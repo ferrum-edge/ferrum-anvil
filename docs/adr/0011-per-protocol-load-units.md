@@ -34,6 +34,16 @@ denominators, and never a sent datagram counted as delivered.
   or gRPC through HBONE in persistent mode.
 - Runs of different unit kinds are never compared.
 
+## Amendment
+Later work defined units for some combinations this decision refused:
+client-streaming and bidirectional gRPC (`grpc_client_stream`,
+`grpc_bidi_stream`), and UDP/DTLS exchanges through a MASQUE (CONNECT-UDP) or
+HBONE datagram tunnel. Streaming over gRPC-Web is still refused, with every
+other call the engine refuses on each send (`grpc_unsupported_combination`),
+and MASQUE only while a proxy profile routes the request
+(`masque_through_proxy`). The current units and refusals are listed
+in [load.md](../load.md). The rest of this decision stands.
+
 ## Consequences
 - Every protocol Anvil sends can be load tested except the refused ones,
   with counts that match independent ground truth (fixtures, and the real
