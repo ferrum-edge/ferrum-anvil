@@ -187,13 +187,22 @@ struct Part {
     refs: Vec<(String, bool)>,
 }
 
+/// Where a scanned value sits: a schema, a map of named schemas
+/// (`properties`, `$defs`, …), or literal data (`const`, `enum`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pos {
+    Schema,
+    Map,
+    Literal,
+}
+
 /// Scan until more than `node_limit` objects and lists, more than
 /// `step_limit` members and items (scalars included), or more than
 /// `byte_limit` bytes of member names and strings have been seen.
 fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> Part {
     let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, refs: vec![] };
-    let mut stack: Vec<(&Value, bool, usize)> = vec![(v, false, 1)];
-    'scan: while let Some((v, down, d)) = stack.pop() {
+    let mut stack: Vec<(&Value, bool, usize, Pos)> = vec![(v, false, 1, Pos::Schema)];
+    'scan: while let Some((v, down, d, pos)) = stack.pop() {
         if part.nodes > node_limit || part.steps > step_limit || part.bytes > byte_limit {
             break;
         }
@@ -201,7 +210,11 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
         match v {
             Value::Object(o) => {
                 part.nodes += 1;
-                if let Some(t) = o.get("$ref").and_then(Value::as_str).and_then(internal_pointer) {
+                // Literal data is counted but holds no references; in a map
+                // of named schemas, `$ref` is a name.
+                if pos == Pos::Schema
+                    && let Some(t) = o.get("$ref").and_then(Value::as_str).and_then(internal_pointer)
+                {
                     part.refs.push((t, down));
                 }
                 for (k, child) in o {
@@ -210,10 +223,17 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
                     if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
+                    let child_pos = match pos {
+                        Pos::Literal => Pos::Literal,
+                        Pos::Map => Pos::Schema,
+                        Pos::Schema if literal_keyword(k) => Pos::Literal,
+                        Pos::Schema if schema_map_keyword(k) => Pos::Map,
+                        Pos::Schema => Pos::Schema,
+                    };
                     // A `$ref` that is not a string is still copied by
                     // conversion and bundling: scanned like any member.
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down || descends(k), d + 1));
+                        stack.push((child, down || descends(k), d + 1, child_pos));
                     }
                 }
             }
@@ -226,7 +246,7 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
                         break 'scan;
                     }
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down, d + 1));
+                        stack.push((child, down, d + 1, pos));
                     }
                 }
             }
@@ -252,6 +272,91 @@ const ROOT: &str = "#root";
 /// [`measure`], adding the members and items it looked at, and the bytes of
 /// their names and strings, to `total`.
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
+    measure_in(&spec.root, schema, total)
+}
+
+/// Check a standalone JSON Schema (a custom ruleset's `schema` function)
+/// before it is compiled, with the same limits as an OpenAPI schema: its
+/// references resolve within the schema itself. Only plain `#`/`#/…`
+/// references are accepted, and nothing may change how they resolve: no
+/// `$id` or `$schema` below the root, a root `$schema` only for draft
+/// 2020-12, and no `$anchor`, `$dynamicRef` or `$recursiveRef`. Every
+/// reference the validator follows is then one the measurement counts.
+///
+/// Keywords are read only where a schema is: literal data (`const`, `enum`,
+/// `default`, `examples`) is not interpreted, unless a reference points into
+/// it (the validator then compiles it as a schema too).
+pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
+    check_standalone_keywords(schema)?;
+    measure_in(schema, schema, &mut Scanned::default())
+}
+
+/// Keywords whose value is instance data, not a schema.
+fn literal_keyword(k: &str) -> bool {
+    matches!(k, "const" | "enum" | "default" | "examples" | "example")
+}
+
+/// Keywords whose value maps names to schemas.
+fn schema_map_keyword(k: &str) -> bool {
+    matches!(k, "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies")
+}
+
+fn check_standalone_keywords(schema: &Value) -> Result<(), String> {
+    let mut stack: Vec<(&Value, bool)> = vec![(schema, true)];
+    let mut followed: HashSet<String> = HashSet::new();
+    // A reference target is walked again from its own position, so the walk
+    // is bounded like the measurement's scan.
+    let mut steps = 0usize;
+    while let Some((v, root)) = stack.pop() {
+        let Value::Object(o) = v else { continue };
+        for (k, child) in o {
+            steps += 1;
+            if steps > MAX_SCAN_STEPS {
+                return Err(format!(
+                    "{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items"
+                ));
+            }
+            match (k.as_str(), child.as_str()) {
+                ("$ref", Some(r)) => match internal_pointer(r) {
+                    // The target is compiled as a schema wherever it is.
+                    Some(p) => {
+                        if followed.insert(p.clone())
+                            && let Some(t) = schema.pointer(&p)
+                        {
+                            stack.push((t, p.is_empty()));
+                        }
+                    }
+                    None => return Err(format!("only references within the schema (`#/…`) are supported, not '{r}'")),
+                },
+                ("$id", Some(_)) if !root => return Err("`$id` is only supported at the root of the schema".into()),
+                ("$schema", Some(d)) => {
+                    let d = d.trim_end_matches('#');
+                    if !root || !(d == "https://json-schema.org/draft/2020-12/schema" || d == "http://json-schema.org/draft/2020-12/schema")
+                    {
+                        return Err("`$schema` is only supported at the root of the schema, for draft 2020-12".into());
+                    }
+                }
+                ("$anchor" | "$dynamicAnchor" | "$dynamicRef" | "$recursiveRef" | "$recursiveAnchor", Some(_)) => {
+                    return Err(format!("`{k}` is not supported; use a `#/…` reference"));
+                }
+                _ => {}
+            }
+            if literal_keyword(k) {
+                continue;
+            }
+            let schemas: Box<dyn Iterator<Item = &Value>> = match child {
+                Value::Object(m) if schema_map_keyword(k) => Box::new(m.values()),
+                Value::Array(a) => Box::new(a.iter()),
+                other => Box::new(std::iter::once(other)),
+            };
+            stack.extend(schemas.filter(|c| c.is_object()).map(|c| (c, false)));
+        }
+    }
+    Ok(())
+}
+
+/// [`measure_counted`] with references resolved in `root`.
+fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
     let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
     let mib = MAX_SCAN_BYTES >> 20;
@@ -284,7 +389,7 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
         if parts.len() >= MAX_REF_TARGETS {
             return Err(format!("{TOO_LARGE}the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
         }
-        match spec.root.pointer(key) {
+        match root_doc.pointer(key) {
             Some(v) => {
                 let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped, MAX_SCAN_BYTES - bytes);
                 scanned += part.nodes;
