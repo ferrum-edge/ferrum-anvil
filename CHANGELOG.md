@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Security
+
+- rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
+  (client session `Debug` output, data buffered across an ECH rejection,
+  pre-authentication Brotli certificate decompression and a key-exchange
+  downgrade).
+
 ### Changed
 
 - Record-integrity checks now cost what an operation touches instead of the
