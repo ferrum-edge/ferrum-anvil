@@ -70,6 +70,24 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
     scrub_json_at(b, v, pointer, &mut Vec::new());
 }
 
+/// Marks a placeholder that replaced a number, so [`render_json`] writes it
+/// without quotes (`"pin": {{pin}}`). A control character the source text
+/// cannot hold unescaped, plus a tag.
+const NUMERIC_PLACEHOLDER: &str = "\u{1}anvil-number\u{1}";
+
+/// Serialize a scrubbed JSON body, writing the placeholders that replaced
+/// numbers unquoted. When the source already held the marker text, they
+/// stay quoted strings.
+pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
+    let text = if pretty { serde_json::to_string_pretty(v).ok()? } else { serde_json::to_string(v).ok()? };
+    let marker = serde_json::to_string(NUMERIC_PLACEHOLDER).ok()?;
+    let marker = &marker[1..marker.len() - 1];
+    if source.contains("anvil-number") || !text.contains(marker) {
+        return Some(text.replace(marker, ""));
+    }
+    Some(text.replace(&format!("\"{marker}"), "").replace(&format!("{marker}\""), ""))
+}
+
 /// Bytes of a member name kept per path segment while walking a body; a
 /// report pointer is built from the segments only for a member that is
 /// redacted, and is itself bounded, so walking a wide array under a long
@@ -112,7 +130,9 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
                     let literal = n.to_string();
                     let new = credential_text(b, &literal, k, &p, &format!("body field {k}"));
                     if new != literal {
-                        *child = Value::String(new);
+                        // Rendered unquoted ([`render_json`]): the value the
+                        // user supplies is substituted as a number again.
+                        *child = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
                     }
                     continue;
                 }
@@ -172,7 +192,7 @@ pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> boo
                 );
             }
             if (b.report.redactions_made() > before || collapse)
-                && let Ok(t) = serde_json::to_string_pretty(&v)
+                && let Some(t) = render_json(&v, true, text)
             {
                 *text = t;
             }
@@ -246,10 +266,12 @@ pub fn scrub_graphql_variables(b: &mut Builder, variables: Option<Value>, pointe
             s
         }
         Some(mut v) => {
-            if !b.opts.include_credentials {
-                scrub_json(b, &mut v, pointer);
+            if b.opts.include_credentials {
+                return v.to_string();
             }
-            v.to_string()
+            let source = v.to_string();
+            scrub_json(b, &mut v, pointer);
+            render_json(&v, false, &source).unwrap_or(source)
         }
     }
 }

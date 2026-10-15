@@ -320,8 +320,10 @@ fn json_data_is_scanned_under_the_node_budget() {
 #[test]
 fn numeric_credentials_and_unscannable_data() {
     let r = curl(r#"curl --json '{"pin":123456,"max_tokens":5}' https://example.test"#);
-    let body = json_body(&r.requests[0].spec);
-    assert_eq!((body["pin"].as_str(), body["max_tokens"].as_u64()), (Some("{{pin}}"), Some(5)));
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    assert!(!text.contains("123456"), "{text}");
+    let body = substituted(text, &[("pin", "123456")]);
+    assert_eq!((body["pin"].as_u64(), body["max_tokens"].as_u64()), (Some(123456), Some(5)));
     let r = curl("curl -H 'Content-Type: application/xml' -d '<a>placeholder-secret</a>' https://example.test");
     assert!(has_at(&r, "body_not_scanned", "/args"));
 }

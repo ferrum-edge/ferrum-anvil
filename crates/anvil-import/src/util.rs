@@ -393,6 +393,53 @@ pub fn scalar_text(v: &Value) -> String {
     }
 }
 
+/// Whether `s` is one complete JSON document, validated as strictly as
+/// parsing it into a `serde_json::Value` (string escapes, surrogate pairs,
+/// numbers, nesting limit) without building the tree.
+pub fn is_json_document(s: &str) -> bool {
+    use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+    struct Discard;
+    impl<'de> Deserialize<'de> for Discard {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_any(DiscardVisitor)
+        }
+    }
+    struct DiscardVisitor;
+    impl<'de> Visitor<'de> for DiscardVisitor {
+        type Value = Discard;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_unit<E>(self) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Discard, A::Error> {
+            while seq.next_element::<Discard>()?.is_some() {}
+            Ok(Discard)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Discard, A::Error> {
+            while map.next_entry::<Discard, Discard>()?.is_some() {}
+            Ok(Discard)
+        }
+    }
+    serde_json::from_str::<Discard>(s).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -748,7 +748,7 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
                             &ptr(at, "text"),
                             "the GraphQL body is JSON without a `query` string; imported as a raw JSON body",
                         );
-                        let text = serde_json::to_string(&other).unwrap_or_default();
+                        let text = crate::common::render_json(&other, false, &text).unwrap_or_default();
                         return Body::Raw { text, content_type: Some("application/json".into()) };
                     }
                 },

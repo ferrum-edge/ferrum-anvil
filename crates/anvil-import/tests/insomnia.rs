@@ -403,9 +403,10 @@ fn graphql_variables_and_numeric_credentials_are_redacted() {
     ] {
         match &r.requests[0].spec.body {
             Body::GraphQl { variables, .. } => {
-                let v: serde_json::Value = serde_json::from_str(variables).unwrap();
+                // The number is a placeholder again once the user supplies it.
+                let v = substituted(variables, &[("pin", "123456")]);
                 assert_eq!(v["password"], "{{password}}");
-                assert_eq!(v["pin"], "{{pin}}");
+                assert_eq!(v["pin"], 123456);
                 assert_eq!(v["user"], "u");
             }
             other => panic!("{other:?}"),
@@ -418,9 +419,11 @@ fn graphql_variables_and_numeric_credentials_are_redacted() {
         "url": "https://example.test/x",
         "body": { "mimeType": "application/json", "text": r#"{"max_tokens":100,"otp":654321}"# },
     }));
-    let body = json_body(&r.requests[0].spec);
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    assert!(!text.contains("654321"), "{text}");
+    let body = substituted(text, &[("otp", "654321")]);
     assert_eq!(body["max_tokens"], 100);
-    assert_eq!(body["otp"], "{{otp}}");
+    assert_eq!(body["otp"], 654321);
 }
 
 #[test]

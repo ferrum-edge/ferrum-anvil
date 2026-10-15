@@ -66,3 +66,13 @@ pub fn dump(r: &ImportResult) -> String {
     }))
     .unwrap()
 }
+
+/// `text` with `{{name}}` placeholders replaced by the given values, as the
+/// engine's resolver substitutes them, parsed as JSON.
+pub fn substituted(text: &str, vars: &[(&str, &str)]) -> serde_json::Value {
+    let mut t = text.to_string();
+    for (n, v) in vars {
+        t = t.replace(&format!("{{{{{n}}}}}"), v);
+    }
+    serde_json::from_str(&t).unwrap_or_else(|e| panic!("not JSON after substitution ({e}): {t}"))
+}

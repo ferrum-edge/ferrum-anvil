@@ -227,8 +227,8 @@ fn graphql_variables_numeric_credentials_and_unscannable_bodies() {
     let r = postman_body(gql.clone(), &opts());
     match &r.requests[0].spec.body {
         Body::GraphQl { variables, .. } => {
-            let v: serde_json::Value = serde_json::from_str(variables).unwrap();
-            assert_eq!((v["password"].as_str(), v["pin"].as_str()), (Some("{{password}}"), Some("{{pin}}")));
+            let v = substituted(variables, &[("pin", "123456")]);
+            assert_eq!((v["password"].as_str(), v["pin"].as_u64()), (Some("{{password}}"), Some(123456)));
         }
         other => panic!("{other:?}"),
     }

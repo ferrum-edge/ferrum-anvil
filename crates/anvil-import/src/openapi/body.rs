@@ -183,7 +183,7 @@ fn looks_like_json_doc(s: &str) -> bool {
     let t = s.trim_start();
     // Validated without building it: the string is one node of the parsed
     // document, so a tree built here would escape the import's node budget.
-    (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<serde::de::IgnoredAny>(s).is_ok()
+    (t.starts_with('{') || t.starts_with('[')) && crate::util::is_json_document(s)
 }
 
 /// Generate the top-level value; an unexpandable root yields a type-correct
