@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.01-1",
+  "version": "2026.10.15-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
