@@ -77,12 +77,6 @@
 
 ### Fixed
 
-- `app.mcp_tool_error` no longer says the call reached the tool or assigns
-  it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
-  `isError: true` result when the gateway fails or refuses the call it makes for
-  the tool. The error result stays confirmed, scope and owner are unknown, and
-  the finding lists both explanations.
-
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback
@@ -153,6 +147,12 @@
   commit and retire the old entry after it. Previously every rotation converted the
   profile to passphrase protection. `PolicyRotation` is now an enum and retired
   credentials are recorded as `RotationPolicy::retired_keychain`.
+
+- `app.mcp_tool_error` no longer says the call reached the tool or assigns
+  it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
+  `isError: true` result when the gateway fails or refuses the call it makes for
+  the tool. The error result stays confirmed, scope and owner are unknown, and
+  the finding lists both explanations.
 
 - A transient storage error no longer locks an unlocked profile. The per-operation
   key check drops the key only on evidence against it (a canary or catalogue that
