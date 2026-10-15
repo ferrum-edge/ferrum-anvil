@@ -353,6 +353,11 @@ struct Shared {
     halt: CancellationToken,
     /// Cancel in-flight sends.
     hard: CancellationToken,
+    /// The caller's user-cancel and vault-lock tokens, read directly before
+    /// each further chain step so a signal the observer task has not
+    /// processed yet still stops the chain.
+    cancel: CancellationToken,
+    lock: CancellationToken,
     reason: Mutex<Option<StopReason>>,
     timeline_truncated: AtomicBool,
 }
@@ -420,6 +425,12 @@ fn slot_engine(tokens: Arc<anvil_auth::oauth::TokenCache>, idle_total: usize) ->
 }
 
 impl Shared {
+    /// No further chain steps: halted, or the user canceled or the vault
+    /// locked (whether or not the observer has recorded it yet).
+    fn chains_halted(&self) -> bool {
+        self.halt.is_cancelled() || self.cancel.is_cancelled() || self.lock.is_cancelled()
+    }
+
     fn engine(&self, slot: usize) -> Arc<Engine> {
         self.engines[slot].get_or_init(|| Arc::new(slot_engine(self.tokens.clone(), self.slot_idle))).clone()
     }
@@ -734,7 +745,7 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
     let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
     let (mut terminal, mut app, mut assertion) = (Terminal::Completed, false, false);
     for (pos, &si) in steps.iter().enumerate() {
-        if pos > 0 && sh.halt.is_cancelled() {
+        if pos > 0 && sh.chains_halted() {
             terminal = Terminal::Canceled;
             break;
         }
@@ -1167,6 +1178,8 @@ impl LoadRun {
             stop: CancellationToken::new(),
             halt: CancellationToken::new(),
             hard: CancellationToken::new(),
+            cancel: cancel.clone(),
+            lock: lock.clone(),
             reason: Mutex::new(None),
             timeline_truncated: AtomicBool::new(false),
             plan: plan.clone(),

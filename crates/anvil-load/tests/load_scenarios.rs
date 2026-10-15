@@ -1029,61 +1029,89 @@ async fn data_016_lock_during_load_stops_run_with_partial_report() {
     assert!(traffic_stopped(&f).await, "no hidden traffic after lock");
 }
 
-/// A vault lock that arrives after the schedule ended, while an iteration's
-/// chain is still in flight, halts the chain before its next step and is
-/// reported as the stop reason (not `Completed`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_lock_during_the_graceful_drain_halts_chains_and_is_reported() {
-    let _g = serial().await;
-    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
-    let (a, b) = (Id::new(), Id::new());
-    // One user for one second; its first iteration's first step outlasts the schedule.
-    let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a, b]);
-    let job = LoadJob {
-        requests: [(a, get(&f.url("/delay-headers/2000"))), (b, get(&f.url("/count/after-lock")))].into_iter().collect(),
-        dataset: None,
-    };
-    let lock = CancellationToken::new();
-    let late = {
-        let lock = lock.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1_400)).await;
-            lock.cancel();
-        })
-    };
-    let r = LoadRun::prepare(p, job, opts()).expect("valid plan").execute_lockable(CancellationToken::new(), lock, None).await;
-    late.await.unwrap();
-    assert_balanced(&r);
-    assert_eq!(r.completion, RunCompletion::StoppedByLock, "{:?}", r.notes);
-    assert!(r.notes.iter().any(|n| n.contains("vault locked")), "{:?}", r.notes);
-    assert_eq!(f.state.counters.lock().get("after-lock"), None, "no step started after the lock");
-    assert_eq!(r.requests.started, 1);
+/// Which external signal a drain-phase test sends.
+#[derive(Clone, Copy, Debug)]
+enum Late {
+    Cancel,
+    Lock,
 }
 
-/// The lock also shortens the rest of the graceful drain to the cancel drain
-/// window: an in-flight send is not given the whole `graceful_stop_ms`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_lock_during_the_graceful_drain_shortens_it_to_the_cancel_window() {
-    let _g = serial().await;
-    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
-    let a = Id::new();
-    let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a]);
-    let job = LoadJob { requests: [(a, get(&f.url("/delay-headers/12000")))].into_iter().collect(), dataset: None };
-    let o = RunOptions { graceful_stop_ms: 30_000, cancel_drain_ms: 500, ..opts() };
-    let lock = CancellationToken::new();
-    let late = {
-        let lock = lock.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1_400)).await;
-            lock.cancel();
+/// Run `p` and send `signal` once progress shows the schedule has ended
+/// (`Draining`) with a send still in flight: the drain-phase precondition is
+/// observed, not assumed from timing.
+async fn run_with_late_signal(p: LoadPlan, job: LoadJob, o: RunOptions, signal: Late) -> (LoadReport, Duration) {
+    let (cancel, lock) = (CancellationToken::new(), CancellationToken::new());
+    let target = match signal {
+        Late::Cancel => cancel.clone(),
+        Late::Lock => lock.clone(),
+    };
+    let sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sink: anvil_load::ProgressSink = {
+        let sent = sent.clone();
+        Arc::new(move |p: &anvil_load::Progress| {
+            if p.phase == anvil_load::executor::RunPhase::Draining
+                && p.in_flight > 0
+                && !sent.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                target.cancel();
+            }
+            true
         })
     };
     let t = Instant::now();
-    let r = LoadRun::prepare(p, job, o).expect("valid plan").execute_lockable(CancellationToken::new(), lock, None).await;
-    late.await.unwrap();
-    // Lock at 1.4 s + 0.5 s cancel drain + the 2 s hard-cancel grace, with
-    // margin; the send itself would take 12 s and the graceful window 30 s.
-    assert!(t.elapsed() < Duration::from_secs(8), "drain not shortened: {:?}", t.elapsed());
-    assert_balanced(&r);
-    assert_eq!(r.completion, RunCompletion::StoppedByLock, "{:?}", r.notes);
+    let r = LoadRun::prepare(p, job, o).expect("valid plan").execute_lockable(cancel, lock, Some(sink)).await;
+    assert!(sent.load(std::sync::atomic::Ordering::SeqCst), "the signal was sent during the drain with a send in flight");
+    (r, t.elapsed())
+}
+
+fn late_completion(signal: Late) -> RunCompletion {
+    match signal {
+        Late::Cancel => RunCompletion::CanceledByUser,
+        Late::Lock => RunCompletion::StoppedByLock,
+    }
+}
+
+/// A user cancel or vault lock that arrives after the schedule ended, while
+/// an iteration's chain is still in flight, halts the chain before its next
+/// step and is reported as the stop reason (not `Completed`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signal_during_the_graceful_drain_halts_chains_and_is_reported() {
+    let _g = serial().await;
+    for signal in [Late::Lock, Late::Cancel] {
+        let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+        let (a, b) = (Id::new(), Id::new());
+        // One user for one second; its first iteration's first step outlasts the schedule.
+        let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a, b]);
+        let job = LoadJob {
+            requests: [(a, get(&f.url("/delay-headers/3000"))), (b, get(&f.url("/count/after-signal")))].into_iter().collect(),
+            dataset: None,
+        };
+        let (r, _) = run_with_late_signal(p, job, opts(), signal).await;
+        assert_balanced(&r);
+        assert_eq!(r.completion, late_completion(signal), "{signal:?}: {:?}", r.notes);
+        assert_eq!(f.state.counters.lock().get("after-signal"), None, "{signal:?}: no step started after the signal");
+        assert_eq!(r.requests.started, 1, "{signal:?}");
+    }
+}
+
+/// The signal also shortens the rest of the graceful drain to the cancel
+/// drain window: an in-flight send is not given the whole `graceful_stop_ms`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signal_during_the_graceful_drain_shortens_it_to_the_cancel_window() {
+    let _g = serial().await;
+    for signal in [Late::Lock, Late::Cancel] {
+        let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+        let a = Id::new();
+        let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a]);
+        let job = LoadJob { requests: [(a, get(&f.url("/delay-headers/15000")))].into_iter().collect(), dataset: None };
+        let o = RunOptions { graceful_stop_ms: 30_000, cancel_drain_ms: 500, ..opts() };
+        let (r, elapsed) = run_with_late_signal(p, job, o, signal).await;
+        // The schedule ends at 1 s and the signal follows within a progress
+        // interval; then 0.5 s of cancel drain and at most the 2 s
+        // hard-cancel grace. The send itself would take 15 s, the graceful
+        // window 30 s.
+        assert!(elapsed < Duration::from_secs(10), "{signal:?}: drain not shortened: {elapsed:?}");
+        assert_balanced(&r);
+        assert_eq!(r.completion, late_completion(signal), "{signal:?}: {:?}", r.notes);
+    }
 }
