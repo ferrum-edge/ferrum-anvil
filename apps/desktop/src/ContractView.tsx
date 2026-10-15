@@ -327,7 +327,10 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
     );
   }
   const c = report.counts;
-  const passed = c.error === 0;
+  // A check that stopped early is not a pass: what was left out may fail.
+  const incomplete = !!report.incomplete || (report.skipped_operations ?? 0) > 0;
+  const verdict = c.error > 0 ? "bad" : incomplete ? "warn" : "ok";
+  const verdictText = { bad: "does not meet the standards", warn: "not completely checked", ok: "meets the standards" }[verdict];
   return (
     <div className="page">
       <div className="page-head">
@@ -335,7 +338,7 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
           <div className="page-title">
             <h2>{report.spec.title || props.fileName}</h2>
             <span className="badge neutral">{DIALECT[report.spec.dialect] ?? report.spec.dialect}</span>
-            <span className={`badge ${passed ? "ok" : "bad"}`}>{passed ? "meets the standards" : "does not meet the standards"}</span>
+            <span className={`badge ${verdict}`}>{verdictText}</span>
           </div>
           <div className="page-meta">
             {props.fileName}
@@ -376,7 +379,10 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
           </button>
         ))}
       </div>
-      {report.findings.length === 0 && <div className="ok-box">No findings: the description meets every rule in effect.</div>}
+      {report.findings.length === 0 && !incomplete && <div className="ok-box">No findings: the description meets every rule in effect.</div>}
+      {report.findings.length === 0 && incomplete && (
+        <div className="warn-box">No findings in what was checked, but the description was not checked completely, so it is not known to meet every rule.</div>
+      )}
       {findings.slice(0, shown).map((f, i) => (
         <LintFindingCard key={`${f.rule}|${f.pointer}|${i}`} f={f} />
       ))}

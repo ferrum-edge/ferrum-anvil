@@ -17,6 +17,7 @@ const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
+import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
 import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
@@ -867,5 +868,89 @@ describe("ReportView", () => {
     expect(screen.getByTestId("protocol-panel").textContent).toContain("Load unit: exchanges");
     const successRow = screen.getByText("Successful exchanges").closest("tr")!;
     expect(successRow.textContent).toContain("— (no samples)");
+  });
+});
+
+describe("PlanEditor save", () => {
+  it("keeps a name typed while the save is on its way, and the next Save sends it", async () => {
+    const first = deferred<LoadPlan>();
+    const saves: LoadPlan[] = [];
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      if (cmd === "load_plan_save") {
+        const sent = args.plan as LoadPlan;
+        saves.push(sent);
+        return saves.length === 1 ? first.promise : sent;
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<PlanEditor plan={{ ...plan(), chain: [] }} {...editorProps} />);
+    fireEvent.change(planName(), { target: { value: "Saved name" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    fireEvent.change(planName(), { target: { value: "Newer name" } });
+    await act(async () => first.resolve({ ...saves[0], updated_at: "2026-09-27T00:00:00Z" }));
+    expect(planName().value).toBe("Newer name");
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(saves).toHaveLength(2));
+    // The newer edit, with the stored metadata of the first save.
+    expect(saves[1]).toMatchObject({ name: "Newer name", updated_at: "2026-09-27T00:00:00Z" });
+  });
+});
+
+describe("LoadView run start", () => {
+  const handlers = new Map<string, (ev: { payload: unknown }) => void>();
+  const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
+  const emit = (name: string, payload: unknown) => act(() => handlers.get(name)?.({ payload }));
+  beforeEach(() => {
+    listenMock.mockImplementation(async (name: string, cb: (ev: { payload: unknown }) => void) => {
+      handlers.set(name, cb);
+      return () => {};
+    });
+  });
+  afterEach(() => {
+    handlers.clear();
+    listenMock.mockImplementation(async () => () => {});
+  });
+
+  async function confirm() {
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.click(button("Run…"));
+    await screen.findByText("Confirm load run");
+    fireEvent.click(screen.getByLabelText(/I own these destinations/));
+  }
+
+  it("starts one run on a double click and keeps its Stop control until that run finishes", async () => {
+    const start = deferred<string>();
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => start.promise, load_run_cancel: () => true });
+    await confirm();
+    fireEvent.click(button("Start load"));
+    fireEvent.click(button("Start load"));
+    await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
+    expect(button("Start load").disabled).toBe(true);
+    await act(async () => start.resolve("key-1"));
+    expect(calls("load_run_start")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Stop run" })).toHaveLength(1);
+
+    // Another run's completion leaves this one's Stop control.
+    emit("load-finished", { run_key: "key-other", run_id: null });
+    expect(screen.getAllByRole("button", { name: "Stop run" })).toHaveLength(1);
+    fireEvent.click(button("Stop run"));
+    await waitFor(() => expect(calls("load_run_cancel")).toEqual([{ runKey: "key-1" }]));
+    emit("load-finished", { run_key: "key-1", run_id: null });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull());
+  });
+
+  it("does not show a run that finished before its start reply arrived", async () => {
+    const start = deferred<string>();
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => start.promise });
+    await confirm();
+    fireEvent.click(button("Start load"));
+    await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
+    emit("load-finished", { run_key: "key-1", run_id: null });
+    await act(async () => start.resolve("key-1"));
+    expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+    expect(screen.queryByText("Confirm load run")).toBeNull();
   });
 });

@@ -263,3 +263,38 @@ test("an imported spec has a Live traffic tab that compares its sends", async ()
   await screen.findByText(/uses path parameter/);
   expect(screen.queryByRole("tab", { name: "Live traffic" })).toBeNull();
 });
+
+test("an incomplete check without errors is not reported as meeting the standards", async () => {
+  for (const skipped of [0, 3]) {
+    backend({
+      standards_lint: () => ({
+        ...report(),
+        counts: { error: 0, warn: 0, info: 0, hint: 0 },
+        findings: [],
+        incomplete: true,
+        skipped_operations: skipped,
+      }),
+    });
+    render(<ContractView workspaceId="A" notify={notify} />);
+    fireEvent.click(await screen.findByText("Orders"));
+    expect(await screen.findByText("not completely checked")).toBeTruthy();
+    expect(screen.queryByText("meets the standards")).toBeNull();
+    expect(screen.queryByText(/meets every rule in effect/)).toBeNull();
+    expect(screen.getByText(/not checked completely, so it is not known to meet every rule/)).toBeTruthy();
+    cleanup();
+    invoke.mockReset();
+  }
+  // Errors still decide the verdict when the check is incomplete.
+  backend({ standards_lint: () => ({ ...report(), incomplete: true, skipped_operations: 1 }) });
+  render(<ContractView workspaceId="A" notify={notify} />);
+  fireEvent.click(await screen.findByText("Orders"));
+  expect(await screen.findByText("does not meet the standards")).toBeTruthy();
+  // A complete check without errors passes.
+  cleanup();
+  invoke.mockReset();
+  backend({ standards_lint: () => ({ ...report(), counts: { error: 0, warn: 0, info: 0, hint: 0 }, findings: [] }) });
+  render(<ContractView workspaceId="A" notify={notify} />);
+  fireEvent.click(await screen.findByText("Orders"));
+  expect(await screen.findByText("meets the standards")).toBeTruthy();
+  expect(screen.getByText(/meets every rule in effect/)).toBeTruthy();
+});

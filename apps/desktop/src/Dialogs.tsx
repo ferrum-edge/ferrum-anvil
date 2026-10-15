@@ -55,6 +55,9 @@ export const FERRUM_COMPATIBILITY = [
 // ------------------------------------------------------------ environments
 
 export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () => void; onChanged: () => void }) {
+  // The workspace as last saved here, until the parent's reload brings a newer copy.
+  const [workspace, setWorkspace] = useState(props.workspace);
+  useEffect(() => setWorkspace(props.workspace), [props.workspace]);
   const [envs, setEnvs] = useState<Environment[]>([]);
   const [sel, setSel] = useState<string>("__base");
   const [draft, setDraft] = useState<Variable[]>([]);
@@ -68,24 +71,35 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
   useEffect(() => {
     void load();
   }, []);
+  // The editor is filled when another set is chosen, not when a list reloads:
+  // a reload (after a save, or the parent's) never puts older values, or the
+  // values of a save, over edits typed meanwhile.
   useEffect(() => {
     if (sel === "__base") {
-      setDraft(props.workspace.variables ?? []);
+      setDraft(workspace.variables ?? []);
       setName("Workspace variables");
     } else {
       const e = envs.find((x) => x.id === sel);
       setDraft(e?.variables ?? []);
       setName(e?.name ?? "");
     }
-  }, [sel, envs]);
+  }, [sel]);
   const saveIt = async () => {
     setErr(null);
+    const [sentDraft, sentName] = [draft, name];
     try {
-      if (sel === "__base") await api.saveWorkspace({ ...props.workspace, variables: draft });
-      else {
+      let saved: Variable[];
+      if (sel === "__base") {
+        const w = await api.saveWorkspace({ ...workspace, variables: sentDraft });
+        setWorkspace(w);
+        saved = w.variables ?? [];
+      } else {
         const e = envs.find((x) => x.id === sel)!;
-        await api.saveEnvironment({ ...e, name, variables: draft });
+        const env = await api.saveEnvironment({ ...e, name: sentName, variables: sentDraft });
+        saved = env.variables ?? [];
       }
+      // Only an editor still showing what was sent takes the saved values.
+      setDraft((cur) => (cur === sentDraft ? saved : cur));
       await load();
       props.onChanged();
     } catch (e) {
