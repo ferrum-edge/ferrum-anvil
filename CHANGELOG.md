@@ -70,6 +70,17 @@
 
 ### Fixed
 
+- A custom ruleset's `schema` function is checked when the ruleset loads with
+  the limits OpenAPI schemas already have: a reference cycle that does not
+  descend into the value, more than 100,000 schema nodes with references
+  expanded, or references nested too deeply make the ruleset fail to load,
+  instead of a small schema fanning out into exponential work during lint.
+  References must be plain `#`/`#/…` pointers within the schema, and `$id` or
+  `$schema` below the root, a root `$schema` other than draft 2020-12,
+  `$anchor`, `$dynamicRef` and `$recursiveRef` are refused; keywords inside
+  literal data (`const`, `enum`, `default`, `examples`) are not read as schema
+  keywords or references, here or for OpenAPI schemas.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback

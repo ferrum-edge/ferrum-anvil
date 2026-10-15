@@ -449,3 +449,71 @@ fn crlf_sources_lint_like_lf() {
     assert_eq!((f.line, f.column), (Some(10), Some(5)));
     assert!(!r.findings.iter().any(|f| f.rule == "info-description"));
 }
+
+fn schema_rule(schema: serde_json::Value) -> Result<RuleSet, anvil_contract::RulesetError> {
+    let ruleset = json!({
+        "anvil_ruleset": 1,
+        "rules": { "info-shape": { "given": "info", "then": { "function": "schema", "options": { "schema": schema } } } }
+    });
+    RuleSet::load(&[("custom.json".into(), ruleset.to_string().into_bytes())])
+}
+
+#[test]
+fn custom_schema_functions_have_the_openapi_schema_limits() {
+    // Each level references the one below twice: tiny to write, 2^28 schema
+    // nodes for the validator to walk.
+    let mut defs = serde_json::Map::new();
+    defs.insert("d0".into(), json!({ "type": "object" }));
+    for i in 1..=28 {
+        let below = format!("#/$defs/d{}", i - 1);
+        defs.insert(format!("d{i}"), json!({ "allOf": [{ "$ref": below }, { "$ref": below }] }));
+    }
+    let fanout = json!({ "$defs": defs, "$ref": "#/$defs/d28" });
+    let e = schema_rule(fanout).unwrap_err();
+    assert!(e.message.contains("too large to check"), "{e:?}");
+    // A reference cycle that never descends into the value.
+    let e = schema_rule(json!({ "$defs": { "a": { "$ref": "#/$defs/a" } }, "$ref": "#/$defs/a" })).unwrap_err();
+    assert!(e.message.contains("refers to itself"), "{e:?}");
+    // References the measurement cannot follow are refused.
+    for schema in [
+        json!({ "$defs": { "a": { "$anchor": "a", "type": "object" } }, "$ref": "#a" }),
+        json!({ "$defs": { "a": { "$id": "https://example.test/a", "type": "object" } } }),
+        json!({ "$dynamicRef": "#meta" }),
+        json!({ "$ref": "https://example.test/schema.json" }),
+        // A nested resource in another dialect, with its own reference scope.
+        json!({ "allOf": [{ "$schema": "http://json-schema.org/draft-04/schema#", "id": "https://example.test/inner" }] }),
+        json!({ "$schema": "http://json-schema.org/draft-04/schema#" }),
+        // Literal data a reference compiles as a schema is checked as one.
+        json!({ "default": { "$schema": "http://json-schema.org/draft-04/schema#" }, "$ref": "#/default" }),
+    ] {
+        let e = schema_rule(schema.clone()).unwrap_err();
+        assert!(e.message.contains("not supported") || e.message.contains("only"), "{schema}: {e:?}");
+    }
+    // Ordinary schemas, with local references and recursion through the
+    // value, still load and lint; a property named `$ref` is not a keyword.
+    let rules = schema_rule(json!({
+        "$id": "https://example.test/info",
+        "$defs": { "node": { "type": "object", "properties": { "child": { "$ref": "#/$defs/node" } } } },
+        "allOf": [{ "$ref": "#/$defs/node" }],
+        "required": ["x-acme-owner"],
+        "properties": { "$ref": { "type": "string" } }
+    }))
+    .unwrap();
+    let r = run(&fixture("orders-3.1.yaml"), &rules);
+    assert!(rules_hit(&r).contains(&"info-shape"), "{:?}", r.findings);
+    // Keywords inside literal data are data, not schema keywords: these load
+    // and their constraints apply.
+    for (schema, fails) in [
+        (json!({ "const": { "$id": "invoice" } }), true),
+        (json!({ "enum": [{ "$ref": "https://example.test/x" }] }), true),
+        (json!({ "not": { "const": { "$id": "invoice" } } }), false),
+        // Local-pointer references inside literal data are data too.
+        (json!({ "const": { "$ref": "#" } }), true),
+        (json!({ "enum": [{ "$ref": "#" }] }), true),
+        (json!({ "default": { "$ref": "#" }, "examples": [{ "$ref": "#" }], "type": "object", "required": ["x-acme-owner"] }), true),
+    ] {
+        let rules = schema_rule(schema.clone()).unwrap_or_else(|e| panic!("{schema}: {e:?}"));
+        let r = run(&fixture("orders-3.1.yaml"), &rules);
+        assert_eq!(rules_hit(&r).contains(&"info-shape"), fails, "{schema}: {:?}", r.findings);
+    }
+}

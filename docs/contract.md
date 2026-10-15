@@ -175,6 +175,17 @@ function sees the whole target.
 `pattern`, `casing` and `enumeration` pass on a missing value: pair them with
 `defined` when the value is required.
 
+A `schema` function's JSON Schema is checked when the ruleset is loaded,
+with the limits OpenAPI schemas have: references resolve within the schema
+and must be plain `#` or `#/…` pointers, and nothing may change how they
+resolve (no `$id` or `$schema` below the root, a root `$schema` only for
+draft 2020-12, no `$anchor`, `$dynamicRef` or `$recursiveRef`). Literal data
+(`const`, `enum`, `default`, `examples`) is not read as schema keywords
+unless a reference points into it. A reference cycle that does not descend
+into the value, more than 100,000 schema nodes with every reference expanded
+(repeated references count each time), or references nested too deeply make
+the ruleset fail to load.
+
 **Messages.** Without `message`, a finding reads `<target>: <field> <why>`.
 A `message` may use `{{value}}` (the checked value), `{{field}}`,
 `{{reason}}` (why the function failed), `{{label}}` (for example `GET
