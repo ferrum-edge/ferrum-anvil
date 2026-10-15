@@ -845,11 +845,17 @@ impl App {
         Ok(self.store.atomically(|s| release_attachment_in(s, sha256))?)
     }
 
+    /// The index entry and the blob it names are read in one read
+    /// transaction: a re-attachment that moves the entry to a new blob and
+    /// releases the old one ([`index_attachment_in`]) commits before or after
+    /// both reads, never between them.
     pub fn get_attachment(&self, sha256: &str) -> Result<Option<Vec<u8>>> {
-        let idx: Option<serde_json::Value> = self.store.get(kind::IMPORT_SOURCE, &attachment_index_id(sha256))?;
-        let Some(idx) = idx else { return Ok(None) };
-        let blob = idx.get("blob").and_then(|b| b.as_str()).unwrap_or_default().to_string();
-        Ok(self.store.get_blob(&blob)?.map(|z| z.to_vec()))
+        Ok(self.store.read_consistently(|r| {
+            let idx: Option<serde_json::Value> = r.get(kind::IMPORT_SOURCE, &attachment_index_id(sha256))?;
+            let Some(idx) = idx else { return Ok(None) };
+            let blob = idx.get("blob").and_then(|b| b.as_str()).unwrap_or_default();
+            Ok(r.get_blob(blob)?.map(|z| z.to_vec()))
+        })?)
     }
 }
 
