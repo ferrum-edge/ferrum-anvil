@@ -203,9 +203,6 @@ impl Function {
             }
             "schema" => {
                 let o: SchemaOpts = options(name, opts)?;
-                // Validation walks the schema with references expanded: the
-                // same size, nesting and cycle limits as OpenAPI schemas.
-                crate::schema::measure_standalone(&o.schema).map_err(|e| format!("JSON Schema for `schema` cannot be used: {e}"))?;
                 let validator = jsonschema::options()
                     .with_draft(jsonschema::Draft::Draft202012)
                     .with_pattern_options(crate::schema::linear_patterns())

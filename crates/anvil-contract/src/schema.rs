@@ -252,91 +252,6 @@ const ROOT: &str = "#root";
 /// [`measure`], adding the members and items it looked at, and the bytes of
 /// their names and strings, to `total`.
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
-    measure_in(&spec.root, schema, total)
-}
-
-/// Check a standalone JSON Schema (a custom ruleset's `schema` function)
-/// before it is compiled, with the same limits as an OpenAPI schema: its
-/// references resolve within the schema itself. Only plain `#`/`#/…`
-/// references are accepted, and nothing may change how they resolve: no
-/// `$id` or `$schema` below the root, a root `$schema` only for draft
-/// 2020-12, and no `$anchor`, `$dynamicRef` or `$recursiveRef`. Every
-/// reference the validator follows is then one the measurement counts.
-///
-/// Keywords are read only where a schema is: literal data (`const`, `enum`,
-/// `default`, `examples`) is not interpreted, unless a reference points into
-/// it (the validator then compiles it as a schema too).
-pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
-    check_standalone_keywords(schema)?;
-    measure_in(schema, schema, &mut Scanned::default())
-}
-
-/// Keywords whose value is instance data, not a schema.
-fn literal_keyword(k: &str) -> bool {
-    matches!(k, "const" | "enum" | "default" | "examples" | "example")
-}
-
-/// Keywords whose value maps names to schemas.
-fn schema_map_keyword(k: &str) -> bool {
-    matches!(k, "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies")
-}
-
-fn check_standalone_keywords(schema: &Value) -> Result<(), String> {
-    let mut stack: Vec<(&Value, bool)> = vec![(schema, true)];
-    let mut followed: HashSet<String> = HashSet::new();
-    // A reference target is walked again from its own position, so the walk
-    // is bounded like the measurement's scan.
-    let mut steps = 0usize;
-    while let Some((v, root)) = stack.pop() {
-        let Value::Object(o) = v else { continue };
-        for (k, child) in o {
-            steps += 1;
-            if steps > MAX_SCAN_STEPS {
-                return Err(format!(
-                    "{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items"
-                ));
-            }
-            match (k.as_str(), child.as_str()) {
-                ("$ref", Some(r)) => match internal_pointer(r) {
-                    // The target is compiled as a schema wherever it is.
-                    Some(p) => {
-                        if followed.insert(p.clone())
-                            && let Some(t) = schema.pointer(&p)
-                        {
-                            stack.push((t, p.is_empty()));
-                        }
-                    }
-                    None => return Err(format!("only references within the schema (`#/…`) are supported, not '{r}'")),
-                },
-                ("$id", Some(_)) if !root => return Err("`$id` is only supported at the root of the schema".into()),
-                ("$schema", Some(d)) => {
-                    let d = d.trim_end_matches('#');
-                    if !root || !(d == "https://json-schema.org/draft/2020-12/schema" || d == "http://json-schema.org/draft/2020-12/schema")
-                    {
-                        return Err("`$schema` is only supported at the root of the schema, for draft 2020-12".into());
-                    }
-                }
-                ("$anchor" | "$dynamicAnchor" | "$dynamicRef" | "$recursiveRef" | "$recursiveAnchor", Some(_)) => {
-                    return Err(format!("`{k}` is not supported; use a `#/…` reference"));
-                }
-                _ => {}
-            }
-            if literal_keyword(k) {
-                continue;
-            }
-            let schemas: Box<dyn Iterator<Item = &Value>> = match child {
-                Value::Object(m) if schema_map_keyword(k) => Box::new(m.values()),
-                Value::Array(a) => Box::new(a.iter()),
-                other => Box::new(std::iter::once(other)),
-            };
-            stack.extend(schemas.filter(|c| c.is_object()).map(|c| (c, false)));
-        }
-    }
-    Ok(())
-}
-
-/// [`measure_counted`] with references resolved in `root`.
-fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
     let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
     let mib = MAX_SCAN_BYTES >> 20;
@@ -369,7 +284,7 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<u
         if parts.len() >= MAX_REF_TARGETS {
             return Err(format!("{TOO_LARGE}the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
         }
-        match root_doc.pointer(key) {
+        match spec.root.pointer(key) {
             Some(v) => {
                 let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped, MAX_SCAN_BYTES - bytes);
                 scanned += part.nodes;
