@@ -194,3 +194,44 @@ fn repeated_and_numeric_credential_members_are_redacted() {
     let all = serde_json::to_string(&r.requests).unwrap();
     assert!(!all.contains("placeholder-secret") && !all.contains("4321"), "{all}");
 }
+
+#[test]
+fn a_wide_array_under_a_long_member_name_is_scanned_in_linear_time() {
+    // On a pointer copied per element this is ~50 GB of copying.
+    let key = "k".repeat(1 << 20);
+    let mut items = vec!["0"; 50_000];
+    items[49_999] = r#"{"password":"placeholder-secret"}"#;
+    let text = format!(r#"{{"{key}":[{}]}}"#, items.join(","));
+    let started = std::time::Instant::now();
+    let r = har_post(serde_json::json!([]), "application/json", &text);
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "{:?}", started.elapsed());
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert!(r.report.redactions.iter().all(|x| x.pointer.len() < 2048));
+}
+
+#[test]
+fn a_detected_json_body_over_the_budget_keeps_its_json_media_type() {
+    let o = ImportOptions { max_nodes: 64, ..opts() };
+    let big = format!("[{}]", vec!["0"; 200].join(","));
+    let r = har_entries_mime(&[&big], "", &o);
+    match &r.requests[0].spec.body {
+        Body::Raw { content_type, .. } => assert_eq!(content_type.as_deref(), Some("application/json")),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn har_entries_mime(texts: &[&str], mime: &str, o: &ImportOptions) -> anvil_import::ImportResult {
+    let entries: Vec<serde_json::Value> = texts
+        .iter()
+        .map(|t| {
+            serde_json::json!({ "request": {
+                "method": "POST",
+                "url": "https://example.test/x",
+                "headers": [],
+                "postData": { "mimeType": mime, "text": t },
+            } })
+        })
+        .collect();
+    let doc = serde_json::json!({ "log": { "version": "1.2", "entries": entries } });
+    anvil_import::import(doc.to_string().as_bytes(), o).unwrap()
+}

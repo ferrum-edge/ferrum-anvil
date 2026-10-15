@@ -67,13 +67,40 @@ pub fn maybe_redact(b: &mut Builder, name: &str, value: &str, pointer: &str, wha
 /// Replace credential-looking string members of a JSON body (recursively),
 /// and numbers under names that hold numeric credentials (a `pin`, an `otp`).
 pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
+    scrub_json_at(b, v, pointer, &mut Vec::new());
+}
+
+/// Bytes of a member name kept per path segment while walking a body; a
+/// report pointer is built from the segments only for a member that is
+/// redacted, and is itself bounded, so walking a wide array under a long
+/// name costs no more than the body.
+const SEGMENT_BYTES: usize = 64;
+const POINTER_BYTES: usize = 1024;
+
+fn segment(name: &str) -> String {
+    crate::util::clip(name, SEGMENT_BYTES)
+}
+
+fn pointer_at(base: &str, path: &[String], last: &str) -> String {
+    let mut p = base.to_string();
+    for seg in path.iter().map(String::as_str).chain(std::iter::once(last)) {
+        if p.len() > POINTER_BYTES {
+            p.push_str("/…");
+            break;
+        }
+        p = crate::util::ptr(&p, seg);
+    }
+    p
+}
+
+fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<String>) {
     match v {
         Value::Object(m) => {
             for (k, child) in m.iter_mut() {
-                let p = crate::util::ptr(pointer, k);
                 if is_credential_name(k)
                     && let Value::String(s) = child
                 {
+                    let p = pointer_at(pointer, path, &segment(k));
                     let new = credential_text(b, s, k, &p, &format!("body field {k}"));
                     *s = new;
                     continue;
@@ -81,6 +108,7 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
                 if is_numeric_credential_name(k)
                     && let Value::Number(n) = child
                 {
+                    let p = pointer_at(pointer, path, &segment(k));
                     let literal = n.to_string();
                     let new = credential_text(b, &literal, k, &p, &format!("body field {k}"));
                     if new != literal {
@@ -88,12 +116,20 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
                     }
                     continue;
                 }
-                scrub_json(b, child, &p);
+                if child.is_object() || child.is_array() {
+                    path.push(segment(k));
+                    scrub_json_at(b, child, pointer, path);
+                    path.pop();
+                }
             }
         }
         Value::Array(a) => {
             for (i, child) in a.iter_mut().enumerate() {
-                scrub_json(b, child, &format!("{pointer}/{i}"));
+                if child.is_object() || child.is_array() {
+                    path.push(i.to_string());
+                    scrub_json_at(b, child, pointer, path);
+                    path.pop();
+                }
             }
         }
         _ => {}

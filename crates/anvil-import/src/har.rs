@@ -236,7 +236,8 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String
             *declared = ct;
             return body;
         }
-        return Body::Raw { text, content_type: Some(mime) };
+        // The same media type the parsed body would have had.
+        return Body::Raw { text, content_type: Some(if mime.is_empty() { "application/json".into() } else { mime }) };
     }
     if !b.opts.include_credentials {
         b.report.warn(
