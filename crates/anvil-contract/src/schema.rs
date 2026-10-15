@@ -252,6 +252,47 @@ const ROOT: &str = "#root";
 /// [`measure`], adding the members and items it looked at, and the bytes of
 /// their names and strings, to `total`.
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
+    measure_in(&spec.root, schema, total)
+}
+
+/// Check a standalone JSON Schema (a custom ruleset's `schema` function)
+/// before it is compiled, with the same limits as an OpenAPI schema: its
+/// references resolve within the schema itself. Only plain `#`/`#/…`
+/// references are accepted (no `$id` below the root, `$anchor`,
+/// `$dynamicRef` or `$recursiveRef`), so every reference the validator
+/// follows is one the measurement counts.
+pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
+    let mut stack = vec![(schema, true)];
+    while let Some((v, root)) = stack.pop() {
+        match v {
+            Value::Object(o) => {
+                for (k, child) in o {
+                    // These keywords take strings; a member of that name
+                    // with another value is a property, not the keyword.
+                    match (k.as_str(), child.as_str()) {
+                        ("$ref", Some(r)) if internal_pointer(r).is_none() => {
+                            return Err(format!("only references within the schema (`#/…`) are supported, not '{r}'"));
+                        }
+                        ("$id", Some(_)) if !root => return Err("`$id` is only supported at the root of the schema".into()),
+                        ("$anchor" | "$dynamicAnchor" | "$dynamicRef" | "$recursiveRef", Some(_)) => {
+                            return Err(format!("`{k}` is not supported; use a `#/…` reference"));
+                        }
+                        _ => {}
+                    }
+                    if child.is_object() || child.is_array() {
+                        stack.push((child, false));
+                    }
+                }
+            }
+            Value::Array(a) => stack.extend(a.iter().filter(|c| c.is_object() || c.is_array()).map(|c| (c, false))),
+            _ => {}
+        }
+    }
+    measure_in(schema, schema, &mut Scanned::default())
+}
+
+/// [`measure_counted`] with references resolved in `root`.
+fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
     let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
     let mib = MAX_SCAN_BYTES >> 20;
@@ -284,7 +325,7 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
         if parts.len() >= MAX_REF_TARGETS {
             return Err(format!("{TOO_LARGE}the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
         }
-        match spec.root.pointer(key) {
+        match root_doc.pointer(key) {
             Some(v) => {
                 let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped, MAX_SCAN_BYTES - bytes);
                 scanned += part.nodes;
