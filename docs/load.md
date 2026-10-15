@@ -477,7 +477,10 @@ gives in-flight sends `cancel_drain_ms` (default 2 s), then cancels them and
 waits 2 s more; anything still running is abandoned and reported as
 `in_flight_at_end`. At the normal end of a schedule, in-flight iterations get
 `graceful_stop_ms` (default 5 s) before the same sequence, and the report
-notes how many were canceled. `LoadController` forwards cancel, kills the
+notes how many were canceled. A cancel or vault lock during that graceful
+drain still stops further chain steps at once, shortens the remaining wait to
+`cancel_drain_ms`, and is the report's completion (`canceled_by_user` or
+`stopped_by_lock`), not `completed`. `LoadController` forwards cancel, kills the
 worker if it has not finished within its drain window plus 5 s, and — if the
 worker dies without a report — rebuilds a **partial `worker_crashed` report**
 from the last progress snapshot and the accumulated timeline, stating that

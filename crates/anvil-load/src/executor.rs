@@ -431,6 +431,17 @@ impl Shared {
         }
     }
 
+    /// A user cancel or vault lock: recorded unless another stop (an abort
+    /// rule, or the other signal) came first. One that arrives after the
+    /// schedule ended, while in-flight iterations drain, replaces
+    /// [`StopReason::ScheduleEnd`]: the run did not complete as scheduled.
+    fn set_external_reason(&self, r: StopReason) {
+        let mut g = self.reason.lock();
+        if matches!(*g, None | Some(StopReason::ScheduleEnd)) {
+            *g = Some(r);
+        }
+    }
+
     fn begin_iteration(&self, measured: bool) {
         let mut l = self.ledger.lock();
         let s = l.side(measured);
@@ -877,8 +888,24 @@ async fn join_all_within(set: &mut JoinSet<()>, d: Duration) -> bool {
 /// and wait [`HARD_CANCEL_GRACE`]; tasks still running after that are
 /// aborted (their work is reported as in flight at end). Returns the number
 /// of aborted tasks.
-async fn drain(sh: &Shared, set: &mut JoinSet<()>, first_wait: Duration) -> usize {
-    if join_all_within(set, first_wait).await {
+///
+/// When chains are halted during the first wait (a user cancel or vault
+/// lock after the schedule ended), the first wait ends no later than
+/// `halt_wait` after that.
+async fn drain(sh: &Shared, set: &mut JoinSet<()>, first_wait: Duration, halt_wait: Duration) -> usize {
+    let mut deadline = tokio::time::Instant::now() + first_wait;
+    let mut halted = sh.halt.is_cancelled();
+    let all_done = loop {
+        tokio::select! {
+            r = set.join_next() => if r.is_none() { break true },
+            _ = tokio::time::sleep_until(deadline) => break false,
+            _ = sh.halt.cancelled(), if !halted => {
+                halted = true;
+                deadline = deadline.min(tokio::time::Instant::now() + halt_wait);
+            }
+        }
+    };
+    if all_done {
         return 0;
     }
     sh.halt.cancel();
@@ -1124,22 +1151,24 @@ impl LoadRun {
         });
         drop(proto);
 
-        // User cancel → stop scheduling and stop chains.
+        // User cancel or vault lock → stop scheduling and stop chains. The
+        // link lives until in-flight work has drained, not only until the
+        // schedule ends: a cancel or lock during the graceful drain still
+        // halts chains before their next step.
         let link = {
             let (c, sh, lock) = (cancel.clone(), sh.clone(), lock.clone());
             tokio::spawn(async move {
                 tokio::select! {
                     _ = c.cancelled() => {
-                        sh.set_reason(StopReason::UserCancel);
+                        sh.set_external_reason(StopReason::UserCancel);
                         sh.halt.cancel();
                         sh.stop.cancel();
                     }
                     _ = lock.cancelled() => {
-                        sh.set_reason(StopReason::Lock);
+                        sh.set_external_reason(StopReason::Lock);
                         sh.halt.cancel();
                         sh.stop.cancel();
                     }
-                    _ = sh.stop.cancelled() => {}
                 }
             })
         };
@@ -1217,9 +1246,13 @@ impl LoadRun {
             _ => Duration::from_millis(opts.cancel_drain_ms),
         };
         let pre_hard = sh.hard.is_cancelled();
-        let aborted_tasks = drain(&sh, &mut set, first_wait).await;
+        let aborted_tasks = drain(&sh, &mut set, first_wait, Duration::from_millis(opts.cancel_drain_ms)).await;
         let hard_canceled = !pre_hard && sh.hard.is_cancelled();
         link.abort();
+        let _ = link.await;
+        // The final reason: a cancel or lock during the drain replaces the
+        // schedule end read above.
+        let reason = sh.reason.lock().clone().unwrap_or(StopReason::ScheduleEnd);
         done.cancel();
         let (mut timeline, sampler) = ticker.await.unwrap_or_else(|_| (Vec::new(), HealthSampler::new()));
         sh.flush(&mut timeline, sh.bucket_of(Instant::now()) + 1);

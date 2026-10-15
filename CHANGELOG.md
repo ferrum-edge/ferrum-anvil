@@ -70,6 +70,13 @@
 
 ### Fixed
 
+- A user cancel or vault lock that arrives after a load schedule has ended,
+  while in-flight iterations drain, now stops their chains before the next
+  step, shortens the drain to `cancel_drain_ms`, and is reported as the run's
+  completion. Before, the cancel/lock observer stopped with the schedule, so a
+  chain could send its next request after the lock and the report said
+  `completed`.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback

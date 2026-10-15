@@ -1028,3 +1028,34 @@ async fn data_016_lock_during_load_stops_run_with_partial_report() {
     assert!(!anvil_load::report::to_json(&r).contains(secret), "no secret in the report");
     assert!(traffic_stopped(&f).await, "no hidden traffic after lock");
 }
+
+/// A vault lock that arrives after the schedule ended, while an iteration's
+/// chain is still in flight, halts the chain before its next step and is
+/// reported as the stop reason (not `Completed`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lock_during_the_graceful_drain_halts_chains_and_is_reported() {
+    let _g = serial().await;
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let (a, b) = (Id::new(), Id::new());
+    // One user for one second; its first iteration's first step outlasts the schedule.
+    let p = plan(Workload::ClosedVirtualUsers { stages: stages(1, 1), think_time_ms: 0 }, vec![a, b]);
+    let job = LoadJob {
+        requests: [(a, get(&f.url("/delay-headers/2000"))), (b, get(&f.url("/count/after-lock")))].into_iter().collect(),
+        dataset: None,
+    };
+    let lock = CancellationToken::new();
+    let late = {
+        let lock = lock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1_400)).await;
+            lock.cancel();
+        })
+    };
+    let r = LoadRun::prepare(p, job, opts()).expect("valid plan").execute_lockable(CancellationToken::new(), lock, None).await;
+    late.await.unwrap();
+    assert_balanced(&r);
+    assert_eq!(r.completion, RunCompletion::StoppedByLock, "{:?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("vault locked")), "{:?}", r.notes);
+    assert_eq!(f.state.counters.lock().get("after-lock"), None, "no step started after the lock");
+    assert_eq!(r.requests.started, 1);
+}
