@@ -70,6 +70,16 @@
 
 ### Fixed
 
+- An export's free-text credential warning (a credential in a body, URL or
+  other unextracted text) no longer recommends encrypted transfer: that mode
+  seals only the vault, so the text stays readable in either bundle mode. The
+  warning now says so and advises removing the literal or moving it into a
+  secret variable or sensitive field.
+
+- The import preview counts request revisions: a new revision is created, and
+  one already stored is a conflict that Merge skips and Replace overwrites, as
+  the import already did.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback
