@@ -263,6 +263,29 @@ impl Redactor {
         replace_matches(matcher, s)
     }
 
+    /// Byte ranges [`Redactor::text_any_case`] would replace in `s`.
+    pub fn any_case_matches(&self, s: &str) -> Vec<std::ops::Range<usize>> {
+        match &self.any_case {
+            Some(m) => m.find_iter(s).map(|f| f.start()..f.end()).collect(),
+            None => {
+                let lower = s.to_ascii_lowercase();
+                let mut out = vec![];
+                let mut offset = 0;
+                while offset < s.len() {
+                    let next = self
+                        .any_case_fallback
+                        .iter()
+                        .filter_map(|p| lower[offset..].find(p.as_str()).map(|at| (offset + at, p.len())))
+                        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+                    let Some((start, len)) = next else { break };
+                    out.push(start..start + len);
+                    offset = start + len;
+                }
+                out
+            }
+        }
+    }
+
     /// [`Redactor::text`] ignoring ASCII case, for text a protocol may have
     /// case-folded after the secret was sent: header names, content codings,
     /// and messages that quote them.

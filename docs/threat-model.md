@@ -147,7 +147,10 @@ against it).
     so are the warnings, assertion messages, findings and summary that can
     quote them. A well-known media type (`application/json`,
     `text/event-stream`, …) keeps its essence even when a secret is part of
-    that constant, because callers act on it; its parameters are scrubbed. The
+    that constant, because callers act on it; its parameters are scrubbed,
+    and a secret that crosses from the type into its parameters is replaced
+    over the whole value. A `Content-Encoding` listing only codings the
+    engine decodes (`gzip`, `br`, …) is kept so history can decode the body. The
     request's own header names and `Content-Type` are scrubbed in the record
     and the effective-request preview. The reason phrase (which the HTTP
     adapters derive from the status code) is scrubbed wherever the record

@@ -425,3 +425,35 @@ async fn a_secret_in_the_reason_phrase_is_scrubbed_from_every_copy() {
     let record = serde_json::to_string(&o.record).unwrap();
     assert!(!record.contains("Forbidden"), "{record}");
 }
+
+/// A secret that crosses from a well-known media type into its parameters is
+/// replaced, and a content coding the engine decodes is kept even when a
+/// secret equals it (history still decodes the body).
+#[tokio::test]
+async fn media_type_and_coding_constants_are_kept_only_when_they_hide_nothing() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "plain;token=secret-77";
+    let mut spec = RequestSpec::http("GET", &f.url("/status/200?ct=text/plain;token=secret-77&body=x"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-S", "{{s}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "s".into(), value: secret.into(), secret: true, literal: false }],
+    }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains(secret), "{record}");
+
+    let mut spec = RequestSpec::http("GET", &f.url("/gzip"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-S", "{{s}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "s".into(), value: "gzip".into(), secret: true, literal: false }],
+    }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    assert_eq!(r.body.content_encoding.as_deref(), Some("gzip"));
+}

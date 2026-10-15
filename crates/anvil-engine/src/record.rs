@@ -98,18 +98,36 @@ const KEPT_ESSENCES: &[&str] = &[
 ];
 
 /// A response `Content-Type` scrubbed of known secrets in any letter case,
-/// keeping a well-known essence ([`KEPT_ESSENCES`]) as it is.
+/// keeping a well-known essence ([`KEPT_ESSENCES`]) as it is. Secrets are
+/// found in the whole value first: one that crosses from the essence into
+/// the parameters is replaced over the whole value.
 fn scrub_media_type(redactor: &Redactor, ct: &str) -> String {
-    let (essence, params) = match ct.split_once(';') {
-        Some((e, p)) => (e, Some(p)),
-        None => (ct, None),
+    let matches = redactor.any_case_matches(ct);
+    if matches.is_empty() {
+        return ct.to_string();
+    }
+    let Some((essence, params)) = ct.split_once(';') else {
+        let kept = KEPT_ESSENCES.iter().any(|k| ct.trim().eq_ignore_ascii_case(k));
+        return if kept { ct.to_string() } else { redactor.text_any_case(ct) };
     };
+    if matches.iter().any(|m| m.start <= essence.len() && m.end > essence.len()) {
+        return redactor.text_any_case(ct);
+    }
     let kept = KEPT_ESSENCES.iter().any(|k| essence.trim().eq_ignore_ascii_case(k));
     let essence = if kept { essence.to_string() } else { redactor.text_any_case(essence) };
-    match params {
-        Some(p) => format!("{essence};{}", redactor.text_any_case(p)),
-        None => essence,
-    }
+    format!("{essence};{}", redactor.text_any_case(params))
+}
+
+/// Content codings the engine decodes: a recorded `Content-Encoding` made
+/// only of these is a list of constants, kept so history can still decode
+/// the body (a secret that happens to equal one reveals nothing).
+const KEPT_CODINGS: &[&str] = &["gzip", "x-gzip", "deflate", "br", "zstd", "identity"];
+
+/// A recorded `Content-Encoding` scrubbed of known secrets in any letter
+/// case, unless it lists only codings in [`KEPT_CODINGS`].
+fn scrub_content_coding(redactor: &Redactor, ce: &str) -> String {
+    let constant = ce.split(',').map(str::trim).all(|c| KEPT_CODINGS.iter().any(|k| c.eq_ignore_ascii_case(k)));
+    if constant { ce.to_string() } else { redactor.text_any_case(ce) }
 }
 
 fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
@@ -419,7 +437,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             }
         };
         scrub(&mut r.reason);
-        scrub(&mut r.body.content_encoding);
+        r.body.content_encoding = r.body.content_encoding.as_deref().map(|ce| scrub_content_coding(redactor, ce));
         r.body.content_type = r.body.content_type.as_deref().map(|ct| scrub_media_type(redactor, ct));
     }
     let prepared_headers: Vec<HeaderEntry> =
