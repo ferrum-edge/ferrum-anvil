@@ -364,7 +364,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         scrub(&mut r.body.decoding_detail);
     }
     let prepared_headers: Vec<HeaderEntry> =
-        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
+        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text(n), value: redactor.header(n, v) }).collect();
     let mut inferred: Vec<String> = a.inferred.iter().map(|i| redactor.inferred(i)).collect();
     for (k, v) in &a.auth_facts {
         inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
