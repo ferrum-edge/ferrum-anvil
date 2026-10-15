@@ -898,6 +898,37 @@ describe("PlanEditor save", () => {
   });
 });
 
+describe("LoadView save", () => {
+  it("keeps an edit typed during a save unsaved, and its own save clears it", async () => {
+    const first = deferred<void>();
+    let n = 0;
+    backend({
+      load_plan_save: async (a) => {
+        n++;
+        if (n === 1) await first.promise;
+        return { ...saveInto(a), updated_at: `2026-09-2${6 + n}T00:00:00Z` };
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "Saved name" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    fireEvent.change(planName(), { target: { value: "Newer name" } });
+    await act(async () => first.resolve());
+    await act(async () => {});
+    expect(planName().value).toBe("Newer name");
+    // Still unsaved, in the editor and in the list.
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    expect(calls("load_plan_save")[1].plan).toMatchObject({ name: "Newer name", updated_at: "2026-09-27T00:00:00Z" });
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    expect(planName().value).toBe("Newer name");
+  });
+});
+
 describe("LoadView run start", () => {
   const handlers = new Map<string, (ev: { payload: unknown }) => void>();
   const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
@@ -948,8 +979,13 @@ describe("LoadView run start", () => {
     await confirm();
     fireEvent.click(button("Start load"));
     await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
-    emit("load-finished", { run_key: "key-1", run_id: null });
-    await act(async () => start.resolve("key-1"));
+    // Progress, the finish and the start reply all arrive before React renders.
+    await act(async () => {
+      handlers.get("load-progress")?.({ payload: { run_key: "key-1", progress: { timeline_from: 0, timeline_delta: [] } } });
+      handlers.get("load-finished")?.({ payload: { run_key: "key-1", run_id: null } });
+      start.resolve("key-1");
+    });
+    await act(async () => {});
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
     expect(screen.queryByText("Confirm load run")).toBeNull();
   });

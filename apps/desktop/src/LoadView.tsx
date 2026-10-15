@@ -176,7 +176,10 @@ export function LoadView(props: {
   // Every accepted run until it finishes, each with its own Stop control.
   const [lives, setLives] = useState<Live[]>([]);
   const live = lives.length > 0;
-  // Runs that finished before their start reply arrived: never shown as live.
+  // Kept in step with every start and finish event as it arrives (not when
+  // React applies the update): runs shown as live, and runs that finished
+  // before their start reply arrived, which are never shown.
+  const liveKeys = useRef(new Set<string>());
   const finishedEarly = useRef(new Set<string>());
   // New plans discarded here: a save of one that was already on its way
   // still lands, but never selects the plan again.
@@ -238,10 +241,8 @@ export function LoadView(props: {
       ),
     );
     const b = onLoadFinished((e) => {
-      setLives((ls) => {
-        if (!ls.some((l) => l.runKey === e.run_key)) finishedEarly.current.add(e.run_key);
-        return ls.filter((l) => l.runKey !== e.run_key);
-      });
+      if (!liveKeys.current.delete(e.run_key)) finishedEarly.current.add(e.run_key);
+      setLives((ls) => ls.filter((l) => l.runKey !== e.run_key));
       if (e.error) current.current.notify(`Load run ended without a saved report: ${e.error}`);
       // A run started in another workspace saves its report there: do not select it here.
       void current.current.reload().then((r) => e.run_id && r?.some((x) => x.run_id === e.run_id) && setSel({ kind: "report", id: e.run_id }));
@@ -408,8 +409,9 @@ export function LoadView(props: {
                   : undefined
               }
               onStarted={(runKey, name) => {
-                if (finishedEarly.current.delete(runKey)) return;
-                setLives((ls) => (ls.some((l) => l.runKey === runKey) ? ls : [...ls, { runKey, planName: name, progress: null, timeline: [] }]));
+                if (finishedEarly.current.delete(runKey) || liveKeys.current.has(runKey)) return;
+                liveKeys.current.add(runKey);
+                setLives((ls) => [...ls, { runKey, planName: name, progress: null, timeline: [] }]);
               }}
             />
           )}
@@ -458,7 +460,10 @@ export function PlanEditor(props: {
   onStarted: (runKey: string, name: string) => void;
 }) {
   const [p, setEdit] = useState<EditPlan>(() => editable(props.plan));
+  // The editor's current edit, read when a save lands.
+  const latest = useRef(p);
   const setP = (next: EditPlan) => {
+    latest.current = next;
     setEdit(next);
     props.onChange?.(next);
   };
@@ -511,10 +516,16 @@ export function PlanEditor(props: {
       const sent = p;
       const saved = await api.saveLoadPlan(sent);
       // Edits typed while the save was on its way stay: only an unchanged
-      // editor takes the saved copy; otherwise just its stored metadata.
-      setEdit((cur) =>
-        cur === sent ? editable(saved) : { ...cur, trusted: saved.trusted, created_at: saved.created_at, updated_at: saved.updated_at },
-      );
+      // editor takes the saved copy; otherwise the edit takes just its stored
+      // metadata, and the view's draft is that same edit, so the next save
+      // of it is recognised as saved.
+      const cur = latest.current;
+      if (cur === sent) {
+        latest.current = editable(saved);
+        setEdit(latest.current);
+      } else {
+        setP({ ...cur, trusted: saved.trusted, created_at: saved.created_at, updated_at: saved.updated_at });
+      }
       props.onSaved(saved, sent);
       return saved;
     } catch (e) {

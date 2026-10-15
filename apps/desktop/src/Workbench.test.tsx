@@ -1611,4 +1611,40 @@ describe("environments dialog", () => {
     await act(async () => {});
     expect(value().value).toBe("newer");
   });
+
+  it("keeps an environment edit across a selection away and back while its save is on its way", async () => {
+    const vars = (v: string) => [{ name: "token", value: { kind: "template" as const, value: v }, enabled: true }];
+    let stored = { ...environment("e1", "A", "Staging"), variables: vars("v0") } as Environment;
+    const save = deferred<void>();
+    backend({
+      environments_list: () => [stored],
+      environment_save: async (a) => {
+        await save.promise;
+        stored = { ...(a.environment as Environment), updated_at: "2026-01-02T00:00:00Z" };
+        return stored;
+      },
+    });
+    await boot();
+    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "__manage" } });
+    const dialog = await screen.findByRole("dialog", { name: "Environments and variables" });
+    const value = () => within(dialog).getByLabelText("Value") as HTMLInputElement;
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Staging" }));
+    await waitFor(() => expect(value().value).toBe("v0"));
+    fireEvent.change(value(), { target: { value: "v1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("environment_save")).toHaveLength(1));
+
+    // Away and back before the save lands: the edit is still shown.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Workspace base" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Staging" }));
+    expect(value().value).toBe("v1");
+    await act(async () => save.resolve());
+    await act(async () => {});
+    expect(value().value).toBe("v1");
+
+    // A later Save writes v1, never v0.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("environment_save")).toHaveLength(2));
+    expect((calls("environment_save")[1].environment as Environment).variables).toEqual(vars("v1"));
+  });
 });

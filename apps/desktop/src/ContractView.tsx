@@ -327,8 +327,10 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
     );
   }
   const c = report.counts;
-  // A check that stopped early is not a pass: what was left out may fail.
-  const incomplete = !!report.incomplete || (report.skipped_operations ?? 0) > 0;
+  // A check that left anything out is not a pass: what was not checked may
+  // fail (a stopped check, skipped operations, unfollowed $refs, unchecked examples).
+  const incomplete =
+    !!report.incomplete || (report.skipped_operations ?? 0) > 0 || (report.unresolved_ref_count ?? 0) > 0 || (report.examples_not_checked ?? 0) > 0;
   const verdict = c.error > 0 ? "bad" : incomplete ? "warn" : "ok";
   const verdictText = { bad: "does not meet the standards", warn: "not completely checked", ok: "meets the standards" }[verdict];
   return (
@@ -381,7 +383,7 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
       </div>
       {report.findings.length === 0 && !incomplete && <div className="ok-box">No findings: the description meets every rule in effect.</div>}
       {report.findings.length === 0 && incomplete && (
-        <div className="warn-box">No findings in what was checked, but the description was not checked completely, so it is not known to meet every rule.</div>
+        <div className="warn-box">No findings in what was checked, but parts of the description were not checked (see below), so it is not known to meet every rule.</div>
       )}
       {findings.slice(0, shown).map((f, i) => (
         <LintFindingCard key={`${f.rule}|${f.pointer}|${i}`} f={f} />

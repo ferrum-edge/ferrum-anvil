@@ -60,8 +60,11 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
   useEffect(() => setWorkspace(props.workspace), [props.workspace]);
   const [envs, setEnvs] = useState<Environment[]>([]);
   const [sel, setSel] = useState<string>("__base");
-  const [draft, setDraft] = useState<Variable[]>([]);
-  const [name, setName] = useState("");
+  // Unsaved edits per variable set. A set without one shows its stored values,
+  // which follow every save and reload; an edit is dropped only by the save of
+  // that very edit, so neither a reload, nor a save that lands after the
+  // editor moved on (or came back), puts older values over newer ones.
+  const [edits, setEdits] = useState<Record<string, { variables: Variable[]; name: string }>>({});
   const [err, setErr] = useState<string | null>(null);
   const load = async () => {
     const e = await api.environments(props.workspace.id);
@@ -71,35 +74,28 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
   useEffect(() => {
     void load();
   }, []);
-  // The editor is filled when another set is chosen, not when a list reloads:
-  // a reload (after a save, or the parent's) never puts older values, or the
-  // values of a save, over edits typed meanwhile.
-  useEffect(() => {
-    if (sel === "__base") {
-      setDraft(workspace.variables ?? []);
-      setName("Workspace variables");
-    } else {
-      const e = envs.find((x) => x.id === sel);
-      setDraft(e?.variables ?? []);
-      setName(e?.name ?? "");
-    }
-  }, [sel]);
+  const selEnv = envs.find((x) => x.id === sel);
+  const stored =
+    sel === "__base"
+      ? { variables: workspace.variables ?? [], name: "Workspace variables" }
+      : { variables: selEnv?.variables ?? [], name: selEnv?.name ?? "" };
+  const { variables: draft, name } = edits[sel] ?? stored;
+  const edit = (patch: Partial<{ variables: Variable[]; name: string }>) =>
+    setEdits((all) => ({ ...all, [sel]: { ...(all[sel] ?? stored), ...patch } }));
+  const dropEdit = (set: string, only?: { variables: Variable[]; name: string }) =>
+    setEdits((all) => (set in all && (!only || all[set] === only) ? Object.fromEntries(Object.entries(all).filter(([k]) => k !== set)) : all));
   const saveIt = async () => {
     setErr(null);
-    const [sentDraft, sentName] = [draft, name];
+    const [sentSel, sent] = [sel, edits[sel]];
     try {
-      let saved: Variable[];
-      if (sel === "__base") {
-        const w = await api.saveWorkspace({ ...workspace, variables: sentDraft });
-        setWorkspace(w);
-        saved = w.variables ?? [];
+      if (sentSel === "__base") {
+        setWorkspace(await api.saveWorkspace({ ...workspace, variables: draft }));
       } else {
-        const e = envs.find((x) => x.id === sel)!;
-        const env = await api.saveEnvironment({ ...e, name: sentName, variables: sentDraft });
-        saved = env.variables ?? [];
+        const env = await api.saveEnvironment({ ...selEnv!, name, variables: draft });
+        setEnvs((all) => all.map((x) => (x.id === env.id ? env : x)));
       }
-      // Only an editor still showing what was sent takes the saved values.
-      setDraft((cur) => (cur === sentDraft ? saved : cur));
+      // Saved: the set shows its stored values again, unless edited since.
+      if (sent) dropEdit(sentSel, sent);
       await load();
       props.onChanged();
     } catch (e) {
@@ -118,6 +114,7 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
               className="btn ghost danger"
               onClick={async () => {
                 await api.deleteEnvironment(sel);
+                dropEdit(sel);
                 setSel("__base");
                 await load();
                 props.onChanged();
@@ -166,11 +163,11 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
           {sel !== "__base" && (
             <label className="lbl">
               Name
-              <input className="field" value={name} onChange={(e) => setName(e.target.value)} />
+              <input className="field" value={name} onChange={(e) => edit({ name: e.target.value })} />
             </label>
           )}
           <p className="hint">Precedence: run values → request → folders → active environment → workspace base. Secret variables are masked, redacted from history and exported only as placeholders unless you choose an encrypted export.</p>
-          <VariablesEditor vars={draft} onChange={setDraft} workspaceId={props.workspace.id} />
+          <VariablesEditor vars={draft} onChange={(variables) => edit({ variables })} workspaceId={props.workspace.id} />
           {err && <div className="bad-box">{err}</div>}
         </div>
       </div>

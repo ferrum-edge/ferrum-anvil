@@ -265,22 +265,22 @@ test("an imported spec has a Live traffic tab that compares its sends", async ()
 });
 
 test("an incomplete check without errors is not reported as meeting the standards", async () => {
-  for (const skipped of [0, 3]) {
+  const unchecked: Partial<LintReport>[] = [
+    { incomplete: true, skipped_operations: 0 },
+    { incomplete: true, skipped_operations: 3 },
+    { unresolved_ref_count: 3, unresolved_refs: ["other.yaml#/Pet"] },
+    { examples_not_checked: 2 },
+  ];
+  for (const left of unchecked) {
     backend({
-      standards_lint: () => ({
-        ...report(),
-        counts: { error: 0, warn: 0, info: 0, hint: 0 },
-        findings: [],
-        incomplete: true,
-        skipped_operations: skipped,
-      }),
+      standards_lint: () => ({ ...report(), counts: { error: 0, warn: 0, info: 0, hint: 0 }, findings: [], ...left }),
     });
     render(<ContractView workspaceId="A" notify={notify} />);
     fireEvent.click(await screen.findByText("Orders"));
     expect(await screen.findByText("not completely checked")).toBeTruthy();
     expect(screen.queryByText("meets the standards")).toBeNull();
     expect(screen.queryByText(/meets every rule in effect/)).toBeNull();
-    expect(screen.getByText(/not checked completely, so it is not known to meet every rule/)).toBeTruthy();
+    expect(screen.getByText(/were not checked \(see below\), so it is not known to meet every rule/)).toBeTruthy();
     cleanup();
     invoke.mockReset();
   }

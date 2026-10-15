@@ -71,7 +71,8 @@
 ### Fixed
 
 - Desktop: an API standards check that stopped early (`incomplete`, or
-  operations skipped) without errors now shows "not completely checked"
+  operations skipped, $refs not followed, examples not checked) without
+  errors now shows "not completely checked"
   instead of "meets the standards", and no longer says the description meets
   every rule.
 - Desktop: **Start load** starts one run per confirmation, even on a double
