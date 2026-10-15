@@ -480,6 +480,11 @@ fn custom_schema_functions_have_the_openapi_schema_limits() {
         json!({ "$defs": { "a": { "$id": "https://example.test/a", "type": "object" } } }),
         json!({ "$dynamicRef": "#meta" }),
         json!({ "$ref": "https://example.test/schema.json" }),
+        // A nested resource in another dialect, with its own reference scope.
+        json!({ "allOf": [{ "$schema": "http://json-schema.org/draft-04/schema#", "id": "https://example.test/inner" }] }),
+        json!({ "$schema": "http://json-schema.org/draft-04/schema#" }),
+        // Literal data a reference compiles as a schema is checked as one.
+        json!({ "default": { "$schema": "http://json-schema.org/draft-04/schema#" }, "$ref": "#/default" }),
     ] {
         let e = schema_rule(schema.clone()).unwrap_err();
         assert!(e.message.contains("not supported") || e.message.contains("only"), "{schema}: {e:?}");
@@ -496,4 +501,15 @@ fn custom_schema_functions_have_the_openapi_schema_limits() {
     .unwrap();
     let r = run(&fixture("orders-3.1.yaml"), &rules);
     assert!(rules_hit(&r).contains(&"info-shape"), "{:?}", r.findings);
+    // Keywords inside literal data are data, not schema keywords: these load
+    // and their constraints apply.
+    for (schema, fails) in [
+        (json!({ "const": { "$id": "invoice" } }), true),
+        (json!({ "enum": [{ "$ref": "https://example.test/x" }] }), true),
+        (json!({ "not": { "const": { "$id": "invoice" } } }), false),
+    ] {
+        let rules = schema_rule(schema.clone()).unwrap_or_else(|e| panic!("{schema}: {e:?}"));
+        let r = run(&fixture("orders-3.1.yaml"), &rules);
+        assert_eq!(rules_hit(&r).contains(&"info-shape"), fails, "{schema}: {:?}", r.findings);
+    }
 }
