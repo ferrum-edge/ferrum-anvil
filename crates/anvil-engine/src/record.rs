@@ -90,7 +90,7 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
             // A CONNECT-UDP request carries the request's auth headers.
             for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
                 h.value = r.header(&h.name, &h.value);
-                h.name = r.text(&h.name);
+                h.name = r.text_any_case(&h.name);
             }
         }
     }
@@ -212,7 +212,8 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.body.decoded_bytes = decoded.as_ref().map(|d| d.len() as u64);
         r.body.decoding = decoding_status;
-        r.body.decoding_detail = decoding_detail.as_deref().map(|d| redactor.text(d));
+        // The decoder quotes the coding lowercased: compared in any case.
+        r.body.decoding_detail = decoding_detail.as_deref().map(|d| redactor.text_any_case(d));
     }
 
     let protocol_status = a.protocol_status_override.clone().unwrap_or_else(|| protocol_status_http(response.as_ref()));
@@ -342,6 +343,18 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
 
     let dispatch = DispatchState::summarize(attempts.iter().map(|x| x.dispatch));
     let summary = summary_line(transport, application, &protocol_status, &diagnosis.findings);
+    // Kept in the record: the status line's reason and the summary that
+    // quotes it and the findings are scrubbed like the response itself.
+    let summary = redactor.text_any_case(&summary);
+    let mut protocol_status = protocol_status;
+    if let ProtocolStatus::Http { reason: Some(reason), .. } = &mut protocol_status {
+        *reason = redactor.text_any_case(reason);
+    }
+    // Warnings can quote response metadata a protocol case-folded (a
+    // content coding in a decoding failure).
+    for w in &mut warnings {
+        w.message = redactor.text_any_case(&w.message);
+    }
     redact_attempts(&mut attempts, redactor);
     let mut findings = diagnosis.findings;
     for f in &mut findings {
@@ -350,21 +363,21 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.headers = redactor.headers(&r.headers);
         r.trailers = redactor.headers(&r.trailers);
-        // Response metadata copied out of the headers (and the status line)
-        // is server-controlled too: a server can reflect a request secret
-        // into `Content-Type`, `Content-Encoding` or the reason phrase.
+        // Response metadata copied out of the headers is server-controlled
+        // too: a server can reflect a request secret into `Content-Type` or
+        // `Content-Encoding` (compared in any case, as codings are
+        // case-insensitive). The reason phrase is scrubbed as well.
         let scrub = |v: &mut Option<String>| {
             if let Some(s) = v.as_mut() {
-                *s = redactor.text(s);
+                *s = redactor.text_any_case(s);
             }
         };
         scrub(&mut r.reason);
         scrub(&mut r.body.content_type);
         scrub(&mut r.body.content_encoding);
-        scrub(&mut r.body.decoding_detail);
     }
     let prepared_headers: Vec<HeaderEntry> =
-        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text(n), value: redactor.header(n, v) }).collect();
+        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect();
     let mut inferred: Vec<String> = a.inferred.iter().map(|i| redactor.inferred(i)).collect();
     for (k, v) in &a.auth_facts {
         inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
@@ -391,7 +404,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             headers: prepared_headers,
             body_bytes: a.prepared_body.len() as u64,
             body_sha256: if a.prepared_body.is_empty() { None } else { Some(anvil_transport::certs::sha256_hex(&a.prepared_body)) },
-            content_type: a.content_type.clone(),
+            content_type: a.content_type.as_deref().map(|c| redactor.text(c)),
             auth_label: a.auth_label.clone(),
             tls_profile: a.tls_profile.clone(),
             proxy: a.proxy.clone(),

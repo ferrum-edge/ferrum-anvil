@@ -104,6 +104,9 @@ pub struct Redactor {
     /// Secret values, their canonical percent-encoded forms and their JSON
     /// string escaping, longest first (scrubbed from arbitrary text).
     matcher: Option<AhoCorasick>,
+    /// The same patterns compared ignoring ASCII case, for fields a protocol
+    /// normalizes (header names, content codings are lowercased).
+    any_case: Option<AhoCorasick>,
     /// Patterns retained only when the matcher cannot be built, so redaction
     /// degrades to a slower replacement pass instead of silently failing.
     fallback_patterns: Vec<String>,
@@ -112,7 +115,7 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new(secrets: Vec<String>, extra_names: Vec<String>) -> Self {
-        let mut r = Redactor { secrets, matcher: None, fallback_patterns: vec![], extra_names };
+        let mut r = Redactor { secrets, matcher: None, any_case: None, fallback_patterns: vec![], extra_names };
         r.secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         r.reindex();
         r
@@ -167,6 +170,16 @@ impl Redactor {
             patterns.extend(json_escaped(s));
         }
         sort_longest_first(&mut patterns);
+        self.any_case = if patterns.is_empty() {
+            None
+        } else {
+            AhoCorasickBuilder::new()
+                .kind(Some(AhoCorasickKind::ContiguousNFA))
+                .match_kind(MatchKind::LeftmostLongest)
+                .ascii_case_insensitive(true)
+                .build(&patterns)
+                .ok()
+        };
         self.matcher = if patterns.is_empty() {
             self.fallback_patterns.clear();
             None
@@ -228,15 +241,21 @@ impl Redactor {
         let Some(matcher) = &self.matcher else {
             return fallback_redact(s, &self.fallback_patterns);
         };
-        let mut out = String::with_capacity(s.len());
-        let mut offset = 0;
-        for found in matcher.find_iter(s) {
-            out.push_str(&s[offset..found.start()]);
-            out.push_str(REDACTED);
-            offset = found.end();
+        replace_matches(matcher, s)
+    }
+
+    /// [`Redactor::text`] ignoring ASCII case, for text a protocol may have
+    /// case-folded after the secret was sent: header names, content codings,
+    /// and messages that quote them.
+    pub fn text_any_case(&self, s: &str) -> String {
+        match &self.any_case {
+            Some(m) => replace_matches(m, s),
+            None if self.matcher.is_none() && !self.fallback_patterns.is_empty() => {
+                let lower: Vec<String> = self.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+                fallback_redact(&self.text(&s.to_ascii_lowercase()), &lower)
+            }
+            None => self.text(s),
         }
-        out.push_str(&s[offset..]);
-        out
     }
 
     /// True when a component, once percent-decoded (and with `+` read as a
@@ -437,11 +456,11 @@ impl Redactor {
     /// A diagnostic finding with its values redacted. URL-valued evidence is
     /// redacted as a URL, and so is its copy in the explanation.
     pub fn finding(&self, f: &mut DiagnosticFinding) {
-        f.title = self.text(&f.title);
+        f.title = self.text_any_case(&f.title);
         let mut explanation = f.explanation.clone();
         for e in &mut f.evidence {
             if !URL_EVIDENCE.contains(&e.key.as_str()) {
-                e.value = self.text(&e.value);
+                e.value = self.text_any_case(&e.value);
                 continue;
             }
             let redacted = self.url(&e.value);
@@ -450,17 +469,18 @@ impl Redactor {
             }
             e.value = redacted;
         }
-        f.explanation = self.text(&explanation);
+        f.explanation = self.text_any_case(&explanation);
         for a in &mut f.alternatives {
-            *a = self.text(a);
+            *a = self.text_any_case(a);
         }
     }
 
     /// Headers with their values redacted ([`Redactor::header`]) and every
-    /// known secret scrubbed from their names: a server can echo a
-    /// credential into a header name as easily as into a value.
+    /// known secret scrubbed from their names, in any letter case (HTTP/2 and
+    /// HTTP/3 lowercase names): a server can echo a credential into a header
+    /// name as easily as into a value.
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
-        h.iter().map(|e| HeaderEntry { name: self.text(&e.name), value: self.header(&e.name, &e.value) }).collect()
+        h.iter().map(|e| HeaderEntry { name: self.text_any_case(&e.name), value: self.header(&e.name, &e.value) }).collect()
     }
 
     /// Redact sensitive query parameter values and secret values in a URL.
@@ -715,6 +735,18 @@ fn lower_hex(encoded: &str) -> String {
             out.push(c);
         }
     }
+    out
+}
+
+fn replace_matches(matcher: &AhoCorasick, s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut offset = 0;
+    for found in matcher.find_iter(s) {
+        out.push_str(&s[offset..found.start()]);
+        out.push_str(REDACTED);
+        offset = found.end();
+    }
+    out.push_str(&s[offset..]);
     out
 }
 

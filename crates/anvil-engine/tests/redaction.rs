@@ -334,20 +334,33 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
 }
 
 /// A server can reflect a request secret into response metadata the record
-/// keeps outside the header values: a header name, the `Content-Type` and
-/// `Content-Encoding` copied into the body capture, and the decoding detail.
-/// None of them may hold it in the stored record.
+/// keeps outside the header values: a header name (lowercased on the wire),
+/// the `Content-Type` and `Content-Encoding` copied into the body capture,
+/// and the decoding detail and warning that quote the coding lowercased.
+/// The request's own header names and `Content-Type` can carry a secret too.
+/// Neither the stored record nor the effective-request preview may hold the
+/// secret in any letter case.
 #[tokio::test]
 async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     anvil_transport::init();
     anvil_fixtures::init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
-    let secret = "reflected-meta-secret-5q9z";
+    let secret = "Reflected-Meta-SECRET-5q9z";
     let url = f.url("/status/200?ct=text/plain;x={{reflected}}&header=X-{{reflected}}:v&header=Content-Encoding:{{reflected}}&body=plain");
-    let mut c = ExecutionContext::standalone(RequestSpec::http("GET", &url));
+    let mut spec = RequestSpec::http("GET", &url);
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Sent-{{reflected}}", "v"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("Content-Type", "text/plain;k={{reflected}}"));
+    let mut c = ExecutionContext::standalone(spec);
     let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true, literal: false }];
     c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
-    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let engine = Engine::new();
+    let leaks = |text: &str| text.contains(secret) || text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
+
+    let preview = engine.preview(&c).expect("preview");
+    let preview = serde_json::to_string(&preview).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret: {preview}");
+
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
     let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
     let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
     assert_eq!(r.status, 200);
@@ -355,6 +368,26 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     assert!(r.headers.iter().any(|h| h.name.eq_ignore_ascii_case(&format!("x-{REDACTED}"))), "{:?}", r.headers);
     assert!(r.body.content_type.as_deref().is_some_and(|ct| ct.contains(REDACTED)), "{:?}", r.body.content_type);
     assert!(r.body.content_encoding.as_deref().is_some_and(|ce| ce.contains(REDACTED)), "{:?}", r.body.content_encoding);
+    assert!(o.record.prepared.headers.iter().any(|h| h.name == format!("X-Sent-{REDACTED}")), "{:?}", o.record.prepared.headers);
     let record = serde_json::to_string(&o.record).unwrap();
-    assert!(!record.contains(secret), "the stored record holds the reflected secret: {record}");
+    assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
+}
+
+/// The status line's reason phrase is kept in the response, the protocol
+/// status and the summary: a known secret is scrubbed from all three.
+#[tokio::test]
+async fn a_secret_in_the_reason_phrase_is_scrubbed_from_every_copy() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http("GET", &f.url("/status/403"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Word", "{{word}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "word".into(), value: "Forbidden".into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    assert_eq!(r.status, 403);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains("Forbidden"), "{record}");
 }
