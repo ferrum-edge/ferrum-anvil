@@ -139,6 +139,11 @@ against it).
     secret value as well, so a server that echoes a credential it received
     into a cookie name, a cookie attribute or an authorization scheme does
     not get it into records, history or exports.
+  - Header and trailer names, the response reason phrase, and the
+    `Content-Type`, `Content-Encoding` and decoding detail the record keeps
+    beside the body are scrubbed of every known secret value too: a server
+    can reflect a credential into any response metadata, not only header
+    values.
   - Every credential an auth profile sends is a known secret, including a
     WS-Security SAML assertion (as stored and as embedded, trimmed), a
     PasswordText password in the XML-escaped form it is sent in, and a

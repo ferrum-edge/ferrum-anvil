@@ -456,8 +456,11 @@ impl Redactor {
         }
     }
 
+    /// Headers with their values redacted ([`Redactor::header`]) and every
+    /// known secret scrubbed from their names: a server can echo a
+    /// credential into a header name as easily as into a value.
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
-        h.iter().map(|e| HeaderEntry { name: e.name.clone(), value: self.header(&e.name, &e.value) }).collect()
+        h.iter().map(|e| HeaderEntry { name: self.text(&e.name), value: self.header(&e.name, &e.value) }).collect()
     }
 
     /// Redact sensitive query parameter values and secret values in a URL.

@@ -332,3 +332,29 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
     assert!(!second_record.contains(secret), "the second record contains a cookie named with the first execution's secret");
     assert!(second.record.prepared.inferred.iter().all(|note| !note.contains(secret)));
 }
+
+/// A server can reflect a request secret into response metadata the record
+/// keeps outside the header values: a header name, the `Content-Type` and
+/// `Content-Encoding` copied into the body capture, and the decoding detail.
+/// None of them may hold it in the stored record.
+#[tokio::test]
+async fn a_secret_reflected_into_response_metadata_is_not_kept() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "reflected-meta-secret-5q9z";
+    let url = f.url("/status/200?ct=text/plain;x={{reflected}}&header=X-{{reflected}}:v&header=Content-Encoding:{{reflected}}&body=plain");
+    let mut c = ExecutionContext::standalone(RequestSpec::http("GET", &url));
+    let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
+    let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
+    assert_eq!(r.status, 200);
+    // The reflection reached the response: the test exercises the fields.
+    assert!(r.headers.iter().any(|h| h.name.eq_ignore_ascii_case(&format!("x-{REDACTED}"))), "{:?}", r.headers);
+    assert!(r.body.content_type.as_deref().is_some_and(|ct| ct.contains(REDACTED)), "{:?}", r.body.content_type);
+    assert!(r.body.content_encoding.as_deref().is_some_and(|ce| ce.contains(REDACTED)), "{:?}", r.body.content_encoding);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains(secret), "the stored record holds the reflected secret: {record}");
+}

@@ -90,6 +90,7 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
             // A CONNECT-UDP request carries the request's auth headers.
             for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
                 h.value = r.header(&h.name, &h.value);
+                h.name = r.text(&h.name);
             }
         }
     }
@@ -349,6 +350,18 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.headers = redactor.headers(&r.headers);
         r.trailers = redactor.headers(&r.trailers);
+        // Response metadata copied out of the headers (and the status line)
+        // is server-controlled too: a server can reflect a request secret
+        // into `Content-Type`, `Content-Encoding` or the reason phrase.
+        let scrub = |v: &mut Option<String>| {
+            if let Some(s) = v.as_mut() {
+                *s = redactor.text(s);
+            }
+        };
+        scrub(&mut r.reason);
+        scrub(&mut r.body.content_type);
+        scrub(&mut r.body.content_encoding);
+        scrub(&mut r.body.decoding_detail);
     }
     let prepared_headers: Vec<HeaderEntry> =
         a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
