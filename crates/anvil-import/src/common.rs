@@ -79,27 +79,91 @@ const NUMERIC_PLACEHOLDER: &str = "\u{1}anvil-number\u{1}";
 /// numbers unquoted.
 ///
 /// Only the exact strings [`scrub_json_at`] produced are unquoted: they are
-/// collected from the tree and replaced by their whole serialized form, so
-/// unrelated source text that merely mentions the marker tag cannot keep a
-/// numeric placeholder quoted, and source strings are never rewritten. The
-/// one indistinguishable case, a source string already equal to a whole
-/// marked placeholder, stays a quoted string with the markers stripped.
+/// collected from the tree into a lookup keyed by their whole serialized
+/// form, then the rendered text and the source are each scanned once for
+/// that form, so unrelated source text that merely mentions the marker tag
+/// cannot keep a numeric placeholder quoted, source strings are never
+/// rewritten, and the work stays linear in the body however many distinct
+/// numeric placeholders it holds. The one indistinguishable case, a source
+/// string already equal to a whole marked placeholder, stays a quoted
+/// string with the markers stripped.
 pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
-    let mut text = if pretty { serde_json::to_string_pretty(v).ok()? } else { serde_json::to_string(v).ok()? };
+    let text = if pretty { serde_json::to_string_pretty(v).ok()? } else { serde_json::to_string(v).ok()? };
     let mut numeric = Vec::new();
     collect_numeric_placeholders(v, &mut numeric);
+    if numeric.is_empty() {
+        return Some(text);
+    }
     numeric.sort();
     numeric.dedup();
-    for marked in numeric {
+    // Serialized marked string -> what replaces it. Built once; its total
+    // size is bounded by the placeholders themselves, not the body.
+    let mut replacements = std::collections::HashMap::with_capacity(numeric.len());
+    for marked in &numeric {
         let serialized = serde_json::to_string(&Value::String(marked.clone())).ok()?;
         let inner = &marked[NUMERIC_PLACEHOLDER.len()..marked.len() - NUMERIC_PLACEHOLDER.len()];
-        text = if source.contains(&serialized) {
-            text.replace(&serialized, &serde_json::to_string(inner).ok()?)
-        } else {
-            text.replace(&serialized, inner)
-        };
+        replacements.insert(serialized, inner.to_string());
     }
-    Some(text)
+    // The marker as it appears inside a serialized JSON string.
+    let marker_json = serde_json::to_string(NUMERIC_PLACEHOLDER).ok()?;
+    let marker_json = &marker_json[1..marker_json.len() - 1];
+    let prefix = format!("\"{marker_json}");
+    let suffix = format!("{marker_json}\"");
+    // No candidate longer than the longest marked string can match, which
+    // bounds every suffix search.
+    let max_candidate = replacements.keys().map(String::len).max().unwrap_or(0);
+    // Marked strings the source itself already held stay quoted.
+    let mut collisions = std::collections::HashSet::new();
+    scan_marked(source, &prefix, &suffix, max_candidate, |candidate| {
+        if replacements.contains_key(candidate) {
+            collisions.insert(candidate.to_string());
+            Some(candidate)
+        } else {
+            None
+        }
+    });
+    for serialized in &collisions {
+        let inner = replacements.get(serialized)?;
+        let quoted = serde_json::to_string(inner).ok()?;
+        replacements.insert(serialized.clone(), quoted);
+    }
+    Some(scan_marked(&text, &prefix, &suffix, max_candidate, |candidate| replacements.get(candidate).map(String::as_str)))
+}
+
+/// One pass over serialized JSON `text`, replacing every whole marked
+/// string (from `prefix` through the next `suffix`) for which `replace`
+/// returns a replacement. A candidate with no replacement is copied only
+/// through its prefix and scanning resumes after it, so a longer string
+/// that merely begins with the marker cannot swallow a marked string
+/// that follows it.
+fn scan_marked(text: &str, prefix: &str, suffix: &str, max_candidate: usize, replace: impl Fn(&str) -> Option<&str>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(prefix) {
+        let after_prefix = &rest[start + prefix.len()..];
+        let window = max_candidate.saturating_sub(prefix.len()).min(after_prefix.len());
+        let Some(end) = after_prefix[..window].find(suffix) else {
+            let through = start + prefix.len();
+            out.push_str(&rest[..through]);
+            rest = &rest[through..];
+            continue;
+        };
+        let candidate = &rest[start..start + prefix.len() + end + suffix.len()];
+        match replace(candidate) {
+            Some(replacement) => {
+                out.push_str(&rest[..start]);
+                out.push_str(replacement);
+                rest = &rest[start + candidate.len()..];
+            }
+            None => {
+                let through = start + prefix.len();
+                out.push_str(&rest[..through]);
+                rest = &rest[through..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Every string in `v` that is a whole numeric placeholder (marker, value,
