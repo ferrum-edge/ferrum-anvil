@@ -144,6 +144,11 @@
   committed database) and is repeated at the next unlock. Pre-rotation
   checkpoints are no longer kept in the profile; keep a portable backup first.
 
+- Attaching the same file again after a data-key rotation no longer leaves the
+  file's pre-rotation blob pinned with nothing able to release it. The new
+  blob replaces it in the attachment index, and the old one is released in the
+  same transaction.
+
 - An OS-keychain profile can now rotate its data key and stay keychain-protected:
   `anvil profile rotate-key --confirm-rotation` without `--new-passphrase-stdin`,
   `App::rotate_keychain_data_key` and `PolicyRotation::Keychain` (identity link,
