@@ -179,6 +179,16 @@
   with a "profile is busy" error instead of waiting forever, and a file system
   without file locks is refused once, when the profile is opened, with an error
   naming it.
+- An export's free-text credential warning (a credential in a body, URL or
+  other unextracted text) no longer recommends encrypted transfer: that mode
+  seals only the vault, so the text stays readable in either bundle mode. The
+  warning now says so and advises removing the literal or moving it into a
+  secret variable or sensitive field.
+
+- The import preview counts request revisions: a new revision is created, and
+  one already stored is a conflict that Merge skips and Replace overwrites, as
+  the import already did.
+
 - A request whose JWT-SVID auth is acquired from the Workload API, a value or a
   file again resolves the context's deferred vault variables. The resolver that
   carries the acquired token did not forward vault-variable bindings, so such a
