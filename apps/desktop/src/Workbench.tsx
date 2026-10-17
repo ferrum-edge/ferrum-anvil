@@ -1100,8 +1100,13 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 setWs(saved);
                 setWorkspaces((l) => l.map((x) => (x.id === saved.id ? saved : x)));
               }
+              // Start the workspace read now, before awaiting the
+              // environments: starting it is what retires an older
+              // workspace read still on its way, which would otherwise
+              // land after `saved` and overwrite it.
+              const refreshed = loadWorkspaces(ws.id);
               await loadEnvs();
-              await loadWorkspaces(ws.id);
+              await refreshed;
             }}
           />
         )}

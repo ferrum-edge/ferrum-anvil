@@ -1738,6 +1738,47 @@ describe("environments dialog", () => {
     expect((calls("workspace_save")[2].workspace as Workspace).variables).toEqual(vars("v2"));
   });
 
+  it("reopens with the saved variables while the post-save refreshes are still on their way", async () => {
+    const vars = (v: string) => [{ name: "base", value: { kind: "template" as const, value: v }, enabled: true }];
+    let stored = { ...workspace("A", "One"), variables: vars("v0") } as Workspace;
+    const envGate = deferred<void>();
+    let holdEnvs = false;
+    backend({
+      workspaces_list: async () => [stored, workspace("B", "Two")],
+      environments_list: async () => {
+        if (holdEnvs) await envGate.promise;
+        return [];
+      },
+      workspace_save: async (a) => {
+        stored = { ...(a.workspace as Workspace), updated_at: "2026-01-02T00:00:00Z" };
+        return stored;
+      },
+    });
+    await boot();
+    const openDialog = async () => {
+      fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "__manage" } });
+      const dialog = await screen.findByRole("dialog", { name: "Environments and variables" });
+      return { dialog, value: () => within(dialog).getByLabelText("Value") as HTMLInputElement };
+    };
+    let { dialog, value } = await openDialog();
+    await waitFor(() => expect(value().value).toBe("v0"));
+    // Every environment read from here is held: the dialog's post-save list
+    // load and the workbench's refresh both wait on it.
+    holdEnvs = true;
+    fireEvent.change(value(), { target: { value: "v1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(1));
+    await act(async () => {});
+    // Closed and reopened before either refresh lands: the saved workspace
+    // the dialog handed its parent at save time is what seeds it.
+    fireEvent.click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Close")!);
+    ({ dialog, value } = await openDialog());
+    await waitFor(() => expect(value().value).toBe("v1"));
+    await act(async () => envGate.resolve());
+    await act(async () => {});
+    expect(value().value).toBe("v1");
+  });
+
   it("reopens with the saved variables after the held stale workspace read lands", async () => {
     const vars = (v: string) => [{ name: "base", value: { kind: "template" as const, value: v }, enabled: true }];
     let stored = { ...workspace("A", "One"), variables: vars("v0") } as Workspace;

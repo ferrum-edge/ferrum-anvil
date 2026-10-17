@@ -110,11 +110,12 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
       }
       // Saved: the set shows its stored values again, unless edited since.
       if (sent) dropEdit(sentSel, sent);
-      await load();
-      // Hand the parent the saved workspace itself, not only a reload: the
-      // dialog's local copy dies with it, and a reopened dialog must seed
-      // from the saved values even before the parent's refresh lands.
+      // Hand the parent the saved workspace itself before any further
+      // await, not only a reload: the dialog's local copy dies with it,
+      // and a dialog closed and reopened while the list below is still
+      // loading must seed from the saved values.
       props.onChanged(saved);
+      await load();
     } catch (e) {
       setErr(String((e as Error).message));
     }
