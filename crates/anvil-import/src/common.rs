@@ -76,16 +76,45 @@ pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
 const NUMERIC_PLACEHOLDER: &str = "\u{1}anvil-number\u{1}";
 
 /// Serialize a scrubbed JSON body, writing the placeholders that replaced
-/// numbers unquoted. When the source already held the marker text, they
-/// stay quoted strings.
+/// numbers unquoted.
+///
+/// Only the exact strings [`scrub_json_at`] produced are unquoted: they are
+/// collected from the tree and replaced by their whole serialized form, so
+/// unrelated source text that merely mentions the marker tag cannot keep a
+/// numeric placeholder quoted, and source strings are never rewritten. The
+/// one indistinguishable case, a source string already equal to a whole
+/// marked placeholder, stays a quoted string with the markers stripped.
 pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
-    let text = if pretty { serde_json::to_string_pretty(v).ok()? } else { serde_json::to_string(v).ok()? };
-    let marker = serde_json::to_string(NUMERIC_PLACEHOLDER).ok()?;
-    let marker = &marker[1..marker.len() - 1];
-    if source.contains("anvil-number") || !text.contains(marker) {
-        return Some(text.replace(marker, ""));
+    let mut text = if pretty { serde_json::to_string_pretty(v).ok()? } else { serde_json::to_string(v).ok()? };
+    let mut numeric = Vec::new();
+    collect_numeric_placeholders(v, &mut numeric);
+    numeric.sort();
+    numeric.dedup();
+    for marked in numeric {
+        let serialized = serde_json::to_string(&Value::String(marked.clone())).ok()?;
+        let inner = &marked[NUMERIC_PLACEHOLDER.len()..marked.len() - NUMERIC_PLACEHOLDER.len()];
+        text = if source.contains(&serialized) {
+            text.replace(&serialized, &serde_json::to_string(inner).ok()?)
+        } else {
+            text.replace(&serialized, inner)
+        };
     }
-    Some(text.replace(&format!("\"{marker}"), "").replace(&format!("{marker}\""), ""))
+    Some(text)
+}
+
+/// Every string in `v` that is a whole numeric placeholder (marker, value,
+/// marker), as written by [`scrub_json_at`].
+fn collect_numeric_placeholders(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => {
+            if s.len() > NUMERIC_PLACEHOLDER.len() * 2 && s.starts_with(NUMERIC_PLACEHOLDER) && s.ends_with(NUMERIC_PLACEHOLDER) {
+                out.push(s.clone());
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|c| collect_numeric_placeholders(c, out)),
+        Value::Object(m) => m.values().for_each(|c| collect_numeric_placeholders(c, out)),
+        _ => {}
+    }
 }
 
 /// Bytes of a member name kept per path segment while walking a body; a

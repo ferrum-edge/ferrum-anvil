@@ -324,6 +324,14 @@ fn numeric_credentials_and_unscannable_data() {
     assert!(!text.contains("123456"), "{text}");
     let body = substituted(text, &[("pin", "123456")]);
     assert_eq!((body["pin"].as_u64(), body["max_tokens"].as_u64()), (Some(123456), Some(5)));
+    // Unrelated source text mentioning the render marker's tag must not keep
+    // the numeric placeholder quoted (which would send the pin as a string),
+    // and the mentioning string itself is preserved.
+    let r = curl(r#"curl --json '{"pin":123456,"note":"anvil-number"}' https://example.test"#);
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    let body = substituted(text, &[("pin", "123456")]);
+    assert_eq!(body["pin"].as_u64(), Some(123456), "{text}");
+    assert_eq!(body["note"].as_str(), Some("anvil-number"), "{text}");
     let r = curl("curl -H 'Content-Type: application/xml' -d '<a>placeholder-secret</a>' https://example.test");
     assert!(has_at(&r, "body_not_scanned", "/args"));
 }
