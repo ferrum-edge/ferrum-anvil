@@ -136,7 +136,16 @@ pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
 /// through its prefix and scanning resumes after it, so a longer string
 /// that merely begins with the marker cannot swallow a marked string
 /// that follows it.
-fn scan_marked(text: &str, prefix: &str, suffix: &str, max_candidate: usize, mut replace: impl FnMut(&str) -> Option<&str>) -> String {
+fn scan_marked<'t, 'r>(
+    text: &'t str,
+    prefix: &str,
+    suffix: &str,
+    max_candidate: usize,
+    mut replace: impl FnMut(&'t str) -> Option<&'r str>,
+) -> String
+where
+    't: 'r,
+{
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find(prefix) {
