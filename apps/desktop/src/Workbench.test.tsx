@@ -1781,7 +1781,7 @@ describe("environments dialog", () => {
     // local saved copy is gone. Reopening must seed from v2, not v1.
     await act(async () => gate.resolve());
     await act(async () => {});
-    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    fireEvent.click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Close")!);
     ({ dialog, value } = await openDialog());
     await waitFor(() => expect(value().value).toBe("v2"));
     fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
