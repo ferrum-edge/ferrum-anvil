@@ -8,6 +8,12 @@
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange
   downgrade).
+- zip is updated to 9.0.4 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
+  preserving SUID/SGID bits and symlink targets escaping the destination).
+  The `zip` 4.6.1 copy held by `tauri-plugin-updater` has no patched 4.x
+  release and is a reviewed `deny.toml` ignore: the updater verifies the
+  release signature before extracting an update archive, and Anvil's own
+  bundle code reads entries in memory without `extract()`.
 
 ### Changed
 
@@ -142,6 +148,14 @@
     applies one total deadline across DNS, handshake and exchange (and MASQUE
     and HBONE DTLS no longer restart it after the handshake).
 
+- Desktop: an API standards check that left anything unchecked (`incomplete`,
+  skipped operations, `$ref`s not followed, examples not checked) without
+  errors shows "not completely checked" instead of "meets the standards", and
+  no longer says the description meets every rule.
+- Desktop: **Start load** starts one run per confirmation, even on a double
+  click. Every accepted run keeps its own Stop control until it finishes, and a
+  run that finishes before its start reply arrives is not shown as live.
+
 - Key rotation removes the old key's material it kept outside the database once
   the rotation commits: `profile.json` no longer holds passphrase and recovery
   wraps of the old key, checkpoints sealed with an earlier key and interrupted
@@ -177,6 +191,16 @@
   with a "profile is busy" error instead of waiting forever, and a file system
   without file locks is refused once, when the profile is opened, with an error
   naming it.
+- An export's free-text credential warning (a credential in a body, URL or
+  other unextracted text) no longer recommends encrypted transfer: that mode
+  seals only the vault, so the text stays readable in either bundle mode. The
+  warning now says so and advises removing the literal or moving it into a
+  secret variable or sensitive field.
+
+- The import preview counts request revisions: a new revision is created, and
+  one already stored is a conflict that Merge skips and Replace overwrites, as
+  the import already did.
+
 - A request whose JWT-SVID auth is acquired from the Workload API, a value or a
   file again resolves the context's deferred vault variables. The resolver that
   carries the acquired token did not forward vault-variable bindings, so such a

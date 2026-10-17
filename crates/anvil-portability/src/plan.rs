@@ -90,6 +90,13 @@ pub(crate) fn all_ids(g: &PortableGraph) -> Vec<(String, Id, String)> {
 /// Compute what applying `g` would do given what already exists.
 pub fn plan(g: &PortableGraph, existing: &Existing, policy: ConflictPolicy) -> ImportPlan {
     let mut ids = all_ids(g);
+    // Request revisions are written (or skipped) like any other object.
+    let request_names: HashMap<Id, &str> = g.requests.iter().map(|r| (r.meta.id, r.name.as_str())).collect();
+    ids.extend(
+        g.revisions
+            .iter()
+            .map(|r| ("revision".to_string(), r.id, request_names.get(&r.request_id).copied().unwrap_or_default().to_string())),
+    );
     ids.extend(secret_ids(g).map(|(id, v)| ("secret".to_string(), id, v.label.clone())));
     let mut conflicts: Vec<String> = ids
         .iter()

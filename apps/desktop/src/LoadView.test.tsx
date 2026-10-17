@@ -17,6 +17,7 @@ const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
+import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
 import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
@@ -867,5 +868,67 @@ describe("ReportView", () => {
     expect(screen.getByTestId("protocol-panel").textContent).toContain("Load unit: exchanges");
     const successRow = screen.getByText("Successful exchanges").closest("tr")!;
     expect(successRow.textContent).toContain("— (no samples)");
+  });
+});
+
+describe("LoadView run start", () => {
+  const handlers = new Map<string, (ev: { payload: unknown }) => void>();
+  const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
+  const emit = (name: string, payload: unknown) => act(() => handlers.get(name)?.({ payload }));
+  beforeEach(() => {
+    listenMock.mockImplementation(async (name: string, cb: (ev: { payload: unknown }) => void) => {
+      handlers.set(name, cb);
+      return () => {};
+    });
+  });
+  afterEach(() => {
+    handlers.clear();
+    listenMock.mockImplementation(async () => () => {});
+  });
+
+  async function confirm() {
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.click(button("Run…"));
+    await screen.findByText("Confirm load run");
+    fireEvent.click(screen.getByLabelText(/I own these destinations/));
+  }
+
+  it("starts one run on a double click and keeps its Stop control until that run finishes", async () => {
+    const start = deferred<string>();
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => start.promise, load_run_cancel: () => true });
+    await confirm();
+    fireEvent.click(button("Start load"));
+    fireEvent.click(button("Start load"));
+    await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
+    expect(button("Start load").disabled).toBe(true);
+    await act(async () => start.resolve("key-1"));
+    expect(calls("load_run_start")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Stop run" })).toHaveLength(1);
+
+    // Another run's completion leaves this one's Stop control.
+    emit("load-finished", { run_key: "key-other", run_id: null });
+    expect(screen.getAllByRole("button", { name: "Stop run" })).toHaveLength(1);
+    fireEvent.click(button("Stop run"));
+    await waitFor(() => expect(calls("load_run_cancel")).toEqual([{ runKey: "key-1" }]));
+    emit("load-finished", { run_key: "key-1", run_id: null });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull());
+  });
+
+  it("does not show a run that finished before its start reply arrived", async () => {
+    const start = deferred<string>();
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => start.promise });
+    await confirm();
+    fireEvent.click(button("Start load"));
+    await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
+    // Progress, the finish and the start reply all arrive before React renders.
+    await act(async () => {
+      handlers.get("load-progress")?.({ payload: { run_key: "key-1", progress: { timeline_from: 0, timeline_delta: [] } } });
+      handlers.get("load-finished")?.({ payload: { run_key: "key-1", run_id: null } });
+      start.resolve("key-1");
+    });
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+    expect(screen.queryByText("Confirm load run")).toBeNull();
   });
 });
