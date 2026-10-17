@@ -83,6 +83,32 @@
 
 ### Fixed
 
+- Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
+  embedded in string fields and apply the credential policy more evenly:
+  - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed
+    with the bounded import parser, and their nodes share one `max_nodes`
+    budget per import. A body that does not fit is kept as text with a
+    `body_not_scanned` warning; the GraphQL payload is no longer copied.
+  - cURL short-option clusters count against the 10,000-argument limit after
+    expansion, not only as shell words.
+  - Postman and Insomnia raw JSON bodies and Postman/Insomnia GraphQL
+    variables have credential-like members redacted like HAR and cURL bodies,
+    and Insomnia form bodies parsed from text have credential-like fields
+    redacted. Numbers under credential names (`pin`, `otp`, …) are redacted
+    too, and a body that repeats a member name is rewritten so an earlier,
+    unscanned value does not survive. XML, SOAP, other text and unparsable
+    JSON bodies get `body_not_scanned` in every migration format.
+  - An Insomnia GraphQL envelope over the budget, malformed, or without a
+    `query` string is kept as a raw JSON body instead of becoming the query
+    text; a bare GraphQL query stays a query.
+  - cURL `-G` data with a bare flag (`flag&api_key=…`) becomes one query
+    parameter per segment, so credential-like values are redacted.
+  - An OpenAPI JSON example given as a string is validated as JSON without
+    building it (it used to be parsed in full outside the node budget).
+  - Credential-like values in a URL query that is kept verbatim (it has a bare
+    `flag` segment, or it is written into an Insomnia URL) are redacted in
+    place in cURL, Postman and Insomnia imports, as HAR already did; a kept
+    value keeps its original encoding.
 - Desktop: an API standards check that stopped early (`incomplete`, or
   operations skipped, $refs not followed, examples not checked) without
   errors now shows "not completely checked"
