@@ -845,11 +845,17 @@ impl App {
         Ok(self.store.atomically(|s| release_attachment_in(s, sha256))?)
     }
 
+    /// The index entry and the blob it names are read in one read
+    /// transaction: a re-attachment that moves the entry to a new blob and
+    /// releases the old one ([`index_attachment_in`]) commits before or after
+    /// both reads, never between them.
     pub fn get_attachment(&self, sha256: &str) -> Result<Option<Vec<u8>>> {
-        let idx: Option<serde_json::Value> = self.store.get(kind::IMPORT_SOURCE, &attachment_index_id(sha256))?;
-        let Some(idx) = idx else { return Ok(None) };
-        let blob = idx.get("blob").and_then(|b| b.as_str()).unwrap_or_default().to_string();
-        Ok(self.store.get_blob(&blob)?.map(|z| z.to_vec()))
+        Ok(self.store.read_consistently(|r| {
+            let idx: Option<serde_json::Value> = r.get(kind::IMPORT_SOURCE, &attachment_index_id(sha256))?;
+            let Some(idx) = idx else { return Ok(None) };
+            let blob = idx.get("blob").and_then(|b| b.as_str()).unwrap_or_default();
+            Ok(r.get_blob(blob)?.map(|z| z.to_vec()))
+        })?)
     }
 }
 
@@ -990,10 +996,19 @@ fn attachment_entry_in(s: &StoreRead<'_>, sha: &str) -> anvil_storage::store::Re
 /// Write the index entry of attachment `sha` stored in `blob`. `user` marks
 /// one a user added (see [`App::put_attachment`]) and records when; an entry
 /// already marked stays marked, with the time it was marked.
+///
+/// Blob ids derive from the data key, and key rotation keeps the stored ids,
+/// so the same bytes stored again after a rotation get a new blob. The entry
+/// is the only reference to the blob it named before, so that blob is
+/// released here, in the same transaction, instead of staying pinned with
+/// nothing that can ever release it.
 pub(crate) fn index_attachment_in(s: &StoreTx<'_>, sha: &str, blob: &str, user: bool) -> anvil_storage::store::Result<()> {
     let id = attachment_index_id(sha);
     let held: Option<serde_json::Value> = s.get(kind::IMPORT_SOURCE, &id)?;
     let held = held.and_then(|h| serde_json::from_value::<AttachmentIndex>(h).ok());
+    if let Some(previous) = held.as_ref().map(|h| h.blob.as_str()).filter(|b| *b != blob) {
+        s.release_blob(previous)?;
+    }
     let (user, attached_at) = match held {
         _ if user => (true, Some(chrono::Utc::now().timestamp_millis())),
         Some(h) if h.user => (true, h.attached_at),

@@ -26,9 +26,10 @@
 //!   here logs or records them.
 //!
 //! The protobuf messages below are transcribed from the upstream
-//! `workload.proto` (field numbers and types identical). Ferrum Edge's copy
-//! differs only in `ValidateJWTSVIDResponse.claims`, which Anvil does not use:
-//! JWT-SVIDs are checked locally against the bundles from `FetchJWTBundles`.
+//! `workload.proto` (field numbers and types identical). Ferrum Edge v0.9.5
+//! and v0.9.7 differ only in `ValidateJWTSVIDResponse.claims` (JSON bytes; a
+//! `google.protobuf.Struct` from v0.9.8), which Anvil does not use: JWT-SVIDs
+//! are checked locally against the bundles from `FetchJWTBundles`.
 
 use crate::connector::BoxIo;
 use crate::errors::display_chain;

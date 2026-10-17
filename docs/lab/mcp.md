@@ -50,7 +50,9 @@ Anvil sends MCP requests as `Content-Type: application/json` with no `charset`, 
 of a non-UTF-8 request charset (`-32600` before routing, GHSA-4f9m-cfqg-fhx9) changes no scenario
 here; the profile configures no `ai_prompt_shield`.
 
-Not covered yet: per-consumer tool grants and OpenAPI-generated tools. The pinned releases'
-`mcp_gateway` has one tool policy for every caller (it binds a session to the principal that opened
-it, but grants no tools per consumer) and no OpenAPI tool source; the profile gains scenarios when a
-pinned release has them.
+Not covered yet: per-consumer tool grants and OpenAPI-generated tools. Releases from v0.9.9 have
+both (`mcp_gateway` grants, and the OpenAPI bridge whose failed or refused calls the catalog records
+as `plugin.mcp_gateway.openapi_bridge_error_result`; see
+[the v0.9.9 delta](../audit/gateway-0.9.9-delta.md)), but this profile configures neither, so the
+lab does not exercise them. Earlier pinned releases (v0.9.5 to v0.9.8) have one tool policy for every
+caller and no OpenAPI tool source.

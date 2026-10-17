@@ -110,7 +110,13 @@ fn reached(c: &mut Checks, env: &Env, tool: &str, before: usize, expected: bool)
     let n = env.upstream.state.tool_calls(tool) - before;
     let what = if expected { "forwarded" } else { "did not forward" };
     let what = format!("the gateway {what} the {tool} call");
-    c.add(CheckKind::GroundTruth, what, (n == 1) == expected, format!("{n} call(s) reached the server"));
+    c.add(CheckKind::GroundTruth, what, forwarding_matches(n, expected), format!("{n} call(s) reached the server"));
+}
+
+/// Exactly one upstream call when forwarding is expected; none when it is not
+/// (a refused call that still reaches the server, even twice, fails).
+fn forwarding_matches(n: usize, expected: bool) -> bool {
+    n == usize::from(expected)
 }
 
 fn done(o: ExecutionOutput, c: Checks) -> Outcome {
@@ -315,4 +321,19 @@ async fn up() -> anyhow::Result<()> {
     harness::wait_for_shutdown().await?;
     env.gateway.stop().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forwarding_matches;
+
+    #[test]
+    fn forwarding_ground_truth_requires_an_exact_count() {
+        assert!(!forwarding_matches(0, true));
+        assert!(forwarding_matches(1, true));
+        assert!(!forwarding_matches(2, true));
+        assert!(forwarding_matches(0, false));
+        assert!(!forwarding_matches(1, false));
+        assert!(!forwarding_matches(2, false));
+    }
 }

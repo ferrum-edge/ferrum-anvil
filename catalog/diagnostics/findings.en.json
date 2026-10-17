@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.01-1",
+  "version": "2026.10.15-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1926,20 +1926,26 @@
       "confirm_with": []
     },
     "app.mcp_tool_error": {
-      "title": "The MCP tool reported an error",
-      "explanation": "The tool call reached the tool (status {status}, a JSON-RPC result), but the tool marked its result as an error (isError: true): {text}",
-      "alternatives": [],
+      "title": "The MCP tool call returned an error result",
+      "explanation": "The tool call was answered (status {status}, a JSON-RPC result) with a result marked as an error (isError: true): {text}",
+      "alternatives": [
+        "The tool ran and reported its own failure.",
+        "A gateway that makes the call for the tool (such as a Ferrum mcp_gateway OpenAPI bridge) failed or refused it and wrote this result; the tool's own logic may never have run."
+      ],
       "does_not_prove": [
-        "That the MCP protocol exchange failed: the error is the tool's own result.",
-        "That a gateway refused the call."
+        "That the MCP protocol exchange failed: the answer is a JSON-RPC result.",
+        "That the call reached the tool, or which component wrote the error.",
+        "Who should act: text that names a gateway error class is result content, not proof that a gateway produced it."
       ],
       "remediation": [
         {
-          "text": "Read the tool's error text and fix the arguments, or ask the tool's owner.",
-          "owner": "api_owner"
+          "text": "Read the result text. A plain tool or backend error points at the tool's owner; a gateway error class (\"gateway error: ...\") points at the gateway operator or the backend's availability, once the gateway's own logs confirm it.",
+          "owner": "unknown"
         }
       ],
-      "confirm_with": []
+      "confirm_with": [
+        "The tool server's log for the call, or the gateway's log for the dispatch it made for the tool."
+      ]
     },
     "app.grpc_status": {
       "title": "The RPC failed: {name}",
