@@ -146,6 +146,17 @@ type PlanDraft = { plan: LoadPlan; created: boolean };
 type Drafts = Record<string, Record<string, PlanDraft>>;
 
 /** The plan with its list fields normalized; an already normalized plan is returned as is. */
+/** What the backend sets on a save; an edit never changes it. */
+function storedMeta(p: LoadPlan): Pick<LoadPlan, "trusted" | "created_at" | "updated_at"> {
+  return { trusted: p.trusted, created_at: p.created_at, updated_at: p.updated_at };
+}
+
+/** Whether two edits of a plan are the same edit (stored metadata aside). */
+function sameEdit(a: LoadPlan, b: LoadPlan): boolean {
+  const content = (p: LoadPlan) => JSON.stringify({ ...p, trusted: null, created_at: null, updated_at: null });
+  return content(a) === content(b);
+}
+
 function editable(plan: LoadPlan): EditPlan {
   return plan.chain && plan.mix ? (plan as EditPlan) : { ...plan, chain: plan.chain ?? [], mix: plan.mix ?? [] };
 }
@@ -202,11 +213,16 @@ export function LoadView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
-  /** The workspace's reports, or null when the workspace changed meanwhile. */
+  // Only the latest reload may apply its lists: reloads overlap (a save's
+  // reload is still running when the next save starts its own), and an
+  // earlier one that answers late holds older plans than a later one.
+  const reloadSeq = useRef(0);
+  /** The workspace's reports, or null when superseded or the workspace changed. */
   const reload = async () => {
     const w = props.workspaceId;
+    const seq = ++reloadSeq.current;
     const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
-    if (w !== wsRef.current) return null;
+    if (w !== wsRef.current || seq !== reloadSeq.current) return null;
     setPlans(p);
     setReports(r);
     setDatasets(d);
@@ -270,7 +286,7 @@ export function LoadView(props: {
   const dropDraft = (ws: string, id: string, only?: LoadPlan) =>
     setDrafts((d) => {
       const own = d[ws];
-      if (!own?.[id] || (only && own[id].plan !== only)) return d;
+      if (!own?.[id] || (only && !sameEdit(own[id].plan, only))) return d;
       return { ...d, [ws]: Object.fromEntries(Object.entries(own).filter(([k]) => k !== id)) };
     });
   /** Selects `s`; an untouched new plan is dropped unless it is the one selected. */
@@ -370,15 +386,20 @@ export function LoadView(props: {
                 // The save response acknowledges this plan before its list
                 // reload finishes. It is no longer a new plan, so Discard
                 // must disappear during that window too.
+                // A draft edited since the save keeps that edit, with the
+                // saved copy's stored metadata.
                 setDrafts((all) => {
                   const own = all[p.workspace_id];
                   const draft = own?.[p.id];
-                  if (!draft?.created) return all;
+                  if (!draft) return all;
+                  const edited = !sameEdit(draft.plan, sent);
+                  if (!draft.created && !edited) return all;
+                  const plan = edited ? { ...draft.plan, ...storedMeta(p) } : draft.plan;
                   return {
                     ...all,
                     [p.workspace_id]: {
                       ...own,
-                      [p.id]: { ...draft, created: false },
+                      [p.id]: { plan, created: false },
                     },
                   };
                 });
@@ -512,7 +533,11 @@ export function PlanEditor(props: {
     try {
       const sent = p;
       const saved = await api.saveLoadPlan(sent);
-      setEdit(editable(saved));
+      // Edits typed while the save was on its way stay: only an unchanged
+      // editor takes the saved copy; otherwise the edit takes just its stored
+      // metadata. The view does the same to its draft (`onSaved`), whether or
+      // not this editor is still shown.
+      setEdit((cur) => (cur === sent ? editable(saved) : { ...cur, ...storedMeta(saved) }));
       props.onSaved(saved, sent);
       return saved;
     } catch (e) {
