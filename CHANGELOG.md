@@ -166,6 +166,13 @@
   request failed with an unresolved variable. `SecretResolver` methods no longer
   have default implementations, so a wrapping resolver must forward each one.
 
+- The lab refuses `--scenario` selectors that name no scenario of the selected
+  profile (or of any profile for `run all`) before starting fixtures, instead
+  of reporting an empty run as a success. Explicitly skipped scenarios stay
+  selectable, and the `policy` and `admission` listings now include them. The
+  MCP lab's "did not forward" ground truth now requires zero upstream calls, so
+  a refused call forwarded twice fails.
+
 - The GW-020-BUDGET lab scenario waits up to three seconds for the gateway's
   budget-rejection log entry, and reports a clear timeout if it never appears
   (#352). PROTO-022 DTLS recovery retries a lost datagram up to three times

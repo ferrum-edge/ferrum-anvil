@@ -48,8 +48,44 @@ pub fn all() -> Vec<Profile> {
     ]
 }
 
+/// `--scenario` selectors that name no scenario (run or explicitly skipped)
+/// of `profiles`, matched case-insensitively. A run refuses them before any
+/// fixture starts, so a typo never passes as an empty, successful run.
+pub fn unknown_selectors(profiles: &[Profile], selectors: &[String]) -> Vec<String> {
+    let known: Vec<&'static str> = profiles.iter().flat_map(|p| (p.scenarios)()).map(|(id, _)| id).collect();
+    selectors.iter().filter(|s| !known.iter().any(|id| id.eq_ignore_ascii_case(s))).cloned().collect()
+}
+
 pub fn find(name: &str) -> Result<Profile> {
     all().into_iter().find(|p| p.name == name).ok_or_else(|| {
         anyhow::anyhow!("unknown profile {name} (available: {})", all().iter().map(|p| p.name).collect::<Vec<_>>().join(", "))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sel(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unknown_selectors_are_reported_alone_or_mixed() {
+        let mcp = vec![find("mcp").unwrap()];
+        assert_eq!(unknown_selectors(&mcp, &sel(&["MCP-DOES-NOT-EXIST"])), sel(&["MCP-DOES-NOT-EXIST"]));
+        assert_eq!(unknown_selectors(&mcp, &sel(&["mcp-003", "MCP-NOPE"])), sel(&["MCP-NOPE"]));
+        assert!(unknown_selectors(&mcp, &sel(&["mcp-003", "MCP-004"])).is_empty());
+        assert!(unknown_selectors(&mcp, &[]).is_empty());
+    }
+
+    #[test]
+    fn explicit_skips_and_the_all_profile_are_known() {
+        assert!(unknown_selectors(&[find("policy").unwrap()], &sel(&["gw-014-geo"])).is_empty());
+        assert!(unknown_selectors(&[find("admission").unwrap()], &sel(&["UP-018-H2"])).is_empty());
+        assert!(unknown_selectors(&[find("tls").unwrap()], &sel(&["TLS-003"])).is_empty());
+        // `all` validates against the union of every profile.
+        assert!(unknown_selectors(&all(), &sel(&["MCP-003", "GW-014-GEO", "TLS-003"])).is_empty());
+        assert_eq!(unknown_selectors(&[find("mcp").unwrap()], &sel(&["TLS-003"])), sel(&["TLS-003"]));
+    }
 }
