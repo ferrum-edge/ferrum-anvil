@@ -42,6 +42,9 @@ impl Limits {
 
 struct Budget {
     remaining: Cell<usize>,
+    /// Whether a map repeated a key (the later value replaced the earlier
+    /// one, which the tree no longer shows).
+    duplicate_keys: Cell<bool>,
     bytes_remaining: Cell<usize>,
     exhausted: Cell<bool>,
     bytes_exhausted: Cell<bool>,
@@ -183,7 +186,9 @@ impl<'de> Visitor<'de> for Bounded<'_> {
         let mut out = Map::new();
         while let Some(k) = map.next_key_seed(KeySeed(self.budget))? {
             let v = map.next_value_seed(child)?;
-            out.insert(k, v);
+            if out.insert(k, v).is_some() {
+                self.budget.duplicate_keys.set(true);
+            }
         }
         Ok(Value::Object(out))
     }
@@ -271,6 +276,7 @@ fn limit_error(b: &Budget, limits: Limits) -> Option<ImportError> {
 fn new_budget(limits: Limits) -> Budget {
     Budget {
         remaining: Cell::new(limits.max_nodes),
+        duplicate_keys: Cell::new(false),
         bytes_remaining: Cell::new(limits.max_bytes),
         exhausted: Cell::new(false),
         bytes_exhausted: Cell::new(false),
@@ -279,17 +285,34 @@ fn new_budget(limits: Limits) -> Budget {
 }
 
 pub fn parse_json(text: &str, limits: Limits) -> Result<Value, ImportError> {
+    parse_json_counted(text, limits).0.map(|p| p.value)
+}
+
+/// A JSON document parsed by [`parse_json_counted`].
+pub struct CountedJson {
+    pub value: Value,
+    /// Whether some object repeated a key: the tree keeps only the last
+    /// value, so it no longer shows every value the text holds.
+    pub duplicate_keys: bool,
+}
+
+/// [`parse_json`] that also returns the nodes it charged, whether or not the
+/// parse succeeded, so a caller can draw several parses from one budget.
+pub fn parse_json_counted(text: &str, limits: Limits) -> (Result<CountedJson, ImportError>, usize) {
     let budget = new_budget(limits);
     let mut de = serde_json::Deserializer::from_str(text);
     let res = Bounded { budget: &budget, depth: 0 }.deserialize(&mut de).and_then(|v| de.end().map(|_| v));
-    res.map_err(|e| {
+    let used = limits.max_nodes - budget.remaining.get();
+    let duplicate_keys = budget.duplicate_keys.get();
+    let res = res.map(|value| CountedJson { value, duplicate_keys }).map_err(|e| {
         limit_error(&budget, limits).unwrap_or_else(|| ImportError::Syntax {
             syntax: "JSON".into(),
             message: e.to_string(),
             line: Some(e.line()),
             column: Some(e.column()),
         })
-    })
+    });
+    (res, used)
 }
 
 pub fn parse_yaml(text: &str, limits: Limits) -> Result<Value, ImportError> {

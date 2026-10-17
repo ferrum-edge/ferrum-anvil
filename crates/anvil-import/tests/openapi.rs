@@ -862,3 +862,22 @@ fn operations_under_a_long_path_charge_their_urls_and_pointers() {
     assert!(has(&r, "text_size_limit"));
     assert!(r.requests.len() < 10, "{} requests", r.requests.len());
 }
+
+#[test]
+fn a_string_example_is_a_json_document_only_when_it_parses_as_one() {
+    // A lone surrogate escape is not valid JSON text: the example stays a string.
+    for (example, json_doc) in [(r#"{"x":"\uD800"}"#.to_string(), false), (r#"{"x":1}"#.to_string(), true)] {
+        let doc = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": { "/a": { "post": {
+                "requestBody": { "content": { "application/json": { "schema": { "type": "object" }, "example": example } } },
+                "responses": { "200": { "description": "ok" } }
+            } } }
+        });
+        let r = anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap();
+        let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(v.is_object(), json_doc, "{example}: {text}");
+    }
+}

@@ -9,7 +9,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact, parse_form,
+    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact,
+    parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, scrub_json, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -20,7 +21,7 @@ use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 64;
@@ -561,6 +562,9 @@ fn request(
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     let raw_url = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
+    // A query written into the URL itself is kept verbatim; its
+    // credential-like values are redacted in place.
+    let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = kv_list(b, r.get("parameters"), &ptr(at, "parameters"), "query");
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
@@ -673,7 +677,18 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
     match essence.as_str() {
         "application/x-www-form-urlencoded" => match v.get("params") {
             Some(_) => Body::FormUrlEncoded { fields: kv_list(b, v.get("params"), &ptr(at, "params"), "form field") },
-            None => parse_form(&text).map(|fields| Body::FormUrlEncoded { fields }).unwrap_or(Body::Raw { text, content_type: mime }),
+            None => match parse_form(&text) {
+                Some(fields) => {
+                    let mut body = Body::FormUrlEncoded { fields };
+                    scrub_body(b, &mut body, &ptr(at, "text"));
+                    body
+                }
+                None => {
+                    let body = Body::Raw { text, content_type: mime };
+                    warn_unscanned(b, &body, &ptr(at, "text"));
+                    body
+                }
+            },
         },
         "multipart/form-data" => {
             let mut parts = vec![];
@@ -709,15 +724,57 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
             Body::Multipart { parts }
         }
         "application/graphql" => {
-            let parsed: Map<String, Value> =
-                serde_json::from_str::<Value>(&text).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default();
-            let query = parsed.get("query").and_then(Value::as_str).unwrap_or(&text).to_string();
-            let variables = match parsed.get("variables") {
-                Some(Value::Null) | None => String::new(),
-                Some(Value::String(s)) => s.clone(),
-                Some(o) => o.to_string(),
+            // The text is a JSON envelope (`query`, `variables`,
+            // `operationName`) or a bare GraphQL query. An envelope is parsed
+            // under the import's embedded-document budget and taken by value.
+            let bare = || Body::GraphQl { query: text.clone(), variables: String::new(), operation_name: None };
+            // A JSON envelope starts with an array or an object key; a GraphQL
+            // query (`{ field }`, `query { … }`) never does.
+            let json_looking = {
+                let t = text.trim_start();
+                t.starts_with('[') || t.strip_prefix('{').is_some_and(|r| matches!(r.trim_start().chars().next(), Some('"' | '}')))
             };
-            let operation_name = parsed.get("operationName").and_then(Value::as_str).map(str::to_string);
+            let mut envelope = match parse_embedded_json(b, &text) {
+                Ok(parsed) => match parsed.value {
+                    Value::Object(m) if m.get("query").is_some_and(Value::is_string) => m,
+                    mut other => {
+                        // JSON, but not an envelope with a query: kept as the
+                        // JSON it is, with the credential policy applied.
+                        if !b.opts.include_credentials {
+                            scrub_json(b, &mut other, &ptr(at, "text"));
+                        }
+                        b.report.warn(
+                            "graphql_envelope_without_query",
+                            &ptr(at, "text"),
+                            "the GraphQL body is JSON without a `query` string; imported as a raw JSON body",
+                        );
+                        let text = crate::common::render_json(&other, false, &text).unwrap_or_default();
+                        return Body::Raw { text, content_type: Some("application/json".into()) };
+                    }
+                },
+                // Not parsed (over the budget, too deep, malformed): an
+                // envelope is kept as raw JSON text, unscanned; anything else
+                // is the query itself.
+                Err(e) if json_looking => {
+                    let why = match e {
+                        ImportError::LimitExceeded { what, limit } => format!("exceeds the import limit for {what} ({limit})"),
+                        _ => "could not be parsed".to_string(),
+                    };
+                    b.report.warn(
+                        "body_not_scanned",
+                        &ptr(at, "text"),
+                        format!("GraphQL JSON body {why}; imported as a raw JSON body and not scanned for credentials"),
+                    );
+                    return Body::Raw { text, content_type: Some("application/json".into()) };
+                }
+                Err(_) => return bare(),
+            };
+            let query = match envelope.remove("query") {
+                Some(Value::String(q)) => q,
+                _ => String::new(),
+            };
+            let variables = scrub_graphql_variables(b, envelope.remove("variables"), &ptr(at, "text/variables"));
+            let operation_name = envelope.get("operationName").and_then(Value::as_str).map(str::to_string);
             Body::GraphQl { query, variables, operation_name }
         }
         _ if str_of(v, "fileName").is_some_and(|f| !f.is_empty()) => {
@@ -732,7 +789,8 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
         }
         "" if text.is_empty() => Body::None,
         _ => {
-            let (body, ct) = body_from_text(mime.as_deref(), text);
+            let (mut body, ct) = body_from_text(mime.as_deref(), text);
+            scrub_body(b, &mut body, &ptr(at, "text"));
             *declared = ct;
             body
         }
