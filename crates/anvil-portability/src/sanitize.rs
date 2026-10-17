@@ -160,10 +160,8 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                     if matches!(k.as_str(), "text" | "url" | "query" | "envelope" | "variables" | "extra_json")
                         && let Some(why) = looks_like_credential(text)
                     {
-                        s.warnings.push(ContentWarning {
-                            pointer: child_ptr.clone(),
-                            reason: format!("{k} {why}; it is exported as written — review it or use encrypted transfer"),
-                        });
+                        s.warnings
+                            .push(ContentWarning { pointer: child_ptr.clone(), reason: format!("{k} {why}; {FREE_TEXT_REMEDIATION}") });
                     }
                     continue;
                 }
@@ -180,6 +178,13 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
         _ => {}
     }
 }
+
+/// What a free-text credential warning advises. Free text is never
+/// extracted, so it stays readable in every bundle mode: encrypted transfer
+/// seals only the vault (secrets and extracted values), not the objects.
+const FREE_TEXT_REMEDIATION: &str = "it is exported as written and stays readable in share-safely and encrypted-transfer \
+     bundles alike (encrypted transfer seals only vault secrets and extracted fields) — remove it, or move it into a secret \
+     variable or a sensitive header/parameter; only a full backup encrypts it";
 
 /// Text [`sanitize`] writes in place of an extracted value: `{{placeholder}}`,
 /// or an empty string for a secret variable.
@@ -292,6 +297,8 @@ mod tests {
         let mut v = serde_json::json!({"requests": [{"spec": {"body": {"type": "json", "text": "{\"password\":\"abc123\"}"}}}]});
         let s = sanitize(&mut v);
         assert_eq!(s.warnings.len(), 1);
+        assert!(!s.warnings[0].reason.contains("use encrypted transfer"), "{}", s.warnings[0].reason);
+        assert!(s.warnings[0].reason.contains("encrypted-transfer"), "{}", s.warnings[0].reason);
         assert!(v.to_string().contains("abc123"));
     }
 }

@@ -1838,7 +1838,7 @@
       "stimulus": "Plant test secrets in URL/body/cookie/header/log/dataset",
       "expected_result": "Safe-share preview/redaction; documented arbitrary-content limits",
       "must_not_claim_or_do": "Guarantee detector knows every possible secret",
-      "remediation_or_recovery": "Review export or use encrypted transfer",
+      "remediation_or_recovery": "Review export; move credentials out of free text into secret variables or sensitive fields (encrypted transfer seals only the vault)",
       "status": "planned_not_executed"
     },
     {

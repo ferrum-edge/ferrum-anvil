@@ -577,7 +577,7 @@ fn write_prepared(
         for index in 0..archive.len() {
             let f = archive.by_index_raw(index)?;
             if f.size() / f.compressed_size().max(1) > limits.ratio {
-                stored.insert(f.name().to_string());
+                stored.insert(f.name()?.into_owned());
             }
         }
     }
@@ -751,7 +751,12 @@ fn export_end_record_error<R: Read + Seek>(
     error: BundleError,
 ) -> BundleError {
     let holder = (0..archive.len())
-        .filter_map(|index| archive.by_index_raw(index).ok().map(|f| (f.header_start(), f.name().to_string())))
+        .filter_map(|index| {
+            archive.by_index_raw(index).ok().and_then(|f| {
+                let start = f.header_start();
+                f.name().ok().map(|n| (start, n.into_owned()))
+            })
+        })
         .filter(|(start, _)| *start <= at as u64)
         .max_by_key(|(start, _)| *start);
     let Some(sha) = holder.as_ref().and_then(|(_, name)| name.strip_prefix("attachments/")) else { return error };
@@ -788,6 +793,15 @@ fn check_directory(bytes: &[u8], start: u64, indexed_count: usize, limits: ReadL
         }
         if !names.insert(name) {
             return Err(BundleError::Unsafe(String::from_utf8_lossy(name).into_owned(), "duplicate entry".into()));
+        }
+        // The file type from the central header's external attributes, read
+        // here rather than through zip's unix_mode(): zip 9 ignores the
+        // high 16 bits for DOS-system archives, which is exactly the
+        // spelling a Windows-written archive uses for a symlink.
+        let external = u32::from_le_bytes(header[38..42].try_into().map_err(|_| invalid())?);
+        let file_type = (external >> 16) & 0o170000;
+        if file_type != 0 && file_type != 0o100000 {
+            return Err(BundleError::Unsafe(String::from_utf8_lossy(name).into_owned(), "only regular files are allowed".into()));
         }
         offset = end;
     }
@@ -831,7 +845,7 @@ fn preflight<R: Read + Seek>(
     for index in 0..zr.len() {
         // Raw readers inspect local headers but never initialize an inflater.
         let f = zr.by_index_raw(index)?;
-        let name = f.name().to_string();
+        let name = f.name()?.into_owned();
         safe_name(&name)?;
         let file_type = f.unix_mode().unwrap_or(0) & 0o170000;
         if !f.is_file() || (file_type != 0 && file_type != 0o100000) {
@@ -889,6 +903,21 @@ fn read_entry<R: Read + Seek>(
         let request = probe.min(chunk.len() as u64) as usize;
         let n = match reader.read(&mut chunk[..request]) {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // zip 9's reader refuses bytes beyond the declared size itself
+            // (and reports corrupt entry data) as InvalidData, where zip 8
+            // let the probe above observe the extra byte. The entry is
+            // either lying about its size or corrupt: report it the way the
+            // probe did, as a budget refusal when the declared size already
+            // spends the available budget, and as invalid otherwise. The
+            // underlying reader is an in-memory cursor, so an io failure
+            // here comes from the zip layer, not the storage.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(if info.declared >= { available } {
+                    BundleError::Limits(format!("entry '{name}' expands beyond the remaining budget"))
+                } else {
+                    BundleError::Invalid(format!("entry '{name}' inflated size does not match its declared size"))
+                });
+            }
             result => result?,
         };
         let actual = (data.len() as u64).checked_add(n as u64).ok_or_else(|| BundleError::Limits("inflated size overflow".into()))?;
@@ -1135,7 +1164,7 @@ mod read_tests {
         for index in 0..archive.len() {
             let f = archive.by_index_raw(index).unwrap();
             let start = f.data_start().unwrap();
-            payloads.push((f.name().to_string(), start..start + f.compressed_size()));
+            payloads.push((f.name().unwrap().into_owned(), start..start + f.compressed_size()));
         }
         let counts = Rc::new(RefCell::new(BTreeMap::new()));
         let reader = TrackedReader { cursor: Cursor::new(bytes), payloads, counts: counts.clone() };
@@ -1166,7 +1195,7 @@ mod read_tests {
             let mut f = archive.by_index(index).unwrap();
             let mut data = Vec::new();
             f.read_to_end(&mut data).unwrap();
-            files.push((f.name().to_string(), data));
+            files.push((f.name().unwrap().into_owned(), data));
         }
         // Attachments precede metadata on disk: ordering must not depend on
         // the order the exporter happens to use.
@@ -1607,7 +1636,7 @@ mod read_tests {
                 let mut f = archive.by_index(index).unwrap();
                 let mut data = Vec::new();
                 f.read_to_end(&mut data).unwrap();
-                files.push((f.name().to_string(), data));
+                files.push((f.name().unwrap().into_owned(), data));
             }
             let limits = boundary_limits(&files);
             let (_, objects, vault) = prepare(&graph, &opts).unwrap();
@@ -1672,7 +1701,7 @@ mod read_tests {
                 let mut entry = archive.by_index(index).unwrap();
                 let mut data = Vec::new();
                 entry.read_to_end(&mut data).unwrap();
-                files.push((entry.name().to_string(), data));
+                files.push((entry.name().unwrap().into_owned(), data));
             }
             // Export and import count the same JSON values, the vault
             // plaintext included, so the exact node budget also round-trips.
