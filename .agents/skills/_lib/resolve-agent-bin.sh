@@ -34,7 +34,11 @@ agent_bin_absolute() {
   case "$candidate" in
     /*) printf '%s\n' "$candidate" ;;
     */*)
-      dir=$(cd -- "$(dirname -- "$candidate")" 2>/dev/null && pwd -P) || return 1
+      # Physical traversal (`-P`) so `link/../bin` resolves through the
+      # symlink the way the original PATH lookup did, and no inherited
+      # CDPATH: it both redirects relative lookups and echoes the result
+      # into the captured stdout.
+      dir=$(CDPATH= cd -P -- "$(dirname -- "$candidate")" 2>/dev/null && pwd -P) || return 1
       printf '%s/%s\n' "$dir" "$(basename -- "$candidate")"
       ;;
     *) return 1 ;;

@@ -72,6 +72,24 @@ class ResolveAgentBinTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(chosen))
 
+    def test_symlinked_parent_traversal_keeps_the_selected_executable(self) -> None:
+        # PATH=link/../bin selects actual/bin/faketool through the
+        # symlink; logical `cd` would cancel link/.. textually and pick
+        # the caller's own bin/faketool instead.
+        chosen = executable(self.root / "actual" / "bin" / "faketool")
+        executable(self.root / "bin" / "faketool")
+        (self.root / "actual" / "inner").mkdir(parents=True)
+        (self.root / "link").symlink_to(self.root / "actual" / "inner", target_is_directory=True)
+        result = resolve(self.root, "link/../bin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(chosen))
+
+    def test_inherited_cdpath_does_not_break_resolution(self) -> None:
+        chosen = executable(self.root / "bin" / "faketool")
+        result = resolve(self.root, "bin", {"CDPATH": "."})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(chosen))
+
     def test_relative_override_is_refused(self) -> None:
         result = resolve(self.root, "bin", {"FAKETOOL_BIN": "bin/faketool"})
         self.assertEqual(result.returncode, 127)
