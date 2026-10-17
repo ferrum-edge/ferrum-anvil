@@ -696,9 +696,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - A compromised, unlocked webview is outside the protection boundary for
   saved request and profile state.
 - The passphrase and keychain-conversion confirmations cannot show the new
-  passphrase the webview supplies, and the conversion still returns the new
-  recovery key to the webview: the dialog confirms that the change happens,
-  not which passphrase it sets.
+  passphrase the webview supplies: the dialog confirms that the change happens,
+  not which passphrase it sets. The conversion's replacement recovery key is
+  shown and acknowledged in the native dialog before commit and is not
+  returned to the webview (`profile_convert_to_passphrase` returns only
+  whether the old keychain entry was removed).
 - Memory of the running unlocked process can contain secrets; zeroization is
   best-effort.
 - Nothing outside the database records which schema it reached. Someone who

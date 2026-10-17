@@ -556,7 +556,11 @@ pub fn profile() -> Profile {
     Profile {
         name: "admission",
         about: "Process-wide admission: overload, retained-buffer capacity, connection ceiling (HTTP 18580; mesh egress 18589)",
-        scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
+        scenarios: || {
+            let mut v: Vec<(&'static str, &'static str)> = all().into_iter().map(|d| (d.id, d.title)).collect();
+            v.extend(SKIPPED.iter().map(|(id, t, _)| (*id, *t)));
+            v
+        },
         run: |args| Box::pin(run(args)) as BoxFut<_>,
         up: || Box::pin(up()) as BoxFut<_>,
     }

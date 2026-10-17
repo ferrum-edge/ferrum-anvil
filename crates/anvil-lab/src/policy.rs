@@ -1025,7 +1025,11 @@ pub fn profile() -> Profile {
     Profile {
         name: "policy",
         about: "WAF/bot, OPA, IP, validators, rate/AI limits, concurrency, breaker, header ownership (HTTP 18280)",
-        scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
+        scenarios: || {
+            let mut v: Vec<(&'static str, &'static str)> = all().into_iter().map(|d| (d.id, d.title)).collect();
+            v.extend(SKIPPED.iter().map(|(id, t, _)| (*id, *t)));
+            v
+        },
         run: |args| Box::pin(run(args)) as BoxFut<_>,
         up: || Box::pin(up()) as BoxFut<_>,
     }

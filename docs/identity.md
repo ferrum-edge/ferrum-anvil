@@ -301,8 +301,9 @@ anvil_identity::find_provider(id)?.authenticate(opener, observer, &FlowOptions, 
 ProfileManager::unlock_requirements(dir) -> Result<UnlockRequirements>
 ProfileManager::unlock(dir, Unlock) -> Result<(ProfileHeader, Key)>          // enforces the policy
 ProfileManager::unlock_with_fresh_login(dir, Unlock, VerifiedIdentity) -> Result<(ProfileHeader, Key)>
-ProfileManager::link_identity(dir, Unlock, VerifiedIdentity, require_fresh_login: bool) -> Result<LinkedIdentity>
-ProfileManager::unlink_identity(dir, Unlock, Option<VerifiedIdentity>) -> Result<()>
+ProfileManager::link_identity(dir, Unlock, VerifiedIdentity, require_fresh_login: bool, PolicyRotation) -> Result<LinkedIdentity>
+ProfileManager::unlink_identity(dir, Unlock, Option<VerifiedIdentity>, PolicyRotation) -> Result<()>
+// Both rotate the data key under the new policy (see storage-and-recovery.md).
 ProfileManager::linked_identity(dir, &Key) -> Result<Option<LinkedIdentity>>
 ```
 

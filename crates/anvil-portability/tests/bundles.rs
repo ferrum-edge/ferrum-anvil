@@ -1541,3 +1541,51 @@ fn g01_bundles_never_import_a_gateway_lookup() {
     // A graph without a lookup imports without a warning about one.
     assert!(validate::clear_gateway_lookups(&mut sample()).is_empty());
 }
+
+#[test]
+fn folder_cycle_check_is_linear_and_still_finds_cycles() {
+    use anvil_portability::validate::validate_and_normalize;
+    // A long parent chain, listed deepest first, validates in one pass. The
+    // previous check walked every folder's whole ancestry (n²/2 steps).
+    let mut g = sample();
+    let template = g.folders[0].clone();
+    let n = 100_000;
+    let ids: Vec<Id> = (0..n).map(|_| Id::new()).collect();
+    let chain: Vec<Folder> = (0..n)
+        .rev()
+        .map(|i| {
+            let mut f = template.clone();
+            f.meta = Meta { id: ids[i], ..template.meta.clone() };
+            f.parent_id = (i > 0).then(|| ids[i - 1]);
+            f.name = format!("f{i}");
+            f
+        })
+        .collect();
+    g.folders.extend(chain);
+    let started = std::time::Instant::now();
+    validate_and_normalize(&mut g).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
+
+    let cycle = |edit: &dyn Fn(&mut Vec<Folder>)| {
+        let mut g = sample();
+        edit(&mut g.folders);
+        match validate_and_normalize(&mut g) {
+            Err(BundleError::Invalid(m)) => assert!(m.contains("parent cycle"), "{m}"),
+            other => panic!("expected a parent cycle, got {other:?}"),
+        }
+    };
+    // A folder that is its own parent.
+    cycle(&|f| f[0].parent_id = Some(f[0].meta.id));
+    // Two folders that are each other's parent.
+    cycle(&|f| f[0].parent_id = Some(f[1].meta.id));
+    // A folder whose ancestry leads into a cycle it is not part of.
+    cycle(&|f| {
+        let (a, b) = (f[0].meta.id, f[1].meta.id);
+        let mut c = f[1].clone();
+        c.meta = Meta { id: Id::new(), ..c.meta.clone() };
+        c.parent_id = Some(b);
+        f[0].parent_id = Some(b);
+        f[1].parent_id = Some(a);
+        f.insert(0, c);
+    });
+}

@@ -83,6 +83,9 @@
   completion. Before, the cancel/lock observer stopped with the schedule, so a
   chain could send its next request after the lock and the report said
   `completed`.
+- Bundle import preview checks folder parent links for cycles in one pass over
+  the folders. It used to walk each folder's whole ancestry, so a long folder
+  chain cost quadratic time on the import worker before the preview appeared.
 
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
@@ -147,6 +150,11 @@
   committed database) and is repeated at the next unlock. Pre-rotation
   checkpoints are no longer kept in the profile; keep a portable backup first.
 
+- Attaching the same file again after a data-key rotation no longer leaves the
+  file's pre-rotation blob pinned with nothing able to release it. The new
+  blob replaces it in the attachment index, and the old one is released in the
+  same transaction.
+
 - An OS-keychain profile can now rotate its data key and stay keychain-protected:
   `anvil profile rotate-key --confirm-rotation` without `--new-passphrase-stdin`,
   `App::rotate_keychain_data_key` and `PolicyRotation::Keychain` (identity link,
@@ -154,6 +162,12 @@
   commit and retire the old entry after it. Previously every rotation converted the
   profile to passphrase protection. `PolicyRotation` is now an enum and retired
   credentials are recorded as `RotationPolicy::retired_keychain`.
+
+- `app.mcp_tool_error` no longer says the call reached the tool or assigns
+  it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
+  `isError: true` result when the gateway fails or refuses the call it makes for
+  the tool. The error result stays confirmed, scope and owner are unknown, and
+  the finding lists both explanations.
 
 - A transient storage error no longer locks an unlocked profile. The per-operation
   key check drops the key only on evidence against it (a canary or catalogue that
@@ -168,6 +182,13 @@
   carries the acquired token did not forward vault-variable bindings, so such a
   request failed with an unresolved variable. `SecretResolver` methods no longer
   have default implementations, so a wrapping resolver must forward each one.
+
+- The lab refuses `--scenario` selectors that name no scenario of the selected
+  profile (or of any profile for `run all`) before starting fixtures, instead
+  of reporting an empty run as a success. Explicitly skipped scenarios stay
+  selectable, and the `policy` and `admission` listings now include them. The
+  MCP lab's "did not forward" ground truth now requires zero upstream calls, so
+  a refused call forwarded twice fails.
 
 - The GW-020-BUDGET lab scenario waits up to three seconds for the gateway's
   budget-rejection log entry, and reports a clear timeout if it never appears
