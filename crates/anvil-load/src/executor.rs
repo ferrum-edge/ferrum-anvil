@@ -297,6 +297,27 @@ struct Shard {
 
 // ------------------------------------------------------------------ shared
 
+/// Record a user cancel or vault lock as the stop reason unless another stop
+/// (an abort rule, or the other signal) came first; it replaces
+/// [`StopReason::ScheduleEnd`].
+fn record_external(reason: &Mutex<Option<StopReason>>, r: StopReason) {
+    let mut g = reason.lock();
+    if matches!(*g, None | Some(StopReason::ScheduleEnd)) {
+        *g = Some(r);
+    }
+}
+
+/// After the cancel/lock observer has stopped: record a signal it may not
+/// have processed yet (it raced the end of the drain), so the report never
+/// says the run completed when it was canceled or the vault locked.
+fn reconcile_external(reason: &Mutex<Option<StopReason>>, cancel: &CancellationToken, lock: &CancellationToken) {
+    if lock.is_cancelled() {
+        record_external(reason, StopReason::Lock);
+    } else if cancel.is_cancelled() {
+        record_external(reason, StopReason::UserCancel);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum StopReason {
     ScheduleEnd,
@@ -332,6 +353,11 @@ struct Shared {
     halt: CancellationToken,
     /// Cancel in-flight sends.
     hard: CancellationToken,
+    /// The caller's user-cancel and vault-lock tokens, read directly before
+    /// each further chain step so a signal the observer task has not
+    /// processed yet still stops the chain.
+    cancel: CancellationToken,
+    lock: CancellationToken,
     reason: Mutex<Option<StopReason>>,
     timeline_truncated: AtomicBool,
 }
@@ -399,6 +425,23 @@ fn slot_engine(tokens: Arc<anvil_auth::oauth::TokenCache>, idle_total: usize) ->
 }
 
 impl Shared {
+    /// No further chain steps: halted, or the user canceled or the vault
+    /// locked (whether or not the observer has recorded it yet).
+    fn chains_halted(&self) -> bool {
+        self.halt.is_cancelled() || self.external_stop()
+    }
+
+    /// The user canceled or the vault locked, read from the caller's tokens.
+    fn external_stop(&self) -> bool {
+        self.cancel.is_cancelled() || self.lock.is_cancelled()
+    }
+
+    /// No new iterations: scheduling stopped, or a cancel or lock the
+    /// observer has not turned into `stop` yet.
+    fn admission_stopped(&self) -> bool {
+        self.stop.is_cancelled() || self.external_stop()
+    }
+
     fn engine(&self, slot: usize) -> Arc<Engine> {
         self.engines[slot].get_or_init(|| Arc::new(slot_engine(self.tokens.clone(), self.slot_idle))).clone()
     }
@@ -429,6 +472,14 @@ impl Shared {
         if g.is_none() {
             *g = Some(r);
         }
+    }
+
+    /// A user cancel or vault lock: recorded unless another stop (an abort
+    /// rule, or the other signal) came first. One that arrives after the
+    /// schedule ended, while in-flight iterations drain, replaces
+    /// [`StopReason::ScheduleEnd`]: the run did not complete as scheduled.
+    fn set_external_reason(&self, r: StopReason) {
+        record_external(&self.reason, r);
     }
 
     fn begin_iteration(&self, measured: bool) {
@@ -705,7 +756,9 @@ async fn run_iteration(sh: &Arc<Shared>, slot: usize, measured: bool) {
     let mut extracted: Vec<(Option<Id>, VarEntry)> = Vec::new();
     let (mut terminal, mut app, mut assertion) = (Terminal::Completed, false, false);
     for (pos, &si) in steps.iter().enumerate() {
-        if pos > 0 && sh.halt.is_cancelled() {
+        // Checked before the first step too: an iteration admitted just
+        // before a cancel or lock (its task not yet run) sends nothing.
+        if sh.chains_halted() {
             terminal = Terminal::Canceled;
             break;
         }
@@ -763,7 +816,7 @@ async fn drive_closed(sh: Arc<Shared>, stages: Vec<Stage>, think: Duration, tota
         set.spawn(async move {
             loop {
                 let now = Instant::now();
-                if sh.stop.is_cancelled() || now >= end {
+                if sh.admission_stopped() || now >= end {
                     break;
                 }
                 let t = now.duration_since(sh.t0).as_secs_f64();
@@ -810,6 +863,9 @@ async fn drive_open(sh: Arc<Shared>, stages: Vec<Stage>, max_in_flight: usize, t
             _ = tokio::time::sleep_until(at.into()) => {}
         }
         while set.try_join_next().is_some() {}
+        if sh.admission_stopped() {
+            break;
+        }
         let measured = sh.measured_at(at);
         let slot = free.lock().pop();
         match slot {
@@ -841,7 +897,7 @@ async fn drive_iterations(sh: Arc<Shared>, iterations: u64, lanes: usize) -> (In
     for lane in 0..lanes {
         let (sh, claimed) = (sh.clone(), claimed.clone());
         set.spawn(async move {
-            while !sh.stop.is_cancelled() && claimed.fetch_add(1, Ordering::Relaxed) < iterations {
+            while !sh.admission_stopped() && claimed.fetch_add(1, Ordering::Relaxed) < iterations {
                 let measured = sh.measured_at(Instant::now());
                 sh.begin_iteration(measured);
                 run_iteration(&sh, lane, measured).await;
@@ -877,8 +933,28 @@ async fn join_all_within(set: &mut JoinSet<()>, d: Duration) -> bool {
 /// and wait [`HARD_CANCEL_GRACE`]; tasks still running after that are
 /// aborted (their work is reported as in flight at end). Returns the number
 /// of aborted tasks.
-async fn drain(sh: &Shared, set: &mut JoinSet<()>, first_wait: Duration) -> usize {
-    if join_all_within(set, first_wait).await {
+///
+/// When chains are halted during the first wait (a user cancel or vault
+/// lock after the schedule ended), the first wait ends no later than
+/// `halt_wait` after that.
+async fn drain(sh: &Shared, set: &mut JoinSet<()>, first_wait: Duration, halt_wait: Duration) -> usize {
+    let mut deadline = tokio::time::Instant::now() + first_wait;
+    // Not read from `halt`: a halt that came after `first_wait` was chosen
+    // (but before this wait started) must shorten it too. When the halt
+    // already chose `first_wait` (a cancel, lock or abort before the
+    // schedule ended), the clamp changes nothing.
+    let mut halted = false;
+    let all_done = loop {
+        tokio::select! {
+            r = set.join_next() => if r.is_none() { break true },
+            _ = tokio::time::sleep_until(deadline) => break false,
+            _ = sh.halt.cancelled(), if !halted => {
+                halted = true;
+                deadline = deadline.min(tokio::time::Instant::now() + halt_wait);
+            }
+        }
+    };
+    if all_done {
         return 0;
     }
     sh.halt.cancel();
@@ -1118,28 +1194,32 @@ impl LoadRun {
             stop: CancellationToken::new(),
             halt: CancellationToken::new(),
             hard: CancellationToken::new(),
+            cancel: cancel.clone(),
+            lock: lock.clone(),
             reason: Mutex::new(None),
             timeline_truncated: AtomicBool::new(false),
             plan: plan.clone(),
         });
         drop(proto);
 
-        // User cancel → stop scheduling and stop chains.
+        // User cancel or vault lock → stop scheduling and stop chains. The
+        // link lives until in-flight work has drained, not only until the
+        // schedule ends: a cancel or lock during the graceful drain still
+        // halts chains before their next step.
         let link = {
             let (c, sh, lock) = (cancel.clone(), sh.clone(), lock.clone());
             tokio::spawn(async move {
                 tokio::select! {
                     _ = c.cancelled() => {
-                        sh.set_reason(StopReason::UserCancel);
+                        sh.set_external_reason(StopReason::UserCancel);
                         sh.halt.cancel();
                         sh.stop.cancel();
                     }
                     _ = lock.cancelled() => {
-                        sh.set_reason(StopReason::Lock);
+                        sh.set_external_reason(StopReason::Lock);
                         sh.halt.cancel();
                         sh.stop.cancel();
                     }
-                    _ = sh.stop.cancelled() => {}
                 }
             })
         };
@@ -1217,9 +1297,14 @@ impl LoadRun {
             _ => Duration::from_millis(opts.cancel_drain_ms),
         };
         let pre_hard = sh.hard.is_cancelled();
-        let aborted_tasks = drain(&sh, &mut set, first_wait).await;
+        let aborted_tasks = drain(&sh, &mut set, first_wait, Duration::from_millis(opts.cancel_drain_ms)).await;
         let hard_canceled = !pre_hard && sh.hard.is_cancelled();
         link.abort();
+        let _ = link.await;
+        reconcile_external(&sh.reason, &cancel, &lock);
+        // The final reason: a cancel or lock during the drain replaces the
+        // schedule end read above.
+        let reason = sh.reason.lock().clone().unwrap_or(StopReason::ScheduleEnd);
         done.cancel();
         let (mut timeline, sampler) = ticker.await.unwrap_or_else(|_| (Vec::new(), HealthSampler::new()));
         sh.flush(&mut timeline, sh.bucket_of(Instant::now()) + 1);
@@ -1281,6 +1366,30 @@ impl LoadRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cancel or lock the observer did not process before it was stopped
+    /// is still the run's stop reason; an earlier abort or external reason
+    /// is kept.
+    #[test]
+    fn signals_the_observer_missed_are_reconciled_into_the_stop_reason() {
+        let (cancel, lock) = (CancellationToken::new(), CancellationToken::new());
+        let reason = Mutex::new(Some(StopReason::ScheduleEnd));
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::ScheduleEnd), "no signal: the schedule end stands");
+        lock.cancel();
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::Lock));
+        let reason = Mutex::new(None);
+        cancel.cancel();
+        reconcile_external(&reason, &cancel, &CancellationToken::new());
+        assert_eq!(*reason.lock(), Some(StopReason::UserCancel));
+        let reason = Mutex::new(Some(StopReason::Abort("rule".into())));
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::Abort("rule".into())), "an abort recorded first is kept");
+        let reason = Mutex::new(Some(StopReason::UserCancel));
+        reconcile_external(&reason, &cancel, &lock);
+        assert_eq!(*reason.lock(), Some(StopReason::UserCancel), "the first external signal is kept");
+    }
 
     /// A begin's timeline bucket is sampled while the ledger is held, so a
     /// begin that waited for the ledger across a bucket boundary counts in

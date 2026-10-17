@@ -83,6 +83,12 @@
 
 ### Fixed
 
+- A user cancel or vault lock that arrives after a load schedule has ended,
+  while in-flight iterations drain, now stops their chains before the next
+  step, shortens the drain to `cancel_drain_ms`, and is reported as the run's
+  completion. Before, the cancel/lock observer stopped with the schedule, so a
+  chain could send its next request after the lock and the report said
+  `completed`.
 - Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
   embedded in string fields and apply the credential policy more evenly:
   - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed
