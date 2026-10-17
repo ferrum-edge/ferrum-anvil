@@ -929,6 +929,49 @@ describe("LoadView save", () => {
   });
 });
 
+describe("LoadView overlapping reloads", () => {
+  it("ignores an earlier reload that answers after a later save's reload", async () => {
+    const gate = deferred<void>();
+    let hold: Promise<void> | null = null;
+    backend({
+      load_plan_save: (a) => saveInto(a),
+      load_plans: async (a) => {
+        // The snapshot is taken when the read starts, as the backend does.
+        const snapshot = plans[a.workspaceId as string] ?? [];
+        const wait = hold;
+        hold = null;
+        if (wait) await wait;
+        return snapshot;
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    const listed = calls("load_plans").length;
+
+    // Save v1; its list reload starts with the v1 snapshot and is held.
+    fireEvent.change(planName(), { target: { value: "v1" } });
+    hold = gate.promise;
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plans")).toHaveLength(listed + 1));
+    expect(hold).toBeNull();
+
+    // Save v2 while that reload is still on its way; its reload answers first.
+    fireEvent.change(planName(), { target: { value: "v2" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    expect(within(sidebar()).getByText("v2")).toBeTruthy();
+
+    // The held v1 reload answers last: the list keeps v2, and reselecting
+    // the plan shows v2, not the restored v1.
+    await act(async () => gate.resolve());
+    await act(async () => {});
+    expect(within(sidebar()).getByText("v2")).toBeTruthy();
+    expect(within(sidebar()).queryByText("v1")).toBeNull();
+    expect(planName().value).toBe("v2");
+  });
+});
+
 describe("LoadView save while the plan is reselected", () => {
   it("keeps an edit made in a new editor after selecting away and back during the save", async () => {
     const first = deferred<void>();

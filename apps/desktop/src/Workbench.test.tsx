@@ -1737,4 +1737,55 @@ describe("environments dialog", () => {
     await waitFor(() => expect(calls("workspace_save")).toHaveLength(3));
     expect((calls("workspace_save")[2].workspace as Workspace).variables).toEqual(vars("v2"));
   });
+
+  it("reopens with the saved variables after the held stale workspace read lands", async () => {
+    const vars = (v: string) => [{ name: "base", value: { kind: "template" as const, value: v }, enabled: true }];
+    let stored = { ...workspace("A", "One"), variables: vars("v0") } as Workspace;
+    const gate = deferred<void>();
+    let hold: Promise<void> | null = null;
+    let saves = 0;
+    backend({
+      workspaces_list: async () => {
+        const snapshot = stored;
+        const wait = hold;
+        hold = null;
+        if (wait) await wait;
+        return [snapshot, workspace("B", "Two")];
+      },
+      workspace_save: async (a) => {
+        saves++;
+        stored = { ...(a.workspace as Workspace), updated_at: `2026-01-0${saves + 1}T00:00:00Z` };
+        if (saves === 1) hold = gate.promise;
+        return stored;
+      },
+    });
+    await boot();
+    const openDialog = async () => {
+      fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "__manage" } });
+      const dialog = await screen.findByRole("dialog", { name: "Environments and variables" });
+      return { dialog, value: () => within(dialog).getByLabelText("Value") as HTMLInputElement };
+    };
+    let { dialog, value } = await openDialog();
+    await waitFor(() => expect(value().value).toBe("v0"));
+    fireEvent.change(value(), { target: { value: "v1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(1));
+    // The workbench's workspace read after that save holds the v1 copy.
+    await waitFor(() => expect(hold).toBeNull());
+    fireEvent.change(value(), { target: { value: "v2" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(2));
+    await act(async () => {});
+    expect(value().value).toBe("v2");
+    // The held v1 workspace read lands now; then the dialog closes, so its
+    // local saved copy is gone. Reopening must seed from v2, not v1.
+    await act(async () => gate.resolve());
+    await act(async () => {});
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    ({ dialog, value } = await openDialog());
+    await waitFor(() => expect(value().value).toBe("v2"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("workspace_save")).toHaveLength(3));
+    expect((calls("workspace_save")[2].workspace as Workspace).variables).toEqual(vars("v2"));
+  });
 });

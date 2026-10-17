@@ -213,11 +213,16 @@ export function LoadView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
-  /** The workspace's reports, or null when the workspace changed meanwhile. */
+  // Only the latest reload may apply its lists: reloads overlap (a save's
+  // reload is still running when the next save starts its own), and an
+  // earlier one that answers late holds older plans than a later one.
+  const reloadSeq = useRef(0);
+  /** The workspace's reports, or null when superseded or the workspace changed. */
   const reload = async () => {
     const w = props.workspaceId;
+    const seq = ++reloadSeq.current;
     const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
-    if (w !== wsRef.current) return null;
+    if (w !== wsRef.current || seq !== reloadSeq.current) return null;
     setPlans(p);
     setReports(r);
     setDatasets(d);

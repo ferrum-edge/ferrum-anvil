@@ -59,7 +59,7 @@ function newer(a: { updated_at: string }, b: { updated_at: string }): boolean {
   return Date.parse(a.updated_at) >= Date.parse(b.updated_at);
 }
 
-export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () => void; onChanged: () => void }) {
+export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () => void; onChanged: (saved?: Workspace) => void }) {
   // The workspace as last saved here, until the parent's reload brings a
   // newer copy. A copy older than one this dialog saved (a reload that
   // answers late) is not taken.
@@ -99,8 +99,10 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
     setErr(null);
     const [sentSel, sent] = [sel, edits[sel]];
     try {
+      let saved: Workspace | undefined;
       if (sentSel === "__base") {
-        setWorkspace(await api.saveWorkspace({ ...workspace, variables: draft }));
+        saved = await api.saveWorkspace({ ...workspace, variables: draft });
+        setWorkspace(saved);
       } else {
         const env = await api.saveEnvironment({ ...selEnv!, name, variables: draft });
         reads.current++; // a list read already on its way predates this save
@@ -109,7 +111,10 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
       // Saved: the set shows its stored values again, unless edited since.
       if (sent) dropEdit(sentSel, sent);
       await load();
-      props.onChanged();
+      // Hand the parent the saved workspace itself, not only a reload: the
+      // dialog's local copy dies with it, and a reopened dialog must seed
+      // from the saved values even before the parent's refresh lands.
+      props.onChanged(saved);
     } catch (e) {
       setErr(String((e as Error).message));
     }
