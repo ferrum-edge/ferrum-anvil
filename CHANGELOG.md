@@ -136,6 +136,14 @@
     applies one total deadline across DNS, handshake and exchange (and MASQUE
     and HBONE DTLS no longer restart it after the handshake).
 
+- Desktop: an API standards check that left anything unchecked (`incomplete`,
+  skipped operations, `$ref`s not followed, examples not checked) without
+  errors shows "not completely checked" instead of "meets the standards", and
+  no longer says the description meets every rule.
+- Desktop: **Start load** starts one run per confirmation, even on a double
+  click. Every accepted run keeps its own Stop control until it finishes, and a
+  run that finishes before its start reply arrives is not shown as live.
+
 - Key rotation removes the old key's material it kept outside the database once
   the rotation commits: `profile.json` no longer holds passphrase and recovery
   wraps of the old key, checkpoints sealed with an earlier key and interrupted
