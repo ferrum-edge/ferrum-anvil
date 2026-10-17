@@ -275,8 +275,12 @@ catalog body:
 
 Independently of any gateway, a JSON-RPC error in a 2xx body is an
 application failure (`app.jsonrpc_error`, with the code's JSON-RPC 2.0
-meaning), and an MCP tool result with `isError: true` is the tool's own
-failure (`app.mcp_tool_error`, scope upstream application).
+meaning), and an MCP tool result with `isError: true` is an application
+failure (`app.mcp_tool_error`). The error result is confirmed; its origin is
+not (scope and owner unknown). The tool may have reported its own failure, or a
+gateway that makes the call for the tool (a Ferrum mcp_gateway OpenAPI bridge,
+`plugin.mcp_gateway.openapi_bridge_error_result`) may have failed or refused
+it. A "(gateway error: …)" class in the result text is content, not proof.
 
 ### Confidence ceilings (why most gateway findings say "likely")
 

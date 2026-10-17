@@ -118,6 +118,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Run { profile, scenario, untrusted_pass } => {
             let selected = if profile == "all" { profiles::all() } else { vec![profiles::find(&profile)?] };
+            let unknown = profiles::unknown_selectors(&selected, &scenario);
+            if !unknown.is_empty() {
+                anyhow::bail!(
+                    "unknown scenario(s) for profile {profile}: {} (see `anvil-lab list {}`)",
+                    unknown.join(", "),
+                    if profile == "all" { "<profile>" } else { profile.as_str() }
+                );
+            }
             let (mut passed, mut failed, mut skipped) = (0, 0, 0);
             for p in selected {
                 let results = (p.run)(profiles::RunArgs { only: scenario.clone(), untrusted_pass }).await?;

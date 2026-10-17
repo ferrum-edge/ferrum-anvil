@@ -28,7 +28,7 @@ cargo run -p anvil-lab -- verify                          # print the verified b
 cargo run -p anvil-lab -- list                            # profiles and scenario counts
 cargo run -p anvil-lab -- list <profile>                  # scenario ids of one profile
 cargo run -p anvil-lab -- run <profile> --untrusted-pass  # or `run all`
-cargo run -p anvil-lab -- run <profile> --scenario <ID>   # repeatable
+cargo run -p anvil-lab -- run <profile> --scenario <ID>   # repeatable; an unknown ID is refused
 cargo run -p anvil-lab -- up <profile>                    # keep fixtures + gateway up until Ctrl-C
 cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 ```

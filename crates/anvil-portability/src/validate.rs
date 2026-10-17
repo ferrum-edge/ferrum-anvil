@@ -69,16 +69,28 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
             return Err(BundleError::Invalid(format!("folder '{}' has a parent that is not in the bundle or its workspace", f.name)));
         }
     }
-    // Cycle detection over parent links.
+    // Cycle detection over parent links, linear in the number of folders: a
+    // folder already known to reach a root is never walked again, so a long
+    // chain costs one pass instead of one walk of its ancestry per folder.
     let parent: HashMap<Id, Option<Id>> = g.folders.iter().map(|f| (f.meta.id, f.parent_id)).collect();
+    // `false`: on the walk in progress; `true`: known to reach a root.
+    let mut reaches_root: HashMap<Id, bool> = HashMap::with_capacity(parent.len());
+    let mut path: Vec<Id> = Vec::new();
     for f in &g.folders {
-        let mut seen = HashSet::new();
+        path.clear();
         let mut cur = Some(f.meta.id);
         while let Some(c) = cur {
-            if !seen.insert(c) {
-                return Err(BundleError::Invalid(format!("folder '{}' is part of a parent cycle", f.name)));
+            match reaches_root.get(&c) {
+                Some(true) => break,
+                Some(false) => return Err(BundleError::Invalid(format!("folder '{}' is part of a parent cycle", f.name))),
+                None => {}
             }
+            reaches_root.insert(c, false);
+            path.push(c);
             cur = parent.get(&c).copied().flatten();
+        }
+        for c in &path {
+            reaches_root.insert(*c, true);
         }
     }
     for r in &g.requests {

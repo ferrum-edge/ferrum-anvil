@@ -138,6 +138,7 @@ the earlier fetch's.
   (`anvil_fixtures::workload_api`, SPIRE-style `spiffe://` bundle keys) and Ferrum Edge's server exercise here.
 - Ferrum Edge's Workload API is dev/test-only (internal CA bootstrap), so the lab cannot show a production-mode
   posture; production deployments use a SPIRE agent's socket.
-- Federated trust domains, `ValidateJWTSVID` (Ferrum returns its claims as JSON bytes, not the SPIFFE
-  `Struct`: ferrum-edge/ferrum-edge#5764) and Windows named pipes are not driven live (see the SPIFFE item
-  in [protocols.md §5](../protocols.md)).
+- Federated trust domains, `ValidateJWTSVID` and Windows named pipes are not driven live (see the SPIFFE
+  item in [protocols.md §5](../protocols.md)). `ValidateJWTSVID` claims are JSON bytes on v0.9.5 and v0.9.7
+  (ferrum-edge/ferrum-edge#5764) and a `google.protobuf.Struct` from v0.9.8 (#5780), a field Anvil does
+  not read.

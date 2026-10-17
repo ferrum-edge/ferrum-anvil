@@ -15,10 +15,13 @@ PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners 
 PROXY v2 `DGRAM` envelope on every datagram. There are no gateway mocks.
 
 Two more scenarios (PP-HTTP-001/002) send an **HTTP-family request with a PROXY header** to
-the gateway's ordinary HTTP and HTTPS listeners. Ferrum Edge HTTP listeners never read a PROXY
-header (`stream_proxy_protocol` is rejected for HTTP-family proxies in `src/config/types.rs`, and
-`src/proxy/gateway_listener.rs` has no PROXY parsing). These scenarios show what a listener that
-does not expect the header does, and that Anvil reports only the public outcome.
+the gateway's ordinary HTTP and HTTPS listeners, which this profile runs without PROXY support.
+`stream_proxy_protocol` is rejected for HTTP-family proxies (`src/config/types.rs`). Before v0.9.9 the
+HTTP listeners never read a PROXY header. From v0.9.9 they can, but only with the frontend opt-in
+(`FERRUM_FRONTEND_PROXY_PROTOCOL_HTTP` / `_HTTPS`, off by default; catalog outcome
+`frontend_parse.proxy_protocol_header_rejected`), which `lab/gateway/proxyproto.yaml` leaves off. These
+scenarios show what a listener that does not expect the header does, and that Anvil reports only
+the public outcome.
 
 What Anvil sends is described in [protocols.md §3.10](../protocols.md). The gateway behaviour
 under test is Ferrum Edge `docs/tcp_udp_proxy.md` ("Inbound PROXY Protocol", "Datagram
