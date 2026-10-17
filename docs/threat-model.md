@@ -139,6 +139,22 @@ against it).
     secret value as well, so a server that echoes a credential it received
     into a cookie name, a cookie attribute or an authorization scheme does
     not get it into records, history or exports.
+  - Header and trailer names, and the `Content-Type`, `Content-Encoding` and
+    decoding detail the record keeps beside the body, are scrubbed of every
+    known secret value too: a server can reflect a credential into any
+    response metadata, not only header values. Header names and content
+    codings are compared in any letter case (protocols lowercase them), and
+    so are the warnings, assertion messages, findings and summary that can
+    quote them. A well-known media type (`application/json`,
+    `text/event-stream`, …) keeps its essence even when a secret is part of
+    that constant, because callers act on it; its parameters are scrubbed,
+    and a secret that crosses from the type into its parameters is replaced
+    over the whole value. A `Content-Encoding` listing only codings the
+    engine decodes (`gzip`, `br`, …) is kept so history can decode the body. The
+    request's own header names and `Content-Type` are scrubbed in the record
+    and the effective-request preview. The reason phrase (which the HTTP
+    adapters derive from the status code) is scrubbed wherever the record
+    keeps it.
   - Every credential an auth profile sends is a known secret, including a
     WS-Security SAML assertion (as stored and as embedded, trimmed), a
     PasswordText password in the XML-escaped form it is sent in, and a

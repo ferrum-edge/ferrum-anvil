@@ -72,6 +72,64 @@ fn refusal_body(r: &Redactor, captured: &str) -> (String, bool) {
     (anvil_transport::session::redact_then_cut(&|s: &str| r.text(s), captured, cut), cut < captured.len())
 }
 
+/// Media types whose exact essence callers act on (event-stream parsing for
+/// MCP, gRPC detection, body rendering). A secret that happens to be part of
+/// such a constant reveals nothing, so the essence is kept; parameters, and
+/// any other essence, are scrubbed.
+const KEPT_ESSENCES: &[&str] = &[
+    "application/json",
+    "application/problem+json",
+    "application/graphql-response+json",
+    "application/xml",
+    "application/soap+xml",
+    "application/x-www-form-urlencoded",
+    "application/octet-stream",
+    "application/grpc",
+    "application/grpc+proto",
+    "application/grpc-web",
+    "application/grpc-web+proto",
+    "application/grpc-web-text",
+    "application/grpc-web-text+proto",
+    "multipart/form-data",
+    "text/event-stream",
+    "text/html",
+    "text/plain",
+    "text/xml",
+];
+
+/// A response `Content-Type` scrubbed of known secrets in any letter case,
+/// keeping a well-known essence ([`KEPT_ESSENCES`]) as it is. Secrets are
+/// found in the whole value first: one that crosses from the essence into
+/// the parameters is replaced over the whole value.
+fn scrub_media_type(redactor: &Redactor, ct: &str) -> String {
+    let matches = redactor.any_case_matches(ct);
+    if matches.is_empty() {
+        return ct.to_string();
+    }
+    let Some((essence, params)) = ct.split_once(';') else {
+        let kept = KEPT_ESSENCES.iter().any(|k| ct.trim().eq_ignore_ascii_case(k));
+        return if kept { ct.to_string() } else { redactor.text_any_case(ct) };
+    };
+    if matches.iter().any(|m| m.start <= essence.len() && m.end > essence.len()) {
+        return redactor.text_any_case(ct);
+    }
+    let kept = KEPT_ESSENCES.iter().any(|k| essence.trim().eq_ignore_ascii_case(k));
+    let essence = if kept { essence.to_string() } else { redactor.text_any_case(essence) };
+    format!("{essence};{}", redactor.text_any_case(params))
+}
+
+/// Content codings the engine decodes: a recorded `Content-Encoding` made
+/// only of these is a list of constants, kept so history can still decode
+/// the body (a secret that happens to equal one reveals nothing).
+const KEPT_CODINGS: &[&str] = &["gzip", "x-gzip", "deflate", "br", "zstd", "identity"];
+
+/// A recorded `Content-Encoding` scrubbed of known secrets in any letter
+/// case, unless it lists only codings in [`KEPT_CODINGS`].
+fn scrub_content_coding(redactor: &Redactor, ce: &str) -> String {
+    let constant = ce.split(',').map(str::trim).all(|c| KEPT_CODINGS.iter().any(|k| c.eq_ignore_ascii_case(k)));
+    if constant { ce.to_string() } else { redactor.text_any_case(ce) }
+}
+
 fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     for a in attempts {
         a.url = r.url(&a.url);
@@ -90,6 +148,7 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
             // A CONNECT-UDP request carries the request's auth headers.
             for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
                 h.value = r.header(&h.name, &h.value);
+                h.name = r.text_any_case(&h.name);
             }
         }
     }
@@ -192,6 +251,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         }
         _ => BodyDecoding::default(),
     };
+    // The decoder quotes the response's content coding, lowercased: scrubbed
+    // in any case before assertions, warnings or the record can repeat it.
+    let decoding_detail = decoding_detail.map(|d| redactor.text_any_case(&d));
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
     let viewed: Option<Bytes> = a.body_view.and_then(|view| view(response.as_ref(), body_for_eval));
     let body_for_eval: &[u8] = viewed.as_deref().unwrap_or(body_for_eval);
@@ -211,7 +273,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.body.decoded_bytes = decoded.as_ref().map(|d| d.len() as u64);
         r.body.decoding = decoding_status;
-        r.body.decoding_detail = decoding_detail.as_deref().map(|d| redactor.text(d));
+        r.body.decoding_detail = decoding_detail.clone();
     }
 
     let protocol_status = a.protocol_status_override.clone().unwrap_or_else(|| protocol_status_http(response.as_ref()));
@@ -341,6 +403,22 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
 
     let dispatch = DispatchState::summarize(attempts.iter().map(|x| x.dispatch));
     let summary = summary_line(transport, application, &protocol_status, &diagnosis.findings);
+    // Kept in the record: the status line's reason and the summary that
+    // quotes it and the findings are scrubbed like the response itself.
+    let summary = redactor.text_any_case(&summary);
+    let mut protocol_status = protocol_status;
+    if let ProtocolStatus::Http { reason: Some(reason), .. } = &mut protocol_status {
+        *reason = redactor.text_any_case(reason);
+    }
+    // Warnings and assertion messages can quote response metadata a
+    // protocol case-folded (a content coding in a decoding failure).
+    for w in &mut warnings {
+        w.message = redactor.text_any_case(&w.message);
+    }
+    let mut assertion_results = assertion_results;
+    for r in &mut assertion_results {
+        r.message = redactor.text_any_case(&r.message);
+    }
     redact_attempts(&mut attempts, redactor);
     let mut findings = diagnosis.findings;
     for f in &mut findings {
@@ -349,9 +427,21 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.headers = redactor.headers(&r.headers);
         r.trailers = redactor.headers(&r.trailers);
+        // Response metadata copied out of the headers is server-controlled
+        // too: a server can reflect a request secret into `Content-Type` or
+        // `Content-Encoding` (compared in any case, as codings are
+        // case-insensitive). The reason phrase is scrubbed as well.
+        let scrub = |v: &mut Option<String>| {
+            if let Some(s) = v.as_mut() {
+                *s = redactor.text_any_case(s);
+            }
+        };
+        scrub(&mut r.reason);
+        r.body.content_encoding = r.body.content_encoding.as_deref().map(|ce| scrub_content_coding(redactor, ce));
+        r.body.content_type = r.body.content_type.as_deref().map(|ct| scrub_media_type(redactor, ct));
     }
     let prepared_headers: Vec<HeaderEntry> =
-        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
+        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect();
     let mut inferred: Vec<String> = a.inferred.iter().map(|i| redactor.inferred(i)).collect();
     for (k, v) in &a.auth_facts {
         inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
@@ -378,7 +468,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             headers: prepared_headers,
             body_bytes: a.prepared_body.len() as u64,
             body_sha256: if a.prepared_body.is_empty() { None } else { Some(anvil_transport::certs::sha256_hex(&a.prepared_body)) },
-            content_type: a.content_type.clone(),
+            content_type: a.content_type.as_deref().map(|c| redactor.text(c)),
             auth_label: a.auth_label.clone(),
             tls_profile: a.tls_profile.clone(),
             proxy: a.proxy.clone(),

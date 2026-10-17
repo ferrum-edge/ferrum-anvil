@@ -77,6 +77,15 @@
 
 ### Fixed
 
+- Execution records no longer keep a known secret that a server reflects into
+  response metadata outside header values: header and trailer names (response,
+  CONNECT-UDP tunnel and prepared headers), and the `Content-Type`,
+  `Content-Encoding` and decoding detail stored with the body are scrubbed
+  with the record's redactor before history or export. Names and codings are
+  compared in any letter case, as are warnings, findings and the summary. The
+  request's `Content-Type` is scrubbed in the record and the preview, and the
+  reason phrase in every copy the record keeps.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback

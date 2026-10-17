@@ -332,3 +332,128 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
     assert!(!second_record.contains(secret), "the second record contains a cookie named with the first execution's secret");
     assert!(second.record.prepared.inferred.iter().all(|note| !note.contains(secret)));
 }
+
+/// A server can reflect a request secret into response metadata the record
+/// keeps outside the header values: a header name (lowercased on the wire),
+/// the `Content-Type` and `Content-Encoding` copied into the body capture,
+/// and the decoding detail and warning that quote the coding lowercased.
+/// The request's own header names and `Content-Type` can carry a secret too.
+/// Neither the stored record nor the effective-request preview may hold the
+/// secret in any letter case.
+#[tokio::test]
+async fn a_secret_reflected_into_response_metadata_is_not_kept() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "Reflected-Meta-SECRET-5q9z";
+    let url = f.url("/status/200?ct=text/plain;x={{reflected}}&header=X-{{reflected}}:v&header=Content-Encoding:{{reflected}}&body=plain");
+    let mut spec = RequestSpec::http("GET", &url);
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Sent-{{reflected}}", "v"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("Content-Type", "text/plain;k={{reflected}}"));
+    // A body check reads the decoding failure, which quotes the coding.
+    spec.assertions.push(anvil_domain::assertions::Assertion {
+        enabled: true,
+        label: "body".into(),
+        kind: anvil_domain::assertions::AssertionKind::Body {
+            comparison: anvil_domain::assertions::Comparison::Contains,
+            value: "plain".into(),
+        },
+    });
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let engine = Engine::new();
+    let leaks = |text: &str| text.contains(secret) || text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
+
+    let preview = engine.preview(&c).expect("preview");
+    let preview = serde_json::to_string(&preview).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret: {preview}");
+
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
+    let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
+    assert_eq!(r.status, 200);
+    // The reflection reached the response: the test exercises the fields.
+    assert!(r.headers.iter().any(|h| h.name.eq_ignore_ascii_case(&format!("x-{REDACTED}"))), "{:?}", r.headers);
+    assert!(r.body.content_type.as_deref().is_some_and(|ct| ct.contains(REDACTED)), "{:?}", r.body.content_type);
+    assert!(r.body.content_encoding.as_deref().is_some_and(|ce| ce.contains(REDACTED)), "{:?}", r.body.content_encoding);
+    assert!(o.record.prepared.headers.iter().any(|h| h.name == format!("X-Sent-{REDACTED}")), "{:?}", o.record.prepared.headers);
+    assert!(!o.record.assertion_results.is_empty());
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
+}
+
+/// A response `Content-Type` that a known secret happens to be part of is
+/// kept when it is a well-known media type: callers act on it (an MCP
+/// event stream is parsed by it). Its parameters are still scrubbed.
+#[tokio::test]
+async fn a_well_known_media_type_survives_a_secret_that_is_part_of_it() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http("GET", &f.url("/status/200?ct=text/event-stream;%20x=stream-param-77&body=data"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Word", "{{word}}"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Param", "{{param}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![
+        VarEntry { name: "word".into(), value: "stream".into(), secret: true, literal: false },
+        VarEntry { name: "param".into(), value: "stream-param-77".into(), secret: true, literal: false },
+    ];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    let ct = r.body.content_type.as_deref().unwrap_or_default();
+    assert!(ct.starts_with("text/event-stream;"), "{ct}");
+    assert!(!ct.contains("stream-param-77"), "{ct}");
+}
+
+/// The status line's reason phrase is kept in the response, the protocol
+/// status and the summary: a known secret is scrubbed from all three.
+#[tokio::test]
+async fn a_secret_in_the_reason_phrase_is_scrubbed_from_every_copy() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http("GET", &f.url("/status/403"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Word", "{{word}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "word".into(), value: "Forbidden".into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    assert_eq!(r.status, 403);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains("Forbidden"), "{record}");
+}
+
+/// A secret that crosses from a well-known media type into its parameters is
+/// replaced, and a content coding the engine decodes is kept even when a
+/// secret equals it (history still decodes the body).
+#[tokio::test]
+async fn media_type_and_coding_constants_are_kept_only_when_they_hide_nothing() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "plain;token=secret-77";
+    let mut spec = RequestSpec::http("GET", &f.url("/status/200?ct=text/plain;token=secret-77&body=x"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-S", "{{s}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "s".into(), value: secret.into(), secret: true, literal: false }],
+    }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains(secret), "{record}");
+
+    let mut spec = RequestSpec::http("GET", &f.url("/gzip"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-S", "{{s}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "s".into(), value: "gzip".into(), secret: true, literal: false }],
+    }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    assert_eq!(r.body.content_encoding.as_deref(), Some("gzip"));
+}
