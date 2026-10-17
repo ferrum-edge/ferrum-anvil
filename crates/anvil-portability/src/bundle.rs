@@ -794,6 +794,15 @@ fn check_directory(bytes: &[u8], start: u64, indexed_count: usize, limits: ReadL
         if !names.insert(name) {
             return Err(BundleError::Unsafe(String::from_utf8_lossy(name).into_owned(), "duplicate entry".into()));
         }
+        // The file type from the central header's external attributes, read
+        // here rather than through zip's unix_mode(): zip 9 ignores the
+        // high 16 bits for DOS-system archives, which is exactly the
+        // spelling a Windows-written archive uses for a symlink.
+        let external = u32::from_le_bytes(header[38..42].try_into().map_err(|_| invalid())?);
+        let file_type = (external >> 16) & 0o170000;
+        if file_type != 0 && file_type != 0o100000 {
+            return Err(BundleError::Unsafe(String::from_utf8_lossy(name).into_owned(), "only regular files are allowed".into()));
+        }
         offset = end;
     }
     if count != indexed_count {
