@@ -77,7 +77,7 @@ fn edit_manifest(bytes: &[u8], edit: impl Fn(&mut serde_json::Value)) -> Vec<u8>
         let mut f = z.by_index(i).unwrap();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
-        entries.push((f.name().to_string(), b));
+        entries.push((f.name().unwrap().into_owned(), b));
     }
     let mut checks = std::collections::BTreeMap::new();
     for (n, b) in &mut entries {
