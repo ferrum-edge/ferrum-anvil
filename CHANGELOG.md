@@ -77,6 +77,10 @@
 
 ### Fixed
 
+- Bundle import preview checks folder parent links for cycles in one pass over
+  the folders. It used to walk each folder's whole ancestry, so a long folder
+  chain cost quadratic time on the import worker before the preview appeared.
+
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
   (#391). Like the token endpoint, cleartext now requires a literal loopback
