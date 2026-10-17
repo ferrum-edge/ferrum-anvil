@@ -802,7 +802,7 @@ under an unchanged key. No mandatory online service is introduced.
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION` (currently 5). Migrations run forward at open and at
+  `DB_SCHEMA_VERSION` (currently 6). Migrations run forward at open and at
   unlock, each step in one write transaction with the version bump that
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its
