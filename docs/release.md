@@ -367,8 +367,8 @@ release page once.
     gtk 0.19+ (glib ≥ 0.20).
   - `RUSTSEC-2026-0367`, `-0368`, `-0369` — `zip` `extract()` permission and
     symlink escapes. Anvil's own `zip` is 9.0.4 and never calls `extract()`;
-    the flagged 4.6.1 comes only from `tauri-plugin-updater`, and in-app
-    install is unavailable without an updater pubkey. Resolves when
+    the flagged 4.6.1 comes only from `tauri-plugin-updater`, which verifies
+    the release signature before extracting an update archive. Resolves when
     `tauri-plugin-updater` moves to `zip` ≥ 9.
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E
