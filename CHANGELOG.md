@@ -83,6 +83,18 @@
 
 ### Fixed
 
+- Desktop: an API standards check that stopped early (`incomplete`, or
+  operations skipped, $refs not followed, examples not checked) without
+  errors now shows "not completely checked"
+  instead of "meets the standards", and no longer says the description meets
+  every rule.
+- Desktop: **Start load** starts one run per confirmation, even on a double
+  click. Every accepted run keeps its own Stop control until it finishes, and a
+  run that finishes before its start reply arrives is not shown as live.
+- Desktop: a load-plan save, or a workspace-variable or environment save in the
+  Environments dialog, no longer puts the saved (older) values over edits typed
+  while the save was on its way. A list reload no longer resets the
+  workspace-variable editor to the workspace's previous values.
 - Bundle import preview checks folder parent links for cycles in one pass over
   the folders. It used to walk each folder's whole ancestry, so a long folder
   chain cost quadratic time on the import worker before the preview appeared.

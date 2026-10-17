@@ -141,9 +141,15 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const fail = (e: unknown) => setToast(String((e as Error).message ?? e));
 
   // ---------------------------------------------------------------- loading
+  // Only the latest workspace read may apply: overlapping reads (two saves
+  // refreshing in turn) can answer out of order, and the older copy would
+  // put stale workspace variables back under the editors seeded from it.
+  const workspaceReads = useRef(0);
   const loadWorkspaces = useCallback(async (selectId?: string) => {
+    const n = ++workspaceReads.current;
     let list = await api.workspaces();
     if (list.length === 0) list = [await api.createWorkspace("My workspace")];
+    if (n !== workspaceReads.current) return;
     setWorkspaces(list);
     setWs((cur) => list.find((w) => w.id === (selectId ?? cur?.id)) ?? list[0]);
   }, []);
@@ -1089,9 +1095,18 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           <EnvironmentsDialog
             workspace={ws}
             onClose={() => setDialog(null)}
-            onChanged={async () => {
+            onChanged={async (saved) => {
+              if (saved) {
+                setWs(saved);
+                setWorkspaces((l) => l.map((x) => (x.id === saved.id ? saved : x)));
+              }
+              // Start the workspace read now, before awaiting the
+              // environments: starting it is what retires an older
+              // workspace read still on its way, which would otherwise
+              // land after `saved` and overwrite it.
+              const refreshed = loadWorkspaces(ws.id);
               await loadEnvs();
-              await loadWorkspaces(ws.id);
+              await refreshed;
             }}
           />
         )}
