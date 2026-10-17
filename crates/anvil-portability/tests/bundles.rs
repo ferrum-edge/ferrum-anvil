@@ -207,7 +207,7 @@ fn data_005_corrupt_or_truncated_bundles_are_rejected() {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let name = f.name().to_string();
+        let name = f.name().unwrap().into_owned();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
         if name == "workspace/objects.json" {
@@ -489,7 +489,7 @@ fn repack(bytes: &[u8], edit: impl Fn(&str, &mut Vec<u8>)) -> Vec<u8> {
         let mut f = z.by_index(i).unwrap();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
-        entries.push((f.name().to_string(), b));
+        entries.push((f.name().unwrap().into_owned(), b));
     }
     let mut checks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (n, b) in &mut entries {
@@ -518,7 +518,7 @@ fn with_entry(bytes: &[u8], name: &str, data: &[u8]) -> Vec<u8> {
         let mut f = z.by_index(i).unwrap();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
-        w.start_file(f.name().to_string(), zip::write::SimpleFileOptions::default()).unwrap();
+        w.start_file(f.name().unwrap().into_owned(), zip::write::SimpleFileOptions::default()).unwrap();
         w.write_all(&b).unwrap();
     }
     w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
@@ -1136,7 +1136,7 @@ fn without_entry(bytes: &[u8], name: &str) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let n = f.name().to_string();
+        let n = f.name().unwrap().into_owned();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
         if n != name {

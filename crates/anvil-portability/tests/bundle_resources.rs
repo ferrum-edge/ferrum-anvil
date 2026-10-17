@@ -68,7 +68,7 @@ fn base_files() -> BTreeMap<String, Vec<u8>> {
         let mut entry = archive.by_index(index).unwrap();
         let mut data = Vec::new();
         entry.read_to_end(&mut data).unwrap();
-        files.insert(entry.name().to_string(), data);
+        files.insert(entry.name().unwrap().into_owned(), data);
     }
     files.remove("checksums.json");
     files
@@ -229,7 +229,7 @@ fn measure_resource_open() {
         let mut total = 0;
         for index in 0..archive.len() {
             let entry = archive.by_index_raw(index).unwrap();
-            if entry.name().starts_with("attachments/") {
+            if entry.name().unwrap().starts_with("attachments/") {
                 total += entry.size();
             }
         }
