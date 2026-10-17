@@ -152,6 +152,12 @@
   profile to passphrase protection. `PolicyRotation` is now an enum and retired
   credentials are recorded as `RotationPolicy::retired_keychain`.
 
+- `app.mcp_tool_error` no longer says the call reached the tool or assigns
+  it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
+  `isError: true` result when the gateway fails or refuses the call it makes for
+  the tool. The error result stays confirmed, scope and owner are unknown, and
+  the finding lists both explanations.
+
 - A transient storage error no longer locks an unlocked profile. The per-operation
   key check drops the key only on evidence against it (a canary or catalogue that
   does not authenticate, or a rotated key); SQLite contention, I/O errors and a
