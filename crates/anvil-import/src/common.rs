@@ -108,13 +108,9 @@ pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
     let marker_json = serde_json::to_string(NUMERIC_PLACEHOLDER).ok()?;
     let marker_json = &marker_json[1..marker_json.len() - 1];
     let prefix = format!("\"{marker_json}");
-    let suffix = format!("{marker_json}\"");
-    // No candidate longer than the longest marked string can match, which
-    // bounds every suffix search.
-    let max_candidate = replacements.keys().map(String::len).max().unwrap_or(0);
     // Marked strings the source itself already held stay quoted.
     let mut collisions = std::collections::HashSet::new();
-    scan_marked(source, &prefix, &suffix, max_candidate, |candidate| {
+    scan_marked(source, &prefix, |candidate| {
         if replacements.contains_key(candidate) {
             collisions.insert(candidate.to_string());
             Some(candidate)
@@ -127,51 +123,48 @@ pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
         let quoted = serde_json::to_string(inner).ok()?;
         replacements.insert(serialized.clone(), quoted);
     }
-    Some(scan_marked(&text, &prefix, &suffix, max_candidate, |candidate| replacements.get(candidate).map(String::as_str)))
+    Some(scan_marked(&text, &prefix, |candidate| replacements.get(candidate).map(String::as_str)))
 }
 
-/// One pass over serialized JSON `text`, replacing every whole marked
-/// string (from `prefix` through the next `suffix`) for which `replace`
-/// returns a replacement. A candidate with no replacement is copied only
-/// through its prefix and scanning resumes after it, so a longer string
-/// that merely begins with the marker cannot swallow a marked string
-/// that follows it.
-fn scan_marked<'t, 'r>(
-    text: &'t str,
-    prefix: &str,
-    suffix: &str,
-    max_candidate: usize,
-    mut replace: impl FnMut(&'t str) -> Option<&'r str>,
-) -> String
+/// One pass over JSON `text`, replacing every whole string token that
+/// starts with `prefix` and for which `replace` returns a replacement.
+///
+/// String tokens are walked with their escapes, so each byte is visited
+/// once and slices land only on ASCII quote boundaries: a longer string
+/// that merely begins with the marker is one token, never rescanned, and
+/// cannot swallow a marked string that follows it.
+fn scan_marked<'t, 'r>(text: &'t str, prefix: &str, mut replace: impl FnMut(&'t str) -> Option<&'r str>) -> String
 where
     't: 'r,
 {
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find(prefix) {
-        let after_prefix = &rest[start + prefix.len()..];
-        let window = max_candidate.saturating_sub(prefix.len()).min(after_prefix.len());
-        let Some(end) = after_prefix[..window].find(suffix) else {
-            let through = start + prefix.len();
-            out.push_str(&rest[..through]);
-            rest = &rest[through..];
+    let mut copied = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if bytes[at] != b'"' {
+            at += 1;
             continue;
-        };
-        let candidate = &rest[start..start + prefix.len() + end + suffix.len()];
-        match replace(candidate) {
-            Some(replacement) => {
-                out.push_str(&rest[..start]);
-                out.push_str(replacement);
-                rest = &rest[start + candidate.len()..];
-            }
-            None => {
-                let through = start + prefix.len();
-                out.push_str(&rest[..through]);
-                rest = &rest[through..];
-            }
         }
+        // The string token from `at`: its closing quote, escapes skipped.
+        let mut end = at + 1;
+        while end < bytes.len() && bytes[end] != b'"' {
+            end += if bytes[end] == b'\\' { 2 } else { 1 };
+        }
+        if end >= bytes.len() {
+            break; // unterminated: the rest is copied verbatim below
+        }
+        let token = &text[at..=end];
+        if token.starts_with(prefix)
+            && let Some(replacement) = replace(token)
+        {
+            out.push_str(&text[copied..at]);
+            out.push_str(replacement);
+            copied = end + 1;
+        }
+        at = end + 1;
     }
-    out.push_str(rest);
+    out.push_str(&text[copied..]);
     out
 }
 

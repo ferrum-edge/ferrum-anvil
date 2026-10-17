@@ -332,6 +332,16 @@ fn numeric_credentials_and_unscannable_data() {
     let body = substituted(text, &[("pin", "123456")]);
     assert_eq!(body["pin"].as_u64(), Some(123456), "{text}");
     assert_eq!(body["note"].as_str(), Some("anvil-number"), "{text}");
+    // A longer string that begins with the whole serialized marker and then
+    // holds multibyte text is not a placeholder: it stays intact, and the
+    // rendering must not slice it at a byte offset.
+    let note = format!("\u{1}anvil-number\u{1}{}é", "x".repeat(31));
+    let cmd = format!(r#"curl --json '{{"pin":123456,"note":{}}}' https://example.test"#, serde_json::to_string(&note).unwrap());
+    let r = curl(&cmd);
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    let body = substituted(text, &[("pin", "123456")]);
+    assert_eq!(body["pin"].as_u64(), Some(123456), "{text}");
+    assert_eq!(body["note"].as_str(), Some(note.as_str()), "{text}");
     let r = curl("curl -H 'Content-Type: application/xml' -d '<a>placeholder-secret</a>' https://example.test");
     assert!(has_at(&r, "body_not_scanned", "/args"));
 }
