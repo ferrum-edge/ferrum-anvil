@@ -16,12 +16,12 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-713 Rust crates, 4 npm packages.
+714 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
 | MIT OR Apache-2.0 | 316 |
-| MIT | 154 |
+| MIT | 155 |
 | Apache-2.0 OR MIT | 112 |
 | MIT/Apache-2.0 | 35 |
 | Unicode-3.0 | 18 |
@@ -66,7 +66,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (713)
+## Rust crates (714)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -406,6 +406,7 @@ the modified file under MPL-2.0.
 | moka | 0.12.16 | (MIT OR Apache-2.0) AND Apache-2.0 | https://github.com/moka-rs/moka |
 | muda | 0.19.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/muda |
 | new_debug_unreachable | 1.0.6 | MIT | https://github.com/mbrubeck/rust-debug-unreachable |
+| nix | 0.31.3 | MIT | https://github.com/nix-rust/nix |
 | nom | 7.1.3 | MIT | https://github.com/Geal/nom |
 | nom | 8.0.0 | MIT | https://github.com/rust-bakery/nom |
 | num | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-num/num |
@@ -773,7 +774,7 @@ the modified file under MPL-2.0.
 | zerovec | 0.11.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zip | 4.6.1 | MIT | https://github.com/zip-rs/zip2.git |
-| zip | 8.6.0 | MIT | https://github.com/zip-rs/zip2 |
+| zip | 9.0.4 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |

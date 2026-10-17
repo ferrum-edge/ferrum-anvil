@@ -8,6 +8,12 @@
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange
   downgrade).
+- zip is updated to 9.0.4 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
+  preserving SUID/SGID bits and symlink targets escaping the destination).
+  The `zip` 4.6.1 copy held by `tauri-plugin-updater` has no patched 4.x
+  release and is a reviewed `deny.toml` ignore: in-app install is unavailable
+  in shipped builds (no updater pubkey), and Anvil's own bundle code reads
+  entries in memory without `extract()`.
 
 ### Changed
 
