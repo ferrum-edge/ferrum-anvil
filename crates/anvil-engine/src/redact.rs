@@ -499,12 +499,12 @@ impl Redactor {
     /// secret, so it is redacted as a URL.
     pub fn inferred(&self, line: &str) -> String {
         let scrubbed = self.text_any_case(line);
-        match scrubbed.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
-            Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", self.url(v)),
-            _ if line.strip_prefix("auth ").and_then(|l| l.split_once(": ")).is_some_and(|(k, _)| k.ends_with(".htu")) => {
-                // A secret overlapped the structural prefix; do not leave an
-                // unrecognised URL whose encodings still need inspection.
-                REDACTED.to_string()
+        match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
+            Some((k, v)) if k.ends_with(".htu") => {
+                if !same_delimiters(line, &scrubbed, b" :/?#&=@") {
+                    return REDACTED.to_string();
+                }
+                self.text_any_case(&format!("auth {k}: {}", self.url(v)))
             }
             _ => scrubbed,
         }

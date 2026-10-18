@@ -513,7 +513,13 @@ fn known_values_cannot_conceal_url_credentials_before_structural_redaction() {
     for url in ["https://peer.test/?token=FreshCredential77", "https://alice:NewPassword77@example.test/path"] {
         let direct = r.url(url);
         let header = r.header("Location", url);
-        for text in [direct, header, r.header("Link", &format!("<{url}>; rel=next")), r.header("Refresh", &format!("0; url={url}"))] {
+        for text in [
+            direct,
+            header,
+            r.header("Link", &format!("<{url}>; rel=next")),
+            r.header("Refresh", &format!("0; url={url}")),
+            r.inferred(&format!("auth dpop.htu: {url}")),
+        ] {
             assert!(!text.contains("FreshCredential77") && !text.contains("NewPassword77"), "{text}");
         }
     }
