@@ -183,7 +183,7 @@ pub fn protocol_status_http(resp: Option<&ResponseRecord>) -> ProtocolStatus {
 }
 
 pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
-    let Assembly { ctx, started_at, mut attempts, last, redactor, .. } = a;
+    let Assembly { ctx, started_at, attempts, last, redactor, .. } = a;
     let response = last.response.clone();
     let raw_body = last.body.clone();
     // Decode for display/assertions; the raw captured bytes stay the evidence.

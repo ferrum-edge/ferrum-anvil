@@ -913,6 +913,21 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn repetitive_secret_matches_fail_closed_at_the_work_budget() {
+        use super::*;
+        let mut r = Redactor::new(vec!["key1".into()], vec![]);
+        let text = "key1 safe ".repeat(MAX_SECRET_MATCHES + 1);
+        assert_eq!(r.text(&text), REDACTED);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), REDACTED);
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.matcher = None;
+        r.any_case = None;
+        assert_eq!(r.text(&text), REDACTED);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), REDACTED);
+    }
+
+    #[test]
     fn overlapping_secrets_are_covered_in_full_even_without_matchers() {
         use super::*;
         let mut r = Redactor::new(vec!["text/plain".into(), "plain;token=secret-77".into(), "aaaa".into()], vec![]);
