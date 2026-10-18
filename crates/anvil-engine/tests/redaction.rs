@@ -83,11 +83,11 @@ fn a_secret_inside_a_longer_encoded_value_is_not_recoverable() {
 }
 
 #[test]
-fn raw_secrets_are_redacted_even_where_they_split_the_query() {
+fn raw_secrets_crossing_query_delimiters_withhold_the_path_and_query() {
     let r = Redactor::new(vec!["raw&secret=value".into()], vec![]);
     let out = r.url("https://h/p?token=raw&secret=value&page=2");
     assert!(!out.contains("raw&secret=value") && !out.contains("secret=value"), "{out}");
-    assert!(out.ends_with("&page=2"), "{out}");
+    assert_eq!(out, format!("https://h/{REDACTED}"));
 }
 
 #[test]
