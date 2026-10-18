@@ -1139,9 +1139,9 @@ impl<'a> State<'a> {
                     self.note(if self.scanned.exceeds(MAX_EXAMPLE_SCAN) {
                         "the analysis' budget for scanning schemas is spent; bodies of the remaining schemas were not checked"
                     } else if schema::too_large(&e) {
-                        "some response schemas are too large or too deeply nested to check; their bodies were not checked"
+                        "some response schemas exceed the supported validation-work limits; their bodies were not checked"
                     } else {
-                        "some response schemas could not be compiled (an external or broken reference); their bodies were not checked"
+                        "some response schemas use unsupported features or could not be compiled; their bodies were not checked"
                     });
                     None
                 }

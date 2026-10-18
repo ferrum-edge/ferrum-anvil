@@ -57,6 +57,13 @@ company ruleset.
     `Cat: allOf [Pet]` is such a cycle;
   - a chain has more than 32 references, or 512 levels of nesting along
     one;
+  - a recursive region has more than one reference per schema, or uses
+    composition, conditions, dependencies, overlapping property patterns,
+    `contains`, or other non-structural applicators. Simple recursion through
+    named properties and array items remains supported; some legitimate
+    composite recursive schemas are conservatively refused;
+  - it uses `unevaluatedProperties` or `unevaluatedItems`: the validator can
+    re-evaluate nested schemas exponentially even without references;
   - it expands to more than 100,000 nodes with every `$ref` expanded
     (repeated references count each time);
   - it and the schemas it references have more than 1,000,000 members and
@@ -70,6 +77,12 @@ company ruleset.
   compiles of a lint scan 20,000,000 members and items, and 320 MiB of
   names and strings, at most; examples past that are counted as not checked
   too.
+  References must remain plain document-local pointers. Modern `$id`,
+  anchors, dynamic/recursive references and nested dialect changes are
+  refused, as are references to the bundle root or its reserved `allOf` and
+  `$schema` wrapper fields. Legacy identifiers are removed by conversion.
+  Literal data and unknown annotations are counted for size, but their
+  members are not schema keywords unless a reference targets them.
 - **Operations are bounded too.** They look at 2 million parameters,
   responses and media types at most in all. Inherited path-level
   parameters, the document's security requirements and a shared response's
@@ -185,6 +198,10 @@ unless a reference points into it. A reference cycle that does not descend
 into the value, more than 100,000 schema nodes with every reference expanded
 (repeated references count each time), or references nested too deeply make
 the ruleset fail to load.
+The same conservative recursive-work and `unevaluated*` refusals apply to
+custom schemas. Rejected example/body schemas are reported as not checked;
+rejected custom schemas make the ruleset fail to load. They never produce
+a successful validation or a schema-mismatch claim without validation.
 
 **Messages.** Without `message`, a finding reads `<target>: <field> <why>`.
 A `message` may use `{{value}}` (the checked value), `{{field}}`,

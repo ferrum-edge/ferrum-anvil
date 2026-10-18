@@ -481,7 +481,7 @@ fn hostile_traffic_is_capped() {
 }
 
 #[test]
-fn wide_recursive_schemas_are_walked_within_budget() {
+fn wide_recursive_schemas_are_refused_before_body_validation() {
     // Every property of a 10,000-property schema is the schema again; each
     // body has 10,000 keys two levels deep.
     let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"$ref": "#/components/schemas/S"}))).collect();
@@ -496,8 +496,21 @@ fn wide_recursive_schemas_are_walked_within_budget() {
     let start = std::time::Instant::now();
     let r = analyze(&spec, &obs, &DriftOptions::default());
     assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
-    assert!(r.notes.iter().any(|n| n.contains("budget for walking bodies")), "{:#?}", r.notes);
-    assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:#?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("validation-work limits") && n.contains("not checked")), "{:#?}", r.notes);
+    assert!(!r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn large_acyclic_required_lists_still_report_only_the_first_difference() {
+    let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"type":"object"}))).collect();
+    let required: Vec<String> = (0..10_000).map(|i| format!("p{i}")).collect();
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/s":{"get":{"responses":{
+        "200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":props,"required":required}}}}
+    }}}}});
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let body: serde_json::Map<String, Value> = (0..1_000).map(|i| (format!("p{i}"), json!({}))).collect();
+    let r = analyze(&spec, &[Obs::new("wide", "GET", "/s").json(200, Value::Object(body)).0], &DriftOptions::default());
+    assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:?}", r.notes);
     assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
 }
 

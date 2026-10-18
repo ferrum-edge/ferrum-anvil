@@ -185,6 +185,8 @@ struct Part {
     /// Deepest nesting of objects and lists.
     depth: usize,
     refs: Vec<(String, bool)>,
+    /// Applicators whose work is not one structural traversal of the value.
+    complex: bool,
 }
 
 /// Where a scanned value sits: a schema, a map of named schemas
@@ -200,7 +202,7 @@ enum Pos {
 /// `step_limit` members and items (scalars included), or more than
 /// `byte_limit` bytes of member names and strings have been seen.
 fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> Part {
-    let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, refs: vec![] };
+    let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, refs: vec![], complex: false };
     let mut stack: Vec<(&Value, bool, usize, Pos)> = vec![(v, false, 1, Pos::Schema)];
     'scan: while let Some((v, down, d, pos)) = stack.pop() {
         if part.nodes > node_limit || part.steps > step_limit || part.bytes > byte_limit {
@@ -210,6 +212,13 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
         match v {
             Value::Object(o) => {
                 part.nodes += 1;
+                if pos == Pos::Schema
+                    && (o.keys().any(|k| complex_applicator(k))
+                        || (o.contains_key("$ref")
+                            && o.keys().any(|k| schema_child_keyword(k) || matches!(k.as_str(), "properties" | "additionalProperties"))))
+                {
+                    part.complex = true;
+                }
                 // Literal data is counted but holds no references; in a map
                 // of named schemas, `$ref` is a name.
                 if pos == Pos::Schema
@@ -223,17 +232,11 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
                     if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
-                    let child_pos = match pos {
-                        Pos::Literal => Pos::Literal,
-                        Pos::Map => Pos::Schema,
-                        Pos::Schema if literal_keyword(k) => Pos::Literal,
-                        Pos::Schema if schema_map_keyword(k) => Pos::Map,
-                        Pos::Schema => Pos::Schema,
-                    };
+                    let child_pos = child_position(pos, k);
                     // A `$ref` that is not a string is still copied by
                     // conversion and bundling: scanned like any member.
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down || descends(k), d + 1, child_pos));
+                        stack.push((child, down || (pos == Pos::Schema && descends(k)), d + 1, child_pos));
                     }
                 }
             }
@@ -272,7 +275,9 @@ const ROOT: &str = "#root";
 /// [`measure`], adding the members and items it looked at, and the bytes of
 /// their names and strings, to `total`.
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
-    measure_in(&spec.root, schema, total)
+    let size = measure_in(&spec.root, schema, total)?;
+    check_keywords(&spec.root, schema, false, legacy(spec.dialect))?;
+    Ok(size)
 }
 
 /// Check a standalone JSON Schema (a custom ruleset's `schema` function)
@@ -287,13 +292,64 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
 /// `default`, `examples`) is not interpreted, unless a reference points into
 /// it (the validator then compiles it as a schema too).
 pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
-    check_standalone_keywords(schema)?;
-    measure_in(schema, schema, &mut Scanned::default())
+    let size = measure_in(schema, schema, &mut Scanned::default())?;
+    check_keywords(schema, schema, true, false)?;
+    Ok(size)
 }
 
-/// Keywords whose value is instance data, not a schema.
-fn literal_keyword(k: &str) -> bool {
-    matches!(k, "const" | "enum" | "default" | "examples" | "example")
+/// Only schema-valued keywords change position. Assertions, annotations and
+/// unknown extensions hold data, unless a reference explicitly targets it.
+fn child_position(pos: Pos, k: &str) -> Pos {
+    match pos {
+        Pos::Literal => Pos::Literal,
+        Pos::Map => Pos::Schema,
+        Pos::Schema if schema_map_keyword(k) => Pos::Map,
+        Pos::Schema if schema_child_keyword(k) => Pos::Schema,
+        Pos::Schema => Pos::Literal,
+    }
+}
+
+fn schema_child_keyword(k: &str) -> bool {
+    matches!(
+        k,
+        "allOf"
+            | "anyOf"
+            | "oneOf"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "items"
+            | "prefixItems"
+            | "additionalItems"
+            | "additionalProperties"
+            | "contains"
+            | "propertyNames"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
+            | "contentSchema"
+    )
+}
+
+fn complex_applicator(k: &str) -> bool {
+    matches!(
+        k,
+        "allOf"
+            | "anyOf"
+            | "oneOf"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "dependentSchemas"
+            | "dependencies"
+            | "contains"
+            | "propertyNames"
+            | "patternProperties"
+            | "contentSchema"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
+    )
 }
 
 /// Keywords whose value maps names to schemas.
@@ -301,13 +357,24 @@ fn schema_map_keyword(k: &str) -> bool {
     matches!(k, "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies")
 }
 
-fn check_standalone_keywords(schema: &Value) -> Result<(), String> {
-    let mut stack: Vec<(&Value, bool)> = vec![(schema, true)];
+fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: bool) -> Result<(), String> {
+    let mut stack: Vec<(&Value, bool, Pos)> = vec![(schema, true, Pos::Schema)];
     let mut followed: HashSet<String> = HashSet::new();
     // A reference target is walked again from its own position, so the walk
     // is bounded like the measurement's scan.
     let mut steps = 0usize;
-    while let Some((v, root)) = stack.pop() {
+    while let Some((v, root, pos)) = stack.pop() {
+        if pos == Pos::Literal {
+            continue;
+        }
+        if let Value::Array(a) = v {
+            steps += a.len();
+            if steps > MAX_SCAN_STEPS {
+                return Err(format!("{TOO_LARGE}the schema keyword scan exceeds {MAX_SCAN_STEPS} members and items"));
+            }
+            stack.extend(a.iter().filter(|c| c.is_object() || c.is_array()).map(|c| (c, false, pos)));
+            continue;
+        }
         let Value::Object(o) = v else { continue };
         for (k, child) in o {
             steps += 1;
@@ -316,40 +383,45 @@ fn check_standalone_keywords(schema: &Value) -> Result<(), String> {
                     "{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items"
                 ));
             }
-            match (k.as_str(), child.as_str()) {
-                ("$ref", Some(r)) => match internal_pointer(r) {
+            if pos != Pos::Schema {
+                stack.push((child, false, child_position(pos, k)));
+                continue;
+            }
+            match k.as_str() {
+                "$ref" if child.is_string() => match internal_pointer(child.as_str().unwrap_or_default()) {
                     // The target is compiled as a schema wherever it is.
                     Some(p) => {
-                        if followed.insert(p.clone())
-                            && let Some(t) = schema.pointer(&p)
+                        if !root_id
+                            && (p.is_empty() || p == "/allOf" || p.starts_with("/allOf/") || p == "/$schema" || p.starts_with("/$schema/"))
                         {
-                            stack.push((t, p.is_empty()));
+                            return Err("references to the OpenAPI bundle root or its wrapper keywords are not supported".into());
+                        }
+                        if followed.insert(p.clone())
+                            && let Some(t) = root_doc.pointer(&p)
+                        {
+                            stack.push((t, root_id && p.is_empty(), Pos::Schema));
                         }
                     }
-                    None => return Err(format!("only references within the schema (`#/…`) are supported, not '{r}'")),
+                    None => return Err("only references within the schema (`#/…`) are supported".into()),
                 },
-                ("$id", Some(_)) if !root => return Err("`$id` is only supported at the root of the schema".into()),
-                ("$schema", Some(d)) => {
+                "$id" if !legacy_ids && !(root_id && root) => return Err("`$id` is only supported at a standalone schema's root".into()),
+                "$schema" if child.is_string() => {
+                    let d = child.as_str().unwrap_or_default();
                     let d = d.trim_end_matches('#');
                     if !root || !(d == "https://json-schema.org/draft/2020-12/schema" || d == "http://json-schema.org/draft/2020-12/schema")
                     {
                         return Err("`$schema` is only supported at the root of the schema, for draft 2020-12".into());
                     }
                 }
-                ("$anchor" | "$dynamicAnchor" | "$dynamicRef" | "$recursiveRef" | "$recursiveAnchor", Some(_)) => {
+                "$anchor" | "$dynamicAnchor" | "$dynamicRef" | "$recursiveRef" | "$recursiveAnchor" => {
                     return Err(format!("`{k}` is not supported; use a `#/…` reference"));
+                }
+                "unevaluatedProperties" | "unevaluatedItems" => {
+                    return Err(format!("{TOO_LARGE}`{k}` can re-evaluate schemas and cannot be checked within the work bound"));
                 }
                 _ => {}
             }
-            if literal_keyword(k) {
-                continue;
-            }
-            let schemas: Box<dyn Iterator<Item = &Value>> = match child {
-                Value::Object(m) if schema_map_keyword(k) => Box::new(m.values()),
-                Value::Array(a) => Box::new(a.iter()),
-                other => Box::new(std::iter::once(other)),
-            };
-            stack.extend(schemas.filter(|c| c.is_object()).map(|c| (c, false)));
+            stack.push((child, false, child_position(pos, k)));
         }
     }
     Ok(())
@@ -459,6 +531,8 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<u
         }
     }
 
+    check_recursive_parts(&parts, &reached)?;
+
     // 3. Sizes, memoized per target; a reference back to a schema being
     //    measured (a cycle through the value) adds nothing more.
     let mut size: HashMap<String, usize> = HashMap::new();
@@ -497,20 +571,94 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<u
     }
 }
 
+/// Iterative strongly connected components over all reference occurrences.
+/// A cyclic part must have exactly one outgoing reference and only ordinary
+/// structural applicators. This deliberately refuses some legitimate trees:
+/// the validator's eager error collection has no runtime work budget, and a
+/// second route (even through aliases or another recursive component) can
+/// multiply work on the same nested value. Duplicate references count twice.
+fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<(), String> {
+    let ids: HashMap<&str, usize> = reached.iter().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
+    let edges: Vec<Vec<usize>> = reached
+        .iter()
+        .map(|key| parts[key.as_str()].refs.iter().filter_map(|(target, _)| ids.get(target.as_str()).copied()).collect())
+        .collect();
+    let mut reverse = vec![vec![]; reached.len()];
+    for (from, targets) in edges.iter().enumerate() {
+        for &to in targets {
+            reverse[to].push(from);
+        }
+    }
+    let mut seen = vec![false; reached.len()];
+    let mut finish = Vec::with_capacity(reached.len());
+    for start in 0..reached.len() {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![(start, 0)];
+        while let Some((node, next)) = stack.last_mut() {
+            if let Some(&target) = edges[*node].get(*next) {
+                *next += 1;
+                if !seen[target] {
+                    seen[target] = true;
+                    stack.push((target, 0));
+                }
+            } else {
+                finish.push(*node);
+                stack.pop();
+            }
+        }
+    }
+    seen.fill(false);
+    while let Some(start) = finish.pop() {
+        if seen[start] {
+            continue;
+        }
+        let mut component = vec![];
+        let mut stack = vec![start];
+        seen[start] = true;
+        while let Some(node) = stack.pop() {
+            component.push(node);
+            for &target in &reverse[node] {
+                if !seen[target] {
+                    seen[target] = true;
+                    stack.push(target);
+                }
+            }
+        }
+        let cyclic = component.len() > 1 || edges[start].contains(&start);
+        if cyclic
+            && component.iter().any(|&node| {
+                let part = &parts[reached[node].as_str()];
+                part.refs.len() != 1 || part.complex
+            })
+        {
+            return Err(format!("{TOO_LARGE}recursive schemas with branching or non-structural applicators are not checked"));
+        }
+    }
+    Ok(())
+}
+
 fn collect_refs(v: &Value, out: &mut Vec<String>) -> Result<(), String> {
-    let mut stack = vec![v];
-    while let Some(v) = stack.pop() {
+    let mut stack = vec![(v, Pos::Schema)];
+    while let Some((v, pos)) = stack.pop() {
+        if pos == Pos::Literal {
+            continue;
+        }
         match v {
             Value::Object(o) => {
-                if let Some(r) = o.get("$ref").and_then(Value::as_str) {
+                if pos == Pos::Schema
+                    && let Some(r) = o.get("$ref").and_then(Value::as_str)
+                {
                     match internal_pointer(r) {
                         Some(p) => out.push(p),
                         None => return Err(format!("external reference '{r}' is not resolved")),
                     }
                 }
-                stack.extend(o.values());
+                stack.extend(o.iter().map(|(k, v)| (v, child_position(pos, k))));
             }
-            Value::Array(a) => stack.extend(a),
+            Value::Array(a) => stack.extend(a.iter().map(|v| (v, pos))),
             _ => {}
         }
     }

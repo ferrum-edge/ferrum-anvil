@@ -380,6 +380,26 @@ fn examples_behind_an_exploding_schema_are_counted_not_checked() {
 }
 
 #[test]
+fn refused_recursive_and_unevaluated_examples_are_reported_as_unchecked() {
+    for schema in [
+        json!({"allOf":[
+            {"properties":{"child":{"$ref":"#/components/schemas/S"}}},
+            {"properties":{"child":{"$ref":"#/components/schemas/S"}}}
+        ]}),
+        json!({"unevaluatedItems":false}),
+    ] {
+        let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},
+        "components":{"schemas":{"S":schema}},
+        "paths":{"/a":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"$ref":"#/components/schemas/S"},"examples":{"a":{"value":{}},"b":{"value":{}}}
+        }}}}}}}});
+        let r = run(&doc.to_string(), &RuleSet::recommended());
+        assert_eq!(r.examples_not_checked, 2);
+        assert!(!rules_hit(&r).contains(&"example-valid"));
+    }
+}
+
+#[test]
 fn security_headers_and_shared_examples_count_against_the_budgets() {
     // 20k global security schemes inherited by 3k operations sharing one
     // response with 20k headers and an example behind a refused schema.

@@ -93,6 +93,13 @@
   `$anchor`, `$dynamicRef` and `$recursiveRef` are refused; keywords inside
   literal data (`const`, `enum`, `default`, `examples`) are not read as schema
   keywords or references, here or for OpenAPI schemas.
+  Recursive reference components with branching or non-structural
+  applicators, and `unevaluatedProperties`/`unevaluatedItems` even without
+  references, are conservatively refused as too complex to check. Shared
+  OpenAPI validation also refuses resource/dialect changes and references
+  to reserved bundle fields; literal and annotation references cannot make
+  bundling copy unmeasured targets. Refused examples and bodies are reported
+  as not checked, preserving ordinary structural recursion.
 - A user cancel or vault lock that arrives after a load schedule has ended,
   while in-flight iterations drain, now stops their chains before the next
   step, shortens the drain to `cancel_drain_ms`, and is reported as the run's

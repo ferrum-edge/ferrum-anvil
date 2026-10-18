@@ -331,6 +331,14 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   ([contract.md](contract.md#guarantees)). Text output escapes control
   characters, so a spec cannot inject CI workflow commands or terminal
   escape sequences.
+  Custom JSON Schema functions share the reference, size and scan limits
+  used for OpenAPI example and drift checks. Recursive branching and
+  non-structural recursive applicators, `unevaluatedProperties` and
+  `unevaluatedItems` are refused before validation because the validator's
+  eager error collection and annotation tracking can amplify work. Scope
+  changes that would make references differ from measurement are refused;
+  literal data and unknown annotations do not expand references. Refused
+  schemas are reported as unchecked, or as a ruleset load error.
 - **Contract drift leaking response data:** drift reads response bodies
   from encrypted history (only when the history policy keeps them) to check
   them against the description. Findings name places, types and
