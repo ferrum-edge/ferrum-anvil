@@ -569,3 +569,32 @@ fn many_failing_suggestions_do_not_copy_the_document() {
     let rev = revise(&spec, &r, &ids);
     assert!(rev.skipped.is_empty(), "{:?}", rev.skipped);
 }
+
+#[test]
+fn redacted_header_and_query_names_cannot_prove_required_names_were_missing() {
+    let doc = json!({"openapi":"3.1.0", "info":{"title":"t","version":"1"},
+    "paths":{"/a":{"get":{
+        "parameters":[{"name":"X-Trace-Id","in":"header","required":true,"schema":{"type":"string"}},
+            {"name":"trace","in":"query","required":true,"schema":{"type":"string"}}],
+        "responses":{"200":{"description":"ok","headers":{"X-Trace-Id":{"required":true,"schema":{"type":"string"}}}}}
+    }}}});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let mut obs = Obs::new("redacted", "GET", "/a").empty(200).0;
+    obs.query = vec!["[REDACTED]".into()];
+    obs.request_headers = vec!["x-[redacted]-id".into()];
+    obs.response.as_mut().unwrap().headers = vec!["x-[redacted]-id".into()];
+    let report = analyze(&spec, &[obs.clone()], &DriftOptions::default());
+    assert!(
+        !report.findings.iter().any(|f| matches!(f.kind, DriftKind::MissingRequiredParameter | DriftKind::MissingResponseHeader)),
+        "{:?}",
+        report.findings
+    );
+    assert!(report.notes.iter().any(|n| n.contains("redacted")), "{:?}", report.notes);
+    obs.query.clear();
+    obs.request_headers.clear();
+    obs.response.as_mut().unwrap().headers.clear();
+    let report = analyze(&spec, &[obs], &DriftOptions::default());
+    for kind in [DriftKind::MissingRequiredParameter, DriftKind::MissingResponseHeader] {
+        assert!(report.findings.iter().any(|f| f.kind == kind), "{kind:?}: {:?}", report.findings);
+    }
+}

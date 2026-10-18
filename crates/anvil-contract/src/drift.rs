@@ -22,6 +22,14 @@
 //! become `*`. An observed value becomes part of a suggestion only as a
 //! short enum token.
 
+/// The recorder's marker can be lowercased with HTTP header names. Such a
+/// name is unknown evidence, not proof that a required name was absent.
+fn redacted_name(name: &str) -> bool {
+    name.as_bytes()
+        .windows(anvil_domain::secret::REDACTED.len())
+        .any(|part| part.eq_ignore_ascii_case(anvil_domain::secret::REDACTED.as_bytes()))
+}
+
 use crate::infer::{Shape, mark_nullable, safe_name};
 use crate::lint::MAX_EXAMPLE_SCAN;
 use crate::lint::SpecSummary;
@@ -1001,6 +1009,15 @@ impl<'a> State<'a> {
                 _ => true,
             };
             if !present {
+                let names = match p.location.as_str() {
+                    "query" => Some(&o.query),
+                    "header" => Some(&o.request_headers),
+                    _ => None,
+                };
+                if names.is_some_and(|names| names.iter().any(|name| redacted_name(name))) {
+                    self.note(format!("required {} parameter presence not checked: some names were redacted", p.location));
+                    continue;
+                }
                 let key: Rc<str> = format!("required|{}|{}", p.pointer, p.name).into();
                 let message = || format!("{label} was called without the required {} parameter `{}`", p.location, p.name);
                 self.finding(&key, DriftKind::MissingRequiredParameter, o, || (message(), Some(label.clone()), Some(p.pointer.clone())));
@@ -1083,6 +1100,10 @@ impl<'a> State<'a> {
         // Required response headers.
         for (name, hptr) in &lists.required_headers[k] {
             if !r.headers.iter().any(|x| x.eq_ignore_ascii_case(name)) {
+                if r.headers.iter().any(|name| redacted_name(name)) {
+                    self.note("required response header presence not checked: some names were redacted");
+                    continue;
+                }
                 let key: Rc<str> = format!("header|{hptr}").into();
                 let message = || format!("The {code} response of {label} did not include the required header `{name}`");
                 self.finding(&key, DriftKind::MissingResponseHeader, o, || (message(), Some(label.clone()), Some(hptr.clone())));

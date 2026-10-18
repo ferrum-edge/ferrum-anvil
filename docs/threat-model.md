@@ -155,7 +155,9 @@ against it).
     an identity body from encoded bytes. This copy is never serialized and its
     debug view omits the media type. Historical drift treats a redacted media
     essence as unknown and reports checks limited by redacted metadata; it
-    never suggests documenting the redaction marker as a media type. A coding
+    never suggests documenting the redaction marker as a media type. Redacted
+    header or query names also cannot prove that a required name was absent.
+    A coding
     redacted from history cannot be recovered for later decompression (the raw
     capture remains viewable). The request's header names and `Content-Type`
     are scrubbed in records and previews. Reason phrases are scrubbed in every
