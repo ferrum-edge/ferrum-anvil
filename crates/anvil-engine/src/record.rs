@@ -96,10 +96,8 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
                 t.refusal_body_truncated |= cut;
             }
             // A CONNECT-UDP request carries the request's auth headers.
-            for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
-                h.value = r.text_any_case(&r.header(&h.name, &h.value));
-                h.name = r.text_any_case(&h.name);
-            }
+            t.connect_headers = r.headers(&t.connect_headers);
+            t.response_headers = r.headers(&t.response_headers);
         }
     }
 }

@@ -274,6 +274,13 @@ impl Redactor {
         }
     }
 
+    /// Metadata with a known reversibly encoded value is withheld when its
+    /// original structural role is unavailable (for example, a late-learned
+    /// extraction in an assertion's observed value).
+    fn metadata_text(&self, s: &str) -> String {
+        if self.hides_secret(s) { REDACTED.to_string() } else { self.text_any_case(s) }
+    }
+
     /// True when a component, once percent-decoded (and with `+` read as a
     /// space), contains a secret value. Raw occurrences are scrubbed by
     /// [`Redactor::text`] before components are examined.
@@ -501,12 +508,13 @@ impl Redactor {
         let scrubbed = self.text_any_case(line);
         match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
             Some((k, v)) if k.ends_with(".htu") => {
-                if !same_delimiters(line, &scrubbed, b" :/?#&=@") {
+                let prefix = format!("auth {k}: ");
+                if !scrubbed.starts_with(&prefix) || !same_delimiters(line, &scrubbed, b" :/?#&=@") {
                     return REDACTED.to_string();
                 }
                 self.text_any_case(&format!("auth {k}: {}", self.url(v)))
             }
-            _ => scrubbed,
+            _ => self.metadata_text(line),
         }
     }
 
@@ -541,7 +549,17 @@ impl Redactor {
     /// name as easily as into a value.
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
         h.iter()
-            .map(|e| HeaderEntry { name: self.text_any_case(&e.name), value: self.text_any_case(&self.header(&e.name, &e.value)) })
+            .map(|e| {
+                let name = self.text_any_case(&e.name);
+                // A later runner pass cannot infer a URL/cookie role from a
+                // masked name, so no value survives losing its identifying name.
+                let value = if name != e.name || name.contains(REDACTED) {
+                    REDACTED.to_string()
+                } else {
+                    self.metadata_text(&self.header(&e.name, &e.value))
+                };
+                HeaderEntry { name, value }
+            })
             .collect()
     }
 
@@ -551,12 +569,12 @@ impl Redactor {
     pub fn record_metadata(&self, r: &mut ExecutionRecord) {
         let scrub = |v: &mut Option<String>| {
             if let Some(s) = v {
-                *s = self.text_any_case(s);
+                *s = self.metadata_text(s);
             }
         };
-        r.prepared.url = self.text_any_case(&self.url(&r.prepared.url));
+        r.prepared.url = self.metadata_text(&self.url(&r.prepared.url));
         for note in &mut r.prepared.inferred {
-            *note = self.text_any_case(&self.inferred(note));
+            *note = self.metadata_text(&self.inferred(note));
         }
         r.prepared.headers = self.headers(&r.prepared.headers);
         scrub(&mut r.prepared.content_type);
@@ -573,7 +591,7 @@ impl Redactor {
             ProtocolStatus::Http { reason, .. } => scrub(reason),
             ProtocolStatus::Grpc { grpc_message, .. } => scrub(grpc_message),
             ProtocolStatus::WebSocket { close_reason, extensions, .. } => {
-                *close_reason = self.text_any_case(close_reason);
+                *close_reason = self.metadata_text(close_reason);
                 if let Some(e) = extensions {
                     scrub(&mut e.offered);
                     scrub(&mut e.answered);
@@ -584,21 +602,21 @@ impl Redactor {
                 }
             }
             ProtocolStatus::Udp { masque: Some(t), .. } => {
-                t.proxy = self.text_any_case(&t.proxy);
-                t.target = self.text_any_case(&t.target);
+                t.proxy = self.metadata_text(&t.proxy);
+                t.target = self.metadata_text(&t.target);
             }
             _ => {}
         }
-        r.outcome.summary = self.text_any_case(&r.outcome.summary);
+        r.outcome.summary = self.metadata_text(&r.outcome.summary);
         for w in &mut r.outcome.warnings {
-            w.message = self.text_any_case(&w.message);
+            w.message = self.metadata_text(&w.message);
         }
         for finding in &mut r.findings {
             self.finding(finding);
         }
         for a in &mut r.assertion_results {
-            a.label = self.text_any_case(&a.label);
-            a.message = self.text_any_case(&a.message);
+            a.label = self.metadata_text(&a.label);
+            a.message = self.metadata_text(&a.message);
             scrub(&mut a.actual);
         }
     }

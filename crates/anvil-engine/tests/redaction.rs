@@ -568,3 +568,31 @@ fn local_failures_and_shared_protocol_metadata_do_not_keep_folded_secrets() {
         assert!(!serde_json::to_string(&record).unwrap().to_ascii_lowercase().contains(&folded));
     }
 }
+
+#[test]
+fn late_learned_encoded_secrets_cannot_hide_behind_masked_metadata_structure() {
+    use anvil_domain::execution::HeaderEntry;
+    let raw = "https://h/u/path%2Dsecret-7f3a/x";
+    let first = Redactor::new(vec!["AUTH".into(), "LOCATION".into()], vec![]);
+    let second = Redactor::new(vec!["path-secret-7f3a".into()], vec![]);
+    let note = first.inferred(&format!("auth dpop.htu: {raw}"));
+    assert_eq!(note, REDACTED);
+    assert_eq!(second.inferred(&note), REDACTED);
+    let headers = first.headers(&[HeaderEntry { name: "Location".into(), value: raw.into() }]);
+    assert_eq!(headers[0].value, REDACTED);
+    assert_eq!(second.headers(&headers)[0].value, REDACTED);
+
+    let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://h/"));
+    let resolver = Resolver::new(vec![], None);
+    let failure = anvil_domain::execution::TransportFailure::new(
+        anvil_domain::execution::Phase::Prepare,
+        anvil_domain::execution::FailureKind::InvalidUrl,
+        "not sent",
+    );
+    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+    record
+        .assertion_results
+        .push(serde_json::from_value(serde_json::json!({"label":"observed URL", "passed":false,"actual":raw,"message":"failed"})).unwrap());
+    second.record_metadata(&mut record);
+    assert_eq!(record.assertion_results[0].actual.as_deref(), Some(REDACTED));
+}
