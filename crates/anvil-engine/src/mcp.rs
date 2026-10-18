@@ -298,7 +298,7 @@ fn quoted(v: Option<&Value>, r: &Redactor) -> String {
     let text = v.and_then(Value::as_str).unwrap_or("?");
     let window: String = text.chars().filter(|c| !c.is_control()).take(MAX_NOTE_TEXT + REDACT_LOOKAHEAD_BYTES).collect();
     let cut = window.char_indices().nth(MAX_NOTE_TEXT).map_or(window.len(), |(i, _)| i);
-    redact_then_cut(&|x: &str| r.text(x), &window, cut)
+    redact_then_cut(&|x: &str| r.text_any_case(x), &window, cut)
 }
 
 /// A JSON-RPC error code as a note shows it: the integer, never the
@@ -548,7 +548,7 @@ fn finish(
     inferred.extend(notes.after.iter().map(|n| redactor.inferred(n)));
     r.prepared.inferred = inferred;
     for w in &notes.warnings {
-        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(w) });
+        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(w) });
     }
     let answered = r.response.as_ref().is_some_and(|x| (200..300).contains(&x.status));
     let mut changed = !notes.warnings.is_empty();
@@ -558,7 +558,7 @@ fn finish(
             r.outcome.application = ApplicationState::NotEvaluated;
         }
         let message = format!("The MCP operation was not sent ({why}), so its outcome was not evaluated");
-        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
         changed = true;
     } else if expects_response && answered && seen.message.is_none() && r.outcome.application == ApplicationState::Success {
         // A 2xx without the JSON-RPC response says nothing about the call.

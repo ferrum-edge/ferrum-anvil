@@ -475,7 +475,7 @@ async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media
     for name in ["coding", "essence", "crossing"] {
         spec.headers.push(anvil_domain::request::KeyValue::new(format!("X-{name}"), format!("{{{{{name}}}}}")));
     }
-    for name in ["content-encoding", "x-mixed-coding-77"] {
+    for name in ["content-type", "content-encoding", "x-mixed-coding-77"] {
         spec.assertions.push(anvil_domain::assertions::Assertion {
             enabled: true,
             label: String::new(),
@@ -495,7 +495,7 @@ async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media
             .collect(),
     });
     let out = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
-    assert_eq!(out.record.assertion_results.len(), 2);
+    assert_eq!(out.record.assertion_results.len(), 3);
     let response = out.record.response.as_ref().expect("response");
     assert_eq!(response.body.content_type.as_deref(), Some(REDACTED));
     assert_eq!(out.record.prepared.content_type.as_deref(), Some(REDACTED));
