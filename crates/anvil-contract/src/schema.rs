@@ -27,14 +27,16 @@ const MAX_REF_CHAIN: usize = 32;
 const MAX_CHAIN_DEPTH: usize = 512;
 /// Members and items (scalars included) looked at while measuring a schema
 /// and the schemas it references: a large `enum` passes, a pathological
-/// one does not stall every compile.
+/// one does not stall every compile. Also caps reference-expanded members
+/// and items, since error collection may copy them once per application.
 pub const MAX_SCAN_STEPS: usize = 10 * MAX_EXPANDED_NODES;
 /// Bytes of member names and strings in a schema and the schemas it
 /// references: a compile copies them (converting and bundling the schema,
 /// and the validator keeps some), however few members hold them. About 16
 /// bytes per member of [`MAX_SCAN_STEPS`], so an ordinary schema meets both
 /// limits at about the same size, and only text this long (a description
-/// of several megabytes, say) meets this one first.
+/// of several megabytes, say) meets this one first. Also caps text with each
+/// reference expanded, bounding repeated subschema copies in errors.
 pub const MAX_SCAN_BYTES: usize = 16 * 1024 * 1024;
 /// Schema nodes a check may visit for one value with every `$ref` expanded
 /// (repeated references count each time): beyond this a schema is not used.
@@ -565,44 +567,7 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
         }
     }
 
-    check_recursive_parts(&parts, &reached)?;
-
-    // 3. Sizes, memoized per target; a reference back to a schema being
-    //    measured (a cycle through the value) adds nothing more.
-    let mut size: HashMap<String, usize> = HashMap::new();
-    let mut open: HashSet<String> = HashSet::from([ROOT.to_string()]);
-    let mut stack: Vec<(String, usize, usize)> = vec![(ROOT.to_string(), 0, 0)];
-    let mut chain_depth = parts[ROOT].depth;
-    loop {
-        let Some((key, i, acc)) = stack.last_mut() else { unreachable!("the root is popped last") };
-        if let Some((target, _)) = parts[key.as_str()].refs.get(*i).cloned() {
-            *i += 1;
-            if let Some(n) = size.get(&target) {
-                *acc = acc.saturating_add(*n);
-            } else if !open.contains(&target) && part_of(&mut parts, &target)? {
-                if stack.len() >= MAX_REF_CHAIN || chain_depth + parts[target.as_str()].depth > MAX_CHAIN_DEPTH {
-                    return Err(format!("{TOO_LARGE}the schema nests references too deeply"));
-                }
-                chain_depth += parts[target.as_str()].depth;
-                open.insert(target.clone());
-                stack.push((target, 0, 0));
-            }
-            continue;
-        }
-        let total = parts[key.as_str()].nodes.saturating_add(*acc);
-        if total > MAX_EXPANDED_NODES {
-            return Err(too_big());
-        }
-        let done = key.clone();
-        stack.pop();
-        chain_depth -= parts[done.as_str()].depth;
-        open.remove(&done);
-        size.insert(done, total);
-        match stack.last_mut() {
-            Some((_, _, parent)) => *parent = parent.saturating_add(total),
-            None => return Ok(total),
-        }
-    }
+    measure_parts(&parts, &reached)
 }
 
 /// Iterative strongly connected components over all reference occurrences.
@@ -611,7 +576,9 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
 /// the validator's eager error collection has no runtime work budget, and a
 /// second route (even through aliases or another recursive component) can
 /// multiply work on the same nested value. Duplicate references count twice.
-fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<(), String> {
+/// The condensed graph bounds longest depth and reference-expanded nodes,
+/// members/items and text bytes, then returns the expanded node count.
+fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<usize, String> {
     let ids: HashMap<&str, usize> = reached.iter().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
     let edges: Vec<Vec<usize>> = reached
         .iter()
@@ -685,6 +652,18 @@ fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> R
     let weights: Vec<(usize, usize)> =
         components.iter().map(|nodes| (nodes.len(), nodes.iter().map(|&node| parts[reached[node].as_str()].depth).sum())).collect();
     let mut longest = weights.clone();
+    // Error collection can clone subschema data for every application.
+    // Count expanded text and scalar members too, not only containers.
+    // A complete lap gives every entry to a permitted cycle the same cost.
+    let mut work: Vec<(usize, usize, usize)> = components
+        .iter()
+        .map(|nodes| {
+            nodes.iter().fold((0, 0, 0), |(objects, steps, bytes), &node| {
+                let part = &parts[reached[node].as_str()];
+                (objects + part.nodes, steps + part.steps, bytes + part.bytes)
+            })
+        })
+        .collect();
     let mut parents = vec![vec![]; components.len()];
     let mut remaining = vec![0; components.len()];
     for (from, targets) in edges.iter().enumerate() {
@@ -699,6 +678,23 @@ fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> R
     let mut ready: Vec<usize> = remaining.iter().enumerate().filter_map(|(i, &count)| (count == 0).then_some(i)).collect();
     while let Some(child) = ready.pop() {
         for &parent in &parents[child] {
+            work[parent].0 = work[parent].0.saturating_add(work[child].0);
+            work[parent].1 = work[parent].1.saturating_add(work[child].1);
+            work[parent].2 = work[parent].2.saturating_add(work[child].2);
+            if work[parent].0 > MAX_EXPANDED_NODES {
+                return Err(format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references"));
+            }
+            if work[parent].1 > MAX_SCAN_STEPS {
+                return Err(format!(
+                    "{TOO_LARGE}the schema expands to more than {MAX_SCAN_STEPS} members and items through its references"
+                ));
+            }
+            if work[parent].2 > MAX_SCAN_BYTES {
+                return Err(format!(
+                    "{TOO_LARGE}the schema expands to more than {} MiB of names and strings through its references",
+                    MAX_SCAN_BYTES >> 20
+                ));
+            }
             longest[parent].0 = longest[parent].0.max(weights[parent].0.saturating_add(longest[child].0));
             longest[parent].1 = longest[parent].1.max(weights[parent].1.saturating_add(longest[child].1));
             remaining[parent] -= 1;
@@ -711,7 +707,7 @@ fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> R
     if references > MAX_REF_CHAIN || depth > MAX_CHAIN_DEPTH {
         return Err(format!("{TOO_LARGE}the schema nests references too deeply"));
     }
-    Ok(())
+    Ok(work[component_of[0]].0)
 }
 
 fn collect_refs(v: &Value, out: &mut Vec<String>) -> Result<(), String> {

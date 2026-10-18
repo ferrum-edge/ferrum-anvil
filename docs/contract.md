@@ -70,9 +70,10 @@ company ruleset.
     (repeated references count each time);
   - it and the schemas it references have more than 1,000,000 members and
     items (a large `enum` passes; a pathological one is not scanned on
-    every compile), or more than 16 MiB of member names and strings (each
-    compile copies them, however few members hold them: a description of
-    several megabytes, say).
+    every compile), or more than 16 MiB of member names and strings. These
+    limits also apply with each reference expanded: error collection may
+    copy a large subschema for every repeated reference. A recursive region
+    is charged for a complete lap, regardless of its entry point.
 
   Examples behind such a schema are counted in `examples_not_checked`. A
   schema is compiled once however many media types `$ref` it, and all the

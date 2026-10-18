@@ -264,3 +264,29 @@ fn cached_reference_tails_cannot_hide_longer_paths() {
         }
     }
 }
+
+#[test]
+fn reference_expansion_charges_error_payload_bytes_and_scalar_members() {
+    for (leaf, repetitions) in [
+        (json!({"not":{"type":"object","description":"x".repeat(512 << 10)}}), 2_000),
+        (json!({"enum":(0..50_000).collect::<Vec<u32>>()}), 32),
+    ] {
+        let refs: Vec<Value> = (0..repetitions).map(|_| json!({"$ref":"#/$defs/fail"})).collect();
+        // Only measure/load the refusal. Eager error collection on the first
+        // case would clone about 1 GiB before yielding its first error.
+        refused_work(&json!({"$defs":{"fail":leaf},"allOf":refs}));
+        let refs: Vec<Value> = (0..repetitions).map(|_| json!({"$ref":"#/components/schemas/Fail"})).collect();
+        let schema = json!({"allOf":refs});
+        let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+            "components":{"schemas":{"Checked":schema,"Fail":leaf}}});
+        let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
+        assert!(schema::too_large(&err), "{err}");
+    }
+    let schema = json!({"$defs":{"fail":{"not":{"type":"object","description":"x".repeat(100)}}},
+        "allOf":[{"$ref":"#/$defs/fail"},{"$ref":"#/$defs/fail"}]});
+    ruleset(&schema).unwrap();
+    let validator = jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&schema).unwrap();
+    assert!(validator.is_valid(&json!("ok")));
+    assert!(!validator.is_valid(&json!({})));
+}

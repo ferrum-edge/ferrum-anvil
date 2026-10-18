@@ -335,8 +335,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   used for OpenAPI example and drift checks. Recursive branching and
   non-structural recursive applicators, `unevaluatedProperties` and
   `unevaluatedItems` are refused before validation because the validator's
-  eager error collection and annotation tracking can amplify work. Scope
-  changes that would make references differ from measurement are refused;
+  eager error collection and annotation tracking can amplify work.
+  Reference-expanded costs include text bytes and scalar members because
+  errors may clone large subschemas for every reference. Simple cycles are
+  charged for a complete lap, and depth limits use longest reference paths.
+  Scope changes that would make references differ from measurement are refused;
   literal data and unknown annotations do not expand references. Refused
   schemas are reported as unchecked, or as a ruleset load error.
 - **Contract drift leaking response data:** drift reads response bodies

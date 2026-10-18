@@ -83,6 +83,8 @@
 
 ### Fixed
 
+- Schema reference-expansion limits count text bytes and scalar members as
+  well as containers, bounding repeated error-payload copies.
 - A custom ruleset's `schema` function is checked when the ruleset loads with
   the limits OpenAPI schemas already have: a reference cycle that does not
   descend into the value, more than 100,000 schema nodes with references
