@@ -77,10 +77,18 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
         a.url = r.text_any_case(&r.url(&a.url));
         if let Some(f) = &mut a.failure {
             f.message = r.text_any_case(&f.message);
+            f.field = f.field.as_deref().map(|s| r.text_any_case(s));
+        }
+        for phase in &mut a.phases {
+            phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
         }
         if let Some(t) = a.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
             if let Some(f) = &mut t.failure {
                 f.message = r.text_any_case(&f.message);
+                f.field = f.field.as_deref().map(|s| r.text_any_case(s));
+            }
+            for phase in &mut t.phases {
+                phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
             }
             if let Some(b) = &mut t.refusal_body {
                 let (kept, cut) = refusal_body(r, b);
@@ -346,10 +354,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let dispatch = DispatchState::summarize(attempts.iter().map(|x| x.dispatch));
     let summary = summary_line(transport, application, &protocol_status, &diagnosis.findings);
     let response_metadata = response.as_ref().map(crate::ResponseMetadata::from_response);
-    let mut findings = diagnosis.findings;
-    for f in &mut findings {
-        redactor.finding(f);
-    }
+    let findings = diagnosis.findings;
     let prepared_headers: Vec<HeaderEntry> =
         a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect();
     let mut inferred: Vec<String> = a.inferred.iter().map(|i| redactor.inferred(i)).collect();
@@ -572,6 +577,8 @@ pub fn local_failure_with(
         extracted: vec![],
         findings: diag.findings,
     };
+    let mut record = record;
+    redactor.record_metadata(&mut record);
     ExecutionOutput { response_metadata: None, record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
 }
 

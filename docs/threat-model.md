@@ -143,7 +143,7 @@ against it).
     decoding detail the record keeps beside the body, are scrubbed of every
     known secret value too: a server can reflect a credential into any
     response metadata, not only header values. Header names and content
-    codings are compared in any letter case (protocols lowercase them), and
+    codings are compared ignoring ASCII case (protocols lowercase them), and
     so are the warnings, assertion messages, findings and summary that can
     quote them (including assertion labels and observed values). Overlapping
     secrets are covered in full, including ones spanning media-type parameters.
@@ -157,6 +157,7 @@ against it).
     essence as unknown and reports checks limited by redacted metadata; it
     never suggests documenting the redaction marker as a media type. Redacted
     header or query names also cannot prove that a required name was absent.
+    A redacted server or path likewise makes routing evidence unavailable.
     A coding
     redacted from history cannot be recovered for later decompression (the raw
     capture remains viewable). The request's header names and `Content-Type`

@@ -408,6 +408,7 @@ async fn a_well_known_media_type_is_scrubbed_without_losing_operational_metadata
         Some("text/event-stream; x=stream-param-77")
     );
     assert!(!ct.contains("stream-param-77"), "{ct}");
+    assert!(!format!("{:?}", o.response_metadata).contains("stream-param-77"));
 }
 
 /// The status line's reason phrase is kept in the response, the protocol
@@ -503,5 +504,61 @@ async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media
     let json = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
     for secret in ["mixed-coding-77", "token=secret-77"] {
         assert!(!json.contains(secret), "{json}");
+    }
+}
+
+#[test]
+fn known_values_cannot_conceal_url_credentials_before_structural_redaction() {
+    let r = Redactor::new(vec!["TOKEN".into(), "HTTPS://ALICE".into()], vec![]);
+    for url in ["https://peer.test/?token=FreshCredential77", "https://alice:NewPassword77@example.test/path"] {
+        let direct = r.url(url);
+        let header = r.header("Location", url);
+        for text in [direct, header, r.header("Link", &format!("<{url}>; rel=next")), r.header("Refresh", &format!("0; url={url}"))] {
+            assert!(!text.contains("FreshCredential77") && !text.contains("NewPassword77"), "{text}");
+        }
+    }
+    let r = Redactor::new(vec![], vec!["Location".into()]);
+    assert_eq!(r.header("Location", "https://peer.test/public"), REDACTED);
+}
+
+#[test]
+fn local_failures_and_shared_protocol_metadata_do_not_keep_folded_secrets() {
+    use anvil_domain::diagnostics::{Owner, Remediation};
+    use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
+    use anvil_domain::outcome::{GrpcStatusSource, ProtocolStatus};
+    let secret = "Folded-Meta-Secret77";
+    let folded = secret.to_ascii_lowercase();
+    let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://example.test/"));
+    let resolver = Resolver::new(vec![], None);
+    resolver.mark_sensitive("credential", secret);
+    let mut failure = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, folded.clone());
+    failure.field = Some(folded.clone());
+    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+    assert!(!serde_json::to_string(&record).unwrap().to_ascii_lowercase().contains(&folded));
+    let redactor = Redactor::new(vec![secret.into()], vec![]);
+    if let Some(finding) = record.findings.first_mut() {
+        finding.does_not_prove.push(folded.clone());
+        finding.confirm_with.push(folded.clone());
+        finding.remediation.push(Remediation { text: folded.clone(), owner: Owner::Caller });
+    }
+    let websocket = serde_json::from_value(serde_json::json!({
+        "protocol":"websocket", "close_reason":folded, "closed_by":"peer",
+        "extensions":{"offered":folded,"answered":folded,"problem":folded,"negotiation":"rejected",
+            "violation":{"kind":"undecodable","detail":folded}}
+    }))
+    .unwrap();
+    for status in [
+        ProtocolStatus::Grpc {
+            http_status: Some(200),
+            grpc_status: Some(7),
+            grpc_message: Some(folded.clone()),
+            source: GrpcStatusSource::Trailers,
+        },
+        websocket,
+    ] {
+        record.outcome.protocol_status = status;
+        record.attempts[0].phases[0].detail = Some(folded.clone());
+        redactor.record_metadata(&mut record);
+        assert!(!serde_json::to_string(&record).unwrap().to_ascii_lowercase().contains(&folded));
     }
 }

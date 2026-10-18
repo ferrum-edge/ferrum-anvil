@@ -340,9 +340,23 @@ impl Redactor {
     /// them. Scrubbing the whole value before it is split also replaces a
     /// secret that spans a `;`, `=` or space whole.
     pub fn header(&self, name: &str, value: &str) -> String {
+        let sensitive = is_sensitive_name(name, &self.extra_names);
+        // Structured redaction must see original query names and userinfo.
+        // Scrubbing `token` or a URL prefix first can conceal that structure.
+        if !sensitive && URL_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h)) {
+            return self.url(value);
+        }
+        if !sensitive && (name.eq_ignore_ascii_case("link") || name.eq_ignore_ascii_case("refresh")) {
+            let scrubbed = self.text_any_case(value);
+            if !same_delimiters(value, &scrubbed, b":/?#&=@<>;\"'") {
+                return REDACTED.to_string();
+            }
+            let structured = if name.eq_ignore_ascii_case("link") { self.link(value) } else { self.refresh(value) };
+            return self.text_any_case(&structured);
+        }
         let scrubbed = self.text_any_case(value);
         let value = scrubbed.as_str();
-        if is_sensitive_name(name, &self.extra_names) {
+        if sensitive {
             let value = self.text(value);
             let value = value.as_str();
             // Keep the scheme word for Authorization-like headers (e.g. "Bearer").
@@ -378,15 +392,6 @@ impl Redactor {
             }
             return REDACTED.to_string();
         }
-        if URL_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h)) {
-            return self.url(value);
-        }
-        if name.eq_ignore_ascii_case("link") {
-            return self.link(value);
-        }
-        if name.eq_ignore_ascii_case("refresh") {
-            return self.refresh(value);
-        }
         self.text(value)
     }
 
@@ -408,9 +413,8 @@ impl Redactor {
     /// `Link` (RFC 8288): every `<URI-reference>` is redacted as a URL, and so
     /// is the value of an `anchor` parameter, which is a URI reference too.
     fn link(&self, value: &str) -> String {
-        let value = self.text(value);
         let mut out = String::with_capacity(value.len());
-        let mut rest = value.as_str();
+        let mut rest = value;
         while let Some(start) = rest.find('<') {
             let Some(len) = rest[start + 1..].find('>') else { break };
             out.push_str(&self.link_params(&rest[..start]));
@@ -451,8 +455,7 @@ impl Redactor {
     /// `Refresh` (`5; url=https://…`): the target after `url=` is redacted as
     /// a URL, keeping surrounding quotes.
     fn refresh(&self, value: &str) -> String {
-        let value = self.text(value);
-        let Some(at) = value.to_ascii_lowercase().find("url=") else { return self.url(&value) };
+        let Some(at) = value.to_ascii_lowercase().find("url=") else { return self.url(value) };
         let (head, target) = value.split_at(at + 4);
         let quote = target.chars().next().filter(|c| matches!(*c, '"' | '\'') && target.len() > 1 && target.ends_with(*c));
         if let Some(q) = quote {
@@ -494,8 +497,11 @@ impl Redactor {
             e.value = redacted;
         }
         f.explanation = self.text_any_case(&explanation);
-        for a in &mut f.alternatives {
+        for a in f.alternatives.iter_mut().chain(f.does_not_prove.iter_mut()).chain(f.confirm_with.iter_mut()) {
             *a = self.text_any_case(a);
+        }
+        for remediation in &mut f.remediation {
+            remediation.text = self.text_any_case(&remediation.text);
         }
     }
 
@@ -542,6 +548,9 @@ impl Redactor {
                     scrub(&mut e.offered);
                     scrub(&mut e.answered);
                     scrub(&mut e.problem);
+                    if let Some(violation) = &mut e.violation {
+                        scrub(&mut violation.detail);
+                    }
                 }
             }
             ProtocolStatus::Udp { masque: Some(t), .. } => {
@@ -553,6 +562,9 @@ impl Redactor {
         r.outcome.summary = self.text_any_case(&r.outcome.summary);
         for w in &mut r.outcome.warnings {
             w.message = self.text_any_case(&w.message);
+        }
+        for finding in &mut r.findings {
+            self.finding(finding);
         }
         for a in &mut r.assertion_results {
             a.label = self.text_any_case(&a.label);
@@ -569,10 +581,25 @@ impl Redactor {
     /// reveals a secret once decoded (a secret split across components by a
     /// raw `/` or `&`), everything after the authority is replaced.
     pub fn url(&self, u: &str) -> String {
-        let u = self.text_any_case(u);
+        let scrubbed = self.text_any_case(u);
+        if !same_delimiters(u, &scrubbed, b":/?#&=@") {
+            // A secret crosses a structural boundary. Withhold the path;
+            // retain only an origin that survives userinfo/value scrubbing.
+            let safe = redact_userinfo(u);
+            let Some((scheme, rest)) = safe.split_once("://").filter(|(scheme, _)| is_scheme(scheme)) else {
+                return REDACTED.to_string();
+            };
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let origin = format!("{scheme}://{}", &rest[..end]);
+            return if self.text_any_case(&origin) != origin || self.reveals_secret(&origin) {
+                REDACTED.to_string()
+            } else {
+                format!("{origin}/{REDACTED}")
+            };
+        }
         let (base, frag) = match u.split_once('#') {
             Some((b, f)) => (b, Some(f)),
-            None => (u.as_str(), None),
+            None => (u, None),
         };
         let (before_query, query) = match base.split_once('?') {
             Some((p, q)) => (p, Some(q)),
@@ -588,7 +615,7 @@ impl Redactor {
             Some(f) => format!("{out}#{}", self.pairs(f)),
             None => out,
         };
-        self.seal(out)
+        self.seal(self.text_any_case(&out))
     }
 
     /// `k=v&k=v` (a query or a fragment) with sensitive names' values and
@@ -838,9 +865,32 @@ fn replace_matches(matcher: &AhoCorasick, s: &str) -> String {
 }
 
 fn replace_ranges(s: &str, ranges: Vec<std::ops::Range<usize>>) -> String {
+    // Existing sentinels are fixed points, even if a secret is "redacted".
+    // A match crossing a sentinel still covers its whole span.
+    let mut markers = s.match_indices(REDACTED).map(|(at, marker)| at..at + marker.len());
+    let mut marker = markers.next();
+    let mut adjusted: Vec<std::ops::Range<usize>> = Vec::new();
+    for mut range in ranges {
+        while marker.as_ref().is_some_and(|m| m.end <= range.start) {
+            marker = markers.next();
+        }
+        if marker.as_ref().is_some_and(|m| m.start <= range.start && m.end >= range.end) {
+            continue;
+        }
+        while let Some(m) = marker.as_ref().filter(|m| m.start < range.end) {
+            range.start = range.start.min(m.start);
+            range.end = range.end.max(m.end);
+            marker = markers.next();
+        }
+        if let Some(last) = adjusted.last_mut().filter(|r| r.end > range.start) {
+            last.end = last.end.max(range.end);
+        } else {
+            adjusted.push(range);
+        }
+    }
     let mut out = String::with_capacity(s.len());
     let mut offset = 0;
-    for range in ranges {
+    for range in adjusted {
         out.push_str(&s[offset..range.start]);
         out.push_str(REDACTED);
         offset = range.end;
@@ -860,7 +910,9 @@ fn fallback_ranges(text: &str, patterns: &[String]) -> Vec<std::ops::Range<usize
             .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
         let Some((start, len)) = next else { break };
         if matches == MAX_SECRET_MATCHES {
-            return vec![0..text.len()];
+            ranges.clear();
+            ranges.push(0..text.len());
+            return ranges;
         }
         matches += 1;
         let end = start + len;
@@ -877,6 +929,10 @@ fn fallback_ranges(text: &str, patterns: &[String]) -> Vec<std::ops::Range<usize
 
 fn fallback_redact(text: &str, patterns: &[String]) -> String {
     replace_ranges(text, fallback_ranges(text, patterns))
+}
+
+fn same_delimiters(before: &str, after: &str, delimiters: &[u8]) -> bool {
+    before.bytes().filter(|b| delimiters.contains(b)).eq(after.bytes().filter(|b| delimiters.contains(b)))
 }
 
 fn is_scheme(s: &str) -> bool {
@@ -919,6 +975,17 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn redaction_markers_are_fixed_points_in_metadata() {
+        use super::*;
+        let r = Redactor::new(vec!["redacted".into()], vec![]);
+        for value in [REDACTED.to_string(), format!("text/{REDACTED}; x={REDACTED}"), "the REDACTED value".into()] {
+            let once = r.text_any_case(&value);
+            assert_eq!(r.text_any_case(&once), once);
+            assert_eq!(r.text(&once), once);
+        }
+    }
+
+    #[test]
     fn repetitive_secret_matches_fail_closed_at_the_work_budget() {
         use super::*;
         let mut r = Redactor::new(vec!["key1".into()], vec![]);
@@ -940,13 +1007,13 @@ mod tests {
         let value = "Ü text/plain;token=secret-77 and aaaaa!";
         let expected = format!("Ü {REDACTED} and {REDACTED}!");
         assert_eq!(r.text(value), expected);
-        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), expected.to_ascii_uppercase());
+        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), format!("Ü {REDACTED} AND {REDACTED}!"));
         r.fallback_patterns = r.fallback_patterns_for_test();
         r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
         r.matcher = None;
         r.any_case = None;
         assert_eq!(r.text(value), expected);
-        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), expected.to_ascii_uppercase());
+        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), format!("Ü {REDACTED} AND {REDACTED}!"));
     }
 
     /// Either automaton can fail to build (its size limit); redaction then

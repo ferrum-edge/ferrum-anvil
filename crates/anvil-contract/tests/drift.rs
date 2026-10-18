@@ -580,9 +580,10 @@ fn redacted_header_and_query_names_cannot_prove_required_names_were_missing() {
     }}}});
     let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
     let mut obs = Obs::new("redacted", "GET", "/a").empty(200).0;
-    obs.query = vec!["[REDACTED]".into()];
-    obs.request_headers = vec!["x-[redacted]-id".into()];
-    obs.response.as_mut().unwrap().headers = vec!["x-[redacted]-id".into()];
+    let marker = anvil_domain::secret::REDACTED;
+    obs.query = vec![marker.into()];
+    obs.request_headers = vec![format!("x-{marker}-id")];
+    obs.response.as_mut().unwrap().headers = vec![format!("x-{marker}-id")];
     let report = analyze(&spec, &[obs.clone()], &DriftOptions::default());
     assert!(
         !report.findings.iter().any(|f| matches!(f.kind, DriftKind::MissingRequiredParameter | DriftKind::MissingResponseHeader)),
@@ -597,4 +598,25 @@ fn redacted_header_and_query_names_cannot_prove_required_names_were_missing() {
     for kind in [DriftKind::MissingRequiredParameter, DriftKind::MissingResponseHeader] {
         assert!(report.findings.iter().any(|f| f.kind == kind), "{kind:?}: {:?}", report.findings);
     }
+}
+
+#[test]
+fn redacted_routes_are_unknown_but_redacted_query_values_still_route() {
+    let spec = Spec::parse(br#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"servers":[{"url":"https://api.test"}],"paths":{"/health":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#).unwrap();
+    let marker = anvil_domain::secret::REDACTED;
+    for url in [
+        format!("https://api.test/{marker}"),
+        format!("https://{marker}.test/health"),
+        "https://api.test/%E2%80%B9redacted%E2%80%BA".into(),
+    ] {
+        let obs = Obs::new("redacted", "GET", &url).empty(200).0;
+        let report = analyze(&spec, &[obs], &DriftOptions::default());
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert!(report.suggestions.is_empty());
+        assert!(report.notes.iter().any(|n| n.contains("routing not checked")));
+    }
+    let obs = Obs::new("query", "GET", &format!("https://api.test/health?token={marker}")).empty(503).0;
+    let report = analyze(&spec, &[obs], &DriftOptions::default());
+    assert_eq!(report.matched, 1);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::UndeclaredStatus));
 }
