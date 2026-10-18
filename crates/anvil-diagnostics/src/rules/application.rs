@@ -63,8 +63,11 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         out.push(d);
     }
     if let Some(t) = &ctx.body.mcp_tool_error {
-        // The tool ran and reported its own failure.
-        let (scope, owner) = (SourceScope::UpstreamApplication, Owner::ApiOwner);
+        // The result is marked as an error, but not who wrote it: a gateway
+        // that dispatches the tool (a Ferrum mcp_gateway OpenAPI bridge) also
+        // writes an isError result when it fails or refuses the call, and the
+        // text naming a gateway error class is content anyone can send.
+        let (scope, owner) = (SourceScope::Unknown, Owner::Unknown);
         out.push(
             Draft::new("app.mcp_tool_error", "app.body", Confidence::Confirmed, scope, owner, Severity::Error)
                 .ev_at(E::BodyContent, "mcp.result.isError", "true", idx)

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Security
+
+- rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
+  (client session `Debug` output, data buffered across an ECH rejection,
+  pre-authentication Brotli certificate decompression and a key-exchange
+  downgrade).
+- zip is updated to 9.0.4 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
+  preserving SUID/SGID bits and symlink targets escaping the destination).
+  The `zip` 4.6.1 copy held by `tauri-plugin-updater` has no patched 4.x
+  release and is a reviewed `deny.toml` ignore: the updater verifies the
+  release signature before extracting an update archive, and Anvil's own
+  bundle code reads entries in memory without `extract()`.
+
 ### Changed
 
 - Record-integrity checks now cost what an operation touches instead of the
@@ -80,6 +93,53 @@
   `$anchor`, `$dynamicRef` and `$recursiveRef` are refused; keywords inside
   literal data (`const`, `enum`, `default`, `examples`) are not read as schema
   keywords or references, here or for OpenAPI schemas.
+- A user cancel or vault lock that arrives after a load schedule has ended,
+  while in-flight iterations drain, now stops their chains before the next
+  step, shortens the drain to `cancel_drain_ms`, and is reported as the run's
+  completion. Before, the cancel/lock observer stopped with the schedule, so a
+  chain could send its next request after the lock and the report said
+  `completed`.
+- Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
+  embedded in string fields and apply the credential policy more evenly:
+  - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed
+    with the bounded import parser, and their nodes share one `max_nodes`
+    budget per import. A body that does not fit is kept as text with a
+    `body_not_scanned` warning; the GraphQL payload is no longer copied.
+  - cURL short-option clusters count against the 10,000-argument limit after
+    expansion, not only as shell words.
+  - Postman and Insomnia raw JSON bodies and Postman/Insomnia GraphQL
+    variables have credential-like members redacted like HAR and cURL bodies,
+    and Insomnia form bodies parsed from text have credential-like fields
+    redacted. Numbers under credential names (`pin`, `otp`, …) are redacted
+    too, and a body that repeats a member name is rewritten so an earlier,
+    unscanned value does not survive. XML, SOAP, other text and unparsable
+    JSON bodies get `body_not_scanned` in every migration format.
+  - An Insomnia GraphQL envelope over the budget, malformed, or without a
+    `query` string is kept as a raw JSON body instead of becoming the query
+    text; a bare GraphQL query stays a query.
+  - cURL `-G` data with a bare flag (`flag&api_key=…`) becomes one query
+    parameter per segment, so credential-like values are redacted.
+  - An OpenAPI JSON example given as a string is validated as JSON without
+    building it (it used to be parsed in full outside the node budget).
+  - Credential-like values in a URL query that is kept verbatim (it has a bare
+    `flag` segment, or it is written into an Insomnia URL) are redacted in
+    place in cURL, Postman and Insomnia imports, as HAR already did; a kept
+    value keeps its original encoding.
+- Desktop: an API standards check that stopped early (`incomplete`, or
+  operations skipped, $refs not followed, examples not checked) without
+  errors now shows "not completely checked"
+  instead of "meets the standards", and no longer says the description meets
+  every rule.
+- Desktop: **Start load** starts one run per confirmation, even on a double
+  click. Every accepted run keeps its own Stop control until it finishes, and a
+  run that finishes before its start reply arrives is not shown as live.
+- Desktop: a load-plan save, or a workspace-variable or environment save in the
+  Environments dialog, no longer puts the saved (older) values over edits typed
+  while the save was on its way. A list reload no longer resets the
+  workspace-variable editor to the workspace's previous values.
+- Bundle import preview checks folder parent links for cycles in one pass over
+  the folders. It used to walk each folder's whole ancestry, so a long folder
+  chain cost quadratic time on the import worker before the preview appeared.
 
 - Browser sign-in (identity and target-API authorization code + PKCE) no longer
   accepts plain `http` authorization endpoints on the DNS name `localhost`
@@ -136,6 +196,14 @@
     applies one total deadline across DNS, handshake and exchange (and MASQUE
     and HBONE DTLS no longer restart it after the handshake).
 
+- Desktop: an API standards check that left anything unchecked (`incomplete`,
+  skipped operations, `$ref`s not followed, examples not checked) without
+  errors shows "not completely checked" instead of "meets the standards", and
+  no longer says the description meets every rule.
+- Desktop: **Start load** starts one run per confirmation, even on a double
+  click. Every accepted run keeps its own Stop control until it finishes, and a
+  run that finishes before its start reply arrives is not shown as live.
+
 - Key rotation removes the old key's material it kept outside the database once
   the rotation commits: `profile.json` no longer holds passphrase and recovery
   wraps of the old key, checkpoints sealed with an earlier key and interrupted
@@ -143,6 +211,11 @@
   is deleted. An interrupted scrub never risks the new key (unlock reads the
   committed database) and is repeated at the next unlock. Pre-rotation
   checkpoints are no longer kept in the profile; keep a portable backup first.
+
+- Attaching the same file again after a data-key rotation no longer leaves the
+  file's pre-rotation blob pinned with nothing able to release it. The new
+  blob replaces it in the attachment index, and the old one is released in the
+  same transaction.
 
 - An OS-keychain profile can now rotate its data key and stay keychain-protected:
   `anvil profile rotate-key --confirm-rotation` without `--new-passphrase-stdin`,
@@ -152,6 +225,12 @@
   profile to passphrase protection. `PolicyRotation` is now an enum and retired
   credentials are recorded as `RotationPolicy::retired_keychain`.
 
+- `app.mcp_tool_error` no longer says the call reached the tool or assigns
+  it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
+  `isError: true` result when the gateway fails or refuses the call it makes for
+  the tool. The error result stays confirmed, scope and owner are unknown, and
+  the finding lists both explanations.
+
 - A transient storage error no longer locks an unlocked profile. The per-operation
   key check drops the key only on evidence against it (a canary or catalogue that
   does not authenticate, or a rotated key); SQLite contention, I/O errors and a
@@ -160,11 +239,28 @@
   with a "profile is busy" error instead of waiting forever, and a file system
   without file locks is refused once, when the profile is opened, with an error
   naming it.
+- An export's free-text credential warning (a credential in a body, URL or
+  other unextracted text) no longer recommends encrypted transfer: that mode
+  seals only the vault, so the text stays readable in either bundle mode. The
+  warning now says so and advises removing the literal or moving it into a
+  secret variable or sensitive field.
+
+- The import preview counts request revisions: a new revision is created, and
+  one already stored is a conflict that Merge skips and Replace overwrites, as
+  the import already did.
+
 - A request whose JWT-SVID auth is acquired from the Workload API, a value or a
   file again resolves the context's deferred vault variables. The resolver that
   carries the acquired token did not forward vault-variable bindings, so such a
   request failed with an unresolved variable. `SecretResolver` methods no longer
   have default implementations, so a wrapping resolver must forward each one.
+
+- The lab refuses `--scenario` selectors that name no scenario of the selected
+  profile (or of any profile for `run all`) before starting fixtures, instead
+  of reporting an empty run as a success. Explicitly skipped scenarios stay
+  selectable, and the `policy` and `admission` listings now include them. The
+  MCP lab's "did not forward" ground truth now requires zero upstream calls, so
+  a refused call forwarded twice fails.
 
 - The GW-020-BUDGET lab scenario waits up to three seconds for the gateway's
   budget-rejection log entry, and reports a clear timeout if it never appears

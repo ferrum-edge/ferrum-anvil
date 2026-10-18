@@ -278,3 +278,79 @@ fn shell_edge_cases() {
     assert!(matches!(import(b"curl 'unterminated", &opts()), Err(ImportError::Syntax { .. })));
     assert!(matches!(import(b"curl -X POST", &opts()), Err(ImportError::Invalid { .. })));
 }
+
+#[test]
+fn short_option_clusters_count_against_the_argument_limit() {
+    // One shell word that expands into more flags than the argument limit.
+    let cmd = format!("curl -{} https://example.test", "s".repeat(20_000));
+    match import(cmd.as_bytes(), &opts()) {
+        Err(ImportError::Syntax { message, .. }) => assert!(message.contains("arguments"), "{message}"),
+        other => panic!("expected the argument limit, got {other:?}"),
+    }
+    // Ordinary clusters still expand.
+    let r = curl("curl -sSL -XPOST https://example.test");
+    assert_eq!(r.requests[0].spec.method, "POST");
+}
+
+#[test]
+fn credentials_in_a_query_with_a_bare_flag_are_redacted_in_place() {
+    let r = curl("curl 'https://example.test/a?flag&api_key=placeholder-secret&page=2#top'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test/a?flag&api_key={{api_key}}&page=2");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert_eq!(r.report.redactions.len(), 1);
+    // Kept verbatim (original encoding) with include_credentials.
+    let o = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://example.test/a?flag&token=a%26b'", &o).unwrap();
+    assert_eq!(r.requests[0].spec.url, "https://example.test/a?flag&token=a%26b");
+}
+
+#[test]
+fn json_data_is_scanned_under_the_node_budget() {
+    let o = ImportOptions { max_nodes: 64, ..opts() };
+    let big = format!("[{}]", vec!["0"; 200].join(","));
+    let cmd = format!("curl -H 'Content-Type: application/json' -d '{big}' https://example.test");
+    let r = import(cmd.as_bytes(), &o).unwrap();
+    assert!(has_at(&r, "body_not_scanned", "/args#json"));
+    // Within the budget, credential members are still redacted.
+    let r = import(br#"curl --json '{"password":"placeholder-secret"}' https://example.test"#, &o).unwrap();
+    assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+}
+
+#[test]
+fn numeric_credentials_and_unscannable_data() {
+    let r = curl(r#"curl --json '{"pin":123456,"max_tokens":5}' https://example.test"#);
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    assert!(!text.contains("123456"), "{text}");
+    let body = substituted(text, &[("pin", "123456")]);
+    assert_eq!((body["pin"].as_u64(), body["max_tokens"].as_u64()), (Some(123456), Some(5)));
+    // Unrelated source text mentioning the render marker's tag must not keep
+    // the numeric placeholder quoted (which would send the pin as a string),
+    // and the mentioning string itself is preserved.
+    let r = curl(r#"curl --json '{"pin":123456,"note":"anvil-number"}' https://example.test"#);
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    let body = substituted(text, &[("pin", "123456")]);
+    assert_eq!(body["pin"].as_u64(), Some(123456), "{text}");
+    assert_eq!(body["note"].as_str(), Some("anvil-number"), "{text}");
+    // A longer string that begins with the whole serialized marker and then
+    // holds multibyte text is not a placeholder: it stays intact, and the
+    // rendering must not slice it at a byte offset.
+    let note = format!("\u{1}anvil-number\u{1}{}é", "x".repeat(31));
+    let cmd = format!(r#"curl --json '{{"pin":123456,"note":{}}}' https://example.test"#, serde_json::to_string(&note).unwrap());
+    let r = curl(&cmd);
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    let body = substituted(text, &[("pin", "123456")]);
+    assert_eq!(body["pin"].as_u64(), Some(123456), "{text}");
+    assert_eq!(body["note"].as_str(), Some(note.as_str()), "{text}");
+    let r = curl("curl -H 'Content-Type: application/xml' -d '<a>placeholder-secret</a>' https://example.test");
+    assert!(has_at(&r, "body_not_scanned", "/args"));
+}
+
+#[test]
+fn get_data_with_a_bare_flag_keeps_the_credential_policy() {
+    let r = curl("curl -G -d 'flag&api_key=placeholder-secret' https://example.test");
+    let s = &r.requests[0].spec;
+    assert_eq!(param(s, "api_key").map(|p| p.value.as_str()), Some("{{api_key}}"));
+    assert!(param(s, "flag").is_some());
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+}

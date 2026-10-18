@@ -332,3 +332,190 @@ fn v4_sibling_and_nested_groups_still_import() {
     assert_eq!(r.requests.len(), 2);
     assert!(!has(&r, "orphan_resource"));
 }
+
+#[test]
+fn raw_json_bodies_and_url_queries_are_redacted() {
+    for r in [
+        v4_request(serde_json::json!({
+            "url": "https://example.test/x?flag&api_key=placeholder-secret",
+            "body": { "mimeType": "application/json", "text": r#"{"user":"u","password":"placeholder-secret"}"# },
+        })),
+        v5_request(serde_json::json!({
+            "url": "https://example.test/x?flag&api_key=placeholder-secret",
+            "body": { "mimeType": "application/json", "text": r#"{"user":"u","password":"placeholder-secret"}"# },
+        })),
+    ] {
+        let s = &r.requests[0].spec;
+        assert_eq!(json_body(s)["password"], "{{password}}");
+        assert_eq!(s.url, "https://example.test/x?flag&api_key={{api_key}}");
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+        assert_eq!(r.report.redactions.len(), 2);
+    }
+}
+
+#[test]
+fn graphql_payloads_are_parsed_under_the_node_budget() {
+    let variables = format!("{{\"ids\":[{}]}}", vec!["0"; 200].join(","));
+    let text = format!(r#"{{"query":"{{ a }}","variables":{variables}}}"#);
+    let request = serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } });
+    let mut request = request;
+    request["_id"] = "req_1".into();
+    request["_type"] = "request".into();
+    request["parentId"] = "wrk_1".into();
+    request["name"] = "R".into();
+    request["method"] = "POST".into();
+    let doc = serde_json::json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [{ "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" }, request],
+    });
+    let o = anvil_import::ImportOptions { max_nodes: 64, ..opts() };
+    let r = anvil_import::import(doc.to_string().as_bytes(), &o).unwrap();
+    // The envelope is kept as the JSON it is (not re-wrapped as a query).
+    match &r.requests[0].spec.body {
+        Body::Raw { text: kept, content_type } => {
+            assert_eq!(kept, &text);
+            assert_eq!(content_type.as_deref(), Some("application/json"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(has_at(&r, "body_not_scanned", "/resources/1/body/text"));
+    // Within the budget the payload is split as before.
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/g",
+        "body": { "mimeType": "application/graphql", "text": r#"{"query":"{ a }","variables":{"n":1}}"# },
+    }));
+    match &r.requests[0].spec.body {
+        Body::GraphQl { query, variables, .. } => {
+            assert_eq!(query, "{ a }");
+            assert_eq!(variables, r#"{"n":1}"#);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn graphql_variables_and_numeric_credentials_are_redacted() {
+    let gql = r#"{"query":"mutation { login }","variables":{"user":"u","password":"placeholder-secret","pin":123456}}"#;
+    for r in [
+        v4_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": gql } })),
+        v5_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": gql } })),
+    ] {
+        match &r.requests[0].spec.body {
+            Body::GraphQl { variables, .. } => {
+                // The number is a placeholder again once the user supplies it.
+                let v = substituted(variables, &[("pin", "123456")]);
+                assert_eq!(v["password"], "{{password}}");
+                assert_eq!(v["pin"], 123456);
+                assert_eq!(v["user"], "u");
+            }
+            other => panic!("{other:?}"),
+        }
+        let all = serde_json::to_string(&r.requests).unwrap();
+        assert!(!all.contains("placeholder-secret") && !all.contains("123456"), "{all}");
+    }
+    // Counts under a `token` name are not credentials.
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/json", "text": r#"{"max_tokens":100,"otp":654321}"# },
+    }));
+    let Body::Json { text } = &r.requests[0].spec.body else { panic!("{:?}", r.requests[0].spec.body) };
+    assert!(!text.contains("654321"), "{text}");
+    let body = substituted(text, &[("otp", "654321")]);
+    assert_eq!(body["max_tokens"], 100);
+    assert_eq!(body["otp"], 654321);
+}
+
+#[test]
+fn a_repeated_credential_member_does_not_keep_its_earlier_value() {
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/json", "text": r#"{"password":"placeholder-secret","password":"{{password}}"}"# },
+    }));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert!(has(&r, "json_duplicate_member"));
+    assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+}
+
+#[test]
+fn a_repeated_ordinary_member_does_not_keep_an_earlier_nested_credential() {
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/json", "text": r#"{"login":{"password":"placeholder-secret"},"login":{}}"# },
+    }));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert!(has(&r, "json_duplicate_member"));
+}
+
+#[test]
+fn graphql_json_without_a_query_string_is_sanitized_not_copied_into_the_query() {
+    for text in [
+        r#"{"variables":{"password":"placeholder-secret"}}"#,
+        r#"{"query":null,"variables":{"password":"placeholder-secret"}}"#,
+        r#"{"query":7,"variables":{"password":"placeholder-secret"}}"#,
+    ] {
+        let r =
+            v4_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } }));
+        let all = serde_json::to_string(&r.requests).unwrap();
+        assert!(!all.contains("placeholder-secret"), "{text}: {all}");
+        assert!(matches!(r.requests[0].spec.body, Body::Raw { .. }), "{text}");
+        assert!(has(&r, "graphql_envelope_without_query"), "{text}");
+    }
+}
+
+#[test]
+fn a_bare_graphql_query_stays_a_query_when_the_budget_is_spent() {
+    // The first request's JSON body spends the embedded-document budget.
+    // An array of 63 items is 64 nodes: the whole budget.
+    let big = format!("[{}]", vec!["0"; 63].join(","));
+    let doc = serde_json::json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [
+            { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+            { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "A", "method": "POST", "url": "https://example.test/a",
+              "body": { "mimeType": "application/json", "text": big } },
+            { "_id": "req_2", "_type": "request", "parentId": "wrk_1", "name": "B", "method": "POST", "url": "https://example.test/g",
+              "body": { "mimeType": "application/graphql", "text": "{ a }" } },
+        ],
+    });
+    let o = anvil_import::ImportOptions { max_nodes: 64, ..opts() };
+    let r = anvil_import::import(doc.to_string().as_bytes(), &o).unwrap();
+    match &req(&r, "insomnia:req_2").spec.body {
+        Body::GraphQl { query, .. } => assert_eq!(query, "{ a }"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn graphql_json_that_cannot_be_parsed_is_kept_as_raw_json_with_a_warning() {
+    let deep = format!("{{\"query\":\"q\",\"variables\":{}{}}}", "[".repeat(150), "]".repeat(150));
+    for text in [r#"{"query":"q","variables":{"password":"placeholder-secret",}}"#.to_string(), deep] {
+        let r =
+            v4_request(serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": text } }));
+        match &r.requests[0].spec.body {
+            Body::Raw { content_type, .. } => assert_eq!(content_type.as_deref(), Some("application/json")),
+            other => panic!("{other:?}"),
+        }
+        assert!(has_at(&r, "body_not_scanned", "/resources/1/body/text"));
+    }
+    // A shorthand query is still a query.
+    let r = v4_request(
+        serde_json::json!({ "url": "https://example.test/g", "body": { "mimeType": "application/graphql", "text": "{ a { b } }" } }),
+    );
+    assert!(matches!(&r.requests[0].spec.body, Body::GraphQl { query, .. } if query == "{ a { b } }"));
+}
+
+#[test]
+fn unscannable_bodies_are_flagged() {
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/xml", "text": "<login><password>placeholder-secret</password></login>" },
+    }));
+    assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
+    let r = v4_request(serde_json::json!({
+        "url": "https://example.test/x",
+        "body": { "mimeType": "application/x-www-form-urlencoded", "text": "flag&password=placeholder-secret" },
+    }));
+    assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
+}

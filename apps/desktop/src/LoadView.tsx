@@ -146,6 +146,17 @@ type PlanDraft = { plan: LoadPlan; created: boolean };
 type Drafts = Record<string, Record<string, PlanDraft>>;
 
 /** The plan with its list fields normalized; an already normalized plan is returned as is. */
+/** What the backend sets on a save; an edit never changes it. */
+function storedMeta(p: LoadPlan): Pick<LoadPlan, "trusted" | "created_at" | "updated_at"> {
+  return { trusted: p.trusted, created_at: p.created_at, updated_at: p.updated_at };
+}
+
+/** Whether two edits of a plan are the same edit (stored metadata aside). */
+function sameEdit(a: LoadPlan, b: LoadPlan): boolean {
+  const content = (p: LoadPlan) => JSON.stringify({ ...p, trusted: null, created_at: null, updated_at: null });
+  return content(a) === content(b);
+}
+
 function editable(plan: LoadPlan): EditPlan {
   return plan.chain && plan.mix ? (plan as EditPlan) : { ...plan, chain: plan.chain ?? [], mix: plan.mix ?? [] };
 }
@@ -173,7 +184,14 @@ export function LoadView(props: {
   // A new plan that was not edited yet: it gets a draft on its first edit and
   // is dropped when something else is selected or the workspace switches.
   const [fresh, setFresh] = useState<LoadPlan | null>(null);
-  const [live, setLive] = useState<{ runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] } | null>(null);
+  // Every accepted run until it finishes, each with its own Stop control.
+  const [lives, setLives] = useState<Live[]>([]);
+  const live = lives.length > 0;
+  // Kept in step with every start and finish event as it arrives (not when
+  // React applies the update): runs shown as live, and runs that finished
+  // before their start reply arrived, which are never shown.
+  const liveKeys = useRef(new Set<string>());
+  const finishedEarly = useRef(new Set<string>());
   // New plans discarded here: a save of one that was already on its way
   // still lands, but never selects the plan again.
   const discarded = useRef(new Set<string>());
@@ -195,11 +213,16 @@ export function LoadView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
-  /** The workspace's reports, or null when the workspace changed meanwhile. */
+  // Only the latest reload may apply its lists: reloads overlap (a save's
+  // reload is still running when the next save starts its own), and an
+  // earlier one that answers late holds older plans than a later one.
+  const reloadSeq = useRef(0);
+  /** The workspace's reports, or null when superseded or the workspace changed. */
   const reload = async () => {
     const w = props.workspaceId;
+    const seq = ++reloadSeq.current;
     const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
-    if (w !== wsRef.current) return null;
+    if (w !== wsRef.current || seq !== reloadSeq.current) return null;
     setPlans(p);
     setReports(r);
     setDatasets(d);
@@ -219,20 +242,23 @@ export function LoadView(props: {
     void reload();
   }, [props.workspaceId]);
   useEffect(() => {
-    props.onLiveChange?.(!!live);
-  }, [!!live]);
+    props.onLiveChange?.(live);
+  }, [live]);
 
   useEffect(() => {
     const a = onLoadProgress((e) =>
-      setLive((l) => {
-        if (!l || l.runKey !== e.run_key) return l;
-        const tl = [...l.timeline];
-        e.progress.timeline_delta.forEach((b, i) => (tl[e.progress.timeline_from + i] = b));
-        return { ...l, progress: e.progress, timeline: tl };
-      }),
+      setLives((ls) =>
+        ls.map((l) => {
+          if (l.runKey !== e.run_key) return l;
+          const tl = [...l.timeline];
+          e.progress.timeline_delta.forEach((b, i) => (tl[e.progress.timeline_from + i] = b));
+          return { ...l, progress: e.progress, timeline: tl };
+        }),
+      ),
     );
     const b = onLoadFinished((e) => {
-      setLive((l) => (l && l.runKey === e.run_key ? null : l));
+      if (!liveKeys.current.delete(e.run_key)) finishedEarly.current.add(e.run_key);
+      setLives((ls) => ls.filter((l) => l.runKey !== e.run_key));
       if (e.error) current.current.notify(`Load run ended without a saved report: ${e.error}`);
       // A run started in another workspace saves its report there: do not select it here.
       void current.current.reload().then((r) => e.run_id && r?.some((x) => x.run_id === e.run_id) && setSel({ kind: "report", id: e.run_id }));
@@ -260,7 +286,7 @@ export function LoadView(props: {
   const dropDraft = (ws: string, id: string, only?: LoadPlan) =>
     setDrafts((d) => {
       const own = d[ws];
-      if (!own?.[id] || (only && own[id].plan !== only)) return d;
+      if (!own?.[id] || (only && !sameEdit(own[id].plan, only))) return d;
       return { ...d, [ws]: Object.fromEntries(Object.entries(own).filter(([k]) => k !== id)) };
     });
   /** Selects `s`; an untouched new plan is dropped unless it is the one selected. */
@@ -336,7 +362,9 @@ export function LoadView(props: {
       <SidebarResizer />
       <section className="work single">
         <div className="pane">
-          {live && <LivePanel live={live} onCancel={() => void api.loadRunCancel(live.runKey)} />}
+          {lives.map((l) => (
+            <LivePanel key={l.runKey} live={l} onCancel={() => void api.loadRunCancel(l.runKey)} />
+          ))}
           {!live && selPlan && (
             <PlanEditor
               key={`${props.workspaceId}/${selPlan.id}`}
@@ -358,15 +386,20 @@ export function LoadView(props: {
                 // The save response acknowledges this plan before its list
                 // reload finishes. It is no longer a new plan, so Discard
                 // must disappear during that window too.
+                // A draft edited since the save keeps that edit, with the
+                // saved copy's stored metadata.
                 setDrafts((all) => {
                   const own = all[p.workspace_id];
                   const draft = own?.[p.id];
-                  if (!draft?.created) return all;
+                  if (!draft) return all;
+                  const edited = !sameEdit(draft.plan, sent);
+                  if (!draft.created && !edited) return all;
+                  const plan = edited ? { ...draft.plan, ...storedMeta(p) } : draft.plan;
                   return {
                     ...all,
                     [p.workspace_id]: {
                       ...own,
-                      [p.id]: { ...draft, created: false },
+                      [p.id]: { plan, created: false },
                     },
                   };
                 });
@@ -396,7 +429,11 @@ export function LoadView(props: {
                     }
                   : undefined
               }
-              onStarted={(runKey, name) => setLive({ runKey, planName: name, progress: null, timeline: [] })}
+              onStarted={(runKey, name) => {
+                if (finishedEarly.current.delete(runKey) || liveKeys.current.has(runKey)) return;
+                liveKeys.current.add(runKey);
+                setLives((ls) => [...ls, { runKey, planName: name, progress: null, timeline: [] }]);
+              }}
             />
           )}
           {!live && sel?.kind === "report" && <ReportView key={sel.id} runId={sel.id} reports={reports} notify={props.notify} onDeleted={async () => { if ((await reload()) === null) return; setSel(null); }} />}
@@ -456,6 +493,9 @@ export function PlanEditor(props: {
   const [check, setCheck] = useState<LoadPlanCheck | null>(null);
   // A save, or a Run… (its save and preflight), is on its way: a new plan cannot be discarded meanwhile.
   const [saving, setSaving] = useState(false);
+  // A Start load is on its way: a second one would start a second worker.
+  const starting = useRef(false);
+  const [startPending, setStartPending] = useState(false);
   const useMix = p.mix.length > 0;
   const dataset = props.datasets.find((d) => d.id === p.dataset_id);
   const requestKey = JSON.stringify([p.chain, p.mix.map((m) => m.request_id), p.connection_mode]);
@@ -493,7 +533,11 @@ export function PlanEditor(props: {
     try {
       const sent = p;
       const saved = await api.saveLoadPlan(sent);
-      setEdit(editable(saved));
+      // Edits typed while the save was on its way stay: only an unchanged
+      // editor takes the saved copy; otherwise the edit takes just its stored
+      // metadata. The view does the same to its draft (`onSaved`), whether or
+      // not this editor is still shown.
+      setEdit((cur) => (cur === sent ? editable(saved) : { ...cur, ...storedMeta(saved) }));
       props.onSaved(saved, sent);
       return saved;
     } catch (e) {
@@ -773,16 +817,22 @@ export function PlanEditor(props: {
               </button>
               <button
                 className="btn primary"
-                disabled={!ack || otherWorkspace}
+                disabled={!ack || otherWorkspace || startPending}
                 onClick={async () => {
-                  if (otherWorkspace) return;
+                  if (otherWorkspace || starting.current) return;
+                  starting.current = true;
+                  setStartPending(true);
+                  const name = p.name;
                   try {
                     const key = await api.loadRunStart(p.id, true);
                     setPreflight(null);
-                    props.onStarted(key, p.name);
+                    props.onStarted(key, name);
                   } catch (e) {
                     setErr(String((e as Error).message));
                     setPreflight(null);
+                  } finally {
+                    starting.current = false;
+                    setStartPending(false);
                   }
                 }}
               >
@@ -969,7 +1019,9 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
 
 // ------------------------------------------------------------- live run
 
-function LivePanel(props: { live: { runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] }; onCancel: () => void }) {
+type Live = { runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] };
+
+function LivePanel(props: { live: Live; onCancel: () => void }) {
   const p = props.live.progress;
   const c = p?.snapshot.counts;
   const u = p?.snapshot.requests;
