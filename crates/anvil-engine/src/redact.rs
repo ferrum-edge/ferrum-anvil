@@ -355,6 +355,36 @@ impl Redactor {
             return self.text_any_case(&structured);
         }
         let scrubbed = self.text_any_case(value);
+        // Inspect encoded cookie names and Path/Domain values while their
+        // original names still identify the structure. If that inspection
+        // and a crossing raw match interact, withhold the whole value.
+        let prepared = if sensitive && name.eq_ignore_ascii_case("set-cookie") {
+            value.split_once('=').map(|(key, rest)| {
+                let key = if self.hides_secret(key.trim()) { REDACTED } else { key };
+                match rest.split_once(';') {
+                    Some((credential, attrs)) => format!("{key}={credential};{}", self.set_cookie_attrs(attrs)),
+                    None => format!("{key}={rest}"),
+                }
+            })
+        } else if sensitive && name.eq_ignore_ascii_case("cookie") {
+            Some(
+                value
+                    .split(';')
+                    .map(|part| match part.split_once('=') {
+                        Some((key, rest)) if self.hides_secret(key.trim()) => format!("{REDACTED}={rest}"),
+                        _ => part.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            )
+        } else {
+            None
+        };
+        let scrubbed = match prepared.filter(|prepared| prepared != value) {
+            Some(_) if !same_delimiters(value, &scrubbed, b";=") => return REDACTED.to_string(),
+            Some(prepared) => self.text_any_case(&prepared),
+            None => scrubbed,
+        };
         let value = scrubbed.as_str();
         if sensitive {
             let value = self.text(value);
@@ -974,6 +1004,23 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cookie_structure_is_examined_before_case_folded_name_scrubbing() {
+        use super::*;
+        let r = Redactor::new(vec!["PATH".into(), "DOMAIN".into(), "encoded-cookie-secret-7q2m".into()], vec![]);
+        for value in
+            ["sid=x; Path=/mixed/encoded%2dcookie-secret-7q2m; HttpOnly", "sid=x; Domain=encoded%252dcookie-secret-7q2m.example; Secure"]
+        {
+            let once = r.header("Set-Cookie", value);
+            assert!(!once.contains("encoded%"), "{once}");
+            assert_eq!(r.header("Set-Cookie", &once), once);
+        }
+        // Both kinds of match interact across an attribute boundary.
+        let r = Redactor::new(vec!["encoded-cookie-secret-7q2m".into(), "Path=/mixed/encoded%2dcookie-secret-7q2m; Tail".into()], vec![]);
+        let result = r.header("Set-Cookie", "sid=x; Path=/mixed/encoded%2dcookie-secret-7q2m; Tail");
+        assert_eq!(result, REDACTED);
+    }
+
     #[test]
     fn redaction_markers_are_fixed_points_in_metadata() {
         use super::*;
