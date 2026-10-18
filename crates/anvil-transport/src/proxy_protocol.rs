@@ -96,8 +96,17 @@ fn scrub(bytes: &[u8], redact: Redact<'_>) -> (String, bool) {
 /// so the recorded hex is replaced as a whole too.
 pub fn scrub_observation(o: &mut ProxyHeaderObservation, redact: Redact<'_>) {
     let Some(r) = redact else { return };
-    let mut hit = false;
-    for f in [&mut o.source, &mut o.destination, &mut o.text] {
+    // A later extraction can teach the engine a value after this header was
+    // built. Opaque TLV summaries contain hex rather than readable text, so
+    // inspect the original bytes too; the authentication tag is not recorded.
+    let mut hit = hex::decode(o.hex.strip_suffix(TAG_MARK).unwrap_or(&o.hex)).ok().is_some_and(|bytes| {
+        let text = String::from_utf8_lossy(&bytes);
+        r(&text) != text
+    });
+    if hit {
+        o.tlvs.fill(REDACTED.to_string());
+    }
+    for f in [&mut o.source, &mut o.destination, &mut o.text, &mut o.problem, &mut o.listener_binding] {
         if let Some(v) = f.as_mut()
             && r(v) != *v
         {
@@ -1062,6 +1071,20 @@ mod tests {
         let h2 = a.build(None, Some(sa("10.0.0.2:2")), Some(&r2)).unwrap();
         assert_eq!(h2.observation.source.as_deref(), Some(REDACTED));
         assert_eq!(h2.observation.hex, REDACTED);
+    }
+
+    #[test]
+    fn late_redaction_covers_opaque_tlv_hex_as_well_as_authority_text() {
+        for kind in [PP2_TYPE_AUTHORITY, 0xEE] {
+            let mut p = plan(ProxyHeaderVersion::V2);
+            p.family = ProxyAddressFamily::Unspec;
+            p.tlvs = vec![(kind, b"late-known-secret".to_vec())];
+            let mut observation = p.build(None, None, None).unwrap().observation;
+            assert_ne!(observation.hex, REDACTED);
+            scrub_observation(&mut observation, Some(&|s| s.replace("late-known-secret", REDACTED)));
+            assert_eq!(observation.hex, REDACTED);
+            assert_eq!(observation.tlvs, vec![REDACTED.to_string()]);
+        }
     }
 
     // Datagram envelope: Ferrum tests/unit/gateway_core/datagram_client_address_tests.rs

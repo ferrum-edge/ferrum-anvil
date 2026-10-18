@@ -164,8 +164,12 @@ against it).
     persisted copy, as are session ids learned during MCP initialization.
     Request methods and host copies in TLS identity/certificate observations,
     tunnel endpoints and previews use the same ASCII-insensitive policy.
+    Proxy labels and PROXY-protocol text and hex observations are scrubbed
+    again when a run learns new secrets, including opaque TLV payloads.
     Structured URL and cookie checks also compare percent-decoded values
     ignoring ASCII case, including noncanonical and repeated encoding.
+    A raw secret crossing URL delimiters withholds the path and query (or
+    the whole structured header) so masking one part cannot expose another.
   - Every credential an auth profile sends is a known secret, including a
     WS-Security SAML assertion (as stored and as embedded, trimmed), a
     PasswordText password in the XML-escaped form it is sent in, and a

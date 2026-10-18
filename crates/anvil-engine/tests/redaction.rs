@@ -17,12 +17,13 @@ fn redactor() -> Redactor {
     Redactor::new(vec![SECRET.into(), "open sesame 42".into()], vec![])
 }
 
-/// True when `secret` can be read from `text` directly or after undoing up
-/// to three layers of percent-encoding (with `+` read either way).
+/// True when `secret` can be read ignoring ASCII case, directly or after
+/// undoing three layers of percent-encoding (with `+` read either way).
 fn reveals(text: &str, secret: &str) -> bool {
+    let contains = |s: &str| s.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
     let mut layers = vec![text.to_string()];
     for _ in 0..3 {
-        if layers.iter().any(|l| l.contains(secret)) {
+        if layers.iter().any(|l| contains(l)) {
             return true;
         }
         layers = layers
@@ -35,7 +36,7 @@ fn reveals(text: &str, secret: &str) -> bool {
             })
             .collect();
     }
-    layers.iter().any(|l| l.contains(secret))
+    layers.iter().any(|l| contains(l))
 }
 
 #[test]
@@ -119,7 +120,7 @@ fn folded_secrets_with_noncanonical_percent_encoding_are_not_recoverable() {
             r.header("Set-Cookie", &format!("sid=x; Path=/{value}")),
             r.header("Cookie", &format!("{value}=x")),
         ] {
-            assert!(!reveals(&text.to_ascii_lowercase(), "mixedcase77"), "{value} → {text}");
+            assert!(!reveals(&text, "MixedCase77"), "{value} → {text}");
         }
     }
 }
@@ -171,7 +172,19 @@ async fn templated_methods_and_hosts_are_scrubbed_from_records_and_previews() {
         alert_received: Some(folded.into()),
         resumed: None,
     };
+    out.record.prepared.proxy = Some(folded.into());
     let connection = out.record.attempts[0].connection.as_mut().expect("HTTP connection observation");
+    connection.via_proxy = Some(folded.into());
+    let plan = anvil_transport::proxy_protocol::HeaderPlan {
+        version: anvil_domain::proxy_protocol::ProxyHeaderVersion::V2,
+        command: anvil_domain::proxy_protocol::ProxyCommand::Proxy,
+        family: anvil_domain::proxy_protocol::ProxyAddressFamily::Unspec,
+        source: None,
+        destination: None,
+        raw: vec![],
+        tlvs: vec![(0x02, folded.as_bytes().to_vec()), (0xEE, folded.as_bytes().to_vec())],
+    };
+    connection.proxy_header = Some(plan.build(None, None, None).unwrap().observation);
     connection.tls = Some(tls.clone());
     connection.tunnel = Some(
         serde_json::from_value(serde_json::json!({
@@ -191,6 +204,9 @@ async fn templated_methods_and_hosts_are_scrubbed_from_records_and_previews() {
         r.record_metadata(&mut out.record);
         let text = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
         assert!(!text.contains(folded), "{text}");
+        let header = out.record.attempts[0].connection.as_ref().unwrap().proxy_header.as_ref().unwrap();
+        assert_eq!(header.hex, REDACTED);
+        assert!(header.tlvs.iter().all(|value| value == REDACTED));
     }
 }
 

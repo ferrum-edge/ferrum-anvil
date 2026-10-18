@@ -84,6 +84,13 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
             phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
         }
         let Some(connection) = &mut a.connection else { continue };
+        if let Some(proxy) = &mut connection.via_proxy {
+            *proxy = r.metadata_text(proxy);
+        }
+        if let Some(header) = &mut connection.proxy_header {
+            let redact = |s: &str| r.metadata_text(s);
+            anvil_transport::proxy_protocol::scrub_observation(header, Some(&redact));
+        }
         if let Some(tls) = &mut connection.tls {
             redact_tls(tls, r);
         }

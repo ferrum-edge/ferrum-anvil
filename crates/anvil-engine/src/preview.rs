@@ -198,7 +198,7 @@ impl Engine {
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),
             tls_verification: prep.tls.as_ref().map(|t| t.verify).unwrap_or(true),
-            proxy: prep.proxy.as_ref().map(|p| p.label.clone()),
+            proxy: prep.proxy.as_ref().map(|p| redactor.metadata_text(&p.label)),
             ferrum_trust: match &prep.trust {
                 FerrumTrust::Trusted { profile_name, compatibility_id, .. } => Some(format!("{profile_name} ({compatibility_id})")),
                 FerrumTrust::NotConfigured => None,

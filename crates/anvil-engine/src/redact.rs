@@ -580,6 +580,7 @@ impl Redactor {
         }
         r.prepared.headers = self.headers(&r.prepared.headers);
         scrub(&mut r.prepared.content_type);
+        scrub(&mut r.prepared.proxy);
         crate::record::redact_attempts(&mut r.attempts, self);
         if let Some(resp) = &mut r.response {
             resp.headers = self.headers(&resp.headers);
@@ -1140,7 +1141,7 @@ mod tests {
             ("Set-Cookie", format!("ordinary=x; Path=/{secret}; HttpOnly"), format!("ordinary={REDACTED}; Path=/{REDACTED}; HttpOnly")),
             ("Set-Cookie", format!("{secret}=x; Path=/"), format!("{REDACTED}={REDACTED}; Path=/")),
             ("Set-Cookie", format!("sid=x; Domain={secret}.example"), format!("sid={REDACTED}; Domain={REDACTED}.example")),
-            ("Set-Cookie", "sid=x; Path=/tok%2Fen%3Dvalue".into(), format!("sid={REDACTED}; Path=/{REDACTED}")),
+            ("Set-Cookie", "sid=x; Path=/tok%2Fen%3Dvalue".into(), format!("sid={REDACTED}; Path={REDACTED}")),
             ("Cookie", format!("a=1; {secret}=2"), format!("a={REDACTED}; {REDACTED}={REDACTED}")),
             ("Authorization", format!("{secret} opaque"), format!("{REDACTED} {REDACTED}")),
             ("Proxy-Authorization", format!("X-{secret} opaque"), format!("X-{REDACTED} {REDACTED}")),
