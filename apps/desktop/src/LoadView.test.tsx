@@ -17,6 +17,7 @@ const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
+import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
 import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
@@ -867,5 +868,207 @@ describe("ReportView", () => {
     expect(screen.getByTestId("protocol-panel").textContent).toContain("Load unit: exchanges");
     const successRow = screen.getByText("Successful exchanges").closest("tr")!;
     expect(successRow.textContent).toContain("— (no samples)");
+  });
+});
+
+describe("PlanEditor save", () => {
+  it("keeps a name typed while the save is on its way, and the next Save sends it", async () => {
+    const first = deferred<LoadPlan>();
+    const saves: LoadPlan[] = [];
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      if (cmd === "load_plan_save") {
+        const sent = args.plan as LoadPlan;
+        saves.push(sent);
+        return saves.length === 1 ? first.promise : sent;
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<PlanEditor plan={{ ...plan(), chain: [] }} {...editorProps} />);
+    fireEvent.change(planName(), { target: { value: "Saved name" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    fireEvent.change(planName(), { target: { value: "Newer name" } });
+    await act(async () => first.resolve({ ...saves[0], updated_at: "2026-09-27T00:00:00Z" }));
+    expect(planName().value).toBe("Newer name");
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(saves).toHaveLength(2));
+    // The newer edit, with the stored metadata of the first save.
+    expect(saves[1]).toMatchObject({ name: "Newer name", updated_at: "2026-09-27T00:00:00Z" });
+  });
+});
+
+describe("LoadView save", () => {
+  it("keeps an edit typed during a save unsaved, and its own save clears it", async () => {
+    const first = deferred<void>();
+    let n = 0;
+    backend({
+      load_plan_save: async (a) => {
+        n++;
+        if (n === 1) await first.promise;
+        return { ...saveInto(a), updated_at: `2026-09-2${6 + n}T00:00:00Z` };
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "Saved name" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    fireEvent.change(planName(), { target: { value: "Newer name" } });
+    await act(async () => first.resolve());
+    await act(async () => {});
+    expect(planName().value).toBe("Newer name");
+    // Still unsaved, in the editor and in the list.
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    expect(calls("load_plan_save")[1].plan).toMatchObject({ name: "Newer name", updated_at: "2026-09-27T00:00:00Z" });
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    expect(planName().value).toBe("Newer name");
+  });
+});
+
+describe("LoadView overlapping reloads", () => {
+  it("ignores an earlier reload that answers after a later save's reload", async () => {
+    const gate = deferred<void>();
+    let hold: Promise<void> | null = null;
+    backend({
+      load_plan_save: (a) => saveInto(a),
+      load_plans: async (a) => {
+        // The snapshot is taken when the read starts, as the backend does.
+        const snapshot = plans[a.workspaceId as string] ?? [];
+        const wait = hold;
+        hold = null;
+        if (wait) await wait;
+        return snapshot;
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    const listed = calls("load_plans").length;
+
+    // Save v1; its list reload starts with the v1 snapshot and is held.
+    fireEvent.change(planName(), { target: { value: "v1" } });
+    hold = gate.promise;
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plans")).toHaveLength(listed + 1));
+    expect(hold).toBeNull();
+
+    // Save v2 while that reload is still on its way; its reload answers first.
+    fireEvent.change(planName(), { target: { value: "v2" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    expect(within(sidebar()).getByText("v2")).toBeTruthy();
+
+    // The held v1 reload answers last: the list keeps v2, and reselecting
+    // the plan shows v2, not the restored v1.
+    await act(async () => gate.resolve());
+    await act(async () => {});
+    expect(within(sidebar()).getByText("v2")).toBeTruthy();
+    expect(within(sidebar()).queryByText("v1")).toBeNull();
+    expect(planName().value).toBe("v2");
+  });
+});
+
+describe("LoadView save while the plan is reselected", () => {
+  it("keeps an edit made in a new editor after selecting away and back during the save", async () => {
+    const first = deferred<void>();
+    let n = 0;
+    backend({
+      load_plan_save: async (a) => {
+        n++;
+        if (n === 1) await first.promise;
+        return { ...saveInto(a), updated_at: `2026-09-2${6 + n}T00:00:00Z` };
+      },
+    });
+    plans.A = [loadPlan("pa", "A", "Plan A"), loadPlan("pa2", "A", "Plan A2")];
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "v1" } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(1));
+    fireEvent.change(planName(), { target: { value: "v2" } });
+    fireEvent.click(screen.getByText("Plan A2"));
+    expect(planName().value).toBe("Plan A2");
+    fireEvent.click(screen.getByText("v2"));
+    expect(planName().value).toBe("v2");
+    fireEvent.change(planName(), { target: { value: "v3" } });
+    await act(async () => first.resolve());
+    await act(async () => {});
+    expect(planName().value).toBe("v3");
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(calls("load_plan_save")).toHaveLength(2));
+    expect((calls("load_plan_save")[1].plan as LoadPlan).name).toBe("v3");
+    await waitFor(() => expect(screen.queryByText("unsaved")).toBeNull());
+    // Away and back: the saved plan, not an older edit.
+    fireEvent.click(screen.getByText("Plan A2"));
+    fireEvent.click(screen.getByText("v3"));
+    expect(planName().value).toBe("v3");
+  });
+});
+
+describe("LoadView run start", () => {
+  const handlers = new Map<string, (ev: { payload: unknown }) => void>();
+  const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
+  const emit = (name: string, payload: unknown) => act(() => handlers.get(name)?.({ payload }));
+  beforeEach(() => {
+    listenMock.mockImplementation(async (name: string, cb: (ev: { payload: unknown }) => void) => {
+      handlers.set(name, cb);
+      return () => {};
+    });
+  });
+  afterEach(() => {
+    handlers.clear();
+    listenMock.mockImplementation(async () => () => {});
+  });
+
+  async function confirm() {
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.click(button("Run…"));
+    await screen.findByText("Confirm load run");
+    fireEvent.click(screen.getByLabelText(/I own these destinations/));
+  }
+
+  it("starts one run on a double click and keeps its Stop control until that run finishes", async () => {
+    const start = deferred<string>();
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => start.promise, load_run_cancel: () => true });
+    await confirm();
+    fireEvent.click(button("Start load"));
+    fireEvent.click(button("Start load"));
+    await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
+    expect(button("Start load").disabled).toBe(true);
+    await act(async () => start.resolve("key-1"));
+    expect(calls("load_run_start")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Stop run" })).toHaveLength(1);
+
+    // Another run's completion leaves this one's Stop control.
+    emit("load-finished", { run_key: "key-other", run_id: null });
+    expect(screen.getAllByRole("button", { name: "Stop run" })).toHaveLength(1);
+    fireEvent.click(button("Stop run"));
+    await waitFor(() => expect(calls("load_run_cancel")).toEqual([{ runKey: "key-1" }]));
+    emit("load-finished", { run_key: "key-1", run_id: null });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull());
+  });
+
+  it("does not show a run that finished before its start reply arrived", async () => {
+    const start = deferred<string>();
+    backend({ load_plan_save: saveInto, load_preflight: () => preflight, load_run_start: () => start.promise });
+    await confirm();
+    fireEvent.click(button("Start load"));
+    await waitFor(() => expect(calls("load_run_start")).toHaveLength(1));
+    // Progress, the finish and the start reply all arrive before React renders.
+    await act(async () => {
+      handlers.get("load-progress")?.({ payload: { run_key: "key-1", progress: { timeline_from: 0, timeline_delta: [] } } });
+      handlers.get("load-finished")?.({ payload: { run_key: "key-1", run_id: null } });
+      start.resolve("key-1");
+    });
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+    expect(screen.queryByText("Confirm load run")).toBeNull();
   });
 });

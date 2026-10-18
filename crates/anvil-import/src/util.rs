@@ -228,6 +228,20 @@ pub fn is_credential_name(name: &str) -> bool {
     CREDENTIAL_PARTS.iter().any(|p| n.contains(p))
 }
 
+/// [`is_credential_name`] for a member holding a number (a PIN, a one-time
+/// code, a numeric API key). A name recognized only by the `token` part is
+/// left out: numbers under such names are counts (`max_tokens`,
+/// `token_count`), not credentials.
+pub fn is_numeric_credential_name(name: &str) -> bool {
+    if !is_credential_name(name) {
+        return false;
+    }
+    let n = name.trim().to_ascii_lowercase();
+    CREDENTIAL_HEADERS.contains(&n.as_str())
+        || CREDENTIAL_EXACT.contains(&n.as_str())
+        || CREDENTIAL_PARTS.iter().filter(|p| **p != "token").any(|p| n.contains(p))
+}
+
 /// True when `v` contains literal text that could be secret material, i.e.
 /// anything besides `{{variable}}` references and an auth-scheme word
 /// (`Bearer {{token}}` carries no literal secret).
@@ -377,6 +391,53 @@ pub fn scalar_text(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         other => other.to_string(),
     }
+}
+
+/// Whether `s` is one complete JSON document, validated as strictly as
+/// parsing it into a `serde_json::Value` (string escapes, surrogate pairs,
+/// numbers, nesting limit) without building the tree.
+pub fn is_json_document(s: &str) -> bool {
+    use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+    struct Discard;
+    impl<'de> Deserialize<'de> for Discard {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_any(DiscardVisitor)
+        }
+    }
+    struct DiscardVisitor;
+    impl<'de> Visitor<'de> for DiscardVisitor {
+        type Value = Discard;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_unit<E>(self) -> Result<Discard, E> {
+            Ok(Discard)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Discard, A::Error> {
+            while seq.next_element::<Discard>()?.is_some() {}
+            Ok(Discard)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Discard, A::Error> {
+            while map.next_entry::<Discard, Discard>()?.is_some() {}
+            Ok(Discard)
+        }
+    }
+    serde_json::from_str::<Discard>(s).is_ok()
 }
 
 #[cfg(test)]

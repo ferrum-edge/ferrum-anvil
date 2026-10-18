@@ -602,7 +602,9 @@ all object kinds (including local device/file bindings), revisions, secrets,
 attachments, history and response bodies, load reports, and the key canary.
 It also re-encrypts a linked-login binding. Existing blob IDs stay stable, so
 saved attachments and response-body references stay intact; newly attached
-identical content can receive a different ID after rotation. A damaged row
+identical content can receive a different ID after rotation. The attachment
+index then moves to the new ID and releases the earlier blob in the same
+transaction, unless a history record uses it as a response body. A damaged row
 that cannot authenticate aborts rotation without changing the committed
 profile. Repair or explicitly remove that row with the existing recovery tools
 before retrying; rotation never silently drops it.
@@ -802,7 +804,7 @@ under an unchanged key. No mandatory online service is introduced.
 ## Schema versions and migration
 
 - Every object and record carries `schema_version`; the database carries
-  `DB_SCHEMA_VERSION` (currently 5). Migrations run forward at open and at
+  `DB_SCHEMA_VERSION` (currently 6). Migrations run forward at open and at
   unlock, each step in one write transaction with the version bump that
   records it, so a step runs once and one that fails changes nothing.
 - **Database schema 2** re-seals every vault secret so its AAD names its

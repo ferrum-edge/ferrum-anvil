@@ -201,3 +201,65 @@ fn a_refused_old_keychain_entry_is_retired_at_the_next_unlock() {
     assert!(matches!(entry.get_secret(), Err(keyring_core::Error::NoEntry)));
     assert!(pm.find(&s.profile_id).unwrap().leftover_keychain_entry.is_none());
 }
+
+/// Attachment blob ids derive from the data key and rotation keeps them, so
+/// attaching the same bytes after a rotation stores a new blob. The index
+/// entry's previous blob is released, so deleting the attachment leaves no
+/// pinned, unreachable blob behind.
+#[test]
+fn reattaching_after_rotation_leaves_no_orphaned_attachment_blob() {
+    use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
+    let root = tempfile::tempdir().unwrap();
+    let (source, _) = app(root.path(), "reattach");
+    // Rotation may replace the database file: each count opens it afresh.
+    let path = source.dir.join(anvil_storage::store::DB_FILE);
+    let counts = || -> (i64, i64) {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let blobs = db.query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get(0)).unwrap();
+        let pins = db.query_row("SELECT COUNT(*) FROM meta WHERE key LIKE 'pin:%'", [], |r| r.get(0)).unwrap();
+        (blobs, pins)
+    };
+    let base = counts();
+    let plus = |n: i64| (base.0 + n, base.1 + n);
+    let bytes = b"attachment bytes kept across a key rotation";
+    let first = source.put_attachment("a.bin", bytes, None).unwrap();
+    source.rotate_data_key(NEW, &vault::RotationRecoveryKey::generate(), KdfParams::testing()).unwrap();
+    let (h, k) = ProfileManager::unlock(&source.dir, Unlock::Passphrase(NEW)).unwrap();
+    let app = App::open(source.dir.clone(), h, k).unwrap();
+    assert_eq!(counts(), plus(1));
+
+    let again = app.put_attachment("a.bin", bytes, None).unwrap();
+    let (AttachmentRef::Stored { sha256: a, .. }, AttachmentRef::Stored { sha256: b, .. }) = (&first, &again) else { panic!() };
+    assert_eq!(a, b);
+    assert_eq!(counts(), plus(1), "the pre-rotation blob is released when the index moves to the new one");
+    assert_eq!(app.get_attachment(b).unwrap().as_deref(), Some(&bytes[..]));
+
+    // Past the grace period, deleting the only request that holds it removes
+    // the content entirely, and retention has nothing left to keep.
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let spec = RequestSpec {
+        body: Body::Binary { attachment: again.clone(), content_type: None },
+        ..RequestSpec::http("POST", "http://127.0.0.1:9/")
+    };
+    let req = app.create_request(&ws, None, "upload", spec).unwrap();
+    let index = app
+        .store
+        .object_meta(anvil_storage::kind::IMPORT_SOURCE)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id.parse::<anvil_domain::Id>().unwrap())
+        .find(|id| {
+            app.store
+                .get::<serde_json::Value>(anvil_storage::kind::IMPORT_SOURCE, id)
+                .unwrap()
+                .is_some_and(|v| v["attachment"] == b.as_str())
+        })
+        .expect("its index entry");
+    let mut entry: serde_json::Value = app.store.get(anvil_storage::kind::IMPORT_SOURCE, &index).unwrap().unwrap();
+    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(31)).timestamp_millis().into();
+    app.store.put(anvil_storage::kind::IMPORT_SOURCE, &index, None, None, 0.0, &entry).unwrap();
+    app.delete_request(&req.meta.id).unwrap();
+    app.store.prune_history(0, 0).unwrap();
+    assert!(app.get_attachment(b).unwrap().is_none());
+    assert_eq!(counts(), base);
+}

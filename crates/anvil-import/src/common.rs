@@ -3,7 +3,9 @@
 //! splitting and dynamic-variable checks.
 
 use crate::builder::Builder;
-use crate::util::{has_literal_secret, is_credential_name, is_json_media, is_xml_media, media_essence, sanitize_var};
+use crate::util::{
+    has_literal_secret, is_credential_name, is_json_media, is_numeric_credential_name, is_xml_media, media_essence, sanitize_var,
+};
 use anvil_domain::request::{Body, KeyValue};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::Variable;
@@ -62,29 +64,334 @@ pub fn maybe_redact(b: &mut Builder, name: &str, value: &str, pointer: &str, wha
     (credential_text(b, value, name, pointer, &format!("{what} {name}")), true)
 }
 
-/// Replace credential-looking string members of a JSON body (recursively).
+/// Replace credential-looking string members of a JSON body (recursively),
+/// and numbers under names that hold numeric credentials (a `pin`, an `otp`).
 pub fn scrub_json(b: &mut Builder, v: &mut Value, pointer: &str) {
+    scrub_json_at(b, v, pointer, &mut Vec::new());
+}
+
+/// Marks a placeholder that replaced a number, so [`render_json`] writes it
+/// without quotes (`"pin": {{pin}}`). A control character the source text
+/// cannot hold unescaped, plus a tag.
+const NUMERIC_PLACEHOLDER: &str = "\u{1}anvil-number\u{1}";
+
+/// Serialize a scrubbed JSON body, writing the placeholders that replaced
+/// numbers unquoted.
+///
+/// Only the exact strings [`scrub_json_at`] produced are unquoted: they are
+/// collected from the tree into a lookup keyed by their whole serialized
+/// form, then the rendered text and the source are each scanned once for
+/// that form, so unrelated source text that merely mentions the marker tag
+/// cannot keep a numeric placeholder quoted, source strings are never
+/// rewritten, and the work stays linear in the body however many distinct
+/// numeric placeholders it holds. The one indistinguishable case, a source
+/// string already equal to a whole marked placeholder, stays a quoted
+/// string with the markers stripped.
+pub fn render_json(v: &Value, pretty: bool, source: &str) -> Option<String> {
+    let text = if pretty { serde_json::to_string_pretty(v).ok()? } else { serde_json::to_string(v).ok()? };
+    let mut numeric = Vec::new();
+    collect_numeric_placeholders(v, &mut numeric);
+    if numeric.is_empty() {
+        return Some(text);
+    }
+    numeric.sort();
+    numeric.dedup();
+    // Serialized marked string -> what replaces it. Built once; its total
+    // size is bounded by the placeholders themselves, not the body.
+    let mut replacements = std::collections::HashMap::with_capacity(numeric.len());
+    for marked in &numeric {
+        let serialized = serde_json::to_string(&Value::String(marked.clone())).ok()?;
+        let inner = &marked[NUMERIC_PLACEHOLDER.len()..marked.len() - NUMERIC_PLACEHOLDER.len()];
+        replacements.insert(serialized, inner.to_string());
+    }
+    // The marker as it appears inside a serialized JSON string.
+    let marker_json = serde_json::to_string(NUMERIC_PLACEHOLDER).ok()?;
+    let marker_json = &marker_json[1..marker_json.len() - 1];
+    let prefix = format!("\"{marker_json}");
+    // Marked strings the source itself already held stay quoted.
+    let mut collisions = std::collections::HashSet::new();
+    scan_marked(source, &prefix, |candidate| {
+        if replacements.contains_key(candidate) {
+            collisions.insert(candidate.to_string());
+            Some(candidate)
+        } else {
+            None
+        }
+    });
+    for serialized in &collisions {
+        let inner = replacements.get(serialized)?;
+        let quoted = serde_json::to_string(inner).ok()?;
+        replacements.insert(serialized.clone(), quoted);
+    }
+    Some(scan_marked(&text, &prefix, |candidate| replacements.get(candidate).map(String::as_str)))
+}
+
+/// One pass over JSON `text`, replacing every whole string token that
+/// starts with `prefix` and for which `replace` returns a replacement.
+///
+/// String tokens are walked with their escapes, so each byte is visited
+/// once and slices land only on ASCII quote boundaries: a longer string
+/// that merely begins with the marker is one token, never rescanned, and
+/// cannot swallow a marked string that follows it.
+fn scan_marked<'t, 'r>(text: &'t str, prefix: &str, mut replace: impl FnMut(&'t str) -> Option<&'r str>) -> String
+where
+    't: 'r,
+{
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0usize;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if bytes[at] != b'"' {
+            at += 1;
+            continue;
+        }
+        // The string token from `at`: its closing quote, escapes skipped.
+        let mut end = at + 1;
+        while end < bytes.len() && bytes[end] != b'"' {
+            end += if bytes[end] == b'\\' { 2 } else { 1 };
+        }
+        if end >= bytes.len() {
+            break; // unterminated: the rest is copied verbatim below
+        }
+        let token = &text[at..=end];
+        if token.starts_with(prefix)
+            && let Some(replacement) = replace(token)
+        {
+            out.push_str(&text[copied..at]);
+            out.push_str(replacement);
+            copied = end + 1;
+        }
+        at = end + 1;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// Every string in `v` that is a whole numeric placeholder (marker, value,
+/// marker), as written by [`scrub_json_at`].
+fn collect_numeric_placeholders(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => {
+            if s.len() > NUMERIC_PLACEHOLDER.len() * 2 && s.starts_with(NUMERIC_PLACEHOLDER) && s.ends_with(NUMERIC_PLACEHOLDER) {
+                out.push(s.clone());
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|c| collect_numeric_placeholders(c, out)),
+        Value::Object(m) => m.values().for_each(|c| collect_numeric_placeholders(c, out)),
+        _ => {}
+    }
+}
+
+/// Bytes of a member name kept per path segment while walking a body; a
+/// report pointer is built from the segments only for a member that is
+/// redacted, and is itself bounded, so walking a wide array under a long
+/// name costs no more than the body.
+const SEGMENT_BYTES: usize = 64;
+const POINTER_BYTES: usize = 1024;
+
+fn segment(name: &str) -> String {
+    crate::util::clip(name, SEGMENT_BYTES)
+}
+
+fn pointer_at(base: &str, path: &[String], last: &str) -> String {
+    let mut p = base.to_string();
+    for seg in path.iter().map(String::as_str).chain(std::iter::once(last)) {
+        if p.len() > POINTER_BYTES {
+            p.push_str("/…");
+            break;
+        }
+        p = crate::util::ptr(&p, seg);
+    }
+    p
+}
+
+fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<String>) {
     match v {
         Value::Object(m) => {
             for (k, child) in m.iter_mut() {
-                let p = crate::util::ptr(pointer, k);
                 if is_credential_name(k)
                     && let Value::String(s) = child
                 {
+                    let p = pointer_at(pointer, path, &segment(k));
                     let new = credential_text(b, s, k, &p, &format!("body field {k}"));
                     *s = new;
                     continue;
                 }
-                scrub_json(b, child, &p);
+                if is_numeric_credential_name(k)
+                    && let Value::Number(n) = child
+                {
+                    let p = pointer_at(pointer, path, &segment(k));
+                    let literal = n.to_string();
+                    let new = credential_text(b, &literal, k, &p, &format!("body field {k}"));
+                    if new != literal {
+                        // Rendered unquoted ([`render_json`]): the value the
+                        // user supplies is substituted as a number again.
+                        *child = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
+                    }
+                    continue;
+                }
+                if child.is_object() || child.is_array() {
+                    path.push(segment(k));
+                    scrub_json_at(b, child, pointer, path);
+                    path.pop();
+                }
             }
         }
         Value::Array(a) => {
             for (i, child) in a.iter_mut().enumerate() {
-                scrub_json(b, child, &format!("{pointer}/{i}"));
+                if child.is_object() || child.is_array() {
+                    path.push(i.to_string());
+                    scrub_json_at(b, child, pointer, path);
+                    path.pop();
+                }
             }
         }
         _ => {}
     }
+}
+
+/// Parse a JSON document embedded in a string field of the source (a request
+/// body, a GraphQL payload) under the import bounds. Its nodes are charged to
+/// one budget shared by every embedded document of the import, so many small
+/// outer strings cannot expand into far more nodes than
+/// [`ImportOptions::max_nodes`](crate::ImportOptions::max_nodes) allows.
+pub fn parse_embedded_json(b: &mut Builder, text: &str) -> Result<crate::structured::CountedJson, crate::ImportError> {
+    let limits = crate::structured::Limits::for_input(b.embedded_nodes_left, b.opts.max_bytes);
+    let (res, used) = crate::structured::parse_json_counted(text, limits);
+    b.embedded_nodes_left = b.embedded_nodes_left.saturating_sub(used);
+    res
+}
+
+/// Scan a JSON body's text for credential-like members and replace their
+/// literal values ([`scrub_json`]). The text is rewritten only when something
+/// was redacted, or (without `include_credentials`) when an object repeats a
+/// member: the parsed tree keeps only its last value, and the text would
+/// still hold the earlier ones, which were never scanned. A body that cannot be parsed (or
+/// exceeds the import's embedded-document budget) is kept verbatim with a
+/// `body_not_scanned` warning. Returns whether the body was scanned.
+pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> bool {
+    match parse_embedded_json(b, text) {
+        Ok(parsed) => {
+            let mut v = parsed.value;
+            // Counted apart from the (capped) list, so a body is rewritten
+            // whenever it was scrubbed.
+            let before = b.report.redactions_made();
+            scrub_json(b, &mut v, pointer);
+            let collapse = parsed.duplicate_keys && !b.opts.include_credentials;
+            if collapse {
+                b.report.warn(
+                    "json_duplicate_member",
+                    pointer,
+                    "the JSON body repeats a member name; it was rewritten keeping the last value of each repeated member, as most parsers read it",
+                );
+            }
+            if (b.report.redactions_made() > before || collapse)
+                && let Some(t) = render_json(&v, true, text)
+            {
+                *text = t;
+            }
+            true
+        }
+        Err(e) => {
+            let why = match e {
+                crate::ImportError::LimitExceeded { what, limit } => format!("it exceeds the import limit for {what} ({limit})"),
+                _ => "it could not be parsed".to_string(),
+            };
+            b.report.warn(
+                "body_not_scanned",
+                pointer,
+                format!("JSON body was not scanned for credentials: {why}; review it before sharing"),
+            );
+            false
+        }
+    }
+}
+
+/// Apply the credential policy to a mapped text body: credential-like JSON
+/// members (unless `include_credentials` is set) and URL-encoded form fields.
+/// A non-empty XML, SOAP or other text body cannot be scanned and gets a
+/// `body_not_scanned` warning ([`warn_unscanned`]).
+pub fn scrub_body(b: &mut Builder, body: &mut Body, pointer: &str) {
+    match body {
+        Body::Json { text } if !text.trim().is_empty() && !b.opts.include_credentials => {
+            scrub_json_text(b, text, pointer);
+        }
+        Body::FormUrlEncoded { fields } => {
+            for (n, f) in fields.iter_mut().enumerate() {
+                let (value, sensitive) = maybe_redact(b, &f.name, &f.value, &format!("{pointer}#field{n}"), "form field");
+                f.value = value;
+                f.sensitive |= sensitive;
+            }
+        }
+        _ => warn_unscanned(b, body, pointer),
+    }
+}
+
+/// `body_not_scanned` for a non-empty body whose kind the credential policy
+/// cannot read (XML, a SOAP envelope, other text), unless credentials are
+/// kept anyway.
+pub fn warn_unscanned(b: &mut Builder, body: &Body, pointer: &str) {
+    if b.opts.include_credentials {
+        return;
+    }
+    let text = match body {
+        Body::Raw { text, .. } | Body::Xml { text } | Body::Soap { envelope: text, .. } => text,
+        _ => return,
+    };
+    if !text.trim().is_empty() {
+        b.report.warn(
+            "body_not_scanned",
+            pointer,
+            "the body is imported verbatim; it was not scanned for credentials (review it before sharing)",
+        );
+    }
+}
+
+/// Apply the credential policy to GraphQL variables (unless
+/// `include_credentials` is set): a JSON object, or a string holding one,
+/// parsed under the embedded-document budget. Returns the variables text.
+pub fn scrub_graphql_variables(b: &mut Builder, variables: Option<Value>, pointer: &str) -> String {
+    match variables {
+        Some(Value::Null) | None => String::new(),
+        Some(Value::String(mut s)) => {
+            if !b.opts.include_credentials && !s.trim().is_empty() {
+                scrub_json_text(b, &mut s, pointer);
+            }
+            s
+        }
+        Some(mut v) => {
+            if b.opts.include_credentials {
+                return v.to_string();
+            }
+            let source = v.to_string();
+            scrub_json(b, &mut v, pointer);
+            render_json(&v, false, &source).unwrap_or(source)
+        }
+    }
+}
+
+/// Redact credential-like values in a query string that [`split_query`]
+/// could not turn into pairs (a bare `flag` segment, for instance). Every
+/// segment keeps its exact syntax; only the value of a `name=value` segment
+/// with a credential-like name is replaced. The fragment is kept.
+pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -> String {
+    let no_frag = strip_fragment(url);
+    let fragment = &url[no_frag.len()..];
+    let Some((base, q)) = no_frag.split_once('?') else { return url.to_string() };
+    let segs: Vec<String> = q
+        .split('&')
+        .map(|seg| match seg.split_once('=') {
+            Some((k, v)) if !v.is_empty() && is_credential_name(&query_decode(k)) => {
+                let decoded = query_decode(v);
+                let (nv, _) = maybe_redact(b, &query_decode(k), &decoded, pointer, what);
+                // A kept value keeps its original encoding.
+                if nv == decoded { seg.to_string() } else { format!("{k}={nv}") }
+            }
+            _ => seg.to_string(),
+        })
+        .collect();
+    format!("{base}?{}{fragment}", segs.join("&"))
 }
 
 /// Map a text body to the matching [`Body`] variant by media type. Returns

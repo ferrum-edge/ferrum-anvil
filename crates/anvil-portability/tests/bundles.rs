@@ -148,6 +148,30 @@ fn text_of(bytes: &[u8]) -> String {
     s
 }
 
+/// Free text is not extracted in either bundle mode, so its warning must not
+/// suggest that encrypted transfer protects it.
+#[test]
+fn free_text_credential_warning_matches_what_each_mode_encrypts() {
+    let mut g = sample();
+    g.requests[0].spec.body = Body::Json { text: r#"{"password":"audit-dummy-password"}"#.into() };
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("transfer pass"))] {
+        let (bytes, preview) = bundle::write(&g, &opts(mode, pass)).unwrap();
+        let warning = preview
+            .manifest
+            .content_warnings
+            .iter()
+            .find(|w| w.pointer.ends_with("/body/text"))
+            .unwrap_or_else(|| panic!("{mode:?}: {:?}", preview.manifest.content_warnings));
+        assert!(!warning.reason.contains("use encrypted transfer"), "{mode:?}: {}", warning.reason);
+        assert!(warning.reason.contains("stays readable in share-safely and encrypted-transfer"), "{mode:?}: {}", warning.reason);
+        // What the warning says: the literal is in the readable objects file.
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).unwrap();
+        let mut objects = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("workspace/objects.json").unwrap(), &mut objects).unwrap();
+        assert!(objects.contains("audit-dummy-password"), "{mode:?}");
+    }
+}
+
 #[test]
 fn data_001_share_safely_roundtrip_preserves_structure_and_excludes_secrets() {
     let g = sample();
@@ -207,7 +231,7 @@ fn data_005_corrupt_or_truncated_bundles_are_rejected() {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let name = f.name().to_string();
+        let name = f.name().unwrap().into_owned();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
         if name == "workspace/objects.json" {
@@ -489,7 +513,7 @@ fn repack(bytes: &[u8], edit: impl Fn(&str, &mut Vec<u8>)) -> Vec<u8> {
         let mut f = z.by_index(i).unwrap();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
-        entries.push((f.name().to_string(), b));
+        entries.push((f.name().unwrap().into_owned(), b));
     }
     let mut checks: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (n, b) in &mut entries {
@@ -518,7 +542,7 @@ fn with_entry(bytes: &[u8], name: &str, data: &[u8]) -> Vec<u8> {
         let mut f = z.by_index(i).unwrap();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
-        w.start_file(f.name().to_string(), zip::write::SimpleFileOptions::default()).unwrap();
+        w.start_file(f.name().unwrap().into_owned(), zip::write::SimpleFileOptions::default()).unwrap();
         w.write_all(&b).unwrap();
     }
     w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
@@ -786,6 +810,43 @@ fn plan_lists_secret_conflicts_and_secrets_owned_outside_the_bundle() {
     }
     let merge = plan::plan(&g, &stored(Some(Id::new())), ConflictPolicy::Merge);
     assert_eq!(merge.skipped_existing, 1);
+}
+
+#[test]
+fn plan_counts_request_revisions_as_created_replaced_or_skipped() {
+    let mut g = sample();
+    let rev = with_revision(&mut g);
+    let listed = format!("revision 'Create order' ({})", rev.id);
+
+    // Nothing stored: every object, the revision included, plus the secret is created.
+    for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
+        let fresh = plan::plan(&g, &Existing::default(), policy);
+        assert_eq!(fresh.to_create, g.object_count() + 1, "{policy:?}");
+        assert!(fresh.conflicts.is_empty(), "{policy:?} {fresh:?}");
+    }
+
+    // The revision is stored: a conflict Merge skips and Replace overwrites;
+    // a Duplicate copy gives it a fresh id, so it is created.
+    let stored = Existing { objects: [rev.id].into_iter().collect(), ..Default::default() };
+    let merge = plan::plan(&g, &stored, ConflictPolicy::Merge);
+    assert_eq!(merge.conflicts, vec![listed.clone()]);
+    assert_eq!((merge.to_create, merge.to_replace, merge.skipped_existing), (g.object_count(), 0, 1));
+    let replace = plan::plan(&g, &stored, ConflictPolicy::Replace);
+    assert_eq!(replace.conflicts, vec![listed.clone()]);
+    assert_eq!((replace.to_create, replace.to_replace, replace.skipped_existing), (g.object_count(), 1, 0));
+    let dup = plan::plan(&g, &stored, ConflictPolicy::Duplicate);
+    assert_eq!((dup.to_create, dup.to_replace, dup.skipped_existing), (g.object_count() + 1, 0, 0));
+
+    // A revision stored under another workspace stays a foreign object.
+    let ws = g.workspaces[0].meta.id;
+    let foreign = Existing {
+        objects: [rev.id].into_iter().collect(),
+        owners: [(("revision".to_string(), rev.id), Some(Id::new()))].into_iter().collect(),
+        ..Default::default()
+    };
+    assert_eq!(plan::plan(&g, &foreign, ConflictPolicy::Replace).foreign_objects, vec![listed.clone()]);
+    let own = Existing { owners: [(("revision".to_string(), rev.id), Some(ws))].into_iter().collect(), ..foreign };
+    assert!(plan::plan(&g, &own, ConflictPolicy::Replace).foreign_objects.is_empty());
 }
 
 #[test]
@@ -1136,7 +1197,7 @@ fn without_entry(bytes: &[u8], name: &str) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let n = f.name().to_string();
+        let n = f.name().unwrap().into_owned();
         let mut b = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut b).unwrap();
         if n != name {
@@ -1540,4 +1601,52 @@ fn g01_bundles_never_import_a_gateway_lookup() {
     assert_eq!(detail.as_ref(), Some(&lookup));
     // A graph without a lookup imports without a warning about one.
     assert!(validate::clear_gateway_lookups(&mut sample()).is_empty());
+}
+
+#[test]
+fn folder_cycle_check_is_linear_and_still_finds_cycles() {
+    use anvil_portability::validate::validate_and_normalize;
+    // A long parent chain, listed deepest first, validates in one pass. The
+    // previous check walked every folder's whole ancestry (n²/2 steps).
+    let mut g = sample();
+    let template = g.folders[0].clone();
+    let n = 100_000;
+    let ids: Vec<Id> = (0..n).map(|_| Id::new()).collect();
+    let chain: Vec<Folder> = (0..n)
+        .rev()
+        .map(|i| {
+            let mut f = template.clone();
+            f.meta = Meta { id: ids[i], ..template.meta.clone() };
+            f.parent_id = (i > 0).then(|| ids[i - 1]);
+            f.name = format!("f{i}");
+            f
+        })
+        .collect();
+    g.folders.extend(chain);
+    let started = std::time::Instant::now();
+    validate_and_normalize(&mut g).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
+
+    let cycle = |edit: &dyn Fn(&mut Vec<Folder>)| {
+        let mut g = sample();
+        edit(&mut g.folders);
+        match validate_and_normalize(&mut g) {
+            Err(BundleError::Invalid(m)) => assert!(m.contains("parent cycle"), "{m}"),
+            other => panic!("expected a parent cycle, got {other:?}"),
+        }
+    };
+    // A folder that is its own parent.
+    cycle(&|f| f[0].parent_id = Some(f[0].meta.id));
+    // Two folders that are each other's parent.
+    cycle(&|f| f[0].parent_id = Some(f[1].meta.id));
+    // A folder whose ancestry leads into a cycle it is not part of.
+    cycle(&|f| {
+        let (a, b) = (f[0].meta.id, f[1].meta.id);
+        let mut c = f[1].clone();
+        c.meta = Meta { id: Id::new(), ..c.meta.clone() };
+        c.parent_id = Some(b);
+        f[0].parent_id = Some(b);
+        f[1].parent_id = Some(a);
+        f.insert(0, c);
+    });
 }
