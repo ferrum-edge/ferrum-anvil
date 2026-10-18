@@ -100,22 +100,6 @@ impl RunSecrets {
     /// Scrub every string of an execution record that can carry a value.
     pub fn scrub_record(&self, r: &mut ExecutionRecord) {
         let red = &self.redactor;
-        r.prepared.url = red.url(&r.prepared.url);
-        r.prepared.headers = red.headers(&r.prepared.headers);
-        for s in &mut r.prepared.inferred {
-            *s = red.inferred(s);
-        }
-        for a in &mut r.attempts {
-            a.url = red.url(&a.url);
-            if let Some(f) = &mut a.failure {
-                f.message = red.text_any_case(&f.message);
-            }
-            for p in &mut a.phases {
-                if let Some(d) = &mut p.detail {
-                    *d = red.text_any_case(d);
-                }
-            }
-        }
         red.record_metadata(r);
         if let Some(st) = &mut r.stream {
             // Hex previews too: the redactor knows secrets' hex forms.
@@ -125,20 +109,6 @@ impl RunSecrets {
                     *s = red.text(s);
                 }
             }
-        }
-        r.outcome.summary = red.text(&r.outcome.summary);
-        for w in &mut r.outcome.warnings {
-            w.message = red.text(&w.message);
-        }
-        for a in &mut r.assertion_results {
-            a.label = red.text(&a.label);
-            a.message = red.text(&a.message);
-            if let Some(x) = &mut a.actual {
-                *x = red.text(x);
-            }
-        }
-        for f in &mut r.findings {
-            red.finding(f);
         }
     }
 

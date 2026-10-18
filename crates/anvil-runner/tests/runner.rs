@@ -819,7 +819,16 @@ async fn sensitive_header_extractions_scrub_metadata_and_preserve_identity_body_
         assert_eq!(records.len(), 1);
         let record: anvil_domain::execution::ExecutionRecord = serde_json::from_str(&records[0].0).unwrap();
         assert!(record.response.as_ref().unwrap().body.content_type.as_deref().unwrap().contains(anvil_domain::secret::REDACTED));
-        assert!(!records[0].0.to_ascii_lowercase().contains(&token.to_ascii_lowercase()), "{}", records[0].0);
+        // Closed-vocabulary identifiers (http.forbidden) describe the
+        // status, not a reflected value, and must retain their identity.
+        assert!(record.findings.iter().any(|f| f.code == "http.forbidden"));
+        let mut content: serde_json::Value = serde_json::from_str(&records[0].0).unwrap();
+        for finding in content["findings"].as_array_mut().unwrap() {
+            finding.as_object_mut().unwrap().remove("code");
+            finding.as_object_mut().unwrap().remove("rule_id");
+        }
+        let content = content.to_string();
+        assert!(!content.to_ascii_lowercase().contains(&token.to_ascii_lowercase()), "{content}");
         if token == "identity" {
             assert_eq!(records[0].1, b"safe body", "identity remains uncoded even after its record value is redacted");
         } else {

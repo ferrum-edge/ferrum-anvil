@@ -259,7 +259,7 @@ impl Redactor {
     /// [`Redactor::json_text`] where the structure is known.
     pub fn text(&self, s: &str) -> String {
         let Some(matcher) = &self.matcher else {
-            return fallback_redact(s, &self.fallback_patterns);
+            return if self.fallback_patterns.is_empty() { s.to_string() } else { fallback_redact(s, &self.fallback_patterns) };
         };
         replace_matches(matcher, s)
     }
@@ -270,6 +270,7 @@ impl Redactor {
     pub fn text_any_case(&self, s: &str) -> String {
         match &self.any_case {
             Some(m) => replace_matches(m, s),
+            None if self.any_case_fallback.is_empty() => s.to_string(),
             None => replace_ranges(s, fallback_ranges(&s.to_ascii_lowercase(), &self.any_case_fallback)),
         }
     }
@@ -913,6 +914,9 @@ fn replace_matches(matcher: &AhoCorasick, s: &str) -> String {
 }
 
 fn replace_ranges(s: &str, ranges: Vec<std::ops::Range<usize>>) -> String {
+    if ranges.is_empty() {
+        return s.to_string();
+    }
     // Existing sentinels are fixed points, even if a secret is "redacted".
     // A match crossing a sentinel still covers its whole span.
     let mut markers = s.match_indices(REDACTED).map(|(at, marker)| at..at + marker.len());
