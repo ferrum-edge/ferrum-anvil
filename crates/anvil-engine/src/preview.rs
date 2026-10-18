@@ -193,7 +193,7 @@ impl Engine {
             headers: headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect(),
             body_bytes: body.len() as u64,
             body_preview,
-            content_type: req.content_type.as_deref().map(|c| redactor.text(c)),
+            content_type: req.content_type.as_deref().map(|c| redactor.text_any_case(c)),
             auth: prep.auth_label.clone(),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),

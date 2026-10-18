@@ -90,7 +90,11 @@
   with the record's redactor before history or export. Names and codings are
   compared in any letter case, as are warnings, findings and the summary. The
   request's `Content-Type` is scrubbed in the record and the preview, and the
-  reason phrase in every copy the record keeps.
+  reason phrase in every copy the record keeps. Engine and collection-run
+  metadata now use one scrubber, including newly extracted secrets and
+  overlapping matches. Live protocol handling uses a separate in-memory copy;
+  historical drift reports redacted metadata as unavailable evidence rather
+  than inventing a media-type mismatch.
 - A user cancel or vault lock that arrives after a load schedule has ended,
   while in-flight iterations drain, now stops their chains before the next
   step, shortens the drain to `cancel_drain_ms`, and is reported as the run's

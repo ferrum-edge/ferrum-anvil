@@ -32,6 +32,8 @@ pub struct Collected {
     pub observations: Vec<Observation>,
     /// Records of the workspace that were read.
     pub scanned: usize,
+    /// Evidence deliberately unavailable after metadata redaction.
+    pub notes: Vec<String>,
 }
 
 impl App {
@@ -77,6 +79,7 @@ impl App {
         let entries = self.store.list_history(Some(&rec.workspace_id), None, (limit.min(MAX_DRIFT_RECORDS) * 20).min(MAX_DRIFT_SCAN))?;
         let mut observations = vec![];
         let mut scanned = 0;
+        let mut notes = vec![];
         let mut budget = BodyBudget::default();
         for e in entries {
             let Some(rid) = e.request_id.as_deref().and_then(|r| r.parse::<Id>().ok()) else { continue };
@@ -84,12 +87,17 @@ impl App {
             scanned += 1;
             let Some((record, body)) = self.store.get_history::<ExecutionRecord>(&e.id)? else { continue };
             let body = body.map(|b| b.to_vec());
+            for note in metadata_notes(&record) {
+                if !notes.contains(&note) {
+                    notes.push(note);
+                }
+            }
             observations.push(observation(&record, body.as_deref(), hint.clone(), &mut budget));
             if observations.len() >= limit.min(MAX_DRIFT_RECORDS) {
                 break;
             }
         }
-        Ok(Collected { observations, scanned })
+        Ok(Collected { observations, scanned, notes })
     }
 
     fn drift_spec(&self, import_id: &Id) -> Result<Spec> {
@@ -102,6 +110,7 @@ impl App {
         let spec = self.drift_spec(import_id)?;
         let c = self.drift_observations(import_id, limit)?;
         let mut report = anvil_contract::analyze(&spec, &c.observations, &DriftOptions::default());
+        report.notes.extend(c.notes);
         if c.observations.is_empty() {
             report.notes.push("No sends of this collection are in history yet: send its requests (or run them) and check again.".into());
         }
@@ -124,7 +133,9 @@ impl App {
             let spec = self.drift_spec(&rec.source.import_id)?;
             let body = body.map(|b| b.to_vec());
             let obs = observation(&record, body.as_deref(), hint.clone(), &mut BodyBudget::default());
-            return Ok(Some((rec, anvil_contract::analyze(&spec, &[obs], &DriftOptions::default()))));
+            let mut report = anvil_contract::analyze(&spec, &[obs], &DriftOptions::default());
+            report.notes.extend(metadata_notes(&record));
+            return Ok(Some((rec, report)));
         }
         Ok(None)
     }
@@ -184,14 +195,44 @@ impl App {
     }
 }
 
+fn metadata_notes(record: &ExecutionRecord) -> Vec<String> {
+    let mut notes = vec![];
+    if record.prepared.content_type.as_deref().is_some_and(redacted) {
+        notes.push("Request media types containing redacted secrets were not checked.".into());
+    }
+    if record
+        .response
+        .as_ref()
+        .is_some_and(|r| r.body.content_type.as_deref().is_some_and(redacted) || r.body.content_encoding.as_deref().is_some_and(redacted))
+    {
+        notes.push("Response metadata containing redacted secrets limits media-type or body checks.".into());
+    }
+    notes
+}
+
+fn redacted(value: &str) -> bool {
+    value.contains(anvil_domain::secret::REDACTED)
+}
+
+/// Parameters do not select a contract media type; a redacted essence is
+/// unknown evidence and must never create a new media-type suggestion.
+fn observable_media_type(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let essence = value.split(';').next().unwrap_or(value);
+    (!redacted(essence)).then(|| essence.trim().to_string())
+}
+
 /// An observation of a recorded exchange. `raw` is the stored response
 /// body (still content-encoded), when history kept it; bodies parsed count
 /// against `budget`.
 pub fn observation(r: &ExecutionRecord, raw: Option<&[u8]>, hint: Option<String>, budget: &mut BodyBudget) -> Observation {
     let response = r.response.as_ref().map(|resp| {
-        let ct = resp.body.content_type.clone();
+        let ct = observable_media_type(resp.body.content_type.as_deref());
+        let metadata_redacted =
+            (resp.body.content_type.is_some() && ct.is_none()) || resp.body.content_encoding.as_deref().is_some_and(redacted);
         let complete = matches!(resp.body.completeness, BodyCompleteness::Complete) && !resp.body.display_truncated;
         let body = match (resp.body.completeness, raw) {
+            _ if metadata_redacted => ObservedBody::Unavailable("response media type or content coding was redacted".into()),
             (BodyCompleteness::NoBody, _) => ObservedBody::Empty,
             (_, None) if resp.body.wire_bytes == 0 => ObservedBody::Empty,
             (_, None) => ObservedBody::Unavailable("history keeps no response bodies (Settings → History)".into()),
@@ -223,7 +264,7 @@ pub fn observation(r: &ExecutionRecord, raw: Option<&[u8]>, hint: Option<String>
         method: r.prepared.method.to_ascii_uppercase(),
         url: r.prepared.url.clone(),
         operation_hint: hint,
-        request_content_type: r.prepared.content_type.clone(),
+        request_content_type: observable_media_type(r.prepared.content_type.as_deref()),
         request_bytes: r.prepared.body_bytes,
         query: query_names(&r.prepared.url),
         request_headers: r.prepared.headers.iter().map(|h| h.name.to_ascii_lowercase()).collect(),

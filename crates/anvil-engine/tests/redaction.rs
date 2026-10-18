@@ -383,11 +383,10 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
 }
 
-/// A response `Content-Type` that a known secret happens to be part of is
-/// kept when it is a well-known media type: callers act on it (an MCP
-/// event stream is parsed by it). Its parameters are still scrubbed.
+/// Constants are scrubbed too; operational consumers get a separate,
+/// nonpersisted copy of the original metadata.
 #[tokio::test]
-async fn a_well_known_media_type_survives_a_secret_that_is_part_of_it() {
+async fn a_well_known_media_type_is_scrubbed_without_losing_operational_metadata() {
     anvil_transport::init();
     anvil_fixtures::init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
@@ -403,7 +402,11 @@ async fn a_well_known_media_type_survives_a_secret_that_is_part_of_it() {
     let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
     let r = o.record.response.as_ref().expect("a response");
     let ct = r.body.content_type.as_deref().unwrap_or_default();
-    assert!(ct.starts_with("text/event-stream;"), "{ct}");
+    assert!(ct.starts_with(&format!("text/event-{REDACTED};")), "{ct}");
+    assert_eq!(
+        o.response_metadata.as_ref().and_then(anvil_engine::ResponseMetadata::content_type),
+        Some("text/event-stream; x=stream-param-77")
+    );
     assert!(!ct.contains("stream-param-77"), "{ct}");
 }
 
@@ -426,11 +429,10 @@ async fn a_secret_in_the_reason_phrase_is_scrubbed_from_every_copy() {
     assert!(!record.contains("Forbidden"), "{record}");
 }
 
-/// A secret that crosses from a well-known media type into its parameters is
-/// replaced, and a content coding the engine decodes is kept even when a
-/// secret equals it (history still decodes the body).
+/// Secrets crossing media-type parameters and matching coding constants are
+/// removed from persisted copies after the body has been decoded.
 #[tokio::test]
-async fn media_type_and_coding_constants_are_kept_only_when_they_hide_nothing() {
+async fn media_type_and_coding_constants_are_scrubbed_after_decoding() {
     anvil_transport::init();
     anvil_fixtures::init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
@@ -455,5 +457,48 @@ async fn media_type_and_coding_constants_are_kept_only_when_they_hide_nothing() 
     }];
     let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
     let r = o.record.response.as_ref().expect("a response");
-    assert_eq!(r.body.content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(r.body.content_encoding.as_deref(), Some(REDACTED));
+    assert!(o.decoded_body.as_ref().is_some_and(|b| !b.is_empty()));
+    assert!(o.response_metadata.as_ref().is_some_and(anvil_engine::ResponseMetadata::has_content_coding));
+}
+
+#[tokio::test]
+async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media_types() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http(
+        "GET",
+        &f.url("/status/200?ct=text/plain;token=secret-77&header=Content-Encoding:mixed-coding-77&header=x-mixed-coding-77:v&body=x"),
+    );
+    for name in ["coding", "essence", "crossing"] {
+        spec.headers.push(anvil_domain::request::KeyValue::new(format!("X-{name}"), format!("{{{{{name}}}}}")));
+    }
+    for name in ["content-encoding", "x-mixed-coding-77"] {
+        spec.assertions.push(anvil_domain::assertions::Assertion {
+            enabled: true,
+            label: String::new(),
+            kind: anvil_domain::assertions::AssertionKind::Header {
+                name: name.into(),
+                comparison: anvil_domain::assertions::Comparison::Equals,
+                value: "other".into(),
+            },
+        });
+    }
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers.push(VarLayer {
+        label: "test".into(),
+        vars: [("coding", "Mixed-Coding-77"), ("essence", "text/plain"), ("crossing", "plain;token=secret-77")]
+            .into_iter()
+            .map(|(name, value)| VarEntry { name: name.into(), value: value.into(), secret: true, literal: false })
+            .collect(),
+    });
+    let out = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    assert_eq!(out.record.assertion_results.len(), 2);
+    let response = out.record.response.as_ref().expect("response");
+    assert_eq!(response.body.content_type.as_deref(), Some(REDACTED));
+    let json = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
+    for secret in ["mixed-coding-77", "token=secret-77"] {
+        assert!(!json.contains(secret), "{json}");
+    }
 }

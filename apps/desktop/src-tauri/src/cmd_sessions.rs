@@ -1224,6 +1224,7 @@ mod tests {
             let (release_tx, release_rx) = oneshot::channel();
             let finalizing = async {
                 let output = anvil_engine::ExecutionOutput {
+                    response_metadata: None,
                     record: view.record,
                     body: b"payload-canary".to_vec().into(),
                     decoded_body: None,

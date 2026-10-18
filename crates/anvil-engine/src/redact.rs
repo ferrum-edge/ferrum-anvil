@@ -16,7 +16,8 @@
 use crate::vars::Resolver;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use anvil_domain::diagnostics::DiagnosticFinding;
-use anvil_domain::execution::HeaderEntry;
+use anvil_domain::execution::{ExecutionRecord, HeaderEntry};
+use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::request::PayloadEncoding;
 use anvil_domain::secret::REDACTED;
 use base64::Engine as _;
@@ -25,6 +26,10 @@ use base64::Engine as _;
 /// exact-value scrubbed: they would shred ordinary text. Name-based
 /// redaction still applies to them.
 const MIN_SECRET_LEN: usize = 4;
+
+/// Bound work for many overlapping secrets in a repetitive value. Past this
+/// budget the entire value is withheld, never a partly scrubbed prefix.
+const MAX_SECRET_MATCHES: usize = 4_096;
 
 /// Occurrences of one secret registered per decoded field (the first ones,
 /// which a transcript preview shows).
@@ -193,7 +198,7 @@ impl Redactor {
         } else {
             AhoCorasickBuilder::new()
                 .kind(Some(AhoCorasickKind::ContiguousNFA))
-                .match_kind(MatchKind::LeftmostLongest)
+                .match_kind(MatchKind::Standard)
                 .ascii_case_insensitive(true)
                 .build(&patterns)
                 .ok()
@@ -203,11 +208,7 @@ impl Redactor {
             self.fallback_patterns.clear();
             None
         } else {
-            match AhoCorasickBuilder::new()
-                .kind(Some(AhoCorasickKind::ContiguousNFA))
-                .match_kind(MatchKind::LeftmostLongest)
-                .build(&patterns)
-            {
+            match AhoCorasickBuilder::new().kind(Some(AhoCorasickKind::ContiguousNFA)).match_kind(MatchKind::Standard).build(&patterns) {
                 Ok(matcher) => {
                     self.fallback_patterns.clear();
                     Some(matcher)
@@ -263,38 +264,13 @@ impl Redactor {
         replace_matches(matcher, s)
     }
 
-    /// Byte ranges [`Redactor::text_any_case`] would replace in `s`.
-    pub fn any_case_matches(&self, s: &str) -> Vec<std::ops::Range<usize>> {
-        match &self.any_case {
-            Some(m) => m.find_iter(s).map(|f| f.start()..f.end()).collect(),
-            None => {
-                let lower = s.to_ascii_lowercase();
-                let mut out = vec![];
-                let mut offset = 0;
-                while offset < s.len() {
-                    let next = self
-                        .any_case_fallback
-                        .iter()
-                        .filter_map(|p| lower[offset..].find(p.as_str()).map(|at| (offset + at, p.len())))
-                        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-                    let Some((start, len)) = next else { break };
-                    out.push(start..start + len);
-                    offset = start + len;
-                }
-                out
-            }
-        }
-    }
-
     /// [`Redactor::text`] ignoring ASCII case, for text a protocol may have
     /// case-folded after the secret was sent: header names, content codings,
     /// and messages that quote them.
     pub fn text_any_case(&self, s: &str) -> String {
         match &self.any_case {
             Some(m) => replace_matches(m, s),
-            None if !self.any_case_fallback.is_empty() => fallback_redact_any_case(s, &self.any_case_fallback),
-            // No patterns at all.
-            None => s.to_string(),
+            None => replace_ranges(s, fallback_ranges(&s.to_ascii_lowercase(), &self.any_case_fallback)),
         }
     }
 
@@ -364,6 +340,8 @@ impl Redactor {
     /// them. Scrubbing the whole value before it is split also replaces a
     /// secret that spans a `;`, `=` or space whole.
     pub fn header(&self, name: &str, value: &str) -> String {
+        let scrubbed = self.text_any_case(value);
+        let value = scrubbed.as_str();
         if is_sensitive_name(name, &self.extra_names) {
             let value = self.text(value);
             let value = value.as_str();
@@ -520,7 +498,61 @@ impl Redactor {
     /// HTTP/3 lowercase names): a server can echo a credential into a header
     /// name as easily as into a value.
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
-        h.iter().map(|e| HeaderEntry { name: self.text_any_case(&e.name), value: self.header(&e.name, &e.value) }).collect()
+        h.iter()
+            .map(|e| HeaderEntry { name: self.text_any_case(&e.name), value: self.text_any_case(&self.header(&e.name, &e.value)) })
+            .collect()
+    }
+
+    /// Scrub metadata and every persisted copy of it. Engine assembly calls
+    /// this after operational consumers finish; the runner repeats the same
+    /// pass when a sensitive extraction teaches it a new secret.
+    pub fn record_metadata(&self, r: &mut ExecutionRecord) {
+        let scrub = |v: &mut Option<String>| {
+            if let Some(s) = v {
+                *s = self.text_any_case(s);
+            }
+        };
+        r.prepared.url = self.text_any_case(&self.url(&r.prepared.url));
+        for note in &mut r.prepared.inferred {
+            *note = self.text_any_case(&self.inferred(note));
+        }
+        r.prepared.headers = self.headers(&r.prepared.headers);
+        scrub(&mut r.prepared.content_type);
+        crate::record::redact_attempts(&mut r.attempts, self);
+        if let Some(resp) = &mut r.response {
+            resp.headers = self.headers(&resp.headers);
+            resp.trailers = self.headers(&resp.trailers);
+            scrub(&mut resp.reason);
+            scrub(&mut resp.body.content_type);
+            scrub(&mut resp.body.content_encoding);
+            scrub(&mut resp.body.decoding_detail);
+        }
+        match &mut r.outcome.protocol_status {
+            ProtocolStatus::Http { reason, .. } => scrub(reason),
+            ProtocolStatus::Grpc { grpc_message, .. } => scrub(grpc_message),
+            ProtocolStatus::WebSocket { close_reason, extensions, .. } => {
+                *close_reason = self.text_any_case(close_reason);
+                if let Some(e) = extensions {
+                    scrub(&mut e.offered);
+                    scrub(&mut e.answered);
+                    scrub(&mut e.problem);
+                }
+            }
+            ProtocolStatus::Udp { masque: Some(t), .. } => {
+                t.proxy = self.text_any_case(&t.proxy);
+                t.target = self.text_any_case(&t.target);
+            }
+            _ => {}
+        }
+        r.outcome.summary = self.text_any_case(&r.outcome.summary);
+        for w in &mut r.outcome.warnings {
+            w.message = self.text_any_case(&w.message);
+        }
+        for a in &mut r.assertion_results {
+            a.label = self.text_any_case(&a.label);
+            a.message = self.text_any_case(&a.message);
+            scrub(&mut a.actual);
+        }
     }
 
     /// Redact sensitive query parameter values and secret values in a URL.
@@ -778,57 +810,67 @@ fn lower_hex(encoded: &str) -> String {
     out
 }
 
+/// Merge all overlapping secret ranges. Choosing only nonoverlapping
+/// matches can expose the suffix of a second secret that begins in a first.
 fn replace_matches(matcher: &AhoCorasick, s: &str) -> String {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    // Standard matches arrive in end order, so a later match can overlap
+    // several earlier ranges. Memory stays bounded by the input length.
+    for (index, found) in matcher.find_overlapping_iter(s).enumerate() {
+        if index == MAX_SECRET_MATCHES {
+            return REDACTED.to_string();
+        }
+        let mut start = found.start();
+        while ranges.last().is_some_and(|r| r.end > start) {
+            if let Some(range) = ranges.pop() {
+                start = start.min(range.start);
+            }
+        }
+        ranges.push(start..found.end());
+    }
+    replace_ranges(s, ranges)
+}
+
+fn replace_ranges(s: &str, ranges: Vec<std::ops::Range<usize>>) -> String {
     let mut out = String::with_capacity(s.len());
     let mut offset = 0;
-    for found in matcher.find_iter(s) {
-        out.push_str(&s[offset..found.start()]);
+    for range in ranges {
+        out.push_str(&s[offset..range.start]);
         out.push_str(REDACTED);
-        offset = found.end();
+        offset = range.end;
     }
     out.push_str(&s[offset..]);
     out
 }
 
-/// [`fallback_redact`] ignoring ASCII case (`patterns` are lowercased). ASCII
-/// lowercasing keeps byte offsets, so unmatched text is copied unchanged.
-fn fallback_redact_any_case(text: &str, patterns: &[String]) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut out = String::with_capacity(text.len());
+fn fallback_ranges(text: &str, patterns: &[String]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
     let mut offset = 0;
-    while offset < text.len() {
-        let next = patterns
-            .iter()
-            .filter_map(|pattern| lower[offset..].find(pattern.as_str()).map(|at| (offset + at, pattern.len())))
-            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-        let Some((start, len)) = next else {
-            out.push_str(&text[offset..]);
-            break;
-        };
-        out.push_str(&text[offset..start]);
-        out.push_str(REDACTED);
-        offset = start + len;
-    }
-    out
-}
-
-fn fallback_redact(text: &str, patterns: &[String]) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut offset = 0;
+    let mut matches = 0;
     while offset < text.len() {
         let next = patterns
             .iter()
             .filter_map(|pattern| text[offset..].find(pattern).map(|at| (offset + at, pattern.len())))
             .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-        let Some((start, len)) = next else {
-            out.push_str(&text[offset..]);
-            break;
-        };
-        out.push_str(&text[offset..start]);
-        out.push_str(REDACTED);
-        offset = start + len;
+        let Some((start, len)) = next else { break };
+        if matches == MAX_SECRET_MATCHES {
+            return vec![0..text.len()];
+        }
+        matches += 1;
+        let end = start + len;
+        if let Some(last) = ranges.last_mut().filter(|r| r.end > start) {
+            last.end = last.end.max(end);
+        } else {
+            ranges.push(start..end);
+        }
+        // Keep searching inside the match to cover overlaps, at a UTF-8 boundary.
+        offset = start + text[start..].chars().next().map_or(1, char::len_utf8);
     }
-    out
+    ranges
+}
+
+fn fallback_redact(text: &str, patterns: &[String]) -> String {
+    replace_ranges(text, fallback_ranges(text, patterns))
 }
 
 fn is_scheme(s: &str) -> bool {
@@ -870,6 +912,22 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlapping_secrets_are_covered_in_full_even_without_matchers() {
+        use super::*;
+        let mut r = Redactor::new(vec!["text/plain".into(), "plain;token=secret-77".into(), "aaaa".into()], vec![]);
+        let value = "Ü text/plain;token=secret-77 and aaaaa!";
+        let expected = format!("Ü {REDACTED} and {REDACTED}!");
+        assert_eq!(r.text(value), expected);
+        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), expected.to_ascii_uppercase());
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.matcher = None;
+        r.any_case = None;
+        assert_eq!(r.text(value), expected);
+        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), expected.to_ascii_uppercase());
+    }
+
     /// Either automaton can fail to build (its size limit); redaction then
     /// degrades to the fallback passes and stays case-insensitive where it
     /// should, keeping every byte it does not replace.

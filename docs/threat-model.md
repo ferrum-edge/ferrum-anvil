@@ -145,16 +145,21 @@ against it).
     response metadata, not only header values. Header names and content
     codings are compared in any letter case (protocols lowercase them), and
     so are the warnings, assertion messages, findings and summary that can
-    quote them. A well-known media type (`application/json`,
-    `text/event-stream`, …) keeps its essence even when a secret is part of
-    that constant, because callers act on it; its parameters are scrubbed,
-    and a secret that crosses from the type into its parameters is replaced
-    over the whole value. A `Content-Encoding` listing only codings the
-    engine decodes (`gzip`, `br`, …) is kept so history can decode the body. The
-    request's own header names and `Content-Type` are scrubbed in the record
-    and the effective-request preview. The reason phrase (which the HTTP
-    adapters derive from the status code) is scrubbed wherever the record
-    keeps it.
+    quote them (including assertion labels and observed values). Overlapping
+    secrets are covered in full, including ones spanning media-type parameters.
+    Known media types and codings have no exemption. The engine and runner
+    share the same metadata scrubber, so sensitive extractions also cover
+    response metadata, protocol statuses and tunnel headers before history.
+    Operational consumers use response metadata held only in memory before
+    redaction: MCP still parses event streams and the runner still distinguishes
+    an identity body from encoded bytes. This copy is never serialized and its
+    debug view omits the media type. Historical drift treats a redacted media
+    essence as unknown and reports checks limited by redacted metadata; it
+    never suggests documenting the redaction marker as a media type. A coding
+    redacted from history cannot be recovered for later decompression (the raw
+    capture remains viewable). The request's header names and `Content-Type`
+    are scrubbed in records and previews. Reason phrases are scrubbed in every
+    persisted copy, as are session ids learned during MCP initialization.
   - Every credential an auth profile sends is a known secret, including a
     WS-Security SAML assertion (as stored and as embedded, trimmed), a
     PasswordText password in the XML-escaped form it is sent in, and a

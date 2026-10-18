@@ -250,7 +250,7 @@ pub fn response_in(content_type: Option<&str>, body: &[u8], id: i64) -> Option<V
 /// The JSON-RPC response of an MCP execution's operation, if its response
 /// held one (the output's decoded body, or its body).
 pub fn operation_response(out: &ExecutionOutput) -> Option<Value> {
-    let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.as_deref());
+    let ct = out.response_metadata.as_ref().and_then(crate::ResponseMetadata::content_type);
     response_in(ct, out.decoded_body.as_ref().unwrap_or(&out.body), OPERATION_ID)
 }
 
@@ -538,6 +538,9 @@ fn finish(
     if let Some(s) = session {
         redactor.add_secret(s);
     }
+    if let Some(s) = &seen.session_id {
+        redactor.add_secret(s);
+    }
     let r = &mut out.record;
     r.prepared.protocol = Protocol::Mcp;
     let mut inferred: Vec<String> = notes.before.iter().map(|n| redactor.inferred(n)).collect();
@@ -568,6 +571,13 @@ fn finish(
     }
     if changed {
         r.outcome.summary = record::summary_line(r.outcome.transport, r.outcome.application, &r.outcome.protocol_status, &r.findings);
+    }
+    redactor.record_metadata(r);
+    for finding in &mut r.findings {
+        redactor.finding(finding);
+    }
+    for note in &mut r.prepared.inferred {
+        *note = redactor.text_any_case(&redactor.inferred(note));
     }
     out
 }

@@ -116,16 +116,7 @@ impl RunSecrets {
                 }
             }
         }
-        if let Some(resp) = &mut r.response {
-            resp.headers = red.headers(&resp.headers);
-            resp.trailers = red.headers(&resp.trailers);
-            if let Some(reason) = &mut resp.reason {
-                *reason = red.text(reason);
-            }
-            if let Some(d) = &mut resp.body.decoding_detail {
-                *d = red.text(d);
-            }
-        }
+        red.record_metadata(r);
         if let Some(st) = &mut r.stream {
             // Hex previews too: the redactor knows secrets' hex forms.
             for m in &mut st.messages {
@@ -163,7 +154,11 @@ impl RunSecrets {
         }
         let secrets: Vec<&[u8]> = self.values.iter().map(|v| v.as_bytes()).collect();
         let capture = out.record.response.as_ref().map(|r| &r.body);
-        let coded = out.decoded_body.is_some() || capture.is_some_and(|b| has_content_coding(b.content_encoding.as_deref()));
+        let coded = out.decoded_body.is_some()
+            || out.response_metadata.as_ref().map_or_else(
+                || capture.is_some_and(|b| has_content_coding(b.content_encoding.as_deref())),
+                anvil_engine::ResponseMetadata::has_content_coding,
+            );
         if coded {
             let complete = capture.and_then(|b| b.decoding) == Some(ContentDecoding::Complete);
             let reason = match out.decoded_body.as_ref().filter(|_| complete) {
