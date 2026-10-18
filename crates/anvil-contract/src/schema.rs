@@ -83,7 +83,7 @@ pub fn compile(spec: &Spec, schema: &Value, direction: Direction) -> Result<json
 
 /// [`compile`], adding what it scans to `scanned` and refusing once that
 /// exceeds `budget` (shared by many compiles, e.g. every example of a lint):
-/// each compile scans, bundles and builds its schema.
+/// each compile scans its input and completed bundle before building.
 pub fn compile_within(
     spec: &Spec,
     schema: &Value,
@@ -102,6 +102,15 @@ pub fn compile_within(
         return Err("the checks' scanning budget is spent".into());
     }
     let wrapper = bundle(spec, schema, direction)?;
+    // A copied target can activate a keyword at the document root (for
+    // example a target copied to `/properties`). Check the exact document
+    // given to the compiler, not just the schema in its original position.
+    // Wrapping the selected schema in allOf adds one subschema level.
+    measure_in(&wrapper, &wrapper, scanned, MAX_DEPTH + 1)?;
+    if scanned.exceeds(budget) {
+        return Err("the checks' scanning budget is spent".into());
+    }
+    check_keywords(&wrapper, &wrapper, false, false)?;
     jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .should_validate_formats(true)
@@ -121,7 +130,14 @@ pub fn linear_patterns() -> jsonschema::PatternOptions<jsonschema::Regex> {
 /// The converted schema with the `$ref` targets it reaches, as one document.
 pub fn bundle(spec: &Spec, schema: &Value, direction: Direction) -> Result<Value, String> {
     let mut flags = Flags::new();
-    let root = convert_in(spec, schema, direction, 0, &mut flags);
+    let mut root = convert_in(spec, schema, direction, 0, &mut flags);
+    // The wrapper declares this same dialect. Preserve a supported root
+    // declaration without moving it into a nested resource during wrapping.
+    if let Value::Object(o) = &mut root
+        && o.get("$schema").and_then(Value::as_str).is_some_and(is_draft_202012)
+    {
+        o.remove("$schema");
+    }
     let mut doc = Value::Object(Map::new());
     let mut pending: Vec<String> = vec![];
     collect_refs(&root, &mut pending)?;
@@ -184,6 +200,9 @@ struct Part {
     bytes: usize,
     /// Deepest nesting of objects and lists.
     depth: usize,
+    /// Schema nesting as conversion follows it; literal data does not add
+    /// conversion depth. Never silently truncate a checked constraint.
+    schema_depth: usize,
     refs: Vec<(String, bool)>,
     /// Applicators whose work is not one structural traversal of the value.
     complex: bool,
@@ -201,14 +220,20 @@ enum Pos {
 /// Scan until more than `node_limit` objects and lists, more than
 /// `step_limit` members and items (scalars included), or more than
 /// `byte_limit` bytes of member names and strings have been seen.
-fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> Part {
-    let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, refs: vec![], complex: false };
-    let mut stack: Vec<(&Value, bool, usize, Pos)> = vec![(v, false, 1, Pos::Schema)];
-    'scan: while let Some((v, down, d, pos)) = stack.pop() {
+fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, schema_depth_limit: usize) -> Part {
+    let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, schema_depth: 0, refs: vec![], complex: false };
+    let mut stack: Vec<(&Value, bool, usize, Pos, usize)> = vec![(v, false, 1, Pos::Schema, 0)];
+    'scan: while let Some((v, down, d, pos, schema_depth)) = stack.pop() {
         if part.nodes > node_limit || part.steps > step_limit || part.bytes > byte_limit {
             break;
         }
         part.depth = part.depth.max(d);
+        if pos == Pos::Schema && v.is_object() {
+            part.schema_depth = part.schema_depth.max(schema_depth);
+            if schema_depth > schema_depth_limit {
+                break;
+            }
+        }
         match v {
             Value::Object(o) => {
                 part.nodes += 1;
@@ -233,10 +258,11 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
                         break 'scan;
                     }
                     let child_pos = child_position(pos, k);
+                    let child_depth = schema_depth + usize::from(child_pos == Pos::Schema && pos != Pos::Literal);
                     // A `$ref` that is not a string is still copied by
                     // conversion and bundling: scanned like any member.
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down || (pos == Pos::Schema && descends(k)), d + 1, child_pos));
+                        stack.push((child, down || (pos == Pos::Schema && descends(k)), d + 1, child_pos, child_depth));
                     }
                 }
             }
@@ -249,7 +275,7 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize) -> P
                         break 'scan;
                     }
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down, d + 1, pos));
+                        stack.push((child, down, d + 1, pos, schema_depth));
                     }
                 }
             }
@@ -275,7 +301,7 @@ const ROOT: &str = "#root";
 /// [`measure`], adding the members and items it looked at, and the bytes of
 /// their names and strings, to `total`.
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
-    let size = measure_in(&spec.root, schema, total)?;
+    let size = measure_in(&spec.root, schema, total, MAX_DEPTH)?;
     check_keywords(&spec.root, schema, false, legacy(spec.dialect))?;
     Ok(size)
 }
@@ -292,7 +318,7 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
 /// `default`, `examples`) is not interpreted, unless a reference points into
 /// it (the validator then compiles it as a schema too).
 pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
-    let size = measure_in(schema, schema, &mut Scanned::default())?;
+    let size = measure_in(schema, schema, &mut Scanned::default(), MAX_DEPTH)?;
     check_keywords(schema, schema, true, false)?;
     Ok(size)
 }
@@ -357,6 +383,10 @@ fn schema_map_keyword(k: &str) -> bool {
     matches!(k, "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies")
 }
 
+fn is_draft_202012(dialect: &str) -> bool {
+    matches!(dialect.trim_end_matches('#'), "https://json-schema.org/draft/2020-12/schema" | "http://json-schema.org/draft/2020-12/schema")
+}
+
 fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: bool) -> Result<(), String> {
     let mut stack: Vec<(&Value, bool, Pos)> = vec![(schema, true, Pos::Schema)];
     let mut followed: HashSet<String> = HashSet::new();
@@ -406,10 +436,7 @@ fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: b
                 },
                 "$id" if !legacy_ids && !(root_id && root) => return Err("`$id` is only supported at a standalone schema's root".into()),
                 "$schema" if child.is_string() => {
-                    let d = child.as_str().unwrap_or_default();
-                    let d = d.trim_end_matches('#');
-                    if !root || !(d == "https://json-schema.org/draft/2020-12/schema" || d == "http://json-schema.org/draft/2020-12/schema")
-                    {
+                    if !root || !is_draft_202012(child.as_str().unwrap_or_default()) {
                         return Err("`$schema` is only supported at the root of the schema, for draft 2020-12".into());
                     }
                 }
@@ -428,17 +455,18 @@ fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: b
 }
 
 /// [`measure_counted`] with references resolved in `root`.
-fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
+fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_depth_limit: usize) -> Result<usize, String> {
     let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
     let mib = MAX_SCAN_BYTES >> 20;
     let too_long = || format!("{TOO_LARGE}the schema and the schemas it references have more than {mib} MiB of names and strings");
+    let too_nested = || format!("{TOO_LARGE}the schema nests subschemas more than {schema_depth_limit} levels");
     // Every reached schema counts at least once in the expanded size, so
     // scanning stops as soon as the schemas scanned so far exceed the limit
     // (targets nested in one another are scanned once each, not more), or
     // their members and items (scalars too: a huge `enum`) or the bytes of
     // their names and strings (a huge `description`) exceed theirs.
-    let root = scan(schema, MAX_EXPANDED_NODES, MAX_SCAN_STEPS, MAX_SCAN_BYTES);
+    let root = scan(schema, MAX_EXPANDED_NODES, MAX_SCAN_STEPS, MAX_SCAN_BYTES, schema_depth_limit);
     let mut scanned = root.nodes;
     total.steps += root.steps;
     total.bytes += root.bytes;
@@ -450,6 +478,9 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<u
     }
     if root.bytes > MAX_SCAN_BYTES {
         return Err(too_long());
+    }
+    if root.schema_depth > schema_depth_limit {
+        return Err(too_nested());
     }
     let mut stepped = root.steps;
     let mut bytes = root.bytes;
@@ -463,7 +494,7 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<u
         }
         match root_doc.pointer(key) {
             Some(v) => {
-                let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped, MAX_SCAN_BYTES - bytes);
+                let part = scan(v, MAX_EXPANDED_NODES - scanned, MAX_SCAN_STEPS - stepped, MAX_SCAN_BYTES - bytes, schema_depth_limit);
                 scanned += part.nodes;
                 stepped += part.steps;
                 bytes += part.bytes;
@@ -477,6 +508,9 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned) -> Result<u
                 }
                 if bytes > MAX_SCAN_BYTES {
                     return Err(too_long());
+                }
+                if part.schema_depth > schema_depth_limit {
+                    return Err(too_nested());
                 }
                 parts.insert(key.to_string(), part);
                 Ok(true)
@@ -716,7 +750,7 @@ fn convert_in(spec: &Spec, schema: &Value, direction: Direction, depth: usize, f
     let mut out = Map::new();
     for (k, v) in src {
         let converted = match k.as_str() {
-            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => match v {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies" => match v {
                 Value::Object(m) => {
                     Value::Object(m.iter().map(|(n, s)| (n.clone(), convert_in(spec, s, direction, depth + 1, flags))).collect())
                 }
@@ -726,6 +760,7 @@ fn convert_in(spec: &Spec, schema: &Value, direction: Direction, depth: usize, f
             | "additionalProperties"
             | "not"
             | "contains"
+            | "contentSchema"
             | "if"
             | "then"
             | "else"
@@ -996,12 +1031,12 @@ mod tests {
         // A shared budget is spent by bytes too.
         let short = json!({"type": "string", "description": "d".repeat(1_000)});
         let mut scanned = Scanned::default();
-        let budget = Scanned { steps: usize::MAX, bytes: 2_500 };
+        let budget = Scanned { steps: usize::MAX, bytes: 5_000 };
         assert!(compile_within(&s, &short, Direction::Response, &mut scanned, budget).is_ok());
         assert!(compile_within(&s, &short, Direction::Response, &mut scanned, budget).is_ok());
         let e = compile_within(&s, &short, Direction::Response, &mut scanned, budget).unwrap_err();
         assert!(e.contains("budget is spent"), "{e}");
-        assert_eq!(scanned.steps, 6);
+        assert!(scanned.bytes > budget.bytes, "{scanned:?}");
     }
 
     #[test]
@@ -1013,8 +1048,8 @@ mod tests {
         assert!(e.contains("MiB of names and strings"), "{e}");
         assert!(too_large(&e), "{e}");
         // A component holding 1 MiB of it, reached by many schemas: each
-        // compile is charged for it, so a shared budget of 10 MiB is spent by
-        // the tenth.
+        // compile is charged for both the input and completed bundle, so a
+        // shared budget of 10 MiB is spent before ten compiles.
         let big = json!({"type": "string", "$ref": {"blob": "x".repeat(1 << 20)}});
         let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {}, "components": {"schemas": {"Big": big}}});
         let s = spec(&doc.to_string());
@@ -1028,7 +1063,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(refused, Some(9), "{scanned:?}");
+        assert!(refused.is_some_and(|i| i > 0 && i < 10), "{scanned:?}");
         assert!(scanned.bytes > 10 << 20, "{scanned:?}");
     }
 

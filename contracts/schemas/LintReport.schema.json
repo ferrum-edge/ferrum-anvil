@@ -55,7 +55,7 @@
       "default": 0
     },
     "examples_not_checked": {
-      "description": "Body examples not checked: their schema uses an external reference\nor an unsupported pattern, refers to itself without descending into\nthe value, or expands too far through its references.",
+      "description": "Body examples not checked: their schemas use unsupported features,\ncannot be compiled, or exceed the validation/scanning work limits.",
       "type": "integer",
       "format": "uint",
       "minimum": 0,

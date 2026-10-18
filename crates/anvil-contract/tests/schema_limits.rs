@@ -160,3 +160,83 @@ fn openapi_scope_changes_and_bundle_collisions_are_refused() {
     let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
     assert!(schema::compile(&spec, &schema, Direction::Response).unwrap().is_valid(&json!("ok")));
 }
+
+#[test]
+fn constraints_at_the_conversion_depth_boundary_are_enforced_or_refused() {
+    let mut schema = json!({"type":"string"});
+    let mut good = json!("ok");
+    let mut bad = json!(7);
+    for _ in 0..64 {
+        schema = json!({"items":schema});
+        good = json!([good]);
+        bad = json!([bad]);
+    }
+    ruleset(&schema).unwrap();
+    let document = spec(&schema);
+    let validator = schema::compile(&document, &schema, Direction::Response).unwrap();
+    assert!(validator.is_valid(&good));
+    assert!(!validator.is_valid(&bad));
+    // The first object constraint beyond conversion's depth limit must not
+    // become an empty (always true) schema.
+    let deep = json!({"items":schema});
+    refused_work(&deep);
+    let document = spec(&deep);
+    let err = schema::compile(&document, &deep, Direction::Response).unwrap_err();
+    assert!(schema::too_large(&err), "{err}");
+    // The same physical depth in annotation data is copied intact, not
+    // recursively converted or interpreted as schema keywords.
+    let mut data = json!({"$id":"literal-data"});
+    for _ in 0..70 {
+        data = json!([data]);
+    }
+    ruleset(&json!({"type":"object","default":data})).unwrap();
+}
+
+#[test]
+fn completed_bundles_cannot_activate_unmeasured_root_keywords() {
+    let schema = json!({"$ref":"#/properties"});
+    for child in [
+        json!({"allOf":[
+            {"properties":{"child":{"$ref":"#/properties/child"}}},
+            {"properties":{"child":{"$ref":"#/properties/child"}}}
+        ]}),
+        json!({"unevaluatedItems":false}),
+    ] {
+        // `child` is an unknown annotation in the measured target at
+        // /properties, but becomes a schema when copied to root properties.
+        let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+            "properties":{"child":child},"components":{"schemas":{"Checked":schema}}});
+        let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
+        assert!(schema::too_large(&err), "{err}");
+    }
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+        "properties":{"child":{"$id":"https://example.test/new-scope","type":"string"}},
+        "components":{"schemas":{"Checked":schema}}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
+    assert!(err.contains("$id"), "{err}");
+}
+
+#[test]
+fn a_supported_root_dialect_survives_openapi_wrapping() {
+    let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"});
+    let document = spec(&schema);
+    let validator = schema::compile(&document, &schema, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!("ok")));
+    assert!(!validator.is_valid(&json!(7)));
+}
+
+#[test]
+fn legacy_dependency_schemas_are_converted_before_internal_references_resolve() {
+    let schema = json!({"type":"object","dependencies":{"trigger":{
+        "$id":"https://example.test/ignored-legacy-id",
+        "properties":{"child":{"$ref":"#/components/schemas/Value"}}
+    }}});
+    let doc = json!({"openapi":"3.0.3","info":{"title":"t","version":"1"},"paths":{},
+        "components":{"schemas":{"Checked":schema,"Value":{"type":"integer"}}}});
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let validator = schema::compile(&spec, &schema, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!({"trigger":true,"child":1})));
+    assert!(!validator.is_valid(&json!({"trigger":true,"child":"bad"})));
+}

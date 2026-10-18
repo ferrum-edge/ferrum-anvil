@@ -133,9 +133,8 @@ pub struct LintReport {
     pub unresolved_refs: Vec<String>,
     #[serde(default)]
     pub unresolved_ref_count: usize,
-    /// Body examples not checked: their schema uses an external reference
-    /// or an unsupported pattern, refers to itself without descending into
-    /// the value, or expands too far through its references.
+    /// Body examples not checked: their schemas use unsupported features,
+    /// cannot be compiled, or exceed the validation/scanning work limits.
     #[serde(default)]
     pub examples_not_checked: usize,
     /// Operations left out because the description is too large to lint
@@ -638,7 +637,7 @@ mod tests {
         drop(Model::build(&spec, &mut examples));
         assert_eq!(checker.compiles, 100);
         // Members alone would not have stopped them; bytes did, after about
-        // ten compiles.
+        // a few compiles (both inputs and completed bundles are charged).
         assert!(checker.scanned.steps < 2_000, "{:?}", checker.scanned);
         assert!(checker.scanned.bytes <= (11 << 20) + 10_000, "{:?}", checker.scanned);
         assert!(checker.not_checked >= 89, "{}", checker.not_checked);

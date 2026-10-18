@@ -197,7 +197,7 @@ fn text(r: &LintReport, name: &str, fail_on: FailOn) -> String {
     }
     if r.examples_not_checked > 0 {
         s.push_str(&format!(
-            "note: {} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far\n",
+            "note: {} example(s) were not checked: their schemas could not be checked within the supported features and work limits\n",
             r.examples_not_checked
         ));
     }

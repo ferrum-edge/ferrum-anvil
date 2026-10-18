@@ -3705,9 +3705,8 @@ export interface LintReport {
   unresolved_refs?: string[];
   unresolved_ref_count?: number;
   /**
-   * Body examples not checked: their schema uses an external reference
-   * or an unsupported pattern, refers to itself without descending into
-   * the value, or expands too far through its references.
+   * Body examples not checked: their schemas use unsupported features,
+   * cannot be compiled, or exceed the validation/scanning work limits.
    */
   examples_not_checked?: number;
   /**

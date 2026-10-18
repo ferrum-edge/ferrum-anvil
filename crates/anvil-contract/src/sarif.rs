@@ -101,7 +101,7 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
     }
     if report.examples_not_checked > 0 {
         notes.push(json!({"level": "note", "message": {"text": format!(
-            "{} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far",
+            "{} example(s) were not checked: their schemas could not be checked within the supported features and work limits",
             report.examples_not_checked
         )}}));
     }

@@ -57,6 +57,8 @@ company ruleset.
     `Cat: allOf [Pet]` is such a cycle;
   - a chain has more than 32 references, or 512 levels of nesting along
     one;
+  - it nests subschemas more than 64 levels deep: constraints are refused
+    before conversion could truncate them (literal data adds no schema depth);
   - a recursive region has more than one reference per schema, or uses
     composition, conditions, dependencies, overlapping property patterns,
     `contains`, or other non-structural applicators. Simple recursion through
@@ -76,7 +78,9 @@ company ruleset.
   schema is compiled once however many media types `$ref` it, and all the
   compiles of a lint scan 20,000,000 members and items, and 320 MiB of
   names and strings, at most; examples past that are counted as not checked
-  too.
+  too. Both the original schema and the completed converted bundle are
+  measured and charged before validator construction; copied targets cannot
+  activate unmeasured keywords at the bundle root.
   References must remain plain document-local pointers. Modern `$id`,
   anchors, dynamic/recursive references and nested dialect changes are
   refused, as are references to the bundle root or its reserved `allOf` and

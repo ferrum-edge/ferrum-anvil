@@ -411,7 +411,7 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
       )}
       {(report.examples_not_checked ?? 0) > 0 && (
         <p className="hint">
-          {report.examples_not_checked} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far.
+          {report.examples_not_checked} example(s) were not checked: their schemas could not be checked within the supported features and work limits.
         </p>
       )}
       {report.dropped > 0 && <p className="hint">{report.dropped} more findings are counted above but not listed. Fix the most severe first, or export the report.</p>}
