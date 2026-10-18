@@ -186,11 +186,11 @@ impl Engine {
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
-            method: req.method.clone(),
+            method: redactor.text_any_case(&req.method),
             url: redactor.url(&shape.url(&target)),
-            destination: format!("{}:{}", target.host, target.port),
-            authority: redactor.text(&authority),
-            headers: headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect(),
+            destination: redactor.metadata_text(&format!("{}:{}", target.host, target.port)),
+            authority: redactor.metadata_text(&authority),
+            headers: redactor.headers(&headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: v.clone() }).collect::<Vec<_>>()),
             body_bytes: body.len() as u64,
             body_preview,
             content_type: req.content_type.as_deref().map(|c| redactor.text_any_case(c)),

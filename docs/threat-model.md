@@ -157,12 +157,15 @@ against it).
     essence as unknown and reports checks limited by redacted metadata; it
     never suggests documenting the redaction marker as a media type. Redacted
     header or query names also cannot prove that a required name was absent.
-    A redacted server or path likewise makes routing evidence unavailable.
-    A coding
-    redacted from history cannot be recovered for later decompression (the raw
+    A redacted method, server or path likewise makes routing evidence unavailable.
+    A coding redacted from history cannot be recovered for later decompression (the raw
     capture remains viewable). The request's header names and `Content-Type`
     are scrubbed in records and previews. Reason phrases are scrubbed in every
     persisted copy, as are session ids learned during MCP initialization.
+    Request methods and host copies in TLS identity/certificate observations,
+    tunnel endpoints and previews use the same ASCII-insensitive policy.
+    Structured URL and cookie checks also compare percent-decoded values
+    ignoring ASCII case, including noncanonical and repeated encoding.
   - Every credential an auth profile sends is a known secret, including a
     WS-Security SAML assertion (as stored and as embedded, trimmed), a
     PasswordText password in the XML-escaped form it is sent in, and a

@@ -278,12 +278,12 @@ impl Redactor {
     /// Metadata with a known reversibly encoded value is withheld when its
     /// original structural role is unavailable (for example, a late-learned
     /// extraction in an assertion's observed value).
-    fn metadata_text(&self, s: &str) -> String {
+    pub(crate) fn metadata_text(&self, s: &str) -> String {
         if self.hides_secret(s) { REDACTED.to_string() } else { self.text_any_case(s) }
     }
 
     /// True when a component, once percent-decoded (and with `+` read as a
-    /// space), contains a secret value. Raw occurrences are scrubbed by
+    /// space), contains a secret value ignoring ASCII case. Raw occurrences are scrubbed by
     /// [`Redactor::text`] before components are examined.
     pub(crate) fn hides_secret(&self, component: &str) -> bool {
         if self.secrets.is_empty() || !component.contains(['%', '+']) {
@@ -314,7 +314,7 @@ impl Redactor {
         }
         // Nothing to decode: only a raw occurrence can reveal a secret.
         if !s.contains(['%', '+']) {
-            return self.secrets.iter().any(|x| s.contains(x.as_str()));
+            return self.secrets.iter().any(|x| contains_bytes(s.as_bytes(), x.as_bytes()));
         }
         let mut layers: Vec<Vec<u8>> = vec![s.as_bytes().to_vec()];
         for round in 0..=MAX_DECODE_ROUNDS {
@@ -573,6 +573,7 @@ impl Redactor {
                 *s = self.metadata_text(s);
             }
         };
+        r.prepared.method = self.metadata_text(&r.prepared.method);
         r.prepared.url = self.metadata_text(&self.url(&r.prepared.url));
         for note in &mut r.prepared.inferred {
             *note = self.metadata_text(&self.inferred(note));
@@ -992,7 +993,7 @@ fn is_scheme(s: &str) -> bool {
 }
 
 fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
+    !needle.is_empty() && hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 /// `scheme://user:pw@host/...` and the scheme-relative `//user:pw@host/...`

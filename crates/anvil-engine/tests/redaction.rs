@@ -110,6 +110,91 @@ fn urls_without_secrets_are_unchanged() {
 }
 
 #[test]
+fn folded_secrets_with_noncanonical_percent_encoding_are_not_recoverable() {
+    let r = Redactor::new(vec!["MixedCase77".into()], vec![]);
+    for value in ["%6Dixedcase77", "%256Dixedcase77", "MIXED%43ASE77"] {
+        for text in [
+            r.url(&format!("https://h/{value}?page=2")),
+            r.header("Location", &format!("https://h/{value}")),
+            r.header("Set-Cookie", &format!("sid=x; Path=/{value}")),
+            r.header("Cookie", &format!("{value}=x")),
+        ] {
+            assert!(!reveals(&text.to_ascii_lowercase(), "mixedcase77"), "{value} → {text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn templated_methods_and_hosts_are_scrubbed_from_records_and_previews() {
+    use anvil_domain::execution::{PeerIdentityCheck, TlsObservation, TlsVerification};
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut ctx = ExecutionContext::standalone(RequestSpec::http("{{word}}", &f.url("/status/200")));
+    ctx.var_layers.push(VarLayer {
+        label: "test".into(),
+        vars: vec![VarEntry { name: "word".into(), value: "MixedCaseWord".into(), secret: true, literal: false }],
+    });
+    let engine = Engine::new();
+    let mut out = engine.execute(&ctx, EventCtx::none(), CancellationToken::new()).await;
+    assert_eq!(out.record.prepared.method, REDACTED);
+    assert_eq!(out.record.attempts[0].method, REDACTED);
+    ctx.spec.url = "https://{{word}}.api.test/path".into();
+    let preview = engine.preview(&ctx).unwrap();
+    assert_eq!(preview.method, REDACTED);
+    assert!(preview.destination.contains(REDACTED) && preview.authority.contains(REDACTED));
+    assert!(!serde_json::to_string(&preview).unwrap().to_ascii_lowercase().contains("mixedcaseword"));
+
+    // A later run-level extraction must also cover every transport copy of
+    // a reflected/templated host, including outer tunnel TLS evidence.
+    let folded = "mixedcaseword";
+    let cert = serde_json::from_value(serde_json::json!({
+        "subject":folded,"issuer":folded,"subject_alt_names":[folded],
+        "not_before":"2026","not_after":"2027","serial_hex":"01",
+        "sha256_fingerprint":"abc","is_ca":false,"key_algorithm":"RSA"
+    }))
+    .unwrap();
+    let tls = TlsObservation {
+        server_name: folded.into(),
+        sni: Some(folded.into()),
+        server_name_overridden: false,
+        identity_check: Some(PeerIdentityCheck::HostName { name: folded.into() }),
+        peer_spiffe_id: Some(format!("spiffe://{folded}/workload")),
+        version: None,
+        cipher_suite: None,
+        alpn_offered: vec!["h2".into()],
+        alpn_negotiated: Some("h2".into()),
+        verification: TlsVerification::Failed { problem: anvil_domain::execution::FailureKind::InvalidUrl, detail: folded.into() },
+        peer_certificates: vec![cert],
+        client_certificate_requested: None,
+        client_certificate_presented: None,
+        alert_received: Some(folded.into()),
+        resumed: None,
+    };
+    let connection = out.record.attempts[0].connection.as_mut().expect("HTTP connection observation");
+    connection.tls = Some(tls.clone());
+    connection.tunnel = Some(
+        serde_json::from_value(serde_json::json!({
+            "kind":"hbone", "endpoint":format!("{folded}:15008"), "authority":format!("{folded}:443"),
+            "resolved_addresses":[],"connect_attempts":[],"phases":[],"tls":tls,
+            "connect_headers":[],"response_headers":[]
+        }))
+        .unwrap(),
+    );
+    let r = Redactor::new(vec!["MixedCaseWord".into()], vec![]);
+    for identity in [
+        PeerIdentityCheck::HostName { name: folded.into() },
+        PeerIdentityCheck::SpiffeId { expected: folded.into(), trust_domain: folded.into() },
+        PeerIdentityCheck::SpiffeTrustDomain { trust_domain: folded.into() },
+    ] {
+        out.record.attempts[0].connection.as_mut().unwrap().tls.as_mut().unwrap().identity_check = Some(identity);
+        r.record_metadata(&mut out.record);
+        let text = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
+        assert!(!text.contains(folded), "{text}");
+    }
+}
+
+#[test]
 fn canonical_encodings_are_scrubbed_from_text_and_url_headers() {
     let r = redactor();
     let sample = ["GET /x?q=AUDIT%2Fsecret%2Bwith%3Dreserved failed", "form q=open+sesame+42", "lower AUDIT%2fsecret%2bwith%3dreserved"];

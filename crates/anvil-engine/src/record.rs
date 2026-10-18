@@ -74,6 +74,7 @@ fn refusal_body(r: &Redactor, captured: &str) -> (String, bool) {
 
 pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     for a in attempts {
+        a.method = r.metadata_text(&a.method);
         a.url = r.text_any_case(&r.url(&a.url));
         if let Some(f) = &mut a.failure {
             f.message = r.text_any_case(&f.message);
@@ -82,7 +83,16 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
         for phase in &mut a.phases {
             phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
         }
-        if let Some(t) = a.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
+        let Some(connection) = &mut a.connection else { continue };
+        if let Some(tls) = &mut connection.tls {
+            redact_tls(tls, r);
+        }
+        if let Some(t) = &mut connection.tunnel {
+            t.endpoint = r.metadata_text(&t.endpoint);
+            t.authority = r.metadata_text(&t.authority);
+            if let Some(tls) = &mut t.tls {
+                redact_tls(tls, r);
+            }
             if let Some(f) = &mut t.failure {
                 f.message = r.text_any_case(&f.message);
                 f.field = f.field.as_deref().map(|s| r.text_any_case(s));
@@ -98,6 +108,50 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
             // A CONNECT-UDP request carries the request's auth headers.
             t.connect_headers = r.headers(&t.connect_headers);
             t.response_headers = r.headers(&t.response_headers);
+        }
+    }
+}
+
+/// Certificate and identity observations can repeat a templated host or a
+/// server-controlled redirect destination. Scrub these copies only after
+/// diagnosis has consumed the original transport evidence.
+fn redact_tls(t: &mut TlsObservation, r: &Redactor) {
+    t.server_name = r.metadata_text(&t.server_name);
+    for value in [&mut t.sni, &mut t.peer_spiffe_id, &mut t.version, &mut t.cipher_suite, &mut t.alpn_negotiated, &mut t.alert_received]
+        .into_iter()
+        .flatten()
+    {
+        *value = r.metadata_text(value);
+    }
+    for value in &mut t.alpn_offered {
+        *value = r.metadata_text(value);
+    }
+    match &mut t.identity_check {
+        Some(PeerIdentityCheck::HostName { name }) => *name = r.metadata_text(name),
+        Some(PeerIdentityCheck::SpiffeId { expected, trust_domain }) => {
+            *expected = r.metadata_text(expected);
+            *trust_domain = r.metadata_text(trust_domain);
+        }
+        Some(PeerIdentityCheck::SpiffeTrustDomain { trust_domain }) => *trust_domain = r.metadata_text(trust_domain),
+        None => {}
+    }
+    if let TlsVerification::Failed { detail, .. } = &mut t.verification {
+        *detail = r.metadata_text(detail);
+    }
+    for cert in t.peer_certificates.iter_mut().chain(t.client_certificate_presented.iter_mut()) {
+        for value in [
+            &mut cert.subject,
+            &mut cert.issuer,
+            &mut cert.not_before,
+            &mut cert.not_after,
+            &mut cert.serial_hex,
+            &mut cert.sha256_fingerprint,
+            &mut cert.key_algorithm,
+        ] {
+            *value = r.metadata_text(value);
+        }
+        for value in &mut cert.subject_alt_names {
+            *value = r.metadata_text(value);
         }
     }
 }

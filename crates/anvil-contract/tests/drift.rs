@@ -615,6 +615,10 @@ fn redacted_routes_are_unknown_but_redacted_query_values_still_route() {
         assert!(report.suggestions.is_empty());
         assert!(report.notes.iter().any(|n| n.contains("routing not checked")));
     }
+    let obs = Obs::new("method", &marker.to_ascii_uppercase(), "https://api.test/health").empty(200).0;
+    let report = analyze(&spec, &[obs], &DriftOptions::default());
+    assert!(report.findings.is_empty() && report.suggestions.is_empty());
+    assert!(report.notes.iter().any(|n| n.contains("routing not checked")));
     let obs = Obs::new("query", "GET", &format!("https://api.test/health?token={marker}")).empty(503).0;
     let report = analyze(&spec, &[obs], &DriftOptions::default());
     assert_eq!(report.matched, 1);

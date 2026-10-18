@@ -231,9 +231,9 @@ pub fn observation(r: &ExecutionRecord, raw: Option<&[u8]>, hint: Option<String>
             (resp.body.content_type.is_some() && ct.is_none()) || resp.body.content_encoding.as_deref().is_some_and(redacted);
         let complete = matches!(resp.body.completeness, BodyCompleteness::Complete) && !resp.body.display_truncated;
         let body = match (resp.body.completeness, raw) {
-            _ if metadata_redacted => ObservedBody::Unavailable("response media type or content coding was redacted".into()),
             (BodyCompleteness::NoBody, _) => ObservedBody::Empty,
             (_, None) if resp.body.wire_bytes == 0 => ObservedBody::Empty,
+            _ if metadata_redacted => ObservedBody::Unavailable("response media type or content coding was redacted".into()),
             (_, None) => ObservedBody::Unavailable("history keeps no response bodies (Settings → History)".into()),
             (_, Some(bytes)) => {
                 // Decoding stops just past what is checked (a larger body

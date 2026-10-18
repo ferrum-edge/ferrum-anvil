@@ -826,10 +826,11 @@ impl<'a> State<'a> {
             self.to = Some(self.to.map_or(at, |t| t.max(at)));
         }
         let (origin, path) = split_url(&o.url);
-        if origin.as_deref().is_some_and(|s| redacted_name(&crate::observe::percent_decode_path(s)))
+        if redacted_name(&o.method)
+            || origin.as_deref().is_some_and(|s| redacted_name(&crate::observe::percent_decode_path(s)))
             || redacted_name(&crate::observe::percent_decode_path(&path))
         {
-            self.note("routing not checked: the server or path contains redacted secrets");
+            self.note("routing not checked: the method, server or path contains redacted secrets");
             if o.response.is_none() {
                 self.without_response += 1;
             }
