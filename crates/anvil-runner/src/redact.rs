@@ -108,11 +108,11 @@ impl RunSecrets {
         for a in &mut r.attempts {
             a.url = red.url(&a.url);
             if let Some(f) = &mut a.failure {
-                f.message = red.text(&f.message);
+                f.message = red.text_any_case(&f.message);
             }
             for p in &mut a.phases {
                 if let Some(d) = &mut p.detail {
-                    *d = red.text(d);
+                    *d = red.text_any_case(d);
                 }
             }
         }

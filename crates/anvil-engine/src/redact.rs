@@ -466,8 +466,8 @@ impl Redactor {
     /// secret, so it is redacted as a URL.
     pub fn inferred(&self, line: &str) -> String {
         match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
-            Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", self.url(v)),
-            _ => self.text(line),
+            Some((k, v)) if k.ends_with(".htu") => self.text_any_case(&format!("auth {k}: {}", self.url(v))),
+            _ => self.text_any_case(line),
         }
     }
 
@@ -563,7 +563,7 @@ impl Redactor {
     /// reveals a secret once decoded (a secret split across components by a
     /// raw `/` or `&`), everything after the authority is replaced.
     pub fn url(&self, u: &str) -> String {
-        let u = self.text(u);
+        let u = self.text_any_case(u);
         let (base, frag) = match u.split_once('#') {
             Some((b, f)) => (b, Some(f)),
             None => (u.as_str(), None),

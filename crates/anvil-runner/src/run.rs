@@ -297,6 +297,7 @@ impl Run {
                     out.record.prepared.inferred.clear();
                     out.record.attempts.clear();
                     out.record.response = None;
+                    out.response_metadata = None;
                     out.record.stream = None;
                     out.record.assertion_results.clear();
                     out.record.extracted.clear();

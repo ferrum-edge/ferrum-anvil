@@ -471,6 +471,7 @@ async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media
         "GET",
         &f.url("/status/200?ct=text/plain;token=secret-77&header=Content-Encoding:mixed-coding-77&header=x-mixed-coding-77:v&body=x"),
     );
+    spec.headers.push(anvil_domain::request::KeyValue::new("Content-Type", "text/plain;token=secret-77"));
     for name in ["coding", "essence", "crossing"] {
         spec.headers.push(anvil_domain::request::KeyValue::new(format!("X-{name}"), format!("{{{{{name}}}}}")));
     }
@@ -488,7 +489,7 @@ async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media
     let mut c = ExecutionContext::standalone(spec);
     c.var_layers.push(VarLayer {
         label: "test".into(),
-        vars: [("coding", "Mixed-Coding-77"), ("essence", "text/plain"), ("crossing", "plain;token=secret-77")]
+        vars: [("coding", "Mixed-Coding-77"), ("essence", "text/plain"), ("crossing", "PLAIN;token=secret-77")]
             .into_iter()
             .map(|(name, value)| VarEntry { name: name.into(), value: value.into(), secret: true, literal: false })
             .collect(),
@@ -497,6 +498,8 @@ async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media
     assert_eq!(out.record.assertion_results.len(), 2);
     let response = out.record.response.as_ref().expect("response");
     assert_eq!(response.body.content_type.as_deref(), Some(REDACTED));
+    assert_eq!(out.record.prepared.content_type.as_deref(), Some(REDACTED));
+
     let json = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
     for secret in ["mixed-coding-77", "token=secret-77"] {
         assert!(!json.contains(secret), "{json}");

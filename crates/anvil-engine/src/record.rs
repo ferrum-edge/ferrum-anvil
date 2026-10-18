@@ -69,7 +69,7 @@ fn refusal_body(r: &Redactor, captured: &str) -> (String, bool) {
     while !captured.is_char_boundary(cut) {
         cut -= 1;
     }
-    (anvil_transport::session::redact_then_cut(&|s: &str| r.text(s), captured, cut), cut < captured.len())
+    (anvil_transport::session::redact_then_cut(&|s: &str| r.text_any_case(s), captured, cut), cut < captured.len())
 }
 
 pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
@@ -248,7 +248,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     // Excerpts a finding quotes from the response are redacted before they
     // are cut: the findings are redacted again below, but a secret that
     // crossed a cut would no longer match there.
-    let redact_excerpt = |s: &str| redactor.text(s);
+    let redact_excerpt = |s: &str| redactor.text_any_case(s);
     let diag_input = DiagnosticInput {
         protocol: ctx.spec.protocol,
         method: &a.prepared_method,
@@ -292,7 +292,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         let message = format!(
             "The application outcome was not determined: a SOAP fault or GraphQL error is reported in the response body, and the complete body is not available ({reason})"
         );
-        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
     }
     if let Some(l) = &a.lint_bypassed {
         warnings.push(OutcomeWarning { code: WarningCode::LintBypassed, message: format!("Sent despite a lint error: {l}") });
@@ -303,7 +303,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let has_checks = ctx.spec.assertions.iter().any(|x| x.enabled) || !ctx.spec.extractions.is_empty();
     if let Some(reason) = body_unavailable.as_ref().filter(|_| has_checks || decoding_gap.is_some()) {
         let message = format!("The complete response body is not available ({reason}); body assertions and extractions were not evaluated");
-        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
     }
 
     // Every attempt counts: a slow hop before a fast redirect or fallback is
@@ -339,7 +339,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
                 extracted.push(name.clone());
                 extracted_values.push((name, value, sensitive));
             }
-            Err(e) => warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&e) }),
+            Err(e) => warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&e) }),
         }
     }
 
@@ -378,7 +378,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             headers: prepared_headers,
             body_bytes: a.prepared_body.len() as u64,
             body_sha256: if a.prepared_body.is_empty() { None } else { Some(anvil_transport::certs::sha256_hex(&a.prepared_body)) },
-            content_type: a.content_type.as_deref().map(|c| redactor.text(c)),
+            content_type: a.content_type.clone(),
             auth_label: a.auth_label.clone(),
             tls_profile: a.tls_profile.clone(),
             proxy: a.proxy.clone(),
@@ -456,14 +456,14 @@ fn redact_workload(mut w: WorkloadApiEvidence, r: &Redactor) -> WorkloadApiEvide
     use anvil_domain::workload::WorkloadCallResult as R;
     for c in &mut w.calls {
         match &mut c.result {
-            R::Unavailable { detail, .. } | R::NoIdentity { detail } | R::Malformed { detail } => *detail = r.text(detail),
-            R::Status { message, .. } => *message = r.text(message),
+            R::Unavailable { detail, .. } | R::NoIdentity { detail } | R::Malformed { detail } => *detail = r.text_any_case(detail),
+            R::Status { message, .. } => *message = r.text_any_case(message),
             R::Ok | R::Timeout { .. } => {}
         }
     }
     if let Some(j) = &mut w.jwt_svid {
         for c in &mut j.checks {
-            c.detail = r.text(&c.detail);
+            c.detail = r.text_any_case(&c.detail);
         }
     }
     w
@@ -485,7 +485,7 @@ pub fn local_failure_with(
     let redactor = Redactor::for_execution(resolver, &ctx.redaction_names);
     let workload = workload.filter(|w| !w.is_empty()).map(|w| redact_workload(w, &redactor));
     let mut f = f;
-    f.message = redactor.text(&f.message);
+    f.message = redactor.text_any_case(&f.message);
     let ps = ProtocolStatus::None;
     let diag = anvil_diagnostics::diagnose(&DiagnosticInput {
         protocol: ctx.spec.protocol,
@@ -502,7 +502,7 @@ pub fn local_failure_with(
         protocol_fallback_from: None,
         workload: workload.as_ref(),
         gateway_detail: None,
-        redact: Some(&|s: &str| redactor.text(s)),
+        redact: Some(&|s: &str| redactor.text_any_case(s)),
     });
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let summary = diag.findings.first().map(|x| x.title.clone()).unwrap_or_else(|| "Not sent".into());

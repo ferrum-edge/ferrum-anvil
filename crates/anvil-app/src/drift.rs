@@ -197,14 +197,13 @@ impl App {
 
 fn metadata_notes(record: &ExecutionRecord) -> Vec<String> {
     let mut notes = vec![];
-    if record.prepared.content_type.as_deref().is_some_and(redacted) {
+    if record.prepared.content_type.is_some() && observable_media_type(record.prepared.content_type.as_deref()).is_none() {
         notes.push("Request media types containing redacted secrets were not checked.".into());
     }
-    if record
-        .response
-        .as_ref()
-        .is_some_and(|r| r.body.content_type.as_deref().is_some_and(redacted) || r.body.content_encoding.as_deref().is_some_and(redacted))
-    {
+    if record.response.as_ref().is_some_and(|r| {
+        (r.body.content_type.is_some() && observable_media_type(r.body.content_type.as_deref()).is_none())
+            || r.body.content_encoding.as_deref().is_some_and(redacted)
+    }) {
         notes.push("Response metadata containing redacted secrets limits media-type or body checks.".into());
     }
     notes

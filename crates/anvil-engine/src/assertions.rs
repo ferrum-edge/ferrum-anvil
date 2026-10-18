@@ -309,7 +309,7 @@ fn jsonrpc_outcome(v: &serde_json::Value, redactor: &Redactor) -> String {
     }
     let window: String = message.chars().take(MAX_ERROR_MESSAGE_CHARS + REDACT_LOOKAHEAD_BYTES).collect();
     let cut = window.char_indices().nth(MAX_ERROR_MESSAGE_CHARS).map_or(window.len(), |(i, _)| i);
-    format!("error {code}: {}", redact_then_cut(&|x: &str| redactor.text(x), &window, cut))
+    format!("error {code}: {}", redact_then_cut(&|x: &str| redactor.text_any_case(x), &window, cut))
 }
 
 /// The `result` of a JSON-RPC response, or why it has none.
@@ -408,7 +408,7 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
     let mut out = Vec::new();
     for a in assertions.iter().filter(|a| a.enabled) {
         let label = if a.label.is_empty() { default_label(&a.kind) } else { a.label.clone() };
-        let label = redactor.text(&label);
+        let label = redactor.text_any_case(&label);
         let res: Result<(bool, Option<String>), String> = (|| {
             if let Some(reason) = o.body_unavailable
                 && reads_body(&a.kind)
@@ -434,11 +434,11 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                 }
                 AssertionKind::JsonPath { path, comparison, value } => {
                     let v = json_path(o.body, path)?;
-                    (compare(*comparison, v.as_deref(), value)?, v.map(|x| redactor.text(&x)))
+                    (compare(*comparison, v.as_deref(), value)?, v.map(|x| redactor.text_any_case(&x)))
                 }
                 AssertionKind::XPath { path, comparison, value } => {
                     let v = xpath(o.body, path)?;
-                    (compare(*comparison, v.as_deref(), value)?, v.map(|x| redactor.text(&x)))
+                    (compare(*comparison, v.as_deref(), value)?, v.map(|x| redactor.text_any_case(&x)))
                 }
                 AssertionKind::JsonSchema { schema } => {
                     let schema: serde_json::Value = serde_json::from_str(schema).map_err(|e| format!("schema is not JSON: {e}"))?;
@@ -447,7 +447,7 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
                     let errors: Vec<String> =
                         validator.iter_errors(&instance).take(5).map(|e| format!("{} at {}", e, e.instance_path())).collect();
                     // Validator messages quote the offending instance values.
-                    (errors.is_empty(), if errors.is_empty() { None } else { Some(redactor.text(&errors.join("; "))) })
+                    (errors.is_empty(), if errors.is_empty() { None } else { Some(redactor.text_any_case(&errors.join("; "))) })
                 }
                 AssertionKind::Body { comparison, value } => {
                     let text = String::from_utf8_lossy(o.body);
@@ -500,7 +500,7 @@ pub fn evaluate(assertions: &[Assertion], o: &Observed<'_>, redactor: &Redactor)
             })
         })();
         // Evaluation errors can quote the body or the assertion's own values.
-        let res = res.map_err(|e| redactor.text(&e));
+        let res = res.map_err(|e| redactor.text_any_case(&e));
         match res {
             Ok((passed, actual)) => out.push(AssertionResult {
                 label: label.clone(),
