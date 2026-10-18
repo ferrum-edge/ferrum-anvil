@@ -240,3 +240,27 @@ fn legacy_dependency_schemas_are_converted_before_internal_references_resolve() 
     assert!(validator.is_valid(&json!({"trigger":true,"child":1})));
     assert!(!validator.is_valid(&json!({"trigger":true,"child":"bad"})));
 }
+
+#[test]
+fn cached_reference_tails_cannot_hide_longer_paths() {
+    for (count, nesting, short) in [(32, 0, 1), (10, 50, 5)] {
+        let mut schemas = serde_json::Map::new();
+        schemas.insert("S0".into(), json!({"type":"string"}));
+        for i in 1..=count {
+            let mut value = json!({"$ref":format!("#/components/schemas/S{}", i - 1)});
+            for _ in 0..nesting {
+                value = json!({"items":value});
+            }
+            schemas.insert(format!("S{i}"), value);
+        }
+        let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+            "components":{"schemas":schemas}});
+        let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let long = json!({"$ref":format!("#/components/schemas/S{count}")});
+        let short = json!({"$ref":format!("#/components/schemas/S{short}")});
+        for branches in [json!([long, short]), json!([short, long])] {
+            let err = schema::compile(&document, &json!({"allOf":branches}), Direction::Response).unwrap_err();
+            assert!(schema::too_large(&err) && err.contains("references too deeply"), "{err}");
+        }
+    }
+}

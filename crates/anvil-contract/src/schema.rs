@@ -645,6 +645,8 @@ fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> R
         }
     }
     seen.fill(false);
+    let mut component_of = vec![0; reached.len()];
+    let mut components = vec![];
     while let Some(start) = finish.pop() {
         if seen[start] {
             continue;
@@ -670,6 +672,44 @@ fn check_recursive_parts(parts: &HashMap<String, Part>, reached: &[String]) -> R
         {
             return Err(format!("{TOO_LARGE}recursive schemas with branching or non-structural applicators are not checked"));
         }
+        for &node in &component {
+            component_of[node] = components.len();
+        }
+        components.push(component);
+    }
+    // Size memoization alone cannot enforce depth: a target first reached
+    // by a short route may later complete a longer route from the cache.
+    // Condense cycles, then measure the longest path in the resulting DAG.
+    // Accepted cyclic components are simple terminal cycles; charge one
+    // full lap, stopping before a repeated member, whichever entry is used.
+    let weights: Vec<(usize, usize)> =
+        components.iter().map(|nodes| (nodes.len(), nodes.iter().map(|&node| parts[reached[node].as_str()].depth).sum())).collect();
+    let mut longest = weights.clone();
+    let mut parents = vec![vec![]; components.len()];
+    let mut remaining = vec![0; components.len()];
+    for (from, targets) in edges.iter().enumerate() {
+        for &to in targets {
+            let (parent, child) = (component_of[from], component_of[to]);
+            if parent != child {
+                parents[child].push(parent);
+                remaining[parent] += 1;
+            }
+        }
+    }
+    let mut ready: Vec<usize> = remaining.iter().enumerate().filter_map(|(i, &count)| (count == 0).then_some(i)).collect();
+    while let Some(child) = ready.pop() {
+        for &parent in &parents[child] {
+            longest[parent].0 = longest[parent].0.max(weights[parent].0.saturating_add(longest[child].0));
+            longest[parent].1 = longest[parent].1.max(weights[parent].1.saturating_add(longest[child].1));
+            remaining[parent] -= 1;
+            if remaining[parent] == 0 {
+                ready.push(parent);
+            }
+        }
+    }
+    let (references, depth) = longest[component_of[0]];
+    if references > MAX_REF_CHAIN || depth > MAX_CHAIN_DEPTH {
+        return Err(format!("{TOO_LARGE}the schema nests references too deeply"));
     }
     Ok(())
 }
