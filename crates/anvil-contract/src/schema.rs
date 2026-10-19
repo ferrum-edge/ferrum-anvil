@@ -241,6 +241,7 @@ struct Work {
     pattern_uses: usize,
     string_scans: usize,
     name_lookups: usize,
+    name_bytes: usize,
     unique_uses: usize,
     required_names: usize,
     property_maps: usize,
@@ -266,6 +267,7 @@ pub struct ValidationPlan {
 impl ValidationPlan {
     pub fn mode(self, instance: &Value) -> CheckMode {
         let mut values = 0usize;
+        let mut objects = 0usize;
         let mut bytes = 0usize;
         let mut longest_array = 0usize;
         // jsonschema owns an instance path for each retained error. A long
@@ -277,6 +279,7 @@ impl ValidationPlan {
             error_path_bytes = error_path_bytes.saturating_add(path_len);
             match value {
                 Value::Object(map) => {
+                    objects = objects.saturating_add(1);
                     for (name, child) in map {
                         bytes = bytes.saturating_add(name.len());
                         let escaped_len = name.len().saturating_add(name.bytes().filter(|b| matches!(b, b'~' | b'/')).count());
@@ -300,6 +303,7 @@ impl ValidationPlan {
             }
             if values.saturating_mul(self.work.steps.max(1)) > MAX_VALIDATION_WORK
                 || bytes.saturating_mul(self.text_scans) > MAX_TEXT_INSTANCE_WORK
+                || objects.saturating_mul(self.work.name_bytes) > MAX_TEXT_INSTANCE_WORK
                 || self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK
             {
                 return CheckMode::Skip;
@@ -335,6 +339,7 @@ impl Work {
         self.pattern_uses = self.pattern_uses.saturating_add(other.pattern_uses);
         self.string_scans = self.string_scans.saturating_add(other.string_scans);
         self.name_lookups = self.name_lookups.saturating_add(other.name_lookups);
+        self.name_bytes = self.name_bytes.saturating_add(other.name_bytes);
         self.unique_uses = self.unique_uses.saturating_add(other.unique_uses);
         self.required_names = self.required_names.saturating_add(other.required_names);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
@@ -482,6 +487,32 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                         .saturating_add(usize::from(o.contains_key("additionalProperties")))
                         .saturating_add(usize::from(o.contains_key("propertyNames")));
                     part.work.name_lookups = part.work.name_lookups.saturating_add(copies.saturating_mul(lookups));
+                    // Some validators hash a schema-side name even when the
+                    // instance has only short, unrelated member names.
+                    let array_name_bytes = |value: Option<&Value>| {
+                        value.and_then(Value::as_array).map_or(0, |names| {
+                            names.iter().filter_map(Value::as_str).fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))
+                        })
+                    };
+                    let dependent_name_bytes = |keyword: &str| {
+                        o.get(keyword).and_then(Value::as_object).map_or(0, |entries| {
+                            entries.iter().fold(0usize, |sum, (name, value)| {
+                                sum.saturating_add(name.len().max(1)).saturating_add(array_name_bytes(Some(value)))
+                            })
+                        })
+                    };
+                    let name_bytes = array_name_bytes(o.get("required"))
+                        .saturating_add(
+                            properties.map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
+                        )
+                        .saturating_add(dependent_name_bytes("dependentRequired"))
+                        .saturating_add(dependent_name_bytes("dependencies"))
+                        .saturating_add(
+                            o.get("dependentSchemas")
+                                .and_then(Value::as_object)
+                                .map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
+                        );
+                    part.work.name_bytes = part.work.name_bytes.saturating_add(copies.saturating_mul(name_bytes));
                     part.work.required_names = part
                         .work
                         .required_names

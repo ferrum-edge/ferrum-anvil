@@ -376,6 +376,17 @@ fn repeated_long_required_names_are_charged_before_validation() {
     let item = json!({(long_name):null});
     assert_eq!(plan.mode(&Value::Array(vec![item; 1_300])), CheckMode::Skip);
 
+    // Required names are long but all instance member names are short and
+    // unrelated. The validator can still hash each schema-side name once
+    // per object and reference application.
+    let prefix = "k".repeat(4_092);
+    let required: Vec<String> = (0..60).map(|i| format!("{prefix}{i:04}")).collect();
+    let references = vec![json!({"$ref":"#/$defs/r"}); 60];
+    let schema = json!({"$defs":{"r":{"required":required}},"items":{"allOf":references}});
+    let plan = schema::measure_standalone_plan(&schema).unwrap();
+    let short_names: serde_json::Map<String, Value> = (0..60).map(|i| (format!("s{i}"), Value::Null)).collect();
+    assert_eq!(plan.mode(&Value::Array(vec![Value::Object(short_names); 80])), CheckMode::Skip);
+
     let small = json!({"required":["owner"]});
     let plan = schema::measure_standalone_plan(&small).unwrap();
     assert_eq!(plan.mode(&json!({"owner":null})), CheckMode::Detailed);
