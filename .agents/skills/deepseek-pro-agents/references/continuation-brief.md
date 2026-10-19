@@ -1,4 +1,4 @@
-# Ferrum Anvil DeepSeek V4 Pro continuation brief
+# Ferrum Anvil DeepSeek V4.1 Flash 1017 continuation brief
 
 Resume the existing worktree and branch named in the dispatch prompt. Follow every rule in
 `agent-brief.md`, especially isolation, direct implementation, the
