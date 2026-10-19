@@ -415,3 +415,31 @@ async fn initialize_does_not_follow_a_cross_origin_redirect() {
     assert!(other.log.entries().is_empty(), "initialize redirects are not followed");
     assert!(notes(&o).contains("MCP initialize was answered with HTTP 307, not a session"), "{}", notes(&o));
 }
+
+#[tokio::test]
+async fn event_stream_operation_response_uses_unredacted_runtime_media_type() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, ..Default::default() }).await.unwrap();
+    let mut ctx = mcp_ctx(&f.url(), list());
+    ctx.spec.headers.push(KeyValue::new("X-Secret", "{{word}}"));
+    ctx.var_layers.push(VarLayer {
+        label: "test".into(),
+        vars: vec![VarEntry { name: "word".into(), value: "stream".into(), secret: true, literal: false }],
+    });
+    let out = run(&Engine::new(), &ctx).await;
+    assert_eq!(out.record.outcome.application, ApplicationState::Success);
+    assert!(out.record.response.as_ref().unwrap().body.content_type.as_deref().unwrap().contains(REDACTED));
+    assert!(operation_response(&out).is_some(), "MCP still reads the event stream");
+    assert!(!serde_json::to_string(&out.record).unwrap().contains("event-stream"));
+}
+
+#[tokio::test]
+async fn refused_initialize_scrubs_a_newly_issued_session_from_all_metadata() {
+    init();
+    let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let ctx = mcp_ctx(&f.url("/status/403?header=Mcp-Session-Id:MetaSession77&ct=application/x-MetaSession77&header=Content-Encoding:metasession77&header=x-metasession77:v"), list());
+    let out = run(&Engine::new(), &ctx).await;
+    assert_eq!(status(&out), Some(403));
+    let record = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
+    assert!(!record.contains("metasession77"), "{record}");
+}

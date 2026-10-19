@@ -139,6 +139,37 @@ against it).
     secret value as well, so a server that echoes a credential it received
     into a cookie name, a cookie attribute or an authorization scheme does
     not get it into records, history or exports.
+  - Header and trailer names, and the `Content-Type`, `Content-Encoding` and
+    decoding detail the record keeps beside the body, are scrubbed of every
+    known secret value too: a server can reflect a credential into any
+    response metadata, not only header values. Header names and content
+    codings are compared ignoring ASCII case (protocols lowercase them), and
+    so are the warnings, assertion messages, findings and summary that can
+    quote them (including assertion labels and observed values). Overlapping
+    secrets are covered in full, including ones spanning media-type parameters.
+    Known media types and codings have no exemption. The engine and runner
+    share the same metadata scrubber, so sensitive extractions also cover
+    response metadata, protocol statuses and tunnel headers before history.
+    Operational consumers use response metadata held only in memory before
+    redaction: MCP still parses event streams and the runner still distinguishes
+    an identity body from encoded bytes. This copy is never serialized and its
+    debug view omits the media type. Historical drift treats a redacted media
+    essence as unknown and reports checks limited by redacted metadata; it
+    never suggests documenting the redaction marker as a media type. Redacted
+    header or query names also cannot prove that a required name was absent.
+    A redacted method, server or path likewise makes routing evidence unavailable.
+    A coding redacted from history cannot be recovered for later decompression (the raw
+    capture remains viewable). The request's header names and `Content-Type`
+    are scrubbed in records and previews. Reason phrases are scrubbed in every
+    persisted copy, as are session ids learned during MCP initialization.
+    Request methods and host copies in TLS identity/certificate observations,
+    tunnel endpoints and previews use the same ASCII-insensitive policy.
+    Proxy labels and PROXY-protocol text and hex observations are scrubbed
+    again when a run learns new secrets, including opaque TLV payloads.
+    Structured URL and cookie checks also compare percent-decoded values
+    ignoring ASCII case, including noncanonical and repeated encoding.
+    A raw secret crossing URL delimiters withholds the path and query (or
+    the whole structured header) so masking one part cannot expose another.
   - Every credential an auth profile sends is a known secret, including a
     WS-Security SAML assertion (as stored and as embedded, trimmed), a
     PasswordText password in the XML-escaped form it is sent in, and a

@@ -271,10 +271,9 @@ async fn finish_session(app: &anvil_app::App, execution_id: String, attempt_id: 
             // Into the profile the session was opened under, never the one
             // open now; refused while that profile is locked.
             let (out, recorded) = app.record_off_runtime(out).await;
-            let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
+            let content_type = out.response_metadata.as_ref().and_then(anvil_engine::ResponseMetadata::content_type);
             let raw = &out.body;
             let decoded = out.decoded_body.as_deref();
-            let content_type = ct.as_deref();
             let body = body_view(raw, decoded, content_type);
             let view = ExecutionView { body, record: out.record };
             let error = recorded.map_err(e).err();
@@ -1224,6 +1223,7 @@ mod tests {
             let (release_tx, release_rx) = oneshot::channel();
             let finalizing = async {
                 let output = anvil_engine::ExecutionOutput {
+                    response_metadata: None,
                     record: view.record,
                     body: b"payload-canary".to_vec().into(),
                     decoded_body: None,

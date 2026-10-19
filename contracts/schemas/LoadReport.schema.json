@@ -390,6 +390,10 @@
           "description": "Closed workload: fixed virtual users; slow responses reduce offered rate.",
           "type": "object",
           "properties": {
+            "model": {
+              "type": "string",
+              "const": "closed_virtual_users"
+            },
             "stages": {
               "type": "array",
               "items": {
@@ -401,10 +405,6 @@
               "format": "uint64",
               "minimum": 0,
               "default": 0
-            },
-            "model": {
-              "type": "string",
-              "const": "closed_virtual_users"
             }
           },
           "required": [
@@ -416,6 +416,10 @@
           "description": "Open workload: scheduled arrivals independent of response time. Late\narrivals beyond `max_in_flight` are dropped and counted, never queued\nwithout bound.",
           "type": "object",
           "properties": {
+            "model": {
+              "type": "string",
+              "const": "open_arrival_rate"
+            },
             "stages": {
               "type": "array",
               "items": {
@@ -426,10 +430,6 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "model": {
-              "type": "string",
-              "const": "open_arrival_rate"
             }
           },
           "required": [
@@ -442,6 +442,10 @@
           "description": "Fixed number of iterations as fast as `concurrency` allows.",
           "type": "object",
           "properties": {
+            "model": {
+              "type": "string",
+              "const": "iterations"
+            },
             "iterations": {
               "type": "integer",
               "format": "uint64",
@@ -451,10 +455,6 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "model": {
-              "type": "string",
-              "const": "iterations"
             }
           },
           "required": [

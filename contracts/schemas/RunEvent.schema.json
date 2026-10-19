@@ -6,6 +6,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "run_started"
+        },
         "run_id": {
           "$ref": "#/$defs/Id"
         },
@@ -21,10 +25,6 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
-        },
-        "event": {
-          "type": "string",
-          "const": "run_started"
         }
       },
       "required": [
@@ -38,6 +38,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "iteration_started"
+        },
         "run_id": {
           "$ref": "#/$defs/Id"
         },
@@ -53,10 +57,6 @@
           ],
           "format": "uint32",
           "minimum": 0
-        },
-        "event": {
-          "type": "string",
-          "const": "iteration_started"
         }
       },
       "required": [
@@ -68,6 +68,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "step_started"
+        },
         "run_id": {
           "$ref": "#/$defs/Id"
         },
@@ -86,10 +90,6 @@
         },
         "name": {
           "type": "string"
-        },
-        "event": {
-          "type": "string",
-          "const": "step_started"
         }
       },
       "required": [
@@ -104,6 +104,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "step_finished"
+        },
         "run_id": {
           "$ref": "#/$defs/Id"
         },
@@ -149,10 +153,6 @@
         },
         "progress": {
           "$ref": "#/$defs/RunProgress"
-        },
-        "event": {
-          "type": "string",
-          "const": "step_finished"
         }
       },
       "required": [
@@ -167,6 +167,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "iteration_finished"
+        },
         "run_id": {
           "$ref": "#/$defs/Id"
         },
@@ -180,10 +184,6 @@
         },
         "progress": {
           "$ref": "#/$defs/RunProgress"
-        },
-        "event": {
-          "type": "string",
-          "const": "iteration_finished"
         }
       },
       "required": [
@@ -197,6 +197,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "run_finished"
+        },
         "run_id": {
           "$ref": "#/$defs/Id"
         },
@@ -211,10 +215,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "event": {
-          "type": "string",
-          "const": "run_finished"
         }
       },
       "required": [

@@ -788,3 +788,51 @@ async fn completely_decoded_body_without_a_run_secret_is_kept() {
     assert!(!r.notes.iter().any(|n| n.contains("not kept in history")), "{:?}", r.notes);
     assert!(!p.records.lock()[0].1.is_empty(), "the compressed body is kept");
 }
+
+#[tokio::test]
+async fn sensitive_header_extractions_scrub_metadata_and_preserve_identity_body_handling() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    for token in ["identity", "Forbidden", "Mixed-Coding-77"] {
+        let mut p = Recording::default();
+        let mut spec = RequestSpec::http("GET", &f.url("/status/403"));
+        spec.params.push(KeyValue::new("ct", format!("application/x-{token}")));
+        spec.params.push(KeyValue::new("body", "safe body"));
+        spec.params.push(KeyValue::new("header", format!("X-Issued:{token}")));
+        spec.params.push(KeyValue::new("header", format!("Content-Encoding:{}", token.to_ascii_lowercase())));
+        spec.params.push(KeyValue::new("header", format!("x-{}:v", token.to_ascii_lowercase())));
+        spec.extractions.push(Extraction {
+            variable: "issued".into(),
+            source: ExtractionSource::Header { name: "X-Issued".into() },
+            sensitive: true,
+        });
+        spec.assertions.push(assertion(AssertionKind::Header {
+            name: "Content-Encoding".into(),
+            comparison: Comparison::Equals,
+            value: "other".into(),
+        }));
+        let id = p.add("Issue", spec);
+        let report =
+            anvil_runner::run(&Engine::new(), &p, plan(&[(id, "Issue")]), RunOptions::default(), CancellationToken::new()).await.unwrap();
+        assert_eq!(report.totals.steps_executed, 1);
+        let records = p.records.lock();
+        assert_eq!(records.len(), 1);
+        let record: anvil_domain::execution::ExecutionRecord = serde_json::from_str(&records[0].0).unwrap();
+        assert!(record.response.as_ref().unwrap().body.content_type.as_deref().unwrap().contains(anvil_domain::secret::REDACTED));
+        // Closed-vocabulary identifiers (http.forbidden) describe the
+        // status, not a reflected value, and must retain their identity.
+        assert!(record.findings.iter().any(|f| f.code == "http.forbidden"));
+        let mut content: serde_json::Value = serde_json::from_str(&records[0].0).unwrap();
+        for finding in content["findings"].as_array_mut().unwrap() {
+            finding.as_object_mut().unwrap().remove("code");
+            finding.as_object_mut().unwrap().remove("rule_id");
+        }
+        let content = content.to_string();
+        assert!(!content.to_ascii_lowercase().contains(&token.to_ascii_lowercase()), "{content}");
+        if token == "identity" {
+            assert_eq!(records[0].1, b"safe body", "identity remains uncoded even after its record value is redacted");
+        } else {
+            assert!(records[0].1.is_empty(), "unsupported encoded bodies cannot be checked and retained");
+        }
+    }
+}

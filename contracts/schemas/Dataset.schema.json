@@ -71,6 +71,10 @@
           "description": "Stored inside Anvil (portable; included in exports).",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stored"
+            },
             "sha256": {
               "type": "string"
             },
@@ -87,10 +91,6 @@
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "stored"
             }
           },
           "required": [
@@ -104,12 +104,12 @@
           "description": "Linked local file (device-specific; exports report it as a rebinding\nrequirement rather than copying an absolute machine path silently).",
           "type": "object",
           "properties": {
-            "path": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "linked_file"
+            },
+            "path": {
+              "type": "string"
             }
           },
           "required": [

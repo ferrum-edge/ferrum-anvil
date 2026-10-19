@@ -17,12 +17,13 @@ fn redactor() -> Redactor {
     Redactor::new(vec![SECRET.into(), "open sesame 42".into()], vec![])
 }
 
-/// True when `secret` can be read from `text` directly or after undoing up
-/// to three layers of percent-encoding (with `+` read either way).
+/// True when `secret` can be read ignoring ASCII case, directly or after
+/// undoing three layers of percent-encoding (with `+` read either way).
 fn reveals(text: &str, secret: &str) -> bool {
+    let contains = |s: &str| s.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
     let mut layers = vec![text.to_string()];
     for _ in 0..3 {
-        if layers.iter().any(|l| l.contains(secret)) {
+        if layers.iter().any(|l| contains(l)) {
             return true;
         }
         layers = layers
@@ -35,7 +36,7 @@ fn reveals(text: &str, secret: &str) -> bool {
             })
             .collect();
     }
-    layers.iter().any(|l| l.contains(secret))
+    layers.iter().any(|l| contains(l))
 }
 
 #[test]
@@ -83,11 +84,11 @@ fn a_secret_inside_a_longer_encoded_value_is_not_recoverable() {
 }
 
 #[test]
-fn raw_secrets_are_redacted_even_where_they_split_the_query() {
+fn raw_secrets_crossing_query_delimiters_withhold_the_path_and_query() {
     let r = Redactor::new(vec!["raw&secret=value".into()], vec![]);
     let out = r.url("https://h/p?token=raw&secret=value&page=2");
     assert!(!out.contains("raw&secret=value") && !out.contains("secret=value"), "{out}");
-    assert!(out.ends_with("&page=2"), "{out}");
+    assert_eq!(out, format!("https://h/{REDACTED}"));
 }
 
 #[test]
@@ -106,6 +107,145 @@ fn urls_without_secrets_are_unchanged() {
     let r = redactor();
     for u in ["https://h/a%20b/c?x=1+2&y=%2F&z#frag", "https://h/", "/relative/path?x=%41", "https://h:8443/p?open=sesame"] {
         assert_eq!(r.url(u), u);
+    }
+}
+
+#[test]
+fn folded_secrets_with_noncanonical_percent_encoding_are_not_recoverable() {
+    let r = Redactor::new(vec!["MixedCase77".into()], vec![]);
+    for value in ["%6Dixedcase77", "%256Dixedcase77", "MIXED%43ASE77"] {
+        for text in [
+            r.url(&format!("https://h/{value}?page=2")),
+            r.header("Location", &format!("https://h/{value}")),
+            r.header("Set-Cookie", &format!("sid=x; Path=/{value}")),
+            r.header("Cookie", &format!("{value}=x")),
+        ] {
+            assert!(!reveals(&text, "MixedCase77"), "{value} → {text}");
+        }
+    }
+}
+
+#[test]
+fn finding_text_withholds_noncanonically_encoded_secrets() {
+    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
+    let r = Redactor::new(vec!["MixedCase77".into()], vec![]);
+    for value in ["%6Dixedcase77", "%256Dixedcase77", "MIXED%43ASE77"] {
+        // A server-controlled header value (or reason phrase) quoted in a
+        // finding must not keep a secret the header copy withholds.
+        let quoted = format!("Bearer error_description=\"{value}\"");
+        let mut f = DiagnosticFinding {
+            code: "http.status.unauthorized".into(),
+            rule_id: "http_status".into(),
+            rule_version: 1,
+            title: format!("401 {value}"),
+            explanation: format!("The server answered `{quoted}`"),
+            scope: SourceScope::UpstreamApplication,
+            confidence: Confidence::Likely,
+            severity: Severity::Warning,
+            evidence: vec![Evidence {
+                source: EvidenceSource::HttpHeader,
+                key: "header.www-authenticate".into(),
+                value: quoted.clone(),
+                attempt: None,
+            }],
+            alternatives: vec![quoted.clone()],
+            does_not_prove: vec![],
+            remediation: vec![Remediation { text: quoted.clone(), owner: Owner::Caller }],
+            owner: Owner::Caller,
+            confirm_with: vec![],
+        };
+        r.finding(&mut f);
+        let text = serde_json::to_string(&f).unwrap();
+        assert!(!reveals(&text, "MixedCase77"), "{value} → {text}");
+        assert_eq!(
+            r.headers(&[anvil_domain::execution::HeaderEntry { name: "www-authenticate".into(), value: quoted }])[0].value,
+            REDACTED
+        );
+    }
+}
+
+#[tokio::test]
+async fn templated_methods_and_hosts_are_scrubbed_from_records_and_previews() {
+    use anvil_domain::execution::{PeerIdentityCheck, TlsObservation, TlsVerification};
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut ctx = ExecutionContext::standalone(RequestSpec::http("{{word}}", &f.url("/status/200")));
+    ctx.var_layers.push(VarLayer {
+        label: "test".into(),
+        vars: vec![VarEntry { name: "word".into(), value: "MixedCaseWord".into(), secret: true, literal: false }],
+    });
+    let engine = Engine::new();
+    let mut out = engine.execute(&ctx, EventCtx::none(), CancellationToken::new()).await;
+    assert_eq!(out.record.prepared.method, REDACTED);
+    assert_eq!(out.record.attempts[0].method, REDACTED);
+    ctx.spec.url = "https://{{word}}.api.test/path".into();
+    let preview = engine.preview(&ctx).unwrap();
+    assert_eq!(preview.method, REDACTED);
+    assert!(preview.destination.contains(REDACTED) && preview.authority.contains(REDACTED));
+    assert!(!serde_json::to_string(&preview).unwrap().to_ascii_lowercase().contains("mixedcaseword"));
+
+    // A later run-level extraction must also cover every transport copy of
+    // a reflected/templated host, including outer tunnel TLS evidence.
+    let folded = "mixedcaseword";
+    let cert = serde_json::from_value(serde_json::json!({
+        "subject":folded,"issuer":folded,"subject_alt_names":[folded],
+        "not_before":"2026","not_after":"2027","serial_hex":"01",
+        "sha256_fingerprint":"abc","is_ca":false,"key_algorithm":"RSA"
+    }))
+    .unwrap();
+    let tls = TlsObservation {
+        server_name: folded.into(),
+        sni: Some(folded.into()),
+        server_name_overridden: false,
+        identity_check: Some(PeerIdentityCheck::HostName { name: folded.into() }),
+        peer_spiffe_id: Some(format!("spiffe://{folded}/workload")),
+        version: None,
+        cipher_suite: None,
+        alpn_offered: vec!["h2".into()],
+        alpn_negotiated: Some("h2".into()),
+        verification: TlsVerification::Failed { problem: anvil_domain::execution::FailureKind::InvalidUrl, detail: folded.into() },
+        peer_certificates: vec![cert],
+        client_certificate_requested: None,
+        client_certificate_presented: None,
+        alert_received: Some(folded.into()),
+        resumed: None,
+    };
+    out.record.prepared.proxy = Some(folded.into());
+    let connection = out.record.attempts[0].connection.as_mut().expect("HTTP connection observation");
+    connection.via_proxy = Some(folded.into());
+    let plan = anvil_transport::proxy_protocol::HeaderPlan {
+        version: anvil_domain::proxy_protocol::ProxyHeaderVersion::V2,
+        command: anvil_domain::proxy_protocol::ProxyCommand::Proxy,
+        family: anvil_domain::proxy_protocol::ProxyAddressFamily::Unspec,
+        source: None,
+        destination: None,
+        raw: vec![],
+        tlvs: vec![(0x02, folded.as_bytes().to_vec()), (0xEE, folded.as_bytes().to_vec())],
+    };
+    connection.proxy_header = Some(plan.build(None, None, None).unwrap().observation);
+    connection.tls = Some(tls.clone());
+    connection.tunnel = Some(
+        serde_json::from_value(serde_json::json!({
+            "kind":"hbone", "endpoint":format!("{folded}:15008"), "authority":format!("{folded}:443"),
+            "resolved_addresses":[],"connect_attempts":[],"phases":[],"tls":tls,
+            "connect_headers":[],"response_headers":[]
+        }))
+        .unwrap(),
+    );
+    let r = Redactor::new(vec!["MixedCaseWord".into()], vec![]);
+    for identity in [
+        PeerIdentityCheck::HostName { name: folded.into() },
+        PeerIdentityCheck::SpiffeId { expected: folded.into(), trust_domain: folded.into() },
+        PeerIdentityCheck::SpiffeTrustDomain { trust_domain: folded.into() },
+    ] {
+        out.record.attempts[0].connection.as_mut().unwrap().tls.as_mut().unwrap().identity_check = Some(identity);
+        r.record_metadata(&mut out.record);
+        let text = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
+        assert!(!text.contains(folded), "{text}");
+        let header = out.record.attempts[0].connection.as_ref().unwrap().proxy_header.as_ref().unwrap();
+        assert_eq!(header.hex, REDACTED);
+        assert!(header.tlvs.iter().all(|value| value == REDACTED));
     }
 }
 
@@ -331,4 +471,268 @@ async fn a_secret_echoed_into_a_set_cookie_name_is_not_kept_or_sent_by_the_jar()
     let second_record = serde_json::to_string(&second.record).unwrap();
     assert!(!second_record.contains(secret), "the second record contains a cookie named with the first execution's secret");
     assert!(second.record.prepared.inferred.iter().all(|note| !note.contains(secret)));
+}
+
+/// A server can reflect a request secret into response metadata the record
+/// keeps outside the header values: a header name (lowercased on the wire),
+/// the `Content-Type` and `Content-Encoding` copied into the body capture,
+/// and the decoding detail and warning that quote the coding lowercased.
+/// The request's own header names and `Content-Type` can carry a secret too.
+/// Neither the stored record nor the effective-request preview may hold the
+/// secret in any letter case.
+#[tokio::test]
+async fn a_secret_reflected_into_response_metadata_is_not_kept() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "Reflected-Meta-SECRET-5q9z";
+    let url = f.url("/status/200?ct=text/plain;x={{reflected}}&header=X-{{reflected}}:v&header=Content-Encoding:{{reflected}}&body=plain");
+    let mut spec = RequestSpec::http("GET", &url);
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Sent-{{reflected}}", "v"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("Content-Type", "text/plain;k={{reflected}}"));
+    // A body check reads the decoding failure, which quotes the coding.
+    spec.assertions.push(anvil_domain::assertions::Assertion {
+        enabled: true,
+        label: "body".into(),
+        kind: anvil_domain::assertions::AssertionKind::Body {
+            comparison: anvil_domain::assertions::Comparison::Contains,
+            value: "plain".into(),
+        },
+    });
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "reflected".into(), value: secret.into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let engine = Engine::new();
+    let leaks = |text: &str| text.contains(secret) || text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
+
+    let preview = engine.preview(&c).expect("preview");
+    let preview = serde_json::to_string(&preview).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret: {preview}");
+
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref());
+    let r = o.record.response.as_ref().unwrap_or_else(|| panic!("no response: {failure:?}"));
+    assert_eq!(r.status, 200);
+    // The reflection reached the response: the test exercises the fields.
+    assert!(r.headers.iter().any(|h| h.name.eq_ignore_ascii_case(&format!("x-{REDACTED}"))), "{:?}", r.headers);
+    assert!(r.body.content_type.as_deref().is_some_and(|ct| ct.contains(REDACTED)), "{:?}", r.body.content_type);
+    assert!(r.body.content_encoding.as_deref().is_some_and(|ce| ce.contains(REDACTED)), "{:?}", r.body.content_encoding);
+    assert!(o.record.prepared.headers.iter().any(|h| h.name == format!("X-Sent-{REDACTED}")), "{:?}", o.record.prepared.headers);
+    assert!(!o.record.assertion_results.is_empty());
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
+}
+
+/// Constants are scrubbed too; operational consumers get a separate,
+/// nonpersisted copy of the original metadata.
+#[tokio::test]
+async fn a_well_known_media_type_is_scrubbed_without_losing_operational_metadata() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http("GET", &f.url("/status/200?ct=text/event-stream;%20x=stream-param-77&body=data"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Word", "{{word}}"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Param", "{{param}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![
+        VarEntry { name: "word".into(), value: "stream".into(), secret: true, literal: false },
+        VarEntry { name: "param".into(), value: "stream-param-77".into(), secret: true, literal: false },
+    ];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    let ct = r.body.content_type.as_deref().unwrap_or_default();
+    assert!(ct.starts_with(&format!("text/event-{REDACTED};")), "{ct}");
+    assert_eq!(
+        o.response_metadata.as_ref().and_then(anvil_engine::ResponseMetadata::content_type),
+        Some("text/event-stream; x=stream-param-77")
+    );
+    assert!(!ct.contains("stream-param-77"), "{ct}");
+    assert!(!format!("{:?}", o.response_metadata).contains("stream-param-77"));
+}
+
+/// The status line's reason phrase is kept in the response, the protocol
+/// status and the summary: a known secret is scrubbed from all three.
+#[tokio::test]
+async fn a_secret_in_the_reason_phrase_is_scrubbed_from_every_copy() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http("GET", &f.url("/status/403"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-Word", "{{word}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "word".into(), value: "Forbidden".into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    assert_eq!(r.status, 403);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains("Forbidden"), "{record}");
+}
+
+/// Secrets crossing media-type parameters and matching coding constants are
+/// removed from persisted copies after the body has been decoded.
+#[tokio::test]
+async fn media_type_and_coding_constants_are_scrubbed_after_decoding() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "plain;token=secret-77";
+    let mut spec = RequestSpec::http("GET", &f.url("/status/200?ct=text/plain;token=secret-77&body=x"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-S", "{{s}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "s".into(), value: secret.into(), secret: true, literal: false }],
+    }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!record.contains(secret), "{record}");
+
+    let mut spec = RequestSpec::http("GET", &f.url("/gzip"));
+    spec.headers.push(anvil_domain::request::KeyValue::new("X-S", "{{s}}"));
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers = vec![VarLayer {
+        label: "environment:test".into(),
+        vars: vec![VarEntry { name: "s".into(), value: "gzip".into(), secret: true, literal: false }],
+    }];
+    let o = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    let r = o.record.response.as_ref().expect("a response");
+    assert_eq!(r.body.content_encoding.as_deref(), Some(REDACTED));
+    assert!(o.decoded_body.as_ref().is_some_and(|b| !b.is_empty()));
+    assert!(o.response_metadata.as_ref().is_some_and(anvil_engine::ResponseMetadata::has_content_coding));
+}
+
+#[tokio::test]
+async fn folded_metadata_is_removed_from_header_assertions_and_overlapping_media_types() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let mut spec = RequestSpec::http(
+        "GET",
+        &f.url("/status/200?ct=text/plain;token=secret-77&header=Content-Encoding:mixed-coding-77&header=x-mixed-coding-77:v&body=x"),
+    );
+    spec.headers.push(anvil_domain::request::KeyValue::new("Content-Type", "text/plain;token=secret-77"));
+    for name in ["coding", "essence", "crossing"] {
+        spec.headers.push(anvil_domain::request::KeyValue::new(format!("X-{name}"), format!("{{{{{name}}}}}")));
+    }
+    for name in ["content-type", "content-encoding", "x-mixed-coding-77"] {
+        spec.assertions.push(anvil_domain::assertions::Assertion {
+            enabled: true,
+            label: String::new(),
+            kind: anvil_domain::assertions::AssertionKind::Header {
+                name: name.into(),
+                comparison: anvil_domain::assertions::Comparison::Equals,
+                value: "other".into(),
+            },
+        });
+    }
+    let mut c = ExecutionContext::standalone(spec);
+    c.var_layers.push(VarLayer {
+        label: "test".into(),
+        vars: [("coding", "Mixed-Coding-77"), ("essence", "text/plain"), ("crossing", "PLAIN;token=secret-77")]
+            .into_iter()
+            .map(|(name, value)| VarEntry { name: name.into(), value: value.into(), secret: true, literal: false })
+            .collect(),
+    });
+    let out = Engine::new().execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    assert_eq!(out.record.assertion_results.len(), 3);
+    let response = out.record.response.as_ref().expect("response");
+    assert_eq!(response.body.content_type.as_deref(), Some(REDACTED));
+    assert_eq!(out.record.prepared.content_type.as_deref(), Some(REDACTED));
+
+    let json = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
+    for secret in ["mixed-coding-77", "token=secret-77"] {
+        assert!(!json.contains(secret), "{json}");
+    }
+}
+
+#[test]
+fn known_values_cannot_conceal_url_credentials_before_structural_redaction() {
+    let r = Redactor::new(vec!["TOKEN".into(), "HTTPS://ALICE".into()], vec![]);
+    for url in ["https://peer.test/?token=FreshCredential77", "https://alice:NewPassword77@example.test/path"] {
+        let direct = r.url(url);
+        let header = r.header("Location", url);
+        for text in [
+            direct,
+            header,
+            r.header("Link", &format!("<{url}>; rel=next")),
+            r.header("Refresh", &format!("0; url={url}")),
+            r.inferred(&format!("auth dpop.htu: {url}")),
+        ] {
+            assert!(!text.contains("FreshCredential77") && !text.contains("NewPassword77"), "{text}");
+        }
+    }
+    let r = Redactor::new(vec![], vec!["Location".into()]);
+    assert_eq!(r.header("Location", "https://peer.test/public"), REDACTED);
+}
+
+#[test]
+fn local_failures_and_shared_protocol_metadata_do_not_keep_folded_secrets() {
+    use anvil_domain::diagnostics::{Owner, Remediation};
+    use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
+    use anvil_domain::outcome::{GrpcStatusSource, ProtocolStatus};
+    let secret = "Folded-Meta-Secret77";
+    let folded = secret.to_ascii_lowercase();
+    let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://example.test/"));
+    let resolver = Resolver::new(vec![], None);
+    resolver.mark_sensitive("credential", secret);
+    let mut failure = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, folded.clone());
+    failure.field = Some(folded.clone());
+    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+    assert!(!serde_json::to_string(&record).unwrap().to_ascii_lowercase().contains(&folded));
+    let redactor = Redactor::new(vec![secret.into()], vec![]);
+    if let Some(finding) = record.findings.first_mut() {
+        finding.does_not_prove.push(folded.clone());
+        finding.confirm_with.push(folded.clone());
+        finding.remediation.push(Remediation { text: folded.clone(), owner: Owner::Caller });
+    }
+    let websocket = serde_json::from_value(serde_json::json!({
+        "protocol":"websocket", "close_reason":folded, "closed_by":"peer",
+        "extensions":{"offered":folded,"answered":folded,"problem":folded,"negotiation":"rejected",
+            "violation":{"kind":"undecodable","detail":folded}}
+    }))
+    .unwrap();
+    for status in [
+        ProtocolStatus::Grpc {
+            http_status: Some(200),
+            grpc_status: Some(7),
+            grpc_message: Some(folded.clone()),
+            source: GrpcStatusSource::Trailers,
+        },
+        websocket,
+    ] {
+        record.outcome.protocol_status = status;
+        record.attempts[0].phases[0].detail = Some(folded.clone());
+        redactor.record_metadata(&mut record);
+        assert!(!serde_json::to_string(&record).unwrap().to_ascii_lowercase().contains(&folded));
+    }
+}
+
+#[test]
+fn late_learned_encoded_secrets_cannot_hide_behind_masked_metadata_structure() {
+    use anvil_domain::execution::HeaderEntry;
+    let raw = "https://h/u/path%2Dsecret-7f3a/x";
+    let first = Redactor::new(vec!["AUTH".into(), "LOCATION".into()], vec![]);
+    let second = Redactor::new(vec!["path-secret-7f3a".into()], vec![]);
+    let note = first.inferred(&format!("auth dpop.htu: {raw}"));
+    assert_eq!(note, REDACTED);
+    assert_eq!(second.inferred(&note), REDACTED);
+    let headers = first.headers(&[HeaderEntry { name: "Location".into(), value: raw.into() }]);
+    assert_eq!(headers[0].value, REDACTED);
+    assert_eq!(second.headers(&headers)[0].value, REDACTED);
+
+    let ctx = ExecutionContext::standalone(RequestSpec::http("GET", "https://h/"));
+    let resolver = Resolver::new(vec![], None);
+    let failure = anvil_domain::execution::TransportFailure::new(
+        anvil_domain::execution::Phase::Prepare,
+        anvil_domain::execution::FailureKind::InvalidUrl,
+        "not sent",
+    );
+    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+    record
+        .assertion_results
+        .push(serde_json::from_value(serde_json::json!({"label":"observed URL", "passed":false,"actual":raw,"message":"failed"})).unwrap());
+    second.record_metadata(&mut record);
+    assert_eq!(record.assertion_results[0].actual.as_deref(), Some(REDACTED));
 }

@@ -557,15 +557,15 @@
           "description": "Query the given DNS servers directly (`ip:port`), bypassing the OS resolver.",
           "type": "object",
           "properties": {
+            "mode": {
+              "type": "string",
+              "const": "custom"
+            },
             "nameservers": {
               "type": "array",
               "items": {
                 "type": "string"
               }
-            },
-            "mode": {
-              "type": "string",
-              "const": "custom"
             }
           },
           "required": [
@@ -794,6 +794,10 @@
           "description": "Anvil could not connect or speak HTTP/2 gRPC to the endpoint.",
           "type": "object",
           "properties": {
+            "result": {
+              "type": "string",
+              "const": "unavailable"
+            },
             "detail": {
               "type": "string"
             },
@@ -802,10 +806,6 @@
                 "string",
                 "null"
               ]
-            },
-            "result": {
-              "type": "string",
-              "const": "unavailable"
             }
           },
           "required": [
@@ -817,14 +817,14 @@
           "description": "No answer within the deadline.",
           "type": "object",
           "properties": {
+            "result": {
+              "type": "string",
+              "const": "timeout"
+            },
             "deadline_ms": {
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "result": {
-              "type": "string",
-              "const": "timeout"
             }
           },
           "required": [
@@ -836,6 +836,10 @@
           "description": "The endpoint answered with a non-OK gRPC status. `message` is the\nendpoint's `grpc-message` (untrusted text, bounded).",
           "type": "object",
           "properties": {
+            "result": {
+              "type": "string",
+              "const": "status"
+            },
             "code": {
               "type": "integer",
               "format": "int32"
@@ -845,10 +849,6 @@
             },
             "message": {
               "type": "string"
-            },
-            "result": {
-              "type": "string",
-              "const": "status"
             }
           },
           "required": [
@@ -862,12 +862,12 @@
           "description": "An OK answer that carried no usable identity (no SVIDs, or none with\nthe requested SPIFFE ID).",
           "type": "object",
           "properties": {
-            "detail": {
-              "type": "string"
-            },
             "result": {
               "type": "string",
               "const": "no_identity"
+            },
+            "detail": {
+              "type": "string"
             }
           },
           "required": [
@@ -879,12 +879,12 @@
           "description": "The answer could not be decoded as the Workload API message.",
           "type": "object",
           "properties": {
-            "detail": {
-              "type": "string"
-            },
             "result": {
               "type": "string",
               "const": "malformed"
+            },
+            "detail": {
+              "type": "string"
             }
           },
           "required": [
@@ -1277,15 +1277,15 @@
         {
           "type": "object",
           "properties": {
+            "reason": {
+              "type": "string",
+              "const": "redirect"
+            },
             "status": {
               "type": "integer",
               "format": "uint16",
               "minimum": 0,
               "maximum": 65535
-            },
-            "reason": {
-              "type": "string",
-              "const": "redirect"
             }
           },
           "required": [
@@ -1296,12 +1296,12 @@
         {
           "type": "object",
           "properties": {
-            "after": {
-              "$ref": "#/$defs/FailureKind"
-            },
             "reason": {
               "type": "string",
               "const": "retry"
+            },
+            "after": {
+              "$ref": "#/$defs/FailureKind"
             }
           },
           "required": [
@@ -1312,12 +1312,12 @@
         {
           "type": "object",
           "properties": {
-            "from": {
-              "type": "string"
-            },
             "reason": {
               "type": "string",
               "const": "protocol_fallback"
+            },
+            "from": {
+              "type": "string"
             }
           },
           "required": [
@@ -1328,12 +1328,12 @@
         {
           "type": "object",
           "properties": {
-            "scheme": {
-              "type": "string"
-            },
             "reason": {
               "type": "string",
               "const": "auth_challenge"
+            },
+            "scheme": {
+              "type": "string"
             }
           },
           "required": [
@@ -1358,12 +1358,12 @@
           "description": "The previous attempt went out on a reused pooled connection that the\nserver had closed, and it failed with `after` before any response.\nSent once more on a new connection, with per-send auth signed again.\nNot a retry: it neither needs nor uses the retry setting.",
           "type": "object",
           "properties": {
-            "after": {
-              "$ref": "#/$defs/FailureKind"
-            },
             "reason": {
               "type": "string",
               "const": "reused_connection_closed"
+            },
+            "after": {
+              "$ref": "#/$defs/FailureKind"
             }
           },
           "required": [
@@ -1774,12 +1774,12 @@
           "description": "RFC 6125 host-name (or IP address) verification against `name`.",
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
             "method": {
               "type": "string",
               "const": "host_name"
+            },
+            "name": {
+              "type": "string"
             }
           },
           "required": [
@@ -1791,15 +1791,15 @@
           "description": "SPIFFE X.509-SVID: the leaf's single URI SAN must equal `expected`\n(which implies its trust domain). DNS names are not consulted.",
           "type": "object",
           "properties": {
+            "method": {
+              "type": "string",
+              "const": "spiffe_id"
+            },
             "expected": {
               "type": "string"
             },
             "trust_domain": {
               "type": "string"
-            },
-            "method": {
-              "type": "string",
-              "const": "spiffe_id"
             }
           },
           "required": [
@@ -1812,12 +1812,12 @@
           "description": "SPIFFE X.509-SVID: the leaf's single URI SAN must be a SPIFFE ID in\n`trust_domain`. DNS names are not consulted.",
           "type": "object",
           "properties": {
-            "trust_domain": {
-              "type": "string"
-            },
             "method": {
               "type": "string",
               "const": "spiffe_trust_domain"
+            },
+            "trust_domain": {
+              "type": "string"
             }
           },
           "required": [
@@ -1845,15 +1845,15 @@
         {
           "type": "object",
           "properties": {
+            "result": {
+              "type": "string",
+              "const": "failed"
+            },
             "problem": {
               "$ref": "#/$defs/FailureKind"
             },
             "detail": {
               "type": "string"
-            },
-            "result": {
-              "type": "string",
-              "const": "failed"
             }
           },
           "required": [
@@ -1866,6 +1866,10 @@
           "description": "Verification disabled by an explicit, scoped bypass. Records what strict\nverification would have concluded.",
           "type": "object",
           "properties": {
+            "result": {
+              "type": "string",
+              "const": "bypassed"
+            },
             "would_have_failed": {
               "anyOf": [
                 {
@@ -1875,10 +1879,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "result": {
-              "type": "string",
-              "const": "bypassed"
             }
           },
           "required": [
@@ -3140,6 +3140,10 @@
         {
           "type": "object",
           "properties": {
+            "protocol": {
+              "type": "string",
+              "const": "http"
+            },
             "status": {
               "type": "integer",
               "format": "uint16",
@@ -3151,10 +3155,6 @@
                 "string",
                 "null"
               ]
-            },
-            "protocol": {
-              "type": "string",
-              "const": "http"
             }
           },
           "required": [
@@ -3165,6 +3165,10 @@
         {
           "type": "object",
           "properties": {
+            "protocol": {
+              "type": "string",
+              "const": "grpc"
+            },
             "http_status": {
               "type": [
                 "integer",
@@ -3189,10 +3193,6 @@
             },
             "source": {
               "$ref": "#/$defs/GrpcStatusSource"
-            },
-            "protocol": {
-              "type": "string",
-              "const": "grpc"
             }
           },
           "required": [
@@ -3203,6 +3203,10 @@
         {
           "type": "object",
           "properties": {
+            "protocol": {
+              "type": "string",
+              "const": "websocket"
+            },
             "handshake_status": {
               "type": [
                 "integer",
@@ -3237,10 +3241,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "protocol": {
-              "type": "string",
-              "const": "websocket"
             }
           },
           "required": [
@@ -3251,6 +3251,10 @@
         {
           "type": "object",
           "properties": {
+            "protocol": {
+              "type": "string",
+              "const": "sse"
+            },
             "http_status": {
               "type": "integer",
               "format": "uint16",
@@ -3264,10 +3268,6 @@
             },
             "closed_by": {
               "$ref": "#/$defs/ClosedBy"
-            },
-            "protocol": {
-              "type": "string",
-              "const": "sse"
             }
           },
           "required": [
@@ -3280,6 +3280,10 @@
         {
           "type": "object",
           "properties": {
+            "protocol": {
+              "type": "string",
+              "const": "tcp"
+            },
             "bytes_sent": {
               "type": "integer",
               "format": "uint64",
@@ -3295,10 +3299,6 @@
             },
             "closed_by": {
               "$ref": "#/$defs/ClosedBy"
-            },
-            "protocol": {
-              "type": "string",
-              "const": "tcp"
             }
           },
           "required": [
@@ -3312,6 +3312,10 @@
         {
           "type": "object",
           "properties": {
+            "protocol": {
+              "type": "string",
+              "const": "udp"
+            },
             "datagrams_sent": {
               "type": "integer",
               "format": "uint64",
@@ -3337,10 +3341,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "protocol": {
-              "type": "string",
-              "const": "udp"
             }
           },
           "required": [

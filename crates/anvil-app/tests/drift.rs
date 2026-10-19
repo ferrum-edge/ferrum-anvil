@@ -113,3 +113,43 @@ async fn a_send_outside_any_import_has_no_drift_check() {
     assert!(app.drift_check_execution(&id).unwrap().is_none());
     assert!(app.drift_check_execution(&Id::new()).is_err());
 }
+
+#[tokio::test]
+async fn redacted_media_types_are_unknown_instead_of_false_contract_drift() {
+    use anvil_contract::observe::{BodyBudget, ObservedBody};
+    use anvil_domain::request::{Body, KeyValue};
+    use anvil_engine::vars::{VarEntry, VarLayer};
+    use anvil_engine::{Engine, ExecutionContext};
+    anvil_fixtures::init();
+    let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let mut request = RequestSpec::http("POST", &f.url("/status/200"));
+    request.body = Body::Raw { text: "{}".into(), content_type: Some("application/json".into()) };
+    request.headers.push(KeyValue::new("X-Secret", "{{word}}"));
+    let mut ctx = ExecutionContext::standalone(request);
+    ctx.var_layers.push(VarLayer {
+        label: "test".into(),
+        vars: vec![VarEntry { name: "word".into(), value: "json".into(), secret: true, literal: false }],
+    });
+    let out = Engine::new().execute(&ctx, EventCtx::none(), CancellationToken::new()).await;
+    assert!(out.record.prepared.content_type.as_deref().unwrap().contains(anvil_domain::secret::REDACTED));
+    let obs = anvil_app::drift::observation(&out.record, Some(&out.body), None, &mut BodyBudget::default());
+    assert!(obs.request_content_type.is_none());
+    let response = obs.response.as_ref().unwrap();
+    assert!(response.content_type.is_none());
+    assert!(matches!(&response.body, ObservedBody::Unavailable(why) if why.contains("redacted")));
+    let spec = anvil_contract::Spec::parse(br#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/status/200":{"post":{"requestBody":{"content":{"application/json":{}}},"responses":{"200":{"description":"ok","content":{"application/json":{}}}}}}}}"#).unwrap();
+    let report = anvil_contract::analyze(&spec, &[obs], &anvil_contract::DriftOptions::default());
+    assert!(!report.findings.iter().any(|f| matches!(f.kind, DriftKind::UndeclaredRequestContentType | DriftKind::UndeclaredContentType)));
+    assert!(report.notes.iter().any(|n| n.contains("redacted")), "{:?}", report.notes);
+
+    let mut record = out.record;
+    let body = &mut record.response.as_mut().unwrap().body;
+    body.completeness = anvil_domain::execution::BodyCompleteness::NoBody;
+    let obs = anvil_app::drift::observation(&record, Some(&[]), None, &mut BodyBudget::default());
+    assert!(matches!(obs.response.unwrap().body, ObservedBody::Empty));
+    let body = &mut record.response.as_mut().unwrap().body;
+    body.completeness = anvil_domain::execution::BodyCompleteness::Complete;
+    body.wire_bytes = 0;
+    let obs = anvil_app::drift::observation(&record, None, None, &mut BodyBudget::default());
+    assert!(matches!(obs.response.unwrap().body, ObservedBody::Empty));
+}

@@ -33,6 +33,10 @@
     {
       "type": "object",
       "properties": {
+        "kind": {
+          "type": "string",
+          "const": "ferrum_gateway"
+        },
         "hosts": {
           "description": "Hosts (and optional ports) that are this gateway's frontends.",
           "type": "array",
@@ -66,10 +70,6 @@
             "string",
             "null"
           ]
-        },
-        "kind": {
-          "type": "string",
-          "const": "ferrum_gateway"
         }
       },
       "required": [
@@ -136,12 +136,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "template"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "required": [
@@ -152,12 +152,12 @@
         {
           "type": "object",
           "properties": {
-            "secret": {
-              "$ref": "#/$defs/SecretRef"
-            },
             "kind": {
               "type": "string",
               "const": "secret"
+            },
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
             }
           },
           "required": [

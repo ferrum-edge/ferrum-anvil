@@ -6,6 +6,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "started"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
@@ -14,10 +18,6 @@
         },
         "url": {
           "type": "string"
-        },
-        "event": {
-          "type": "string",
-          "const": "started"
         }
       },
       "required": [
@@ -30,6 +30,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "attempt_started"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
@@ -37,10 +41,6 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
-        },
-        "event": {
-          "type": "string",
-          "const": "attempt_started"
         }
       },
       "required": [
@@ -52,6 +52,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "phase"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
@@ -70,10 +74,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "event": {
-          "type": "string",
-          "const": "phase"
         }
       },
       "required": [
@@ -88,6 +88,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "response_head"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
@@ -101,10 +105,6 @@
           "format": "uint16",
           "minimum": 0,
           "maximum": 65535
-        },
-        "event": {
-          "type": "string",
-          "const": "response_head"
         }
       },
       "required": [
@@ -117,6 +117,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "body_progress"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
@@ -124,10 +128,6 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
-        },
-        "event": {
-          "type": "string",
-          "const": "body_progress"
         }
       },
       "required": [
@@ -139,15 +139,15 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "message"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
         "message": {
           "$ref": "#/$defs/StreamMessage"
-        },
-        "event": {
-          "type": "string",
-          "const": "message"
         }
       },
       "required": [
@@ -159,6 +159,10 @@
     {
       "type": "object",
       "properties": {
+        "event": {
+          "type": "string",
+          "const": "attempt_failed"
+        },
         "execution_id": {
           "$ref": "#/$defs/Id"
         },
@@ -169,10 +173,6 @@
         },
         "kind": {
           "$ref": "#/$defs/FailureKind"
-        },
-        "event": {
-          "type": "string",
-          "const": "attempt_failed"
         }
       },
       "required": [
@@ -185,12 +185,12 @@
     {
       "type": "object",
       "properties": {
-        "execution_id": {
-          "$ref": "#/$defs/Id"
-        },
         "event": {
           "type": "string",
           "const": "finished"
+        },
+        "execution_id": {
+          "$ref": "#/$defs/Id"
         }
       },
       "required": [

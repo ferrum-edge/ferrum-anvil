@@ -997,8 +997,8 @@ async fn send_request(handle: AppHandle, fence: PayloadFence, window: Window, in
     };
     drop(pending);
     let out = res?;
-    let ct = out.record.response.as_ref().and_then(|r| r.body.content_type.clone());
-    let body = body_view(&out.body, out.decoded_body.as_deref(), ct.as_deref());
+    let ct = out.response_metadata.as_ref().and_then(anvil_engine::ResponseMetadata::content_type);
+    let body = body_view(&out.body, out.decoded_body.as_deref(), ct);
     Ok(ExecutionView { record: out.record, body })
 }
 

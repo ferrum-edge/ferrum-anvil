@@ -644,6 +644,16 @@ async fn encoded_secret_query_values_leave_no_reversible_trace_in_the_record() {
     pin.sensitive = true;
     ctx.spec.params.push(pin);
     ctx.spec.params.push(KeyValue::new("page", "2"));
+    let raw = run(&e, &ctx).await;
+    assert_eq!(raw.record.response.as_ref().unwrap().status, 200);
+    assert_eq!(raw.record.prepared.url, format!("{}{REDACTED}", f.url("/")));
+    let json = serde_json::to_string(&raw.record).unwrap();
+    for s in [secret, spaced] {
+        assert!(!reveals(&json, s), "{s} is recoverable from the raw-crossing record");
+    }
+    // With the credential carried only by the params table, its encoding
+    // leaves URL structure intact and unrelated parameters stay readable.
+    ctx.spec.url = f.url("/echo/{{spaced}}");
     let o = run(&e, &ctx).await;
     assert_eq!(o.record.response.as_ref().unwrap().status, 200);
     // Ground truth: the server received the encoded values.

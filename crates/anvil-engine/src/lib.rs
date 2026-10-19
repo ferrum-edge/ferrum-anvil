@@ -53,6 +53,8 @@ pub use sessions::{SessionError, SessionHandle};
 /// Result of one execution.
 #[derive(Debug, Clone)]
 pub struct ExecutionOutput {
+    /// Runtime metadata captured before record redaction. Never serialized or persisted.
+    pub response_metadata: Option<ResponseMetadata>,
     pub record: ExecutionRecord,
     /// Raw captured response bytes (bounded by the capture limit).
     pub body: Bytes,
@@ -64,6 +66,41 @@ pub struct ExecutionOutput {
     /// and repeated datagram payloads). Not persisted; `None` for HTTP and
     /// for sessions that failed during preparation.
     pub session_facts: Option<anvil_transport::session::SessionFacts>,
+}
+
+/// Operational response facts, kept outside the persistable record. Debug
+/// deliberately omits the original media type, which may contain secrets.
+#[derive(Clone)]
+pub struct ResponseMetadata {
+    content_type: Option<String>,
+    has_content_coding: bool,
+}
+
+impl ResponseMetadata {
+    pub(crate) fn from_response(r: &ResponseRecord) -> Self {
+        Self {
+            content_type: r.body.content_type.clone(),
+            has_content_coding: r
+                .body
+                .content_encoding
+                .as_deref()
+                .is_some_and(|ce| ce.split(',').map(str::trim).any(|c| !c.is_empty() && !c.eq_ignore_ascii_case("identity"))),
+        }
+    }
+
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    pub fn has_content_coding(&self) -> bool {
+        self.has_content_coding
+    }
+}
+
+impl std::fmt::Debug for ResponseMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseMetadata").finish_non_exhaustive()
+    }
 }
 
 pub struct Engine {
