@@ -83,6 +83,21 @@
 
 ### Fixed
 
+- Execution records no longer keep a known secret that a server reflects into
+  response metadata outside header values: header and trailer names (response,
+  CONNECT-UDP tunnel and prepared headers), and the `Content-Type`,
+  `Content-Encoding` and decoding detail stored with the body are scrubbed
+  with the record's redactor before history or export. Names and codings are
+  compared ignoring ASCII case, as are warnings, findings and the summary;
+  finding text that quotes metadata with a reversibly encoded secret is
+  withheld like the metadata itself. The
+  request's `Content-Type` is scrubbed in the record and the preview, and the
+  reason phrase in every copy the record keeps. Engine and collection-run
+  metadata now use one scrubber, including newly extracted secrets and
+  overlapping matches. Live protocol handling uses a separate in-memory copy;
+  historical drift reports redacted metadata as unavailable evidence rather
+  than inventing a media-type mismatch. This applies to new records; existing
+  stored history is not rewritten.
 - A user cancel or vault lock that arrives after a load schedule has ended,
   while in-flight iterations drain, now stops their chains before the next
   step, shortens the drain to `cancel_drain_ms`, and is reported as the run's

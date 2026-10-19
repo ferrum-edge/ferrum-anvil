@@ -16,7 +16,8 @@
 use crate::vars::Resolver;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use anvil_domain::diagnostics::DiagnosticFinding;
-use anvil_domain::execution::HeaderEntry;
+use anvil_domain::execution::{ExecutionRecord, HeaderEntry};
+use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::request::PayloadEncoding;
 use anvil_domain::secret::REDACTED;
 use base64::Engine as _;
@@ -25,6 +26,10 @@ use base64::Engine as _;
 /// exact-value scrubbed: they would shred ordinary text. Name-based
 /// redaction still applies to them.
 const MIN_SECRET_LEN: usize = 4;
+
+/// Bound work for many overlapping secrets in a repetitive value. Past this
+/// budget the entire value is withheld, never a partly scrubbed prefix.
+const MAX_SECRET_MATCHES: usize = 4_096;
 
 /// Occurrences of one secret registered per decoded field (the first ones,
 /// which a transcript preview shows).
@@ -104,6 +109,13 @@ pub struct Redactor {
     /// Secret values, their canonical percent-encoded forms and their JSON
     /// string escaping, longest first (scrubbed from arbitrary text).
     matcher: Option<AhoCorasick>,
+    /// The same patterns compared ignoring ASCII case, for fields a protocol
+    /// normalizes (header names, content codings are lowercased).
+    any_case: Option<AhoCorasick>,
+    /// The patterns, lowercased, kept only when `any_case` cannot be built,
+    /// so case-insensitive redaction degrades to a slower pass instead of
+    /// silently becoming case-sensitive.
+    any_case_fallback: Vec<String>,
     /// Patterns retained only when the matcher cannot be built, so redaction
     /// degrades to a slower replacement pass instead of silently failing.
     fallback_patterns: Vec<String>,
@@ -112,7 +124,7 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new(secrets: Vec<String>, extra_names: Vec<String>) -> Self {
-        let mut r = Redactor { secrets, matcher: None, fallback_patterns: vec![], extra_names };
+        let mut r = Redactor { secrets, matcher: None, any_case: None, any_case_fallback: vec![], fallback_patterns: vec![], extra_names };
         r.secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         r.reindex();
         r
@@ -155,6 +167,20 @@ impl Redactor {
         }
     }
 
+    /// The patterns [`Redactor::reindex`] builds its matchers from.
+    #[cfg(test)]
+    fn fallback_patterns_for_test(&self) -> Vec<String> {
+        let mut patterns = Vec::new();
+        for s in &self.secrets {
+            patterns.push(s.clone());
+            patterns.push(hex::encode(s));
+            patterns.extend(encoded_forms(s));
+            patterns.extend(json_escaped(s));
+        }
+        sort_longest_first(&mut patterns);
+        patterns
+    }
+
     /// Longest first so overlapping values are fully covered.
     fn reindex(&mut self) {
         sort_longest_first(&mut self.secrets);
@@ -167,15 +193,22 @@ impl Redactor {
             patterns.extend(json_escaped(s));
         }
         sort_longest_first(&mut patterns);
+        self.any_case = if patterns.is_empty() {
+            None
+        } else {
+            AhoCorasickBuilder::new()
+                .kind(Some(AhoCorasickKind::ContiguousNFA))
+                .match_kind(MatchKind::Standard)
+                .ascii_case_insensitive(true)
+                .build(&patterns)
+                .ok()
+        };
+        self.any_case_fallback = if self.any_case.is_none() { patterns.iter().map(|p| p.to_ascii_lowercase()).collect() } else { vec![] };
         self.matcher = if patterns.is_empty() {
             self.fallback_patterns.clear();
             None
         } else {
-            match AhoCorasickBuilder::new()
-                .kind(Some(AhoCorasickKind::ContiguousNFA))
-                .match_kind(MatchKind::LeftmostLongest)
-                .build(&patterns)
-            {
+            match AhoCorasickBuilder::new().kind(Some(AhoCorasickKind::ContiguousNFA)).match_kind(MatchKind::Standard).build(&patterns) {
                 Ok(matcher) => {
                     self.fallback_patterns.clear();
                     Some(matcher)
@@ -226,21 +259,31 @@ impl Redactor {
     /// [`Redactor::json_text`] where the structure is known.
     pub fn text(&self, s: &str) -> String {
         let Some(matcher) = &self.matcher else {
-            return fallback_redact(s, &self.fallback_patterns);
+            return if self.fallback_patterns.is_empty() { s.to_string() } else { fallback_redact(s, &self.fallback_patterns) };
         };
-        let mut out = String::with_capacity(s.len());
-        let mut offset = 0;
-        for found in matcher.find_iter(s) {
-            out.push_str(&s[offset..found.start()]);
-            out.push_str(REDACTED);
-            offset = found.end();
+        replace_matches(matcher, s)
+    }
+
+    /// [`Redactor::text`] ignoring ASCII case, for text a protocol may have
+    /// case-folded after the secret was sent: header names, content codings,
+    /// and messages that quote them.
+    pub fn text_any_case(&self, s: &str) -> String {
+        match &self.any_case {
+            Some(m) => replace_matches(m, s),
+            None if self.any_case_fallback.is_empty() => s.to_string(),
+            None => replace_ranges(s, fallback_ranges(&s.to_ascii_lowercase(), &self.any_case_fallback)),
         }
-        out.push_str(&s[offset..]);
-        out
+    }
+
+    /// Metadata with a known reversibly encoded value is withheld when its
+    /// original structural role is unavailable (for example, a late-learned
+    /// extraction in an assertion's observed value).
+    pub(crate) fn metadata_text(&self, s: &str) -> String {
+        if self.hides_secret(s) { REDACTED.to_string() } else { self.text_any_case(s) }
     }
 
     /// True when a component, once percent-decoded (and with `+` read as a
-    /// space), contains a secret value. Raw occurrences are scrubbed by
+    /// space), contains a secret value ignoring ASCII case. Raw occurrences are scrubbed by
     /// [`Redactor::text`] before components are examined.
     pub(crate) fn hides_secret(&self, component: &str) -> bool {
         if self.secrets.is_empty() || !component.contains(['%', '+']) {
@@ -271,7 +314,7 @@ impl Redactor {
         }
         // Nothing to decode: only a raw occurrence can reveal a secret.
         if !s.contains(['%', '+']) {
-            return self.secrets.iter().any(|x| s.contains(x.as_str()));
+            return self.secrets.iter().any(|x| contains_bytes(s.as_bytes(), x.as_bytes()));
         }
         let mut layers: Vec<Vec<u8>> = vec![s.as_bytes().to_vec()];
         for round in 0..=MAX_DECODE_ROUNDS {
@@ -305,7 +348,53 @@ impl Redactor {
     /// them. Scrubbing the whole value before it is split also replaces a
     /// secret that spans a `;`, `=` or space whole.
     pub fn header(&self, name: &str, value: &str) -> String {
-        if is_sensitive_name(name, &self.extra_names) {
+        let sensitive = is_sensitive_name(name, &self.extra_names);
+        // Structured redaction must see original query names and userinfo.
+        // Scrubbing `token` or a URL prefix first can conceal that structure.
+        if !sensitive && URL_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h)) {
+            return self.url(value);
+        }
+        if !sensitive && (name.eq_ignore_ascii_case("link") || name.eq_ignore_ascii_case("refresh")) {
+            let scrubbed = self.text_any_case(value);
+            if !same_delimiters(value, &scrubbed, b":/?#&=@<>;\"'") {
+                return REDACTED.to_string();
+            }
+            let structured = if name.eq_ignore_ascii_case("link") { self.link(value) } else { self.refresh(value) };
+            return self.text_any_case(&structured);
+        }
+        let scrubbed = self.text_any_case(value);
+        // Inspect encoded cookie names and Path/Domain values while their
+        // original names still identify the structure. If that inspection
+        // and a crossing raw match interact, withhold the whole value.
+        let prepared = if sensitive && name.eq_ignore_ascii_case("set-cookie") {
+            value.split_once('=').map(|(key, rest)| {
+                let key = if self.hides_secret(key.trim()) { REDACTED } else { key };
+                match rest.split_once(';') {
+                    Some((credential, attrs)) => format!("{key}={credential};{}", self.set_cookie_attrs(attrs)),
+                    None => format!("{key}={rest}"),
+                }
+            })
+        } else if sensitive && name.eq_ignore_ascii_case("cookie") {
+            Some(
+                value
+                    .split(';')
+                    .map(|part| match part.split_once('=') {
+                        Some((key, rest)) if self.hides_secret(key.trim()) => format!("{REDACTED}={rest}"),
+                        _ => part.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            )
+        } else {
+            None
+        };
+        let scrubbed = match prepared.filter(|prepared| prepared != value) {
+            Some(_) if !same_delimiters(value, &scrubbed, b";=") => return REDACTED.to_string(),
+            Some(prepared) => self.text_any_case(&prepared),
+            None => scrubbed,
+        };
+        let value = scrubbed.as_str();
+        if sensitive {
             let value = self.text(value);
             let value = value.as_str();
             // Keep the scheme word for Authorization-like headers (e.g. "Bearer").
@@ -341,15 +430,6 @@ impl Redactor {
             }
             return REDACTED.to_string();
         }
-        if URL_HEADERS.iter().any(|h| name.eq_ignore_ascii_case(h)) {
-            return self.url(value);
-        }
-        if name.eq_ignore_ascii_case("link") {
-            return self.link(value);
-        }
-        if name.eq_ignore_ascii_case("refresh") {
-            return self.refresh(value);
-        }
         self.text(value)
     }
 
@@ -371,9 +451,8 @@ impl Redactor {
     /// `Link` (RFC 8288): every `<URI-reference>` is redacted as a URL, and so
     /// is the value of an `anchor` parameter, which is a URI reference too.
     fn link(&self, value: &str) -> String {
-        let value = self.text(value);
         let mut out = String::with_capacity(value.len());
-        let mut rest = value.as_str();
+        let mut rest = value;
         while let Some(start) = rest.find('<') {
             let Some(len) = rest[start + 1..].find('>') else { break };
             out.push_str(&self.link_params(&rest[..start]));
@@ -414,8 +493,7 @@ impl Redactor {
     /// `Refresh` (`5; url=https://…`): the target after `url=` is redacted as
     /// a URL, keeping surrounding quotes.
     fn refresh(&self, value: &str) -> String {
-        let value = self.text(value);
-        let Some(at) = value.to_ascii_lowercase().find("url=") else { return self.url(&value) };
+        let Some(at) = value.to_ascii_lowercase().find("url=") else { return self.url(value) };
         let (head, target) = value.split_at(at + 4);
         let quote = target.chars().next().filter(|c| matches!(*c, '"' | '\'') && target.len() > 1 && target.ends_with(*c));
         if let Some(q) = quote {
@@ -428,20 +506,29 @@ impl Redactor {
     /// auth fact's `htu` (the DPoP target URI) is a URL whose path can carry a
     /// secret, so it is redacted as a URL.
     pub fn inferred(&self, line: &str) -> String {
+        let scrubbed = self.text_any_case(line);
         match line.strip_prefix("auth ").and_then(|l| l.split_once(": ")) {
-            Some((k, v)) if k.ends_with(".htu") => format!("auth {k}: {}", self.url(v)),
-            _ => self.text(line),
+            Some((k, v)) if k.ends_with(".htu") => {
+                let prefix = format!("auth {k}: ");
+                if !scrubbed.starts_with(&prefix) || !same_delimiters(line, &scrubbed, b" :/?#&=@") {
+                    return REDACTED.to_string();
+                }
+                self.text_any_case(&format!("auth {k}: {}", self.url(v)))
+            }
+            _ => self.metadata_text(line),
         }
     }
 
     /// A diagnostic finding with its values redacted. URL-valued evidence is
-    /// redacted as a URL, and so is its copy in the explanation.
+    /// redacted as a URL, and so is its copy in the explanation. Other text
+    /// can quote response metadata (header values, the reason phrase), so a
+    /// reversibly encoded secret in it is withheld like in the metadata.
     pub fn finding(&self, f: &mut DiagnosticFinding) {
-        f.title = self.text(&f.title);
+        f.title = self.metadata_text(&f.title);
         let mut explanation = f.explanation.clone();
         for e in &mut f.evidence {
             if !URL_EVIDENCE.contains(&e.key.as_str()) {
-                e.value = self.text(&e.value);
+                e.value = self.metadata_text(&e.value);
                 continue;
             }
             let redacted = self.url(&e.value);
@@ -450,14 +537,93 @@ impl Redactor {
             }
             e.value = redacted;
         }
-        f.explanation = self.text(&explanation);
-        for a in &mut f.alternatives {
-            *a = self.text(a);
+        f.explanation = self.metadata_text(&explanation);
+        for a in f.alternatives.iter_mut().chain(f.does_not_prove.iter_mut()).chain(f.confirm_with.iter_mut()) {
+            *a = self.metadata_text(a);
+        }
+        for remediation in &mut f.remediation {
+            remediation.text = self.metadata_text(&remediation.text);
         }
     }
 
+    /// Headers with their values redacted ([`Redactor::header`]) and every
+    /// known secret scrubbed from their names, in any letter case (HTTP/2 and
+    /// HTTP/3 lowercase names): a server can echo a credential into a header
+    /// name as easily as into a value.
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
-        h.iter().map(|e| HeaderEntry { name: e.name.clone(), value: self.header(&e.name, &e.value) }).collect()
+        h.iter()
+            .map(|e| {
+                let name = self.text_any_case(&e.name);
+                // A later runner pass cannot infer a URL/cookie role from a
+                // masked name, so no value survives losing its identifying name.
+                let value = if name != e.name || name.contains(REDACTED) {
+                    REDACTED.to_string()
+                } else {
+                    self.metadata_text(&self.header(&e.name, &e.value))
+                };
+                HeaderEntry { name, value }
+            })
+            .collect()
+    }
+
+    /// Scrub metadata and every persisted copy of it. Engine assembly calls
+    /// this after operational consumers finish; the runner repeats the same
+    /// pass when a sensitive extraction teaches it a new secret.
+    pub fn record_metadata(&self, r: &mut ExecutionRecord) {
+        let scrub = |v: &mut Option<String>| {
+            if let Some(s) = v {
+                *s = self.metadata_text(s);
+            }
+        };
+        r.prepared.method = self.metadata_text(&r.prepared.method);
+        r.prepared.url = self.metadata_text(&self.url(&r.prepared.url));
+        for note in &mut r.prepared.inferred {
+            *note = self.metadata_text(&self.inferred(note));
+        }
+        r.prepared.headers = self.headers(&r.prepared.headers);
+        scrub(&mut r.prepared.content_type);
+        scrub(&mut r.prepared.proxy);
+        crate::record::redact_attempts(&mut r.attempts, self);
+        if let Some(resp) = &mut r.response {
+            resp.headers = self.headers(&resp.headers);
+            resp.trailers = self.headers(&resp.trailers);
+            scrub(&mut resp.reason);
+            scrub(&mut resp.body.content_type);
+            scrub(&mut resp.body.content_encoding);
+            scrub(&mut resp.body.decoding_detail);
+        }
+        match &mut r.outcome.protocol_status {
+            ProtocolStatus::Http { reason, .. } => scrub(reason),
+            ProtocolStatus::Grpc { grpc_message, .. } => scrub(grpc_message),
+            ProtocolStatus::WebSocket { close_reason, extensions, .. } => {
+                *close_reason = self.metadata_text(close_reason);
+                if let Some(e) = extensions {
+                    scrub(&mut e.offered);
+                    scrub(&mut e.answered);
+                    scrub(&mut e.problem);
+                    if let Some(violation) = &mut e.violation {
+                        scrub(&mut violation.detail);
+                    }
+                }
+            }
+            ProtocolStatus::Udp { masque: Some(t), .. } => {
+                t.proxy = self.metadata_text(&t.proxy);
+                t.target = self.metadata_text(&t.target);
+            }
+            _ => {}
+        }
+        r.outcome.summary = self.metadata_text(&r.outcome.summary);
+        for w in &mut r.outcome.warnings {
+            w.message = self.metadata_text(&w.message);
+        }
+        for finding in &mut r.findings {
+            self.finding(finding);
+        }
+        for a in &mut r.assertion_results {
+            a.label = self.metadata_text(&a.label);
+            a.message = self.metadata_text(&a.message);
+            scrub(&mut a.actual);
+        }
     }
 
     /// Redact sensitive query parameter values and secret values in a URL.
@@ -468,10 +634,25 @@ impl Redactor {
     /// reveals a secret once decoded (a secret split across components by a
     /// raw `/` or `&`), everything after the authority is replaced.
     pub fn url(&self, u: &str) -> String {
-        let u = self.text(u);
+        let scrubbed = self.text_any_case(u);
+        if !same_delimiters(u, &scrubbed, b":/?#&=@") {
+            // A secret crosses a structural boundary. Withhold the path;
+            // retain only an origin that survives userinfo/value scrubbing.
+            let safe = redact_userinfo(u);
+            let Some((scheme, rest)) = safe.split_once("://").filter(|(scheme, _)| is_scheme(scheme)) else {
+                return REDACTED.to_string();
+            };
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let origin = format!("{scheme}://{}", &rest[..end]);
+            return if self.text_any_case(&origin) != origin || self.reveals_secret(&origin) {
+                REDACTED.to_string()
+            } else {
+                format!("{origin}/{REDACTED}")
+            };
+        }
         let (base, frag) = match u.split_once('#') {
             Some((b, f)) => (b, Some(f)),
-            None => (u.as_str(), None),
+            None => (u, None),
         };
         let (before_query, query) = match base.split_once('?') {
             Some((p, q)) => (p, Some(q)),
@@ -487,7 +668,7 @@ impl Redactor {
             Some(f) => format!("{out}#{}", self.pairs(f)),
             None => out,
         };
-        self.seal(out)
+        self.seal(self.text_any_case(&out))
     }
 
     /// `k=v&k=v` (a query or a fragment) with sensitive names' values and
@@ -715,23 +896,99 @@ fn lower_hex(encoded: &str) -> String {
     out
 }
 
-fn fallback_redact(text: &str, patterns: &[String]) -> String {
-    let mut out = String::with_capacity(text.len());
+/// Merge all overlapping secret ranges. Choosing only nonoverlapping
+/// matches can expose the suffix of a second secret that begins in a first.
+fn replace_matches(matcher: &AhoCorasick, s: &str) -> String {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    // Standard matches arrive in end order, so a later match can overlap
+    // several earlier ranges. Memory stays bounded by the input length.
+    for (index, found) in matcher.find_overlapping_iter(s).enumerate() {
+        if index == MAX_SECRET_MATCHES {
+            return REDACTED.to_string();
+        }
+        let mut start = found.start();
+        while ranges.last().is_some_and(|r| r.end > start) {
+            if let Some(range) = ranges.pop() {
+                start = start.min(range.start);
+            }
+        }
+        ranges.push(start..found.end());
+    }
+    replace_ranges(s, ranges)
+}
+
+fn replace_ranges(s: &str, ranges: Vec<std::ops::Range<usize>>) -> String {
+    if ranges.is_empty() {
+        return s.to_string();
+    }
+    // Existing sentinels are fixed points, even if a secret is "redacted".
+    // A match crossing a sentinel still covers its whole span.
+    let mut markers = s.match_indices(REDACTED).map(|(at, marker)| at..at + marker.len());
+    let mut marker = markers.next();
+    let mut adjusted: Vec<std::ops::Range<usize>> = Vec::new();
+    for mut range in ranges {
+        while marker.as_ref().is_some_and(|m| m.end <= range.start) {
+            marker = markers.next();
+        }
+        if marker.as_ref().is_some_and(|m| m.start <= range.start && m.end >= range.end) {
+            continue;
+        }
+        while let Some(m) = marker.as_ref().filter(|m| m.start < range.end) {
+            range.start = range.start.min(m.start);
+            range.end = range.end.max(m.end);
+            marker = markers.next();
+        }
+        if let Some(last) = adjusted.last_mut().filter(|r| r.end > range.start) {
+            last.end = last.end.max(range.end);
+        } else {
+            adjusted.push(range);
+        }
+    }
+    let mut out = String::with_capacity(s.len());
     let mut offset = 0;
+    for range in adjusted {
+        out.push_str(&s[offset..range.start]);
+        out.push_str(REDACTED);
+        offset = range.end;
+    }
+    out.push_str(&s[offset..]);
+    out
+}
+
+fn fallback_ranges(text: &str, patterns: &[String]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut offset = 0;
+    let mut matches = 0;
     while offset < text.len() {
         let next = patterns
             .iter()
             .filter_map(|pattern| text[offset..].find(pattern).map(|at| (offset + at, pattern.len())))
             .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-        let Some((start, len)) = next else {
-            out.push_str(&text[offset..]);
-            break;
-        };
-        out.push_str(&text[offset..start]);
-        out.push_str(REDACTED);
-        offset = start + len;
+        let Some((start, len)) = next else { break };
+        if matches == MAX_SECRET_MATCHES {
+            ranges.clear();
+            ranges.push(0..text.len());
+            return ranges;
+        }
+        matches += 1;
+        let end = start + len;
+        if let Some(last) = ranges.last_mut().filter(|r| r.end > start) {
+            last.end = last.end.max(end);
+        } else {
+            ranges.push(start..end);
+        }
+        // Keep searching inside the match to cover overlaps, at a UTF-8 boundary.
+        offset = start + text[start..].chars().next().map_or(1, char::len_utf8);
     }
-    out
+    ranges
+}
+
+fn fallback_redact(text: &str, patterns: &[String]) -> String {
+    replace_ranges(text, fallback_ranges(text, patterns))
+}
+
+fn same_delimiters(before: &str, after: &str, delimiters: &[u8]) -> bool {
+    before.bytes().filter(|b| delimiters.contains(b)).eq(after.bytes().filter(|b| delimiters.contains(b)))
 }
 
 fn is_scheme(s: &str) -> bool {
@@ -739,7 +996,7 @@ fn is_scheme(s: &str) -> bool {
 }
 
 fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
+    !needle.is_empty() && hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 /// `scheme://user:pw@host/...` and the scheme-relative `//user:pw@host/...`
@@ -773,6 +1030,86 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cookie_structure_is_examined_before_case_folded_name_scrubbing() {
+        use super::*;
+        let r = Redactor::new(vec!["PATH".into(), "DOMAIN".into(), "encoded-cookie-secret-7q2m".into()], vec![]);
+        for value in
+            ["sid=x; Path=/mixed/encoded%2dcookie-secret-7q2m; HttpOnly", "sid=x; Domain=encoded%252dcookie-secret-7q2m.example; Secure"]
+        {
+            let once = r.header("Set-Cookie", value);
+            assert!(!once.contains("encoded%"), "{once}");
+            assert_eq!(r.header("Set-Cookie", &once), once);
+        }
+        // Both kinds of match interact across an attribute boundary.
+        let r = Redactor::new(vec!["encoded-cookie-secret-7q2m".into(), "Path=/mixed/encoded%2dcookie-secret-7q2m; Tail".into()], vec![]);
+        let result = r.header("Set-Cookie", "sid=x; Path=/mixed/encoded%2dcookie-secret-7q2m; Tail");
+        assert_eq!(result, REDACTED);
+    }
+
+    #[test]
+    fn redaction_markers_are_fixed_points_in_metadata() {
+        use super::*;
+        let r = Redactor::new(vec!["redacted".into()], vec![]);
+        for value in [REDACTED.to_string(), format!("text/{REDACTED}; x={REDACTED}"), "the REDACTED value".into()] {
+            let once = r.text_any_case(&value);
+            assert_eq!(r.text_any_case(&once), once);
+            assert_eq!(r.text(&once), once);
+        }
+    }
+
+    #[test]
+    fn repetitive_secret_matches_fail_closed_at_the_work_budget() {
+        use super::*;
+        let mut r = Redactor::new(vec!["key1".into()], vec![]);
+        let text = "key1 safe ".repeat(MAX_SECRET_MATCHES + 1);
+        assert_eq!(r.text(&text), REDACTED);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), REDACTED);
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.matcher = None;
+        r.any_case = None;
+        assert_eq!(r.text(&text), REDACTED);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), REDACTED);
+    }
+
+    #[test]
+    fn overlapping_secrets_are_covered_in_full_even_without_matchers() {
+        use super::*;
+        let mut r = Redactor::new(vec!["text/plain".into(), "plain;token=secret-77".into(), "aaaa".into()], vec![]);
+        let value = "Ü text/plain;token=secret-77 and aaaaa!";
+        let expected = format!("Ü {REDACTED} and {REDACTED}!");
+        assert_eq!(r.text(value), expected);
+        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), format!("Ü {REDACTED} AND {REDACTED}!"));
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.matcher = None;
+        r.any_case = None;
+        assert_eq!(r.text(value), expected);
+        assert_eq!(r.text_any_case(&value.to_ascii_uppercase()), format!("Ü {REDACTED} AND {REDACTED}!"));
+    }
+
+    /// Either automaton can fail to build (its size limit); redaction then
+    /// degrades to the fallback passes and stays case-insensitive where it
+    /// should, keeping every byte it does not replace.
+    #[test]
+    fn case_insensitive_redaction_survives_failed_matchers() {
+        use super::*;
+        let secret = "Mixed-Case-Secret-7Q";
+        let text = "x-mixed-case-secret-7q: v; MIXED-CASE-SECRET-7Q and Ünïcode";
+        let expect = format!("x-{REDACTED}: v; {REDACTED} and Ünïcode");
+        let mut r = Redactor::new(vec![secret.into()], vec![]);
+        assert_eq!(r.text_any_case(text), expect);
+        // Only the case-insensitive automaton failed.
+        r.any_case_fallback = r.fallback_patterns_for_test().iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.any_case = None;
+        assert_eq!(r.text_any_case(text), expect);
+        // Both failed.
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.matcher = None;
+        assert_eq!(r.text_any_case(text), expect);
+        assert_eq!(r.text(&format!("a {secret} b")), format!("a {REDACTED} b"));
+    }
     use super::*;
 
     #[test]
@@ -806,7 +1143,7 @@ mod tests {
             ("Set-Cookie", format!("ordinary=x; Path=/{secret}; HttpOnly"), format!("ordinary={REDACTED}; Path=/{REDACTED}; HttpOnly")),
             ("Set-Cookie", format!("{secret}=x; Path=/"), format!("{REDACTED}={REDACTED}; Path=/")),
             ("Set-Cookie", format!("sid=x; Domain={secret}.example"), format!("sid={REDACTED}; Domain={REDACTED}.example")),
-            ("Set-Cookie", "sid=x; Path=/tok%2Fen%3Dvalue".into(), format!("sid={REDACTED}; Path=/{REDACTED}")),
+            ("Set-Cookie", "sid=x; Path=/tok%2Fen%3Dvalue".into(), format!("sid={REDACTED}; Path={REDACTED}")),
             ("Cookie", format!("a=1; {secret}=2"), format!("a={REDACTED}; {REDACTED}={REDACTED}")),
             ("Authorization", format!("{secret} opaque"), format!("{REDACTED} {REDACTED}")),
             ("Proxy-Authorization", format!("X-{secret} opaque"), format!("X-{REDACTED} {REDACTED}")),

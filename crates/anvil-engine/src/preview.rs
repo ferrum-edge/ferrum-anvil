@@ -186,19 +186,19 @@ impl Engine {
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
-            method: req.method.clone(),
+            method: redactor.text_any_case(&req.method),
             url: redactor.url(&shape.url(&target)),
-            destination: format!("{}:{}", target.host, target.port),
-            authority: redactor.text(&authority),
-            headers: headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect(),
+            destination: redactor.metadata_text(&format!("{}:{}", target.host, target.port)),
+            authority: redactor.metadata_text(&authority),
+            headers: redactor.headers(&headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: v.clone() }).collect::<Vec<_>>()),
             body_bytes: body.len() as u64,
             body_preview,
-            content_type: req.content_type.clone(),
+            content_type: req.content_type.as_deref().map(|c| redactor.text_any_case(c)),
             auth: prep.auth_label.clone(),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),
             tls_verification: prep.tls.as_ref().map(|t| t.verify).unwrap_or(true),
-            proxy: prep.proxy.as_ref().map(|p| p.label.clone()),
+            proxy: prep.proxy.as_ref().map(|p| redactor.metadata_text(&p.label)),
             ferrum_trust: match &prep.trust {
                 FerrumTrust::Trusted { profile_name, compatibility_id, .. } => Some(format!("{profile_name} ({compatibility_id})")),
                 FerrumTrust::NotConfigured => None,

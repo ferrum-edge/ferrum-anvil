@@ -69,18 +69,43 @@ fn refusal_body(r: &Redactor, captured: &str) -> (String, bool) {
     while !captured.is_char_boundary(cut) {
         cut -= 1;
     }
-    (anvil_transport::session::redact_then_cut(&|s: &str| r.text(s), captured, cut), cut < captured.len())
+    (anvil_transport::session::redact_then_cut(&|s: &str| r.text_any_case(s), captured, cut), cut < captured.len())
 }
 
-fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
+pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
     for a in attempts {
-        a.url = r.url(&a.url);
+        a.method = r.metadata_text(&a.method);
+        a.url = r.text_any_case(&r.url(&a.url));
         if let Some(f) = &mut a.failure {
-            f.message = r.text(&f.message);
+            f.message = r.text_any_case(&f.message);
+            f.field = f.field.as_deref().map(|s| r.text_any_case(s));
         }
-        if let Some(t) = a.connection.as_mut().and_then(|c| c.tunnel.as_mut()) {
+        for phase in &mut a.phases {
+            phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
+        }
+        let Some(connection) = &mut a.connection else { continue };
+        if let Some(proxy) = &mut connection.via_proxy {
+            *proxy = r.metadata_text(proxy);
+        }
+        if let Some(header) = &mut connection.proxy_header {
+            let redact = |s: &str| r.metadata_text(s);
+            anvil_transport::proxy_protocol::scrub_observation(header, Some(&redact));
+        }
+        if let Some(tls) = &mut connection.tls {
+            redact_tls(tls, r);
+        }
+        if let Some(t) = &mut connection.tunnel {
+            t.endpoint = r.metadata_text(&t.endpoint);
+            t.authority = r.metadata_text(&t.authority);
+            if let Some(tls) = &mut t.tls {
+                redact_tls(tls, r);
+            }
             if let Some(f) = &mut t.failure {
-                f.message = r.text(&f.message);
+                f.message = r.text_any_case(&f.message);
+                f.field = f.field.as_deref().map(|s| r.text_any_case(s));
+            }
+            for phase in &mut t.phases {
+                phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
             }
             if let Some(b) = &mut t.refusal_body {
                 let (kept, cut) = refusal_body(r, b);
@@ -88,9 +113,52 @@ fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor) {
                 t.refusal_body_truncated |= cut;
             }
             // A CONNECT-UDP request carries the request's auth headers.
-            for h in t.connect_headers.iter_mut().chain(t.response_headers.iter_mut()) {
-                h.value = r.header(&h.name, &h.value);
-            }
+            t.connect_headers = r.headers(&t.connect_headers);
+            t.response_headers = r.headers(&t.response_headers);
+        }
+    }
+}
+
+/// Certificate and identity observations can repeat a templated host or a
+/// server-controlled redirect destination. Scrub these copies only after
+/// diagnosis has consumed the original transport evidence.
+fn redact_tls(t: &mut TlsObservation, r: &Redactor) {
+    t.server_name = r.metadata_text(&t.server_name);
+    for value in [&mut t.sni, &mut t.peer_spiffe_id, &mut t.version, &mut t.cipher_suite, &mut t.alpn_negotiated, &mut t.alert_received]
+        .into_iter()
+        .flatten()
+    {
+        *value = r.metadata_text(value);
+    }
+    for value in &mut t.alpn_offered {
+        *value = r.metadata_text(value);
+    }
+    match &mut t.identity_check {
+        Some(PeerIdentityCheck::HostName { name }) => *name = r.metadata_text(name),
+        Some(PeerIdentityCheck::SpiffeId { expected, trust_domain }) => {
+            *expected = r.metadata_text(expected);
+            *trust_domain = r.metadata_text(trust_domain);
+        }
+        Some(PeerIdentityCheck::SpiffeTrustDomain { trust_domain }) => *trust_domain = r.metadata_text(trust_domain),
+        None => {}
+    }
+    if let TlsVerification::Failed { detail, .. } = &mut t.verification {
+        *detail = r.metadata_text(detail);
+    }
+    for cert in t.peer_certificates.iter_mut().chain(t.client_certificate_presented.iter_mut()) {
+        for value in [
+            &mut cert.subject,
+            &mut cert.issuer,
+            &mut cert.not_before,
+            &mut cert.not_after,
+            &mut cert.serial_hex,
+            &mut cert.sha256_fingerprint,
+            &mut cert.key_algorithm,
+        ] {
+            *value = r.metadata_text(value);
+        }
+        for value in &mut cert.subject_alt_names {
+            *value = r.metadata_text(value);
         }
     }
 }
@@ -182,7 +250,7 @@ pub fn protocol_status_http(resp: Option<&ResponseRecord>) -> ProtocolStatus {
 }
 
 pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
-    let Assembly { ctx, started_at, mut attempts, last, redactor, .. } = a;
+    let Assembly { ctx, started_at, attempts, last, redactor, .. } = a;
     let response = last.response.clone();
     let raw_body = last.body.clone();
     // Decode for display/assertions; the raw captured bytes stay the evidence.
@@ -192,6 +260,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         }
         _ => BodyDecoding::default(),
     };
+    // The decoder quotes the response's content coding, lowercased: scrubbed
+    // in any case before assertions, warnings or the record can repeat it.
+    let decoding_detail = decoding_detail.map(|d| redactor.text_any_case(&d));
     let body_for_eval: &[u8] = decoded.as_deref().unwrap_or(&raw_body);
     let viewed: Option<Bytes> = a.body_view.and_then(|view| view(response.as_ref(), body_for_eval));
     let body_for_eval: &[u8] = viewed.as_deref().unwrap_or(body_for_eval);
@@ -211,7 +282,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     if let Some(r) = response.as_mut() {
         r.body.decoded_bytes = decoded.as_ref().map(|d| d.len() as u64);
         r.body.decoding = decoding_status;
-        r.body.decoding_detail = decoding_detail.as_deref().map(|d| redactor.text(d));
+        r.body.decoding_detail = decoding_detail.clone();
     }
 
     let protocol_status = a.protocol_status_override.clone().unwrap_or_else(|| protocol_status_http(response.as_ref()));
@@ -244,7 +315,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     // Excerpts a finding quotes from the response are redacted before they
     // are cut: the findings are redacted again below, but a secret that
     // crossed a cut would no longer match there.
-    let redact_excerpt = |s: &str| redactor.text(s);
+    let redact_excerpt = |s: &str| redactor.text_any_case(s);
     let diag_input = DiagnosticInput {
         protocol: ctx.spec.protocol,
         method: &a.prepared_method,
@@ -288,7 +359,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         let message = format!(
             "The application outcome was not determined: a SOAP fault or GraphQL error is reported in the response body, and the complete body is not available ({reason})"
         );
-        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
     }
     if let Some(l) = &a.lint_bypassed {
         warnings.push(OutcomeWarning { code: WarningCode::LintBypassed, message: format!("Sent despite a lint error: {l}") });
@@ -299,7 +370,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let has_checks = ctx.spec.assertions.iter().any(|x| x.enabled) || !ctx.spec.extractions.is_empty();
     if let Some(reason) = body_unavailable.as_ref().filter(|_| has_checks || decoding_gap.is_some()) {
         let message = format!("The complete response body is not available ({reason}); body assertions and extractions were not evaluated");
-        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&message) });
+        warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
     }
 
     // Every attempt counts: a slow hop before a fast redirect or fallback is
@@ -335,23 +406,16 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
                 extracted.push(name.clone());
                 extracted_values.push((name, value, sensitive));
             }
-            Err(e) => warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text(&e) }),
+            Err(e) => warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&e) }),
         }
     }
 
     let dispatch = DispatchState::summarize(attempts.iter().map(|x| x.dispatch));
     let summary = summary_line(transport, application, &protocol_status, &diagnosis.findings);
-    redact_attempts(&mut attempts, redactor);
-    let mut findings = diagnosis.findings;
-    for f in &mut findings {
-        redactor.finding(f);
-    }
-    if let Some(r) = response.as_mut() {
-        r.headers = redactor.headers(&r.headers);
-        r.trailers = redactor.headers(&r.trailers);
-    }
+    let response_metadata = response.as_ref().map(crate::ResponseMetadata::from_response);
+    let findings = diagnosis.findings;
     let prepared_headers: Vec<HeaderEntry> =
-        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: n.clone(), value: redactor.header(n, v) }).collect();
+        a.prepared_headers.iter().map(|(n, v)| HeaderEntry { name: redactor.text_any_case(n), value: redactor.header(n, v) }).collect();
     let mut inferred: Vec<String> = a.inferred.iter().map(|i| redactor.inferred(i)).collect();
     for (k, v) in &a.auth_facts {
         inferred.push(redactor.inferred(&format!("auth {k}: {v}")));
@@ -406,8 +470,9 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         findings,
     };
     let mut record = record;
+    redactor.record_metadata(&mut record);
     record.outcome.completeness = record.response.as_ref().map(|r| r.body.completeness);
-    ExecutionOutput { record, body: raw_body, decoded_body: decoded, extracted: extracted_values, session_facts: None }
+    ExecutionOutput { response_metadata, record, body: raw_body, decoded_body: decoded, extracted: extracted_values, session_facts: None }
 }
 
 pub fn summary_line(
@@ -455,14 +520,14 @@ fn redact_workload(mut w: WorkloadApiEvidence, r: &Redactor) -> WorkloadApiEvide
     use anvil_domain::workload::WorkloadCallResult as R;
     for c in &mut w.calls {
         match &mut c.result {
-            R::Unavailable { detail, .. } | R::NoIdentity { detail } | R::Malformed { detail } => *detail = r.text(detail),
-            R::Status { message, .. } => *message = r.text(message),
+            R::Unavailable { detail, .. } | R::NoIdentity { detail } | R::Malformed { detail } => *detail = r.text_any_case(detail),
+            R::Status { message, .. } => *message = r.text_any_case(message),
             R::Ok | R::Timeout { .. } => {}
         }
     }
     if let Some(j) = &mut w.jwt_svid {
         for c in &mut j.checks {
-            c.detail = r.text(&c.detail);
+            c.detail = r.text_any_case(&c.detail);
         }
     }
     w
@@ -484,7 +549,7 @@ pub fn local_failure_with(
     let redactor = Redactor::for_execution(resolver, &ctx.redaction_names);
     let workload = workload.filter(|w| !w.is_empty()).map(|w| redact_workload(w, &redactor));
     let mut f = f;
-    f.message = redactor.text(&f.message);
+    f.message = redactor.text_any_case(&f.message);
     let ps = ProtocolStatus::None;
     let diag = anvil_diagnostics::diagnose(&DiagnosticInput {
         protocol: ctx.spec.protocol,
@@ -501,7 +566,7 @@ pub fn local_failure_with(
         protocol_fallback_from: None,
         workload: workload.as_ref(),
         gateway_detail: None,
-        redact: Some(&|s: &str| redactor.text(s)),
+        redact: Some(&|s: &str| redactor.text_any_case(s)),
     });
     let settings = crate::settings::resolve(&ctx.settings_layers);
     let summary = diag.findings.first().map(|x| x.title.clone()).unwrap_or_else(|| "Not sent".into());
@@ -571,7 +636,9 @@ pub fn local_failure_with(
         extracted: vec![],
         findings: diag.findings,
     };
-    ExecutionOutput { record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
+    let mut record = record;
+    redactor.record_metadata(&mut record);
+    ExecutionOutput { response_metadata: None, record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
 }
 
 #[cfg(test)]
