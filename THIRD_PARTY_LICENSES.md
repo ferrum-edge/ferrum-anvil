@@ -790,8 +790,8 @@ the modified file under MPL-2.0.
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
 | @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | https://www.npmjs.com/package/@tauri-apps/api/v/2.11.1 |
-| react | 19.3.0 | MIT | https://www.npmjs.com/package/react/v/19.3.0 |
-| react-dom | 19.3.0 | MIT | https://www.npmjs.com/package/react-dom/v/19.3.0 |
+| react | 19.3.1 | MIT | https://www.npmjs.com/package/react/v/19.3.1 |
+| react-dom | 19.3.1 | MIT | https://www.npmjs.com/package/react-dom/v/19.3.1 |
 | scheduler | 0.28.0 | MIT | https://www.npmjs.com/package/scheduler/v/0.28.0 |
 
 ## Notices
