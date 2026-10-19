@@ -373,7 +373,7 @@ the modified file under MPL-2.0.
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | https://github.com/pyfisch/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
-| keyring-core | 1.0.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-core.git |
+| keyring-core | 1.0.1 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-core.git |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | https://github.com/rust-lang-nursery/lazy-static.rs |
 | libappindicator | 0.9.0 | Apache-2.0 OR MIT | https://crates.io/crates/libappindicator/0.9.0 |
 | libappindicator-sys | 0.9.0 | Apache-2.0 OR MIT | https://crates.io/crates/libappindicator-sys/0.9.0 |
@@ -540,7 +540,7 @@ the modified file under MPL-2.0.
 | rusticata-macros | 4.1.0 | MIT/Apache-2.0 | https://github.com/rusticata/rusticata-macros.git |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
-| rustls-native-certs | 0.8.4 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
+| rustls-native-certs | 0.8.5 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki | 0.103.15 | ISC | https://github.com/rustls/webpki |
@@ -550,9 +550,9 @@ the modified file under MPL-2.0.
 | schannel | 0.1.29 | MIT | https://github.com/steffengy/schannel-rs |
 | schemars | 0.8.22 | MIT | https://github.com/GREsau/schemars |
 | schemars | 0.9.0 | MIT | https://github.com/GREsau/schemars |
-| schemars | 1.2.2 | MIT | https://github.com/GREsau/schemars |
+| schemars | 1.2.3 | MIT | https://github.com/GREsau/schemars |
 | schemars_derive | 0.8.22 | MIT | https://github.com/GREsau/schemars |
-| schemars_derive | 1.2.2 | MIT | https://github.com/GREsau/schemars |
+| schemars_derive | 1.2.3 | MIT | https://github.com/GREsau/schemars |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
 | scrypt | 0.12.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes |
 | sec1 | 0.7.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/sec1 |
@@ -567,7 +567,7 @@ the modified file under MPL-2.0.
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_derive_internals | 0.29.1 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_derive_internals | 0.30.0 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
-| serde_json | 1.0.151 | MIT OR Apache-2.0 | https://github.com/serde-rs/json |
+| serde_json | 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json |
 | serde_json_path | 0.7.2 | MIT | https://github.com/hiltontj/serde_json_path |
 | serde_json_path_core | 0.2.2 | MIT | https://github.com/hiltontj/serde_json_path |
 | serde_json_path_macros | 0.1.6 | MIT | https://github.com/hiltontj/serde_json_path |
@@ -587,7 +587,7 @@ the modified file under MPL-2.0.
 | sha1 | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | sha1_smol | 1.0.1 | BSD-3-Clause | https://github.com/mitsuhiko/sha1-smol |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
-| sha2 | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
+| sha2 | 0.11.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
 | signature | 2.2.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits/tree/master/signature |
@@ -649,11 +649,11 @@ the modified file under MPL-2.0.
 | time-macros | 0.2.32 | MIT OR Apache-2.0 | https://github.com/time-rs/time |
 | tinystr | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
-| tokio | 1.53.2 | MIT | https://github.com/tokio-rs/tokio |
+| tokio | 1.53.3 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-macros | 2.7.2 | MIT | https://github.com/tokio-rs/tokio |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | https://github.com/rustls/tokio-rustls |
 | tokio-tungstenite | 0.30.0 | MIT | https://github.com/snapview/tokio-tungstenite |
-| tokio-util | 0.7.19 | MIT | https://github.com/tokio-rs/tokio |
+| tokio-util | 0.7.20 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
@@ -723,7 +723,6 @@ the modified file under MPL-2.0.
 | windows_x86_64_msvc | 0.53.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-collections | 0.2.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-core | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows-core | 0.62.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-future | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-implement | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-interface | 0.59.3 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
@@ -736,6 +735,7 @@ the modified file under MPL-2.0.
 | windows-result | 0.4.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.4.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-sys | 0.52.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.59.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
@@ -778,9 +778,9 @@ the modified file under MPL-2.0.
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |
-| zstd | 0.14.0 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
-| zstd-safe | 8.0.0 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
-| zstd-sys | 2.1.0+zstd.1.5.7 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
+| zstd | 0.14.3 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
+| zstd-safe | 8.2.0 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
+| zstd-sys | 2.1.2+zstd.1.5.7 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
 | zvariant | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zvariant_derive | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zvariant_utils | 4.2.0 | MIT | https://github.com/z-galaxy/zbus/ |

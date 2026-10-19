@@ -82,12 +82,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "template"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "required": [
@@ -98,12 +98,12 @@
         {
           "type": "object",
           "properties": {
-            "secret": {
-              "$ref": "#/$defs/SecretRef"
-            },
             "kind": {
               "type": "string",
               "const": "secret"
+            },
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
             }
           },
           "required": [

@@ -28,8 +28,8 @@ export type ResolverMode =
       mode: "system";
     }
   | {
-      nameservers: string[];
       mode: "custom";
+      nameservers: string[];
     };
 /**
  * Explicit proxy choice: a profile, or explicitly none (overrides inherited).
@@ -42,8 +42,8 @@ export type ProxySelection =
       kind: "none";
     }
   | {
-      id: Id;
       kind: "profile";
+      id: Id;
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -72,15 +72,15 @@ export type DatasetFormat = "csv" | "json";
  */
 export type AttachmentRef =
   | {
+      kind: "stored";
       sha256: string;
       size: number;
       file_name: string;
       media_type?: string | null;
-      kind: "stored";
     }
   | {
-      path: string;
       kind: "linked_file";
+      path: string;
     };
 /**
  * Which leg / owner of the path a claim is about.
@@ -217,12 +217,12 @@ export type PatchKind = "remove" | "add" | "replace" | "union";
  */
 export type SensitiveValue =
   | {
-      value: string;
       kind: "template";
+      value: string;
     }
   | {
-      secret: SecretRef;
       kind: "secret";
+      secret: SecretRef;
     };
 /**
  * Structured, bounded progress events emitted while an execution runs. The
@@ -234,49 +234,49 @@ export type SensitiveValue =
  */
 export type ExecutionEvent =
   | {
+      event: "started";
       execution_id: Id;
       method: string;
       url: string;
-      event: "started";
     }
   | {
+      event: "attempt_started";
       execution_id: Id;
       attempt: number;
-      event: "attempt_started";
     }
   | {
+      event: "phase";
       execution_id: Id;
       attempt: number;
       phase: Phase;
       status: PhaseStatus;
       offset_us: number;
-      event: "phase";
     }
   | {
+      event: "response_head";
       execution_id: Id;
       attempt: number;
       status: number;
-      event: "response_head";
     }
   | {
+      event: "body_progress";
       execution_id: Id;
       bytes: number;
-      event: "body_progress";
     }
   | {
+      event: "message";
       execution_id: Id;
       message: StreamMessage;
-      event: "message";
     }
   | {
+      event: "attempt_failed";
       execution_id: Id;
       attempt: number;
       kind: FailureKind;
-      event: "attempt_failed";
     }
   | {
-      execution_id: Id;
       event: "finished";
+      execution_id: Id;
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -436,27 +436,27 @@ export type WorkloadCallResult =
       result: "ok";
     }
   | {
+      result: "unavailable";
       detail: string;
       io_error_kind?: string | null;
-      result: "unavailable";
     }
   | {
-      deadline_ms: number;
       result: "timeout";
+      deadline_ms: number;
     }
   | {
+      result: "status";
       code: number;
       code_name: string;
       message: string;
-      result: "status";
     }
   | {
-      detail: string;
       result: "no_identity";
+      detail: string;
     }
   | {
-      detail: string;
       result: "malformed";
+      detail: string;
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -482,27 +482,27 @@ export type AttemptReason =
       reason: "initial";
     }
   | {
-      status: number;
       reason: "redirect";
+      status: number;
     }
   | {
-      after: FailureKind;
       reason: "retry";
+      after: FailureKind;
     }
   | {
-      from: string;
       reason: "protocol_fallback";
+      from: string;
     }
   | {
-      scheme: string;
       reason: "auth_challenge";
+      scheme: string;
     }
   | {
       reason: "too_early_retry";
     }
   | {
-      after: FailureKind;
       reason: "reused_connection_closed";
+      after: FailureKind;
     };
 /**
  * Which peer identity check the TLS verifier applied (or would have applied,
@@ -513,17 +513,17 @@ export type AttemptReason =
  */
 export type PeerIdentityCheck =
   | {
-      name: string;
       method: "host_name";
+      name: string;
     }
   | {
+      method: "spiffe_id";
       expected: string;
       trust_domain: string;
-      method: "spiffe_id";
     }
   | {
-      trust_domain: string;
       method: "spiffe_trust_domain";
+      trust_domain: string;
     };
 /**
  * Result of peer-certificate verification.
@@ -536,13 +536,13 @@ export type TlsVerification =
       result: "verified";
     }
   | {
+      result: "failed";
       problem: FailureKind;
       detail: string;
-      result: "failed";
     }
   | {
-      would_have_failed?: FailureKind | null;
       result: "bypassed";
+      would_have_failed?: FailureKind | null;
     }
   | {
       result: "not_reached";
@@ -650,18 +650,19 @@ export type ProtocolStatus =
       protocol: "none";
     }
   | {
+      protocol: "http";
       status: number;
       reason?: string | null;
-      protocol: "http";
     }
   | {
+      protocol: "grpc";
       http_status?: number | null;
       grpc_status?: number | null;
       grpc_message?: string | null;
       source: GrpcStatusSource;
-      protocol: "grpc";
     }
   | {
+      protocol: "websocket";
       handshake_status?: number | null;
       close_code?: number | null;
       close_reason?: string;
@@ -671,22 +672,22 @@ export type ProtocolStatus =
        * offered or answered, or a frame claimed one.
        */
       extensions?: WsExtensions | null;
-      protocol: "websocket";
     }
   | {
+      protocol: "sse";
       http_status: number;
       events: number;
       closed_by: ClosedBy;
-      protocol: "sse";
     }
   | {
+      protocol: "tcp";
       bytes_sent: number;
       bytes_received: number;
       half_closed: boolean;
       closed_by: ClosedBy;
-      protocol: "tcp";
     }
   | {
+      protocol: "udp";
       datagrams_sent: number;
       datagrams_received: number;
       window_ms: number;
@@ -695,7 +696,6 @@ export type ProtocolStatus =
        * (MASQUE) proxy.
        */
       masque?: MasqueTunnel | null;
-      protocol: "udp";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -763,12 +763,12 @@ export type JwtSvidSource =
       kind: "workload_api";
     }
   | {
-      token: SensitiveValue;
       kind: "value";
+      token: SensitiveValue;
     }
   | {
-      path: string;
       kind: "file";
+      path: string;
     };
 /**
  * Auth configuration. Applied after interpolation, content-type inference
@@ -785,25 +785,26 @@ export type AuthConfig =
       type: "none";
     }
   | {
+      type: "api_key";
       name: string;
       value: SensitiveValue;
       /**
        * Where an API key is presented.
        */
       location?: "header" | "query" | "cookie";
-      type: "api_key";
     }
   | {
+      type: "basic";
       username: string;
       password: SensitiveValue;
-      type: "basic";
     }
   | {
+      type: "bearer";
       token: SensitiveValue;
       prefix?: string;
-      type: "bearer";
     }
   | {
+      type: "jwt";
       algorithm: JwtAlgorithm;
       /**
        * A field that may carry sensitive material (password, token, key).
@@ -816,12 +817,12 @@ export type AuthConfig =
        */
       signing_key:
         | {
-            value: string;
             kind: "template";
+            value: string;
           }
         | {
-            secret: SecretRef;
             kind: "secret";
+            secret: SecretRef;
           };
       claims: JwtClaims;
       kid?: string | null;
@@ -830,31 +831,30 @@ export type AuthConfig =
        */
       header_name?: string;
       prefix?: string;
-      type: "jwt";
     }
   | {
-      config: OAuth2Config;
       type: "oauth2";
+      config: OAuth2Config;
     }
   | {
-      config: HmacConfig;
       type: "hmac";
+      config: HmacConfig;
     }
   | {
-      config: DpopConfig;
       type: "dpop";
+      config: DpopConfig;
     }
   | {
-      config: WsseConfig;
       type: "wsse";
+      config: WsseConfig;
     }
   | {
-      config: JwtSvidConfig;
       type: "jwt_svid";
+      config: JwtSvidConfig;
     }
   | {
-      profiles: AuthConfig[];
       type: "multi";
+      profiles: AuthConfig[];
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -877,6 +877,7 @@ export type ImportedDiagnosticTrust = "unverified";
  */
 export type IntegrationProfile = IntegrationProfile1 & IntegrationProfile2;
 export type IntegrationProfile1 = {
+  kind: "ferrum_gateway";
   /**
    * Hosts (and optional ports) that are this gateway's frontends.
    */
@@ -901,7 +902,6 @@ export type IntegrationProfile1 = {
    * Link to Foundry/Nexus for read-only context (never auto-edited).
    */
   console_url?: string | null;
-  kind: "ferrum_gateway";
 };
 /**
  * What a rule applies to.
@@ -933,19 +933,19 @@ export type TargetKind =
  */
 export type Workload =
   | {
+      model: "closed_virtual_users";
       stages: Stage[];
       think_time_ms?: number;
-      model: "closed_virtual_users";
     }
   | {
+      model: "open_arrival_rate";
       stages: Stage[];
       max_in_flight: number;
-      model: "open_arrival_rate";
     }
   | {
+      model: "iterations";
       iterations: number;
       concurrency: number;
-      model: "iterations";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -987,13 +987,13 @@ export type MultipartPart = {
 } & MultipartPart1;
 export type MultipartPart1 =
   | {
-      value: string;
       part_kind: "text";
+      value: string;
     }
   | {
+      part_kind: "file";
       attachment: AttachmentRef;
       file_name?: string | null;
-      part_kind: "file";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1013,93 +1013,93 @@ export type Assertion = {
 } & Assertion1;
 export type Assertion1 =
   | {
+      type: "status";
       comparison: Comparison;
       value: string;
-      type: "status";
     }
   | {
-      values: number[];
       type: "status_in";
+      values: number[];
     }
   | {
-      name: string;
-      comparison: Comparison;
-      value?: string;
       type: "header";
-    }
-  | {
       name: string;
       comparison: Comparison;
       value?: string;
+    }
+  | {
       type: "trailer";
-    }
-  | {
-      path: string;
+      name: string;
       comparison: Comparison;
       value?: string;
+    }
+  | {
       type: "json_path";
-    }
-  | {
       path: string;
       comparison: Comparison;
       value?: string;
+    }
+  | {
       type: "x_path";
-    }
-  | {
-      schema: string;
-      type: "json_schema";
-    }
-  | {
+      path: string;
       comparison: Comparison;
       value?: string;
+    }
+  | {
+      type: "json_schema";
+      schema: string;
+    }
+  | {
       type: "body";
+      comparison: Comparison;
+      value?: string;
     }
   | {
-      max: number;
       type: "latency_ms";
+      max: number;
     }
   | {
-      code: number;
       type: "grpc_status";
+      code: number;
     }
   | {
+      type: "message_count";
       comparison: Comparison;
       value: number;
-      type: "message_count";
     }
   | {
+      type: "diagnostic";
       code: string;
       present: boolean;
-      type: "diagnostic";
     }
   | {
-      state: string;
       type: "transport";
+      state: string;
     }
   | {
-      code: number;
       type: "json_rpc_error";
+      code: number;
     }
   | {
       type: "json_rpc_result";
     }
   | {
-      is_error: boolean;
       type: "mcp_is_error";
+      is_error: boolean;
     }
   | {
-      name: string;
       type: "tool_present";
-    }
-  | {
       name: string;
-      type: "tool_absent";
     }
   | {
+      type: "tool_absent";
+      name: string;
+    }
+  | {
+      type: "tool_input_schema";
       name: string;
       schema?: string | null;
       sha256?: string | null;
-      type: "tool_input_schema";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1130,21 +1130,21 @@ export type Extraction = {
 } & Extraction1;
 export type Extraction1 =
   | {
-      path: string;
       from: "json_path";
-    }
-  | {
       path: string;
+    }
+  | {
       from: "x_path";
+      path: string;
     }
   | {
-      name: string;
       from: "header";
+      name: string;
     }
   | {
+      from: "regex";
       pattern: string;
       group?: number;
-      from: "regex";
     }
   | {
       from: "status";
@@ -1157,12 +1157,12 @@ export type Extraction1 =
  */
 export type GrpcSchemaSource =
   | {
-      files: AttachmentRef[];
       kind: "proto_files";
+      files: AttachmentRef[];
     }
   | {
-      attachment: AttachmentRef;
       kind: "descriptor_set";
+      attachment: AttachmentRef;
     }
   | {
       kind: "reflection";
@@ -1173,21 +1173,21 @@ export type GrpcSchemaSource =
  */
 export type WsMessage =
   | {
-      text: string;
       kind: "text";
+      text: string;
     }
   | {
-      hex: string;
       kind: "binary";
-    }
-  | {
       hex: string;
-      kind: "ping";
     }
   | {
+      kind: "ping";
+      hex: string;
+    }
+  | {
+      kind: "close";
       code: number;
       reason: string;
-      kind: "close";
     };
 /**
  * The receive boundary a datagram listener authenticates envelopes at. Part
@@ -1205,46 +1205,46 @@ export type DatagramListenerProtocol = "udp" | "dtls";
  */
 export type McpOperation =
   | {
-      cursor?: string | null;
       kind: "tools_list";
+      cursor?: string | null;
     }
   | {
-      name: string;
-      /**
-       * The `arguments` object, as JSON (variables allowed).
-       */
-      arguments?: string;
       kind: "tools_call";
-    }
-  | {
-      cursor?: string | null;
-      kind: "resources_list";
-    }
-  | {
-      cursor?: string | null;
-      kind: "resource_templates_list";
-    }
-  | {
-      uri: string;
-      kind: "resources_read";
-    }
-  | {
-      cursor?: string | null;
-      kind: "prompts_list";
-    }
-  | {
       name: string;
       /**
        * The `arguments` object, as JSON (variables allowed).
        */
       arguments?: string;
-      kind: "prompts_get";
     }
   | {
+      kind: "resources_list";
+      cursor?: string | null;
+    }
+  | {
+      kind: "resource_templates_list";
+      cursor?: string | null;
+    }
+  | {
+      kind: "resources_read";
+      uri: string;
+    }
+  | {
+      kind: "prompts_list";
+      cursor?: string | null;
+    }
+  | {
+      kind: "prompts_get";
+      name: string;
+      /**
+       * The `arguments` object, as JSON (variables allowed).
+       */
+      arguments?: string;
+    }
+  | {
+      kind: "raw";
       method: string;
       params?: string;
       notification?: boolean;
-      kind: "raw";
     };
 /**
  * How one stored ruleset participates in the current standards view.
@@ -1264,27 +1264,28 @@ export type RulesetLoadStatus = "loaded" | "disabled" | "error";
  */
 export type RunEvent =
   | {
+      event: "run_started";
       run_id: Id;
       name: string;
       iterations: number;
       steps: number;
-      event: "run_started";
     }
   | {
+      event: "iteration_started";
       run_id: Id;
       iteration: number;
       dataset_row?: number | null;
-      event: "iteration_started";
     }
   | {
+      event: "step_started";
       run_id: Id;
       iteration: number;
       step: number;
       request_id: Id;
       name: string;
-      event: "step_started";
     }
   | {
+      event: "step_finished";
       run_id: Id;
       iteration: number;
       step: number;
@@ -1293,16 +1294,16 @@ export type RunEvent =
       http_status?: number | null;
       duration_ms?: number | null;
       progress: RunProgress;
-      event: "step_finished";
     }
   | {
+      event: "iteration_finished";
       run_id: Id;
       iteration: number;
       status: RunIterationStatus;
       progress: RunProgress;
-      event: "iteration_finished";
     }
   | {
+      event: "run_finished";
       run_id: Id;
       completion: RunnerCompletion;
       progress: RunProgress;
@@ -1310,7 +1311,6 @@ export type RunEvent =
        * Events dropped by throttling.
        */
       dropped_events: number;
-      event: "run_finished";
     };
 /**
  * Status of one step in one iteration.
@@ -1341,6 +1341,7 @@ export type RunnerCompletion = "completed" | "canceled" | "aborted";
  */
 export type RunSource =
   | {
+      kind: "scenario";
       scenario_id: Id;
       name: string;
       /**
@@ -1348,9 +1349,9 @@ export type RunSource =
        * the user explicitly allowed it for this run.
        */
       untrusted_override?: boolean;
-      kind: "scenario";
     }
   | {
+      kind: "folder";
       /**
        * `None` = the workspace root.
        */
@@ -1359,7 +1360,6 @@ export type RunSource =
        * Display path (`Orders/Refunds`, or `/` for the root).
        */
       path: string;
-      kind: "folder";
     };
 /**
  * One of the three independent outcome dimensions of a step.
@@ -1376,20 +1376,20 @@ export type OutcomeDimension = "transport" | "application" | "assertions";
  */
 export type SessionCommand =
   | {
-      text: string;
       command: "send_text";
+      text: string;
     }
   | {
-      hex: string;
       command: "send_binary_hex";
+      hex: string;
     }
   | {
       command: "ping";
     }
   | {
+      command: "close";
       code: number;
       reason: string;
-      command: "close";
     }
   | {
       command: "half_close";
@@ -1403,6 +1403,7 @@ export type SessionCommand =
  */
 export type ClientIdentity =
   | {
+      format: "pem";
       /**
        * Certificate chain PEM (not secret).
        */
@@ -1418,16 +1419,16 @@ export type ClientIdentity =
        */
       private_key_pem:
         | {
-            value: string;
             kind: "template";
+            value: string;
           }
         | {
-            secret: SecretRef;
             kind: "secret";
+            secret: SecretRef;
           };
-      format: "pem";
     }
   | {
+      format: "pkcs12";
       /**
        * A field that may carry sensitive material (password, token, key).
        *
@@ -1439,17 +1440,17 @@ export type ClientIdentity =
        */
       bundle_b64:
         | {
-            value: string;
             kind: "template";
+            value: string;
           }
         | {
-            secret: SecretRef;
             kind: "secret";
+            secret: SecretRef;
           };
       password: SensitiveValue;
-      format: "pkcs12";
     }
   | {
+      format: "workload_api";
       /**
        * `unix:///path/to/socket` (or `npipe:name` on Windows). Empty: the
        * `SPIFFE_ENDPOINT_SOCKET` environment variable.
@@ -1466,7 +1467,6 @@ export type ClientIdentity =
        * profile's CA certificates.
        */
       trust_bundle?: boolean;
-      format: "workload_api";
     };
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1540,42 +1540,42 @@ export type Body =
       type: "none";
     }
   | {
+      type: "raw";
       text: string;
       content_type?: string | null;
-      type: "raw";
     }
   | {
-      text: string;
       type: "json";
-    }
-  | {
       text: string;
+    }
+  | {
       type: "xml";
+      text: string;
     }
   | {
-      fields: KeyValue[];
       type: "form_url_encoded";
+      fields: KeyValue[];
     }
   | {
-      parts: MultipartPart[];
       type: "multipart";
+      parts: MultipartPart[];
     }
   | {
+      type: "binary";
       attachment: AttachmentRef;
       content_type?: string | null;
-      type: "binary";
     }
   | {
+      type: "graphql";
       query: string;
       variables?: string;
       operation_name?: string | null;
-      type: "graphql";
     }
   | {
+      type: "soap";
       version: SoapVersion;
       envelope: string;
       action?: string | null;
-      type: "soap";
     };
 /**
  * Policy for sending a body whose syntax lint failed. Anvil is a testing
@@ -3285,25 +3285,26 @@ export interface Folder {
         type: "none";
       }
     | {
+        type: "api_key";
         name: string;
         value: SensitiveValue;
         /**
          * Where an API key is presented.
          */
         location?: "header" | "query" | "cookie";
-        type: "api_key";
       }
     | {
+        type: "basic";
         username: string;
         password: SensitiveValue;
-        type: "basic";
       }
     | {
+        type: "bearer";
         token: SensitiveValue;
         prefix?: string;
-        type: "bearer";
       }
     | {
+        type: "jwt";
         algorithm: JwtAlgorithm;
         /**
          * A field that may carry sensitive material (password, token, key).
@@ -3316,12 +3317,12 @@ export interface Folder {
          */
         signing_key:
           | {
-              value: string;
               kind: "template";
+              value: string;
             }
           | {
-              secret: SecretRef;
               kind: "secret";
+              secret: SecretRef;
             };
         claims: JwtClaims;
         kid?: string | null;
@@ -3330,31 +3331,30 @@ export interface Folder {
          */
         header_name?: string;
         prefix?: string;
-        type: "jwt";
       }
     | {
-        config: OAuth2Config;
         type: "oauth2";
+        config: OAuth2Config;
       }
     | {
-        config: HmacConfig;
         type: "hmac";
+        config: HmacConfig;
       }
     | {
-        config: DpopConfig;
         type: "dpop";
+        config: DpopConfig;
       }
     | {
-        config: WsseConfig;
         type: "wsse";
+        config: WsseConfig;
       }
     | {
-        config: JwtSvidConfig;
         type: "jwt_svid";
+        config: JwtSvidConfig;
       }
     | {
-        profiles: AuthConfig[];
         type: "multi";
+        profiles: AuthConfig[];
       };
   tags?: string[];
   /**
@@ -3446,12 +3446,12 @@ export interface OAuth2Config {
    */
   client_secret?:
     | {
-        value: string;
         kind: "template";
+        value: string;
       }
     | {
-        secret: SecretRef;
         kind: "secret";
+        secret: SecretRef;
       };
   scope?: string;
   audience?: string;
@@ -3510,12 +3510,12 @@ export interface DpopConfig {
    */
   access_token:
     | {
-        value: string;
         kind: "template";
+        value: string;
       }
     | {
-        secret: SecretRef;
         kind: "secret";
+        secret: SecretRef;
       };
   /**
    * A field that may carry sensitive material (password, token, key).
@@ -3528,12 +3528,12 @@ export interface DpopConfig {
    */
   private_key_pem:
     | {
-        value: string;
         kind: "template";
+        value: string;
       }
     | {
-        secret: SecretRef;
         kind: "secret";
+        secret: SecretRef;
       };
   /**
    * Present the token as `DPoP <token>` (RFC 9449) or legacy `Bearer`.
@@ -3653,12 +3653,12 @@ export interface DiagnosticDetailAccess {
    */
   credential:
     | {
-        value: string;
         kind: "template";
+        value: string;
       }
     | {
-        secret: SecretRef;
         kind: "secret";
+        secret: SecretRef;
       };
   /**
    * The gateway's namespace (`FERRUM_NAMESPACE`). When set, a record of
@@ -4699,42 +4699,42 @@ export interface RequestSpec {
         type: "none";
       }
     | {
+        type: "raw";
         text: string;
         content_type?: string | null;
-        type: "raw";
       }
     | {
-        text: string;
         type: "json";
-      }
-    | {
         text: string;
+      }
+    | {
         type: "xml";
+        text: string;
       }
     | {
-        fields: KeyValue[];
         type: "form_url_encoded";
+        fields: KeyValue[];
       }
     | {
-        parts: MultipartPart[];
         type: "multipart";
+        parts: MultipartPart[];
       }
     | {
+        type: "binary";
         attachment: AttachmentRef;
         content_type?: string | null;
-        type: "binary";
       }
     | {
+        type: "graphql";
         query: string;
         variables?: string;
         operation_name?: string | null;
-        type: "graphql";
       }
     | {
+        type: "soap";
         version: SoapVersion;
         envelope: string;
         action?: string | null;
-        type: "soap";
       };
   /**
    * Auth configuration. Applied after interpolation, content-type inference
@@ -4748,25 +4748,26 @@ export interface RequestSpec {
         type: "none";
       }
     | {
+        type: "api_key";
         name: string;
         value: SensitiveValue;
         /**
          * Where an API key is presented.
          */
         location?: "header" | "query" | "cookie";
-        type: "api_key";
       }
     | {
+        type: "basic";
         username: string;
         password: SensitiveValue;
-        type: "basic";
       }
     | {
+        type: "bearer";
         token: SensitiveValue;
         prefix?: string;
-        type: "bearer";
       }
     | {
+        type: "jwt";
         algorithm: JwtAlgorithm;
         /**
          * A field that may carry sensitive material (password, token, key).
@@ -4779,12 +4780,12 @@ export interface RequestSpec {
          */
         signing_key:
           | {
-              value: string;
               kind: "template";
+              value: string;
             }
           | {
-              secret: SecretRef;
               kind: "secret";
+              secret: SecretRef;
             };
         claims: JwtClaims;
         kid?: string | null;
@@ -4793,31 +4794,30 @@ export interface RequestSpec {
          */
         header_name?: string;
         prefix?: string;
-        type: "jwt";
       }
     | {
-        config: OAuth2Config;
         type: "oauth2";
+        config: OAuth2Config;
       }
     | {
-        config: HmacConfig;
         type: "hmac";
+        config: HmacConfig;
       }
     | {
-        config: DpopConfig;
         type: "dpop";
+        config: DpopConfig;
       }
     | {
-        config: WsseConfig;
         type: "wsse";
+        config: WsseConfig;
       }
     | {
-        config: JwtSvidConfig;
         type: "jwt_svid";
+        config: JwtSvidConfig;
       }
     | {
-        profiles: AuthConfig[];
         type: "multi";
+        profiles: AuthConfig[];
       };
   settings?: SettingsOverrides2;
   assertions?: Assertion[];
@@ -5145,12 +5145,12 @@ export interface DatagramAuthSpec {
    */
   secret:
     | {
-        value: string;
         kind: "template";
+        value: string;
       }
     | {
-        secret: SecretRef;
         kind: "secret";
+        secret: SecretRef;
       };
   /**
    * Default: `dtls` when Anvil speaks DTLS, otherwise `udp`.
@@ -5810,25 +5810,26 @@ export interface Workspace {
         type: "none";
       }
     | {
+        type: "api_key";
         name: string;
         value: SensitiveValue;
         /**
          * Where an API key is presented.
          */
         location?: "header" | "query" | "cookie";
-        type: "api_key";
       }
     | {
+        type: "basic";
         username: string;
         password: SensitiveValue;
-        type: "basic";
       }
     | {
+        type: "bearer";
         token: SensitiveValue;
         prefix?: string;
-        type: "bearer";
       }
     | {
+        type: "jwt";
         algorithm: JwtAlgorithm;
         /**
          * A field that may carry sensitive material (password, token, key).
@@ -5841,12 +5842,12 @@ export interface Workspace {
          */
         signing_key:
           | {
-              value: string;
               kind: "template";
+              value: string;
             }
           | {
-              secret: SecretRef;
               kind: "secret";
+              secret: SecretRef;
             };
         claims: JwtClaims;
         kid?: string | null;
@@ -5855,31 +5856,30 @@ export interface Workspace {
          */
         header_name?: string;
         prefix?: string;
-        type: "jwt";
       }
     | {
-        config: OAuth2Config;
         type: "oauth2";
+        config: OAuth2Config;
       }
     | {
-        config: HmacConfig;
         type: "hmac";
+        config: HmacConfig;
       }
     | {
-        config: DpopConfig;
         type: "dpop";
+        config: DpopConfig;
       }
     | {
-        config: WsseConfig;
         type: "wsse";
+        config: WsseConfig;
       }
     | {
-        config: JwtSvidConfig;
         type: "jwt_svid";
+        config: JwtSvidConfig;
       }
     | {
-        profiles: AuthConfig[];
         type: "multi";
+        profiles: AuthConfig[];
       };
   active_environment_id?: Id | null;
 }
