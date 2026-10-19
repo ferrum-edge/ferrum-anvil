@@ -146,6 +146,25 @@ fn openapi_recursive_models_with_sibling_references_are_checked() {
 }
 
 #[test]
+fn densely_connected_structural_cycles_compile_once() {
+    // Every member refers to every member by a distinct property name: many
+    // routes through the schema, but one route to each nested value.
+    let defs: serde_json::Map<String, Value> = (0..10)
+        .map(|i| {
+            let properties: serde_json::Map<String, Value> =
+                (0..10).map(|j| (format!("to{j}"), json!({"$ref":format!("#/$defs/n{j}")}))).collect();
+            (format!("n{i}"), json!({"type":"object","properties":properties}))
+        })
+        .collect();
+    let schema = json!({"$defs":defs,"$ref":"#/$defs/n0"});
+    schema::measure_standalone(&schema).unwrap();
+    ruleset(&schema).unwrap();
+    let validator = jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&schema).unwrap();
+    assert!(validator.is_valid(&json!({"to3":{"to7":{"to0":{}}}})));
+    assert!(!validator.is_valid(&json!({"to3":{"to7":{"to0":7}}})));
+}
+
+#[test]
 fn copied_bundle_targets_are_charged_once() {
     // A component referenced once counts once against the expanded-node
     // limit, even though the bundle holds a copy of it next to the root.
