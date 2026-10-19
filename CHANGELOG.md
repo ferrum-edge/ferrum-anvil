@@ -94,10 +94,10 @@
   `not` validators, bounding repeated schema payload copies. Compiler
   preflight caps retained locations, property-pattern and union-analysis
   products, distinct regexes and legacy-dependency error copies, and checks
-  referenced `dependentRequired` names before compiler uniqueness work. Instance
-  preflight bounds validation work, repeated text and property-name scans and unique-item
+  malformed string arrays before metaschema or compiler uniqueness work. Instance
+  preflight bounds validation work, repeated text and property-name scans, quadratic regex-format parsing, and unique-item
   comparisons; invalid values use generic mismatches when detailed error
-  contexts could retain too much, and checks beyond the work limit are
+  contexts, including nested reference paths, could retain too much, and checks beyond the work limit are
   reported as incomplete.
 - A custom ruleset's `schema` function is checked when the ruleset loads with
   the limits OpenAPI schemas already have: a reference cycle that does not

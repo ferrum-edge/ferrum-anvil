@@ -258,6 +258,14 @@ fn sarif_output_names_rules_and_regions() {
     }
     let email = rules.iter().find(|r| r["id"] == "acme-problem-json").unwrap();
     assert_eq!(email["defaultConfiguration"]["level"], "error");
+
+    let mut combined = r.clone();
+    combined.incomplete = true;
+    combined.skipped_operations = 2;
+    let sarif = anvil_contract::sarif::to_sarif(&combined, "api/orders.yaml");
+    let notes = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"].as_array().unwrap();
+    assert!(notes.iter().any(|note| note["message"]["text"].as_str().is_some_and(|text| text.contains("2 operation(s)"))));
+    assert!(notes.iter().any(|note| note["message"]["text"].as_str().is_some_and(|text| text.contains("custom schema checks"))));
 }
 
 #[test]

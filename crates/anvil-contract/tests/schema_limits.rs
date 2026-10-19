@@ -345,6 +345,34 @@ fn referenced_dependent_required_names_are_checked_before_compilation() {
 }
 
 #[test]
+fn metaschema_string_arrays_are_checked_before_uniqueness_validation() {
+    let base = 9_223_372_036_854_775_808u64;
+    let pairs: Vec<Value> = (0..4_000).map(|i| json!([base + i % 100, base + i / 100])).collect();
+    for (keyword, schema) in [
+        ("required", json!({"required":pairs.clone()})),
+        ("type", json!({"type":pairs.clone()})),
+        ("dependencies", json!({"dependencies":{"x":pairs.clone()}})),
+        ("required", json!({"$ref":"#/default","default":{"required":pairs.clone()}})),
+        ("required", json!({"$defs":{"bad":{"required":pairs}}})),
+    ] {
+        let err = schema::measure_standalone(&schema).unwrap_err();
+        assert!(err.contains(keyword), "{keyword}: {err}");
+        assert!(ruleset(&schema).is_err(), "{keyword}");
+        let document = spec(&schema);
+        let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
+        assert!(err.contains(keyword), "{keyword}: {err}");
+    }
+
+    let valid = json!({"type":["object","null"],"required":["a"],
+        "dependencies":{"a":["b"],"b":{"required":["c"]}}});
+    ruleset(&valid).unwrap();
+    let document = spec(&valid);
+    let validator = schema::compile(&document, &valid, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!({"a":1,"b":2,"c":3})));
+    assert!(!validator.is_valid(&json!({"a":1,"b":2})));
+}
+
+#[test]
 fn instance_validation_and_error_collection_choose_bounded_modes() {
     use schema::CheckMode;
     let plan = schema::measure_standalone_plan(&json!({"items":{"not":{"type":"object","description":"x".repeat(512 * 1024)}}})).unwrap();
@@ -375,6 +403,27 @@ fn repeated_error_paths_choose_generic_reporting() {
 }
 
 #[test]
+fn recursive_reference_prefixes_choose_generic_reporting() {
+    use schema::CheckMode;
+    let mut targets = serde_json::Map::new();
+    for i in 0..29 {
+        targets.insert(format!("a{i}"), json!({"$ref":format!("#/default/a{}", i + 1)}));
+    }
+    targets.insert("a29".into(), json!({"type":"array","items":{"$ref":"#/default/a0"}}));
+    let shape = json!({"$ref":"#/default/a0","default":targets});
+    let plan = schema::measure_standalone_plan(&shape).unwrap();
+    let mut value = json!(7);
+    for _ in 0..100 {
+        value = json!([value]);
+    }
+    assert_eq!(plan.mode(&value), CheckMode::Generic);
+
+    let small = json!({"type":"array","items":{"$ref":"#"}});
+    let plan = schema::measure_standalone_plan(&small).unwrap();
+    assert_eq!(plan.mode(&json!([[[7]]])), CheckMode::Detailed);
+}
+
+#[test]
 fn repeated_unique_and_string_assertions_charge_each_application() {
     use schema::CheckMode;
     let unique = json!({"allOf":vec![json!({"uniqueItems":true}); 10_000]});
@@ -389,6 +438,25 @@ fn repeated_unique_and_string_assertions_charge_each_application() {
     assert_eq!(plan.mode(&json!("x".repeat(512 * 1024))), CheckMode::Skip);
     let one_length = schema::measure_standalone_plan(&json!({"minLength":1})).unwrap();
     assert_eq!(one_length.mode(&json!("ok")), CheckMode::Detailed);
+}
+
+#[test]
+fn regex_format_checks_charge_quadratic_parser_work() {
+    use schema::CheckMode;
+    let shape = json!({"type":"string","format":"regex"});
+    let document = spec(&shape);
+    let checked =
+        schema::compile_within_checked(&document, &shape, Direction::Response, &mut schema::Scanned::default(), schema::Scanned::UNLIMITED)
+            .unwrap();
+    let many_groups = Value::String((0..2_000).map(|i| format!("(?<g{i:04}>x)")).collect::<String>());
+    assert_eq!(checked.plan.mode(&many_groups), CheckMode::Skip);
+    // Custom rules leave formats as annotations and need no quadratic cap.
+    let custom_plan = schema::measure_standalone_plan(&shape).unwrap();
+    assert_ne!(custom_plan.mode(&many_groups), CheckMode::Skip);
+    assert_eq!(checked.plan.mode(&json!("^(a|b)$")), CheckMode::Detailed);
+    assert!(checked.validator.is_valid(&json!("^(a|b)$")));
+    assert!(checked.validator.is_valid(&json!(r"(?<x>a)\k<x>")));
+    assert!(!checked.validator.is_valid(&json!("(")));
 }
 
 #[test]

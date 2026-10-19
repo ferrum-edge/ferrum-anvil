@@ -206,7 +206,8 @@ fn text(r: &LintReport, name: &str, fail_on: FailOn) -> String {
             "note: the description is too large to lint completely: {} operation(s) were not checked\n",
             r.skipped_operations
         ));
-    } else if r.incomplete {
+    }
+    if r.incomplete {
         s.push_str("note: lint report is incomplete: some targets or custom schema checks were not checked\n");
     }
     if r.unresolved_ref_count > 0 {

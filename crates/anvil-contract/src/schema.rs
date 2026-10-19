@@ -243,6 +243,7 @@ struct Work {
     pattern_name_work: usize,
     pattern_uses: usize,
     string_scans: usize,
+    regex_format_uses: usize,
     name_lookups: usize,
     name_bytes: usize,
     unique_uses: usize,
@@ -250,6 +251,7 @@ struct Work {
     required_name_bytes: usize,
     property_maps: usize,
     union: bool,
+    max_ref_chain: usize,
 }
 
 /// Whether checking an instance can report detailed errors within a bounded
@@ -273,13 +275,17 @@ impl ValidationPlan {
         let mut values = 0usize;
         let mut objects = 0usize;
         let mut bytes = 0usize;
+        let mut string_bytes = 0usize;
+        let mut longest_string = 0usize;
         let mut longest_array = 0usize;
+        let mut max_value_depth = 0usize;
         // jsonschema owns an instance path for each retained error. A long
         // ancestor property name is repeated for every failing descendant.
         let mut error_path_bytes = 0usize;
-        let mut stack = vec![(instance, 0usize)];
-        while let Some((value, path_len)) = stack.pop() {
+        let mut stack = vec![(instance, 0usize, 0usize)];
+        while let Some((value, path_len, depth)) = stack.pop() {
             values = values.saturating_add(1);
+            max_value_depth = max_value_depth.max(depth);
             error_path_bytes = error_path_bytes.saturating_add(path_len);
             match value {
                 Value::Object(map) => {
@@ -287,7 +293,7 @@ impl ValidationPlan {
                     for (name, child) in map {
                         bytes = bytes.saturating_add(name.len());
                         let escaped_len = name.len().saturating_add(name.bytes().filter(|b| matches!(b, b'~' | b'/')).count());
-                        stack.push((child, path_len.saturating_add(1).saturating_add(escaped_len)));
+                        stack.push((child, path_len.saturating_add(1).saturating_add(escaped_len), depth.saturating_add(1)));
                     }
                 }
                 Value::Array(items) => {
@@ -299,14 +305,26 @@ impl ValidationPlan {
                             remaining /= 10;
                             digits += 1;
                         }
-                        (child, path_len.saturating_add(1 + digits))
+                        (child, path_len.saturating_add(1 + digits), depth.saturating_add(1))
                     }));
                 }
-                Value::String(s) => bytes = bytes.saturating_add(s.len()),
+                Value::String(s) => {
+                    bytes = bytes.saturating_add(s.len());
+                    string_bytes = string_bytes.saturating_add(s.len());
+                    longest_string = longest_string.max(s.len());
+                }
                 _ => {}
             }
             if values.saturating_mul(self.work.steps.max(1)) > MAX_VALIDATION_WORK
                 || bytes.saturating_mul(self.text_scans) > MAX_TEXT_INSTANCE_WORK
+                // The ECMA `regex` format parser can compare every named
+                // group with earlier groups in the same string.
+                || self
+                    .work
+                    .regex_format_uses
+                    .saturating_mul(longest_string)
+                    .saturating_mul(string_bytes)
+                    > MAX_TEXT_INSTANCE_WORK
                 || objects.saturating_mul(self.work.name_bytes) > MAX_TEXT_INSTANCE_WORK
                 || self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK
             {
@@ -322,9 +340,16 @@ impl ValidationPlan {
         // product exceeds the retained-error allowance.
         let instance_heap = bytes.saturating_add(values.saturating_mul(64));
         let schema_heap = self.work.bytes.saturating_add(self.work.steps.saturating_mul(64));
+        // A captured error makes jsonschema cache every active `$ref`
+        // evaluation prefix. In a structural reference cycle, one full
+        // reference chain can be active for each instance level, and each
+        // cached prefix can contain every earlier schema-location suffix.
+        let active_refs = max_value_depth.saturating_add(1).saturating_mul(self.work.max_ref_chain);
+        let schema_path_bound = self.work.bytes.saturating_mul(2).saturating_add(self.work.steps.saturating_mul(8));
         if error_path_bytes.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
             || instance_heap.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
             || schema_heap.saturating_mul(values) > MAX_ERROR_BYTES
+            || active_refs.saturating_mul(active_refs).saturating_mul(schema_path_bound) > MAX_ERROR_BYTES
         {
             CheckMode::Generic
         } else {
@@ -342,6 +367,7 @@ impl Work {
         self.pattern_name_work = self.pattern_name_work.saturating_add(other.pattern_name_work);
         self.pattern_uses = self.pattern_uses.saturating_add(other.pattern_uses);
         self.string_scans = self.string_scans.saturating_add(other.string_scans);
+        self.regex_format_uses = self.regex_format_uses.saturating_add(other.regex_format_uses);
         self.name_lookups = self.name_lookups.saturating_add(other.name_lookups);
         self.name_bytes = self.name_bytes.saturating_add(other.name_bytes);
         self.unique_uses = self.unique_uses.saturating_add(other.unique_uses);
@@ -349,6 +375,7 @@ impl Work {
         self.required_name_bytes = self.required_name_bytes.saturating_add(other.required_name_bytes);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
         self.union |= other.union;
+        self.max_ref_chain = self.max_ref_chain.max(other.max_ref_chain);
     }
 
     fn check(self) -> Result<(), String> {
@@ -474,6 +501,9 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                                 .saturating_add(o.get("enum").and_then(Value::as_array).map_or(0, Vec::len)),
                         ),
                     );
+                    if o.get("format").and_then(Value::as_str) == Some("regex") {
+                        part.work.regex_format_uses = part.work.regex_format_uses.saturating_add(copies);
+                    }
                     // Required/property/dependency validators can hash or
                     // compare instance member names once per application.
                     // Charge long names for every reference-expanded use.
@@ -627,9 +657,12 @@ pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
 }
 
 pub fn measure_standalone_plan(schema: &Value) -> Result<ValidationPlan, String> {
-    let work = measure_in(schema, schema, &mut Scanned::default(), MAX_DEPTH)?;
+    let mut work = measure_in(schema, schema, &mut Scanned::default(), MAX_DEPTH)?;
     check_keywords(schema, schema, true, false)?;
     let risk = check_compile_work(schema, work, true)?;
+    // Custom rules use the draft's format-annotation default, unlike the
+    // OpenAPI checks that explicitly assert formats.
+    work.regex_format_uses = 0;
     Ok(ValidationPlan {
         work,
         unique_uses: work.unique_uses.max(usize::from(risk.unique)),
@@ -773,11 +806,26 @@ fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<Comp
                 if pos == Pos::Schema {
                     let properties = map.get("properties").and_then(Value::as_object);
                     let pattern_properties = map.get("patternProperties").and_then(Value::as_object);
-                    // The dependency compiler hashes array members to check
-                    // uniqueness before validating their types. Numeric
-                    // members can collide through f64 hashing and turn a
-                    // malformed referenced target into quadratic compile
-                    // work, so reject them before invoking the compiler.
+                    // Metaschema validation checks array uniqueness before
+                    // item types for these keywords. Numeric members can
+                    // collide through f64 hashing, making a malformed
+                    // string array quadratic before keyword compilation.
+                    for keyword in ["required", "type"] {
+                        if let Some(Value::Array(names)) = map.get(keyword)
+                            && names.iter().any(|name| !name.is_string())
+                        {
+                            return Err(format!("`{keyword}` arrays must contain only strings"));
+                        }
+                    }
+                    if let Some(Value::Object(entries)) = map.get("dependencies") {
+                        for value in entries.values() {
+                            if let Value::Array(names) = value
+                                && names.iter().any(|name| !name.is_string())
+                            {
+                                return Err("`dependencies` arrays must contain only strings".into());
+                            }
+                        }
+                    }
                     if let Some(dependencies) = map.get("dependentRequired") {
                         let Some(entries) = dependencies.as_object() else {
                             return Err("`dependentRequired` must be an object of string arrays".into());
@@ -1188,7 +1236,11 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
     if references > MAX_REF_CHAIN || depth > MAX_CHAIN_DEPTH {
         return Err(format!("{TOO_LARGE}the schema nests references too deeply"));
     }
-    Ok(work[component_of[0]])
+    let mut result = work[component_of[0]];
+    if reached.iter().any(|key| !parts[key.as_str()].refs.is_empty()) {
+        result.max_ref_chain = references;
+    }
+    Ok(result)
 }
 
 fn collect_refs(v: &Value, out: &mut Vec<String>) -> Result<(), String> {
