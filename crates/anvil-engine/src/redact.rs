@@ -520,13 +520,15 @@ impl Redactor {
     }
 
     /// A diagnostic finding with its values redacted. URL-valued evidence is
-    /// redacted as a URL, and so is its copy in the explanation.
+    /// redacted as a URL, and so is its copy in the explanation. Other text
+    /// can quote response metadata (header values, the reason phrase), so a
+    /// reversibly encoded secret in it is withheld like in the metadata.
     pub fn finding(&self, f: &mut DiagnosticFinding) {
-        f.title = self.text_any_case(&f.title);
+        f.title = self.metadata_text(&f.title);
         let mut explanation = f.explanation.clone();
         for e in &mut f.evidence {
             if !URL_EVIDENCE.contains(&e.key.as_str()) {
-                e.value = self.text_any_case(&e.value);
+                e.value = self.metadata_text(&e.value);
                 continue;
             }
             let redacted = self.url(&e.value);
@@ -535,12 +537,12 @@ impl Redactor {
             }
             e.value = redacted;
         }
-        f.explanation = self.text_any_case(&explanation);
+        f.explanation = self.metadata_text(&explanation);
         for a in f.alternatives.iter_mut().chain(f.does_not_prove.iter_mut()).chain(f.confirm_with.iter_mut()) {
-            *a = self.text_any_case(a);
+            *a = self.metadata_text(a);
         }
         for remediation in &mut f.remediation {
-            remediation.text = self.text_any_case(&remediation.text);
+            remediation.text = self.metadata_text(&remediation.text);
         }
     }
 

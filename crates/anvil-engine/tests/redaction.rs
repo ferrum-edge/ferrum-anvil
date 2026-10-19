@@ -125,6 +125,45 @@ fn folded_secrets_with_noncanonical_percent_encoding_are_not_recoverable() {
     }
 }
 
+#[test]
+fn finding_text_withholds_noncanonically_encoded_secrets() {
+    use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
+    let r = Redactor::new(vec!["MixedCase77".into()], vec![]);
+    for value in ["%6Dixedcase77", "%256Dixedcase77", "MIXED%43ASE77"] {
+        // A server-controlled header value (or reason phrase) quoted in a
+        // finding must not keep a secret the header copy withholds.
+        let quoted = format!("Bearer error_description=\"{value}\"");
+        let mut f = DiagnosticFinding {
+            code: "http.status.unauthorized".into(),
+            rule_id: "http_status".into(),
+            rule_version: 1,
+            title: format!("401 {value}"),
+            explanation: format!("The server answered `{quoted}`"),
+            scope: SourceScope::UpstreamApplication,
+            confidence: Confidence::Likely,
+            severity: Severity::Warning,
+            evidence: vec![Evidence {
+                source: EvidenceSource::HttpHeader,
+                key: "header.www-authenticate".into(),
+                value: quoted.clone(),
+                attempt: None,
+            }],
+            alternatives: vec![quoted.clone()],
+            does_not_prove: vec![],
+            remediation: vec![Remediation { text: quoted.clone(), owner: Owner::Caller }],
+            owner: Owner::Caller,
+            confirm_with: vec![],
+        };
+        r.finding(&mut f);
+        let text = serde_json::to_string(&f).unwrap();
+        assert!(!reveals(&text, "MixedCase77"), "{value} → {text}");
+        assert_eq!(
+            r.headers(&[anvil_domain::execution::HeaderEntry { name: "www-authenticate".into(), value: quoted }])[0].value,
+            REDACTED
+        );
+    }
+}
+
 #[tokio::test]
 async fn templated_methods_and_hosts_are_scrubbed_from_records_and_previews() {
     use anvil_domain::execution::{PeerIdentityCheck, TlsObservation, TlsVerification};
