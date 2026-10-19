@@ -50,7 +50,7 @@ const MAX_UNION_ANALYSIS: usize = 1_000_000;
 const MAX_DISTINCT_PATTERNS: usize = 128;
 const MAX_DEPENDENCY_COPY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_VALIDATION_WORK: usize = 50_000_000;
-const MAX_PATTERN_INSTANCE_WORK: usize = 256 * 1024 * 1024;
+const MAX_TEXT_INSTANCE_WORK: usize = 256 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 8 * 1024 * 1024;
 const MAX_UNIQUE_WORK: usize = 4_000_000;
 /// What every refusal of a schema for its size or nesting starts with (see
@@ -147,7 +147,14 @@ pub fn compile_within_checked(
         .with_pattern_options(linear_patterns())
         .build(&wrapper)
         .map_err(|e| format!("the schema cannot be compiled: {e}"))?;
-    Ok(CheckedValidator { validator, plan: ValidationPlan { work, unique: work.unique || risk.unique, pattern_uses: work.pattern_uses } })
+    Ok(CheckedValidator {
+        validator,
+        plan: ValidationPlan {
+            work,
+            unique_uses: work.unique_uses.max(usize::from(risk.unique)),
+            text_scans: work.pattern_uses.saturating_add(work.string_scans),
+        },
+    })
 }
 
 /// `pattern` and `patternProperties` use the linear-time `regex` engine (not
@@ -232,10 +239,11 @@ struct Work {
     pattern_pairs: usize,
     pattern_name_work: usize,
     pattern_uses: usize,
+    string_scans: usize,
+    unique_uses: usize,
     required_names: usize,
     property_maps: usize,
     union: bool,
-    unique: bool,
 }
 
 /// Whether checking an instance can report detailed errors within a bounded
@@ -250,8 +258,8 @@ pub enum CheckMode {
 #[derive(Clone, Copy, Debug)]
 pub struct ValidationPlan {
     work: Work,
-    unique: bool,
-    pattern_uses: usize,
+    unique_uses: usize,
+    text_scans: usize,
 }
 
 impl ValidationPlan {
@@ -259,31 +267,44 @@ impl ValidationPlan {
         let mut values = 0usize;
         let mut bytes = 0usize;
         let mut longest_array = 0usize;
-        let mut stack = vec![instance];
-        while let Some(value) = stack.pop() {
+        // jsonschema owns an instance path for each retained error. A long
+        // ancestor property name is repeated for every failing descendant.
+        let mut error_path_bytes = 0usize;
+        let mut stack = vec![(instance, 0usize)];
+        while let Some((value, path_len)) = stack.pop() {
             values = values.saturating_add(1);
+            error_path_bytes = error_path_bytes.saturating_add(path_len);
             match value {
                 Value::Object(map) => {
                     for (name, child) in map {
                         bytes = bytes.saturating_add(name.len());
-                        stack.push(child);
+                        let escaped_len = name.len().saturating_add(name.bytes().filter(|b| matches!(b, b'~' | b'/')).count());
+                        stack.push((child, path_len.saturating_add(1).saturating_add(escaped_len)));
                     }
                 }
                 Value::Array(items) => {
                     longest_array = longest_array.max(items.len());
-                    stack.extend(items);
+                    stack.extend(items.iter().enumerate().map(|(index, child)| {
+                        let mut digits = 1;
+                        let mut remaining = index;
+                        while remaining >= 10 {
+                            remaining /= 10;
+                            digits += 1;
+                        }
+                        (child, path_len.saturating_add(1 + digits))
+                    }));
                 }
                 Value::String(s) => bytes = bytes.saturating_add(s.len()),
                 _ => {}
             }
             if values.saturating_mul(self.work.steps.max(1)) > MAX_VALIDATION_WORK
-                || bytes.saturating_mul(self.pattern_uses) > MAX_PATTERN_INSTANCE_WORK
-                || (self.unique && longest_array.saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK)
+                || bytes.saturating_mul(self.text_scans) > MAX_TEXT_INSTANCE_WORK
+                || self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK
             {
                 return CheckMode::Skip;
             }
         }
-        if self.unique && longest_array.saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK {
+        if self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK {
             return CheckMode::Skip;
         }
         // A failed anyOf/oneOf may own one full instance per branch even in
@@ -292,7 +313,10 @@ impl ValidationPlan {
         // product exceeds the retained-error allowance.
         let instance_heap = bytes.saturating_add(values.saturating_mul(64));
         let schema_heap = self.work.bytes.saturating_add(self.work.steps.saturating_mul(64));
-        if instance_heap.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES || schema_heap.saturating_mul(values) > MAX_ERROR_BYTES {
+        if error_path_bytes > MAX_ERROR_BYTES
+            || instance_heap.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
+            || schema_heap.saturating_mul(values) > MAX_ERROR_BYTES
+        {
             CheckMode::Generic
         } else {
             CheckMode::Detailed
@@ -308,10 +332,11 @@ impl Work {
         self.pattern_pairs = self.pattern_pairs.saturating_add(other.pattern_pairs);
         self.pattern_name_work = self.pattern_name_work.saturating_add(other.pattern_name_work);
         self.pattern_uses = self.pattern_uses.saturating_add(other.pattern_uses);
+        self.string_scans = self.string_scans.saturating_add(other.string_scans);
+        self.unique_uses = self.unique_uses.saturating_add(other.unique_uses);
         self.required_names = self.required_names.saturating_add(other.required_names);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
         self.union |= other.union;
-        self.unique |= other.unique;
     }
 
     fn check(self) -> Result<(), String> {
@@ -424,12 +449,22 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                             .saturating_add(copies.saturating_mul(
                                 usize::from(o.get("pattern").is_some_and(Value::is_string)) + patterns.map_or(0, Map::len),
                             ));
+                    part.work.string_scans = part.work.string_scans.saturating_add(
+                        copies.saturating_mul(
+                            ["minLength", "maxLength", "format", "contentEncoding", "contentMediaType"]
+                                .into_iter()
+                                .filter(|keyword| o.contains_key(*keyword))
+                                .count(),
+                        ),
+                    );
                     part.work.required_names = part
                         .work
                         .required_names
                         .saturating_add(copies.saturating_mul(o.get("required").and_then(Value::as_array).map_or(0, Vec::len)));
                     part.work.union |= o.contains_key("anyOf") || o.contains_key("oneOf");
-                    part.work.unique |= o.get("uniqueItems") == Some(&Value::Bool(true));
+                    if o.get("uniqueItems") == Some(&Value::Bool(true)) {
+                        part.work.unique_uses = part.work.unique_uses.saturating_add(copies);
+                    }
                 }
                 if pos == Pos::Schema
                     && (o.keys().any(|k| complex_applicator(k))
@@ -528,7 +563,11 @@ pub fn measure_standalone_plan(schema: &Value) -> Result<ValidationPlan, String>
     let work = measure_in(schema, schema, &mut Scanned::default(), MAX_DEPTH)?;
     check_keywords(schema, schema, true, false)?;
     let risk = check_compile_work(schema, work, true)?;
-    Ok(ValidationPlan { work, unique: work.unique || risk.unique, pattern_uses: work.pattern_uses })
+    Ok(ValidationPlan {
+        work,
+        unique_uses: work.unique_uses.max(usize::from(risk.unique)),
+        text_scans: work.pattern_uses.saturating_add(work.string_scans),
+    })
 }
 
 /// Only schema-valued keywords change position. Assertions, annotations and

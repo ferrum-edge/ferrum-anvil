@@ -141,10 +141,8 @@ pub struct LintReport {
     /// completely (see `model::MAX_MODEL_WORK`).
     #[serde(default)]
     pub skipped_operations: usize,
-    /// The description is too large to lint completely: past some point,
-    /// nothing more was checked (operations, parameters, responses, schemas,
-    /// properties and security schemes), whether or not operations were left
-    /// out.
+    /// The description or a custom schema instance exceeded a work limit;
+    /// some operations, fields, or rule checks were not completed.
     #[serde(default)]
     pub incomplete: bool,
 }
@@ -171,7 +169,8 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
     };
     let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
     let model = Model::build(spec, &mut examples);
-    let mut out = Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0 };
+    let mut out =
+        Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0, incomplete: false };
     let (mut run, mut skipped) = (0, 0);
     for rule in &rules.rules {
         if !rule.applies_to(spec.dialect) {
@@ -214,7 +213,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
             .then(a.message.cmp(&b.message))
     });
     let skipped_operations = model.skipped_operations;
-    let incomplete = model.incomplete;
+    let incomplete = model.incomplete || out.incomplete;
     let examples_not_checked = checker.not_checked;
     let (unresolved_refs, unresolved_ref_count) = spec.unresolved();
     let mut dropped = out.dropped;
@@ -256,6 +255,7 @@ struct Collector<'a> {
     counts: SeverityCounts,
     seen: HashSet<(String, String, String)>,
     dropped: usize,
+    incomplete: bool,
 }
 
 /// A selected field value and the pointer it came from, when known. A value
@@ -269,12 +269,16 @@ fn apply(spec: &Spec, rule: &Rule, t: &Target, out: &mut Collector<'_>) {
     let sibling = |name: &str| -> Option<Value> { t.view.get(name).cloned() };
     for c in &rule.conditions {
         let selected = select(spec, t, c);
-        if selected.iter().any(|s| c.function.evaluate(s.value.as_deref(), &sibling).is_some()) {
+        if selected.iter().any(|s| {
+            out.incomplete |= c.function.schema_check_skipped(s.value.as_deref());
+            c.function.evaluate(s.value.as_deref(), &sibling).is_some()
+        }) {
             return;
         }
     }
     for a in &rule.then {
         for s in select(spec, t, a) {
+            out.incomplete |= a.function.schema_check_skipped(s.value.as_deref());
             let Some(reason) = a.function.evaluate(s.value.as_deref(), &sibling) else { continue };
             let pointer = s.pointer.unwrap_or_else(|| t.pointer.clone());
             // A Swagger 2.0 synthetic target keys itself `…#suffix`.

@@ -91,8 +91,9 @@ company ruleset.
   legacy-dependency payload copies to 32 MiB. A single property-pattern
   precomputation may scan at most 32 MiB of property-name text.
   Each instance has a 50-million-unit validation-work limit, a 256 MiB
-  pattern/input work limit, and a conservative uniqueness-comparison limit.
-  Error details are collected only when possible retained copies fit an
+  text-scan/input work limit, and a conservative uniqueness-comparison limit
+  that counts repeated schema applications. Error details are collected only
+  when possible retained copies, including repeated instance paths, fit an
   8 MiB allowance. Otherwise an invalid value has a generic mismatch;
   a value exceeding validation-work limits is counted as not checked.
   References must remain plain document-local pointers. Modern `$id`,
@@ -175,7 +176,8 @@ skipped this way.
 
 A check is `{ field, function, options }`. `then` fails when any check
 fails for any selected value; `where` skips the target when any of its
-checks fails.
+checks fails. If a `schema` check cannot run within its work limit, the
+report is marked incomplete, including when that check is in `where`.
 
 **Fields** are dot-separated names of the target's fields (below). `*`
 selects every item of a list or value of a map (`static_segments.*`,
@@ -223,7 +225,8 @@ a successful validation or a schema-mismatch claim without validation.
 For an instance that exceeds the runtime work limit, a custom `schema`
 function fails closed with an explicit “not checked” reason. Large invalid
 instances can report a generic mismatch when detailed error collection
-would retain too much data.
+would retain too much data. A skipped custom check sets `LintReport.incomplete`
+so the CLI requires explicit acceptance of a partial report.
 
 **Messages.** Without `message`, a finding reads `<target>: <field> <why>`.
 A `message` may use `{{value}}` (the checked value), `{{field}}`,

@@ -528,6 +528,20 @@ fn large_schema_error_payloads_report_a_bounded_generic_mismatch() {
 }
 
 #[test]
+fn repeated_long_instance_paths_report_a_bounded_generic_mismatch() {
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"object","additionalProperties":{"items":{"type":"string"}}}
+        }}}}}}}
+    });
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let body = json!({("k".repeat(512 * 1024)): vec![0; 4_096]});
+    let report = analyze(&spec, &[Obs::new("long-path", "GET", "/s").json(200, body).0], &DriftOptions::default());
+    assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
+}
+
+#[test]
 fn null_and_fraction_on_the_same_field_both_hold() {
     let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/n": {"get": {"responses": {"200": {"description": "ok",
         "content": {"application/json": {"schema": {"type": "object", "properties": {

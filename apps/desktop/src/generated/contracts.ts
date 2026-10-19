@@ -3715,10 +3715,8 @@ export interface LintReport {
    */
   skipped_operations?: number;
   /**
-   * The description is too large to lint completely: past some point,
-   * nothing more was checked (operations, parameters, responses, schemas,
-   * properties and security schemes), whether or not operations were left
-   * out.
+   * The description or a custom schema instance exceeded a work limit;
+   * some operations, fields, or rule checks were not completed.
    */
   incomplete?: boolean;
 }

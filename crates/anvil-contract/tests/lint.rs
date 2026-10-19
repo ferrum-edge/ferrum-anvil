@@ -140,6 +140,48 @@ fn large_error_payloads_keep_example_results_bounded() {
 }
 
 #[test]
+fn custom_schema_work_refusal_marks_lint_incomplete() {
+    let rules = RuleSet::load(&[(
+        "bounded.json".into(),
+        serde_json::to_vec(&json!({"anvil_ruleset":1,"rules":{"bounded":{
+            "given":"info","then":{"field":"x-values","function":"schema","options":{"schema":{"uniqueItems":true}}}
+        }}}))
+        .unwrap(),
+    )])
+    .unwrap();
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":vec![0; 10_000]},"paths":{}});
+    let report = run(&doc.to_string(), &rules);
+    assert!(report.incomplete);
+    assert!(report.findings.iter().any(|f| f.message.contains("not checked")), "{:?}", report.findings);
+}
+
+#[test]
+fn unchecked_where_schema_marks_lint_incomplete_without_a_false_finding() {
+    let rules = RuleSet::load(&[(
+        "conditional.json".into(),
+        serde_json::to_vec(&json!({"anvil_ruleset":1,"rules":{"owner-when-unique":{
+            "given":"info",
+            "where":{"field":"raw.x-values","function":"schema","options":{"schema":{"uniqueItems":true}}},
+            "then":{"field":"raw.x-owner","function":"defined"}
+        }}}))
+        .unwrap(),
+    )])
+    .unwrap();
+    let doc = |values: Vec<usize>| json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":values},"paths":{}});
+    let unchecked = run(&doc((0..10_000).collect()).to_string(), &rules);
+    assert!(unchecked.incomplete);
+    assert!(!rules_hit(&unchecked).contains(&"owner-when-unique"));
+
+    let false_predicate = run(&doc(vec![1, 1]).to_string(), &rules);
+    assert!(!false_predicate.incomplete);
+    assert!(!rules_hit(&false_predicate).contains(&"owner-when-unique"));
+
+    let true_predicate = run(&doc(vec![1, 2]).to_string(), &rules);
+    assert!(!true_predicate.incomplete);
+    assert!(rules_hit(&true_predicate).contains(&"owner-when-unique"));
+}
+
+#[test]
 fn jsonpath_and_raw_fields_reach_the_document() {
     let rules = RuleSet::load(&[(
         "t.yaml".into(),

@@ -202,20 +202,20 @@ fn completed_bundles_cannot_activate_unmeasured_root_keywords() {
         ]}),
         json!({"unevaluatedItems":false}),
     ] {
-        // `child` is an unknown annotation in the measured target at
-        // /properties, but becomes a schema when copied to root properties.
+        // Refuse the target before copying /properties into the validator
+        // root, where its children would become active schema keywords.
         let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
             "properties":{"child":child},"components":{"schemas":{"Checked":schema}}});
         let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
         let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
-        assert!(schema::too_large(&err), "{err}");
+        assert!(err.contains("validation keyword"), "{err}");
     }
     let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
         "properties":{"child":{"$id":"https://example.test/new-scope","type":"string"}},
         "components":{"schemas":{"Checked":schema}}});
     let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
     let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
-    assert!(err.contains("$id"), "{err}");
+    assert!(err.contains("validation keyword"), "{err}");
 
     // Even a cheap copied keyword changes meaning: /properties is inert
     // OpenAPI data but would constrain the wrapper's instance at its root.
@@ -287,6 +287,32 @@ fn instance_validation_and_error_collection_choose_bounded_modes() {
     assert_eq!(plan.mode(&json!(vec![0; 10_000])), CheckMode::Skip);
     let plan = schema::measure_standalone_plan(&json!({"items":{"type":"string"}})).unwrap();
     assert_eq!(plan.mode(&json!([1, 2, 3])), CheckMode::Detailed);
+}
+
+#[test]
+fn repeated_error_paths_choose_generic_reporting() {
+    use schema::CheckMode;
+    let plan = schema::measure_standalone_plan(&json!({"additionalProperties":{"items":{"type":"string"}}})).unwrap();
+    let long_name = "k".repeat(512 * 1024);
+    let value = json!({(long_name): vec![0; 4_096]});
+    assert_eq!(plan.mode(&value), CheckMode::Generic);
+}
+
+#[test]
+fn repeated_unique_and_string_assertions_charge_each_application() {
+    use schema::CheckMode;
+    let unique = json!({"allOf":vec![json!({"uniqueItems":true}); 10_000]});
+    let plan = schema::measure_standalone_plan(&unique).unwrap();
+    let values: Vec<u64> = (0..1_000).map(|i| 9_223_372_036_854_775_808u64 + i).collect();
+    assert_eq!(plan.mode(&json!(values)), CheckMode::Skip);
+    let one_unique = schema::measure_standalone_plan(&json!({"uniqueItems":true})).unwrap();
+    assert_eq!(one_unique.mode(&json!([1, 2, 3])), CheckMode::Detailed);
+
+    let lengths = json!({"allOf":vec![json!({"minLength":1}); 50_000]});
+    let plan = schema::measure_standalone_plan(&lengths).unwrap();
+    assert_eq!(plan.mode(&json!("x".repeat(512 * 1024))), CheckMode::Skip);
+    let one_length = schema::measure_standalone_plan(&json!({"minLength":1})).unwrap();
+    assert_eq!(one_length.mode(&json!("ok")), CheckMode::Detailed);
 }
 
 #[test]

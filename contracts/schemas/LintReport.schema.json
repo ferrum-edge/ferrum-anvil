@@ -69,7 +69,7 @@
       "default": 0
     },
     "incomplete": {
-      "description": "The description is too large to lint completely: past some point,\nnothing more was checked (operations, parameters, responses, schemas,\nproperties and security schemes), whether or not operations were left\nout.",
+      "description": "The description or a custom schema instance exceeded a work limit;\nsome operations, fields, or rule checks were not completed.",
       "type": "boolean",
       "default": false
     }

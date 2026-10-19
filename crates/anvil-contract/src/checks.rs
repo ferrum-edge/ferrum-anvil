@@ -152,6 +152,15 @@ struct SchemaOpts {
 }
 
 impl Function {
+    /// Whether this schema function cannot safely check the selected value.
+    /// The lint report records this separately from an ordinary rule failure.
+    pub(crate) fn schema_check_skipped(&self, value: Option<&Value>) -> bool {
+        match (self, value) {
+            (Function::Schema { plan, .. }, Some(value)) => plan.mode(value) == crate::schema::CheckMode::Skip,
+            _ => false,
+        }
+    }
+
     pub fn compile(name: &str, opts: &Value) -> Result<Function, String> {
         Ok(match name {
             "defined" | "undefined" | "truthy" | "falsy" | "unique" => {
