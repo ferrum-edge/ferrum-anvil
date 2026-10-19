@@ -296,6 +296,30 @@ fn nested_legacy_dependencies_cannot_multiply_metaschema_errors() {
 }
 
 #[test]
+fn referenced_dependent_required_names_are_checked_before_compilation() {
+    let base = 9_223_372_036_854_775_808u64;
+    let pairs: Vec<Value> = (0..20_000).map(|i| json!([base + i % 1_000, base + i / 1_000])).collect();
+    let schema = json!({"$ref":"#/default","default":{"dependentRequired":{"x":pairs.clone()}}});
+    let err = schema::measure_standalone(&schema).unwrap_err();
+    assert!(err.contains("dependentRequired"), "{err}");
+    assert!(ruleset(&schema).is_err());
+
+    let chosen = json!({"$ref":"#/x-malformed"});
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+        "x-malformed":{"dependentRequired":{"x":pairs}},"components":{"schemas":{"Checked":chosen}}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let err = schema::compile(&document, &chosen, Direction::Response).unwrap_err();
+    assert!(err.contains("dependentRequired"), "{err}");
+
+    let valid = json!({"dependentRequired":{"x":["a","b"]}});
+    ruleset(&valid).unwrap();
+    let document = spec(&valid);
+    let validator = schema::compile(&document, &valid, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!({"x":1,"a":1,"b":1})));
+    assert!(!validator.is_valid(&json!({"x":1,"a":1})));
+}
+
+#[test]
 fn instance_validation_and_error_collection_choose_bounded_modes() {
     use schema::CheckMode;
     let plan = schema::measure_standalone_plan(&json!({"items":{"not":{"type":"object","description":"x".repeat(512 * 1024)}}})).unwrap();
@@ -340,6 +364,25 @@ fn repeated_unique_and_string_assertions_charge_each_application() {
     assert_eq!(plan.mode(&json!("x".repeat(512 * 1024))), CheckMode::Skip);
     let one_length = schema::measure_standalone_plan(&json!({"minLength":1})).unwrap();
     assert_eq!(one_length.mode(&json!("ok")), CheckMode::Detailed);
+}
+
+#[test]
+fn repeated_long_required_names_are_charged_before_validation() {
+    use schema::CheckMode;
+    let long_name = "k".repeat(4_096);
+    let references = vec![json!({"$ref":"#/$defs/r"}); 4_000];
+    let schema = json!({"$defs":{"r":{"required":[long_name.clone()]}},"items":{"allOf":references}});
+    let plan = schema::measure_standalone_plan(&schema).unwrap();
+    let item = json!({(long_name):null});
+    assert_eq!(plan.mode(&Value::Array(vec![item; 1_300])), CheckMode::Skip);
+
+    let small = json!({"required":["owner"]});
+    let plan = schema::measure_standalone_plan(&small).unwrap();
+    assert_eq!(plan.mode(&json!({"owner":null})), CheckMode::Detailed);
+    let document = spec(&small);
+    let validator = schema::compile(&document, &small, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!({"owner":null})));
+    assert!(!validator.is_valid(&json!({"other":null})));
 }
 
 #[test]

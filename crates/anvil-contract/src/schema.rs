@@ -152,7 +152,7 @@ pub fn compile_within_checked(
         plan: ValidationPlan {
             work,
             unique_uses: work.unique_uses.max(usize::from(risk.unique)),
-            text_scans: work.pattern_uses.saturating_add(work.string_scans),
+            text_scans: work.pattern_uses.saturating_add(work.string_scans).saturating_add(work.name_lookups),
         },
     })
 }
@@ -240,6 +240,7 @@ struct Work {
     pattern_name_work: usize,
     pattern_uses: usize,
     string_scans: usize,
+    name_lookups: usize,
     unique_uses: usize,
     required_names: usize,
     property_maps: usize,
@@ -333,6 +334,7 @@ impl Work {
         self.pattern_name_work = self.pattern_name_work.saturating_add(other.pattern_name_work);
         self.pattern_uses = self.pattern_uses.saturating_add(other.pattern_uses);
         self.string_scans = self.string_scans.saturating_add(other.string_scans);
+        self.name_lookups = self.name_lookups.saturating_add(other.name_lookups);
         self.unique_uses = self.unique_uses.saturating_add(other.unique_uses);
         self.required_names = self.required_names.saturating_add(other.required_names);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
@@ -459,6 +461,27 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                                 .saturating_add(o.get("enum").and_then(Value::as_array).map_or(0, Vec::len)),
                         ),
                     );
+                    // Required/property/dependency validators can hash or
+                    // compare instance member names once per application.
+                    // Charge long names for every reference-expanded use.
+                    let dependent_lookups = |keyword: &str| {
+                        o.get(keyword).and_then(Value::as_object).map_or(0, |entries| {
+                            entries.len().saturating_add(
+                                entries.values().map(|v| v.as_array().map_or(0, Vec::len)).fold(0usize, |sum, len| sum.saturating_add(len)),
+                            )
+                        })
+                    };
+                    let lookups = o
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                        .saturating_add(properties.map_or(0, Map::len))
+                        .saturating_add(dependent_lookups("dependentRequired"))
+                        .saturating_add(dependent_lookups("dependencies"))
+                        .saturating_add(o.get("dependentSchemas").and_then(Value::as_object).map_or(0, Map::len))
+                        .saturating_add(usize::from(o.contains_key("additionalProperties")))
+                        .saturating_add(usize::from(o.contains_key("propertyNames")));
+                    part.work.name_lookups = part.work.name_lookups.saturating_add(copies.saturating_mul(lookups));
                     part.work.required_names = part
                         .work
                         .required_names
@@ -568,7 +591,7 @@ pub fn measure_standalone_plan(schema: &Value) -> Result<ValidationPlan, String>
     Ok(ValidationPlan {
         work,
         unique_uses: work.unique_uses.max(usize::from(risk.unique)),
-        text_scans: work.pattern_uses.saturating_add(work.string_scans),
+        text_scans: work.pattern_uses.saturating_add(work.string_scans).saturating_add(work.name_lookups),
     })
 }
 
@@ -707,6 +730,24 @@ fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<Comp
                 if pos == Pos::Schema {
                     let properties = map.get("properties").and_then(Value::as_object);
                     let pattern_properties = map.get("patternProperties").and_then(Value::as_object);
+                    // The dependency compiler hashes array members to check
+                    // uniqueness before validating their types. Numeric
+                    // members can collide through f64 hashing and turn a
+                    // malformed referenced target into quadratic compile
+                    // work, so reject them before invoking the compiler.
+                    if let Some(dependencies) = map.get("dependentRequired") {
+                        let Some(entries) = dependencies.as_object() else {
+                            return Err("`dependentRequired` must be an object of string arrays".into());
+                        };
+                        for names in entries.values() {
+                            let Some(names) = names.as_array() else {
+                                return Err("`dependentRequired` must be an object of string arrays".into());
+                            };
+                            if names.iter().any(|name| !name.is_string()) {
+                                return Err("`dependentRequired` must be an object of string arrays".into());
+                            }
+                        }
+                    }
                     if let Some(properties) = properties {
                         property_maps = property_maps.saturating_add(1);
                         if let Some(pattern_properties) = pattern_properties {

@@ -89,10 +89,12 @@ company ruleset.
   root URIs to 4 KiB, property-pattern pairs and union-discriminator scans
   to 1 million each, distinct regexes to 128 (each with 128 KiB size and DFA
   limits), and repeated
-  legacy-dependency payload copies to 32 MiB. A single property-pattern
-  precomputation may scan at most 32 MiB of property-name text.
+  legacy-dependency payload copies to 32 MiB. Referenced
+  `dependentRequired` lists must contain strings before the compiler's
+  uniqueness check. A single property-pattern precomputation may scan at
+  most 32 MiB of property-name text.
   Each instance has a 50-million-unit validation-work limit, a 256 MiB
-  text-scan/input work limit, and a conservative uniqueness-comparison limit
+  text-scan/input work limit (including repeated property-name lookups), and a conservative uniqueness-comparison limit
   that counts repeated schema applications. Error details are collected only
   when possible retained copies, including repeated instance paths, fit an
   8 MiB allowance. Otherwise an invalid value has a generic mismatch;
