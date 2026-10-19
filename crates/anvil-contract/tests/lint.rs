@@ -127,6 +127,19 @@ fn examples_are_checked_against_their_schema_in_every_dialect() {
 }
 
 #[test]
+fn large_error_payloads_keep_example_results_bounded() {
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"array","items":{"not":{"type":"object","description":"x".repeat(256 * 1024)}}},
+            "example":vec![json!({}); 128]
+        }}}}}}}
+    });
+    let report = run(&doc.to_string(), &RuleSet::recommended());
+    assert_eq!(report.examples_not_checked, 0);
+    assert!(report.findings.iter().any(|f| f.rule == "example-valid" && f.message.contains("details omitted")), "{:?}", report.findings);
+}
+
+#[test]
 fn jsonpath_and_raw_fields_reach_the_document() {
     let rules = RuleSet::load(&[(
         "t.yaml".into(),

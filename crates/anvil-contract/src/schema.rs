@@ -43,6 +43,16 @@ pub const MAX_SCAN_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXPANDED_NODES: usize = 100_000;
 /// Distinct `$ref` targets copied into one validator.
 const MAX_REF_TARGETS: usize = 4_096;
+const MAX_COMPILE_LOCATIONS: usize = 64 * 1024 * 1024;
+const MAX_PATTERN_PAIRS: usize = 1_000_000;
+const MAX_PATTERN_NAME_WORK: usize = 32 * 1024 * 1024;
+const MAX_UNION_ANALYSIS: usize = 1_000_000;
+const MAX_DISTINCT_PATTERNS: usize = 128;
+const MAX_DEPENDENCY_COPY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_VALIDATION_WORK: usize = 50_000_000;
+const MAX_PATTERN_INSTANCE_WORK: usize = 256 * 1024 * 1024;
+const MAX_ERROR_BYTES: usize = 8 * 1024 * 1024;
+const MAX_UNIQUE_WORK: usize = 4_000_000;
 /// What every refusal of a schema for its size or nesting starts with (see
 /// [`too_large`]).
 const TOO_LARGE: &str = "too large to check: ";
@@ -93,6 +103,23 @@ pub fn compile_within(
     scanned: &mut Scanned,
     budget: Scanned,
 ) -> Result<jsonschema::Validator, String> {
+    compile_within_checked(spec, schema, direction, scanned, budget).map(|checked| checked.validator)
+}
+
+/// A validator and the bound used before checking each instance. Eager error
+/// collection retains copies of both schema payloads and instance values.
+pub struct CheckedValidator {
+    pub validator: jsonschema::Validator,
+    pub plan: ValidationPlan,
+}
+
+pub fn compile_within_checked(
+    spec: &Spec,
+    schema: &Value,
+    direction: Direction,
+    scanned: &mut Scanned,
+    budget: Scanned,
+) -> Result<CheckedValidator, String> {
     if scanned.exceeds(budget) {
         return Err("the checks' scanning budget is spent".into());
     }
@@ -108,17 +135,19 @@ pub fn compile_within(
     // example a target copied to `/properties`). Check the exact document
     // given to the compiler, not just the schema in its original position.
     // Wrapping the selected schema in allOf adds one subschema level.
-    measure_in(&wrapper, &wrapper, scanned, MAX_DEPTH + 1)?;
+    let work = measure_in(&wrapper, &wrapper, scanned, MAX_DEPTH + 1)?;
     if scanned.exceeds(budget) {
         return Err("the checks' scanning budget is spent".into());
     }
     check_keywords(&wrapper, &wrapper, false, false)?;
-    jsonschema::options()
+    let risk = check_compile_work(&wrapper, work, false)?;
+    let validator = jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .should_validate_formats(true)
         .with_pattern_options(linear_patterns())
         .build(&wrapper)
-        .map_err(|e| format!("the schema cannot be compiled: {e}"))
+        .map_err(|e| format!("the schema cannot be compiled: {e}"))?;
+    Ok(CheckedValidator { validator, plan: ValidationPlan { work, unique: work.unique || risk.unique, pattern_uses: work.pattern_uses } })
 }
 
 /// `pattern` and `patternProperties` use the linear-time `regex` engine (not
@@ -126,7 +155,9 @@ pub fn compile_within(
 /// check. Patterns that need look-around or back-references do not compile,
 /// and a schema using one is not checked.
 pub fn linear_patterns() -> jsonschema::PatternOptions<jsonschema::Regex> {
-    jsonschema::PatternOptions::regex().size_limit(1 << 20).dfa_size_limit(1 << 20)
+    // At most 128 distinct patterns are accepted per validator. Together
+    // with the per-pattern cap this bounds retained automata to about 16 MiB.
+    jsonschema::PatternOptions::regex().size_limit(1 << 17).dfa_size_limit(1 << 17)
 }
 
 /// The converted schema with the `$ref` targets it reaches, as one document.
@@ -191,6 +222,125 @@ fn descends(keyword: &str) -> bool {
     )
 }
 
+/// Validation/compilation work, including data retained by inline `not`
+/// validators. Kept separate from physical scans charged to a shared budget.
+#[derive(Clone, Copy, Default, Debug)]
+struct Work {
+    nodes: usize,
+    steps: usize,
+    bytes: usize,
+    pattern_pairs: usize,
+    pattern_name_work: usize,
+    pattern_uses: usize,
+    required_names: usize,
+    property_maps: usize,
+    union: bool,
+    unique: bool,
+}
+
+/// Whether checking an instance can report detailed errors within a bounded
+/// allocation, or only its validity. `Skip` is reported as unchecked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckMode {
+    Detailed,
+    Generic,
+    Skip,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ValidationPlan {
+    work: Work,
+    unique: bool,
+    pattern_uses: usize,
+}
+
+impl ValidationPlan {
+    pub fn mode(self, instance: &Value) -> CheckMode {
+        let mut values = 0usize;
+        let mut bytes = 0usize;
+        let mut longest_array = 0usize;
+        let mut stack = vec![instance];
+        while let Some(value) = stack.pop() {
+            values = values.saturating_add(1);
+            match value {
+                Value::Object(map) => {
+                    for (name, child) in map {
+                        bytes = bytes.saturating_add(name.len());
+                        stack.push(child);
+                    }
+                }
+                Value::Array(items) => {
+                    longest_array = longest_array.max(items.len());
+                    stack.extend(items);
+                }
+                Value::String(s) => bytes = bytes.saturating_add(s.len()),
+                _ => {}
+            }
+            if values.saturating_mul(self.work.steps.max(1)) > MAX_VALIDATION_WORK
+                || bytes.saturating_mul(self.pattern_uses) > MAX_PATTERN_INSTANCE_WORK
+                || (self.unique && longest_array.saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK)
+            {
+                return CheckMode::Skip;
+            }
+        }
+        if self.unique && longest_array.saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK {
+            return CheckMode::Skip;
+        }
+        // A failed anyOf/oneOf may own one full instance per branch even in
+        // validate(); iter_errors can additionally own one const/enum/not
+        // payload for each failed application. Avoid both paths when either
+        // product exceeds the retained-error allowance.
+        let instance_heap = bytes.saturating_add(values.saturating_mul(64));
+        let schema_heap = self.work.bytes.saturating_add(self.work.steps.saturating_mul(64));
+        if instance_heap.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES || schema_heap.saturating_mul(values) > MAX_ERROR_BYTES {
+            CheckMode::Generic
+        } else {
+            CheckMode::Detailed
+        }
+    }
+}
+
+impl Work {
+    fn add(&mut self, other: Self) {
+        self.nodes = self.nodes.saturating_add(other.nodes);
+        self.steps = self.steps.saturating_add(other.steps);
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.pattern_pairs = self.pattern_pairs.saturating_add(other.pattern_pairs);
+        self.pattern_name_work = self.pattern_name_work.saturating_add(other.pattern_name_work);
+        self.pattern_uses = self.pattern_uses.saturating_add(other.pattern_uses);
+        self.required_names = self.required_names.saturating_add(other.required_names);
+        self.property_maps = self.property_maps.saturating_add(other.property_maps);
+        self.union |= other.union;
+        self.unique |= other.unique;
+    }
+
+    fn check(self) -> Result<(), String> {
+        if self.nodes > MAX_EXPANDED_NODES {
+            return Err(format!(
+                "{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through references or schema copies"
+            ));
+        }
+        if self.steps > MAX_SCAN_STEPS {
+            return Err(format!(
+                "{TOO_LARGE}the schema expands to more than {MAX_SCAN_STEPS} members and items through references or schema copies"
+            ));
+        }
+        if self.bytes > MAX_SCAN_BYTES {
+            return Err(format!(
+                "{TOO_LARGE}the schema expands to more than {} MiB of names and strings through references or schema copies",
+                MAX_SCAN_BYTES >> 20
+            ));
+        }
+        if self.pattern_pairs > MAX_PATTERN_PAIRS || self.pattern_name_work > MAX_PATTERN_NAME_WORK {
+            return Err(format!("{TOO_LARGE}property-pattern precomputation exceeds its comparison budget"));
+        }
+        if self.union && self.required_names.saturating_mul(self.property_maps) > MAX_UNION_ANALYSIS {
+            return Err(format!("{TOO_LARGE}union discriminator analysis exceeds {MAX_UNION_ANALYSIS} comparisons"));
+        }
+        Ok(())
+    }
+}
+
 /// One schema (the root, or a `$ref` target): how many objects and lists
 /// it has, and its internal references, each with whether it sits under a
 /// keyword that descends into the value.
@@ -200,6 +350,8 @@ struct Part {
     steps: usize,
     /// Bytes of the member names and strings among them.
     bytes: usize,
+    /// Cost including inline subschema copies retained by the validator.
+    work: Work,
     /// Deepest nesting of objects and lists.
     depth: usize,
     /// Schema nesting as conversion follows it; literal data does not add
@@ -223,9 +375,18 @@ enum Pos {
 /// `step_limit` members and items (scalars included), or more than
 /// `byte_limit` bytes of member names and strings have been seen.
 fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, schema_depth_limit: usize) -> Part {
-    let mut part = Part { nodes: 0, steps: 0, bytes: text_bytes(v), depth: 0, schema_depth: 0, refs: vec![], complex: false };
-    let mut stack: Vec<(&Value, bool, usize, Pos, usize)> = vec![(v, false, 1, Pos::Schema, 0)];
-    'scan: while let Some((v, down, d, pos, schema_depth)) = stack.pop() {
+    let mut part = Part {
+        nodes: 0,
+        steps: 0,
+        bytes: text_bytes(v),
+        work: Work { bytes: text_bytes(v), ..Work::default() },
+        depth: 0,
+        schema_depth: 0,
+        refs: vec![],
+        complex: false,
+    };
+    let mut stack: Vec<(&Value, bool, usize, Pos, usize, usize)> = vec![(v, false, 1, Pos::Schema, 0, 1)];
+    'scan: while let Some((v, down, d, pos, schema_depth, copies)) = stack.pop() {
         if part.nodes > node_limit || part.steps > step_limit || part.bytes > byte_limit {
             break;
         }
@@ -239,6 +400,37 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
         match v {
             Value::Object(o) => {
                 part.nodes += 1;
+                part.work.nodes = part.work.nodes.saturating_add(copies);
+                if pos == Pos::Schema {
+                    let properties = o.get("properties").and_then(Value::as_object);
+                    let patterns = o.get("patternProperties").and_then(Value::as_object);
+                    if let Some(properties) = properties {
+                        part.work.property_maps = part.work.property_maps.saturating_add(copies);
+                        if let Some(patterns) = patterns {
+                            part.work.pattern_pairs = part
+                                .work
+                                .pattern_pairs
+                                .saturating_add(copies.saturating_mul(properties.len()).saturating_mul(patterns.len()));
+                            let name_bytes = properties.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)));
+                            part.work.pattern_name_work = part
+                                .work
+                                .pattern_name_work
+                                .saturating_add(copies.saturating_mul(name_bytes).saturating_mul(patterns.len()));
+                        }
+                    }
+                    part.work.pattern_uses =
+                        part.work
+                            .pattern_uses
+                            .saturating_add(copies.saturating_mul(
+                                usize::from(o.get("pattern").is_some_and(Value::is_string)) + patterns.map_or(0, Map::len),
+                            ));
+                    part.work.required_names = part
+                        .work
+                        .required_names
+                        .saturating_add(copies.saturating_mul(o.get("required").and_then(Value::as_array).map_or(0, Vec::len)));
+                    part.work.union |= o.contains_key("anyOf") || o.contains_key("oneOf");
+                    part.work.unique |= o.get("uniqueItems") == Some(&Value::Bool(true));
+                }
                 if pos == Pos::Schema
                     && (o.keys().any(|k| complex_applicator(k))
                         || (o.contains_key("$ref")
@@ -256,6 +448,12 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                 for (k, child) in o {
                     part.steps += 1;
                     part.bytes += k.len() + text_bytes(child);
+                    // NotValidator keeps a clone of its whole child schema,
+                    // including literal data; nested nots retain overlapping
+                    // copies. Unknown/literal `not` members are just data.
+                    let child_copies = copies + usize::from(pos == Pos::Schema && k == "not");
+                    part.work.steps = part.work.steps.saturating_add(copies);
+                    part.work.bytes = part.work.bytes.saturating_add(copies * k.len() + child_copies * text_bytes(child));
                     if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
@@ -264,20 +462,23 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                     // A `$ref` that is not a string is still copied by
                     // conversion and bundling: scanned like any member.
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down || (pos == Pos::Schema && descends(k)), d + 1, child_pos, child_depth));
+                        stack.push((child, down || (pos == Pos::Schema && descends(k)), d + 1, child_pos, child_depth, child_copies));
                     }
                 }
             }
             Value::Array(a) => {
                 part.nodes += 1;
+                part.work.nodes = part.work.nodes.saturating_add(copies);
                 for child in a {
                     part.steps += 1;
                     part.bytes += text_bytes(child);
+                    part.work.steps = part.work.steps.saturating_add(copies);
+                    part.work.bytes = part.work.bytes.saturating_add(copies * text_bytes(child));
                     if part.steps > step_limit || part.bytes > byte_limit {
                         break 'scan;
                     }
                     if child.is_object() || child.is_array() {
-                        stack.push((child, down, d + 1, pos, schema_depth));
+                        stack.push((child, down, d + 1, pos, schema_depth, copies));
                     }
                 }
             }
@@ -305,7 +506,7 @@ const ROOT: &str = "#root";
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
     let size = measure_in(&spec.root, schema, total, MAX_DEPTH)?;
     check_keywords(&spec.root, schema, false, legacy(spec.dialect))?;
-    Ok(size)
+    Ok(size.nodes)
 }
 
 /// Check a standalone JSON Schema (a custom ruleset's `schema` function)
@@ -320,9 +521,14 @@ fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<u
 /// `default`, `examples`) is not interpreted, unless a reference points into
 /// it (the validator then compiles it as a schema too).
 pub fn measure_standalone(schema: &Value) -> Result<usize, String> {
-    let size = measure_in(schema, schema, &mut Scanned::default(), MAX_DEPTH)?;
+    measure_standalone_plan(schema).map(|plan| plan.work.nodes)
+}
+
+pub fn measure_standalone_plan(schema: &Value) -> Result<ValidationPlan, String> {
+    let work = measure_in(schema, schema, &mut Scanned::default(), MAX_DEPTH)?;
     check_keywords(schema, schema, true, false)?;
-    Ok(size)
+    let risk = check_compile_work(schema, work, true)?;
+    Ok(ValidationPlan { work, unique: work.unique || risk.unique, pattern_uses: work.pattern_uses })
 }
 
 /// Only schema-valued keywords change position. Assertions, annotations and
@@ -385,6 +591,151 @@ fn schema_map_keyword(k: &str) -> bool {
     matches!(k, "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" | "dependencies")
 }
 
+/// A copied pointer target at one of these document-root names would become
+/// an assertion on the wrapper, even if it was inert OpenAPI data before.
+fn root_assertion_keyword(k: &str) -> bool {
+    schema_child_keyword(k)
+        || matches!(
+            k,
+            "$ref"
+                | "properties"
+                | "patternProperties"
+                | "dependentSchemas"
+                | "dependencies"
+                | "type"
+                | "const"
+                | "enum"
+                | "required"
+                | "dependentRequired"
+                | "minimum"
+                | "maximum"
+                | "exclusiveMinimum"
+                | "exclusiveMaximum"
+                | "multipleOf"
+                | "minLength"
+                | "maxLength"
+                | "pattern"
+                | "format"
+                | "minItems"
+                | "maxItems"
+                | "uniqueItems"
+                | "minContains"
+                | "maxContains"
+                | "minProperties"
+                | "maxProperties"
+                | "contentEncoding"
+                | "contentMediaType"
+        )
+}
+
+/// Bound work the jsonschema compiler does in addition to walking nodes.
+/// Only schema positions are visited; a `const` object is data, while a
+/// referenced target in otherwise literal data is promoted to a schema.
+struct CompileRisk {
+    unique: bool,
+}
+
+fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<CompileRisk, String> {
+    let uri_len = if standalone { root.get("$id").and_then(Value::as_str).map_or(0, str::len) } else { 0 };
+    if uri_len > crate::spec::MAX_KEY_BYTES {
+        return Err(format!("{TOO_LARGE}the schema's root URI exceeds the compiler location limit"));
+    }
+    let mut locations = 0usize;
+    let mut pattern_pairs = 0usize;
+    let mut pattern_name_work = 0usize;
+    let mut required_names = 0usize;
+    let mut property_maps = 0usize;
+    let mut has_union = false;
+    let mut unique = false;
+    let mut deepest_dependency = 0usize;
+    let mut patterns: HashSet<String> = HashSet::new();
+    let mut followed: HashSet<String> = HashSet::new();
+    let mut stack = vec![(root, Pos::Schema, 0usize, 0usize, false)];
+    while let Some((value, pos, path, dependency_depth, dependency_map)) = stack.pop() {
+        if pos == Pos::Literal {
+            continue;
+        }
+        if pos == Pos::Schema {
+            locations = locations.saturating_add(2usize.saturating_mul(path.saturating_add(uri_len).saturating_mul(3).saturating_add(64)));
+        }
+        if locations > MAX_COMPILE_LOCATIONS {
+            return Err(format!("{TOO_LARGE}compiled schema locations exceed {} MiB", MAX_COMPILE_LOCATIONS >> 20));
+        }
+        match value {
+            Value::Object(map) => {
+                if pos == Pos::Schema {
+                    let properties = map.get("properties").and_then(Value::as_object);
+                    let pattern_properties = map.get("patternProperties").and_then(Value::as_object);
+                    if let Some(properties) = properties {
+                        property_maps = property_maps.saturating_add(1);
+                        if let Some(pattern_properties) = pattern_properties {
+                            pattern_pairs = pattern_pairs.saturating_add(properties.len().saturating_mul(pattern_properties.len()));
+                            let names = properties.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)));
+                            pattern_name_work = pattern_name_work.saturating_add(names.saturating_mul(pattern_properties.len()));
+                        }
+                    }
+                    if let Some(Value::Array(names)) = map.get("required") {
+                        required_names = required_names.saturating_add(names.len());
+                    }
+                    has_union |= map.contains_key("anyOf") || map.contains_key("oneOf");
+                    unique |= map.get("uniqueItems") == Some(&Value::Bool(true));
+                    if let Some(pattern) = map.get("pattern").and_then(Value::as_str) {
+                        patterns.insert(pattern.to_owned());
+                    }
+                    if let Some(property_patterns) = pattern_properties {
+                        patterns.extend(property_patterns.keys().cloned());
+                    }
+                    if let Some(reference) = map.get("$ref").and_then(Value::as_str).and_then(internal_pointer)
+                        && followed.insert(reference.clone())
+                        && let Some(target) = root.pointer(&reference)
+                    {
+                        stack.push((target, Pos::Schema, reference.len(), dependency_depth, false));
+                    }
+                }
+                for (name, child) in map {
+                    if name.len() > crate::spec::MAX_KEY_BYTES {
+                        return Err(format!("{TOO_LARGE}a schema member name exceeds {} bytes", crate::spec::MAX_KEY_BYTES));
+                    }
+                    let next = child_position(pos, name);
+                    if next == Pos::Literal {
+                        continue;
+                    }
+                    let escaped = name.len().saturating_add(name.bytes().filter(|b| *b == b'~' || *b == b'/').count());
+                    let child_path = path.saturating_add(escaped.saturating_add(1));
+                    if pos == Pos::Schema {
+                        locations = locations.saturating_add(child_path.saturating_add(uri_len).saturating_mul(3).saturating_add(64));
+                    }
+                    // Only children of a legacy `dependencies` map add a
+                    // metaschema copy layer, not ordinary properties/$defs.
+                    let child_dependency_depth = dependency_depth.saturating_add(usize::from(pos == Pos::Map && dependency_map));
+                    stack.push((child, next, child_path, child_dependency_depth, pos == Pos::Schema && name == "dependencies"));
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    stack.push((child, pos, path.saturating_add(1 + index.to_string().len()), dependency_depth, false));
+                }
+            }
+            _ => {}
+        }
+        deepest_dependency = deepest_dependency.max(dependency_depth);
+        if locations > MAX_COMPILE_LOCATIONS
+            || pattern_pairs > MAX_PATTERN_PAIRS
+            || pattern_name_work > MAX_PATTERN_NAME_WORK
+            || patterns.len() > MAX_DISTINCT_PATTERNS
+        {
+            return Err(format!("{TOO_LARGE}schema compiler locations, property-pattern comparisons or regexes exceed their limits"));
+        }
+    }
+    if has_union && required_names.saturating_mul(property_maps) > MAX_UNION_ANALYSIS {
+        return Err(format!("{TOO_LARGE}union discriminator analysis exceeds {MAX_UNION_ANALYSIS} comparisons"));
+    }
+    if deepest_dependency.saturating_mul(work.bytes.saturating_add(work.steps.saturating_mul(64))) > MAX_DEPENDENCY_COPY_BYTES {
+        return Err(format!("{TOO_LARGE}legacy dependency validation may copy too much schema data"));
+    }
+    Ok(CompileRisk { unique })
+}
+
 fn is_draft_202012(dialect: &str) -> bool {
     matches!(dialect.trim_end_matches('#'), "https://json-schema.org/draft/2020-12/schema" | "http://json-schema.org/draft/2020-12/schema")
 }
@@ -423,10 +774,15 @@ fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: b
                 "$ref" if child.is_string() => match internal_pointer(child.as_str().unwrap_or_default()) {
                     // The target is compiled as a schema wherever it is.
                     Some(p) => {
+                        let root_name = p.split('/').nth(1).map(unescape);
                         if !root_id
-                            && (p.is_empty() || p == "/allOf" || p.starts_with("/allOf/") || p == "/$schema" || p.starts_with("/$schema/"))
+                            && (p.is_empty()
+                                || root_name.as_deref() == Some("$schema")
+                                || root_name.as_deref().is_some_and(root_assertion_keyword))
                         {
-                            return Err("references to the OpenAPI bundle root or its wrapper keywords are not supported".into());
+                            return Err(
+                                "references to the OpenAPI bundle root or a validation keyword at that root are not supported".into()
+                            );
                         }
                         if followed.insert(p.clone())
                             && let Some(t) = root_doc.pointer(&p)
@@ -457,7 +813,7 @@ fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: b
 }
 
 /// [`measure_counted`] with references resolved in `root`.
-fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_depth_limit: usize) -> Result<usize, String> {
+fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_depth_limit: usize) -> Result<Work, String> {
     let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
     let mib = MAX_SCAN_BYTES >> 20;
@@ -578,7 +934,7 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
 /// multiply work on the same nested value. Duplicate references count twice.
 /// The condensed graph bounds longest depth and reference-expanded nodes,
 /// members/items and text bytes, then returns the expanded node count.
-fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<usize, String> {
+fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Work, String> {
     let ids: HashMap<&str, usize> = reached.iter().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
     let edges: Vec<Vec<usize>> = reached
         .iter()
@@ -655,15 +1011,18 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<us
     // Error collection can clone subschema data for every application.
     // Count expanded text and scalar members too, not only containers.
     // A complete lap gives every entry to a permitted cycle the same cost.
-    let mut work: Vec<(usize, usize, usize)> = components
+    let mut work: Vec<Work> = components
         .iter()
         .map(|nodes| {
-            nodes.iter().fold((0, 0, 0), |(objects, steps, bytes), &node| {
-                let part = &parts[reached[node].as_str()];
-                (objects + part.nodes, steps + part.steps, bytes + part.bytes)
+            nodes.iter().fold(Work::default(), |mut work, &node| {
+                work.add(parts[reached[node].as_str()].work);
+                work
             })
         })
         .collect();
+    for cost in &work {
+        cost.check()?;
+    }
     let mut parents = vec![vec![]; components.len()];
     let mut remaining = vec![0; components.len()];
     for (from, targets) in edges.iter().enumerate() {
@@ -678,23 +1037,9 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<us
     let mut ready: Vec<usize> = remaining.iter().enumerate().filter_map(|(i, &count)| (count == 0).then_some(i)).collect();
     while let Some(child) = ready.pop() {
         for &parent in &parents[child] {
-            work[parent].0 = work[parent].0.saturating_add(work[child].0);
-            work[parent].1 = work[parent].1.saturating_add(work[child].1);
-            work[parent].2 = work[parent].2.saturating_add(work[child].2);
-            if work[parent].0 > MAX_EXPANDED_NODES {
-                return Err(format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references"));
-            }
-            if work[parent].1 > MAX_SCAN_STEPS {
-                return Err(format!(
-                    "{TOO_LARGE}the schema expands to more than {MAX_SCAN_STEPS} members and items through its references"
-                ));
-            }
-            if work[parent].2 > MAX_SCAN_BYTES {
-                return Err(format!(
-                    "{TOO_LARGE}the schema expands to more than {} MiB of names and strings through its references",
-                    MAX_SCAN_BYTES >> 20
-                ));
-            }
+            let child_work = work[child];
+            work[parent].add(child_work);
+            work[parent].check()?;
             longest[parent].0 = longest[parent].0.max(weights[parent].0.saturating_add(longest[child].0));
             longest[parent].1 = longest[parent].1.max(weights[parent].1.saturating_add(longest[child].1));
             remaining[parent] -= 1;
@@ -707,7 +1052,7 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<us
     if references > MAX_REF_CHAIN || depth > MAX_CHAIN_DEPTH {
         return Err(format!("{TOO_LARGE}the schema nests references too deeply"));
     }
-    Ok(work[component_of[0]].0)
+    Ok(work[component_of[0]])
 }
 
 fn collect_refs(v: &Value, out: &mut Vec<String>) -> Result<(), String> {

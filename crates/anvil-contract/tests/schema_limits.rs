@@ -216,6 +216,77 @@ fn completed_bundles_cannot_activate_unmeasured_root_keywords() {
     let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
     let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
     assert!(err.contains("$id"), "{err}");
+
+    // Even a cheap copied keyword changes meaning: /properties is inert
+    // OpenAPI data but would constrain the wrapper's instance at its root.
+    for reference in ["#/properties", "#/%70roperties", "#/type"] {
+        let chosen = json!({"$ref":reference});
+        let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+            "properties":{"child":{"type":"string"}},"type":{"type":"string"},
+            "components":{"schemas":{"Checked":chosen}}});
+        let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let err = schema::compile(&document, &chosen, Direction::Response).unwrap_err();
+        assert!(err.contains("bundle root") || err.contains("validation keyword"), "{err}");
+    }
+    let chosen = json!({"$ref":"#/components/schemas/Plain"});
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+        "components":{"schemas":{"Checked":chosen,"Plain":{"type":"string"}}}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert!(schema::compile(&document, &chosen, Direction::Response).unwrap().is_valid(&json!("ok")));
+}
+
+#[test]
+fn compiler_location_and_cartesian_work_are_bounded() {
+    let long_key = "k".repeat(512 * 1024);
+    let mut descendants = serde_json::Map::new();
+    for i in 0..1_000 {
+        descendants.insert(format!("p{i}"), json!({"type":"string"}));
+    }
+    refused_work(&json!({"properties":{(long_key.clone()):{"properties":descendants}}}));
+    refused_work(&json!({"$id":format!("https://example.test/{long_key}"),"properties":{"x":{"type":"string"}}}));
+    // A long member in literal data is copied, but is not a schema location.
+    schema::measure_standalone(&json!({"const":{(long_key):1}})).unwrap();
+
+    let properties: serde_json::Map<String, Value> = (0..1_001).map(|i| (format!("p{i}"), json!(true))).collect();
+    let patterns: serde_json::Map<String, Value> = (0..1_001).map(|i| (format!("^p{i}$"), json!(true))).collect();
+    refused_work(&json!({"properties":properties,"patternProperties":patterns,"additionalProperties":false}));
+    let properties: serde_json::Map<String, Value> = (0..10).map(|i| (format!("p{i}"), json!(true))).collect();
+    let patterns: serde_json::Map<String, Value> = (0..10).map(|i| (format!("^p{i}$"), json!(true))).collect();
+    ruleset(&json!({"properties":properties,"patternProperties":patterns,"additionalProperties":false})).unwrap();
+
+    let required: Vec<String> = (0..1_001).map(|i| format!("p{i}")).collect();
+    let all_of: Vec<Value> = (0..1_001).map(|_| json!({"properties":{}})).collect();
+    refused_work(&json!({"anyOf":[{"required":required,"allOf":all_of},false]}));
+
+    let patterns: serde_json::Map<String, Value> = (0..129).map(|i| (format!("^p{i}$"), json!(true))).collect();
+    refused_work(&json!({"patternProperties":patterns}));
+    ruleset(&json!({"patternProperties":{"^p$":true}})).unwrap();
+}
+
+#[test]
+fn nested_legacy_dependencies_cannot_multiply_metaschema_errors() {
+    let mut schema = json!({"description":"x".repeat(1 << 20),"type":"invalid-type"});
+    for _ in 0..33 {
+        schema = json!({"dependencies":{"x":schema}});
+    }
+    let err = schema::measure_standalone(&schema).unwrap_err();
+    assert!(schema::too_large(&err), "{err}");
+    ruleset(&json!({"dependencies":{"x":{"type":"string"}}})).unwrap();
+}
+
+#[test]
+fn instance_validation_and_error_collection_choose_bounded_modes() {
+    use schema::CheckMode;
+    let plan = schema::measure_standalone_plan(&json!({"items":{"not":{"type":"object","description":"x".repeat(512 * 1024)}}})).unwrap();
+    assert_eq!(plan.mode(&json!(vec![json!({}); 128])), CheckMode::Generic);
+    let plan = schema::measure_standalone_plan(&json!({"items":{"const":"x".repeat(512 * 1024)}})).unwrap();
+    assert_eq!(plan.mode(&json!(vec![json!(null); 128])), CheckMode::Generic);
+    let plan = schema::measure_standalone_plan(&json!({"anyOf":vec![json!({"type":"string"}); 2_000]})).unwrap();
+    assert_eq!(plan.mode(&json!({"payload":"x".repeat(512 * 1024)})), CheckMode::Generic);
+    let plan = schema::measure_standalone_plan(&json!({"uniqueItems":true})).unwrap();
+    assert_eq!(plan.mode(&json!(vec![0; 10_000])), CheckMode::Skip);
+    let plan = schema::measure_standalone_plan(&json!({"items":{"type":"string"}})).unwrap();
+    assert_eq!(plan.mode(&json!([1, 2, 3])), CheckMode::Detailed);
 }
 
 #[test]
@@ -289,4 +360,51 @@ fn reference_expansion_charges_error_payload_bytes_and_scalar_members() {
     let validator = jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&schema).unwrap();
     assert!(validator.is_valid(&json!("ok")));
     assert!(!validator.is_valid(&json!({})));
+}
+
+#[test]
+fn inline_not_copies_are_charged_including_literal_payloads() {
+    for mut schema in [
+        json!({"type":"object","description":"x".repeat(512 << 10)}),
+        json!({"type":"object","default":{"description":"x".repeat(512 << 10)}}),
+        json!({"enum":(0..20_000).collect::<Vec<u32>>()}),
+        json!({"type":"object","default":vec![json!({}); 2_000]}),
+    ] {
+        for _ in 0..64 {
+            schema = json!({"not":schema});
+        }
+        // Refuse before compilation retains a copy of this payload for
+        // each inline not validator, even though no reference is present.
+        refused_work(&schema);
+        let document = spec(&schema);
+        let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
+        assert!(schema::too_large(&err), "{err}");
+    }
+    // A member named not inside annotation data is never compiled and must
+    // not multiply the work estimate.
+    let mut data = json!({"description":"x".repeat(512 << 10)});
+    for _ in 0..64 {
+        data = json!({"not":data});
+    }
+    ruleset(&json!({"default":data})).unwrap();
+    let schema = json!({"not":{"not":{"type":"string","description":"small"}}});
+    ruleset(&schema).unwrap();
+    let document = spec(&schema);
+    let validator = schema::compile(&document, &schema, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!("ok")));
+    assert!(!validator.is_valid(&json!(7)));
+}
+
+#[test]
+fn repeated_entries_charge_a_complete_recursive_lap() {
+    for entry in ["a", "b"] {
+        let refs: Vec<Value> = (0..40).map(|_| json!({"$ref":format!("#/$defs/{entry}")})).collect();
+        let schema = json!({"$defs":{
+            "a":{"description":"x".repeat(256 << 10),"properties":{"child":{"$ref":"#/$defs/b"}}},
+            "b":{"description":"x".repeat(256 << 10),"properties":{"child":{"$ref":"#/$defs/a"}}}
+        },"allOf":refs});
+        // Each entry owes both halves of the cycle, even when a previous
+        // entry would have cached only part of it in a depth-first walk.
+        refused_work(&schema);
+    }
 }

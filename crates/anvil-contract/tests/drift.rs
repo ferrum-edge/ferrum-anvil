@@ -501,7 +501,7 @@ fn wide_recursive_schemas_are_refused_before_body_validation() {
 }
 
 #[test]
-fn large_acyclic_required_lists_still_report_only_the_first_difference() {
+fn large_acyclic_required_lists_report_a_bounded_generic_difference() {
     let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"type":"object"}))).collect();
     let required: Vec<String> = (0..10_000).map(|i| format!("p{i}")).collect();
     let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/s":{"get":{"responses":{
@@ -510,8 +510,21 @@ fn large_acyclic_required_lists_still_report_only_the_first_difference() {
     let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
     let body: serde_json::Map<String, Value> = (0..1_000).map(|i| (format!("p{i}"), json!({}))).collect();
     let r = analyze(&spec, &[Obs::new("wide", "GET", "/s").json(200, Value::Object(body)).0], &DriftOptions::default());
-    assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("without details")), "{:?}", r.notes);
     assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn large_schema_error_payloads_report_a_bounded_generic_mismatch() {
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"array","items":{"not":{"type":"object","description":"x".repeat(256 * 1024)}}}
+        }}}}}}}
+    });
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let report = analyze(&spec, &[Obs::new("payload", "GET", "/s").json(200, json!(vec![json!({}); 128])).0], &DriftOptions::default());
+    assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
 }
 
 #[test]

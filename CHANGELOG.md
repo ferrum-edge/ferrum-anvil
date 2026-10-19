@@ -84,7 +84,13 @@
 ### Fixed
 
 - Schema reference-expansion limits count text bytes and scalar members as
-  well as containers, bounding repeated error-payload copies.
+  well as containers, including overlapping copies retained by inline
+  `not` validators, bounding repeated schema payload copies. Compiler
+  preflight caps retained locations, property-pattern and union-analysis
+  products, distinct regexes and legacy-dependency error copies. Instance
+  preflight bounds validation work and unique-item comparisons; invalid
+  values use generic mismatches when detailed error contexts could retain
+  too much, and checks beyond the work limit are reported as incomplete.
 - A custom ruleset's `schema` function is checked when the ruleset loads with
   the limits OpenAPI schemas already have: a reference cycle that does not
   descend into the value, more than 100,000 schema nodes with references

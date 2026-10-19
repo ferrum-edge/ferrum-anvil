@@ -339,6 +339,14 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   Reference-expanded costs include text bytes and scalar members because
   errors may clone large subschemas for every reference. Simple cycles are
   charged for a complete lap, and depth limits use longest reference paths.
+  Inline `not` nesting charges overlapping retained child-schema copies,
+  including their literal/annotation payloads.
+  Compiler preflight also caps retained schema locations, property-pattern
+  and union-analysis Cartesian products, distinct compiled regexes, and
+  invalid nested legacy-dependency payload copies. Instance preflight caps
+  schema traversal and unique-item comparisons. Invalid values use a bounded
+  generic mismatch when eager error contexts might copy too much schema or
+  instance data; values over the validation-work cap are explicitly unchecked.
   Scope changes that would make references differ from measurement are refused;
   literal data and unknown annotations do not expand references. Refused
   schemas are reported as unchecked, or as a ruleset load error.

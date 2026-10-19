@@ -59,7 +59,7 @@ company ruleset.
     one;
   - it nests subschemas more than 64 levels deep: constraints are refused
     before conversion could truncate them (literal data adds no schema depth);
-  - a recursive region has more than one reference per schema, or uses
+  - a schema in a recursive region has more than one reference, or uses
     composition, conditions, dependencies, overlapping property patterns,
     `contains`, or other non-structural applicators. Simple recursion through
     named properties and array items remains supported; some legitimate
@@ -73,7 +73,10 @@ company ruleset.
     every compile), or more than 16 MiB of member names and strings. These
     limits also apply with each reference expanded: error collection may
     copy a large subschema for every repeated reference. A recursive region
-    is charged for a complete lap, regardless of its entry point.
+    is charged for a complete lap, regardless of its entry point. Inline
+    `not` adds the cost of each retained child-schema copy, including data
+    in literals and annotations; deep negation cannot multiply a large
+    payload past these limits without references either.
 
   Examples behind such a schema are counted in `examples_not_checked`. A
   schema is compiled once however many media types `$ref` it, and all the
@@ -81,11 +84,21 @@ company ruleset.
   names and strings, at most; examples past that are counted as not checked
   too. Both the original schema and the completed converted bundle are
   measured and charged before validator construction; copied targets cannot
-  activate unmeasured keywords at the bundle root.
+  activate unmeasured keywords at the bundle root. Compilation also limits
+  retained schema locations to 64 MiB, schema member names and standalone
+  root URIs to 4 KiB, property-pattern pairs and union-discriminator scans
+  to 1 million each, distinct regexes to 128 (128 KiB each), and repeated
+  legacy-dependency payload copies to 32 MiB. A single property-pattern
+  precomputation may scan at most 32 MiB of property-name text.
+  Each instance has a 50-million-unit validation-work limit, a 256 MiB
+  pattern/input work limit, and a conservative uniqueness-comparison limit.
+  Error details are collected only when possible retained copies fit an
+  8 MiB allowance. Otherwise an invalid value has a generic mismatch;
+  a value exceeding validation-work limits is counted as not checked.
   References must remain plain document-local pointers. Modern `$id`,
   anchors, dynamic/recursive references and nested dialect changes are
-  refused, as are references to the bundle root or its reserved `allOf` and
-  `$schema` wrapper fields. Legacy identifiers are removed by conversion.
+  refused, as are references to the bundle root or root validation keywords
+  that copying would activate. Legacy identifiers are removed by conversion.
   Literal data and unknown annotations are counted for size, but their
   members are not schema keywords unless a reference targets them.
 - **Operations are bounded too.** They look at 2 million parameters,
@@ -207,6 +220,10 @@ The same conservative recursive-work and `unevaluated*` refusals apply to
 custom schemas. Rejected example/body schemas are reported as not checked;
 rejected custom schemas make the ruleset fail to load. They never produce
 a successful validation or a schema-mismatch claim without validation.
+For an instance that exceeds the runtime work limit, a custom `schema`
+function fails closed with an explicit “not checked” reason. Large invalid
+instances can report a generic mismatch when detailed error collection
+would retain too much data.
 
 **Messages.** Without `message`, a finding reads `<target>: <field> <why>`.
 A `message` may use `{{value}}` (the checked value), `{{field}}`,

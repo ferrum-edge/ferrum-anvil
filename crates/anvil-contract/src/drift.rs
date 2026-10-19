@@ -427,7 +427,7 @@ struct State<'a> {
     /// (schema holding `required`, name) → (seen, missing, owner).
     required: BTreeMap<(String, String), (usize, usize, String)>,
     servers: BTreeMap<String, (usize, String)>,
-    validators: HashMap<(String, bool), Option<jsonschema::Validator>>,
+    validators: HashMap<(String, bool), Option<schema::CheckedValidator>>,
     /// What schema compiles scanned (members and items, and bytes).
     scanned: Scanned,
     /// The longest `required` list of the description.
@@ -1133,7 +1133,7 @@ impl<'a> State<'a> {
         };
         let vkey = (target.unwrap_or_else(|| media.schema_pointer.clone()), false);
         if !self.validators.contains_key(&vkey) {
-            let v = match schema::compile_within(spec, schema, Direction::Response, &mut self.scanned, MAX_EXAMPLE_SCAN) {
+            let v = match schema::compile_within_checked(spec, schema, Direction::Response, &mut self.scanned, MAX_EXAMPLE_SCAN) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     self.note(if self.scanned.exceeds(MAX_EXAMPLE_SCAN) {
@@ -1148,18 +1148,25 @@ impl<'a> State<'a> {
             };
             self.validators.insert(vkey.clone(), v);
         }
-        let Some(validator) = self.validators.get(&vkey).and_then(Option::as_ref) else { return };
-        let mut first_only = false;
-        let messages: Vec<(String, String, String)> = if validator.is_valid(body) {
+        let Some(checked) = self.validators.get(&vkey).and_then(Option::as_ref) else { return };
+        let mode = checked.plan.mode(body);
+        if mode == schema::CheckMode::Skip {
+            self.note("some response bodies exceed the supported schema-validation work limit and were not checked");
+            return;
+        }
+        let mut generic = false;
+        let messages: Vec<(String, String, String)> = if checked.validator.is_valid(body) {
             vec![]
-        } else if count_values(body, MAX_ERROR_WORK).saturating_mul(1 + self.max_required) <= MAX_ERROR_WORK {
-            validator.iter_errors(body).take(10).map(|e| describe(&e)).collect()
+        } else if mode == schema::CheckMode::Detailed
+            && count_values(body, MAX_ERROR_WORK).saturating_mul(1 + self.max_required) <= MAX_ERROR_WORK
+        {
+            checked.validator.iter_errors(body).take(10).map(|e| describe(&e)).collect()
         } else {
-            first_only = true;
-            validator.validate(body).err().map(|e| describe(&e)).into_iter().collect()
+            generic = true;
+            vec![("the body".into(), "does not match its schema (details omitted to bound error collection)".into(), "other".into())]
         };
-        if first_only {
-            self.note("for large bodies against long `required` lists only the first schema difference is reported");
+        if generic {
+            self.note("some response schema differences are reported without details to bound error collection");
         }
         if self.findings_full() {
             return;

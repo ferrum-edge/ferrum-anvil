@@ -456,7 +456,7 @@ fn show_plain(v: &Value) -> String {
 struct ExampleChecker {
     budget: usize,
     not_checked: usize,
-    compiled: HashMap<(String, bool), Option<jsonschema::Validator>>,
+    compiled: HashMap<(String, bool), Option<schema::CheckedValidator>>,
     /// Compiles attempted.
     compiles: usize,
     /// What those compiles scanned, and the limit.
@@ -520,10 +520,10 @@ impl ExampleChecker {
         if !self.compiled.contains_key(&key) {
             self.budget -= 1;
             self.compiles += 1;
-            let v = schema::compile_within(spec, schema, dir, &mut self.scanned, self.scan_budget).ok();
+            let v = schema::compile_within_checked(spec, schema, dir, &mut self.scanned, self.scan_budget).ok();
             self.compiled.insert(key.clone(), v);
         }
-        let Some(validator) = self.compiled.get(&key).and_then(Option::as_ref) else {
+        let Some(checked) = self.compiled.get(&key).and_then(Option::as_ref) else {
             self.not_checked += examples.len();
             return vec![];
         };
@@ -534,9 +534,19 @@ impl ExampleChecker {
                 continue;
             }
             self.budget -= 1;
-            for e in validator.iter_errors(v).take(3) {
-                let at = e.instance_path().to_string();
-                out.push(if at.is_empty() { format!("{name}: {e}") } else { format!("{name}: {e} at {at}") });
+            match checked.plan.mode(v) {
+                schema::CheckMode::Skip => self.not_checked += 1,
+                schema::CheckMode::Generic => {
+                    if !checked.validator.is_valid(v) {
+                        out.push(format!("{name}: does not match schema (details omitted to bound error collection)"));
+                    }
+                }
+                schema::CheckMode::Detailed => {
+                    for e in checked.validator.iter_errors(v).take(3) {
+                        let at = e.instance_path().to_string();
+                        out.push(if at.is_empty() { format!("{name}: {e}") } else { format!("{name}: {e} at {at}") });
+                    }
+                }
             }
         }
         out

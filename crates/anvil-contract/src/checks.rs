@@ -77,7 +77,7 @@ pub enum Function {
     Includes { values: Vec<Value>, pattern: Option<Regex> },
     Unique,
     Xor { fields: Vec<String> },
-    Schema { validator: Box<jsonschema::Validator> },
+    Schema { validator: Box<jsonschema::Validator>, plan: crate::schema::ValidationPlan },
 }
 
 fn options<T: DeserializeOwned>(name: &str, v: &Value) -> Result<T, String> {
@@ -205,13 +205,14 @@ impl Function {
                 let o: SchemaOpts = options(name, opts)?;
                 // Validation walks the schema with references expanded: the
                 // same size, nesting and cycle limits as OpenAPI schemas.
-                crate::schema::measure_standalone(&o.schema).map_err(|e| format!("JSON Schema for `schema` cannot be used: {e}"))?;
+                let plan = crate::schema::measure_standalone_plan(&o.schema)
+                    .map_err(|e| format!("JSON Schema for `schema` cannot be used: {e}"))?;
                 let validator = jsonschema::options()
                     .with_draft(jsonschema::Draft::Draft202012)
                     .with_pattern_options(crate::schema::linear_patterns())
                     .build(&o.schema)
                     .map_err(|e| format!("invalid JSON Schema for `schema`: {e}"))?;
-                Function::Schema { validator: Box::new(validator) }
+                Function::Schema { validator: Box::new(validator), plan }
             }
             other => return Err(format!("unknown function `{other}` (known: {})", FUNCTIONS.join(", "))),
         })
@@ -326,8 +327,18 @@ impl Function {
                     )),
                 }
             }
-            Function::Schema { validator } => {
+            Function::Schema { validator, plan } => {
                 let v = value?;
+                match plan.mode(v) {
+                    crate::schema::CheckMode::Skip => {
+                        return Some("schema check exceeded the validation-work limit and was not checked".into());
+                    }
+                    crate::schema::CheckMode::Generic => {
+                        return (!validator.is_valid(v))
+                            .then(|| "does not match the schema (details omitted to bound error collection)".into());
+                    }
+                    crate::schema::CheckMode::Detailed => {}
+                }
                 let errors: Vec<String> = validator
                     .iter_errors(v)
                     .take(3)
@@ -427,6 +438,22 @@ mod tests {
         assert!(eval("includes", json!({"values": ["401"]}), json!(["200", "401"])).is_none());
         assert!(eval("unique", Value::Null, json!(["a", "a"])).is_some());
         assert!(eval("schema", json!({"schema": {"type": "string", "maxLength": 2}}), json!("abc")).is_some());
+    }
+
+    #[test]
+    fn schema_function_bounds_instance_error_payloads() {
+        let function = Function::compile(
+            "schema",
+            &json!({"schema":{
+                "items":{"const":"x".repeat(256 * 1024)}
+            }}),
+        )
+        .unwrap();
+        let value = json!(vec![Value::Null; 128]);
+        let error = function.evaluate(Some(&value), &|_| None).unwrap();
+        assert!(error.contains("details omitted"), "{error}");
+        let valid = json!([]);
+        assert!(function.evaluate(Some(&valid), &|_| None).is_none());
     }
 
     #[test]
