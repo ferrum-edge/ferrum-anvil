@@ -112,7 +112,7 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
         )}}));
     } else if report.incomplete {
         notes.push(json!({"level": "warning", "message": {"text":
-            "the description is too large to lint completely: some schemas, parameters, responses or security schemes were not checked"
+            "lint report is incomplete: some targets or custom schema checks were not checked"
         }}));
     }
     if report.unresolved_ref_count > 0 {

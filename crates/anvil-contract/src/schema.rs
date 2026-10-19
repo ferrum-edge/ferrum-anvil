@@ -454,7 +454,9 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                             ["minLength", "maxLength", "format", "contentEncoding", "contentMediaType"]
                                 .into_iter()
                                 .filter(|keyword| o.contains_key(*keyword))
-                                .count(),
+                                .count()
+                                .saturating_add(usize::from(o.contains_key("const")))
+                                .saturating_add(o.get("enum").and_then(Value::as_array).map_or(0, Vec::len)),
                         ),
                     );
                     part.work.required_names = part

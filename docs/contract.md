@@ -87,7 +87,8 @@ company ruleset.
   activate unmeasured keywords at the bundle root. Compilation also limits
   retained schema locations to 64 MiB, schema member names and standalone
   root URIs to 4 KiB, property-pattern pairs and union-discriminator scans
-  to 1 million each, distinct regexes to 128 (128 KiB each), and repeated
+  to 1 million each, distinct regexes to 128 (each with 128 KiB size and DFA
+  limits), and repeated
   legacy-dependency payload copies to 32 MiB. A single property-pattern
   precomputation may scan at most 32 MiB of property-name text.
   Each instance has a 50-million-unit validation-work limit, a 256 MiB

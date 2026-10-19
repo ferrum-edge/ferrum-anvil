@@ -122,9 +122,40 @@ fn a_lint_cut_short_after_the_operations_is_a_local_error_unless_accepted() {
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!((report["incomplete"].as_bool(), report["skipped_operations"].as_u64()), (Some(true), Some(0)));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("some targets not checked") && stderr.contains("--allow-incomplete"), "{stderr}");
+    assert!(stderr.contains("some targets or custom schema checks were not checked") && stderr.contains("--allow-incomplete"), "{stderr}");
     let out = anvil(data.path(), &["lint-spec", spec.to_str().unwrap(), "--fail-on", "never", "--allow-incomplete"]);
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("some schemas, parameters, responses or security schemes were not checked"), "{text}");
+    assert!(text.contains("some targets or custom schema checks were not checked"), "{text}");
+}
+
+#[test]
+fn a_skipped_custom_schema_predicate_requires_allow_incomplete() {
+    let data = tempfile::tempdir().unwrap();
+    let spec = data.path().join("predicate.json");
+    let rules = data.path().join("predicate-rules.json");
+    let doc = serde_json::json!({"openapi":"3.1.0","info":{
+        "title":"t","version":"1","x-values":(0..10_000).collect::<Vec<_>>()
+    },"paths":{}});
+    std::fs::write(&spec, doc.to_string()).unwrap();
+    let ruleset = serde_json::json!({"anvil_ruleset":1,"rules":{"owner-when-unique":{
+        "given":"info",
+        "where":{"field":"raw.x-values","function":"schema","options":{"schema":{"uniqueItems":true}}},
+        "then":{"field":"raw.x-owner","function":"defined"}
+    }}});
+    std::fs::write(&rules, ruleset.to_string()).unwrap();
+    let args = ["lint-spec", spec.to_str().unwrap(), "--ruleset", rules.to_str().unwrap(), "--fail-on", "never"];
+    let out = anvil(data.path(), &args);
+    assert_eq!(out.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("some targets or custom schema checks were not checked"), "{stderr}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("lint report is incomplete"));
+
+    let out = anvil(data.path(), &[&args[..], &["--allow-incomplete"]].concat());
+    assert_eq!(out.status.code(), Some(0));
+    let out = anvil(data.path(), &[&args[..], &["--format", "sarif", "--allow-incomplete"]].concat());
+    assert_eq!(out.status.code(), Some(0));
+    let sarif: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let notes = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"].as_array().unwrap();
+    assert!(notes.iter().any(|n| n["message"]["text"].as_str().is_some_and(|s| s.contains("custom schema checks"))));
 }
