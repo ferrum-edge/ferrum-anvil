@@ -83,14 +83,21 @@
 
 ### Fixed
 
+- A user cancel or vault lock that arrives after a load schedule has ended,
+  while in-flight iterations drain, now stops their chains before the next
+  step, shortens the drain to `cancel_drain_ms`, and is reported as the run's
+  completion. Before, the cancel/lock observer stopped with the schedule, so a
+  chain could send its next request after the lock and the report said
+  `completed`.
 - Schema reference-expansion limits count text bytes and scalar members as
   well as containers, including overlapping copies retained by inline
   `not` validators, bounding repeated schema payload copies. Compiler
   preflight caps retained locations, property-pattern and union-analysis
   products, distinct regexes and legacy-dependency error copies. Instance
-  preflight bounds validation work and unique-item comparisons; invalid
-  values use generic mismatches when detailed error contexts could retain
-  too much, and checks beyond the work limit are reported as incomplete.
+  preflight bounds validation work, repeated text scans and unique-item
+  comparisons; invalid values use generic mismatches when detailed error
+  contexts could retain too much, and checks beyond the work limit are
+  reported as incomplete.
 - A custom ruleset's `schema` function is checked when the ruleset loads with
   the limits OpenAPI schemas already have: a reference cycle that does not
   descend into the value, more than 100,000 schema nodes with references
@@ -108,12 +115,6 @@
   to reserved bundle fields; literal and annotation references cannot make
   bundling copy unmeasured targets. Refused examples and bodies are reported
   as not checked, preserving ordinary structural recursion.
-- A user cancel or vault lock that arrives after a load schedule has ended,
-  while in-flight iterations drain, now stops their chains before the next
-  step, shortens the drain to `cancel_drain_ms`, and is reported as the run's
-  completion. Before, the cancel/lock observer stopped with the schedule, so a
-  chain could send its next request after the lock and the report said
-  `completed`.
 - Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
   embedded in string fields and apply the credential policy more evenly:
   - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed
