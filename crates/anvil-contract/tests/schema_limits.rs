@@ -352,8 +352,7 @@ fn metaschema_string_arrays_are_checked_before_uniqueness_validation() {
         ("required", json!({"required":pairs.clone()})),
         ("type", json!({"type":pairs.clone()})),
         ("dependencies", json!({"dependencies":{"x":pairs.clone()}})),
-        ("required", json!({"$ref":"#/default","default":{"required":pairs.clone()}})),
-        ("required", json!({"$defs":{"bad":{"required":pairs}}})),
+        ("required", json!({"$defs":{"bad":{"required":pairs.clone()}}})),
     ] {
         let err = schema::measure_standalone(&schema).unwrap_err();
         assert!(err.contains(keyword), "{keyword}: {err}");
@@ -362,6 +361,15 @@ fn metaschema_string_arrays_are_checked_before_uniqueness_validation() {
         let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
         assert!(err.contains(keyword), "{keyword}: {err}");
     }
+
+    let standalone_ref = json!({"$ref":"#/$defs/bad","$defs":{"bad":{"required":pairs.clone()}}});
+    let err = schema::measure_standalone(&standalone_ref).unwrap_err();
+    assert!(err.contains("required"), "{err}");
+    assert!(ruleset(&standalone_ref).is_err());
+    let openapi_ref = json!({"$ref":"#/components/schemas/Checked/$defs/bad","$defs":{"bad":{"required":pairs}}});
+    let document = spec(&openapi_ref);
+    let err = schema::compile(&document, &openapi_ref, Direction::Response).unwrap_err();
+    assert!(err.contains("required"), "{err}");
 
     let valid = json!({"type":["object","null"],"required":["a"],
         "dependencies":{"a":["b"],"b":{"required":["c"]}}});
@@ -457,6 +465,41 @@ fn regex_format_checks_charge_quadratic_parser_work() {
     assert!(checked.validator.is_valid(&json!("^(a|b)$")));
     assert!(checked.validator.is_valid(&json!(r"(?<x>a)\k<x>")));
     assert!(!checked.validator.is_valid(&json!("(")));
+
+    let property_shape = json!({"propertyNames":{"format":"regex"}});
+    let document = spec(&property_shape);
+    let property_checked = schema::compile_within_checked(
+        &document,
+        &property_shape,
+        Direction::Response,
+        &mut schema::Scanned::default(),
+        schema::Scanned::UNLIMITED,
+    )
+    .unwrap();
+    let mut keyed = serde_json::Map::new();
+    keyed.insert(many_groups.as_str().unwrap().to_owned(), Value::Null);
+    assert_eq!(property_checked.plan.mode(&Value::Object(keyed)), CheckMode::Skip);
+    assert_eq!(property_checked.plan.mode(&json!({"^a+$":null})), CheckMode::Detailed);
+    assert!(property_checked.validator.is_valid(&json!({"^a+$":null})));
+}
+
+#[test]
+fn repeated_regex_translation_is_checked_before_compilation() {
+    let long = json!({"pattern":format!("(?:{}){{0}}", r"\cA".repeat(50_000))});
+    let err = schema::measure_standalone(&long).unwrap_err();
+    assert!(err.contains("regex translation"), "{err}");
+    assert!(ruleset(&long).is_err());
+    let document = spec(&long);
+    assert!(schema::compile(&document, &long, Direction::Response).is_err());
+
+    let small = json!({"pattern":r"\cA"});
+    ruleset(&small).unwrap();
+    let document = spec(&small);
+    schema::compile(&document, &small, Direction::Response).unwrap();
+
+    let many = json!({"allOf":(0..6).map(|i| json!({"pattern":format!("{}x{i}", r"\cA".repeat(1_000))})).collect::<Vec<_>>()});
+    let err = schema::measure_standalone(&many).unwrap_err();
+    assert!(err.contains("regex translation"), "{err}");
 }
 
 #[test]

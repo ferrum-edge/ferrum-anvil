@@ -88,7 +88,7 @@ company ruleset.
   retained schema locations to 64 MiB, schema member names and standalone
   root URIs to 4 KiB, property-pattern pairs and union-discriminator scans
   to 1 million each, distinct regexes to 128 (each with 128 KiB size and DFA
-  limits), and repeated
+  limits), aggregate regex-translation work to 32 MiB, and repeated
   legacy-dependency payload copies to 32 MiB. `required`, array `type`,
   array-form `dependencies`, and `dependentRequired` must contain strings
   before metaschema or compiler uniqueness checks. A single property-pattern precomputation may scan at
@@ -97,7 +97,8 @@ company ruleset.
   even an absent long name is hashed against every map.
   Each instance has a 50-million-unit validation-work limit, a 256 MiB
   text-scan/input work limit (including repeated property-name lookups and
-  the quadratic named-group work of `format: "regex"`), and a conservative uniqueness-comparison limit
+  the quadratic named-group work of `format: "regex"` on values and object
+  keys), and a conservative uniqueness-comparison limit
   that counts repeated schema applications. Error details are collected only
   when possible retained copies, including repeated instance paths and
   cached prefixes of nested references, fit an

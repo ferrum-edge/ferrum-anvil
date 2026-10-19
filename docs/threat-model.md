@@ -343,10 +343,12 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   including their literal/annotation payloads.
   Compiler preflight also caps retained schema locations, property-pattern
   and union-analysis Cartesian products (including long required-name bytes
-  hashed against property maps), distinct compiled regexes, and
+  hashed against property maps), distinct compiled regexes and their aggregate
+  translation work, and
   invalid nested legacy-dependency payload copies. It rejects malformed
   string arrays before metaschema uniqueness checks. Instance preflight caps
-  schema traversal, quadratic regex-format parsing, and unique-item comparisons. Invalid values use a bounded
+  schema traversal, quadratic regex-format parsing of values and object keys,
+  and unique-item comparisons. Invalid values use a bounded
   generic mismatch when eager error contexts might copy too much schema or
   instance data, including cached reference-path prefixes; values over the
   validation-work cap are explicitly unchecked.

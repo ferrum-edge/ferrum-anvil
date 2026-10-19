@@ -46,6 +46,9 @@ const MAX_REF_TARGETS: usize = 4_096;
 const MAX_COMPILE_LOCATIONS: usize = 64 * 1024 * 1024;
 const MAX_PATTERN_PAIRS: usize = 1_000_000;
 const MAX_PATTERN_NAME_WORK: usize = 32 * 1024 * 1024;
+/// jsonschema-regex reparses the full pattern after translating each ECMA
+/// escape. Cap that work across distinct patterns before constructing it.
+const MAX_PATTERN_TRANSLATION_WORK: usize = 32 * 1024 * 1024;
 const MAX_UNION_ANALYSIS: usize = 1_000_000;
 /// Union discriminator inference hashes each required name against property
 /// maps, including names that none of those maps contains.
@@ -292,6 +295,10 @@ impl ValidationPlan {
                     objects = objects.saturating_add(1);
                     for (name, child) in map {
                         bytes = bytes.saturating_add(name.len());
+                        // `propertyNames` validates object keys as strings,
+                        // including checked `format: regex` assertions.
+                        string_bytes = string_bytes.saturating_add(name.len());
+                        longest_string = longest_string.max(name.len());
                         let escaped_len = name.len().saturating_add(name.bytes().filter(|b| matches!(b, b'~' | b'/')).count());
                         stack.push((child, path_len.saturating_add(1).saturating_add(escaped_len), depth.saturating_add(1)));
                     }
@@ -911,6 +918,21 @@ fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<Comp
     }
     if deepest_dependency.saturating_mul(work.bytes.saturating_add(work.steps.saturating_mul(64))) > MAX_DEPENDENCY_COPY_BYTES {
         return Err(format!("{TOO_LARGE}legacy dependency validation may copy too much schema data"));
+    }
+    let translation_work = patterns.iter().fold(0usize, |sum, pattern| {
+        // The dependency may parse again after every control or character
+        // class escape. Its class-set pass can double the input length; a
+        // translated character class adds fewer than 256 bytes per class
+        // escape, while control escapes only shorten the pattern.
+        let bytes = pattern.as_bytes();
+        let escapes = bytes.iter().filter(|byte| **byte == b'\\').count();
+        let class_escapes =
+            bytes.windows(2).filter(|pair| pair[0] == b'\\' && matches!(pair[1], b'd' | b'D' | b's' | b'S' | b'w' | b'W')).count();
+        let longest_translation = pattern.len().saturating_mul(2).saturating_add(class_escapes.saturating_mul(256));
+        sum.saturating_add(longest_translation.saturating_mul(escapes.saturating_add(1)))
+    });
+    if translation_work > MAX_PATTERN_TRANSLATION_WORK {
+        return Err(format!("{TOO_LARGE}regex translation exceeds {MAX_PATTERN_TRANSLATION_WORK} bytes of compiler work"));
     }
     Ok(CompileRisk { unique })
 }

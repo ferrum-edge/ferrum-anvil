@@ -93,9 +93,11 @@
   well as containers, including overlapping copies retained by inline
   `not` validators, bounding repeated schema payload copies. Compiler
   preflight caps retained locations, property-pattern and union-analysis
-  products, distinct regexes and legacy-dependency error copies, and checks
+  products, distinct regexes, aggregate regex-translation work and
+  legacy-dependency error copies, and checks
   malformed string arrays before metaschema or compiler uniqueness work. Instance
-  preflight bounds validation work, repeated text and property-name scans, quadratic regex-format parsing, and unique-item
+  preflight bounds validation work, repeated text and property-name scans,
+  quadratic regex-format parsing of values and object keys, and unique-item
   comparisons; invalid values use generic mismatches when detailed error
   contexts, including nested reference paths, could retain too much, and checks beyond the work limit are
   reported as incomplete.
