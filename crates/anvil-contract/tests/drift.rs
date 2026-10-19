@@ -481,9 +481,10 @@ fn hostile_traffic_is_capped() {
 }
 
 #[test]
-fn wide_recursive_schemas_are_walked_within_budget() {
+fn wide_recursive_schemas_are_refused_before_body_validation() {
     // Every property of a 10,000-property schema is the schema again; each
-    // body has 10,000 keys two levels deep.
+    // body has 10,000 keys two levels deep. Structural recursion compiles
+    // once; such bodies are then skipped before validation.
     let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"$ref": "#/components/schemas/S"}))).collect();
     let required: Vec<String> = (0..10_000).map(|i| format!("p{i}")).collect();
     let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {"/s": {"get": {"responses": {"200": {"description": "ok",
@@ -496,9 +497,60 @@ fn wide_recursive_schemas_are_walked_within_budget() {
     let start = std::time::Instant::now();
     let r = analyze(&spec, &obs, &DriftOptions::default());
     assert!(start.elapsed() < std::time::Duration::from_secs(30), "{:?}", start.elapsed());
-    assert!(r.notes.iter().any(|n| n.contains("budget for walking bodies")), "{:#?}", r.notes);
-    assert!(r.notes.iter().any(|n| n.contains("only the first schema difference")), "{:#?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("work limit") && n.contains("not checked")), "{:#?}", r.notes);
+    assert!(!r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn large_acyclic_required_lists_report_a_bounded_generic_difference() {
+    let props: serde_json::Map<String, Value> = (0..10_000).map(|i| (format!("p{i}"), json!({"type":"object"}))).collect();
+    let required: Vec<String> = (0..10_000).map(|i| format!("p{i}")).collect();
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/s":{"get":{"responses":{
+        "200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":props,"required":required}}}}
+    }}}}});
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let body: serde_json::Map<String, Value> = (0..1_000).map(|i| (format!("p{i}"), json!({}))).collect();
+    let r = analyze(&spec, &[Obs::new("wide", "GET", "/s").json(200, Value::Object(body)).0], &DriftOptions::default());
+    assert!(r.notes.iter().any(|n| n.contains("without details")), "{:?}", r.notes);
     assert!(r.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch));
+}
+
+#[test]
+fn large_schema_error_payloads_report_a_bounded_generic_mismatch() {
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"array","items":{"not":{"type":"object","description":"x".repeat(256 * 1024)}}}
+        }}}}}}}
+    });
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let report = analyze(&spec, &[Obs::new("payload", "GET", "/s").json(200, json!(vec![json!({}); 128])).0], &DriftOptions::default());
+    assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
+}
+
+#[test]
+fn repeated_long_instance_paths_report_a_bounded_generic_mismatch() {
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"object","additionalProperties":{"items":{"type":"string"}}}
+        }}}}}}}
+    });
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let body = json!({("k".repeat(512 * 1024)): vec![0; 4_096]});
+    let report = analyze(&spec, &[Obs::new("long-path", "GET", "/s").json(200, body).0], &DriftOptions::default());
+    assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
+
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"object","additionalProperties":{"items":{"allOf":vec![json!({"type":"string"}); 80]}}}
+        }}}}}}}
+    });
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let body = json!({("k".repeat(22_500)): vec![0; 360]});
+    let report = analyze(&spec, &[Obs::new("many-paths", "GET", "/s").json(200, body).0], &DriftOptions::default());
+    assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
 }
 
 #[test]

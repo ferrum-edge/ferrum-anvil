@@ -101,7 +101,7 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
     }
     if report.examples_not_checked > 0 {
         notes.push(json!({"level": "note", "message": {"text": format!(
-            "{} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far",
+            "{} example(s) were not checked: their schemas could not be checked within the supported features and work limits",
             report.examples_not_checked
         )}}));
     }
@@ -110,9 +110,10 @@ pub fn to_sarif(report: &LintReport, artifact_uri: &str) -> Value {
             "the description is too large to lint completely: {} operation(s) were not checked",
             report.skipped_operations
         )}}));
-    } else if report.incomplete {
+    }
+    if report.incomplete {
         notes.push(json!({"level": "warning", "message": {"text":
-            "the description is too large to lint completely: some schemas, parameters, responses or security schemes were not checked"
+            "lint report is incomplete: some targets or custom schema checks were not checked"
         }}));
     }
     if report.unresolved_ref_count > 0 {

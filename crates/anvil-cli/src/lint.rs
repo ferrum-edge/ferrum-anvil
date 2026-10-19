@@ -64,9 +64,9 @@ pub struct LintSpecArgs {
     /// Print the rules in effect and exit.
     #[arg(long)]
     list_rules: bool,
-    /// Accept a description too large to lint completely (something left
-    /// out, see `skipped_operations` and `incomplete`) instead of exiting
-    /// with 3.
+    /// Accept an incomplete lint report (targets or custom schema checks
+    /// left out; see `skipped_operations` and `incomplete`) instead of
+    /// exiting with 3.
     #[arg(long)]
     allow_incomplete: bool,
 }
@@ -130,7 +130,7 @@ pub fn lint_spec(a: &LintSpecArgs) -> Result<i32> {
     }
     if report.incomplete && !a.allow_incomplete {
         eprintln!(
-            "error: the description is too large to lint completely (some targets not checked); pass --allow-incomplete to accept that"
+            "error: lint report is incomplete (some targets or custom schema checks were not checked); pass --allow-incomplete to accept that"
         );
         return Ok(3);
     }
@@ -197,7 +197,7 @@ fn text(r: &LintReport, name: &str, fail_on: FailOn) -> String {
     }
     if r.examples_not_checked > 0 {
         s.push_str(&format!(
-            "note: {} example(s) were not checked: their schema uses an external reference or an unsupported pattern, refers to itself, or expands too far\n",
+            "note: {} example(s) were not checked: their schemas could not be checked within the supported features and work limits\n",
             r.examples_not_checked
         ));
     }
@@ -206,10 +206,9 @@ fn text(r: &LintReport, name: &str, fail_on: FailOn) -> String {
             "note: the description is too large to lint completely: {} operation(s) were not checked\n",
             r.skipped_operations
         ));
-    } else if r.incomplete {
-        s.push_str(
-            "note: the description is too large to lint completely: some schemas, parameters, responses or security schemes were not checked\n",
-        );
+    }
+    if r.incomplete {
+        s.push_str("note: lint report is incomplete: some targets or custom schema checks were not checked\n");
     }
     if r.unresolved_ref_count > 0 {
         let first: Vec<String> = r.unresolved_refs.iter().take(5).map(|p| t(p)).collect();

@@ -127,6 +127,69 @@ fn examples_are_checked_against_their_schema_in_every_dialect() {
 }
 
 #[test]
+fn large_error_payloads_keep_example_results_bounded() {
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"array","items":{"not":{"type":"object","description":"x".repeat(256 * 1024)}}},
+            "example":vec![json!({}); 128]
+        }}}}}}}
+    });
+    let report = run(&doc.to_string(), &RuleSet::recommended());
+    assert_eq!(report.examples_not_checked, 0);
+    assert!(report.findings.iter().any(|f| f.rule == "example-valid" && f.message.contains("details omitted")), "{:?}", report.findings);
+}
+
+#[test]
+fn custom_schema_work_refusal_marks_lint_incomplete() {
+    let rules = RuleSet::load(&[(
+        "bounded.json".into(),
+        serde_json::to_vec(&json!({"anvil_ruleset":1,"rules":{"bounded":{
+            "given":"info","then":{"field":"raw.x-values","function":"schema","options":{"schema":{"uniqueItems":true}}}
+        }}}))
+        .unwrap(),
+    )])
+    .unwrap();
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":vec![0; 10_000]},"paths":{}});
+    let report = run(&doc.to_string(), &rules);
+    assert!(report.incomplete);
+    assert!(report.findings.iter().any(|f| f.message.contains("not checked")), "{:?}", report.findings);
+    let valid = json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":[1,2]},"paths":{}});
+    let report = run(&valid.to_string(), &rules);
+    assert!(!report.incomplete);
+    assert!(!rules_hit(&report).contains(&"bounded"));
+    let duplicate = json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":[1,1]},"paths":{}});
+    let report = run(&duplicate.to_string(), &rules);
+    assert!(!report.incomplete);
+    assert!(rules_hit(&report).contains(&"bounded"));
+}
+
+#[test]
+fn unchecked_where_schema_marks_lint_incomplete_without_a_false_finding() {
+    let rules = RuleSet::load(&[(
+        "conditional.json".into(),
+        serde_json::to_vec(&json!({"anvil_ruleset":1,"rules":{"owner-when-unique":{
+            "given":"info",
+            "where":{"field":"raw.x-values","function":"schema","options":{"schema":{"uniqueItems":true}}},
+            "then":{"field":"raw.x-owner","function":"defined"}
+        }}}))
+        .unwrap(),
+    )])
+    .unwrap();
+    let doc = |values: Vec<usize>| json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":values},"paths":{}});
+    let unchecked = run(&doc((0..10_000).collect()).to_string(), &rules);
+    assert!(unchecked.incomplete);
+    assert!(!rules_hit(&unchecked).contains(&"owner-when-unique"));
+
+    let false_predicate = run(&doc(vec![1, 1]).to_string(), &rules);
+    assert!(!false_predicate.incomplete);
+    assert!(!rules_hit(&false_predicate).contains(&"owner-when-unique"));
+
+    let true_predicate = run(&doc(vec![1, 2]).to_string(), &rules);
+    assert!(!true_predicate.incomplete);
+    assert!(rules_hit(&true_predicate).contains(&"owner-when-unique"));
+}
+
+#[test]
 fn jsonpath_and_raw_fields_reach_the_document() {
     let rules = RuleSet::load(&[(
         "t.yaml".into(),
@@ -195,6 +258,14 @@ fn sarif_output_names_rules_and_regions() {
     }
     let email = rules.iter().find(|r| r["id"] == "acme-problem-json").unwrap();
     assert_eq!(email["defaultConfiguration"]["level"], "error");
+
+    let mut combined = r.clone();
+    combined.incomplete = true;
+    combined.skipped_operations = 2;
+    let sarif = anvil_contract::sarif::to_sarif(&combined, "api/orders.yaml");
+    let notes = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"].as_array().unwrap();
+    assert!(notes.iter().any(|note| note["message"]["text"].as_str().is_some_and(|text| text.contains("2 operation(s)"))));
+    assert!(notes.iter().any(|note| note["message"]["text"].as_str().is_some_and(|text| text.contains("custom schema checks"))));
 }
 
 #[test]
@@ -380,6 +451,26 @@ fn examples_behind_an_exploding_schema_are_counted_not_checked() {
 }
 
 #[test]
+fn refused_recursive_and_unevaluated_examples_are_reported_as_unchecked() {
+    for schema in [
+        json!({"allOf":[
+            {"properties":{"child":{"$ref":"#/components/schemas/S"}}},
+            {"properties":{"child":{"$ref":"#/components/schemas/S"}}}
+        ]}),
+        json!({"unevaluatedItems":false}),
+    ] {
+        let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},
+        "components":{"schemas":{"S":schema}},
+        "paths":{"/a":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"$ref":"#/components/schemas/S"},"examples":{"a":{"value":{}},"b":{"value":{}}}
+        }}}}}}}});
+        let r = run(&doc.to_string(), &RuleSet::recommended());
+        assert_eq!(r.examples_not_checked, 2);
+        assert!(!rules_hit(&r).contains(&"example-valid"));
+    }
+}
+
+#[test]
 fn security_headers_and_shared_examples_count_against_the_budgets() {
     // 20k global security schemes inherited by 3k operations sharing one
     // response with 20k headers and an example behind a refused schema.
@@ -448,4 +539,72 @@ fn crlf_sources_lint_like_lf() {
     let f = r.findings.iter().find(|f| f.rule == "path-params-declared").unwrap();
     assert_eq!((f.line, f.column), (Some(10), Some(5)));
     assert!(!r.findings.iter().any(|f| f.rule == "info-description"));
+}
+
+fn schema_rule(schema: serde_json::Value) -> Result<RuleSet, anvil_contract::RulesetError> {
+    let ruleset = json!({
+        "anvil_ruleset": 1,
+        "rules": { "info-shape": { "given": "info", "then": { "function": "schema", "options": { "schema": schema } } } }
+    });
+    RuleSet::load(&[("custom.json".into(), ruleset.to_string().into_bytes())])
+}
+
+#[test]
+fn custom_schema_functions_have_the_openapi_schema_limits() {
+    // Each level references the one below twice: tiny to write, 2^28 schema
+    // nodes for the validator to walk.
+    let mut defs = serde_json::Map::new();
+    defs.insert("d0".into(), json!({ "type": "object" }));
+    for i in 1..=28 {
+        let below = format!("#/$defs/d{}", i - 1);
+        defs.insert(format!("d{i}"), json!({ "allOf": [{ "$ref": below }, { "$ref": below }] }));
+    }
+    let fanout = json!({ "$defs": defs, "$ref": "#/$defs/d28" });
+    let e = schema_rule(fanout).unwrap_err();
+    assert!(e.message.contains("too large to check"), "{e:?}");
+    // A reference cycle that never descends into the value.
+    let e = schema_rule(json!({ "$defs": { "a": { "$ref": "#/$defs/a" } }, "$ref": "#/$defs/a" })).unwrap_err();
+    assert!(e.message.contains("refers to itself"), "{e:?}");
+    // References the measurement cannot follow are refused.
+    for schema in [
+        json!({ "$defs": { "a": { "$anchor": "a", "type": "object" } }, "$ref": "#a" }),
+        json!({ "$defs": { "a": { "$id": "https://example.test/a", "type": "object" } } }),
+        json!({ "$dynamicRef": "#meta" }),
+        json!({ "$ref": "https://example.test/schema.json" }),
+        // A nested resource in another dialect, with its own reference scope.
+        json!({ "allOf": [{ "$schema": "http://json-schema.org/draft-04/schema#", "id": "https://example.test/inner" }] }),
+        json!({ "$schema": "http://json-schema.org/draft-04/schema#" }),
+        // Literal data a reference compiles as a schema is checked as one.
+        json!({ "default": { "$schema": "http://json-schema.org/draft-04/schema#" }, "$ref": "#/default" }),
+    ] {
+        let e = schema_rule(schema.clone()).unwrap_err();
+        assert!(e.message.contains("not supported") || e.message.contains("only"), "{schema}: {e:?}");
+    }
+    // Ordinary schemas, with local references and recursion through the
+    // value, still load and lint; a property named `$ref` is not a keyword.
+    let rules = schema_rule(json!({
+        "$id": "https://example.test/info",
+        "$defs": { "node": { "type": "object", "properties": { "child": { "$ref": "#/$defs/node" } } } },
+        "allOf": [{ "$ref": "#/$defs/node" }],
+        "required": ["x-acme-owner"],
+        "properties": { "$ref": { "type": "string" } }
+    }))
+    .unwrap();
+    let r = run(&fixture("orders-3.1.yaml"), &rules);
+    assert!(rules_hit(&r).contains(&"info-shape"), "{:?}", r.findings);
+    // Keywords inside literal data are data, not schema keywords: these load
+    // and their constraints apply.
+    for (schema, fails) in [
+        (json!({ "const": { "$id": "invoice" } }), true),
+        (json!({ "enum": [{ "$ref": "https://example.test/x" }] }), true),
+        (json!({ "not": { "const": { "$id": "invoice" } } }), false),
+        // Local-pointer references inside literal data are data too.
+        (json!({ "const": { "$ref": "#" } }), true),
+        (json!({ "enum": [{ "$ref": "#" }] }), true),
+        (json!({ "default": { "$ref": "#" }, "examples": [{ "$ref": "#" }], "type": "object", "required": ["x-acme-owner"] }), true),
+    ] {
+        let rules = schema_rule(schema.clone()).unwrap_or_else(|e| panic!("{schema}: {e:?}"));
+        let r = run(&fixture("orders-3.1.yaml"), &rules);
+        assert_eq!(rules_hit(&r).contains(&"info-shape"), fails, "{schema}: {:?}", r.findings);
+    }
 }

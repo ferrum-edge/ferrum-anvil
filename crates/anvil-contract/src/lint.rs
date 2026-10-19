@@ -133,19 +133,16 @@ pub struct LintReport {
     pub unresolved_refs: Vec<String>,
     #[serde(default)]
     pub unresolved_ref_count: usize,
-    /// Body examples not checked: their schema uses an external reference
-    /// or an unsupported pattern, refers to itself without descending into
-    /// the value, or expands too far through its references.
+    /// Body examples not checked: their schemas use unsupported features,
+    /// cannot be compiled, or exceed the validation/scanning work limits.
     #[serde(default)]
     pub examples_not_checked: usize,
     /// Operations left out because the description is too large to lint
     /// completely (see `model::MAX_MODEL_WORK`).
     #[serde(default)]
     pub skipped_operations: usize,
-    /// The description is too large to lint completely: past some point,
-    /// nothing more was checked (operations, parameters, responses, schemas,
-    /// properties and security schemes), whether or not operations were left
-    /// out.
+    /// The description or a custom schema instance exceeded a work limit;
+    /// some operations, fields, or rule checks were not completed.
     #[serde(default)]
     pub incomplete: bool,
 }
@@ -172,7 +169,8 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
     };
     let mut examples = |m: &Media<'_>, dir: Direction| checker.check(spec, m, dir);
     let model = Model::build(spec, &mut examples);
-    let mut out = Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0 };
+    let mut out =
+        Collector { spec, findings: vec![], counts: SeverityCounts::default(), seen: HashSet::new(), dropped: 0, incomplete: false };
     let (mut run, mut skipped) = (0, 0);
     for rule in &rules.rules {
         if !rule.applies_to(spec.dialect) {
@@ -215,7 +213,7 @@ pub fn lint(spec: &Spec, rules: &RuleSet, opts: &LintOptions) -> LintReport {
             .then(a.message.cmp(&b.message))
     });
     let skipped_operations = model.skipped_operations;
-    let incomplete = model.incomplete;
+    let incomplete = model.incomplete || out.incomplete;
     let examples_not_checked = checker.not_checked;
     let (unresolved_refs, unresolved_ref_count) = spec.unresolved();
     let mut dropped = out.dropped;
@@ -257,6 +255,7 @@ struct Collector<'a> {
     counts: SeverityCounts,
     seen: HashSet<(String, String, String)>,
     dropped: usize,
+    incomplete: bool,
 }
 
 /// A selected field value and the pointer it came from, when known. A value
@@ -270,12 +269,16 @@ fn apply(spec: &Spec, rule: &Rule, t: &Target, out: &mut Collector<'_>) {
     let sibling = |name: &str| -> Option<Value> { t.view.get(name).cloned() };
     for c in &rule.conditions {
         let selected = select(spec, t, c);
-        if selected.iter().any(|s| c.function.evaluate(s.value.as_deref(), &sibling).is_some()) {
+        if selected.iter().any(|s| {
+            out.incomplete |= c.function.schema_check_skipped(s.value.as_deref());
+            c.function.evaluate(s.value.as_deref(), &sibling).is_some()
+        }) {
             return;
         }
     }
     for a in &rule.then {
         for s in select(spec, t, a) {
+            out.incomplete |= a.function.schema_check_skipped(s.value.as_deref());
             let Some(reason) = a.function.evaluate(s.value.as_deref(), &sibling) else { continue };
             let pointer = s.pointer.unwrap_or_else(|| t.pointer.clone());
             // A Swagger 2.0 synthetic target keys itself `…#suffix`.
@@ -457,7 +460,7 @@ fn show_plain(v: &Value) -> String {
 struct ExampleChecker {
     budget: usize,
     not_checked: usize,
-    compiled: HashMap<(String, bool), Option<jsonschema::Validator>>,
+    compiled: HashMap<(String, bool), Option<schema::CheckedValidator>>,
     /// Compiles attempted.
     compiles: usize,
     /// What those compiles scanned, and the limit.
@@ -521,10 +524,10 @@ impl ExampleChecker {
         if !self.compiled.contains_key(&key) {
             self.budget -= 1;
             self.compiles += 1;
-            let v = schema::compile_within(spec, schema, dir, &mut self.scanned, self.scan_budget).ok();
+            let v = schema::compile_within_checked(spec, schema, dir, &mut self.scanned, self.scan_budget).ok();
             self.compiled.insert(key.clone(), v);
         }
-        let Some(validator) = self.compiled.get(&key).and_then(Option::as_ref) else {
+        let Some(checked) = self.compiled.get(&key).and_then(Option::as_ref) else {
             self.not_checked += examples.len();
             return vec![];
         };
@@ -535,9 +538,19 @@ impl ExampleChecker {
                 continue;
             }
             self.budget -= 1;
-            for e in validator.iter_errors(v).take(3) {
-                let at = e.instance_path().to_string();
-                out.push(if at.is_empty() { format!("{name}: {e}") } else { format!("{name}: {e} at {at}") });
+            match checked.plan.mode(v) {
+                schema::CheckMode::Skip => self.not_checked += 1,
+                schema::CheckMode::Generic => {
+                    if !checked.validator.is_valid(v) {
+                        out.push(format!("{name}: does not match schema (details omitted to bound error collection)"));
+                    }
+                }
+                schema::CheckMode::Detailed => {
+                    for e in checked.validator.iter_errors(v).take(3) {
+                        let at = e.instance_path().to_string();
+                        out.push(if at.is_empty() { format!("{name}: {e}") } else { format!("{name}: {e} at {at}") });
+                    }
+                }
             }
         }
         out
@@ -638,7 +651,7 @@ mod tests {
         drop(Model::build(&spec, &mut examples));
         assert_eq!(checker.compiles, 100);
         // Members alone would not have stopped them; bytes did, after about
-        // ten compiles.
+        // a few compiles (both inputs and completed bundles are charged).
         assert!(checker.scanned.steps < 2_000, "{:?}", checker.scanned);
         assert!(checker.scanned.bytes <= (11 << 20) + 10_000, "{:?}", checker.scanned);
         assert!(checker.not_checked >= 89, "{}", checker.not_checked);

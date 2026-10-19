@@ -104,6 +104,39 @@
   completion. Before, the cancel/lock observer stopped with the schedule, so a
   chain could send its next request after the lock and the report said
   `completed`.
+- Schema reference-expansion limits count text bytes and scalar members as
+  well as containers, including overlapping copies retained by inline
+  `not` validators, bounding repeated schema payload copies. Compiler
+  preflight caps retained locations, property-pattern and union-analysis
+  products, distinct regexes, aggregate regex-translation work and
+  legacy-dependency error copies, and checks
+  malformed string arrays before metaschema or compiler uniqueness work. Instance
+  preflight bounds validation work, repeated text and property-name scans,
+  quadratic regex-format parsing of values and object keys, and unique-item
+  comparisons; invalid values use generic mismatches when detailed error
+  contexts, including nested reference paths, could retain too much, and checks beyond the work limit are
+  reported as incomplete.
+- A custom ruleset's `schema` function is checked when the ruleset loads with
+  the limits OpenAPI schemas already have: a reference cycle that does not
+  descend into the value, more than 100,000 schema nodes with references
+  expanded, or references nested too deeply make the ruleset fail to load,
+  instead of a small schema fanning out into exponential work during lint.
+  References must be plain `#`/`#/…` pointers within the schema, and `$id` or
+  `$schema` below the root, a root `$schema` other than draft 2020-12,
+  `$anchor`, `$dynamicRef` and `$recursiveRef` are refused; keywords inside
+  literal data (`const`, `enum`, `default`, `examples`) are not read as schema
+  keywords or references, here or for OpenAPI schemas.
+  Recursive reference components with non-structural applicators
+  (composition, including a nullable self-reference spelled as `anyOf`,
+  conditions, negation, dependencies, overlapping property patterns,
+  `contains`), and `unevaluatedProperties`/`unevaluatedItems` even without
+  references, are conservatively refused as too complex to check; recursion
+  through properties and array items stays checked with any number of
+  references. Shared OpenAPI validation also refuses resource/dialect changes and references
+  to reserved bundle fields; literal and annotation references cannot make
+  bundling copy unmeasured targets. Refused examples and bodies are reported
+  as not checked. Copied bundle targets are charged once against the
+  expanded-node limit.
 - Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
   embedded in string fields and apply the credential policy more evenly:
   - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed

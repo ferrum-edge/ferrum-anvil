@@ -57,19 +57,63 @@ company ruleset.
     `Cat: allOf [Pet]` is such a cycle;
   - a chain has more than 32 references, or 512 levels of nesting along
     one;
+  - it nests subschemas more than 64 levels deep: constraints are refused
+    before conversion could truncate them (literal data adds no schema depth);
+  - a schema in a recursive region uses composition (`allOf`, `anyOf`,
+    `oneOf`, including a nullable reference spelled as `anyOf`), conditions,
+    negation, dependencies, overlapping property patterns, `contains`, or a
+    `$ref` with sibling applicators: these can apply several routes to the
+    same nested value. Recursion through named properties,
+    `additionalProperties` and array items remains supported, with any number
+    of references (a tree node's `parent` and `children`, a comment's
+    `author` and `replies`); some legitimate composite recursive schemas are
+    conservatively refused;
+  - it uses `unevaluatedProperties` or `unevaluatedItems`: the validator can
+    re-evaluate nested schemas exponentially even without references;
   - it expands to more than 100,000 nodes with every `$ref` expanded
     (repeated references count each time);
   - it and the schemas it references have more than 1,000,000 members and
     items (a large `enum` passes; a pathological one is not scanned on
-    every compile), or more than 16 MiB of member names and strings (each
-    compile copies them, however few members hold them: a description of
-    several megabytes, say).
+    every compile), or more than 16 MiB of member names and strings. These
+    limits also apply with each reference expanded: error collection may
+    copy a large subschema for every repeated reference. A recursive region
+    is charged for a complete lap, regardless of its entry point. Inline
+    `not` adds the cost of each retained child-schema copy, including data
+    in literals and annotations; deep negation cannot multiply a large
+    payload past these limits without references either.
 
   Examples behind such a schema are counted in `examples_not_checked`. A
   schema is compiled once however many media types `$ref` it, and all the
   compiles of a lint scan 20,000,000 members and items, and 320 MiB of
   names and strings, at most; examples past that are counted as not checked
-  too.
+  too. Both the original schema and the completed converted bundle are
+  measured and charged before validator construction; copied targets cannot
+  activate unmeasured keywords at the bundle root. Compilation also limits
+  retained schema locations to 64 MiB, schema member names and standalone
+  root URIs to 4 KiB, property-pattern pairs and union-discriminator scans
+  to 1 million each, distinct regexes to 128 (each with 128 KiB size and DFA
+  limits), aggregate regex-translation work to 32 MiB, and repeated
+  legacy-dependency payload copies to 32 MiB. `required`, array `type`,
+  array-form `dependencies`, and `dependentRequired` must contain strings
+  before metaschema or compiler uniqueness checks. A single property-pattern precomputation may scan at
+  most 32 MiB of property-name text. Union-discriminator preflight also
+  limits required-name bytes multiplied by property maps to 32 MiB, since
+  even an absent long name is hashed against every map.
+  Each instance has a 50-million-unit validation-work limit, a 256 MiB
+  text-scan/input work limit (including repeated property-name lookups and
+  the quadratic named-group work of `format: "regex"` on values and object
+  keys), and a conservative uniqueness-comparison limit
+  that counts repeated schema applications. Error details are collected only
+  when possible retained copies, including repeated instance paths and
+  cached prefixes of nested references, fit an
+  8 MiB allowance. Otherwise an invalid value has a generic mismatch;
+  a value exceeding validation-work limits is counted as not checked.
+  References must remain plain document-local pointers. Modern `$id`,
+  anchors, dynamic/recursive references and nested dialect changes are
+  refused, as are references to the bundle root or root validation keywords
+  that copying would activate. Legacy identifiers are removed by conversion.
+  Literal data and unknown annotations are counted for size, but their
+  members are not schema keywords unless a reference targets them.
 - **Operations are bounded too.** They look at 2 million parameters,
   responses and media types at most in all. Inherited path-level
   parameters, the document's security requirements and a shared response's
@@ -144,7 +188,8 @@ skipped this way.
 
 A check is `{ field, function, options }`. `then` fails when any check
 fails for any selected value; `where` skips the target when any of its
-checks fails.
+checks fails. If a `schema` check cannot run within its work limit, the
+report is marked incomplete, including when that check is in `where`.
 
 **Fields** are dot-separated names of the target's fields (below). `*`
 selects every item of a list or value of a map (`static_segments.*`,
@@ -174,6 +219,26 @@ function sees the whole target.
 
 `pattern`, `casing` and `enumeration` pass on a missing value: pair them with
 `defined` when the value is required.
+
+A `schema` function's JSON Schema is checked when the ruleset is loaded,
+with the limits OpenAPI schemas have: references resolve within the schema
+and must be plain `#` or `#/…` pointers, and nothing may change how they
+resolve (no `$id` or `$schema` below the root, a root `$schema` only for
+draft 2020-12, no `$anchor`, `$dynamicRef` or `$recursiveRef`). Literal data
+(`const`, `enum`, `default`, `examples`) is not read as schema keywords
+unless a reference points into it. A reference cycle that does not descend
+into the value, more than 100,000 schema nodes with every reference expanded
+(repeated references count each time), or references nested too deeply make
+the ruleset fail to load.
+The same conservative recursive-work and `unevaluated*` refusals apply to
+custom schemas. Rejected example/body schemas are reported as not checked;
+rejected custom schemas make the ruleset fail to load. They never produce
+a successful validation or a schema-mismatch claim without validation.
+For an instance that exceeds the runtime work limit, a custom `schema`
+function fails closed with an explicit “not checked” reason. Large invalid
+instances can report a generic mismatch when detailed error collection
+would retain too much data. A skipped custom check sets `LintReport.incomplete`
+so the CLI requires explicit acceptance of a partial report.
 
 **Messages.** Without `message`, a finding reads `<target>: <field> <why>`.
 A `message` may use `{{value}}` (the checked value), `{{field}}`,
@@ -531,9 +596,10 @@ revised text.
 
 A HAR capture is read up to 64 MiB and 10,000 entries (a note says how many
 were left out). Parsed bodies are also capped at 1,000,000 JSON values per
-analysis, and when a large body could produce very many validation errors
-(many objects against a long `required` list) only its first difference is
-reported, with a note.
+analysis. When detailed validation errors could retain too much data (many
+objects against a long `required` list, for example), an invalid body gets
+a generic schema mismatch without details, with a note. A body beyond the
+validation-work limit is recorded as not checked instead.
 
 ### History, the desktop and the CLI
 

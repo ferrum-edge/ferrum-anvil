@@ -3705,9 +3705,8 @@ export interface LintReport {
   unresolved_refs?: string[];
   unresolved_ref_count?: number;
   /**
-   * Body examples not checked: their schema uses an external reference
-   * or an unsupported pattern, refers to itself without descending into
-   * the value, or expands too far through its references.
+   * Body examples not checked: their schemas use unsupported features,
+   * cannot be compiled, or exceed the validation/scanning work limits.
    */
   examples_not_checked?: number;
   /**
@@ -3716,10 +3715,8 @@ export interface LintReport {
    */
   skipped_operations?: number;
   /**
-   * The description is too large to lint completely: past some point,
-   * nothing more was checked (operations, parameters, responses, schemas,
-   * properties and security schemes), whether or not operations were left
-   * out.
+   * The description or a custom schema instance exceeded a work limit;
+   * some operations, fields, or rule checks were not completed.
    */
   incomplete?: boolean;
 }
