@@ -585,9 +585,10 @@ revised text.
 
 A HAR capture is read up to 64 MiB and 10,000 entries (a note says how many
 were left out). Parsed bodies are also capped at 1,000,000 JSON values per
-analysis, and when a large body could produce very many validation errors
-(many objects against a long `required` list) only its first difference is
-reported, with a note.
+analysis. When detailed validation errors could retain too much data (many
+objects against a long `required` list, for example), an invalid body gets
+a generic schema mismatch without details, with a note. A body beyond the
+validation-work limit is recorded as not checked instead.
 
 ### History, the desktop and the CLI
 

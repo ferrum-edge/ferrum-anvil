@@ -144,7 +144,7 @@ fn custom_schema_work_refusal_marks_lint_incomplete() {
     let rules = RuleSet::load(&[(
         "bounded.json".into(),
         serde_json::to_vec(&json!({"anvil_ruleset":1,"rules":{"bounded":{
-            "given":"info","then":{"field":"x-values","function":"schema","options":{"schema":{"uniqueItems":true}}}
+            "given":"info","then":{"field":"raw.x-values","function":"schema","options":{"schema":{"uniqueItems":true}}}
         }}}))
         .unwrap(),
     )])
@@ -153,6 +153,14 @@ fn custom_schema_work_refusal_marks_lint_incomplete() {
     let report = run(&doc.to_string(), &rules);
     assert!(report.incomplete);
     assert!(report.findings.iter().any(|f| f.message.contains("not checked")), "{:?}", report.findings);
+    let valid = json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":[1,2]},"paths":{}});
+    let report = run(&valid.to_string(), &rules);
+    assert!(!report.incomplete);
+    assert!(!rules_hit(&report).contains(&"bounded"));
+    let duplicate = json!({"openapi":"3.1.0","info":{"title":"t","version":"1","x-values":[1,1]},"paths":{}});
+    let report = run(&duplicate.to_string(), &rules);
+    assert!(!report.incomplete);
+    assert!(rules_hit(&report).contains(&"bounded"));
 }
 
 #[test]

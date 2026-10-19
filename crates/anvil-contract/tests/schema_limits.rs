@@ -139,6 +139,27 @@ fn references_into_data_make_the_target_an_active_schema() {
 }
 
 #[test]
+fn references_with_unmeasurable_array_indexes_are_refused() {
+    for reference in ["#/default/00", "#/default/+0", "#/%64efault/00", "#/default/%30%30"] {
+        let schema = json!({
+            "$ref":reference,
+            "default":[{"allOf":[
+                {"properties":{"child":{"$ref":reference}}},
+                {"properties":{"child":{"$ref":reference}}}
+            ]}]
+        });
+        let err = schema::measure_standalone(&schema).unwrap_err();
+        assert!(err.contains("unresolved reference"), "{reference}: {err}");
+        assert!(ruleset(&schema).is_err(), "{reference}");
+    }
+    // Canonical array indexes still resolve, including inside annotation
+    // data that becomes an active schema when referenced.
+    let schema = json!({"default":[{"type":"string"}],"$ref":"#/default/0"});
+    schema::measure_standalone(&schema).unwrap();
+    ruleset(&schema).unwrap();
+}
+
+#[test]
 fn openapi_scope_changes_and_bundle_collisions_are_refused() {
     for schema in [
         json!({"$id":"https://example.test/scoped", "x":{
@@ -295,6 +316,12 @@ fn repeated_error_paths_choose_generic_reporting() {
     let plan = schema::measure_standalone_plan(&json!({"additionalProperties":{"items":{"type":"string"}}})).unwrap();
     let long_name = "k".repeat(512 * 1024);
     let value = json!({(long_name): vec![0; 4_096]});
+    assert_eq!(plan.mode(&value), CheckMode::Generic);
+    let plan = schema::measure_standalone_plan(&json!({
+        "additionalProperties":{"items":{"allOf":vec![json!({"type":"string"}); 80]}}
+    }))
+    .unwrap();
+    let value = json!({("k".repeat(22_500)): vec![0; 360]});
     assert_eq!(plan.mode(&value), CheckMode::Generic);
 }
 

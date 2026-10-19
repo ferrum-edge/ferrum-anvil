@@ -313,7 +313,7 @@ impl ValidationPlan {
         // product exceeds the retained-error allowance.
         let instance_heap = bytes.saturating_add(values.saturating_mul(64));
         let schema_heap = self.work.bytes.saturating_add(self.work.steps.saturating_mul(64));
-        if error_path_bytes > MAX_ERROR_BYTES
+        if error_path_bytes.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
             || instance_heap.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
             || schema_heap.saturating_mul(values) > MAX_ERROR_BYTES
         {
@@ -884,9 +884,9 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
     let mut stepped = root.steps;
     let mut bytes = root.bytes;
     let mut parts: HashMap<String, Part> = HashMap::from([(ROOT.to_string(), root)]);
-    let mut part_of = |parts: &mut HashMap<String, Part>, key: &str| -> Result<bool, String> {
+    let mut part_of = |parts: &mut HashMap<String, Part>, key: &str| -> Result<(), String> {
         if parts.contains_key(key) {
-            return Ok(true);
+            return Ok(());
         }
         if parts.len() >= MAX_REF_TARGETS {
             return Err(format!("{TOO_LARGE}the schema reaches more than {MAX_REF_TARGETS} referenced schemas"));
@@ -912,9 +912,13 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
                     return Err(too_nested());
                 }
                 parts.insert(key.to_string(), part);
-                Ok(true)
+                Ok(())
             }
-            None => Ok(false),
+            // The validator's resolver accepts some array-index spellings
+            // that serde_json::Value::pointer does not. An unmeasured target
+            // must never reach validator construction, even if that resolver
+            // could follow it at validation time.
+            None => Err(format!("unresolved reference #{key}")),
         }
     };
 
@@ -925,7 +929,8 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
     while let Some(key) = queue.pop() {
         let targets: Vec<String> = parts[key.as_str()].refs.iter().map(|(t, _)| t.clone()).collect();
         for t in targets {
-            if queued.insert(t.clone()) && part_of(&mut parts, &t)? {
+            if queued.insert(t.clone()) {
+                part_of(&mut parts, &t)?;
                 reached.push(t.clone());
                 queue.push(t);
             }

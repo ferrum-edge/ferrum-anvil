@@ -539,6 +539,17 @@ fn repeated_long_instance_paths_report_a_bounded_generic_mismatch() {
     let report = analyze(&spec, &[Obs::new("long-path", "GET", "/s").json(200, body).0], &DriftOptions::default());
     assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
     assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
+
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+        "/s":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{
+            "schema":{"type":"object","additionalProperties":{"items":{"allOf":vec![json!({"type":"string"}); 80]}}}
+        }}}}}}}
+    });
+    let spec = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let body = json!({("k".repeat(22_500)): vec![0; 360]});
+    let report = analyze(&spec, &[Obs::new("many-paths", "GET", "/s").json(200, body).0], &DriftOptions::default());
+    assert!(report.notes.iter().any(|n| n.contains("without details")), "{:?}", report.notes);
+    assert!(report.findings.iter().any(|f| f.kind == DriftKind::ResponseSchemaMismatch), "{:?}", report.findings);
 }
 
 #[test]
