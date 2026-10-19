@@ -279,6 +279,31 @@ fn compiler_location_and_cartesian_work_are_bounded() {
     let all_of: Vec<Value> = (0..1_001).map(|_| json!({"properties":{}})).collect();
     refused_work(&json!({"anyOf":[{"required":required,"allOf":all_of},false]}));
 
+    // The discriminator probes every required name against each property
+    // map, hashing the whole name even when none of the maps contains it.
+    // This is a small input whose comparison count alone looks harmless.
+    let long_required = "k".repeat(128 * 1024);
+    let property_map = json!({"properties":{"x":true,"y":true}});
+    let many_maps = vec![property_map.clone(); 512];
+    let schema = json!({"anyOf":[{"required":[long_required],"allOf":many_maps},false,false]});
+    refused_work(&schema);
+    let document = spec(&schema);
+    let err = schema::compile(&document, &schema, Direction::Response).unwrap_err();
+    assert!(schema::too_large(&err), "{err}");
+
+    // A reference to the required constraint must be charged too.
+    let referenced = json!({"$defs":{"required":{"required":["k".repeat(128 * 1024)]}},
+        "anyOf":[{"allOf":[{"$ref":"#/$defs/required"},
+            {"allOf":vec![property_map.clone(); 512]}]},false,false]});
+    refused_work(&referenced);
+
+    let accepted = json!({"anyOf":[{"required":["id"],"allOf":vec![property_map; 8]},false,false]});
+    ruleset(&accepted).unwrap();
+    let document = spec(&accepted);
+    let validator = schema::compile(&document, &accepted, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!({"id":1})));
+    assert!(!validator.is_valid(&json!({"x":1})));
+
     let patterns: serde_json::Map<String, Value> = (0..129).map(|i| (format!("^p{i}$"), json!(true))).collect();
     refused_work(&json!({"patternProperties":patterns}));
     ruleset(&json!({"patternProperties":{"^p$":true}})).unwrap();

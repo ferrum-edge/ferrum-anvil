@@ -342,7 +342,8 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   Inline `not` nesting charges overlapping retained child-schema copies,
   including their literal/annotation payloads.
   Compiler preflight also caps retained schema locations, property-pattern
-  and union-analysis Cartesian products, distinct compiled regexes, and
+  and union-analysis Cartesian products (including long required-name bytes
+  hashed against property maps), distinct compiled regexes, and
   invalid nested legacy-dependency payload copies. Instance preflight caps
   schema traversal and unique-item comparisons. Invalid values use a bounded
   generic mismatch when eager error contexts might copy too much schema or

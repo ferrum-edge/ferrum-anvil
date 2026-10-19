@@ -92,7 +92,9 @@ company ruleset.
   legacy-dependency payload copies to 32 MiB. Referenced
   `dependentRequired` lists must contain strings before the compiler's
   uniqueness check. A single property-pattern precomputation may scan at
-  most 32 MiB of property-name text.
+  most 32 MiB of property-name text. Union-discriminator preflight also
+  limits required-name bytes multiplied by property maps to 32 MiB, since
+  even an absent long name is hashed against every map.
   Each instance has a 50-million-unit validation-work limit, a 256 MiB
   text-scan/input work limit (including repeated property-name lookups), and a conservative uniqueness-comparison limit
   that counts repeated schema applications. Error details are collected only

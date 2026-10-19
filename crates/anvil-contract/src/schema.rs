@@ -47,6 +47,9 @@ const MAX_COMPILE_LOCATIONS: usize = 64 * 1024 * 1024;
 const MAX_PATTERN_PAIRS: usize = 1_000_000;
 const MAX_PATTERN_NAME_WORK: usize = 32 * 1024 * 1024;
 const MAX_UNION_ANALYSIS: usize = 1_000_000;
+/// Union discriminator inference hashes each required name against property
+/// maps, including names that none of those maps contains.
+const MAX_UNION_NAME_WORK: usize = 32 * 1024 * 1024;
 const MAX_DISTINCT_PATTERNS: usize = 128;
 const MAX_DEPENDENCY_COPY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_VALIDATION_WORK: usize = 50_000_000;
@@ -244,6 +247,7 @@ struct Work {
     name_bytes: usize,
     unique_uses: usize,
     required_names: usize,
+    required_name_bytes: usize,
     property_maps: usize,
     union: bool,
 }
@@ -342,6 +346,7 @@ impl Work {
         self.name_bytes = self.name_bytes.saturating_add(other.name_bytes);
         self.unique_uses = self.unique_uses.saturating_add(other.unique_uses);
         self.required_names = self.required_names.saturating_add(other.required_names);
+        self.required_name_bytes = self.required_name_bytes.saturating_add(other.required_name_bytes);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
         self.union |= other.union;
     }
@@ -368,6 +373,9 @@ impl Work {
         }
         if self.union && self.required_names.saturating_mul(self.property_maps) > MAX_UNION_ANALYSIS {
             return Err(format!("{TOO_LARGE}union discriminator analysis exceeds {MAX_UNION_ANALYSIS} comparisons"));
+        }
+        if self.union && self.required_name_bytes.saturating_mul(self.property_maps) > MAX_UNION_NAME_WORK {
+            return Err(format!("{TOO_LARGE}union discriminator analysis exceeds {MAX_UNION_NAME_WORK} bytes of name comparisons"));
         }
         Ok(())
     }
@@ -501,7 +509,8 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                             })
                         })
                     };
-                    let name_bytes = array_name_bytes(o.get("required"))
+                    let required_name_bytes = array_name_bytes(o.get("required"));
+                    let name_bytes = required_name_bytes
                         .saturating_add(
                             properties.map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
                         )
@@ -513,6 +522,8 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                                 .map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
                         );
                     part.work.name_bytes = part.work.name_bytes.saturating_add(copies.saturating_mul(name_bytes));
+                    part.work.required_name_bytes =
+                        part.work.required_name_bytes.saturating_add(copies.saturating_mul(required_name_bytes));
                     part.work.required_names = part
                         .work
                         .required_names
@@ -739,6 +750,7 @@ fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<Comp
     let mut pattern_pairs = 0usize;
     let mut pattern_name_work = 0usize;
     let mut required_names = 0usize;
+    let mut required_name_bytes = 0usize;
     let mut property_maps = 0usize;
     let mut has_union = false;
     let mut unique = false;
@@ -789,6 +801,9 @@ fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<Comp
                     }
                     if let Some(Value::Array(names)) = map.get("required") {
                         required_names = required_names.saturating_add(names.len());
+                        required_name_bytes = required_name_bytes.saturating_add(
+                            names.iter().filter_map(Value::as_str).fold(0usize, |sum, name| sum.saturating_add(name.len().max(1))),
+                        );
                     }
                     has_union |= map.contains_key("anyOf") || map.contains_key("oneOf");
                     unique |= map.get("uniqueItems") == Some(&Value::Bool(true));
@@ -842,6 +857,9 @@ fn check_compile_work(root: &Value, work: Work, standalone: bool) -> Result<Comp
     }
     if has_union && required_names.saturating_mul(property_maps) > MAX_UNION_ANALYSIS {
         return Err(format!("{TOO_LARGE}union discriminator analysis exceeds {MAX_UNION_ANALYSIS} comparisons"));
+    }
+    if has_union && required_name_bytes.saturating_mul(property_maps) > MAX_UNION_NAME_WORK {
+        return Err(format!("{TOO_LARGE}union discriminator analysis exceeds {MAX_UNION_NAME_WORK} bytes of name comparisons"));
     }
     if deepest_dependency.saturating_mul(work.bytes.saturating_add(work.steps.saturating_mul(64))) > MAX_DEPENDENCY_COPY_BYTES {
         return Err(format!("{TOO_LARGE}legacy dependency validation may copy too much schema data"));
