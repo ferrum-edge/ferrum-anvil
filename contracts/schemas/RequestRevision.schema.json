@@ -245,6 +245,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "raw"
+            },
             "text": {
               "type": "string"
             },
@@ -253,10 +257,6 @@
                 "string",
                 "null"
               ]
-            },
-            "type": {
-              "type": "string",
-              "const": "raw"
             }
           },
           "required": [
@@ -267,12 +267,12 @@
         {
           "type": "object",
           "properties": {
-            "text": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "json"
+            },
+            "text": {
+              "type": "string"
             }
           },
           "required": [
@@ -283,12 +283,12 @@
         {
           "type": "object",
           "properties": {
-            "text": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "xml"
+            },
+            "text": {
+              "type": "string"
             }
           },
           "required": [
@@ -299,15 +299,15 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "form_url_encoded"
+            },
             "fields": {
               "type": "array",
               "items": {
                 "$ref": "#/$defs/KeyValue"
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "form_url_encoded"
             }
           },
           "required": [
@@ -318,15 +318,15 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "multipart"
+            },
             "parts": {
               "type": "array",
               "items": {
                 "$ref": "#/$defs/MultipartPart"
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "multipart"
             }
           },
           "required": [
@@ -337,6 +337,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "binary"
+            },
             "attachment": {
               "$ref": "#/$defs/AttachmentRef"
             },
@@ -345,10 +349,6 @@
                 "string",
                 "null"
               ]
-            },
-            "type": {
-              "type": "string",
-              "const": "binary"
             }
           },
           "required": [
@@ -359,6 +359,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "graphql"
+            },
             "query": {
               "type": "string"
             },
@@ -370,10 +374,6 @@
                 "string",
                 "null"
               ]
-            },
-            "type": {
-              "type": "string",
-              "const": "graphql"
             }
           },
           "required": [
@@ -384,6 +384,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "soap"
+            },
             "version": {
               "$ref": "#/$defs/SoapVersion"
             },
@@ -395,10 +399,6 @@
                 "string",
                 "null"
               ]
-            },
-            "type": {
-              "type": "string",
-              "const": "soap"
             }
           },
           "required": [
@@ -433,12 +433,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "part_kind": {
               "type": "string",
               "const": "text"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "required": [
@@ -449,6 +449,10 @@
         {
           "type": "object",
           "properties": {
+            "part_kind": {
+              "type": "string",
+              "const": "file"
+            },
             "attachment": {
               "$ref": "#/$defs/AttachmentRef"
             },
@@ -457,10 +461,6 @@
                 "string",
                 "null"
               ]
-            },
-            "part_kind": {
-              "type": "string",
-              "const": "file"
             }
           },
           "required": [
@@ -477,6 +477,10 @@
           "description": "Stored inside Anvil (portable; included in exports).",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stored"
+            },
             "sha256": {
               "type": "string"
             },
@@ -493,10 +497,6 @@
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "stored"
             }
           },
           "required": [
@@ -510,12 +510,12 @@
           "description": "Linked local file (device-specific; exports report it as a rebinding\nrequirement rather than copying an absolute machine path silently).",
           "type": "object",
           "properties": {
-            "path": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "linked_file"
+            },
+            "path": {
+              "type": "string"
             }
           },
           "required": [
@@ -564,6 +564,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "api_key"
+            },
             "name": {
               "type": "string"
             },
@@ -573,10 +577,6 @@
             "location": {
               "$ref": "#/$defs/KeyLocation",
               "default": "header"
-            },
-            "type": {
-              "type": "string",
-              "const": "api_key"
             }
           },
           "required": [
@@ -588,15 +588,15 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "basic"
+            },
             "username": {
               "type": "string"
             },
             "password": {
               "$ref": "#/$defs/SensitiveValue"
-            },
-            "type": {
-              "type": "string",
-              "const": "basic"
             }
           },
           "required": [
@@ -608,16 +608,16 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "bearer"
+            },
             "token": {
               "$ref": "#/$defs/SensitiveValue"
             },
             "prefix": {
               "type": "string",
               "default": "Bearer"
-            },
-            "type": {
-              "type": "string",
-              "const": "bearer"
             }
           },
           "required": [
@@ -628,6 +628,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "jwt"
+            },
             "algorithm": {
               "$ref": "#/$defs/JwtAlgorithm"
             },
@@ -652,10 +656,6 @@
             "prefix": {
               "type": "string",
               "default": "Bearer"
-            },
-            "type": {
-              "type": "string",
-              "const": "jwt"
             }
           },
           "required": [
@@ -668,12 +668,12 @@
         {
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/OAuth2Config"
-            },
             "type": {
               "type": "string",
               "const": "oauth2"
+            },
+            "config": {
+              "$ref": "#/$defs/OAuth2Config"
             }
           },
           "required": [
@@ -684,12 +684,12 @@
         {
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/HmacConfig"
-            },
             "type": {
               "type": "string",
               "const": "hmac"
+            },
+            "config": {
+              "$ref": "#/$defs/HmacConfig"
             }
           },
           "required": [
@@ -700,12 +700,12 @@
         {
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/DpopConfig"
-            },
             "type": {
               "type": "string",
               "const": "dpop"
+            },
+            "config": {
+              "$ref": "#/$defs/DpopConfig"
             }
           },
           "required": [
@@ -717,12 +717,12 @@
           "description": "SOAP WS-Security header inserted into the SOAP envelope.",
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/WsseConfig"
-            },
             "type": {
               "type": "string",
               "const": "wsse"
+            },
+            "config": {
+              "$ref": "#/$defs/WsseConfig"
             }
           },
           "required": [
@@ -734,12 +734,12 @@
           "description": "SPIFFE JWT-SVID as a bearer credential, from the Workload API or a\nvariable/file, checked locally before it is sent.",
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/JwtSvidConfig"
-            },
             "type": {
               "type": "string",
               "const": "jwt_svid"
+            },
+            "config": {
+              "$ref": "#/$defs/JwtSvidConfig"
             }
           },
           "required": [
@@ -751,15 +751,15 @@
           "description": "Several explicit presentations in one request (e.g. mTLS + API key).\nOrder is preserved; conflicting headers fail validation. At most one\nOAuth profile, including nested sets, may acquire a token.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "multi"
+            },
             "profiles": {
               "type": "array",
               "items": {
                 "$ref": "#/$defs/AuthConfig"
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "multi"
             }
           },
           "required": [
@@ -775,12 +775,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "template"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "required": [
@@ -791,12 +791,12 @@
         {
           "type": "object",
           "properties": {
-            "secret": {
-              "$ref": "#/$defs/SecretRef"
-            },
             "kind": {
               "type": "string",
               "const": "secret"
+            },
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
             }
           },
           "required": [
@@ -1177,12 +1177,12 @@
           "description": "A token held in a variable or the vault (for example `{{jwt_svid}}`).",
           "type": "object",
           "properties": {
-            "token": {
-              "$ref": "#/$defs/SensitiveValue"
-            },
             "kind": {
               "type": "string",
               "const": "value"
+            },
+            "token": {
+              "$ref": "#/$defs/SensitiveValue"
             }
           },
           "required": [
@@ -1194,12 +1194,12 @@
           "description": "A token file written by another agent (for example spiffe-helper),\nread at send time.",
           "type": "object",
           "properties": {
-            "path": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "file"
+            },
+            "path": {
+              "type": "string"
             }
           },
           "required": [
@@ -1532,15 +1532,15 @@
           "description": "Query the given DNS servers directly (`ip:port`), bypassing the OS resolver.",
           "type": "object",
           "properties": {
+            "mode": {
+              "type": "string",
+              "const": "custom"
+            },
             "nameservers": {
               "type": "array",
               "items": {
                 "type": "string"
               }
-            },
-            "mode": {
-              "type": "string",
-              "const": "custom"
             }
           },
           "required": [
@@ -1588,12 +1588,12 @@
         {
           "type": "object",
           "properties": {
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
             "kind": {
               "type": "string",
               "const": "profile"
+            },
+            "id": {
+              "$ref": "#/$defs/Id"
             }
           },
           "required": [
@@ -1678,15 +1678,15 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "status"
+            },
             "comparison": {
               "$ref": "#/$defs/Comparison"
             },
             "value": {
               "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "status"
             }
           },
           "required": [
@@ -1698,6 +1698,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "status_in"
+            },
             "values": {
               "type": "array",
               "items": {
@@ -1706,10 +1710,6 @@
                 "minimum": 0,
                 "maximum": 65535
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "status_in"
             }
           },
           "required": [
@@ -1720,30 +1720,10 @@
         {
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
-            "comparison": {
-              "$ref": "#/$defs/Comparison"
-            },
-            "value": {
-              "type": "string",
-              "default": ""
-            },
             "type": {
               "type": "string",
               "const": "header"
-            }
-          },
-          "required": [
-            "type",
-            "name",
-            "comparison"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
+            },
             "name": {
               "type": "string"
             },
@@ -1753,10 +1733,6 @@
             "value": {
               "type": "string",
               "default": ""
-            },
-            "type": {
-              "type": "string",
-              "const": "trailer"
             }
           },
           "required": [
@@ -1768,7 +1744,11 @@
         {
           "type": "object",
           "properties": {
-            "path": {
+            "type": {
+              "type": "string",
+              "const": "trailer"
+            },
+            "name": {
               "type": "string"
             },
             "comparison": {
@@ -1777,21 +1757,21 @@
             "value": {
               "type": "string",
               "default": ""
-            },
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "type": {
               "type": "string",
               "const": "json_path"
-            }
-          },
-          "required": [
-            "type",
-            "path",
-            "comparison"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
+            },
             "path": {
               "type": "string"
             },
@@ -1801,10 +1781,6 @@
             "value": {
               "type": "string",
               "default": ""
-            },
-            "type": {
-              "type": "string",
-              "const": "x_path"
             }
           },
           "required": [
@@ -1816,12 +1792,36 @@
         {
           "type": "object",
           "properties": {
-            "schema": {
+            "type": {
+              "type": "string",
+              "const": "x_path"
+            },
+            "path": {
               "type": "string"
             },
+            "comparison": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "required": [
+            "type",
+            "path",
+            "comparison"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "type": {
               "type": "string",
               "const": "json_schema"
+            },
+            "schema": {
+              "type": "string"
             }
           },
           "required": [
@@ -1832,16 +1832,16 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "body"
+            },
             "comparison": {
               "$ref": "#/$defs/Comparison"
             },
             "value": {
               "type": "string",
               "default": ""
-            },
-            "type": {
-              "type": "string",
-              "const": "body"
             }
           },
           "required": [
@@ -1852,14 +1852,14 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "latency_ms"
+            },
             "max": {
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "type": {
-              "type": "string",
-              "const": "latency_ms"
             }
           },
           "required": [
@@ -1870,13 +1870,13 @@
         {
           "type": "object",
           "properties": {
-            "code": {
-              "type": "integer",
-              "format": "int32"
-            },
             "type": {
               "type": "string",
               "const": "grpc_status"
+            },
+            "code": {
+              "type": "integer",
+              "format": "int32"
             }
           },
           "required": [
@@ -1887,6 +1887,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "message_count"
+            },
             "comparison": {
               "$ref": "#/$defs/Comparison"
             },
@@ -1894,10 +1898,6 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "type": {
-              "type": "string",
-              "const": "message_count"
             }
           },
           "required": [
@@ -1910,15 +1910,15 @@
           "description": "Assert the presence/absence of a diagnostic finding code.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "diagnostic"
+            },
             "code": {
               "type": "string"
             },
             "present": {
               "type": "boolean"
-            },
-            "type": {
-              "type": "string",
-              "const": "diagnostic"
             }
           },
           "required": [
@@ -1931,12 +1931,12 @@
           "description": "Assert transport completion state (`completed`, `failed`, ...).",
           "type": "object",
           "properties": {
-            "state": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "transport"
+            },
+            "state": {
+              "type": "string"
             }
           },
           "required": [
@@ -1948,13 +1948,13 @@
           "description": "The response is a JSON-RPC error with this `code` (MCP, and any\nJSON-RPC API).",
           "type": "object",
           "properties": {
-            "code": {
-              "type": "integer",
-              "format": "int64"
-            },
             "type": {
               "type": "string",
               "const": "json_rpc_error"
+            },
+            "code": {
+              "type": "integer",
+              "format": "int64"
             }
           },
           "required": [
@@ -1979,12 +1979,12 @@
           "description": "MCP `tools/call`: the tool result's `isError` flag (absent = false).",
           "type": "object",
           "properties": {
-            "is_error": {
-              "type": "boolean"
-            },
             "type": {
               "type": "string",
               "const": "mcp_is_error"
+            },
+            "is_error": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -1996,12 +1996,12 @@
           "description": "MCP `tools/list`: a tool with this name is listed.",
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "tool_present"
+            },
+            "name": {
+              "type": "string"
             }
           },
           "required": [
@@ -2013,12 +2013,12 @@
           "description": "MCP `tools/list`: no tool with this name is listed.",
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "tool_absent"
+            },
+            "name": {
+              "type": "string"
             }
           },
           "required": [
@@ -2030,6 +2030,10 @@
           "description": "MCP `tools/list`: the listed tool's `inputSchema` equals `schema`\n(JSON, compared as values) and/or its SHA-256 is `sha256` (lowercase\nhex of the schema's JSON with object keys sorted and no whitespace).",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_input_schema"
+            },
             "name": {
               "type": "string"
             },
@@ -2044,10 +2048,6 @@
                 "string",
                 "null"
               ]
-            },
-            "type": {
-              "type": "string",
-              "const": "tool_input_schema"
             }
           },
           "required": [
@@ -2091,12 +2091,12 @@
         {
           "type": "object",
           "properties": {
-            "path": {
-              "type": "string"
-            },
             "from": {
               "type": "string",
               "const": "json_path"
+            },
+            "path": {
+              "type": "string"
             }
           },
           "required": [
@@ -2107,12 +2107,12 @@
         {
           "type": "object",
           "properties": {
-            "path": {
-              "type": "string"
-            },
             "from": {
               "type": "string",
               "const": "x_path"
+            },
+            "path": {
+              "type": "string"
             }
           },
           "required": [
@@ -2123,12 +2123,12 @@
         {
           "type": "object",
           "properties": {
-            "name": {
-              "type": "string"
-            },
             "from": {
               "type": "string",
               "const": "header"
+            },
+            "name": {
+              "type": "string"
             }
           },
           "required": [
@@ -2139,6 +2139,10 @@
         {
           "type": "object",
           "properties": {
+            "from": {
+              "type": "string",
+              "const": "regex"
+            },
             "pattern": {
               "type": "string"
             },
@@ -2147,10 +2151,6 @@
               "format": "uint",
               "minimum": 0,
               "default": 0
-            },
-            "from": {
-              "type": "string",
-              "const": "regex"
             }
           },
           "required": [
@@ -2266,15 +2266,15 @@
           "description": "`.proto` sources (compiled in-process; imports resolved only among the\nprovided files).",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "proto_files"
+            },
             "files": {
               "type": "array",
               "items": {
                 "$ref": "#/$defs/AttachmentRef"
               }
-            },
-            "kind": {
-              "type": "string",
-              "const": "proto_files"
             }
           },
           "required": [
@@ -2286,12 +2286,12 @@
           "description": "Serialized `FileDescriptorSet`.",
           "type": "object",
           "properties": {
-            "attachment": {
-              "$ref": "#/$defs/AttachmentRef"
-            },
             "kind": {
               "type": "string",
               "const": "descriptor_set"
+            },
+            "attachment": {
+              "$ref": "#/$defs/AttachmentRef"
             }
           },
           "required": [
@@ -2411,12 +2411,12 @@
         {
           "type": "object",
           "properties": {
-            "text": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "text"
+            },
+            "text": {
+              "type": "string"
             }
           },
           "required": [
@@ -2428,12 +2428,12 @@
           "description": "Hex-encoded bytes.",
           "type": "object",
           "properties": {
-            "hex": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "binary"
+            },
+            "hex": {
+              "type": "string"
             }
           },
           "required": [
@@ -2444,12 +2444,12 @@
         {
           "type": "object",
           "properties": {
-            "hex": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "ping"
+            },
+            "hex": {
+              "type": "string"
             }
           },
           "required": [
@@ -2460,6 +2460,10 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "close"
+            },
             "code": {
               "type": "integer",
               "format": "uint16",
@@ -2468,10 +2472,6 @@
             },
             "reason": {
               "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "close"
             }
           },
           "required": [
@@ -3034,15 +3034,15 @@
           "description": "`tools/list`.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tools_list"
+            },
             "cursor": {
               "type": [
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "tools_list"
             }
           },
           "required": [
@@ -3053,6 +3053,10 @@
           "description": "`tools/call`.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tools_call"
+            },
             "name": {
               "type": "string"
             },
@@ -3060,10 +3064,6 @@
               "description": "The `arguments` object, as JSON (variables allowed).",
               "type": "string",
               "default": "{}"
-            },
-            "kind": {
-              "type": "string",
-              "const": "tools_call"
             }
           },
           "required": [
@@ -3075,15 +3075,15 @@
           "description": "`resources/list`.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resources_list"
+            },
             "cursor": {
               "type": [
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "resources_list"
             }
           },
           "required": [
@@ -3094,15 +3094,15 @@
           "description": "`resources/templates/list`.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resource_templates_list"
+            },
             "cursor": {
               "type": [
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "resource_templates_list"
             }
           },
           "required": [
@@ -3113,12 +3113,12 @@
           "description": "`resources/read`.",
           "type": "object",
           "properties": {
-            "uri": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "resources_read"
+            },
+            "uri": {
+              "type": "string"
             }
           },
           "required": [
@@ -3130,15 +3130,15 @@
           "description": "`prompts/list`.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prompts_list"
+            },
             "cursor": {
               "type": [
                 "string",
                 "null"
               ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "prompts_list"
             }
           },
           "required": [
@@ -3149,6 +3149,10 @@
           "description": "`prompts/get`.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prompts_get"
+            },
             "name": {
               "type": "string"
             },
@@ -3156,10 +3160,6 @@
               "description": "The `arguments` object, as JSON (variables allowed).",
               "type": "string",
               "default": "{}"
-            },
-            "kind": {
-              "type": "string",
-              "const": "prompts_get"
             }
           },
           "required": [
@@ -3171,6 +3171,10 @@
           "description": "Any JSON-RPC method, with its `params` as JSON (empty = none). A\nnotification carries no `id` and gets no JSON-RPC response.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "raw"
+            },
             "method": {
               "type": "string"
             },
@@ -3180,10 +3184,6 @@
             "notification": {
               "type": "boolean",
               "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "raw"
             }
           },
           "required": [

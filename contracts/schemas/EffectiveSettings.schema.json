@@ -284,15 +284,15 @@
           "description": "Query the given DNS servers directly (`ip:port`), bypassing the OS resolver.",
           "type": "object",
           "properties": {
+            "mode": {
+              "type": "string",
+              "const": "custom"
+            },
             "nameservers": {
               "type": "array",
               "items": {
                 "type": "string"
               }
-            },
-            "mode": {
-              "type": "string",
-              "const": "custom"
             }
           },
           "required": [

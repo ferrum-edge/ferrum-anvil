@@ -391,15 +391,15 @@
           "description": "Query the given DNS servers directly (`ip:port`), bypassing the OS resolver.",
           "type": "object",
           "properties": {
+            "mode": {
+              "type": "string",
+              "const": "custom"
+            },
             "nameservers": {
               "type": "array",
               "items": {
                 "type": "string"
               }
-            },
-            "mode": {
-              "type": "string",
-              "const": "custom"
             }
           },
           "required": [
@@ -447,12 +447,12 @@
         {
           "type": "object",
           "properties": {
-            "id": {
-              "$ref": "#/$defs/Id"
-            },
             "kind": {
               "type": "string",
               "const": "profile"
+            },
+            "id": {
+              "$ref": "#/$defs/Id"
             }
           },
           "required": [
@@ -555,12 +555,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "template"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "required": [
@@ -571,12 +571,12 @@
         {
           "type": "object",
           "properties": {
-            "secret": {
-              "$ref": "#/$defs/SecretRef"
-            },
             "kind": {
               "type": "string",
               "const": "secret"
+            },
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
             }
           },
           "required": [
@@ -635,6 +635,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "api_key"
+            },
             "name": {
               "type": "string"
             },
@@ -644,10 +648,6 @@
             "location": {
               "$ref": "#/$defs/KeyLocation",
               "default": "header"
-            },
-            "type": {
-              "type": "string",
-              "const": "api_key"
             }
           },
           "required": [
@@ -659,15 +659,15 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "basic"
+            },
             "username": {
               "type": "string"
             },
             "password": {
               "$ref": "#/$defs/SensitiveValue"
-            },
-            "type": {
-              "type": "string",
-              "const": "basic"
             }
           },
           "required": [
@@ -679,16 +679,16 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "bearer"
+            },
             "token": {
               "$ref": "#/$defs/SensitiveValue"
             },
             "prefix": {
               "type": "string",
               "default": "Bearer"
-            },
-            "type": {
-              "type": "string",
-              "const": "bearer"
             }
           },
           "required": [
@@ -699,6 +699,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "jwt"
+            },
             "algorithm": {
               "$ref": "#/$defs/JwtAlgorithm"
             },
@@ -723,10 +727,6 @@
             "prefix": {
               "type": "string",
               "default": "Bearer"
-            },
-            "type": {
-              "type": "string",
-              "const": "jwt"
             }
           },
           "required": [
@@ -739,12 +739,12 @@
         {
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/OAuth2Config"
-            },
             "type": {
               "type": "string",
               "const": "oauth2"
+            },
+            "config": {
+              "$ref": "#/$defs/OAuth2Config"
             }
           },
           "required": [
@@ -755,12 +755,12 @@
         {
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/HmacConfig"
-            },
             "type": {
               "type": "string",
               "const": "hmac"
+            },
+            "config": {
+              "$ref": "#/$defs/HmacConfig"
             }
           },
           "required": [
@@ -771,12 +771,12 @@
         {
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/DpopConfig"
-            },
             "type": {
               "type": "string",
               "const": "dpop"
+            },
+            "config": {
+              "$ref": "#/$defs/DpopConfig"
             }
           },
           "required": [
@@ -788,12 +788,12 @@
           "description": "SOAP WS-Security header inserted into the SOAP envelope.",
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/WsseConfig"
-            },
             "type": {
               "type": "string",
               "const": "wsse"
+            },
+            "config": {
+              "$ref": "#/$defs/WsseConfig"
             }
           },
           "required": [
@@ -805,12 +805,12 @@
           "description": "SPIFFE JWT-SVID as a bearer credential, from the Workload API or a\nvariable/file, checked locally before it is sent.",
           "type": "object",
           "properties": {
-            "config": {
-              "$ref": "#/$defs/JwtSvidConfig"
-            },
             "type": {
               "type": "string",
               "const": "jwt_svid"
+            },
+            "config": {
+              "$ref": "#/$defs/JwtSvidConfig"
             }
           },
           "required": [
@@ -822,15 +822,15 @@
           "description": "Several explicit presentations in one request (e.g. mTLS + API key).\nOrder is preserved; conflicting headers fail validation. At most one\nOAuth profile, including nested sets, may acquire a token.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "multi"
+            },
             "profiles": {
               "type": "array",
               "items": {
                 "$ref": "#/$defs/AuthConfig"
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "multi"
             }
           },
           "required": [
@@ -1194,12 +1194,12 @@
           "description": "A token held in a variable or the vault (for example `{{jwt_svid}}`).",
           "type": "object",
           "properties": {
-            "token": {
-              "$ref": "#/$defs/SensitiveValue"
-            },
             "kind": {
               "type": "string",
               "const": "value"
+            },
+            "token": {
+              "$ref": "#/$defs/SensitiveValue"
             }
           },
           "required": [
@@ -1211,12 +1211,12 @@
           "description": "A token file written by another agent (for example spiffe-helper),\nread at send time.",
           "type": "object",
           "properties": {
-            "path": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "file"
+            },
+            "path": {
+              "type": "string"
             }
           },
           "required": [

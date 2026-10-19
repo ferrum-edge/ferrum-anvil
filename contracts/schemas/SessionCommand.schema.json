@@ -6,12 +6,12 @@
     {
       "type": "object",
       "properties": {
-        "text": {
-          "type": "string"
-        },
         "command": {
           "type": "string",
           "const": "send_text"
+        },
+        "text": {
+          "type": "string"
         }
       },
       "required": [
@@ -22,12 +22,12 @@
     {
       "type": "object",
       "properties": {
-        "hex": {
-          "type": "string"
-        },
         "command": {
           "type": "string",
           "const": "send_binary_hex"
+        },
+        "hex": {
+          "type": "string"
         }
       },
       "required": [
@@ -50,6 +50,10 @@
     {
       "type": "object",
       "properties": {
+        "command": {
+          "type": "string",
+          "const": "close"
+        },
         "code": {
           "type": "integer",
           "format": "uint16",
@@ -58,10 +62,6 @@
         },
         "reason": {
           "type": "string"
-        },
-        "command": {
-          "type": "string",
-          "const": "close"
         }
       },
       "required": [

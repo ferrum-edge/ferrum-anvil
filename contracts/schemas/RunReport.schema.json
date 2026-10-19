@@ -141,6 +141,10 @@
           "description": "A saved scenario.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "scenario"
+            },
             "scenario_id": {
               "$ref": "#/$defs/Id"
             },
@@ -151,10 +155,6 @@
               "description": "The scenario was not trusted (e.g. imported) and ran only because\nthe user explicitly allowed it for this run.",
               "type": "boolean",
               "default": false
-            },
-            "kind": {
-              "type": "string",
-              "const": "scenario"
             }
           },
           "required": [
@@ -167,6 +167,10 @@
           "description": "An ad-hoc run of every request in a folder subtree, in tree order.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "folder"
+            },
             "folder_id": {
               "description": "`None` = the workspace root.",
               "anyOf": [
@@ -181,10 +185,6 @@
             "path": {
               "description": "Display path (`Orders/Refunds`, or `/` for the root).",
               "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "folder"
             }
           },
           "required": [

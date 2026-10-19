@@ -97,6 +97,10 @@
         {
           "type": "object",
           "properties": {
+            "format": {
+              "type": "string",
+              "const": "pem"
+            },
             "cert_chain_pem": {
               "description": "Certificate chain PEM (not secret).",
               "type": "string"
@@ -104,10 +108,6 @@
             "private_key_pem": {
               "description": "Private key PEM (PKCS#8, PKCS#1 or SEC1) — sensitive.",
               "$ref": "#/$defs/SensitiveValue"
-            },
-            "format": {
-              "type": "string",
-              "const": "pem"
             }
           },
           "required": [
@@ -119,16 +119,16 @@
         {
           "type": "object",
           "properties": {
+            "format": {
+              "type": "string",
+              "const": "pkcs12"
+            },
             "bundle_b64": {
               "description": "Base64 PKCS#12 bundle — sensitive.",
               "$ref": "#/$defs/SensitiveValue"
             },
             "password": {
               "$ref": "#/$defs/SensitiveValue"
-            },
-            "format": {
-              "type": "string",
-              "const": "pkcs12"
             }
           },
           "required": [
@@ -141,6 +141,10 @@
           "description": "X.509-SVID from the SPIFFE Workload API (`FetchX509SVID`), fetched\nwhen a request needs it and re-fetched at half its lifetime (SVID\nrotation). The private key stays in memory and is cleared on lock.",
           "type": "object",
           "properties": {
+            "format": {
+              "type": "string",
+              "const": "workload_api"
+            },
             "endpoint": {
               "description": "`unix:///path/to/socket` (or `npipe:name` on Windows). Empty: the\n`SPIFFE_ENDPOINT_SOCKET` environment variable.",
               "type": "string"
@@ -156,10 +160,6 @@
               "description": "Also trust the SVID's trust-domain bundle from the Workload API\n(for verifying mesh peers by SPIFFE ID), in addition to the\nprofile's CA certificates.",
               "type": "boolean",
               "default": false
-            },
-            "format": {
-              "type": "string",
-              "const": "workload_api"
             }
           },
           "required": [
@@ -174,12 +174,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "template"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "required": [
@@ -190,12 +190,12 @@
         {
           "type": "object",
           "properties": {
-            "secret": {
-              "$ref": "#/$defs/SecretRef"
-            },
             "kind": {
               "type": "string",
               "const": "secret"
+            },
+            "secret": {
+              "$ref": "#/$defs/SecretRef"
             }
           },
           "required": [
