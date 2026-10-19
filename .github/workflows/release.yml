@@ -113,7 +113,7 @@ jobs:
           cache-key: release-preflight
           # A failed release run never writes the build cache.
           cache-on-failure: "false"
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
       - name: cargo deny
@@ -189,7 +189,7 @@ jobs:
       - name: Trusted AppImage extractor (pinned source, hosted build only)
         uses: ./.github/actions/trusted-appimage-extractor
         if: runner.os == 'Linux'
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-cyclonedx@0.5.9
 
