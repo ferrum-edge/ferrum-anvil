@@ -441,7 +441,7 @@ the modified file under MPL-2.0.
 | ordered-stream | 0.2.0 | MIT OR Apache-2.0 | https://github.com/danieldg/ordered-stream |
 | osakit | 0.3.1 | MIT OR Apache-2.0 | https://github.com/mdevils/rust-osakit |
 | outref | 0.5.2 | MIT | https://github.com/Nugine/outref |
-| p12-keystore | 0.3.2 | MIT/Apache-2.0 | https://github.com/ancwrd1/p12-keystore |
+| p12-keystore | 0.4.1 | MIT/Apache-2.0 | https://github.com/ancwrd1/p12-keystore |
 | p256 | 0.13.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves/tree/master/p256 |
 | p256 | 0.14.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves |
 | p384 | 0.13.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves/tree/master/p384 |
