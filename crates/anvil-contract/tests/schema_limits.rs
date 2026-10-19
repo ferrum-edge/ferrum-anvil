@@ -44,12 +44,8 @@ fn recursive_branching_and_nonstructural_applicators_are_refused() {
         json!({"patternProperties":{"^child$":{"$ref":"#"}}}),
         json!({"items":{"$ref":"#"},"contains":true}),
         json!({"dependentSchemas":{"child":{"properties":{"child":{"$ref":"#"}}}}}),
-        // Multiple recursive regions compose work even without one SCC
-        // containing two back edges.
-        json!({"$defs":{
-            "a":{"properties":{"child":{"$ref":"#/$defs/a"},"other":{"$ref":"#/$defs/b"}}},
-            "b":{"properties":{"child":{"$ref":"#/$defs/b"}}}
-        },"$ref":"#/$defs/a"}),
+        // A nullable self-reference applies a union at every level.
+        json!({"type":"object","properties":{"next":{"anyOf":[{"$ref":"#"},{"type":"null"}]}}}),
         // Separate aliases must not deduplicate two applications.
         json!({"$defs":{
             "a":{"properties":{"child":{"$ref":"#/$defs/left"}},"patternProperties":{"^child$":{"$ref":"#/$defs/right"}}},
@@ -81,6 +77,37 @@ fn simple_structural_recursion_and_acyclic_composition_still_validate() {
             json!({"children":[7]}),
         ),
         (json!({"$defs":{"v":{"type":"string"}},"allOf":[{"$ref":"#/$defs/v"},{"$ref":"#/$defs/v"}]}), json!("ok"), json!(7)),
+        // Several references in a cycle at different locations of the value:
+        // each nested value is still reached by one route.
+        (
+            json!({"type":"object","properties":{
+                "parent":{"$ref":"#"},
+                "children":{"type":"array","items":{"$ref":"#"}}
+            }}),
+            json!({"parent":{},"children":[{"children":[]}]}),
+            json!({"children":[{"parent":7}]}),
+        ),
+        // A recursive model that also refers to a schema outside its cycle.
+        (
+            json!({"$defs":{
+                "user":{"type":"object","properties":{"name":{"type":"string"}}},
+                "comment":{"type":"object","properties":{
+                    "author":{"$ref":"#/$defs/user"},
+                    "replies":{"type":"array","items":{"$ref":"#/$defs/comment"}}
+                }}
+            },"$ref":"#/$defs/comment"}),
+            json!({"author":{"name":"a"},"replies":[{"replies":[]}]}),
+            json!({"replies":[{"author":{"name":7}}]}),
+        ),
+        // One recursive region leading into another.
+        (
+            json!({"$defs":{
+                "a":{"type":"object","properties":{"child":{"$ref":"#/$defs/a"},"other":{"$ref":"#/$defs/b"}}},
+                "b":{"type":"object","properties":{"child":{"$ref":"#/$defs/b"}}}
+            },"$ref":"#/$defs/a"}),
+            json!({"child":{},"other":{"child":{}}}),
+            json!({"other":{"child":7}}),
+        ),
     ] {
         schema::measure_standalone(&schema).unwrap();
         ruleset(&schema).unwrap();
@@ -88,6 +115,48 @@ fn simple_structural_recursion_and_acyclic_composition_still_validate() {
         assert!(validator.is_valid(&good));
         assert!(!validator.is_valid(&bad));
     }
+}
+
+#[test]
+fn openapi_recursive_models_with_sibling_references_are_checked() {
+    let schema = json!({"$ref":"#/components/schemas/Comment"});
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+    "components":{"schemas":{
+        "Checked":schema,
+        "User":{"type":"object","properties":{"name":{"type":"string"}}},
+        "Comment":{"type":"object","properties":{
+            "author":{"$ref":"#/components/schemas/User"},
+            "parent":{"$ref":"#/components/schemas/Comment"},
+            "replies":{"type":"array","items":{"$ref":"#/components/schemas/Comment"}}
+        }}
+    }}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let checked = schema::compile_within_checked(
+        &document,
+        &schema,
+        Direction::Response,
+        &mut schema::Scanned::default(),
+        schema::Scanned::UNLIMITED,
+    )
+    .unwrap();
+    let good = json!({"author":{"name":"a"},"replies":[{"parent":{},"replies":[]}]});
+    assert_eq!(checked.plan.mode(&good), schema::CheckMode::Detailed);
+    assert!(checked.validator.is_valid(&good));
+    assert!(!checked.validator.is_valid(&json!({"replies":[{"author":{"name":7}}]})));
+}
+
+#[test]
+fn copied_bundle_targets_are_charged_once() {
+    // A component referenced once counts once against the expanded-node
+    // limit, even though the bundle holds a copy of it next to the root.
+    let properties: serde_json::Map<String, Value> = (0..60_000).map(|i| (format!("p{i}"), json!({"type":"string"}))).collect();
+    let schema = json!({"$ref":"#/components/schemas/Large"});
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+        "components":{"schemas":{"Checked":schema,"Large":{"type":"object","properties":properties}}}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let validator = schema::compile(&document, &schema, Direction::Response).unwrap();
+    assert!(validator.is_valid(&json!({"p1":"ok"})));
+    assert!(!validator.is_valid(&json!({"p1":7})));
 }
 
 #[test]

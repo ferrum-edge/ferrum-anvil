@@ -111,13 +111,17 @@
   `$anchor`, `$dynamicRef` and `$recursiveRef` are refused; keywords inside
   literal data (`const`, `enum`, `default`, `examples`) are not read as schema
   keywords or references, here or for OpenAPI schemas.
-  Recursive reference components with branching or non-structural
-  applicators, and `unevaluatedProperties`/`unevaluatedItems` even without
-  references, are conservatively refused as too complex to check. Shared
-  OpenAPI validation also refuses resource/dialect changes and references
+  Recursive reference components with non-structural applicators
+  (composition, including a nullable self-reference spelled as `anyOf`,
+  conditions, negation, dependencies, overlapping property patterns,
+  `contains`), and `unevaluatedProperties`/`unevaluatedItems` even without
+  references, are conservatively refused as too complex to check; recursion
+  through properties and array items stays checked with any number of
+  references. Shared OpenAPI validation also refuses resource/dialect changes and references
   to reserved bundle fields; literal and annotation references cannot make
   bundling copy unmeasured targets. Refused examples and bodies are reported
-  as not checked, preserving ordinary structural recursion.
+  as not checked. Copied bundle targets are charged once against the
+  expanded-node limit.
 - Migration imports (HAR, cURL, Postman, Insomnia) bound the JSON documents
   embedded in string fields and apply the credential policy more evenly:
   - HAR, cURL and Insomnia JSON bodies and Insomnia GraphQL payloads are parsed

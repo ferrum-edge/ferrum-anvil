@@ -59,11 +59,15 @@ company ruleset.
     one;
   - it nests subschemas more than 64 levels deep: constraints are refused
     before conversion could truncate them (literal data adds no schema depth);
-  - a schema in a recursive region has more than one reference, or uses
-    composition, conditions, dependencies, overlapping property patterns,
-    `contains`, or other non-structural applicators. Simple recursion through
-    named properties and array items remains supported; some legitimate
-    composite recursive schemas are conservatively refused;
+  - a schema in a recursive region uses composition (`allOf`, `anyOf`,
+    `oneOf`, including a nullable reference spelled as `anyOf`), conditions,
+    negation, dependencies, overlapping property patterns, `contains`, or a
+    `$ref` with sibling applicators: these can apply several routes to the
+    same nested value. Recursion through named properties,
+    `additionalProperties` and array items remains supported, with any number
+    of references (a tree node's `parent` and `children`, a comment's
+    `author` and `replies`); some legitimate composite recursive schemas are
+    conservatively refused;
   - it uses `unevaluatedProperties` or `unevaluatedItems`: the validator can
     re-evaluate nested schemas exponentially even without references;
   - it expands to more than 100,000 nodes with every `$ref` expanded

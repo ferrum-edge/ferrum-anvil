@@ -141,7 +141,23 @@ pub fn compile_within_checked(
     // example a target copied to `/properties`). Check the exact document
     // given to the compiler, not just the schema in its original position.
     // Wrapping the selected schema in allOf adds one subschema level.
-    let work = measure_in(&wrapper, &wrapper, scanned, MAX_DEPTH + 1)?;
+    // Copied targets under inert root members (`components`, `$defs`) are
+    // measured where references reach them; scanning them again as part of
+    // the root would charge each target twice. Root members that could
+    // apply to the instance stay in the root scan.
+    let root = match &wrapper {
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .filter(|(k, _)| {
+                    k.as_str() == "$schema"
+                        || (child_position(Pos::Schema, k) != Pos::Literal && !matches!(k.as_str(), "$defs" | "definitions"))
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    };
+    let work = measure_in(&wrapper, &root, scanned, MAX_DEPTH + 1)?;
     if scanned.exceeds(budget) {
         return Err("the checks' scanning budget is spent".into());
     }
@@ -1133,13 +1149,19 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
 }
 
 /// Iterative strongly connected components over all reference occurrences.
-/// A cyclic part must have exactly one outgoing reference and only ordinary
-/// structural applicators. This deliberately refuses some legitimate trees:
-/// the validator's eager error collection has no runtime work budget, and a
-/// second route (even through aliases or another recursive component) can
-/// multiply work on the same nested value. Duplicate references count twice.
-/// The condensed graph bounds longest depth and reference-expanded nodes,
-/// members/items and text bytes, then returns the expanded node count.
+/// A cyclic part may use only ordinary structural applicators (named
+/// properties, `additionalProperties`, `items`, `prefixItems`, or a bare
+/// `$ref` alias). Each of those applies at most one subschema to a given
+/// location of the value, so however many references a part has, inside the
+/// cycle or out of it, every nested value is reached by one route, and the
+/// validator compiles a recursive target once and shares it. Composition,
+/// conditions, negation, dependencies, overlapping property patterns and
+/// `contains` can apply several routes to the same nested value; the
+/// validator's eager error collection has no runtime work budget, so such
+/// cycles are refused (including a nullable self-reference spelled with
+/// `anyOf`). Duplicate references count twice. The condensed graph bounds
+/// longest depth and reference-expanded nodes, members/items and text bytes,
+/// then returns the expanded node count.
 fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Work, String> {
     let ids: HashMap<&str, usize> = reached.iter().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
     let edges: Vec<Vec<usize>> = reached
@@ -1193,13 +1215,8 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
             }
         }
         let cyclic = component.len() > 1 || edges[start].contains(&start);
-        if cyclic
-            && component.iter().any(|&node| {
-                let part = &parts[reached[node].as_str()];
-                part.refs.len() != 1 || part.complex
-            })
-        {
-            return Err(format!("{TOO_LARGE}recursive schemas with branching or non-structural applicators are not checked"));
+        if cyclic && component.iter().any(|&node| parts[reached[node].as_str()].complex) {
+            return Err(format!("{TOO_LARGE}recursive schemas with non-structural applicators are not checked"));
         }
         for &node in &component {
             component_of[node] = components.len();
@@ -1209,8 +1226,9 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
     // Size memoization alone cannot enforce depth: a target first reached
     // by a short route may later complete a longer route from the cache.
     // Condense cycles, then measure the longest path in the resulting DAG.
-    // Accepted cyclic components are simple terminal cycles; charge one
-    // full lap, stopping before a repeated member, whichever entry is used.
+    // Charge an accepted cyclic component one full lap (every member once),
+    // whichever entry is used: no route within it repeats a member before
+    // descending, and its exits are charged as edges to other components.
     let weights: Vec<(usize, usize)> =
         components.iter().map(|nodes| (nodes.len(), nodes.iter().map(|&node| parts[reached[node].as_str()].depth).sum())).collect();
     let mut longest = weights.clone();

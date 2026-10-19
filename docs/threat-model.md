@@ -332,13 +332,15 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   characters, so a spec cannot inject CI workflow commands or terminal
   escape sequences.
   Custom JSON Schema functions share the reference, size and scan limits
-  used for OpenAPI example and drift checks. Recursive branching and
-  non-structural recursive applicators, `unevaluatedProperties` and
+  used for OpenAPI example and drift checks. Non-structural applicators in a
+  recursive region (composition, conditions, negation, dependencies,
+  overlapping property patterns, `contains`), `unevaluatedProperties` and
   `unevaluatedItems` are refused before validation because the validator's
   eager error collection and annotation tracking can amplify work.
   Reference-expanded costs include text bytes and scalar members because
-  errors may clone large subschemas for every reference. Simple cycles are
-  charged for a complete lap, and depth limits use longest reference paths.
+  errors may clone large subschemas for every reference. Structural cycles
+  apply one subschema per nested value and are charged for a complete lap,
+  and depth limits use longest reference paths.
   Inline `not` nesting charges overlapping retained child-schema copies,
   including their literal/annotation payloads.
   Compiler preflight also caps retained schema locations, property-pattern
