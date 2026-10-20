@@ -379,13 +379,16 @@ impl ValidationPlan {
         // byte, every name check against every object, every `uniqueItems`
         // against the longest array. When one is over its limit, charge each
         // keyword only where it applies before giving up on the instance.
+        // A recursive lap does not bound uniqueness work: each nested array
+        // can hash/compare the same descendant subtree again. Always use the
+        // per-application walk when recursion and uniqueness are both present.
         let coarse = bytes.saturating_mul(self.text_scans) > MAX_TEXT_INSTANCE_WORK
             // The ECMA `regex` format parser can compare every named group
             // with earlier groups in the same string.
             || self.work.regex_format_uses.saturating_mul(longest_string).saturating_mul(string_bytes) > MAX_TEXT_INSTANCE_WORK
             || objects.saturating_mul(self.work.name_bytes) > MAX_TEXT_INSTANCE_WORK
             || self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK;
-        if coarse {
+        if coarse || (self.work.recursive && self.unique_uses > 0) {
             match self.applied(instance) {
                 Some(a)
                     if a.text <= MAX_TEXT_INSTANCE_WORK

@@ -372,6 +372,9 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   it are limited by instance depth, since each failed level copies its
   nested errors. Per-instance text, name and `uniqueItems` work is charged
   where each keyword applies when whole-instance estimates are too coarse.
+  Recursion together with `uniqueItems` always triggers per-application
+  accounting, charging descendant subtrees at every array level against
+  the 4-million-unit uniqueness budget.
   Reference-expanded costs include text bytes and scalar members because
   errors may clone large subschemas for every reference. Structural cycles
   apply one subschema per nested value and are charged for a complete lap,
