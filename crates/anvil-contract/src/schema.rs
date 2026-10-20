@@ -62,7 +62,7 @@ const MAX_ERROR_BYTES: usize = 8 * 1024 * 1024;
 const MAX_UNIQUE_WORK: usize = 4_000_000;
 /// Schema applications (and instance values sized for them) the per-instance
 /// walk may visit before an instance is left unchecked.
-const MAX_APPLIED_STEPS: usize = 4_000_000;
+const MAX_APPLIED_STEPS: usize = 2_000_000;
 /// What every refusal of a schema for its size or nesting starts with (see
 /// [`too_large`]).
 const TOO_LARGE: &str = "too large to check: ";
@@ -276,10 +276,10 @@ struct Work {
     required_name_bytes: usize,
     property_maps: usize,
     union: bool,
-    /// A recursive component applies a nullable reference (`anyOf`/`oneOf`
-    /// with `null`): a failed union owns copies of its nested errors, so
+    /// Some reached component is a reference cycle. With a union anywhere
+    /// (`union`), a failed union owns copies of its nested errors, so
     /// detailed errors can retain one instance subtree per level.
-    recursive_union: bool,
+    recursive: bool,
     max_ref_chain: usize,
 }
 
@@ -407,11 +407,12 @@ impl ValidationPlan {
         // cached prefix can contain every earlier schema-location suffix.
         let active_refs = max_value_depth.saturating_add(1).saturating_mul(self.work.max_ref_chain);
         let schema_path_bound = self.work.bytes.saturating_mul(2).saturating_add(self.work.steps.saturating_mul(8));
-        // A recursive nullable reference fails as a union at every level on
-        // the way to a nested error. Each failed union owns its branches'
-        // errors and re-evaluates them, so detailed collection can retain and
-        // revisit one instance subtree per level.
-        let levels = if self.work.recursive_union { max_value_depth.saturating_add(1) } else { 1 };
+        // A failed anyOf/oneOf owns deep copies of its branches' errors and
+        // re-evaluates them. Inside or above a reference cycle (a recursive
+        // nullable reference, or a nullable reference to a recursive schema)
+        // detailed collection can retain and revisit one instance subtree
+        // per level.
+        let levels = if self.work.union && self.work.recursive { max_value_depth.saturating_add(1) } else { 1 };
         if error_path_bytes.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
             || instance_heap.saturating_mul(self.work.steps.max(1)).saturating_mul(levels) > MAX_ERROR_BYTES
             || values.saturating_mul(self.work.steps.max(1)).saturating_mul(levels) > MAX_VALIDATION_WORK
@@ -428,8 +429,9 @@ impl ValidationPlan {
     /// all union branches and conditions, every `patternProperties` pattern
     /// against every member, `additionalProperties` against every member
     /// not named in `properties`. Each route counts, as the validator also
-    /// applies each one. `None` when the walk exceeds [`MAX_APPLIED_STEPS`]
-    /// or a reference does not resolve.
+    /// applies each one. `None` when the work is over a limit, the walk
+    /// exceeds [`MAX_APPLIED_STEPS`] (every entry is charged before it is
+    /// queued, which bounds memory too), or a reference does not resolve.
     fn applied(&self, instance: &Value) -> Option<Applied> {
         let doc = &*self.schema;
         let mut out = Applied::default();
@@ -467,29 +469,40 @@ impl ValidationPlan {
             sizes.insert(key, size);
             Some(size)
         };
+        let charge = |steps: &mut usize, n: usize| -> Option<()> {
+            *steps = steps.saturating_add(n);
+            (*steps <= MAX_APPLIED_STEPS).then_some(())
+        };
         let mut stack: Vec<(&Value, At)> = vec![(doc, At::Value(instance))];
         while let Some((schema, at)) = stack.pop() {
-            steps += 1;
-            if steps > MAX_APPLIED_STEPS || stack.len() > MAX_APPLIED_STEPS {
+            if out.text > MAX_TEXT_INSTANCE_WORK
+                || out.regex_format > MAX_TEXT_INSTANCE_WORK
+                || out.names > MAX_TEXT_INSTANCE_WORK
+                || out.unique > MAX_UNIQUE_WORK
+            {
                 return None;
             }
             let Value::Object(s) = schema else { continue };
             // Subschemas applied to the same value.
             if let Some(r) = s.get("$ref") {
+                charge(&mut steps, 1)?;
                 stack.push((r.as_str().and_then(internal_pointer).and_then(|p| doc.pointer(&p))?, at));
             }
             for keyword in ["allOf", "anyOf", "oneOf"] {
                 if let Some(Value::Array(members)) = s.get(keyword) {
+                    charge(&mut steps, members.len())?;
                     stack.extend(members.iter().map(|member| (member, at)));
                 }
             }
             for keyword in ["not", "if", "then", "else"] {
                 if let Some(sub) = s.get(keyword) {
+                    charge(&mut steps, 1)?;
                     stack.push((sub, at));
                 }
             }
             for keyword in ["dependentSchemas", "dependencies"] {
                 if let Some(Value::Object(entries)) = s.get(keyword) {
+                    charge(&mut steps, entries.len())?;
                     stack.extend(entries.values().filter(|sub| !sub.is_array()).map(|sub| (sub, at)));
                 }
             }
@@ -525,6 +538,12 @@ impl ValidationPlan {
                     out.names = out.names.saturating_add(cost.name_bytes);
                     let properties = s.get("properties").and_then(Value::as_object);
                     let patterns = s.get("patternProperties").and_then(Value::as_object);
+                    let per_member = patterns.map_or(0, Map::len).saturating_add(
+                        usize::from(properties.is_some())
+                            + usize::from(s.contains_key("additionalProperties"))
+                            + usize::from(s.contains_key("propertyNames")),
+                    );
+                    charge(&mut steps, map.len().saturating_mul(per_member))?;
                     for (name, child) in map {
                         let named = properties.and_then(|p| p.get(name));
                         if let Some(sub) = named {
@@ -553,6 +572,7 @@ impl ValidationPlan {
                         Some(Value::Array(prefix)) => (Some(prefix), s.get("additionalItems")),
                         other => (s.get("prefixItems").and_then(Value::as_array), other),
                     };
+                    charge(&mut steps, items.len().saturating_mul(1 + usize::from(s.contains_key("contains"))))?;
                     for (i, item) in items.iter().enumerate() {
                         if let Some(sub) = prefix.and_then(|prefix| prefix.get(i)).or(rest) {
                             stack.push((sub, At::Value(item)));
@@ -586,7 +606,7 @@ impl Work {
         self.required_name_bytes = self.required_name_bytes.saturating_add(other.required_name_bytes);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
         self.union |= other.union;
-        self.recursive_union |= other.recursive_union;
+        self.recursive |= other.recursive;
         self.max_ref_chain = self.max_ref_chain.max(other.max_ref_chain);
     }
 
@@ -725,8 +745,6 @@ struct Part {
     refs: Vec<(String, bool)>,
     /// Applicators whose work is not one structural traversal of the value.
     complex: bool,
-    /// A nullable reference ([`nullable_reference`]).
-    nullable_union: bool,
 }
 
 /// Where a scanned value sits: a schema, a map of named schemas
@@ -751,7 +769,6 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
         schema_depth: 0,
         refs: vec![],
         complex: false,
-        nullable_union: false,
     };
     let mut stack: Vec<(&Value, bool, usize, Pos, usize, usize)> = vec![(v, false, 1, Pos::Schema, 0, 1)];
     'scan: while let Some((v, down, d, pos, schema_depth, copies)) = stack.pop() {
@@ -807,9 +824,8 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                         part.work.unique_uses = part.work.unique_uses.saturating_add(copies);
                     }
                 }
-                if pos == Pos::Schema && nullable_reference(o) {
-                    part.nullable_union = true;
-                } else if pos == Pos::Schema
+                if pos == Pos::Schema
+                    && !nullable_reference(o)
                     && ((o.keys().any(|k| complex_applicator(k)) && !lone_all_of(o))
                         || (o.contains_key("$ref")
                             && o.keys().any(|k| schema_child_keyword(k) || matches!(k.as_str(), "properties" | "additionalProperties"))))
@@ -1426,7 +1442,7 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
 /// cycles are refused. Two forms keep one route: a one-member `allOf` with
 /// no other applicator, and a nullable reference ([`nullable_reference`]),
 /// whose second branch is a constant-cost `null` check; the plan limits
-/// detailed errors for the latter by instance depth. Duplicate references
+/// detailed errors under unions in recursive schemas by instance depth. Duplicate references
 /// count twice. The condensed graph bounds
 /// longest depth and reference-expanded nodes, members/items and text bytes,
 /// then returns the expanded node count.
@@ -1466,7 +1482,7 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
     seen.fill(false);
     let mut component_of = vec![0; reached.len()];
     let mut components = vec![];
-    let mut recursive_unions = vec![];
+    let mut cyclic_components = vec![];
     while let Some(start) = finish.pop() {
         if seen[start] {
             continue;
@@ -1487,7 +1503,7 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
         if cyclic && component.iter().any(|&node| parts[reached[node].as_str()].complex) {
             return Err(format!("{TOO_LARGE}recursive schemas with non-structural applicators are not checked"));
         }
-        recursive_unions.push(cyclic && component.iter().any(|&node| parts[reached[node].as_str()].nullable_union));
+        cyclic_components.push(cyclic);
         for &node in &component {
             component_of[node] = components.len();
         }
@@ -1507,9 +1523,9 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
     // A complete lap gives every entry to a permitted cycle the same cost.
     let mut work: Vec<Work> = components
         .iter()
-        .zip(&recursive_unions)
-        .map(|(nodes, &recursive_union)| {
-            nodes.iter().fold(Work { recursive_union, ..Work::default() }, |mut work, &node| {
+        .zip(&cyclic_components)
+        .map(|(nodes, &recursive)| {
+            nodes.iter().fold(Work { recursive, ..Work::default() }, |mut work, &node| {
                 work.add(parts[reached[node].as_str()].work);
                 work
             })

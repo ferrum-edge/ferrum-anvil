@@ -299,6 +299,38 @@ fn recursive_nullable_references_limit_detailed_errors_by_depth() {
 }
 
 #[test]
+fn unions_above_recursive_schemas_limit_detailed_errors_by_depth() {
+    use schema::CheckMode;
+    let mut chain = json!({"s":"x".repeat(4_000)});
+    for _ in 0..39 {
+        chain = json!({"next":chain,"s":"x".repeat(4_000)});
+    }
+    let node = json!({"type":"object","required":["a","b","c","d","e","f","g","h"],
+        "properties":{"next":{"$ref":"#/$defs/node"},"s":{"type":"string"}}});
+    // A nullable reference to a recursive schema: every failed level of the
+    // chain is inside the union's copied errors.
+    let nullable = json!({"anyOf":[{"$ref":"#/$defs/node"},{"type":"null"}],"$defs":{"node":node}});
+    let plan = schema::measure_standalone_plan(&nullable).unwrap();
+    assert_eq!(plan.mode(&chain), CheckMode::Generic);
+    let plain = json!({"$ref":"#/$defs/node","$defs":{"node":node}});
+    let plan = schema::measure_standalone_plan(&plain).unwrap();
+    assert_eq!(plan.mode(&chain), CheckMode::Detailed);
+}
+
+#[test]
+fn applied_work_is_charged_before_it_is_queued() {
+    use schema::CheckMode;
+    let patterns: serde_json::Map<String, Value> = (0..128).map(|i| (format!("^p{i}$"), json!(true))).collect();
+    let shape = json!({"type":"object","properties":{"tags":{"uniqueItems":true}},"patternProperties":patterns});
+    let plan = schema::measure_standalone_plan(&shape).unwrap();
+    // Every member would queue every pattern: refused before queueing.
+    let mut wide: serde_json::Map<String, Value> = (0..40_000).map(|i| (format!("k{i}"), Value::Null)).collect();
+    wide.insert("tags".into(), json!((0..32).collect::<Vec<_>>()));
+    assert_eq!(plan.mode(&Value::Object(wide)), CheckMode::Skip);
+    assert_ne!(plan.mode(&json!({"tags":[1, 2],"k1":null})), CheckMode::Skip);
+}
+
+#[test]
 fn unevaluated_work_is_refused_even_without_references() {
     let mut properties = json!(true);
     let mut items = json!(false);

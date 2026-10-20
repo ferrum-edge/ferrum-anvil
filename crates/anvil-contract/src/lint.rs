@@ -270,16 +270,18 @@ fn apply(spec: &Spec, rule: &Rule, t: &Target, out: &mut Collector<'_>) {
     for c in &rule.conditions {
         let selected = select(spec, t, c);
         if selected.iter().any(|s| {
-            out.incomplete |= c.function.schema_check_skipped(s.value.as_deref());
-            c.function.evaluate(s.value.as_deref(), &sibling).is_some()
+            let (reason, skipped) = c.function.evaluate_reporting_skip(s.value.as_deref(), &sibling);
+            out.incomplete |= skipped;
+            reason.is_some()
         }) {
             return;
         }
     }
     for a in &rule.then {
         for s in select(spec, t, a) {
-            out.incomplete |= a.function.schema_check_skipped(s.value.as_deref());
-            let Some(reason) = a.function.evaluate(s.value.as_deref(), &sibling) else { continue };
+            let (reason, skipped) = a.function.evaluate_reporting_skip(s.value.as_deref(), &sibling);
+            out.incomplete |= skipped;
+            let Some(reason) = reason else { continue };
             let pointer = s.pointer.unwrap_or_else(|| t.pointer.clone());
             // A Swagger 2.0 synthetic target keys itself `…#suffix`.
             let pointer = pointer.split('#').next().unwrap_or("").to_string();
