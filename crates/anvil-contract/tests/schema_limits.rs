@@ -2,7 +2,7 @@
 //! hostile instance; positive controls still enforce the accepted schemas.
 
 use anvil_contract::model::Direction;
-use anvil_contract::{RuleSet, Spec, schema};
+use anvil_contract::{DriftKind, DriftOptions, LintOptions, Observation, ObservedResponse, RuleSet, Spec, analyze, lint, observe, schema};
 use serde_json::{Value, json};
 
 fn spec(schema: &Value) -> Spec {
@@ -210,7 +210,7 @@ fn unique_items_are_charged_on_the_arrays_they_apply_to() {
         "status":{"enum":["available","sold"]}
     }});
     let shape = json!({"type":"array","items":{"$ref":"#/components/schemas/Pet"}});
-    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+    let mut doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
         "components":{"schemas":{"Checked":shape,"Pet":pet}}});
     let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
     let checked =
@@ -222,13 +222,98 @@ fn unique_items_are_charged_on_the_arrays_they_apply_to() {
     assert_eq!(checked.plan.mode(&list), CheckMode::Detailed);
     assert!(checked.validator.is_valid(&list));
     let mut duplicate = list.clone();
-    duplicate[7]["tags"] = json!(["a", "a"]);
+    duplicate[7]["name"] = json!("private-pet-name");
+    duplicate[7]["tags"] = json!(["private-tag-value", "private-tag-value"]);
     assert!(!checked.validator.is_valid(&duplicate));
+
+    // Exercise the public reports too: accepting the plan must actually
+    // check the response/example, and findings must keep value-free labels.
+    doc["paths"] = json!({"/pets/{accountId}":{"get":{
+        "parameters":[{"name":"accountId","in":"path","required":true,"schema":{"type":"integer"}}],
+        "responses":{"200":{"description":"ok","content":{"application/json":{"schema":shape}}}}
+    }}});
+    let rules = RuleSet::recommended();
+    for (body, invalid) in [(&list, false), (&duplicate, true)] {
+        doc["paths"]["/pets/{accountId}"]["get"]["responses"]["200"]["content"]["application/json"]["example"] = body.clone();
+        let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+        let bytes = serde_json::to_vec(body).unwrap();
+        let observation = Observation {
+            id: "pets-response".into(),
+            at: None,
+            method: "GET".into(),
+            url: "https://example.test/pets/778812".into(),
+            operation_hint: None,
+            request_content_type: None,
+            request_bytes: 0,
+            query: vec![],
+            request_headers: vec![],
+            response: Some(ObservedResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                headers: vec![],
+                bytes: Some(bytes.len() as u64),
+                body: observe::body_of(Some("application/json"), &bytes, true, &mut observe::BodyBudget::default()),
+            }),
+            latency_ms: None,
+        };
+        let drift = analyze(&document, &[observation], &DriftOptions::default());
+        assert_eq!(drift.matched, 1);
+        assert!(!drift.notes.iter().any(|note| note.contains("not checked")), "{:?}", drift.notes);
+        let mismatches: Vec<_> = drift.findings.iter().filter(|f| f.kind == DriftKind::ResponseSchemaMismatch).collect();
+        assert_eq!(mismatches.len(), usize::from(invalid), "{:?}", drift.findings);
+        if invalid {
+            assert_eq!(mismatches[0].operation.as_deref(), Some("GET /pets/{accountId}"));
+            assert!(mismatches[0].message.contains("`/*/tags` has duplicate items"), "{}", mismatches[0].message);
+        }
+        let drift_text = serde_json::to_string(&drift).unwrap();
+        for value in ["private-pet-name", "private-tag-value", "778812"] {
+            assert!(!drift_text.contains(value), "{value} leaked into drift report");
+        }
+
+        let report = lint(&document, &rules, &LintOptions::default());
+        assert_eq!(report.examples_not_checked, 0);
+        assert!(!report.incomplete);
+        let findings: Vec<_> = report.findings.iter().filter(|f| f.rule == "example-valid").collect();
+        assert_eq!(findings.len(), usize::from(invalid), "{:?}", report.findings);
+        if invalid {
+            assert_eq!(findings[0].label, "application/json in the 200 response of GET /pets/{accountId}");
+        }
+        assert!(report.findings.iter().all(|f| !f.message.contains("not checked")));
+        for finding in &report.findings {
+            for value in ["private-pet-name", "private-tag-value", "778812"] {
+                assert!(!finding.label.contains(value), "{value} leaked into lint label");
+            }
+        }
+    }
 
     // `uniqueItems` on the list itself compares whole items.
     let whole = json!({"type":"array","uniqueItems":true,"items":pet});
     let plan = schema::measure_standalone_plan(&whole).unwrap();
     assert_eq!(plan.mode(&list), CheckMode::Skip);
+}
+
+#[test]
+fn recursive_uniqueness_charges_repeated_descendant_subtrees() {
+    use schema::CheckMode;
+    let mut nested = json!("x".repeat(100_000));
+    for _ in 0..60 {
+        let mut items: Vec<Value> = (0..15).map(|i| json!(i)).collect();
+        items.push(nested);
+        nested = Value::Array(items);
+    }
+    for items in [json!({"$ref":"#"}), json!({"anyOf":[{"$ref":"#"},{"type":"null"}]})] {
+        let shape = json!({"uniqueItems":true,"items":items});
+        let plan = schema::measure_standalone_plan(&shape).unwrap();
+        // The one-lap product is below 4M, but just hashing the 100KB leaf
+        // at every level reads 6M bytes. Refuse before invoking validation.
+        assert_eq!(plan.mode(&nested), CheckMode::Skip);
+        let check = anvil_contract::checks::Function::compile("schema", &json!({"schema":shape})).unwrap();
+        assert!(check.evaluate(Some(&nested), &|_| None).unwrap().contains("not checked"));
+        let small = json!([0, 1, [2, 3, "ok"]]);
+        assert_ne!(plan.mode(&small), CheckMode::Skip);
+        assert_eq!(check.evaluate(Some(&small), &|_| None), None);
+        assert!(check.evaluate(Some(&json!([0, [1, 1]])), &|_| None).is_some());
+    }
 }
 
 #[test]

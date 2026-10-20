@@ -105,13 +105,16 @@ company ruleset.
   Each instance has a 50-million-unit validation-work limit, a 256 MiB
   text-scan/input work limit (including repeated property-name lookups and
   the quadratic named-group work of `format: "regex"` on values and object
-  keys), and a conservative uniqueness-comparison limit
+  keys), and a conservative 4-million-unit uniqueness-comparison limit
   that counts repeated schema applications. These start as products over
   the whole instance; when one is over its limit, each keyword is charged
   only for the values it can apply to (every union branch and property
-  pattern counted, a bounded walk of at most 4 million applications), so
-  a `uniqueItems` tag list or a large `enum` no longer makes an unrelated
-  part of a large body unchecked. Error details are collected only
+  pattern counted, a bounded walk of at most 2 million applications and
+  values sized for them), so a `uniqueItems` tag list or a large `enum` no
+  longer makes an unrelated part of a large body unchecked. Schemas with
+  both recursion and `uniqueItems` always use that walk: hashing or comparing
+  nested arrays reads descendant subtrees again at each level, which a
+  one-lap schema estimate does not bound. Error details are collected only
   when possible retained copies, including repeated instance paths and
   cached prefixes of nested references, fit an
   8 MiB allowance. Otherwise an invalid value has a generic mismatch;

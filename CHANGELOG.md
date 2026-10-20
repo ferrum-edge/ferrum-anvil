@@ -26,7 +26,9 @@
   reported as not checked. A nullable reference (`anyOf`/`oneOf` of a
   `$ref` and `null`, including converted OpenAPI 3.0 `nullable`) inside a
   recursive schema is accepted, with detailed errors limited by instance
-  depth.
+  depth. Recursive schemas with `uniqueItems` always use per-application
+  accounting, counting descendant subtrees again at every array level;
+  bodies exceeding the 4-million-unit uniqueness budget are not checked.
 - Record-integrity checks now cost what an operation touches instead of the
   profile size. The protected-record catalogue is stored per entry under a
   bucketed authenticated root (database schema 6), so a write updates only its
