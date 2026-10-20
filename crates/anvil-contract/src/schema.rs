@@ -19,6 +19,7 @@ use crate::spec::{Reach, Spec, internal_pointer};
 use anvil_import::Dialect;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const MAX_DEPTH: usize = 64;
 /// References followed inside one another, and nesting summed along such a
@@ -59,6 +60,9 @@ const MAX_VALIDATION_WORK: usize = 50_000_000;
 const MAX_TEXT_INSTANCE_WORK: usize = 256 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 8 * 1024 * 1024;
 const MAX_UNIQUE_WORK: usize = 4_000_000;
+/// Schema applications (and instance values sized for them) the per-instance
+/// walk may visit before an instance is left unchecked.
+const MAX_APPLIED_STEPS: usize = 4_000_000;
 /// What every refusal of a schema for its size or nesting starts with (see
 /// [`too_large`]).
 const TOO_LARGE: &str = "too large to check: ";
@@ -175,6 +179,8 @@ pub fn compile_within_checked(
             work,
             unique_uses: work.unique_uses.max(usize::from(risk.unique)),
             text_scans: work.pattern_uses.saturating_add(work.string_scans).saturating_add(work.name_lookups),
+            schema: Arc::new(wrapper),
+            formats: true,
         },
     })
 }
@@ -270,6 +276,10 @@ struct Work {
     required_name_bytes: usize,
     property_maps: usize,
     union: bool,
+    /// A recursive component applies a nullable reference (`anyOf`/`oneOf`
+    /// with `null`): a failed union owns copies of its nested errors, so
+    /// detailed errors can retain one instance subtree per level.
+    recursive_union: bool,
     max_ref_chain: usize,
 }
 
@@ -282,15 +292,38 @@ pub enum CheckMode {
     Skip,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ValidationPlan {
     work: Work,
     unique_uses: usize,
     text_scans: usize,
+    /// The document the validator was built from (bundle or custom schema),
+    /// walked against an instance when the whole-instance products are too
+    /// coarse ([`ValidationPlan::applied`]).
+    schema: Arc<Value>,
+    /// Whether `format` is asserted (OpenAPI checks) rather than annotated.
+    formats: bool,
+}
+
+/// Text, name, `uniqueItems` and `format: regex` work, charged where each
+/// keyword applies rather than as products over the whole instance.
+#[derive(Default)]
+struct Applied {
+    text: usize,
+    regex_format: usize,
+    names: usize,
+    unique: usize,
+}
+
+/// Where a schema applies: a value, or an object member name (`propertyNames`).
+#[derive(Clone, Copy)]
+enum At<'a> {
+    Value(&'a Value),
+    Name(&'a str),
 }
 
 impl ValidationPlan {
-    pub fn mode(self, instance: &Value) -> CheckMode {
+    pub fn mode(&self, instance: &Value) -> CheckMode {
         let mut values = 0usize;
         let mut objects = 0usize;
         let mut bytes = 0usize;
@@ -338,24 +371,29 @@ impl ValidationPlan {
                 }
                 _ => {}
             }
-            if values.saturating_mul(self.work.steps.max(1)) > MAX_VALIDATION_WORK
-                || bytes.saturating_mul(self.text_scans) > MAX_TEXT_INSTANCE_WORK
-                // The ECMA `regex` format parser can compare every named
-                // group with earlier groups in the same string.
-                || self
-                    .work
-                    .regex_format_uses
-                    .saturating_mul(longest_string)
-                    .saturating_mul(string_bytes)
-                    > MAX_TEXT_INSTANCE_WORK
-                || objects.saturating_mul(self.work.name_bytes) > MAX_TEXT_INSTANCE_WORK
-                || self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK
-            {
+            if values.saturating_mul(self.work.steps.max(1)) > MAX_VALIDATION_WORK {
                 return CheckMode::Skip;
             }
         }
-        if self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK {
-            return CheckMode::Skip;
+        // Whole-instance products: every text-reading keyword against every
+        // byte, every name check against every object, every `uniqueItems`
+        // against the longest array. When one is over its limit, charge each
+        // keyword only where it applies before giving up on the instance.
+        let coarse = bytes.saturating_mul(self.text_scans) > MAX_TEXT_INSTANCE_WORK
+            // The ECMA `regex` format parser can compare every named group
+            // with earlier groups in the same string.
+            || self.work.regex_format_uses.saturating_mul(longest_string).saturating_mul(string_bytes) > MAX_TEXT_INSTANCE_WORK
+            || objects.saturating_mul(self.work.name_bytes) > MAX_TEXT_INSTANCE_WORK
+            || self.unique_uses.saturating_mul(longest_array).saturating_mul(values.saturating_add(bytes)) > MAX_UNIQUE_WORK;
+        if coarse {
+            match self.applied(instance) {
+                Some(a)
+                    if a.text <= MAX_TEXT_INSTANCE_WORK
+                        && a.regex_format <= MAX_TEXT_INSTANCE_WORK
+                        && a.names <= MAX_TEXT_INSTANCE_WORK
+                        && a.unique <= MAX_UNIQUE_WORK => {}
+                _ => return CheckMode::Skip,
+            }
         }
         // A failed anyOf/oneOf may own one full instance per branch even in
         // validate(); iter_errors can additionally own one const/enum/not
@@ -369,8 +407,14 @@ impl ValidationPlan {
         // cached prefix can contain every earlier schema-location suffix.
         let active_refs = max_value_depth.saturating_add(1).saturating_mul(self.work.max_ref_chain);
         let schema_path_bound = self.work.bytes.saturating_mul(2).saturating_add(self.work.steps.saturating_mul(8));
+        // A recursive nullable reference fails as a union at every level on
+        // the way to a nested error. Each failed union owns its branches'
+        // errors and re-evaluates them, so detailed collection can retain and
+        // revisit one instance subtree per level.
+        let levels = if self.work.recursive_union { max_value_depth.saturating_add(1) } else { 1 };
         if error_path_bytes.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
-            || instance_heap.saturating_mul(self.work.steps.max(1)) > MAX_ERROR_BYTES
+            || instance_heap.saturating_mul(self.work.steps.max(1)).saturating_mul(levels) > MAX_ERROR_BYTES
+            || values.saturating_mul(self.work.steps.max(1)).saturating_mul(levels) > MAX_VALIDATION_WORK
             || schema_heap.saturating_mul(values) > MAX_ERROR_BYTES
             || active_refs.saturating_mul(active_refs).saturating_mul(schema_path_bound) > MAX_ERROR_BYTES
         {
@@ -378,6 +422,150 @@ impl ValidationPlan {
         } else {
             CheckMode::Detailed
         }
+    }
+    /// [`Applied`] work of validating `instance`, following the schema the
+    /// way the validator applies it and over-approximating every choice:
+    /// all union branches and conditions, every `patternProperties` pattern
+    /// against every member, `additionalProperties` against every member
+    /// not named in `properties`. Each route counts, as the validator also
+    /// applies each one. `None` when the walk exceeds [`MAX_APPLIED_STEPS`]
+    /// or a reference does not resolve.
+    fn applied(&self, instance: &Value) -> Option<Applied> {
+        let doc = &*self.schema;
+        let mut out = Applied::default();
+        let mut steps = 0usize;
+        let mut costs: HashMap<usize, NodeCost> = HashMap::new();
+        // Values and member-name/string bytes of each container, as the
+        // whole-instance products count them: one equality comparison can
+        // read the whole subtree.
+        let mut sizes: HashMap<usize, usize> = HashMap::new();
+        let mut size_of = |v: &Value, steps: &mut usize| -> Option<usize> {
+            let key = std::ptr::from_ref(v) as usize;
+            if let Some(&size) = sizes.get(&key) {
+                return Some(size);
+            }
+            let mut size = 0usize;
+            let mut stack = vec![v];
+            while let Some(v) = stack.pop() {
+                *steps += 1;
+                if *steps > MAX_APPLIED_STEPS {
+                    return None;
+                }
+                size = size.saturating_add(1);
+                match v {
+                    Value::Object(map) => {
+                        for (name, child) in map {
+                            size = size.saturating_add(name.len());
+                            stack.push(child);
+                        }
+                    }
+                    Value::Array(items) => stack.extend(items),
+                    Value::String(s) => size = size.saturating_add(s.len()),
+                    _ => {}
+                }
+            }
+            sizes.insert(key, size);
+            Some(size)
+        };
+        let mut stack: Vec<(&Value, At)> = vec![(doc, At::Value(instance))];
+        while let Some((schema, at)) = stack.pop() {
+            steps += 1;
+            if steps > MAX_APPLIED_STEPS || stack.len() > MAX_APPLIED_STEPS {
+                return None;
+            }
+            let Value::Object(s) = schema else { continue };
+            // Subschemas applied to the same value.
+            if let Some(r) = s.get("$ref") {
+                stack.push((r.as_str().and_then(internal_pointer).and_then(|p| doc.pointer(&p))?, at));
+            }
+            for keyword in ["allOf", "anyOf", "oneOf"] {
+                if let Some(Value::Array(members)) = s.get(keyword) {
+                    stack.extend(members.iter().map(|member| (member, at)));
+                }
+            }
+            for keyword in ["not", "if", "then", "else"] {
+                if let Some(sub) = s.get(keyword) {
+                    stack.push((sub, at));
+                }
+            }
+            for keyword in ["dependentSchemas", "dependencies"] {
+                if let Some(Value::Object(entries)) = s.get(keyword) {
+                    stack.extend(entries.values().filter(|sub| !sub.is_array()).map(|sub| (sub, at)));
+                }
+            }
+            let cost = *costs.entry(std::ptr::from_ref(s) as usize).or_insert_with(|| NodeCost::of(s));
+            let text = |len: usize, out: &mut Applied| {
+                out.text = out
+                    .text
+                    .saturating_add(len.saturating_mul(cost.pattern.saturating_add(cost.string_scans).saturating_add(cost.literals)));
+                if self.formats && cost.regex_format {
+                    out.regex_format = out.regex_format.saturating_add(len.saturating_mul(len));
+                }
+            };
+            let value = match at {
+                At::Name(name) => {
+                    text(name.len(), &mut out);
+                    continue;
+                }
+                At::Value(Value::String(string)) => {
+                    text(string.len(), &mut out);
+                    continue;
+                }
+                At::Value(value) if value.is_object() || value.is_array() => value,
+                // `const`/`enum` compare numbers, booleans and null in constant time.
+                At::Value(_) => continue,
+            };
+            if cost.literals > 0 {
+                out.text = out.text.saturating_add(cost.literals.saturating_mul(size_of(value, &mut steps)?));
+            }
+            match value {
+                Value::Object(map) => {
+                    let name_bytes = map.keys().fold(0usize, |sum, name| sum.saturating_add(name.len()));
+                    out.text = out.text.saturating_add(name_bytes.saturating_mul(cost.lookups.saturating_add(cost.pattern_properties)));
+                    out.names = out.names.saturating_add(cost.name_bytes);
+                    let properties = s.get("properties").and_then(Value::as_object);
+                    let patterns = s.get("patternProperties").and_then(Value::as_object);
+                    for (name, child) in map {
+                        let named = properties.and_then(|p| p.get(name));
+                        if let Some(sub) = named {
+                            stack.push((sub, At::Value(child)));
+                        }
+                        if let Some(patterns) = patterns {
+                            stack.extend(patterns.values().map(|sub| (sub, At::Value(child))));
+                        }
+                        if named.is_none()
+                            && let Some(sub) = s.get("additionalProperties")
+                        {
+                            stack.push((sub, At::Value(child)));
+                        }
+                        if let Some(sub) = s.get("propertyNames") {
+                            stack.push((sub, At::Name(name)));
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    if cost.unique {
+                        out.unique = out.unique.saturating_add(items.len().saturating_mul(size_of(value, &mut steps)?));
+                    }
+                    // Draft 2020-12 `prefixItems`/`items`, or a legacy `items`
+                    // list with `additionalItems`.
+                    let (prefix, rest) = match s.get("items") {
+                        Some(Value::Array(prefix)) => (Some(prefix), s.get("additionalItems")),
+                        other => (s.get("prefixItems").and_then(Value::as_array), other),
+                    };
+                    for (i, item) in items.iter().enumerate() {
+                        if let Some(sub) = prefix.and_then(|prefix| prefix.get(i)).or(rest) {
+                            stack.push((sub, At::Value(item)));
+                        }
+                        if let Some(sub) = s.get("contains") {
+                            stack.push((sub, At::Value(item)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(out)
     }
 }
 
@@ -398,6 +586,7 @@ impl Work {
         self.required_name_bytes = self.required_name_bytes.saturating_add(other.required_name_bytes);
         self.property_maps = self.property_maps.saturating_add(other.property_maps);
         self.union |= other.union;
+        self.recursive_union |= other.recursive_union;
         self.max_ref_chain = self.max_ref_chain.max(other.max_ref_chain);
     }
 
@@ -431,6 +620,92 @@ impl Work {
     }
 }
 
+/// What one application of a schema object can cost: measurement multiplies
+/// it by the object's reference-expanded copies, and the per-instance walk
+/// ([`ValidationPlan::mode`]) by the values it actually applies to.
+#[derive(Clone, Copy, Default)]
+struct NodeCost {
+    /// `pattern`, matched against a whole string.
+    pattern: usize,
+    /// `patternProperties` patterns, each matched against every member name.
+    pattern_properties: usize,
+    /// String assertions that read a whole string.
+    string_scans: usize,
+    /// `const` and `enum` entries, each compared with a whole value.
+    literals: usize,
+    /// `format: regex`, whose parser can compare named groups pairwise.
+    regex_format: bool,
+    /// Member-name lookups of required/property/dependency validators.
+    lookups: usize,
+    /// Schema-side name bytes some validators hash once per application.
+    name_bytes: usize,
+    required_names: usize,
+    required_name_bytes: usize,
+    unique: bool,
+}
+
+impl NodeCost {
+    fn of(o: &Map<String, Value>) -> Self {
+        let properties = o.get("properties").and_then(Value::as_object);
+        let dependent_lookups = |keyword: &str| {
+            o.get(keyword).and_then(Value::as_object).map_or(0, |entries| {
+                entries.len().saturating_add(
+                    entries.values().map(|v| v.as_array().map_or(0, Vec::len)).fold(0usize, |sum, len| sum.saturating_add(len)),
+                )
+            })
+        };
+        let lookups = o
+            .get("required")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+            .saturating_add(properties.map_or(0, Map::len))
+            .saturating_add(dependent_lookups("dependentRequired"))
+            .saturating_add(dependent_lookups("dependencies"))
+            .saturating_add(o.get("dependentSchemas").and_then(Value::as_object).map_or(0, Map::len))
+            .saturating_add(usize::from(o.contains_key("additionalProperties")))
+            .saturating_add(usize::from(o.contains_key("propertyNames")));
+        // Some validators hash a schema-side name even when the instance has
+        // only short, unrelated member names.
+        let array_name_bytes = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_array)
+                .map_or(0, |names| names.iter().filter_map(Value::as_str).fold(0usize, |sum, name| sum.saturating_add(name.len().max(1))))
+        };
+        let dependent_name_bytes = |keyword: &str| {
+            o.get(keyword).and_then(Value::as_object).map_or(0, |entries| {
+                entries
+                    .iter()
+                    .fold(0usize, |sum, (name, value)| sum.saturating_add(name.len().max(1)).saturating_add(array_name_bytes(Some(value))))
+            })
+        };
+        let required_name_bytes = array_name_bytes(o.get("required"));
+        let name_bytes = required_name_bytes
+            .saturating_add(properties.map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))))
+            .saturating_add(dependent_name_bytes("dependentRequired"))
+            .saturating_add(dependent_name_bytes("dependencies"))
+            .saturating_add(
+                o.get("dependentSchemas")
+                    .and_then(Value::as_object)
+                    .map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
+            );
+        NodeCost {
+            pattern: usize::from(o.get("pattern").is_some_and(Value::is_string)),
+            pattern_properties: o.get("patternProperties").and_then(Value::as_object).map_or(0, Map::len),
+            string_scans: ["minLength", "maxLength", "format", "contentEncoding", "contentMediaType"]
+                .into_iter()
+                .filter(|keyword| o.contains_key(*keyword))
+                .count(),
+            literals: usize::from(o.contains_key("const")).saturating_add(o.get("enum").and_then(Value::as_array).map_or(0, Vec::len)),
+            regex_format: o.get("format").and_then(Value::as_str) == Some("regex"),
+            lookups,
+            name_bytes,
+            required_names: o.get("required").and_then(Value::as_array).map_or(0, Vec::len),
+            required_name_bytes,
+            unique: o.get("uniqueItems") == Some(&Value::Bool(true)),
+        }
+    }
+}
+
 /// One schema (the root, or a `$ref` target): how many objects and lists
 /// it has, and its internal references, each with whether it sits under a
 /// keyword that descends into the value.
@@ -450,6 +725,8 @@ struct Part {
     refs: Vec<(String, bool)>,
     /// Applicators whose work is not one structural traversal of the value.
     complex: bool,
+    /// A nullable reference ([`nullable_reference`]).
+    nullable_union: bool,
 }
 
 /// Where a scanned value sits: a schema, a map of named schemas
@@ -474,6 +751,7 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
         schema_depth: 0,
         refs: vec![],
         complex: false,
+        nullable_union: false,
     };
     let mut stack: Vec<(&Value, bool, usize, Pos, usize, usize)> = vec![(v, false, 1, Pos::Schema, 0, 1)];
     'scan: while let Some((v, down, d, pos, schema_depth, copies)) = stack.pop() {
@@ -508,86 +786,31 @@ fn scan(v: &Value, node_limit: usize, step_limit: usize, byte_limit: usize, sche
                                 .saturating_add(copies.saturating_mul(name_bytes).saturating_mul(patterns.len()));
                         }
                     }
+                    let cost = NodeCost::of(o);
                     part.work.pattern_uses =
-                        part.work
-                            .pattern_uses
-                            .saturating_add(copies.saturating_mul(
-                                usize::from(o.get("pattern").is_some_and(Value::is_string)) + patterns.map_or(0, Map::len),
-                            ));
-                    part.work.string_scans = part.work.string_scans.saturating_add(
-                        copies.saturating_mul(
-                            ["minLength", "maxLength", "format", "contentEncoding", "contentMediaType"]
-                                .into_iter()
-                                .filter(|keyword| o.contains_key(*keyword))
-                                .count()
-                                .saturating_add(usize::from(o.contains_key("const")))
-                                .saturating_add(o.get("enum").and_then(Value::as_array).map_or(0, Vec::len)),
-                        ),
-                    );
-                    if o.get("format").and_then(Value::as_str) == Some("regex") {
+                        part.work.pattern_uses.saturating_add(copies.saturating_mul(cost.pattern.saturating_add(cost.pattern_properties)));
+                    part.work.string_scans =
+                        part.work.string_scans.saturating_add(copies.saturating_mul(cost.string_scans.saturating_add(cost.literals)));
+                    if cost.regex_format {
                         part.work.regex_format_uses = part.work.regex_format_uses.saturating_add(copies);
                     }
                     // Required/property/dependency validators can hash or
                     // compare instance member names once per application.
                     // Charge long names for every reference-expanded use.
-                    let dependent_lookups = |keyword: &str| {
-                        o.get(keyword).and_then(Value::as_object).map_or(0, |entries| {
-                            entries.len().saturating_add(
-                                entries.values().map(|v| v.as_array().map_or(0, Vec::len)).fold(0usize, |sum, len| sum.saturating_add(len)),
-                            )
-                        })
-                    };
-                    let lookups = o
-                        .get("required")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len)
-                        .saturating_add(properties.map_or(0, Map::len))
-                        .saturating_add(dependent_lookups("dependentRequired"))
-                        .saturating_add(dependent_lookups("dependencies"))
-                        .saturating_add(o.get("dependentSchemas").and_then(Value::as_object).map_or(0, Map::len))
-                        .saturating_add(usize::from(o.contains_key("additionalProperties")))
-                        .saturating_add(usize::from(o.contains_key("propertyNames")));
-                    part.work.name_lookups = part.work.name_lookups.saturating_add(copies.saturating_mul(lookups));
-                    // Some validators hash a schema-side name even when the
-                    // instance has only short, unrelated member names.
-                    let array_name_bytes = |value: Option<&Value>| {
-                        value.and_then(Value::as_array).map_or(0, |names| {
-                            names.iter().filter_map(Value::as_str).fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))
-                        })
-                    };
-                    let dependent_name_bytes = |keyword: &str| {
-                        o.get(keyword).and_then(Value::as_object).map_or(0, |entries| {
-                            entries.iter().fold(0usize, |sum, (name, value)| {
-                                sum.saturating_add(name.len().max(1)).saturating_add(array_name_bytes(Some(value)))
-                            })
-                        })
-                    };
-                    let required_name_bytes = array_name_bytes(o.get("required"));
-                    let name_bytes = required_name_bytes
-                        .saturating_add(
-                            properties.map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
-                        )
-                        .saturating_add(dependent_name_bytes("dependentRequired"))
-                        .saturating_add(dependent_name_bytes("dependencies"))
-                        .saturating_add(
-                            o.get("dependentSchemas")
-                                .and_then(Value::as_object)
-                                .map_or(0, |entries| entries.keys().fold(0usize, |sum, name| sum.saturating_add(name.len().max(1)))),
-                        );
-                    part.work.name_bytes = part.work.name_bytes.saturating_add(copies.saturating_mul(name_bytes));
+                    part.work.name_lookups = part.work.name_lookups.saturating_add(copies.saturating_mul(cost.lookups));
+                    part.work.name_bytes = part.work.name_bytes.saturating_add(copies.saturating_mul(cost.name_bytes));
                     part.work.required_name_bytes =
-                        part.work.required_name_bytes.saturating_add(copies.saturating_mul(required_name_bytes));
-                    part.work.required_names = part
-                        .work
-                        .required_names
-                        .saturating_add(copies.saturating_mul(o.get("required").and_then(Value::as_array).map_or(0, Vec::len)));
+                        part.work.required_name_bytes.saturating_add(copies.saturating_mul(cost.required_name_bytes));
+                    part.work.required_names = part.work.required_names.saturating_add(copies.saturating_mul(cost.required_names));
                     part.work.union |= o.contains_key("anyOf") || o.contains_key("oneOf");
-                    if o.get("uniqueItems") == Some(&Value::Bool(true)) {
+                    if cost.unique {
                         part.work.unique_uses = part.work.unique_uses.saturating_add(copies);
                     }
                 }
-                if pos == Pos::Schema
-                    && (o.keys().any(|k| complex_applicator(k))
+                if pos == Pos::Schema && nullable_reference(o) {
+                    part.nullable_union = true;
+                } else if pos == Pos::Schema
+                    && ((o.keys().any(|k| complex_applicator(k)) && !lone_all_of(o))
                         || (o.contains_key("$ref")
                             && o.keys().any(|k| schema_child_keyword(k) || matches!(k.as_str(), "properties" | "additionalProperties"))))
                 {
@@ -690,6 +913,8 @@ pub fn measure_standalone_plan(schema: &Value) -> Result<ValidationPlan, String>
         work,
         unique_uses: work.unique_uses.max(usize::from(risk.unique)),
         text_scans: work.pattern_uses.saturating_add(work.string_scans).saturating_add(work.name_lookups),
+        schema: Arc::new(schema.clone()),
+        formats: false,
     })
 }
 
@@ -725,6 +950,46 @@ fn schema_child_keyword(k: &str) -> bool {
             | "unevaluatedItems"
             | "contentSchema"
     )
+}
+
+/// Keywords that apply a subschema somewhere (to the value, a member, an item
+/// or a member name).
+fn applicator(k: &str) -> bool {
+    complex_applicator(k) || schema_child_keyword(k) || matches!(k, "$ref" | "properties")
+}
+
+/// A one-member `allOf` beside no other applicator applies that member to the
+/// same value once, like a `$ref` alias; its errors are not copied.
+fn lone_all_of(o: &Map<String, Value>) -> bool {
+    o.get("allOf").and_then(Value::as_array).is_some_and(|members| members.len() == 1) && o.keys().all(|k| k == "allOf" || !applicator(k))
+}
+
+/// `{"anyOf"|"oneOf": [R, {"type": "null"}]}` in either order, beside no other
+/// applicator, where R's only applicator is a `$ref` or a one-member `allOf`
+/// of one: a nullable reference, as OpenAPI 3.0 `nullable`/`x-nullable` on a
+/// reference converts. It applies one route into the referenced schema.
+fn nullable_reference(o: &Map<String, Value>) -> bool {
+    fn reference(v: &Value, depth: usize) -> bool {
+        let Value::Object(o) = v else { return false };
+        let mut applicators = o.keys().filter(|k| applicator(k));
+        match (applicators.next().map(String::as_str), applicators.next()) {
+            (Some("$ref"), None) => o["$ref"].is_string(),
+            (Some("allOf"), None) => {
+                depth < 2 && o["allOf"].as_array().is_some_and(|members| members.len() == 1 && reference(&members[0], depth + 1))
+            }
+            _ => false,
+        }
+    }
+    let mut applicators = o.keys().filter(|k| applicator(k));
+    let (Some(union), None) = (applicators.next(), applicators.next()) else { return false };
+    if !matches!(union.as_str(), "anyOf" | "oneOf") {
+        return false;
+    }
+    let null = json!({"type": "null"});
+    match o[union].as_array().map(Vec::as_slice) {
+        Some([a, b]) => (a == &null && reference(b, 0)) || (reference(a, 0) && b == &null),
+        _ => false,
+    }
 }
 
 fn complex_applicator(k: &str) -> bool {
@@ -1158,8 +1423,11 @@ fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_dept
 /// conditions, negation, dependencies, overlapping property patterns and
 /// `contains` can apply several routes to the same nested value; the
 /// validator's eager error collection has no runtime work budget, so such
-/// cycles are refused (including a nullable self-reference spelled with
-/// `anyOf`). Duplicate references count twice. The condensed graph bounds
+/// cycles are refused. Two forms keep one route: a one-member `allOf` with
+/// no other applicator, and a nullable reference ([`nullable_reference`]),
+/// whose second branch is a constant-cost `null` check; the plan limits
+/// detailed errors for the latter by instance depth. Duplicate references
+/// count twice. The condensed graph bounds
 /// longest depth and reference-expanded nodes, members/items and text bytes,
 /// then returns the expanded node count.
 fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Work, String> {
@@ -1198,6 +1466,7 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
     seen.fill(false);
     let mut component_of = vec![0; reached.len()];
     let mut components = vec![];
+    let mut recursive_unions = vec![];
     while let Some(start) = finish.pop() {
         if seen[start] {
             continue;
@@ -1218,6 +1487,7 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
         if cyclic && component.iter().any(|&node| parts[reached[node].as_str()].complex) {
             return Err(format!("{TOO_LARGE}recursive schemas with non-structural applicators are not checked"));
         }
+        recursive_unions.push(cyclic && component.iter().any(|&node| parts[reached[node].as_str()].nullable_union));
         for &node in &component {
             component_of[node] = components.len();
         }
@@ -1237,8 +1507,9 @@ fn measure_parts(parts: &HashMap<String, Part>, reached: &[String]) -> Result<Wo
     // A complete lap gives every entry to a permitted cycle the same cost.
     let mut work: Vec<Work> = components
         .iter()
-        .map(|nodes| {
-            nodes.iter().fold(Work::default(), |mut work, &node| {
+        .zip(&recursive_unions)
+        .map(|(nodes, &recursive_union)| {
+            nodes.iter().fold(Work { recursive_union, ..Work::default() }, |mut work, &node| {
                 work.add(parts[reached[node].as_str()].work);
                 work
             })

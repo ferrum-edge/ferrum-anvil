@@ -367,7 +367,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   recursive region (composition, conditions, negation, dependencies,
   overlapping property patterns, `contains`), `unevaluatedProperties` and
   `unevaluatedItems` are refused before validation because the validator's
-  eager error collection and annotation tracking can amplify work.
+  eager error collection and annotation tracking can amplify work. A
+  nullable reference is the one union accepted there; detailed errors under
+  it are limited by instance depth, since each failed level copies its
+  nested errors. Per-instance text, name and `uniqueItems` work is charged
+  where each keyword applies when whole-instance estimates are too coarse.
   Reference-expanded costs include text bytes and scalar members because
   errors may clone large subschemas for every reference. Structural cycles
   apply one subschema per nested value and are charged for a complete lap,

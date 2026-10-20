@@ -60,14 +60,17 @@ company ruleset.
   - it nests subschemas more than 64 levels deep: constraints are refused
     before conversion could truncate them (literal data adds no schema depth);
   - a schema in a recursive region uses composition (`allOf`, `anyOf`,
-    `oneOf`, including a nullable reference spelled as `anyOf`), conditions,
-    negation, dependencies, overlapping property patterns, `contains`, or a
-    `$ref` with sibling applicators: these can apply several routes to the
-    same nested value. Recursion through named properties,
-    `additionalProperties` and array items remains supported, with any number
-    of references (a tree node's `parent` and `children`, a comment's
-    `author` and `replies`); some legitimate composite recursive schemas are
-    conservatively refused;
+    `oneOf`), conditions, negation, dependencies, overlapping property
+    patterns, `contains`, or a `$ref` with sibling applicators: these can
+    apply several routes to the same nested value. Recursion through named
+    properties, `additionalProperties` and array items remains supported,
+    with any number of references (a tree node's `parent` and `children`, a
+    comment's `author` and `replies`), as do a one-member `allOf` and a
+    nullable reference (`anyOf`/`oneOf` of a reference and `{"type":
+    "null"}`, the form OpenAPI 3.0 `nullable` takes). Detailed errors under
+    a recursive nullable reference are bounded by instance depth too, since
+    each failed level copies its nested errors; some legitimate composite
+    recursive schemas are conservatively refused;
   - it uses `unevaluatedProperties` or `unevaluatedItems`: the validator can
     re-evaluate nested schemas exponentially even without references;
   - it expands to more than 100,000 nodes with every `$ref` expanded
@@ -103,7 +106,12 @@ company ruleset.
   text-scan/input work limit (including repeated property-name lookups and
   the quadratic named-group work of `format: "regex"` on values and object
   keys), and a conservative uniqueness-comparison limit
-  that counts repeated schema applications. Error details are collected only
+  that counts repeated schema applications. These start as products over
+  the whole instance; when one is over its limit, each keyword is charged
+  only for the values it can apply to (every union branch and property
+  pattern counted, a bounded walk of at most 4 million applications), so
+  a `uniqueItems` tag list or a large `enum` no longer makes an unrelated
+  part of a large body unchecked. Error details are collected only
   when possible retained copies, including repeated instance paths and
   cached prefixes of nested references, fit an
   8 MiB allowance. Otherwise an invalid value has a generic mismatch;

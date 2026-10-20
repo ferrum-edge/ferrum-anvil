@@ -44,8 +44,15 @@ fn recursive_branching_and_nonstructural_applicators_are_refused() {
         json!({"patternProperties":{"^child$":{"$ref":"#"}}}),
         json!({"items":{"$ref":"#"},"contains":true}),
         json!({"dependentSchemas":{"child":{"properties":{"child":{"$ref":"#"}}}}}),
-        // A nullable self-reference applies a union at every level.
-        json!({"type":"object","properties":{"next":{"anyOf":[{"$ref":"#"},{"type":"null"}]}}}),
+        // A union with two recursive branches, or a nullable reference with
+        // another applicator beside it, applies several routes per level.
+        json!({"type":"object","properties":{"next":{"anyOf":[{"$ref":"#"},{"$ref":"#"}]}}}),
+        json!({"properties":{"next":{"anyOf":[{"$ref":"#"},{"type":"null"}],"properties":{"x":{"$ref":"#"}}}}}),
+        // A one-member allOf beside other applicators adds a second route.
+        json!({"$defs":{
+            "a":{"allOf":[{"$ref":"#/$defs/b"}],"properties":{"child":{"$ref":"#/$defs/a"}}},
+            "b":{"properties":{"child":{"$ref":"#/$defs/a"}}}
+        },"$ref":"#/$defs/a"}),
         // Separate aliases must not deduplicate two applications.
         json!({"$defs":{
             "a":{"properties":{"child":{"$ref":"#/$defs/left"}},"patternProperties":{"^child$":{"$ref":"#/$defs/right"}}},
@@ -98,6 +105,17 @@ fn simple_structural_recursion_and_acyclic_composition_still_validate() {
             },"$ref":"#/$defs/comment"}),
             json!({"author":{"name":"a"},"replies":[{"replies":[]}]}),
             json!({"replies":[{"author":{"name":7}}]}),
+        ),
+        // A nullable self-reference: one route plus a constant null check.
+        (
+            json!({"type":"object","properties":{"next":{"anyOf":[{"$ref":"#"},{"type":"null"}]}}}),
+            json!({"next":{"next":null}}),
+            json!({"next":{"next":7}}),
+        ),
+        (
+            json!({"type":"object","properties":{"next":{"oneOf":[{"type":"null"},{"allOf":[{"$ref":"#"}]}]}}}),
+            json!({"next":{"next":null}}),
+            json!({"next":7}),
         ),
         // One recursive region leading into another.
         (
@@ -176,6 +194,108 @@ fn copied_bundle_targets_are_charged_once() {
     let validator = schema::compile(&document, &schema, Direction::Response).unwrap();
     assert!(validator.is_valid(&json!({"p1":"ok"})));
     assert!(!validator.is_valid(&json!({"p1":7})));
+}
+
+fn pets(count: usize) -> Value {
+    json!((0..count).map(|i| json!({"id":i,"name":format!("pet{i:04}"),"tags":["a","b","c"],"status":"available"})).collect::<Vec<_>>())
+}
+
+#[test]
+fn unique_items_are_charged_on_the_arrays_they_apply_to() {
+    use schema::CheckMode;
+    let pet = json!({"type":"object","properties":{
+        "id":{"type":"integer"},
+        "name":{"type":"string"},
+        "tags":{"type":"array","uniqueItems":true,"items":{"type":"string"}},
+        "status":{"enum":["available","sold"]}
+    }});
+    let shape = json!({"type":"array","items":{"$ref":"#/components/schemas/Pet"}});
+    let doc = json!({"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{},
+        "components":{"schemas":{"Checked":shape,"Pet":pet}}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let checked =
+        schema::compile_within_checked(&document, &shape, Direction::Response, &mut schema::Scanned::default(), schema::Scanned::UNLIMITED)
+            .unwrap();
+    // 400 items: the whole-instance estimate (every array times the whole
+    // body) is over the limit, but only the three-element tag lists apply.
+    let list = pets(400);
+    assert_eq!(checked.plan.mode(&list), CheckMode::Detailed);
+    assert!(checked.validator.is_valid(&list));
+    let mut duplicate = list.clone();
+    duplicate[7]["tags"] = json!(["a", "a"]);
+    assert!(!checked.validator.is_valid(&duplicate));
+
+    // `uniqueItems` on the list itself compares whole items.
+    let whole = json!({"type":"array","uniqueItems":true,"items":pet});
+    let plan = schema::measure_standalone_plan(&whole).unwrap();
+    assert_eq!(plan.mode(&list), CheckMode::Skip);
+}
+
+#[test]
+fn large_enums_are_charged_on_the_values_they_apply_to() {
+    use schema::CheckMode;
+    let countries: Vec<String> = (0..250).map(|i| format!("C{i:03}")).collect();
+    let mut properties: serde_json::Map<String, Value> = (0..10).map(|i| (format!("p{i}"), json!({"$ref":"#/$defs/country"}))).collect();
+    properties.insert("notes".into(), json!({"type":"string"}));
+    let shape = json!({"type":"object","properties":properties,"$defs":{"country":{"enum":countries}}});
+    let plan = schema::measure_standalone_plan(&shape).unwrap();
+    let mut body: serde_json::Map<String, Value> = (0..10).map(|i| (format!("p{i}"), json!("C001"))).collect();
+    body.insert("notes".into(), json!("x".repeat(300_000)));
+    let body = Value::Object(body);
+    assert_ne!(plan.mode(&body), CheckMode::Skip);
+    let validator = jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&shape).unwrap();
+    assert!(validator.is_valid(&body));
+
+    // Long strings in every enum-checked property still exceed the limit.
+    let hostile: serde_json::Map<String, Value> = (0..10).map(|i| (format!("p{i}"), json!("x".repeat(300_000)))).collect();
+    assert_eq!(plan.mode(&Value::Object(hostile)), CheckMode::Skip);
+    let strings = json!({"type":"array","items":{"enum":(0..250).map(|i| format!("C{i:03}")).collect::<Vec<_>>()}});
+    let plan = schema::measure_standalone_plan(&strings).unwrap();
+    assert_eq!(plan.mode(&json!(vec!["y".repeat(1_000); 1_500])), CheckMode::Skip);
+}
+
+#[test]
+fn openapi30_nullable_recursive_references_are_checked() {
+    let schema = json!({"$ref":"#/components/schemas/Node"});
+    let doc = json!({"openapi":"3.0.3","info":{"title":"t","version":"1"},"paths":{},
+    "components":{"schemas":{
+        "Checked":schema,
+        "Node":{"type":"object","properties":{
+            "name":{"type":"string"},
+            "parent":{"allOf":[{"$ref":"#/components/schemas/Node"}],"nullable":true},
+            "children":{"type":"array","items":{"$ref":"#/components/schemas/Node"}}
+        }}
+    }}});
+    let document = Spec::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let checked = schema::compile_within_checked(
+        &document,
+        &schema,
+        Direction::Response,
+        &mut schema::Scanned::default(),
+        schema::Scanned::UNLIMITED,
+    )
+    .unwrap();
+    let good = json!({"name":"a","parent":null,"children":[{"parent":{"parent":null}}]});
+    assert_eq!(checked.plan.mode(&good), schema::CheckMode::Detailed);
+    assert!(checked.validator.is_valid(&good));
+    assert!(!checked.validator.is_valid(&json!({"parent":7})));
+    assert!(!checked.validator.is_valid(&json!({"children":[{"parent":{"name":7}}]})));
+}
+
+#[test]
+fn recursive_nullable_references_limit_detailed_errors_by_depth() {
+    use schema::CheckMode;
+    let mut chain = json!({"s":"x".repeat(2_000)});
+    for _ in 0..49 {
+        chain = json!({"next":chain,"s":"x".repeat(2_000)});
+    }
+    let nullable = json!({"type":"object","properties":{"next":{"anyOf":[{"$ref":"#"},{"type":"null"}]},"s":{"type":"string"}}});
+    let plan = schema::measure_standalone_plan(&nullable).unwrap();
+    // Each failed level would own a copy of its nested errors.
+    assert_eq!(plan.mode(&chain), CheckMode::Generic);
+    let plain = json!({"type":"object","properties":{"next":{"$ref":"#"},"s":{"type":"string"}}});
+    let plan = schema::measure_standalone_plan(&plain).unwrap();
+    assert_eq!(plan.mode(&chain), CheckMode::Detailed);
 }
 
 #[test]
