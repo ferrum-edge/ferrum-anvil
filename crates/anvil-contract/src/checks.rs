@@ -152,13 +152,15 @@ struct SchemaOpts {
 }
 
 impl Function {
-    /// Whether this schema function cannot safely check the selected value.
-    /// The lint report records this separately from an ordinary rule failure.
-    pub(crate) fn schema_check_skipped(&self, value: Option<&Value>) -> bool {
-        match (self, value) {
-            (Function::Schema { plan, .. }, Some(value)) => plan.mode(value) == crate::schema::CheckMode::Skip,
-            _ => false,
+    /// [`Function::evaluate`], and whether a schema function could not safely
+    /// check the selected value: the lint report records that separately from
+    /// an ordinary rule failure. The work estimate runs once per value.
+    pub(crate) fn evaluate_reporting_skip(&self, value: Option<&Value>, sibling: &dyn Fn(&str) -> Option<Value>) -> (Option<String>, bool) {
+        if let (Function::Schema { validator, plan }, Some(v)) = (self, value.filter(|v| !v.is_null())) {
+            let mode = plan.mode(v);
+            return (schema_reason(validator, mode, v), mode == crate::schema::CheckMode::Skip);
         }
+        (self.evaluate(value, sibling), false)
     }
 
     pub fn compile(name: &str, opts: &Value) -> Result<Function, String> {
@@ -338,25 +340,7 @@ impl Function {
             }
             Function::Schema { validator, plan } => {
                 let v = value?;
-                match plan.mode(v) {
-                    crate::schema::CheckMode::Skip => {
-                        return Some("schema check exceeded the validation-work limit and was not checked".into());
-                    }
-                    crate::schema::CheckMode::Generic => {
-                        return (!validator.is_valid(v))
-                            .then(|| "does not match the schema (details omitted to bound error collection)".into());
-                    }
-                    crate::schema::CheckMode::Detailed => {}
-                }
-                let errors: Vec<String> = validator
-                    .iter_errors(v)
-                    .take(3)
-                    .map(|e| {
-                        let at = e.instance_path().to_string();
-                        if at.is_empty() { e.to_string() } else { format!("{e} at {at}") }
-                    })
-                    .collect();
-                (!errors.is_empty()).then(|| format!("does not match the schema: {}", errors.join("; ")))
+                schema_reason(validator, plan.mode(v), v)
             }
         }
     }
@@ -391,6 +375,27 @@ pub fn show(v: &Value) -> String {
         other => other.to_string(),
     };
     if s.chars().count() > 120 { format!("{}…", s.chars().take(120).collect::<String>()) } else { s }
+}
+
+/// Why `v` fails a schema function checked in `mode`, if it does.
+fn schema_reason(validator: &jsonschema::Validator, mode: crate::schema::CheckMode, v: &Value) -> Option<String> {
+    match mode {
+        crate::schema::CheckMode::Skip => Some("schema check exceeded the validation-work limit and was not checked".into()),
+        crate::schema::CheckMode::Generic => {
+            (!validator.is_valid(v)).then(|| "does not match the schema (details omitted to bound error collection)".into())
+        }
+        crate::schema::CheckMode::Detailed => {
+            let errors: Vec<String> = validator
+                .iter_errors(v)
+                .take(3)
+                .map(|e| {
+                    let at = e.instance_path().to_string();
+                    if at.is_empty() { e.to_string() } else { format!("{e} at {at}") }
+                })
+                .collect();
+            (!errors.is_empty()).then(|| format!("does not match the schema: {}", errors.join("; ")))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,16 @@
 
 ### Changed
 
+- Schema checks of examples, drift bodies and custom ruleset values charge
+  `uniqueItems`, text-reading assertions (`pattern`, `enum`, `const`, length
+  and format checks), property-name lookups and `format: regex` only where
+  they can apply, when the whole-instance estimate is over its limit: a
+  list response whose items have a `uniqueItems` tag array, or a large
+  `enum` used in a few properties of a large body, is checked instead of
+  reported as not checked. A nullable reference (`anyOf`/`oneOf` of a
+  `$ref` and `null`, including converted OpenAPI 3.0 `nullable`) inside a
+  recursive schema is accepted, with detailed errors limited by instance
+  depth.
 - Record-integrity checks now cost what an operation touches instead of the
   profile size. The protected-record catalogue is stored per entry under a
   bucketed authenticated root (database schema 6), so a write updates only its
