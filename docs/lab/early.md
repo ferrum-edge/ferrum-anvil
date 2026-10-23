@@ -170,7 +170,9 @@ by #5775), so a request Anvil sent as ordinary 1-RTT data reaches the backend wi
 or draws 425 when its method is not GET. Lab run 36345042003 saw it on macOS for CTRL-EARLY and
 EARLY-001's ticket GET. On releases before v0.9.8 the ground-truth checks on 1-RTT requests through
 the early-data listener (CTRL-EARLY, EARLY-001's ticket GET, EARLY-005, EARLY-007 and missed 0-RTT
-rounds) therefore accept `Early-Data: 1`, and EARLY-005 accepts a 425 followed by its one retry; the
+rounds) therefore accept `Early-Data: 1`, and EARLY-005 accepts a single 425 that Anvil does not
+retry (it retries a 425 only for a method its early-data opt-in allows, and POST never is), whose
+exchange completed without a transport failure, when the gateway log records its HTTP/3 0-RTT refusal of the POST and the backend received nothing; the
 check detail names the misclassification. Anvil's own evidence must still say nothing was sent
 early. On v0.9.8 and later these checks stay strict. EARLY-002's retry must stay outside the race
 even though the relay queues it during the hold: it reaches the gateway only after the first gateway

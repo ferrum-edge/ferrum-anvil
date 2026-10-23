@@ -14,7 +14,7 @@ use anvil_fixtures::streams::{self, UdpMode};
 use anvil_fixtures::{LabPki, TlsServerOptions};
 use anvil_transport::dns::DnsConfig;
 use anvil_transport::recorder::EventCtx;
-use anvil_transport::session::TranscriptLimits;
+use anvil_transport::session::{SessionOutput, TranscriptLimits};
 use anvil_transport::tls::{self, TlsSettings};
 use anvil_transport::{dtls, grpc, sse, udp};
 use bytes::Bytes;
@@ -518,6 +518,132 @@ async fn dtls_total_deadline_ends_the_application_exchange() {
     assert!(elapsed < std::time::Duration::from_millis(2_500), "{elapsed:?}");
     let transcript = out.transcript.as_ref().unwrap();
     assert!(!transcript.messages.iter().any(|m| m.kind == "close_notify"), "no close_notify after the deadline");
+}
+
+/// Runs a DTLS exchange through a relay that answers the client's first
+/// datagram with `stray` before it forwards anything, the way a record from an
+/// earlier association on a reused client port arrives ahead of the server's
+/// first flight. Returns the result and how many handshakes the server
+/// completed.
+async fn dtls_with_stray_before_the_server_flight(stray: Vec<u8>) -> (SessionOutput, usize) {
+    init();
+    let f = anvil_fixtures::dtls::serve(
+        "127.0.0.1:0",
+        anvil_fixtures::dtls::DtlsServerOptions {
+            cert_pem: pki().server.cert.clone(),
+            key_pem: pki().server.key.clone(),
+            client_ca_pem: None,
+        },
+    )
+    .await
+    .unwrap();
+    // A relay in front of the fixture answers the client's first datagram
+    // with the stray record before it forwards anything.
+    let relay = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let upstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    upstream.connect(f.addr).await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+    let (r, u, c) = (relay.clone(), upstream.clone(), client.clone());
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_535];
+        while let Ok((n, peer)) = r.recv_from(&mut buf).await {
+            if c.lock().replace(peer).is_none() {
+                let _ = r.send_to(&stray, peer).await;
+            }
+            let _ = u.send(&buf[..n]).await;
+        }
+    });
+    let (r, u, c) = (relay.clone(), upstream.clone(), client.clone());
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_535];
+        while let Ok(n) = u.recv(&mut buf).await {
+            let peer = *c.lock();
+            if let Some(peer) = peer {
+                let _ = r.send_to(&buf[..n], peer).await;
+            }
+        }
+    });
+    let prepared = Arc::new(
+        tls::prepare(&TlsSettings {
+            verify: true,
+            use_system_roots: false,
+            extra_roots_pem: vec![pki().ca.cert.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let plan = dtls::DtlsPlan {
+        host: "127.0.0.1".into(),
+        port: relay_addr.port(),
+        dns: DnsConfig::default(),
+        timeouts: timeouts(),
+        tls: prepared,
+        identity: None,
+        datagrams: vec![Bytes::from_static(b"hi")],
+        response_window_ms: 300,
+        max_datagrams: 1,
+        display_url: format!("dtls://{relay_addr}"),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+        masque: None,
+        hbone: None,
+    };
+    let out = dtls::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    (out, f.completed_handshakes().len())
+}
+
+fn assert_stray_discarded(out: &SessionOutput, completed: usize, what: &str) {
+    let o = &out.attempts[0].observation;
+    assert_eq!(o.phase(Phase::DtlsHandshake).unwrap().status, PhaseStatus::Completed, "{:?}", o.failure);
+    assert_eq!(out.facts.echoed_datagrams, 1, "the exchange went on after the handshake");
+    assert!(
+        out.facts.notes.iter().any(|n| n.starts_with(what) && n.contains("discarded")),
+        "the discarded record is in the evidence: {:?}",
+        out.facts.notes
+    );
+    assert_eq!(completed, 1, "ground truth: the server completed the handshake");
+}
+
+/// A record from an earlier DTLS association on the client's address (here
+/// the encrypted epoch-1 alert a server sent to a port the OS has since
+/// reused) that arrives before the server's first flight is discarded: the
+/// handshake goes on and completes, and the evidence says what was dropped.
+#[tokio::test]
+async fn dtls_record_of_an_earlier_association_before_the_server_flight_is_discarded() {
+    // Captured from a loopback run: an encrypted alert (content type 21),
+    // DTLS 1.2, epoch 1, sequence number 2.
+    let stray = hex::decode("15fefd0001000000000002001a99c072f5bffccbb1a4a972c2aaf7694b9622dd096fea3d564214").unwrap();
+    let (out, completed) = dtls_with_stray_before_the_server_flight(stray).await;
+    assert_stray_discarded(&out, completed, "a DTLS record of a nonzero epoch");
+}
+
+/// The same for a DTLS 1.3 association: its records carry the unified
+/// (encrypted) header, which no server first flight uses.
+#[tokio::test]
+async fn dtls13_record_of_an_earlier_association_before_the_server_flight_is_discarded() {
+    // Unified header 0b001_0_1_1_01 (16-bit sequence number, length present,
+    // epoch bits 1), sequence 2, length 24, then 24 bytes of ciphertext.
+    let mut stray = hex::decode("2d00020018").unwrap();
+    stray.extend([0xa5; 24]);
+    let (out, completed) = dtls_with_stray_before_the_server_flight(stray).await;
+    assert_stray_discarded(&out, completed, "an encrypted DTLS 1.3 record");
+}
+
+/// A discarded datagram leaves no evidence behind: a CertificateRequest
+/// coalesced after the foreign record was never the server's, so the
+/// completed handshake still reports that no client certificate was asked for.
+#[tokio::test]
+async fn dtls_discarded_datagram_does_not_count_as_a_certificate_request() {
+    let mut stray = hex::decode("15fefd0001000000000002001a99c072f5bffccbb1a4a972c2aaf7694b9622dd096fea3d564214").unwrap();
+    // An epoch-0 handshake record holding an empty CertificateRequest header.
+    stray.extend(hex::decode("16fefd0000000000000005000c0d000000000000000000000000").unwrap());
+    let (out, completed) = dtls_with_stray_before_the_server_flight(stray).await;
+    assert_stray_discarded(&out, completed, "a DTLS record of a nonzero epoch");
+    let tls = out.attempts[0].observation.connection.as_ref().and_then(|c| c.tls.as_ref()).expect("TLS evidence");
+    assert_eq!(tls.client_certificate_requested, Some(false), "the fixture asks for no client certificate");
+    assert_eq!(tls.client_certificate_presented, None);
 }
 
 #[tokio::test]

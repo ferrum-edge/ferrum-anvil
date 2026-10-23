@@ -579,7 +579,9 @@ fn ext_rate_limit(env: &Env) -> Fut<'_> {
         c.success(CheckKind::GroundTruth, &a);
         c.success(CheckKind::GroundTruth, &b);
         backend_hits(before, env.fixtures.echo.log.count_requests(), 2, "admitted within the window", &mut c);
-        let ops = env.op(from, "rl-rate-limit").await;
+        // The two admitted requests' lines can be read before the 429's:
+        // wait for the rejection line itself.
+        let (ops, _) = op_log_field(&env.gateway, from, "rl-rate-limit", "/metadata/rejection_phase", &["on_request_received"]).await;
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         plugin_reject(&mut c, &o, 429, "http.too_many_requests");
         c.add(CheckKind::GroundTruth, "x-ratelimit-remaining: 0 exposed", header(&o, "x-ratelimit-remaining") == ["0"], "");

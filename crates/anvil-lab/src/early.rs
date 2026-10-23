@@ -932,22 +932,41 @@ fn early005(env: &Env) -> Fut<'_> {
         fresh(env);
         fetch_ticket(env, &mut c, HTTPS, HttpVersionPolicy::Http3Only, true).await;
         let from = backend_count(env);
+        let log_from = gw_from(&env.gateway);
         let o = send(env, &ctx(env, "POST", HTTPS, HttpVersionPolicy::Http3Only, Some(&[]))).await;
-        c.success(CheckKind::Diagnosis, &o);
         let a = &o.record.attempts;
-        // Before v0.9.8 the gateway may answer the 1-RTT POST 425; Anvil then
-        // retries it once, still not as early data.
-        let misclassified = misclassifies_1rtt()
-            && a.len() == 2
-            && a[0].response_status == Some(425)
-            && a[1].reason == AttemptReason::TooEarlyRetry
-            && early(&o, 1).is_some_and(|e| !e.offered);
+        // Before v0.9.8 the gateway may classify the 1-RTT POST as early data
+        // and refuse it 425 as a method outside its early-data list, logging
+        // that refusal. Anvil retries a 425 only for a method its early-data
+        // opt-in allows, and POST never is, so that is one 425 attempt, not
+        // retried, and nothing reaches the backend.
+        let refusals = if misclassifies_1rtt() && status(&o) == Some(425) {
+            crate::fixtures_policy::wait_for_op_log(|| {
+                gw_lines(&env.gateway, log_from, H3_REFUSAL).into_iter().filter(|l| l.contains("POST")).collect()
+            })
+            .await
+        } else {
+            vec![]
+        };
+        // The exchange itself must have completed: a 425 whose body was reset or
+        // timed out is a transport failure, not the known misclassification.
+        let misclassified = !refusals.is_empty() && a.len() == 1 && a[0].response_status == Some(425) && a[0].failure.is_none();
+        if misclassified {
+            c.add(
+                CheckKind::GroundTruth,
+                "the gateway logged its HTTP/3 0-RTT refusal of the POST Anvil sent after the handshake",
+                true,
+                format!("{} line(s); {}", refusals.len(), misclassified_note()),
+            );
+        } else {
+            c.success(CheckKind::Diagnosis, &o);
+        }
         c.add(
             CheckKind::Diagnosis,
             "POST is never early data: resumed, sent after the handshake, reason recorded",
             early(&o, 0).is_some_and(|e| {
                 !e.method_eligible && !e.offered && e.resumption_attempted && e.not_used == Some(EarlyDataNotUsed::MethodNotEligible)
-            }) && (a.len() == 1 || misclassified),
+            }) && a.len() == 1,
             if misclassified { format!("{}; {}", line(&o), misclassified_note()) } else { line(&o) },
         );
         c.add(
@@ -956,9 +975,23 @@ fn early005(env: &Env) -> Fut<'_> {
             !codes(&o).iter().any(|x| x.starts_with("early_data.accepted") || (x == "request.too_early" && !misclassified)),
             format!("{:?}", codes(&o)),
         );
-        let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["POST"]);
-        c.add(CheckKind::GroundTruth, "the backend saw the POST without Early-Data", ok, detail);
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
+        if misclassified {
+            c.add(
+                CheckKind::Diagnosis,
+                "the 425 finding says Anvil did not send the POST as early data",
+                o.record
+                    .findings
+                    .iter()
+                    .any(|f| f.code == "request.too_early" && f.explanation.contains("did not send this request as early data")),
+                format!("{:?}", codes(&o)),
+            );
+            let seen = backend_requests(env, from);
+            c.add(CheckKind::GroundTruth, "the backend received nothing", seen.is_empty(), format!("{seen:?}"));
+        } else {
+            let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["POST"]);
+            c.add(CheckKind::GroundTruth, "the backend saw the POST without Early-Data", ok, detail);
+        }
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: refusals }
     })
 }
 

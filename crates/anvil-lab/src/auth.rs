@@ -224,12 +224,17 @@ fn backend_reached(c: &mut Checks, env: &Env, before: usize) {
     c.add(CheckKind::GroundTruth, "the backend received the request", n >= 1, format!("{n}"));
 }
 
-/// Gateway transaction log shows this proxy answered `status`.
-fn logged(c: &mut Checks, env: &Env, from: usize, proxy: &str, status: u16) -> Vec<String> {
-    let lines = op_lines(&env.gw, from, proxy);
-    let ok = lines.iter().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|v| {
-        ["response_status_code", "status_code", "status"].iter().any(|k| v.get(*k).and_then(|s| s.as_u64()) == Some(status as u64))
-    });
+/// Gateway transaction log shows this proxy answered `status`. The gateway
+/// writes the line as the exchange ends, just after Anvil has its response,
+/// so the log is polled (bounded) until the line appears.
+async fn logged(c: &mut Checks, env: &Env, from: usize, proxy: &str, status: u16) -> Vec<String> {
+    let answered = |lines: &[String]| {
+        lines.iter().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|v| {
+            ["response_status_code", "status_code", "status"].iter().any(|k| v.get(*k).and_then(|s| s.as_u64()) == Some(status as u64))
+        })
+    };
+    let lines = crate::fixtures_policy::wait_for_op_lines(|| op_lines(&env.gw, from, proxy), answered).await;
+    let ok = answered(&lines);
     c.add(CheckKind::GroundTruth, format!("gateway transaction log: {proxy} answered {status}"), ok, format!("{lines:?}"));
     lines
 }
@@ -311,7 +316,7 @@ fn ctrl(env: &Env) -> Fut<'_> {
             "",
         );
         record_excludes(&mut c, &o, &key, "the API key");
-        let log = logged(&mut c, env, from, "auth001-key-auth", 200);
+        let log = logged(&mut c, env, from, "auth001-key-auth", 200).await;
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: log }
     })
 }
@@ -340,7 +345,7 @@ fn auth001(env: &Env) -> Fut<'_> {
         signal(&mut c, &wrong, 401, "Invalid API key");
         gateway_outcome(&mut c, env, &wrong);
         backend_untouched(&mut c, env, before);
-        let log = logged(&mut c, env, from, "auth001-key-auth", 401);
+        let log = logged(&mut c, env, from, "auth001-key-auth", 401).await;
         let r = go(env, &ctx(env, "GET", "/auth/key/echo", api_key("X-Lab-Api-Key", &key))).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
@@ -395,7 +400,7 @@ fn auth003(env: &Env) -> Fut<'_> {
         no_confirmed_text(&mut c, &o, "tls");
         backend_untouched(&mut c, env, before);
         record_excludes(&mut c, &o, "wrong-password", "the Basic password");
-        let log = logged(&mut c, env, from, "auth003-basic-auth", 401);
+        let log = logged(&mut c, env, from, "auth003-basic-auth", 401).await;
         let r = go(env, &ctx(env, "GET", "/auth/basic/echo", basic("alice", &env.fx.secrets.alice_password))).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
@@ -715,7 +720,7 @@ fn auth016(env: &Env) -> Fut<'_> {
         let again = go(env, &ctx(env, "GET", "/auth/introspect/echo", oauth_cc(env))).await;
         c.success(CheckKind::Diagnosis, &again);
         c.add(CheckKind::Diagnosis, "the cached token is reused (no second token request)", env.fx.idp.token_requests() == tokens + 1, "");
-        let log = logged(&mut c, env, from, "authx01-introspect", 200);
+        let log = logged(&mut c, env, from, "authx01-introspect", 200).await;
         Outcome { main: Some(o), recovery: Some(again), checks: c, operator_log: log }
     })
 }
@@ -848,7 +853,7 @@ fn auth018(env: &Env) -> Fut<'_> {
         let nonce = |x: &ExecutionOutput| x.record.prepared.inferred.iter().find(|i| i.starts_with("auth hmac.nonce")).cloned();
         c.add(CheckKind::Diagnosis, "each send used its own nonce", nonce(&o).is_some() && nonce(&o) != nonce(&p), "");
         record_excludes(&mut c, &o, &env.fx.secrets.alice_hmac_secret, "the HMAC secret");
-        let log = logged(&mut c, env, from, "auth018-hmac", 200);
+        let log = logged(&mut c, env, from, "auth018-hmac", 200).await;
         Outcome { main: Some(o), recovery: Some(p), checks: c, operator_log: log }
     })
 }
@@ -1131,7 +1136,7 @@ fn auth028(env: &Env) -> Fut<'_> {
         no_confirmed_text(&mut c, &o, "password");
         no_confirmed_text(&mut c, &o, "invalid");
         backend_untouched(&mut c, env, before);
-        let log = logged(&mut c, env, from, "auth028-ldap-down", 500);
+        let log = logged(&mut c, env, from, "auth028-ldap-down", 500).await;
         // The same credentials succeed where the directory is reachable.
         let r = go(env, &ctx(env, "GET", "/auth/ldap/echo", basic("alice", &pw))).await;
         c.success(CheckKind::Recovery, &r);
@@ -1191,7 +1196,7 @@ fn gw011(env: &Env) -> Fut<'_> {
         let waf = o.record.findings.iter().any(|f| f.confidence >= Confidence::Likely && f.title.to_lowercase().contains("waf"));
         c.add(CheckKind::Diagnosis, "the ACL 403 is not called a WAF block", !waf, "");
         backend_untouched(&mut c, env, before);
-        let log = logged(&mut c, env, from, "gw011-acl", 403);
+        let log = logged(&mut c, env, from, "gw011-acl", 403).await;
         let r = go(env, &ctx(env, "GET", "/gw/acl/echo", api_key("X-Lab-Api-Key", &env.fx.secrets.bob_key))).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
@@ -1236,7 +1241,7 @@ fn authx04(env: &Env) -> Fut<'_> {
             has_relay(&mut c, &o);
         }
         backend_reached(&mut c, env, before);
-        let log = logged(&mut c, env, from, "auth001-key-auth", 401);
+        let log = logged(&mut c, env, from, "auth001-key-auth", 401).await;
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: log }
     })
 }
@@ -1390,7 +1395,7 @@ fn auth029(env: &Env) -> Fut<'_> {
         }
         c.add(CheckKind::Recovery, "three fresh Anvil envelopes in a row are all accepted", all_ok, "");
         c.add(CheckKind::GroundTruth, "the backend received the accepted requests", env.fx.echo.log.count_requests() >= before + 5, "");
-        let log = logged(&mut c, env, from, "auth029-soap-digest", 401);
+        let log = logged(&mut c, env, from, "auth029-soap-digest", 401).await;
         Outcome { main: Some(o), recovery: Some(ok), checks: c, operator_log: log }
     })
 }
