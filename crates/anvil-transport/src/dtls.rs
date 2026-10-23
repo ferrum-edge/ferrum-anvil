@@ -895,18 +895,18 @@ async fn exchange<C: DatagramChannel>(
                     // server's first flight: dimpl leaves the auto-sense
                     // state as it was, so drop the record and keep waiting
                     // (RFC 6347 section 4.1.2.7).
-                    Err(dimpl::Error::UnexpectedMessage(UnexpectedMessageError::UnrecognizedAutoServerResponse))
-                        if let Some(epoch) = foreign_epoch(&d) =>
-                    {
-                        notes.once(
-                            facts,
-                            format!(
-                                "a DTLS record of epoch {epoch} arrived before the server's first handshake flight; \
-                                 it belongs to no handshake of this session and was discarded"
-                            ),
-                        );
-                    }
-                    Err(e) => break Err(classify_dimpl(&e, hs_ms)),
+                    Err(e) => match (&e, foreign_epoch(&d)) {
+                        (dimpl::Error::UnexpectedMessage(UnexpectedMessageError::UnrecognizedAutoServerResponse), Some(epoch)) => {
+                            notes.once(
+                                facts,
+                                format!(
+                                    "a DTLS record of epoch {epoch} arrived before the server's first handshake flight; \
+                                     it belongs to no handshake of this session and was discarded"
+                                ),
+                            );
+                        }
+                        _ => break Err(classify_dimpl(&e, hs_ms)),
+                    },
                 }
             }
             HsEv::In(Inbound::PortUnreachable(e)) => {
