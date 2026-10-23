@@ -16,11 +16,11 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-714 Rust crates, 4 npm packages.
+713 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
-| MIT OR Apache-2.0 | 316 |
+| MIT OR Apache-2.0 | 315 |
 | MIT | 155 |
 | Apache-2.0 OR MIT | 112 |
 | MIT/Apache-2.0 | 35 |
@@ -66,7 +66,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (714)
+## Rust crates (713)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -543,7 +543,7 @@ the modified file under MPL-2.0.
 | rustls-native-certs | 0.8.5 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 | https://github.com/rustls/rustls-platform-verifier |
-| rustls-webpki | 0.103.15 | ISC | https://github.com/rustls/webpki |
+| rustls-webpki | 0.103.16 | ISC | https://github.com/rustls/webpki |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
 | salsa20 | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/stream-ciphers |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
@@ -735,7 +735,6 @@ the modified file under MPL-2.0.
 | windows-result | 0.4.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.4.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows-sys | 0.52.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.59.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
