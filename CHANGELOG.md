@@ -95,6 +95,22 @@
 
 ### Fixed
 
+- A DTLS handshake no longer fails when a record from an earlier DTLS
+  association on the same client address (a server's late `close_notify` to
+  a reused port, say) arrives before the server's first flight: a record of
+  a nonzero epoch at that point is discarded and noted, and the handshake
+  goes on (RFC 6347 section 4.1.2.7). It failed about one loopback handshake
+  in a few thousand with `UnrecognizedAutoServerResponse`.
+- Lab: on Ferrum Edge releases before 0.9.8, EARLY-005 accepts the
+  gateway's 425 for a POST sent after the handshake as the known
+  misclassification only when the gateway logged its 0-RTT refusal of the
+  POST, the 425 was not retried and the backend received nothing. Anvil
+  never retries a 425 for a method outside its early-data opt-in, so the
+  earlier tolerance (a 425 followed by one retry) could not match.
+- Lab: CTRL-AUTH and the other auth scenarios that check the gateway's
+  transaction line, and EXT-RL-001's rejection-phase check, wait (up to
+  three seconds) for the line instead of reading the log once right after
+  the response.
 - Execution records no longer keep a known secret that a server reflects into
   response metadata outside header values: header and trailer names (response,
   CONNECT-UDP tunnel and prepared headers), and the `Content-Type`,
