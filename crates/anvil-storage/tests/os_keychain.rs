@@ -33,7 +33,8 @@ fn keychain_profile_round_trips_through_the_os_credential_store() {
 
     // Removing the entry makes the profile unopenable (only a backup restores it).
     vault::delete_keychain_entry(&h).expect("the entry is removed");
-    assert!(matches!(vault::unlock_with_keychain(&h), Err(VaultError::KeychainUnavailable(_))));
+    let after = vault::unlock_with_keychain(&h);
+    assert!(matches!(after, Err(VaultError::KeychainUnavailable(_))), "unlock after the entry was removed: {after:?}");
 }
 
 #[test]
