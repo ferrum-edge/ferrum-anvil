@@ -520,6 +520,91 @@ async fn dtls_total_deadline_ends_the_application_exchange() {
     assert!(!transcript.messages.iter().any(|m| m.kind == "close_notify"), "no close_notify after the deadline");
 }
 
+/// A record from an earlier DTLS association on the client's address (here
+/// the encrypted epoch-1 alert a server sent to a port the OS has since
+/// reused) that arrives before the server's first flight is discarded: the
+/// handshake goes on and completes, and the evidence says what was dropped.
+#[tokio::test]
+async fn dtls_record_of_an_earlier_association_before_the_server_flight_is_discarded() {
+    init();
+    let f = anvil_fixtures::dtls::serve(
+        "127.0.0.1:0",
+        anvil_fixtures::dtls::DtlsServerOptions {
+            cert_pem: pki().server.cert.clone(),
+            key_pem: pki().server.key.clone(),
+            client_ca_pem: None,
+        },
+    )
+    .await
+    .unwrap();
+    // Captured from a loopback run: an encrypted alert (content type 21),
+    // DTLS 1.2, epoch 1, sequence number 2.
+    let stray = hex::decode("15fefd0001000000000002001a99c072f5bffccbb1a4a972c2aaf7694b9622dd096fea3d564214").unwrap();
+    // A relay in front of the fixture answers the client's first datagram
+    // with the stray record before it forwards anything.
+    let relay = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let upstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    upstream.connect(f.addr).await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+    let (r, u, c) = (relay.clone(), upstream.clone(), client.clone());
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_535];
+        while let Ok((n, peer)) = r.recv_from(&mut buf).await {
+            if c.lock().replace(peer).is_none() {
+                let _ = r.send_to(&stray, peer).await;
+            }
+            let _ = u.send(&buf[..n]).await;
+        }
+    });
+    let (r, u, c) = (relay.clone(), upstream.clone(), client.clone());
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_535];
+        while let Ok(n) = u.recv(&mut buf).await {
+            let peer = *c.lock();
+            if let Some(peer) = peer {
+                let _ = r.send_to(&buf[..n], peer).await;
+            }
+        }
+    });
+    let prepared = Arc::new(
+        tls::prepare(&TlsSettings {
+            verify: true,
+            use_system_roots: false,
+            extra_roots_pem: vec![pki().ca.cert.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let plan = dtls::DtlsPlan {
+        host: "127.0.0.1".into(),
+        port: relay_addr.port(),
+        dns: DnsConfig::default(),
+        timeouts: timeouts(),
+        tls: prepared,
+        identity: None,
+        datagrams: vec![Bytes::from_static(b"hi")],
+        response_window_ms: 300,
+        max_datagrams: 1,
+        display_url: format!("dtls://{relay_addr}"),
+        transcript: TranscriptLimits::default(),
+        redact: None,
+        envelope: None,
+        masque: None,
+        hbone: None,
+    };
+    let out = dtls::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    let o = &out.attempts[0].observation;
+    assert_eq!(o.phase(Phase::DtlsHandshake).unwrap().status, PhaseStatus::Completed, "{:?}", o.failure);
+    assert_eq!(out.facts.echoed_datagrams, 1, "the exchange went on after the handshake");
+    assert!(
+        out.facts.notes.iter().any(|n| n.contains("epoch 1") && n.contains("discarded")),
+        "the discarded record is in the evidence: {:?}",
+        out.facts.notes
+    );
+    assert_eq!(f.completed_handshakes().len(), 1, "ground truth: the server completed the handshake");
+}
+
 #[tokio::test]
 async fn proto_022_dtls_to_a_non_dtls_listener_times_out_with_a_deadline() {
     init();

@@ -18,6 +18,9 @@
 //!   evidence says so.
 //! * Retransmission timers are driven from dimpl's `Timeout` outputs; the
 //!   handshake deadline is the TLS handshake timeout class.
+//! * Before the server's first flight, a record of a nonzero epoch (left
+//!   over from an earlier association on the same address) is discarded and
+//!   noted rather than taken as the server's answer.
 //! * For DTLS 1.2, whether the server sent a CertificateRequest is observed
 //!   from its plaintext flight. For DTLS 1.3 that message is encrypted, so it
 //!   is recorded as not observed.
@@ -46,7 +49,7 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
 use anvil_domain::settings::Timeouts;
 use bytes::Bytes;
-use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion, SecurityError};
+use dimpl::{Config, Dtls, DtlsCertificate, Output, ProtocolVersion, SecurityError, UnexpectedMessageError};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -330,6 +333,19 @@ fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
             TransportFailure::new(Phase::DtlsHandshake, FailureKind::DtlsHandshakeFailed, format!("the DTLS handshake failed: {other:?}"))
         }
     }
+}
+
+/// The epoch of a datagram whose first record is a DTLS 1.0/1.2 plaintext
+/// header (content type, version, epoch) with a nonzero epoch. A server's
+/// first handshake flight (HelloVerifyRequest, ServerHello,
+/// HelloRetryRequest) is always epoch 0, so such a record cannot answer the
+/// ClientHello.
+fn foreign_epoch(d: &[u8]) -> Option<u16> {
+    let header = d.get(..13)?;
+    let content_type = (20..=25).contains(&header[0]);
+    let version = matches!(u16::from_be_bytes([header[1], header[2]]), 0xfeff | 0xfefd);
+    let epoch = u16::from_be_bytes([header[3], header[4]]);
+    (content_type && version && epoch != 0).then_some(epoch)
 }
 
 fn version_label(v: Option<ProtocolVersion>) -> Option<String> {
@@ -872,8 +888,25 @@ async fn exchange<C: DatagramChannel>(
         match ev {
             HsEv::In(Inbound::Datagram(d)) => {
                 cert_requested |= has_certificate_request(&d);
-                if let Err(e) = dtls.handle_packet(&d) {
-                    break Err(classify_dimpl(&e, hs_ms));
+                match dtls.handle_packet(&d) {
+                    Ok(()) => {}
+                    // A record from an earlier association on this address
+                    // (a late close_notify to a reused port, say) before the
+                    // server's first flight: dimpl leaves the auto-sense
+                    // state as it was, so drop the record and keep waiting
+                    // (RFC 6347 section 4.1.2.7).
+                    Err(dimpl::Error::UnexpectedMessage(UnexpectedMessageError::UnrecognizedAutoServerResponse))
+                        if let Some(epoch) = foreign_epoch(&d) =>
+                    {
+                        notes.once(
+                            facts,
+                            format!(
+                                "a DTLS record of epoch {epoch} arrived before the server's first handshake flight; \
+                                 it belongs to no handshake of this session and was discarded"
+                            ),
+                        );
+                    }
+                    Err(e) => break Err(classify_dimpl(&e, hs_ms)),
                 }
             }
             HsEv::In(Inbound::PortUnreachable(e)) => {
