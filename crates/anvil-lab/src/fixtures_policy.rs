@@ -173,6 +173,12 @@ async fn poll_op_log_status(
     }
 }
 
+/// Wait (bounded) until `ready` accepts the operator-log lines `read_lines`
+/// returns; the latest read is returned either way.
+pub(crate) async fn wait_for_op_lines(read_lines: impl FnMut() -> Vec<String>, ready: impl FnMut(&[String]) -> bool) -> Vec<String> {
+    poll_op_log(read_lines, ready, OP_LOG_WAIT, OP_LOG_INTERVAL).await
+}
+
 /// Wait (bounded) for at least one operator-log line for `proxy_id`.
 pub(crate) async fn wait_for_op_log(read_lines: impl FnMut() -> Vec<String>) -> Vec<String> {
     poll_op_log(read_lines, |lines| !lines.is_empty(), OP_LOG_WAIT, OP_LOG_INTERVAL).await
