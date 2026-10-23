@@ -18,9 +18,10 @@
 //!   evidence says so.
 //! * Retransmission timers are driven from dimpl's `Timeout` outputs; the
 //!   handshake deadline is the TLS handshake timeout class.
-//! * Before the server's first flight, a record of a nonzero epoch (left
-//!   over from an earlier association on the same address) is discarded and
-//!   noted rather than taken as the server's answer.
+//! * Before the server's first flight, a record that cannot answer the
+//!   ClientHello (a DTLS 1.0/1.2 record of a nonzero epoch or an encrypted
+//!   DTLS 1.3 record, left over from an earlier association on the same
+//!   address) is discarded and noted rather than taken as the server's answer.
 //! * For DTLS 1.2, whether the server sent a CertificateRequest is observed
 //!   from its plaintext flight. For DTLS 1.3 that message is encrypted, so it
 //!   is recorded as not observed.
@@ -335,17 +336,22 @@ fn classify_dimpl(e: &dimpl::Error, deadline_ms: u64) -> TransportFailure {
     }
 }
 
-/// The epoch of a datagram whose first record is a DTLS 1.0/1.2 plaintext
-/// header (content type, version, epoch) with a nonzero epoch. A server's
-/// first handshake flight (HelloVerifyRequest, ServerHello,
-/// HelloRetryRequest) is always epoch 0, so such a record cannot answer the
-/// ClientHello.
-fn foreign_epoch(d: &[u8]) -> Option<u16> {
+/// What a datagram's first record is, when it cannot answer the ClientHello.
+/// A server's first handshake flight (HelloVerifyRequest, ServerHello,
+/// HelloRetryRequest) is always an epoch-0 plaintext record, so a whole
+/// DTLS 1.0/1.2 record of a nonzero epoch, or a DTLS 1.3 unified-header
+/// (encrypted) record of at least the smallest valid size (two header bytes
+/// and a 16-byte AEAD tag), belongs to another association.
+fn foreign_record(d: &[u8]) -> Option<&'static str> {
+    if d.len() >= 18 && d[0] & 0b1110_0000 == 0b0010_0000 {
+        return Some("an encrypted DTLS 1.3 record");
+    }
     let header = d.get(..13)?;
     let content_type = (20..=25).contains(&header[0]);
     let version = matches!(u16::from_be_bytes([header[1], header[2]]), 0xfeff | 0xfefd);
     let epoch = u16::from_be_bytes([header[3], header[4]]);
-    (content_type && version && epoch != 0).then_some(epoch)
+    let whole = 13 + u16::from_be_bytes([header[11], header[12]]) as usize <= d.len();
+    (content_type && version && epoch != 0 && whole).then_some("a DTLS record of a nonzero epoch")
 }
 
 fn version_label(v: Option<ProtocolVersion>) -> Option<String> {
@@ -887,21 +893,22 @@ async fn exchange<C: DatagramChannel>(
         };
         match ev {
             HsEv::In(Inbound::Datagram(d)) => {
-                cert_requested |= has_certificate_request(&d);
                 match dtls.handle_packet(&d) {
-                    Ok(()) => {}
+                    // Only a datagram dimpl took counts as the server's
+                    // flight, so only it can show a CertificateRequest.
+                    Ok(()) => cert_requested |= has_certificate_request(&d),
                     // A record from an earlier association on this address
                     // (a late close_notify to a reused port, say) before the
                     // server's first flight: dimpl leaves the auto-sense
-                    // state as it was, so drop the record and keep waiting
+                    // state as it was, so drop the datagram and keep waiting
                     // (RFC 6347 section 4.1.2.7).
-                    Err(e) => match (&e, foreign_epoch(&d)) {
-                        (dimpl::Error::UnexpectedMessage(UnexpectedMessageError::UnrecognizedAutoServerResponse), Some(epoch)) => {
+                    Err(e) => match (&e, foreign_record(&d)) {
+                        (dimpl::Error::UnexpectedMessage(UnexpectedMessageError::UnrecognizedAutoServerResponse), Some(what)) => {
                             notes.once(
                                 facts,
                                 format!(
-                                    "a DTLS record of epoch {epoch} arrived before the server's first handshake flight; \
-                                     it belongs to no handshake of this session and was discarded"
+                                    "{what} arrived before the server's first handshake flight; \
+                                     it cannot answer this ClientHello and was discarded"
                                 ),
                             );
                         }

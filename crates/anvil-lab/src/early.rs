@@ -948,7 +948,9 @@ fn early005(env: &Env) -> Fut<'_> {
         } else {
             vec![]
         };
-        let misclassified = !refusals.is_empty() && a.len() == 1 && a[0].response_status == Some(425);
+        // The exchange itself must have completed: a 425 whose body was reset or
+        // timed out is a transport failure, not the known misclassification.
+        let misclassified = !refusals.is_empty() && a.len() == 1 && a[0].response_status == Some(425) && a[0].failure.is_none();
         if misclassified {
             c.add(
                 CheckKind::GroundTruth,
