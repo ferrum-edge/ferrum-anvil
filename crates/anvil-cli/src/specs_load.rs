@@ -410,17 +410,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_spec_source_pipe_is_read_only_to_the_limit() {
+        use crate::input::{fifo_with, within_seconds, writer_done};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("openapi.json");
-        let writer = crate::input::fifo_with(&path, MAX_SPEC_SOURCE_BYTES as usize + 4096);
-        let err = read_spec_source(&path).unwrap_err();
+        let writer = fifo_with(&path, MAX_SPEC_SOURCE_BYTES as usize + 4096);
+        let err = within_seconds(move || read_spec_source(&path)).unwrap_err();
         assert!(err.to_string().contains("larger than 32 MiB"), "a pipe has no size to check first: {err:#}");
-        writer.join().unwrap();
+        writer_done(writer);
 
         let path = dir.path().join("small.json");
-        let writer = crate::input::fifo_with(&path, 10);
-        let (bytes, name) = read_spec_source(&path).unwrap();
+        let writer = fifo_with(&path, 10);
+        let (bytes, name) = within_seconds(move || read_spec_source(&path)).unwrap();
         assert_eq!((bytes, name.as_str()), (vec![b'a'; 10], "small.json"));
-        writer.join().unwrap();
+        writer_done(writer);
     }
 }

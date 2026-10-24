@@ -3,7 +3,7 @@
 //! while it is read, or a pipe whose size is unknown, is never buffered
 //! past its limit.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -41,15 +41,14 @@ pub fn read_file_within(path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
 /// bundle. A larger file is refused unread.
 pub fn read_import_file(path: &Path, passphrase: Option<&str>) -> Result<Vec<u8>> {
     let context = || format!("reading {}", path.display());
-    // Checked before opening: opening a FIFO waits for a writer.
+    let not_regular = || anyhow::anyhow!("{} is not a regular file; nothing was imported", path.display());
+    // A cheap filter. What counts is the opened handle: the open does not
+    // wait for a writer on a FIFO swapped in since (a blocking open would),
+    // and anything but a regular file is refused before it is read.
     if !std::fs::metadata(path).with_context(context)?.is_file() {
-        bail!("{} is not a regular file; nothing was imported", path.display());
+        return Err(not_regular());
     }
-    let file = File::open(path).with_context(context)?;
-    let meta = file.metadata().with_context(context)?;
-    if !meta.is_file() {
-        bail!("{} is not a regular file; nothing was imported", path.display());
-    }
+    let (file, meta) = anvil_app::file_grants::open_regular_file(path).with_context(context)?.ok_or_else(not_regular)?;
     read_import(&file, meta.len(), passphrase).with_context(context)
 }
 
@@ -77,19 +76,48 @@ fn read_import_with(mut reader: impl Read, size: u64, limit: impl FnOnce(&[u8], 
     Ok(bytes)
 }
 
-/// A FIFO at `path`, and a thread writing `len` bytes into it.
+/// Runs `f` on its own thread, failing the test instead of hanging if it
+/// blocks (an open of a FIFO that waits for its other end, say).
 #[cfg(all(test, unix))]
-pub(crate) fn fifo_with(path: &Path, len: usize) -> std::thread::JoinHandle<()> {
+pub(crate) fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(30)).expect("it blocked")
+}
+
+/// Makes a FIFO at `path`.
+#[cfg(all(test, unix))]
+pub(crate) fn mkfifo(path: &Path) {
     let made = std::process::Command::new("mkfifo").arg(path).status().unwrap();
     assert!(made.success(), "mkfifo {}", path.display());
+}
+
+/// A FIFO at `path`, and a thread writing `len` bytes into it once a reader
+/// opens it. Wait for the writer with [`writer_done`].
+#[cfg(all(test, unix))]
+pub(crate) fn fifo_with(path: &Path, len: usize) -> std::sync::mpsc::Receiver<()> {
+    mkfifo(path);
     let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::Write;
-        let mut w = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        // The reader stops one byte past its limit and closes the pipe, so
-        // the rest of a longer write fails; that is expected.
-        let _ = w.write_all(&vec![b'a'; len]);
-    })
+        if let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(path) {
+            // The reader stops one byte past its limit and closes the pipe,
+            // so the rest of a longer write fails; that is expected.
+            let _ = w.write_all(&vec![b'a'; len]);
+        }
+        let _ = tx.send(());
+    });
+    rx
+}
+
+/// Wait for a [`fifo_with`] writer to finish, failing instead of hanging
+/// when no reader ever opened the FIFO.
+#[cfg(all(test, unix))]
+pub(crate) fn writer_done(writer: std::sync::mpsc::Receiver<()>) {
+    writer.recv_timeout(std::time::Duration::from_secs(30)).expect("the FIFO writer finished (a reader opened the FIFO)");
 }
 
 #[cfg(test)]
@@ -199,24 +227,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("over");
         let writer = fifo_with(&path, 1024 * 1024);
-        assert!(read_file_within(&path, 1024).unwrap().is_none(), "a pipe has no size to check first");
-        writer.join().unwrap();
+        let read = within_seconds(move || read_file_within(&path, 1024));
+        assert!(read.unwrap().is_none(), "a pipe has no size to check first");
+        writer_done(writer);
 
         let path = dir.path().join("within");
         let writer = fifo_with(&path, 100);
-        assert_eq!(read_file_within(&path, 1024).unwrap().unwrap(), vec![b'a'; 100]);
-        writer.join().unwrap();
+        let read = within_seconds(move || read_file_within(&path, 1024));
+        assert_eq!(read.unwrap().unwrap(), vec![b'a'; 100]);
+        writer_done(writer);
     }
 
     #[cfg(unix)]
     #[test]
-    fn an_import_of_a_pipe_is_refused_without_opening_it() {
+    fn an_import_of_a_pipe_is_refused_without_waiting_for_a_writer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pipe");
-        let made = std::process::Command::new("mkfifo").arg(&path).status().unwrap();
-        assert!(made.success());
-        // Opening it would wait for a writer, and there is none.
-        let err = read_import_file(&path, None).unwrap_err();
+        mkfifo(&path);
+        // There is no writer: a blocking open would wait for one forever.
+        let p = path.clone();
+        let err = within_seconds(move || read_import_file(&p, None)).unwrap_err();
         assert!(err.to_string().contains("not a regular file"), "{err:#}");
+        // A link to it too.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let err = within_seconds(move || read_import_file(&link, None)).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err:#}");
+    }
+
+    /// The path check is only a filter: a FIFO swapped in after it reaches
+    /// the opener, which must neither wait for a writer nor accept it.
+    #[cfg(unix)]
+    #[test]
+    fn the_opener_refuses_a_pipe_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe");
+        mkfifo(&path);
+        let opened = within_seconds(move || anvil_app::file_grants::open_regular_file(&path));
+        assert!(opened.unwrap().is_none(), "a FIFO is not a regular file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_import_follows_a_link_to_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("bundle.anvil-workspace");
+        std::fs::write(&target, b"PK not really a bundle").unwrap();
+        let link = dir.path().join("link.anvil-workspace");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(read_import_file(&link, None).unwrap(), b"PK not really a bundle");
     }
 }

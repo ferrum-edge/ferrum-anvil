@@ -627,6 +627,28 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<Option<(File, Metadat
     crate::no_follow::open_regular(path)
 }
 
+/// Open `path` for reading if it leads to a regular file; `None` when it does
+/// not. For a path named on the command line (`anvil import`), not a grant:
+/// links are followed as for any path a user types (there is no selection
+/// made earlier for a swapped-in link to redirect, and system paths such as
+/// macOS's `/tmp` are links). A FIFO or device never blocks the open, even
+/// one swapped in after a check of the path: on Unix it is opened
+/// non-blocking (which does not change how a regular file reads) and never as
+/// a controlling terminal, and the opened handle is checked.
+pub fn open_regular_file(path: &Path) -> std::io::Result<Option<(File, Metadata)>> {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+        File::from(rustix::fs::open(path, flags, Mode::empty())?)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path)?;
+    // The check that counts is on the opened handle.
+    let meta = file.metadata()?;
+    Ok(meta.is_file().then_some((file, meta)))
+}
+
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
     let Target::Write { dir, id, name } = target else {
         return Err(GrantError::WrongPurpose);

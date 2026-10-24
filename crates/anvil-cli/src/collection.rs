@@ -355,16 +355,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_dataset_pipe_is_read_only_to_the_limit() {
+        use crate::input::{fifo_with, within_seconds, writer_done};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rows.csv");
-        let writer = crate::input::fifo_with(&path, anvil_runner::dataset::MAX_DATASET_BYTES + 4096);
-        let err = read_dataset_file(&path).unwrap_err();
+        let writer = fifo_with(&path, anvil_runner::dataset::MAX_DATASET_BYTES + 4096);
+        let err = within_seconds(move || read_dataset_file(&path)).unwrap_err();
         assert!(err.to_string().contains("the most the collection runner accepts"), "a pipe has no size to check first: {err:#}");
-        writer.join().unwrap();
+        writer_done(writer);
 
         let path = dir.path().join("small.csv");
-        let writer = crate::input::fifo_with(&path, 10);
-        assert_eq!(read_dataset_file(&path).unwrap(), vec![b'a'; 10]);
-        writer.join().unwrap();
+        let writer = fifo_with(&path, 10);
+        assert_eq!(within_seconds(move || read_dataset_file(&path)).unwrap(), vec![b'a'; 10]);
+        writer_done(writer);
     }
 }
