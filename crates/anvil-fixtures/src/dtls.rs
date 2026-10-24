@@ -1,4 +1,8 @@
-//! DTLS 1.2 echo fixture built on dimpl (Sans-IO, RustCrypto provider).
+//! DTLS 1.2 echo fixture built on dimpl (Sans-IO, AWS-LC provider).
+//!
+//! The AWS-LC provider signs with each key's native hash only (P-256 with
+//! SHA-256, P-384 with SHA-384); it cannot sign P-256 with SHA-384 or P-384
+//! with SHA-256. A client that offers only the other hash gets the native one.
 //!
 //! dimpl verifies handshake signatures but performs no PKI validation. When
 //! client authentication is configured, this fixture validates the client's

@@ -1,8 +1,9 @@
 //! DTLS datagram exchanges (RFC 6347 / RFC 9147) with `dimpl`.
 //!
 //! This is a dedicated DTLS implementation choice, not the TLS adapter:
-//! * dimpl (RustCrypto provider) supports DTLS 1.2 and 1.3 with ECDSA
-//!   P-256/P-384 certificates only (no RSA). The client offers both versions
+//! * dimpl (AWS-LC provider) supports DTLS 1.2 and 1.3 with ECDSA
+//!   P-256/P-384 certificates only (no RSA), signing with each key's native
+//!   hash (P-256/SHA-256, P-384/SHA-384). The client offers both versions
 //!   (hybrid ClientHello) and records the negotiated one.
 //! * dimpl verifies handshake signatures but performs **no PKI validation**.
 //!   Anvil validates the peer's leaf certificate itself with the same
@@ -79,7 +80,7 @@ fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFai
 }
 
 /// Convert a PEM client identity for DTLS. Only ECDSA P-256/P-384 keys are
-/// usable with dimpl's RustCrypto provider; anything else fails locally.
+/// usable with dimpl's AWS-LC provider; anything else fails locally.
 pub fn identity_from_pem(cert_chain_pem: &str, key_pem: &str) -> Result<DtlsIdentity, TransportFailure> {
     use rustls_pki_types::pem::PemObject;
     let certs: Vec<CertificateDer<'static>> =

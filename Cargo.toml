@@ -102,6 +102,11 @@ keyring = { version = "4.2.0" }
 keyring-core = { version = "1.0.0" }
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+# AWS-LC behind jsonwebtoken and dimpl. Declared so every crate that reaches it
+# (anvil-auth, and dimpl's users) builds with `prebuilt-nasm`: on Windows x86_64
+# aws-lc-sys then uses the prebuilt NASM objects when `nasm` is not installed,
+# also for a single-crate build such as `cargo test -p anvil-auth`.
+aws-lc-rs = { version = "1.18.2", features = ["prebuilt-nasm"] }
 p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
 serde_norway = "0.9.42"
 roxmltree = "0.21.1"

@@ -229,6 +229,7 @@ version = "0.1.5"
 dependencies = [
  "anvil-domain",
  "anvil-xml-limits",
+ "aws-lc-rs",
  "base64 0.23.1",
  "chrono",
  "hex",

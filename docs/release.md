@@ -494,7 +494,7 @@ E2E build and requires it to fail.
   ferrum-edge/ferrum-anvil#3.
 - **Packaged-app smoke tests** (install, first run, dialogs, uninstall) are not
   automated; the native E2E suite runs against the instrumented debug build.
-- The two advisory ignores in `deny.toml` (see above).
+- The advisory ignores in `deny.toml` (see above).
 - After merging dependency changes, regenerate `THIRD_PARTY_LICENSES.md`
   (`node scripts/licenses.mjs`); CI fails while it is stale.
 
