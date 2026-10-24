@@ -356,12 +356,8 @@ release page once.
   exceptions — `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`
   (Tauri's HTML/CSS tooling) and `option-ext` (`dirs`) — all used unmodified.
   Sources: crates.io only. Duplicate crate versions are reported as warnings.
-- **Advisories**: RustSec, with five reviewed ignores. Each carries an exit
+- **Advisories**: RustSec, with four reviewed ignores. Each carries an exit
   condition in `deny.toml` and is an open item for the owner:
-  - `RUSTSEC-2023-0071` — `rsa` (Marvin timing side channel) via
-    `jsonwebtoken`'s `rust_crypto` backend for RS256 signing in `anvil-auth`.
-    Anvil only signs caller-built JWTs locally; no patched `rsa` exists. Consider
-    switching `jsonwebtoken` to a constant-time backend.
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
     gtk 0.19+ (glib ≥ 0.20).
@@ -498,7 +494,7 @@ E2E build and requires it to fail.
   ferrum-edge/ferrum-anvil#3.
 - **Packaged-app smoke tests** (install, first run, dialogs, uninstall) are not
   automated; the native E2E suite runs against the instrumented debug build.
-- The two advisory ignores in `deny.toml` (see above).
+- The advisory ignores in `deny.toml` (see above).
 - After merging dependency changes, regenerate `THIRD_PARTY_LICENSES.md`
   (`node scripts/licenses.mjs`); CI fails while it is stale.
 

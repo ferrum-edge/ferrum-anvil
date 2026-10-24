@@ -10,11 +10,16 @@
 - Dependencies must be permissively licensed (MIT, Apache-2.0, BSD, ISC,
   Zlib, Unicode-3.0, CDLA-Permissive-2.0 and similar). `cargo deny` enforces
   this, together with advisories and sources, in CI.
-- Crypto comes from audited libraries only: rustls (ring provider),
-  RustCrypto AEADs/hashes, argon2, p256/rsa, and dimpl for DTLS. No
-  primitives are implemented here.
+- Crypto comes from audited libraries only: rustls (ring provider) for TLS,
+  RustCrypto AEADs/hashes, argon2 and p256 (DPoP keys) for local primitives,
+  AWS-LC (`aws-lc-rs`) for JWT signing/verification (jsonwebtoken's
+  `aws_lc_rs` backend) and for DTLS (dimpl's AWS-LC provider). No primitives
+  are implemented here. The RustCrypto `rsa` crate is not used (RUSTSEC-2023-0071).
 - Native libraries:
   - SQLite is bundled via rusqlite.
+  - AWS-LC is built from source by `aws-lc-sys` (C, plus assembly; prebuilt
+    NASM objects on Windows x86_64 through `aws-lc-rs/prebuilt-nasm`). It
+    needs only the C compiler the Tauri and ring builds already need.
   - WebKitGTK is required on Linux, WebView2 on Windows and WKWebView on
     macOS.
   - The OS keychain is used through `keyring` 4 (Keychain, Credential

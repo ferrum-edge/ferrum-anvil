@@ -59,6 +59,20 @@ jobs:
         run: cargo check --locked -p anvil-desktop
       - name: cargo check anvil-desktop --features e2e (test-only WebDriver build)
         run: cargo check --locked -p anvil-desktop --features e2e
+      # aws-lc-sys (behind jsonwebtoken and dimpl) compiles C and assembly in
+      # its build script. The release builds x86_64-apple-darwin from the arm64
+      # macOS runner, which nothing else on a pull request exercises, so check
+      # the crates that reach AWS-LC for that target here.
+      - name: cargo check AWS-LC crates for the x86_64-apple-darwin release target
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo check --locked --target x86_64-apple-darwin -p anvil-auth -p anvil-transport
+      # A single-crate build gets no help from workspace feature unification;
+      # anvil-auth must still select aws-lc-rs/prebuilt-nasm on its own.
+      - name: cargo check anvil-auth on its own (aws-lc prebuilt NASM)
+        if: runner.os == 'Windows'
+        run: cargo check --locked -p anvil-auth
       - name: cargo test (workspace except the desktop shell)
         shell: bash
         run: |

@@ -14,6 +14,29 @@
   release and is a reviewed `deny.toml` ignore: the updater verifies the
   release signature before extracting an update archive, and Anvil's own
   bundle code reads entries in memory without `extract()`.
+- JWT signing (`jsonwebtoken`) and DTLS (`dimpl`) now use their AWS-LC
+  backends instead of the RustCrypto ones. This removes `crypto-bigint`
+  0.5.5 (RUSTSEC-2026-0387: operations meant to be constant-time could branch
+  on secret values) and `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing side
+  channel). Both were on the paths that sign ES256/RS256 JWTs, DPoP proofs
+  and DTLS handshakes with your keys. The `rsa` ignore in `deny.toml` is
+  removed, and `crypto-bigint` 0.7 is updated to 0.7.7 for the same
+  advisory. Behavior changes:
+  - RSA keys must be 2048–8192 bits for both signing and verification. RS256
+    signing with a shorter key fails. A JWT-SVID signed by a bundle key under
+    2048 bits (or over 8192) no longer verifies, and Anvil reports
+    "the signature does not verify". Previously keys of any size up to 4096
+    bits verified.
+  - ES256 signatures are randomized rather than RFC 6979 deterministic; both
+    are valid ES256.
+  - DTLS handshake signatures use each key's native hash only (P-256 with
+    SHA-256, P-384 with SHA-384). Anvil's client already signed that way. The
+    DTLS 1.2 fixture server can no longer sign P-256 with SHA-384 or P-384
+    with SHA-256. Peer signatures are still verified with all four
+    combinations.
+  - Building now compiles AWS-LC (C) through `aws-lc-sys`. Every crate that
+    reaches it selects `aws-lc-rs/prebuilt-nasm`, so Windows x86_64 needs no
+    NASM install.
 
 ### Changed
 
