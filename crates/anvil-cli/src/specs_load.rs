@@ -8,7 +8,7 @@ use anvil_import::{GroupBy, ImportOptions, SampleMode};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Fixed, non-secret mode flag: `anvil` re-launches itself as the load
 /// worker; the job travels on stdin only.
@@ -55,18 +55,29 @@ pub struct ImportSpecArgs {
     dry_run: bool,
 }
 
-pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
-    let (bytes, name) = if a.file.as_os_str() == "-" {
+/// The most `anvil import-spec` reads of a source.
+const MAX_SPEC_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The source `file` names (`-` is stdin) and its name. Bounded while it is
+/// read, so a pipe or a file that grows is not buffered past the limit.
+fn read_spec_source(file: &Path) -> Result<(Vec<u8>, String)> {
+    let too_large = || anyhow!("the source is larger than 32 MiB");
+    if file.as_os_str() == "-" {
         let mut v = Vec::new();
-        std::io::stdin().take(32 * 1024 * 1024 + 1).read_to_end(&mut v)?;
-        (v, "stdin".to_string())
-    } else {
-        let meta = std::fs::metadata(&a.file).with_context(|| format!("reading {}", a.file.display()))?;
-        if meta.len() > 32 * 1024 * 1024 {
-            bail!("the source is larger than 32 MiB");
+        std::io::stdin().take(MAX_SPEC_SOURCE_BYTES + 1).read_to_end(&mut v)?;
+        if v.len() as u64 > MAX_SPEC_SOURCE_BYTES {
+            return Err(too_large());
         }
-        (std::fs::read(&a.file)?, a.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "source".into()))
-    };
+        return Ok((v, "stdin".to_string()));
+    }
+    let bytes = crate::input::read_file_within(file, MAX_SPEC_SOURCE_BYTES)
+        .with_context(|| format!("reading {}", file.display()))?
+        .ok_or_else(too_large)?;
+    Ok((bytes, file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "source".into())))
+}
+
+pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
+    let (bytes, name) = read_spec_source(&a.file)?;
     let opts = ImportOptions {
         mode: match a.bodies {
             BodyMode::Sample => SampleMode::Sample,
@@ -381,4 +392,35 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
 /// A success-latency value, or "—" when no send succeeded (never "0 µs").
 fn us_or_none(count: u64, us: u64) -> String {
     if count == 0 { "—".into() } else { format!("{us} µs") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spec_source_over_the_limit_is_refused_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openapi.json");
+        std::fs::File::create(&path).unwrap().set_len(MAX_SPEC_SOURCE_BYTES + 1).unwrap();
+        let err = read_spec_source(&path).unwrap_err();
+        assert!(err.to_string().contains("larger than 32 MiB"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spec_source_pipe_is_read_only_to_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("openapi.json");
+        let writer = crate::input::fifo_with(&path, MAX_SPEC_SOURCE_BYTES as usize + 4096);
+        let err = read_spec_source(&path).unwrap_err();
+        assert!(err.to_string().contains("larger than 32 MiB"), "a pipe has no size to check first: {err:#}");
+        writer.join().unwrap();
+
+        let path = dir.path().join("small.json");
+        let writer = crate::input::fifo_with(&path, 10);
+        let (bytes, name) = read_spec_source(&path).unwrap();
+        assert_eq!((bytes, name.as_str()), (vec![b'a'; 10], "small.json"));
+        writer.join().unwrap();
+    }
 }

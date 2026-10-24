@@ -240,8 +240,9 @@ measurements of released desktop binaries or of a corpus of real exports.
 
 ## Residual risks
 
-- **Input buffer.** The desktop app reads the whole chosen file before opening it.
-  It inspects the file's header first: a bundle is read only up to
+- **Input buffer.** The desktop app and `anvil import` read the whole chosen
+  file before opening it. Each inspects the file's header first: a bundle is
+  read only up to
   `MAX_BUNDLE_FILE_BYTES` (320 MiB, the 256 MiB budget plus 64 MiB of ZIP
   framing), and a larger one is refused before it is read
   (`backup::import_read_limit`). The bundle limits apply to what is inflated and

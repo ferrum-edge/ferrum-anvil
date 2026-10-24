@@ -388,7 +388,8 @@ bundle may be (`anvil_portability::bundle::MAX_BUNDLE_FILE_BYTES`: the
 256 MiB inflated budget plus 64 MiB for zip framing); `bundle::open` refuses a
 larger one too. A full backup's single envelope authenticates the whole
 payload at once, so a backup that passes these checks is read whole before
-it is decrypted.
+it is decrypted. `anvil import` reads its file the same way, with or without
+`--dry-run`, and refuses anything but a regular file.
 
 - A preview or import started with an `attempt` id can be canceled with
   `import_cancel` (a lock cancels it too). The command returns `CANCELED` at
