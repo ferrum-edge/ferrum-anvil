@@ -22,6 +22,9 @@ rand.workspace = true
 chrono.workspace = true
 httpdate.workspace = true
 jsonwebtoken.workspace = true
+# Not called directly: enables `aws-lc-rs/prebuilt-nasm` for jsonwebtoken's
+# AWS-LC backend when this crate is built on its own (see the workspace entry).
+aws-lc-rs.workspace = true
 p256.workspace = true
 zeroize.workspace = true
 parking_lot.workspace = true

@@ -1,8 +1,9 @@
 //! DTLS datagram exchanges (RFC 6347 / RFC 9147) with `dimpl`.
 //!
 //! This is a dedicated DTLS implementation choice, not the TLS adapter:
-//! * dimpl (RustCrypto provider) supports DTLS 1.2 and 1.3 with ECDSA
-//!   P-256/P-384 certificates only (no RSA). The client offers both versions
+//! * dimpl (AWS-LC provider) supports DTLS 1.2 and 1.3 with ECDSA
+//!   P-256/P-384 certificates only (no RSA), signing with each key's native
+//!   hash (P-256/SHA-256, P-384/SHA-384). The client offers both versions
 //!   (hybrid ClientHello) and records the negotiated one.
 //! * dimpl verifies handshake signatures but performs **no PKI validation**.
 //!   Anvil validates the peer's leaf certificate itself with the same
@@ -79,7 +80,7 @@ fn local(kind: FailureKind, msg: impl Into<String>, field: &str) -> TransportFai
 }
 
 /// Convert a PEM client identity for DTLS. Only ECDSA P-256/P-384 keys are
-/// usable with dimpl's RustCrypto provider; anything else fails locally.
+/// usable with dimpl's AWS-LC provider; anything else fails locally.
 pub fn identity_from_pem(cert_chain_pem: &str, key_pem: &str) -> Result<DtlsIdentity, TransportFailure> {
     use rustls_pki_types::pem::PemObject;
     let certs: Vec<CertificateDer<'static>> =
@@ -101,7 +102,7 @@ pub fn identity_from_pem(cert_chain_pem: &str, key_pem: &str) -> Result<DtlsIden
         }
         _ => return Err(local(FailureKind::ClientIdentityInvalid, "no private key found in PEM", "tls.client_identity.private_key")),
     };
-    dimpl::crypto::rust_crypto::default_provider().key_provider.load_private_key(&key).map_err(|e| {
+    dimpl::crypto::aws_lc_rs::default_provider().key_provider.load_private_key(&key).map_err(|e| {
         local(
             FailureKind::ClientIdentityInvalid,
             format!("the client key cannot be used for DTLS (ECDSA P-256/P-384 only): {e}"),
@@ -786,7 +787,7 @@ async fn exchange<C: DatagramChannel>(
     let mut notes = PathNotes::default();
     let hs_ms = plan.timeouts.tls_handshake_ms.or(plan.timeouts.connect_ms).unwrap_or(10_000);
     let mut builder = Config::builder()
-        .with_crypto_provider(dimpl::crypto::rust_crypto::default_provider())
+        .with_crypto_provider(dimpl::crypto::aws_lc_rs::default_provider())
         .handshake_timeout(Duration::from_millis(hs_ms + 2_000))
         .flight_retries(8);
     // Size records to the path when it carries less than dimpl's default MTU
