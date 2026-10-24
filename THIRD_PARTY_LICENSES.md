@@ -183,7 +183,7 @@ the modified file under MPL-2.0.
 | crossbeam-epoch | 0.9.21 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crypto-bigint | 0.5.5 | Apache-2.0 OR MIT | https://github.com/RustCrypto/crypto-bigint |
-| crypto-bigint | 0.7.5 | Apache-2.0 OR MIT | https://github.com/RustCrypto/crypto-bigint |
+| crypto-bigint | 0.7.7 | Apache-2.0 OR MIT | https://github.com/RustCrypto/crypto-bigint |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | cssparser | 0.36.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |

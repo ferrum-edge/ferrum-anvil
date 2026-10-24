@@ -14,6 +14,11 @@
   release and is a reviewed `deny.toml` ignore: the updater verifies the
   release signature before extracting an update archive, and Anvil's own
   bundle code reads entries in memory without `extract()`.
+- crypto-bigint 0.7 is updated to 0.7.7 for RUSTSEC-2026-0387 (operations
+  meant to be constant-time could branch on secret values). The 0.5.5 copy
+  used by `dimpl` and `jsonwebtoken` through `p256`/`p384` 0.13 has no patched
+  0.5.x release. It is a time-boxed `deny.toml` ignore, pending owner
+  acceptance, until those crates move to `p256`/`p384` 0.14.
 
 ### Changed
 
