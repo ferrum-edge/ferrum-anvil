@@ -118,6 +118,13 @@
 
 ### Fixed
 
+- `anvil import` no longer reads a whole file before checking it against the
+  import limits: as in the desktop, the file's start decides how much is read
+  (a full backup's header is checked first, and anything else is read only up
+  to the 320 MiB bundle limit), a larger file is refused unread, also with
+  `--dry-run`, and the file must be a regular file. `anvil import-spec` and
+  run or scenario datasets enforce their 32 MiB and 16 MiB limits while
+  reading, so a pipe or a file that grows is not buffered past them.
 - A DTLS handshake no longer fails when a record from an earlier DTLS
   association on the same client address (a server's late `close_notify` to
   a reused port, say) arrives before the server's first flight: a whole

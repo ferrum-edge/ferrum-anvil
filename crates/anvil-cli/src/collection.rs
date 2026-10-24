@@ -33,18 +33,14 @@ fn dataset_format(path: &Path, explicit: Option<DsFormat>) -> Result<DatasetForm
     }
 }
 
-/// Read a dataset file with the size bound checked before reading.
+/// Read a dataset file within the runner's size bound, which is checked while
+/// it is read (a pipe or a file that grows), and before for a regular file.
 fn read_dataset_file(path: &Path) -> Result<Vec<u8>> {
-    let meta = std::fs::metadata(path).with_context(|| format!("dataset '{}'", path.display()))?;
-    if meta.len() > anvil_runner::dataset::MAX_DATASET_BYTES as u64 {
-        bail!(
-            "dataset '{}' is {} bytes; the collection runner accepts at most {}",
-            path.display(),
-            meta.len(),
-            anvil_runner::dataset::MAX_DATASET_BYTES
-        );
+    let max = anvil_runner::dataset::MAX_DATASET_BYTES as u64;
+    match crate::input::read_file_within(path, max).with_context(|| format!("dataset '{}'", path.display()))? {
+        Some(bytes) => Ok(bytes),
+        None => bail!("dataset '{}' is larger than {max} bytes, the most the collection runner accepts", path.display()),
     }
-    std::fs::read(path).with_context(|| format!("dataset '{}'", path.display()))
 }
 
 fn file_name(path: &Path) -> String {
@@ -340,5 +336,36 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
             println!("scenario '{}' is now trusted", s.name);
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dataset_over_the_limit_is_refused_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.csv");
+        std::fs::File::create(&path).unwrap().set_len(anvil_runner::dataset::MAX_DATASET_BYTES as u64 + 1).unwrap();
+        let err = read_dataset_file(&path).unwrap_err();
+        assert!(err.to_string().contains("the most the collection runner accepts"), "{err:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dataset_pipe_is_read_only_to_the_limit() {
+        use crate::input::{fifo_with, within_seconds, writer_done};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.csv");
+        let writer = fifo_with(&path, anvil_runner::dataset::MAX_DATASET_BYTES + 4096);
+        let err = within_seconds(move || read_dataset_file(&path)).unwrap_err();
+        assert!(err.to_string().contains("the most the collection runner accepts"), "a pipe has no size to check first: {err:#}");
+        writer_done(writer);
+
+        let path = dir.path().join("small.csv");
+        let writer = fifo_with(&path, 10);
+        assert_eq!(within_seconds(move || read_dataset_file(&path)).unwrap(), vec![b'a'; 10]);
+        writer_done(writer);
     }
 }

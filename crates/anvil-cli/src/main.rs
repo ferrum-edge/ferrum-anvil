@@ -16,6 +16,7 @@
 
 mod collection;
 mod drift;
+mod input;
 mod lint;
 mod specs_load;
 
@@ -1321,8 +1322,10 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Import { file, policy, dry_run, into_existing, bundle_sha256 } => {
-            let bytes = std::fs::read(file)?;
             let pass = export_passphrase();
+            // Bounded while it is read: a backup's start, or the bundle limit,
+            // decides how much, before anything else (see `input`).
+            let bytes = input::read_import_file(file, pass.as_deref())?;
             let pol = match policy {
                 Policy::Merge => ConflictPolicy::Merge,
                 Policy::Replace => ConflictPolicy::Replace,

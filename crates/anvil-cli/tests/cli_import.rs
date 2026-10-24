@@ -2,7 +2,8 @@
 //! real profile on disk. A backup that claims a workspace stored here is
 //! restored only when `--into-existing` names that workspace, and only from
 //! the file `--bundle-sha256` names when given. A bundle without a vault is
-//! imported without an export passphrase.
+//! imported without an export passphrase. A file larger than an import
+//! reads is refused before it is read.
 
 use anvil_app::App;
 use anvil_app::profiles::{ProfileManager, Unlock};
@@ -149,4 +150,26 @@ fn a_bundle_without_a_vault_is_imported_without_an_export_passphrase() {
     let o = anvil_with_export_pass(&data, "", &["import", file]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert_eq!(requests(&data, &ws), vec!["Probe"]);
+}
+
+#[test]
+fn a_file_larger_than_an_import_reads_is_refused_before_it_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let ws = shared_bundle(&data, &dir.path().join("shared.anvil-workspace"));
+    // Sparse: one byte over the largest bundle costs no disk or reading.
+    let big = dir.path().join("big.anvil-workspace");
+    let max = anvil_portability::bundle::MAX_BUNDLE_FILE_BYTES;
+    std::fs::File::create(&big).unwrap().set_len(max + 1).unwrap();
+    let file = big.to_str().unwrap();
+    for args in [&["import", file, "--dry-run"][..], &["import", file][..]] {
+        let o = anvil_with_export_pass(&data, "", args);
+        assert_eq!(o.status.code(), Some(3), "{args:?}: {}", text(&o));
+        assert!(text(&o).contains(&format!("larger than {max} bytes, the most an import reads")), "{args:?}: {}", text(&o));
+    }
+    // A folder is not a file to import.
+    let o = anvil_with_export_pass(&data, "", &["import", dir.path().to_str().unwrap(), "--dry-run"]);
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("not a regular file"), "{}", text(&o));
+    assert!(requests(&data, &ws).is_empty(), "nothing was imported");
 }
