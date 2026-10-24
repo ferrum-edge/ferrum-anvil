@@ -34,16 +34,13 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 unmaintained = "workspace"
 unsound = "all"
-# Every entry needs a reason and an exit condition. Reviewed 2026-09-25
-# (RUSTSEC-2026-0387 added 2026-10-24);
+# Every entry needs a reason and an exit condition. Reviewed 2026-09-25;
 # these are also listed as open items in docs/release.md.
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side channel, via jsonwebtoken's rust_crypto backend (anvil-auth RS256 signing). Anvil only signs caller-built JWTs locally; it performs no RSA decryption and exposes no network-observable private-key oracle. No patched rsa release exists. Exit: RustCrypto/RSA#626 fixed, or jsonwebtoken switched to a constant-time backend." },
     { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter unsoundness, via Tauri's Linux GTK stack (gtk-rs 0.18 is pinned by tauri/wry/tao/muda/webkit2gtk 2.0). Neither Anvil nor those crates (nor rfd) call VariantStrIter. Exit: Tauri moves to gtk >= 0.19 (glib >= 0.20)." },
     { id = "RUSTSEC-2026-0367", reason = "zip extraction preserves SUID/SGID bits. Anvil's own zip use is 9.0.4 (patched) and reads entries in memory without extract(); the flagged 4.6.1 arrives only via tauri-plugin-updater, which verifies the release signature (require_signed_version, signed updater artifacts) before extracting, so reaching extract() needs a validly signed update archive. No patched zip 4.x exists. Exit: tauri-plugin-updater moves to zip >= 9. Owner-accepted 2026-10-20." },
     { id = "RUSTSEC-2026-0368", reason = "zip ZipArchive::extract symlink targets escape the destination. Same scope as RUSTSEC-2026-0367: patched direct zip 9.0.4 without extract(); unpatched 4.6.1 only via the signature-verified in-app updater. Exit: tauri-plugin-updater moves to zip >= 9. Owner-accepted 2026-10-20." },
     { id = "RUSTSEC-2026-0369", reason = "zip extract() applies Unix permissions through symlinks. Same scope as RUSTSEC-2026-0367: patched direct zip 9.0.4 without extract(); unpatched 4.6.1 only via the signature-verified in-app updater. Exit: tauri-plugin-updater moves to zip >= 9. Owner-accepted 2026-10-20." },
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 timing variability in operations meant to be constant-time; fixed only in >= 0.7.6, no patched 0.5.x. The 0.7 copy (p256 0.14, used directly by anvil-auth) is bumped to the fixed 0.7.7; 0.5.5 remains via dimpl 0.7.5 (rust-crypto: ecdsa 0.16 / p256 0.13 / p384 0.13) and jsonwebtoken 11.1.0 (rust_crypto: p256 0.13 / p384 0.13). The latest releases (dimpl 0.8.0, jsonwebtoken 11.1.0) still require p256 ^0.13. SECRET-DEPENDENT USE IS REACHABLE: ES256 JWT and DPoP proof signing with operator-supplied keys (anvil-auth via jsonwebtoken) and DTLS ECDSA client/fixture signing (P-256) run p256 0.13 scalar arithmetic (add_mod/sub_mod/mul_wide/sbb/ct_lt) on crypto-bigint 0.5.5 with the private key and nonce. P-384 uses fiat-crypto, and ECDHE uses crypto-bigint only for encoding and range checks. The code that 0.7.6 changed is not present in 0.5.5 in that form (the borrowing_sub branch is 0.7-only; zero counting, division and Montgomery are not on this path; UintRef/BoxedMontyForm are absent), but 0.5.5 has never had a cargo checkct check. Signing is local to the operator's machine. Exit: dimpl and jsonwebtoken move to p256/p384 0.14 (elliptic-curve 0.14 / crypto-bigint >= 0.7.6), or Anvil switches both to aws-lc-rs backends. Review by 2026-11-30. Pending owner acceptance." },
 ]
 
 [licenses]

@@ -134,7 +134,7 @@ pub async fn serve(bind: &str, opts: DtlsServerOptions) -> anyhow::Result<DtlsFi
     let certificate = DtlsCertificate { certificate: cert_der.as_ref().to_vec(), private_key: key_der };
     let config = Arc::new(
         Config::builder()
-            .with_crypto_provider(dimpl::crypto::rust_crypto::default_provider())
+            .with_crypto_provider(dimpl::crypto::aws_lc_rs::default_provider())
             .require_client_certificate(opts.client_ca_pem.is_some())
             .build()
             .map_err(|e| anyhow::anyhow!("dimpl config: {e:?}"))?,

@@ -356,12 +356,8 @@ release page once.
   exceptions — `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`
   (Tauri's HTML/CSS tooling) and `option-ext` (`dirs`) — all used unmodified.
   Sources: crates.io only. Duplicate crate versions are reported as warnings.
-- **Advisories**: RustSec, with six reviewed ignores. Each carries an exit
+- **Advisories**: RustSec, with four reviewed ignores. Each carries an exit
   condition in `deny.toml` and is an open item for the owner:
-  - `RUSTSEC-2023-0071` — `rsa` (Marvin timing side channel) via
-    `jsonwebtoken`'s `rust_crypto` backend for RS256 signing in `anvil-auth`.
-    Anvil only signs caller-built JWTs locally; no patched `rsa` exists. Consider
-    switching `jsonwebtoken` to a constant-time backend.
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
     gtk 0.19+ (glib ≥ 0.20).
@@ -370,18 +366,6 @@ release page once.
     the flagged 4.6.1 comes only from `tauri-plugin-updater`, which verifies
     the release signature before extracting an update archive. Resolves when
     `tauri-plugin-updater` moves to `zip` ≥ 9.
-  - `RUSTSEC-2026-0387` — `crypto-bigint` 0.5.5 timing variability in
-    operations meant to be constant-time. **Pending owner acceptance; review by
-    2026-11-30.** There is no patched 0.5.x. The 0.7 copy used by `p256` 0.14 in
-    `anvil-auth` is updated to the fixed 0.7.7. 0.5.5 remains through `dimpl`
-    0.7.5 (`rust-crypto`) and `jsonwebtoken` 11.1.0 (`rust_crypto`): both use
-    `p256`/`p384` 0.13, and their latest releases still do. A secret-dependent
-    path is reachable. ES256 JWT and DPoP proof signing with operator-supplied
-    keys, and DTLS ECDSA P-256 signing, run `p256` 0.13 scalar arithmetic on
-    `crypto-bigint` 0.5.5 with the private key and the nonce. The code fixed
-    in 0.7.6 is not present in 0.5.5 in that form, but 0.5.5 has never had the
-    `cargo checkct` check. Resolves when `dimpl` and `jsonwebtoken` move to
-    `p256`/`p384` 0.14, or when Anvil switches both to aws-lc-rs backends.
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E
   tooling uses `@wdio/tauri-service` 1.5.0 with its supported WebdriverIO 9.31.9

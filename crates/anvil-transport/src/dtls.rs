@@ -101,7 +101,7 @@ pub fn identity_from_pem(cert_chain_pem: &str, key_pem: &str) -> Result<DtlsIden
         }
         _ => return Err(local(FailureKind::ClientIdentityInvalid, "no private key found in PEM", "tls.client_identity.private_key")),
     };
-    dimpl::crypto::rust_crypto::default_provider().key_provider.load_private_key(&key).map_err(|e| {
+    dimpl::crypto::aws_lc_rs::default_provider().key_provider.load_private_key(&key).map_err(|e| {
         local(
             FailureKind::ClientIdentityInvalid,
             format!("the client key cannot be used for DTLS (ECDSA P-256/P-384 only): {e}"),
@@ -786,7 +786,7 @@ async fn exchange<C: DatagramChannel>(
     let mut notes = PathNotes::default();
     let hs_ms = plan.timeouts.tls_handshake_ms.or(plan.timeouts.connect_ms).unwrap_or(10_000);
     let mut builder = Config::builder()
-        .with_crypto_provider(dimpl::crypto::rust_crypto::default_provider())
+        .with_crypto_provider(dimpl::crypto::aws_lc_rs::default_provider())
         .handshake_timeout(Duration::from_millis(hs_ms + 2_000))
         .flight_retries(8);
     // Size records to the path when it carries less than dimpl's default MTU

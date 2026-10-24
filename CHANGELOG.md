@@ -14,11 +14,16 @@
   release and is a reviewed `deny.toml` ignore: the updater verifies the
   release signature before extracting an update archive, and Anvil's own
   bundle code reads entries in memory without `extract()`.
-- crypto-bigint 0.7 is updated to 0.7.7 for RUSTSEC-2026-0387 (operations
-  meant to be constant-time could branch on secret values). The 0.5.5 copy
-  used by `dimpl` and `jsonwebtoken` through `p256`/`p384` 0.13 has no patched
-  0.5.x release. It is a time-boxed `deny.toml` ignore, pending owner
-  acceptance, until those crates move to `p256`/`p384` 0.14.
+- JWT signing (`jsonwebtoken`) and DTLS (`dimpl`) now use their AWS-LC
+  backends instead of the RustCrypto ones. This removes `crypto-bigint`
+  0.5.5 (RUSTSEC-2026-0387: operations meant to be constant-time could branch
+  on secret values) and `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing side
+  channel). Both were on the paths that sign ES256/RS256 JWTs, DPoP proofs
+  and DTLS handshakes with your keys. The `rsa` ignore in `deny.toml` is
+  removed, and `crypto-bigint` 0.7 is updated to 0.7.7 for the same
+  advisory. RSA JWT signing keys must now be 2048–8192 bits, and ES256
+  signatures are randomized rather than RFC 6979 deterministic; both remain
+  valid ES256.
 
 ### Changed
 
