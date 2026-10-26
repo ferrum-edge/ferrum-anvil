@@ -358,9 +358,9 @@ the modified file under MPL-2.0.
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
 | json-patch | 3.0.1 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
 | jsonptr | 0.6.3 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
-| jsonschema | 0.58.6 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-regex | 0.58.6 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-value | 0.58.6 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | https://github.com/pyfisch/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
@@ -502,7 +502,7 @@ the modified file under MPL-2.0.
 | rcgen | 0.14.10 | MIT OR Apache-2.0 | https://github.com/rustls/rcgen |
 | ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
-| referencing | 0.58.6 | MIT | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
