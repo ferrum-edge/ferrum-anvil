@@ -53,6 +53,9 @@ jobs:
       - name: cargo fmt
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
+      - name: Compile the Swift branding helper (without generating assets)
+        if: runner.os == 'macOS'
+        run: swift build --package-path apps/desktop/scripts
       - name: cargo clippy (workspace, all targets)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: cargo check anvil-desktop (release feature set)

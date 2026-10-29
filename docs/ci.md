@@ -19,6 +19,11 @@ required checks" ruleset. `e2e.yml` only runs for PRs that touch its paths, so
 the ruleset cannot require it; when it runs, it must pass before merging. The
 nightly lab run does not replace either.
 
+The existing macOS Rust job also compiles the standalone Swift branding helper
+with `swift build --package-path apps/desktop/scripts`. Its small SwiftPM
+manifest lets CodeQL discover the helper. This step never runs the asset
+generator, and adds no runner or merge requirement.
+
 ## Dependabot version updates
 
 Dependabot PRs may need manual follow-up before CI passes. On the Dependabot
