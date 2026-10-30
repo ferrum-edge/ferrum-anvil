@@ -316,5 +316,7 @@ flaky test; `client.tls.closed_after_certificate_request` (fix 2 above) covers
 it, and the scenarios accept exactly that alternative shape.
 
 After every batch `pgrep -fl ferrum-edge` showed no gateway left from the lab.
-Current per-scenario coverage is in
-[matrix-coverage.md](../verification/matrix-coverage.md).
+Per-scenario coverage is in
+[matrix-coverage.md](../verification/matrix-coverage.md), a historical v0.9.7
+snapshot pending regeneration; current hosted qualification is linked from the
+[README](README.md).

@@ -123,12 +123,17 @@ company ruleset.
 | Stored ruleset size | 1 MiB | the ruleset is refused |
 | Example validations per lint | 1,000 | later examples are counted in `examples_not_checked` |
 | Lint findings kept (`max_findings`, configurable) | default 5,000 | the most severe are kept, the rest counted (`dropped`) |
-| Drift HAR capture | 64 MiB and 10,000 entries | later entries are not read; a note says how many |
+| Drift HAR capture size | 64 MiB | the capture is refused |
+| Drift HAR capture entries | 10,000 | later entries are not read; a note says how many |
 | Drift history records (`--limit`) | default 500, at most 1,000 | older records are not read |
 
 Unchecked examples and dropped findings are counted but do not make a lint
-report `incomplete`; only operations left out do, and only that makes
-`anvil lint-spec` exit with 3 (see above). A drift limit adds a note.
+report `incomplete`. A report is `incomplete` when targets were left out
+(parameters, responses, schemas, properties or security schemes past the
+budgets above) or a custom schema check was skipped (see
+[Checks](#checks)). `anvil lint-spec` exits with 3 when operations were
+skipped (`skipped_operations`) or the report is `incomplete`, unless
+`--allow-incomplete` is passed. A drift limit adds a note.
 
 ## Rulesets
 

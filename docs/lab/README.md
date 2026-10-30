@@ -85,7 +85,8 @@ the port plan and config citations are in [../audit/gateway-lab-config.md](../au
 
 ## `core` scenarios
 
-Every pull request runs this profile. The UP-* scenarios and GW-001 also check that a request to a
+Pull requests that touch the lab's paths run this profile (see the `lab.yml` row in
+[ci.md](../ci.md)). The UP-* scenarios and GW-001 also check that a request to a
 healthy route succeeds afterwards. Expectations are for the trusted pass; in the untrusted pass a
 `ferrum.token.*` finding is replaced by `ferrum.marker.unverified` when the response carries a
 marker, and no `ferrum.token.*` finding appears. Scenario code: `crates/anvil-lab/src/core.rs`.

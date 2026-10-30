@@ -89,7 +89,9 @@ Exact commands are in `docs/release.md` → "Local verification record".
 ### Failure matrix (182 seed cases)
 
 `docs/verification/matrix-coverage.md` is generated from test names, lab
-results and reasoned statuses.
+results and reasoned statuses. It is a historical v0.9.7 snapshot pending
+regeneration; current hosted qualification is in
+[lab/README.md](lab/README.md).
 
 - **175 cases have executed evidence:**
   - 97 live against the real gateway;
