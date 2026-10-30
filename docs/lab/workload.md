@@ -2,13 +2,13 @@
 
 Anvil as a client of the **real** Ferrum Edge SPIFFE Workload API (gRPC over a Unix socket), using what it
 issues — an X.509-SVID as the TLS client identity and a JWT-SVID as the bearer token — against the same
-release's mesh inbound listener and a `jwks_auth` route. Pinned releases: **v0.9.15** (`lab/gateway/RELEASE.lock`), **v0.9.14** and **v0.9.11** (all three with hosted
-Anvil qualification recorded), **v0.9.10**, **v0.9.9**, **v0.9.8**, **v0.9.7** and **v0.9.5** (`lab/gateway/releases/`); the Workload API code is identical in v0.9.5 and v0.9.7
-(`src/identity/workload_api/server.rs`, `src/identity/jwt_svid/`), and `src/identity/` is unchanged from v0.9.8 to v0.9.10. v0.9.8 returns
-`ValidateJWTSVIDResponse.claims` as a `google.protobuf.Struct` (#5780), a field Anvil does not read. These source comparisons and observations remain historical; v0.9.11 has its
-[source delta and hosted qualification](../audit/gateway-0.9.11-delta.md), and `src/identity/` is
-unchanged from v0.9.11 to v0.9.15 ([v0.9.14 delta](../audit/gateway-0.9.14-delta.md) and the
-[v0.9.15 delta and hosted qualification](../audit/gateway-0.9.15-delta.md#qualification-status)).
+release's mesh inbound listener and a `jwks_auth` route, on the default pin (`lab/gateway/RELEASE.lock`) or,
+with `--release`, any supported release ([README](README.md)). The Workload API code is identical in v0.9.5 and
+v0.9.7 (`src/identity/workload_api/server.rs`, `src/identity/jwt_svid/`); `src/identity/` is unchanged from
+v0.9.8 to v0.9.10 and from v0.9.11 to v0.9.15 (source deltas: [0.9.11](../audit/gateway-0.9.11-delta.md),
+[0.9.14](../audit/gateway-0.9.14-delta.md), [0.9.15](../audit/gateway-0.9.15-delta.md)). v0.9.8 returns
+`ValidateJWTSVIDResponse.claims` as a `google.protobuf.Struct` (#5780), a field Anvil does not read.
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is named.
 No SPIRE, no Kubernetes, no control plane.
 
 Protocol behaviour and findings: [protocols.md §3.11](../protocols.md), [diagnostics.md](../diagnostics.md)
@@ -118,17 +118,10 @@ carry no `iss`, so the provider names none (`jwks_auth.rs` then tries every prov
 
 ## 4. Stability
 
-Three consecutive `anvil-lab run workload --untrusted-pass` runs on v0.9.7 and one on v0.9.5, on 2026-09-26
-(macOS arm64; binaries `ferrum-edge-macos-aarch64`, sha256 from the lock files):
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/workload.md#4-stability).
 
-| Run | Release | Result |
-|---|---|---|
-| 1 (`results/lab/20260926T045317Z-workload`) | v0.9.7 | 18 passed, 0 failed, 0 skipped |
-| 2 (`results/lab/20260926T045327Z-workload`) | v0.9.7 | 18 passed, 0 failed, 0 skipped |
-| 3 (`results/lab/20260926T045336Z-workload`) | v0.9.7 | 18 passed, 0 failed, 0 skipped |
-| 4 (`results/lab/20260926T045345Z-workload`) | v0.9.5 | 18 passed, 0 failed, 0 skipped |
-
-18 = 9 scenarios × (trusted + untrusted pass). In every run the untrusted WL-001 reused the X.509-SVID the trusted pass had fetched (Anvil's cache
+In every run the untrusted WL-001 reused the X.509-SVID the trusted pass had fetched (Anvil's cache
 holds it until half its 1-hour lifetime), which the evidence records as a cached call; its attestation line is
 the earlier fetch's.
 

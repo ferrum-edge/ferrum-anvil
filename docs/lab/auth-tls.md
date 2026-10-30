@@ -1,14 +1,9 @@
 # Gateway failure lab: `auth` and `tls` profiles
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
-These two profiles drive a **real, pinned Ferrum Edge release binary** (v0.9.15
-default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`) with controllable fixtures, and
+These two profiles drive a **real, pinned Ferrum Edge release binary** (the default pin or, with `--release`, any supported release) with controllable fixtures, and
 check what Anvil's shared engine concludes from the public evidence alone.
 Nothing is faked: no injected headers, no injected failure enums, no fixture
 pretending to be the gateway. Every result records the gateway release, source
@@ -309,21 +304,10 @@ or the wrong thing.
 
 ## Stability
 
-`anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS 26
-arm64) gave the same counts on **v0.9.7** (`f3bd0027…`) and **v0.9.5**
-(`6a531f2c…`): tls 66 passed, 0 failed, 7 skipped; auth 80 passed, 0 failed,
-5 skipped. `AUTH-009.iss-array` and `AUTH-X01.nbf` pass on both with their
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/auth-tls.md#stability).
+`AUTH-009.iss-array` and `AUTH-X01.nbf` pass on v0.9.5 and v0.9.7 with their
 release-dependent expectations.
-
-Earlier batches, v0.9.5 only (`cargo run -p anvil-lab -- run <profile>
---untrusted-pass`, macOS 26 arm64, `6a531f2c…`; counts include both passes):
-
-| Batch | tls (per run) | auth (per run) |
-|---|---|---|
-| With AUTH-017/029/030/031 live, 4 consecutive auth runs + 1 tls run | 66 passed, 0 failed, 7 skipped ×1 | 76 passed, 0 failed, 5 skipped ×4 |
-| Before AUTH-017/029/030/031, 3 consecutive runs | 66 passed, 0 failed, 7 skipped ×3 | 62 passed, 0 failed, 9 skipped ×3 |
-| Before AUTH-026 moved into tls, 5 consecutive runs | 64 passed, 0 failed, 7 skipped ×5 | 62 passed, 0 failed, 10 skipped ×5 |
-| With AUTH-026 in tls, 5 consecutive runs | 66 passed, 0 failed, 7 skipped ×5 | 62 passed, 0 failed, 9 skipped ×5 |
 
 One earlier batch failed 3 of 64 tls results (TLS-005/006/014, untrusted
 pass): the TLS 1.3 alert was lost to the gateway's reset and Anvil reported

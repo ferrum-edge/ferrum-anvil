@@ -25,7 +25,8 @@ happened on the wire. No account, works offline.
 ## Features
 
 - **Every protocol you need** — HTTP/1.1, HTTP/2, HTTP/3, WebSocket, gRPC,
-  gRPC-Web, SSE, TCP/TLS and UDP/DTLS, with live interactive sessions.
+  gRPC-Web, SSE, TCP/TLS, UDP/DTLS and MCP (Streamable HTTP), with live
+  interactive sessions.
 - **Clear failure diagnosis** — every response is checked against the DNS,
   connect, TLS and protocol evidence, and Anvil tells you what went wrong,
   how sure it is, and what to try next.

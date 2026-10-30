@@ -10,8 +10,12 @@
 
 `ANVIL_DATA_DIR` overrides the location for both the desktop and the CLI (the
 CLI also takes `--data-dir`). Each local profile has its own directory with a
-header (`profile.json`: KDF parameters, wrapped keys and protection mode, no
-plaintext key) and an encrypted SQLite database.
+SQLite database (`anvil.db`) whose payloads are encrypted. Its unlock header
+(KDF parameters, wrapped keys and protection mode; never an unwrapped key) is
+stored as plaintext JSON in the database's `meta.local_key_state_v1` record,
+which is authoritative for new and enrolled profiles. `profile.json` is a
+sidecar copy of that header; it is read only for a profile that has no
+`local_key_state_v1` record (older profiles not yet enrolled or rotated).
 
 Warnings, such as a stored object that does not decode, go to a log. The
 desktop writes `anvil.log` in its log directory at level `info`:
@@ -73,7 +77,7 @@ it: open the field, choose **Replace**, and save the value to the vault again.
 | Protection | How the data key is obtained |
 |---|---|
 | Passphrase | Argon2id(passphrase, salt, parameters in the header) unwraps the data key. |
-| Recovery key | A random recovery key unwraps a second copy of the data key. It is shown once: when a passphrase profile is created, or when a keychain profile is converted to a passphrase. |
+| Recovery key | A random recovery key unwraps a second copy of the data key in a passphrase profile. A new one is shown, once, at passphrase profile creation and whenever a rotation leaves the profile passphrase-protected: passphrase change or key rotation, keychain-to-passphrase conversion, policy enrollment, and identity link/unlink or fresh-login-policy changes. A rotation that stays in the OS keychain writes a new keychain entry and issues no recovery key. |
 | OS keychain | The data key is stored in the platform credential store: the macOS Keychain, the Windows Credential Manager (per user, "local machine" persistence, so it does not roam with domain profiles), or the freedesktop Secret Service on Linux and the BSDs (GNOME Keyring, KWallet). |
 
 **OS keychain details.** This is the first-run default ("Start now — no
@@ -87,7 +91,8 @@ is lost only a portable backup restores the data.
 three platforms in CI.
 
 The backend accepts only the unlock methods of the profile's protection mode
-(recorded in the plaintext header): the passphrase and recovery key for a
+(recorded in the [plaintext unlock header](#where-data-lives), authenticated as
+described below): the passphrase and recovery key for a
 passphrase profile, the OS keychain for a keychain profile.
 
 **The protection mode is authenticated.** The header carries an HMAC-SHA256
@@ -747,17 +752,13 @@ certifying the damaged current database. Damaged revision payloads can still be
 enumerated for deliberate removal without returning their contents.
 
 Cached request contexts verify all actual protected rows before preparation,
-cached-secret or linked-file access, and native session sends. The open store
-keeps the catalogue and the outcome of that row verification in memory, keyed
-by the authenticated root and SQLite's `data_version`, which changes whenever
-another connection (another Anvil process, or any raw SQLite writer) commits.
-While only this store has written since, its own catalogue-tracked writes keep
-both current and a check costs one header MAC, one canary open and the context's
-own dependencies. After any other commit, a checkpoint restore, rotation or a
-migration, the catalogue is read and checked against its root, and every
-protected row is compared with it again, before the next context relies on them. Their ephemeral
-dependency proof captures configuration and permission inputs in one consistent
-read transaction, including absent selections and ordered gateway candidates.
+cached-secret or linked-file access, and native session sends. After another
+connection commits (another Anvil process, or any raw SQLite writer), a
+checkpoint restore, rotation or a migration, the catalogue is checked against
+its root and every protected row against it again before the next context
+relies on them. A context's ephemeral dependency proof captures configuration
+and permission inputs in one consistent read transaction, including absent
+selections and ordered gateway candidates.
 A relevant object, credential or permission change stales an older context:
 rebuild the request or reopen the session. Saving another request or workspace,
 unused environment/TLS/proxy/secret rows, or a collection-run report does not
@@ -780,27 +781,24 @@ holds certified. Deliberate restoration rebuilds the staged catalogue under the
 current credentials and linked policy before the atomic live replacement. Its
 historical data is an intentional owner choice.
 
-A write costs its own entries plus one bucket and the root (1024 digests),
-independent of profile size. Opening a profile reads and checks the whole
-catalogue once; the first context check after open, and after another
-connection's commit, additionally hashes all protected ciphertext. Both are
-O(profile) and are then kept until something outside this store changes the
-database.
+**Limits:**
 
-**Limits:** rotation does not erase historical raw files, checkpoints, WAL/free
-page remnants or independently encrypted portable backups. An owner can recover
-historical data with its matching historical credentials and export/import it.
-An authentic historical database contains the wrapped header, policy, catalogue
-and coupled canary. Replaying all trusted freshness-authority state can select historical-key state,
-including by restoring those authority rows and matching historical protected
-records, and discarding newer protected state. This does not require replacing every database byte.
-Historical deleted secrets and permissive settings may return; a same-epoch
-snapshot also remains restorable. Old keys cannot decrypt newer-key ciphertext.
-No independent monotonic
-authority exists in this offline design. This is not complete-profile or
-complete-machine antirollback protection. Recovery intentionally bypasses online
-provider login; explicit unlink/repair rotates the key rather than changing policy
-under an unchanged key. No mandatory online service is introduced.
+- Rotation does not erase historical raw files, checkpoints, WAL/free page
+  remnants or independently encrypted portable backups.
+- Historical credentials still open historical data: an owner can recover it
+  with its matching historical credentials and export/import it. Old keys
+  cannot decrypt newer-key ciphertext.
+- An authentic historical database contains the wrapped header, policy,
+  catalogue and coupled canary. Replaying all trusted freshness-authority
+  state, with matching historical protected records, and discarding newer
+  protected state can select historical-key state and policy without
+  replacing every database byte. Historical deleted secrets and permissive
+  settings may return; a same-epoch snapshot also remains restorable.
+- No independent monotonic authority exists in this offline design: this is
+  not complete-profile or complete-machine anti-rollback protection.
+- Recovery intentionally bypasses online provider login; explicit
+  unlink/repair rotates the key rather than changing policy under an
+  unchanged key. No mandatory online service is introduced.
 
 ## Schema versions and migration
 
@@ -1043,24 +1041,14 @@ Otherwise it reads again, up to three times, and then gives up until the
 next pass. When an object does not decode, it could name any file, so the
 pass removes and releases nothing (the orphaned revisions stay, and so keep
 track of their files, until it is repaired or deleted); each such object is
-logged as a warning by kind and id, and the pass reports them. To find
-orphaned revisions a pass authenticates every revision (only its sealed
-request id decides), unless no revision row (by id, owner, parent and time
-written) and no request row (by id) was added, removed or written since a
-pass that left no orphaned revision: a revision's sealed request never
-changes, so then none can be orphaned, and the pass decrypts no revision to
-look. Otherwise a pass with nothing to release decrypts only the attachment
-index entries and the revisions. A pass blocked by an object that does not
-decode reads every object that can reference a file, so while none of those
-objects and no attachment index entry has changed since (by id, parent and
-time written), the pass at open is skipped: it would find the same. A
+logged as a warning by kind and id, and the pass reports them. A
 cleanup that fails does not stop the profile opening; it is logged and runs
 again at a later open.
 
 The last pass is kept in the database's `meta` table (a plaintext note of
 this device, never carried by a backup or export): when it ran, how many
 revisions it removed and files it released, the kind and id of each object
-that did not decode, and the row digests above. `anvil storage-cleanup`
+that did not decode, and digests of the rows it read. `anvil storage-cleanup`
 prints it (`--json` as JSON, `--now` runs a pass first). In the desktop,
 Settings → Storage shows it on request (`storage_cleanup_last`), runs a pass
 now (`storage_cleanup_now`) and lists the revisions that do not decode.

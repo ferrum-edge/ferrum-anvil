@@ -64,7 +64,7 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 
 | Profile | What it covers | Gateway listeners | Fixtures | Doc |
 |---|---|---|---|---|
-| `core` | Upstream failures, gateway admission, response ownership; G01 diagnostic references (v0.9.9 and later) | HTTP 18080, admin 18090 | 19000–19099 | [below](#g01-diagnostic-references-core-profile) |
+| `core` | Upstream failures, gateway admission, response ownership; G01 diagnostic references (v0.9.9 and later) | HTTP 18080, admin 18090 | 19000–19099 | [below](#core-scenarios) |
 | `policy` | WAF/bot, OPA, IP, validators, rate/AI limits, concurrency, breaker, header ownership | HTTP 18280, admin 18290 | 19200–19299 | [policy-admission.md](policy-admission.md) |
 | `admission` | Overload, retained-buffer capacity, connection ceiling | HTTP 18580, admin 18590; mesh egress 18589 | 19500–19599 | [policy-admission.md](policy-admission.md) |
 | `drain` | Graceful shutdown: drain refusal and in-flight completion | HTTP 18680, admin 18690 | 19600–19699 | [policy-admission.md](policy-admission.md) |
@@ -82,6 +82,36 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 `cargo run -p anvil-lab -- list` prints the same list from the profile registry
 (`crates/anvil-lab/src/profiles.rs`). Gateway settings and routes are in `lab/gateway/<profile>*`;
 the port plan and config citations are in [../audit/gateway-lab-config.md](../audit/gateway-lab-config.md).
+
+## `core` scenarios
+
+Every pull request runs this profile. The UP-* scenarios and GW-001 also check that a request to a
+healthy route succeeds afterwards. Expectations are for the trusted pass; in the untrusted pass a
+`ferrum.token.*` finding is replaced by `ferrum.marker.unverified` when the response carries a
+marker, and no `ferrum.token.*` finding appears. Scenario code: `crates/anvil-lab/src/core.rs`.
+
+| Scenario | Stimulus | Expected |
+|---|---|---|
+| CTRL-001 | `GET /ok/echo` through a healthy route | Success; the backend received the request; no `ferrum.token.*` finding |
+| UP-001 | Backend name does not resolve (`/up/dns/`) | 502/503; operator log `dns_lookup_error`; `ferrum.token.connection_failure`, scope gateway to upstream, at most likely; no `client.dns.*` finding or confirmed TLS claim |
+| UP-002 | Backend connect refused (`/up/refused/`) | 502/503; operator log `connection_refused`; `ferrum.token.connection_failure`, at most likely; no `client.connect.*` finding or confirmed TLS or DNS claim |
+| UP-003 | Backend connect deadline (`/up/connect-stall/`) | 502/503/504; a connect-class operator log entry; `ferrum.token.connection_failure` or `ferrum.token.backend_timeout`; no `client.*` finding or confirmed read-timeout claim |
+| UP-009 | 4 MiB upload to a backend that stops reading (`/up/upload-stall/`) | Not a success; a 502/504 with `ferrum.token.backend_timeout` or `backend_error`, or, when the gateway's reset discards that answer, a reset/write/closed finding with `request.processing_uncertain` and no `ferrum.*` finding |
+| UP-010 | Backend stalls before its response headers (`/up/header-stall/`) | 504; operator log `read_write_timeout`; `ferrum.token.backend_timeout`, scope gateway to upstream; the backend received the request |
+| UP-011 | Backend body goes idle (`/up/body-stall/`) | Not a success; `response.body_incomplete`, `response.body_idle_timeout`, or a `backend_timeout`/`backend_error` token finding |
+| UP-012 | Backend resets mid-body after reading a JSON `POST` (`/up/reset/`) | Not a success; the backend received the request; no confirmed "not dispatched" claim |
+| UP-013 | Backend body shorter than its `Content-Length` (`/up/short-body/`) | Not a success; `response.body_incomplete` or a `backend_error`/`connection_failure` token finding (untrusted: `response.body_incomplete` or `http.bad_gateway`) |
+| UP-014 | Oversized buffered response (`/up/oversize-buffered/…`) | Not a success; no confirmed crash claim; no `ferrum.backend_passthrough` finding |
+| UP-020 | Backend fails after reading the request (`/up/post-dispatch/`) | 502/503; the backend read the request; a `backend_error` or `connection_failure` token finding; no confirmed "not dispatched" claim |
+| GW-001 | Backend 500s until the circuit breaker opens (`/gw/breaker/`) | 503; `ferrum.token.circuit_breaker_open`, scope gateway admission |
+| GW-006 | No matched route (`/gw/no-such-route`), and the application's own 404 | 404 with `http.not_found` and `ferrum.outcome` at most likely; the application's 404 is not attributed to a route miss |
+| GW-007 | `DELETE` on a route that allows only `GET` and `POST` (`/gw/methods/`) | 405 with `http.method_not_allowed`, no `http.unauthorized`; a `GET` then succeeds |
+| GW-008 | 4 KiB body over the route's request-size limit | 413 with `http.payload_too_large`; the backend never received it; a 100-byte body then succeeds |
+| GW-016 | The application's own 403 with a WAF-identical body | 403 with `http.forbidden`; not called a WAF block (no likely or confirmed WAF claim); the backend produced it |
+| GW-017 | The application's complete 500 | 500; `ferrum.token.backend_error`; no confirmed application claim; the backend produced it |
+| GW-018 | Success while the active health check marks the only target unhealthy (`/gw/degraded/`) | Success; when the gateway sends `X-Gateway-Upstream-Status`, a `degraded_routing` warning (untrusted: `unverified_ferrum_marker`) |
+
+The G01 and TRUST scenarios of this profile are described below.
 
 ## G01 diagnostic references (`core` profile)
 

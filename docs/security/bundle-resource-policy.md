@@ -218,22 +218,11 @@ The regression ceilings are not app limits:
 - 512 MiB for `json_nodes_over`;
 - the boundary case must stay below half of each 1 GiB baseline.
 
-Peak RSS at `2a91360702a0023b4fe8a40e1a406c610190510b`, in
-[run 37453622679](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37453622679).
-Linux values are GNU `time` KiB converted to bytes; macOS values are as reported.
-
-| Source and case | Linux bytes | macOS bytes |
-|---|---:|---:|
-| this policy, exact 256 MiB/128 MiB | 281,530,368 | 279,003,136 |
-| this policy, exact 128 MiB manifest | 410,939,392 | 408,928,256 |
-| this policy, 1 GiB bundle (refused) | 24,752,128 | 22,052,864 |
-| this policy, entry one byte over (refused) | 9,932,800 | 7,372,800 |
-| this policy, total one byte over (refused) | 12,304,384 | 9,502,720 |
-| landed preflight, exact 1 GiB/512 MiB | 1,099,362,304 | 1,085,227,008 |
-| released 0.1.1, exact 1 GiB/512 MiB | 2,174,164,992 | 1,582,743,552 |
-
-The `json_nodes_over` case and the end-record checks were added after that run.
-The same workflow measures them on every later head.
+The workflow measures every case on each run. The first hosted measurement
+([run 37453622679](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37453622679),
+at `2a91360702a0023b4fe8a40e1a406c610190510b`, before the `json_nodes_over`
+case and the end-record checks were added) is kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/security/bundle-resource-policy.md#hosted-qualification).
 
 These are measurements of synthetic source-test binaries. They are not
 measurements of released desktop binaries or of a corpus of real exports.

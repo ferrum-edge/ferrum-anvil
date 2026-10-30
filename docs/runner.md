@@ -31,6 +31,9 @@ have been processed unless the method is idempotent.
   sidebar order: at each level subfolders first, then requests, each by
   `sort_key`. Folder runs default to `stop_on_failure = false`.
 
+A scenario or folder run has at most 1,000 steps, and `delay_ms` is at most
+600,000 (10 minutes).
+
 ### Trust
 
 Imported scenarios arrive with `trusted = false`, and nothing runs on

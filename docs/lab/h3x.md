@@ -1,14 +1,10 @@
 # Failure lab: `h3x` profile (SSE over HTTP/3, CONNECT-UDP, DTLS in the tunnel)
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
 This profile runs Anvil's shared engine against the **real, pinned Ferrum Edge release
-binary** (v0.9.15 default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`). It exercises HTTP/3 extensions
+binary** (the default pin or, with `--release`, any supported release). It exercises HTTP/3 extensions
 through the gateway's QUIC listener:
 
 - **Server-sent events over HTTP/3.** The event stream is parsed from the HTTP/3 request
@@ -112,14 +108,8 @@ MASQUE-006 yields `ferrum.marker.absent` (**unknown**). No CONNECT-UDP refusal c
 
 ## 4. Results
 
-| Date | Release | Runs | Result per run |
-|---|---|---|---|
-| before DTLS (17 scenarios) | v0.9.7 | 3 consecutive, macOS aarch64, sha256 `f3bd0027…` | 34 passed, 0 failed, 0 skipped |
-| 2026-09-26, `run all` (17 scenarios) | v0.9.7 and v0.9.5 | 1 each | 34/0/0 |
-| 2026-09-26, with MASQUE-DTLS-001…004 (20 scenarios) | v0.9.7 | 3 consecutive | 40/0/0 |
-| 2026-09-26, 20 scenarios | v0.9.5 | 1 | 40/0/0 |
-
-Each result counts both the trusted and the untrusted pass.
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/h3x.md#4-results).
 
 Gateway behaviour the scenarios rely on, each confirmed by the operator log or the wire
 (v0.9.7; v0.9.5 behaves the same in these scenarios):

@@ -26,8 +26,62 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 | Safe XML | WSDL is parsed with `roxmltree` with DTDs refused (`allow_dtd: false`): internal/external entity declarations fail the import with `ImportError::UnsafeXml`; undeclared entities are syntax errors. Node count is bounded. |
 | Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
 | No invented credentials | Auth is imported as configs whose secrets are `{{variable}}` references, listed in `report.required_variables` and deliberately *not* defined, so a request fails validation (unresolved variable) until the user supplies a value. Credential-like body fields and parameters are never generated in samples. |
-| Credential redaction (migrations) | Literal credentials in HAR, cURL, Postman and Insomnia input (Authorization/Cookie/API-key-like headers, credential-like query parameters, form fields and JSON members, auth helper secrets, secret variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables and listed in `report.redactions`, unless `ImportOptions::include_credentials` is set (kept values are then marked sensitive). A value that is only variable references plus an auth scheme word (`Bearer {{token}}`) is not a literal secret and is kept. A query kept in the URL verbatim (one with a bare `flag` segment, or written into an Insomnia URL) has its credential-like values replaced in place. JSON bodies and GraphQL variables are scanned recursively: string members with credential-like names, and numbers under such names (`pin`, `otp`, …; not names recognized only by `token`, such as `max_tokens`), whose placeholder is written unquoted (`"pin": {{pin}}`) so the value supplied later is sent as a number. A JSON body that repeats a member name is rewritten keeping the last value of each member (`json_duplicate_member`), so an earlier value that was never scanned does not survive. An Insomnia GraphQL body that is JSON without a `query` string is imported as a raw JSON body with the same policy applied (`graphql_envelope_without_query`). Detection is name-based and best effort; bodies that cannot be scanned (XML, SOAP, arbitrary text, unparsable JSON, JSON beyond the embedded-document budget) produce a `body_not_scanned` warning. |
-| Bounded work | `max_bytes` (input size), `max_nodes` (parsed JSON/YAML nodes — charged *during* deserialization, so YAML alias bombs are refused — and XML nodes), the string bytes a parsed JSON/YAML document keeps (string values and map keys, alias expansions included; at most twice `max_bytes`, charged before each copy), a fixed nesting-depth limit, `max_ref_depth` (direct `$ref`s and those followed while merging `allOf`), `max_ref_expansions` (whole import), `$ref`s of at most 2048 bytes (longer ones are reported as `ref_too_long` and not followed), `max_sample_nodes` (per payload; also charged per `allOf` branch, and for WSDL per schema node looked at: each child of a construct, each element, attribute, group reference, extension base and message part), bytes generated or copied into OpenAPI samples (generated values at about 32 bytes each plus their text, examples, defaults, merged schemas, per-operation parameters, and the work a sample repeats on each visit: the pointer of every value, a byte per member, `required` name, `type` entry, `$ref` sibling key, `oneOf`/`anyOf` alternative or `enum` value looked at plus its length, the size of `const` once per `enum` value it is compared with, and in `allOf` merges each key, property name, property compared (by its size), `required` name and pair of `type` or `enum` values compared; four times `max_bytes` per import), generated WSDL envelope bytes (8 MiB per envelope, four times `max_bytes` per import), text copied from the source into the imported objects (names, keys, request URLs and source pointers, folder names, descriptions, SOAP actions, server URLs and variables, the pointer of every OpenAPI 3.2 additional operation, the JSON size of every operation and security scheme each time it is imported; four times `max_bytes` per import, after which later operations are skipped with `text_size_limit`), at most 1024 `xmlns` declarations in an XML document, 256 attributes on any element, 2^24 attribute pairs over the whole document (n·(n−1)/2 per element, the comparisons the parser makes), 1 KiB per attribute name, 256 bytes per namespace prefix and 2 KiB per namespace URI, 256 namespace declarations in scope of any element (its own and its ancestors', a prefix declared again counting again), 2^26 for the squares of the declarations in scope summed over the elements that declare one (all counted in the text before it is parsed, which relies on DTDs being refused), 256 XML namespaces in scope of any element after parsing, `max_operations`, JSON documents embedded in string fields (HAR, cURL, Postman and Insomnia JSON bodies, Insomnia GraphQL payloads), which are parsed under the same per-document bounds and together may parse into at most `max_nodes` nodes per import (a body that does not fit is kept as text with `body_not_scanned`), and 10,000 cURL arguments, counted both as shell words and after short-option clusters are expanded. Byte budgets are charged before the copy is made. The 1024 `xmlns` cap can refuse a large WSDL that declares its prefixes again on every element, as WCF `singleWsdl` output and some other generators do; such a document fails with `LimitExceeded` ("XML namespace declarations (xmlns)"). Malformed input yields an `ImportError`, never a panic (property-tested). |
+| Credential redaction (migrations) | Literal credentials in migrated input become `{{placeholder}}` variables; see [Credential redaction](#credential-redaction). |
+| Bounded work | Inputs and generated output are bounded; see [Limits](#limits). Malformed input yields an `ImportError`, never a panic (property-tested). |
+
+### Credential redaction
+
+- Literal credentials in HAR, cURL, Postman and Insomnia input
+  (Authorization/Cookie/API-key-like headers, credential-like query
+  parameters, form fields and JSON members, auth helper secrets, secret
+  variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables
+  and listed in `report.redactions`, unless `ImportOptions::include_credentials`
+  is set (kept values are then marked sensitive).
+- A value that is only variable references plus an auth scheme word
+  (`Bearer {{token}}`) is not a literal secret and is kept.
+- A query kept in the URL verbatim (one with a bare `flag` segment, or written
+  into an Insomnia URL) has its credential-like values replaced in place.
+- JSON bodies and GraphQL variables are scanned recursively: string members
+  with credential-like names, and numbers under such names (`pin`, `otp`, …;
+  not names recognized only by `token`, such as `max_tokens`), whose
+  placeholder is written unquoted (`"pin": {{pin}}`) so the value supplied
+  later is sent as a number.
+- A JSON body that repeats a member name is rewritten keeping the last value of
+  each member (`json_duplicate_member`), so an earlier value that was never
+  scanned does not survive.
+- An Insomnia GraphQL body that is JSON without a `query` string is imported as
+  a raw JSON body with the same policy applied (`graphql_envelope_without_query`).
+- Detection is name-based and best effort; bodies that cannot be scanned (XML,
+  SOAP, arbitrary text, unparsable JSON, JSON beyond the embedded-document
+  budget) produce a `body_not_scanned` warning.
+
+### Limits
+
+`max_*` limits are `ImportOptions` fields; the rest are fixed.
+
+| Limit | Default / value | On exceed |
+|---|---|---|
+| `max_bytes` (input size) | 32 MiB | `ImportError::TooLarge` |
+| `max_nodes`: parsed JSON/YAML nodes (charged during deserialization, alias expansions included, so YAML alias bombs are refused) and XML nodes | 2,000,000 | `ImportError::LimitExceeded` |
+| String bytes a parsed JSON/YAML document keeps (values and map keys, alias expansions included) | 2 × `max_bytes` | `LimitExceeded` |
+| JSON/YAML nesting depth | 200 | `LimitExceeded` |
+| `max_operations` | 5,000 | later operations skipped, `operation_limit` warning |
+| `max_ref_depth` (direct `$ref`s and those followed while merging `allOf`) | 32 | not expanded, `ref_depth_limit` warning |
+| `max_ref_expansions` (whole import) | 250,000 | not expanded, `ref_budget_exhausted` warning |
+| `$ref` length | 2,048 bytes | not followed, `ref_too_long` warning |
+| `max_sample_nodes` (per payload or envelope; also charged per `allOf` branch, and for WSDL per schema node looked at) | 20,000 | rest omitted, `sample_size_limit` warning |
+| Bytes generated or copied into OpenAPI samples | 4 × `max_bytes` per import | rest omitted, `sample_size_limit` warning |
+| Generated WSDL envelope bytes | 8 MiB per envelope, 4 × `max_bytes` per import | rest omitted, `sample_size_limit` warning |
+| Text copied from the source into the imported objects (names, keys, URLs, descriptions, SOAP actions, server variables, operation and security-scheme JSON) | 4 × `max_bytes` per import | later operations skipped, `text_size_limit` warning |
+| XML text, counted before parsing (relies on DTDs being refused) | 1,024 `xmlns` declarations per document; 256 attributes per element; 2^24 attribute pairs per document (n·(n−1)/2 per element); 1 KiB per attribute name; 256 bytes per namespace prefix; 2 KiB per namespace URI; 256 namespace declarations in scope of any element (a prefix declared again counts again); 2^26 for the squares of the declarations in scope, summed over the elements that declare one | `LimitExceeded` |
+| XML namespaces in scope of any element after parsing | 256 | `LimitExceeded` |
+| JSON documents embedded in string fields (HAR, cURL, Postman and Insomnia JSON bodies, Insomnia GraphQL payloads) | the per-document bounds above; together at most `max_nodes` nodes per import | kept as text, `body_not_scanned` warning |
+| cURL arguments, as shell words and after short-option clusters are expanded | 10,000 | shell `ImportError::Syntax` |
+
+Byte budgets are charged before the copy is made. The 1,024 `xmlns` cap can
+refuse a large WSDL that declares its prefixes again on every element, as WCF
+`singleWsdl` output and some other generators do; such a document fails with
+`LimitExceeded` ("XML namespace declarations (xmlns)").
 
 ## Report
 
@@ -93,7 +147,7 @@ The desktop requires review binding for both pasted and file sources:
 
 | Command | Required input | Result |
 | --- | --- | --- |
-| `spec_preview` | `input`, `options`, `target` | Existing preview fields plus `binding` and `approval` |
+| `spec_preview` | `input`, `options`, `target` | Preview fields plus `binding` and `approval` |
 | `spec_import` | Same `input`, `options`, `target`, and returned `approval` | `SpecImported` |
 | `spec_reimport_plan` | `importId`, `input` | `{ plan, approval }` |
 | `spec_reimport_apply` | Same `importId`, `input`, `decisions`, returned `approval` | Applied count |
@@ -107,14 +161,14 @@ hash covers the canonical parsed graph and all import options; reimport also
 covers the current source record, requests, scoped configuration, generated
 baseline and complete proposed plan. Only generated object timestamps are
 normalized; stored metadata and similarly named fields in request bodies
-remain bound. New import ids use a fresh independent namespace when persisted,
-as before; review uses the deterministic namespace for a comparable graph.
+remain bound. New import ids use a fresh independent namespace when persisted;
+review uses the deterministic namespace for a comparable graph.
 
 The scope digest binds the native desktop process instance, profile id,
 lock epoch, grant token (or pasted source name), operation and destination
 workspace/import id. Lock, lock/unlock, profile switch, desktop restart,
 choosing another grant or changing the destination invalidates old approval.
-Existing grant expiry and revocation still apply. The UI invalidates its
+Grant expiry and revocation apply as for any file grant. The UI invalidates its
 preview after source/options/destination changes and ignores a late preview
 for an earlier edit; apply refusal requires another preview.
 
@@ -126,17 +180,16 @@ file read between digest verification and mutation. Source I/O and parsing
 run outside the desktop delivery gate. The final scope/fence check and commit
 run synchronously on the blocking worker under that gate, so a lock/profile
 switch either wins before writes or follows the committed transaction.
-Reimport's transaction still rechecks the entire stored baseline, including
+Reimport's transaction rechecks the entire stored baseline, including
 full provenance, before writing.
 
 There is no retained preview cache, opaque token pool or approval-byte store
 to expire or evict. Approvals are stateless: an unchanged new import can be
-repeated within the same valid scope, creating another independent copy as
-before. Reimport approval becomes stale when its bound stored baseline is
+repeated within the same valid scope, creating another independent copy.
+Reimport approval becomes stale when its bound stored baseline is
 changed by an apply or a user edit. Trusted byte-owning CLI/internal services
-continue to use `App::spec_import`/`App::spec_reimport_apply`; native IPC uses
-only the reviewed preparation/apply APIs. No format, normalization, resource
-limit, grant-purpose or destination transaction policy changes here.
+use `App::spec_import`/`App::spec_reimport_apply`; native IPC uses
+only the reviewed preparation/apply APIs.
 
 The import is atomic. A restore checkpoint is taken first; then the new
 workspace or root folder, the original bytes (a stored attachment), folders,

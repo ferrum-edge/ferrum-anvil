@@ -1,15 +1,10 @@
 # Failure lab: `early` profile
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
 This profile drives Anvil's TLS 1.3 / QUIC **0-RTT early data** ([protocols.md §3.12](../protocols.md))
-against the **real, pinned Ferrum Edge release binary** (v0.9.15 default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
-`--release`). There are no gateway mocks.
+against the **real, pinned Ferrum Edge release binary** (the default pin or, with `--release`, any supported release). There are no gateway mocks.
 
 The gateway behaviour under test is Ferrum Edge `docs/http3.md` ("0-RTT (TLS 1.3 early data)"),
 `docs/frontend_tls.md` and its source (v0.9.7 `8fed134` lines; the early-data code of v0.9.5
@@ -181,12 +176,10 @@ into a Handshake datagram, which the hold's check detail counts).
 
 ## 4. Results
 
-| Release | Runs | Result |
-|---|---|---|
-| v0.9.7 | 3 consecutive, trusted + untrusted | 16 passed, 0 failed, 0 skipped each (`results/lab/20260926T045920Z-early`, `…045921Z-early`, `…045923Z-early`) |
-| v0.9.5 | 1, trusted + untrusted | 16 passed, 0 failed, 0 skipped (`results/lab/20260926T045925Z-early`) |
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/early.md#4-results).
 
-These runs predate the pending-window relay (#223), which changed how EARLY-001 and EARLY-002 reach
+The recorded runs predate the pending-window relay (#223), which changed how EARLY-001 and EARLY-002 reach
 the gateway.
 
 Observed on both releases: 2 session tickets per handshake on every listener; `max_early_data_size`

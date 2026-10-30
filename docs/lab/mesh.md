@@ -1,14 +1,9 @@
 # Failure lab: `mesh` profile (Ferrum Mesh client)
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
-Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (v0.9.15
-default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`) in **mesh mode**. There is no Kubernetes, no control plane and
+Anvil tested as a **mesh client** against the real, pinned Ferrum Edge release binary (the default pin or, with `--release`, any supported release) in **mesh mode**. There is no Kubernetes, no control plane and
 no traffic capture: every gateway runs the localized file source (`FERRUM_MESH_CONFIG_PROTOCOL=file`,
 Ferrum Edge `docs/mesh.md` "Localized file source (no control plane)") with file-based SVIDs
 (`FERRUM_GATEWAY_SVID_*`, "File-Based SVIDs: Two-Process Local Mesh"), and Anvil
@@ -186,20 +181,8 @@ The relay-synthesis refusal reason is only logged at debug level, so the lab sta
 
 ## 4. Stability
 
-All runs are `anvil-lab run mesh --untrusted-pass` on 2026-09-26, macOS arm64, with the
-`ferrum-edge-macos-aarch64` binaries pinned by the lock files. Each count covers both passes; skipped
-scenarios are reported once per run.
-
-| Scope | Release | Runs (`results/lab/…-mesh`) | Result per run |
-|---|---|---|---|
-| MESH-001…017 (15 scenarios, skips 016 and 017) | v0.9.7 | `20260926T023532Z`, `…023540Z`, `…023547Z`, then `run all` | 30 passed, 0 failed, 2 skipped |
-| same | v0.9.5 | `--release v0.9.5 run all` | 30/0/2 |
-| + UDP through HBONE, MESH-018…030 (26 scenarios, skips 016, 017, 029, 030) | v0.9.7 | `20260926T043340Z`, `…043354Z`, `…043404Z` | 52/0/4 |
-| same | v0.9.5 | `20260926T043415Z` | 52/0/4 |
-| + DTLS through HBONE, MESH-031…034 (30 scenarios, same skips) | v0.9.7 | `20260926T054744Z`, `…054757Z`, `…054809Z` | 60/0/4 |
-| same | v0.9.5 | `20260926T054821Z` | 60/0/4 |
-
-An earlier set of the same four DTLS runs (`20260926T053733Z`…`053810Z`) had the same results.
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/mesh.md#4-stability).
 
 - **Lost alerts.** The lost-alert shapes appeared in every set and were explained by the lost-alert
   findings: MESH-006 (run 1) and MESH-013 (runs 2 and 3) in the first set; MESH-012 (v0.9.7 runs 2 and 3)

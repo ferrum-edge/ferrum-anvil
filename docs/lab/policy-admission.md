@@ -1,15 +1,10 @@
 # Failure lab: policy, admission and drain profiles
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
 Three real-gateway profiles for the WAF/policy and gateway-admission families of the failure matrix.
-Every stimulus drives a pinned Ferrum Edge release binary (v0.9.15 default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
-`--release`) with controllable local fixtures. No response is faked, and no failure is
+Every stimulus drives a pinned Ferrum Edge release binary (the default pin or, with `--release`, any supported release) with controllable local fixtures. No response is faked, and no failure is
 injected as an enum. Behaviour recorded below as "0.9.5" was re-observed on 0.9.7: every scenario
 passes on both releases with the same expectations, except `GW-010-BOT.allow-edge`, whose verdict is
 release-dependent (see [gateway-0.9.7-delta.md](../audit/gateway-0.9.7-delta.md)). v0.9.8 and later strip
@@ -260,22 +255,8 @@ suggests disabling the WAF, TLS or a policy.
 
 ## 6. Stability record
 
-Both releases, `anvil-lab [--release v0.9.5] run all --untrusted-pass` (2026-09-26, macOS 26 arm64):
-policy 48 passed / 0 failed / 1 skipped, admission 8 / 0 / 2 and drain 4 / 0 / 0 on **v0.9.7** and on
-**v0.9.5** (policy gained `GW-010-BOT.allow-edge`, run trusted and untrusted).
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/policy-admission.md#6-stability-record).
 
-Earlier runs, v0.9.5 only (`anvil-lab run <profile> --untrusted-pass`, macOS 26 arm64, 2026-09-25),
-three consecutive runs per profile:
-
-| Profile | Run 1 | Run 2 | Run 3 | Wall time per run |
-|---|---|---|---|---|
-| policy (23 scenarios) | 46 passed / 0 failed / 1 skipped | 46 / 0 / 1 | 46 / 0 / 1 | ~40 s |
-| admission (before UP-018) | 6 / 0 / 1 | 6 / 0 / 1 | 6 / 0 / 1 | ~8 s |
-| admission (with the UP-018 mesh instance) | 8 / 0 / 2 | 8 / 0 / 2 | 8 / 0 / 2 | ~15 s |
-| drain | 4 / 0 / 0 | 4 / 0 / 0 | 4 / 0 / 0 | ~22 s |
-
-- Passed counts include both passes; skips are listed once and never counted as passes. The second
-  admission skip is UP-018-H2.
 - Across all eight recorded GW-003 passes, the keep-alive request during drain ended the same way:
   the idle socket was closed and the re-dial refused, and Anvil reported `client.connect.refused`.
-- The unchanged `core` profile passed 36/36 with these diagnostics changes.

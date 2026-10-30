@@ -16,8 +16,9 @@ It addresses three advisories:
 
 The reports concern a source snapshot based on
 `b7aca6f46988dacdaec97f4d2a0af0f8fe238d7e`. That snapshot does not prove that a
-distributed 0.1.1 binary, or any other release, is affected. This policy ships
-under `[Unreleased]`, and no patched release is claimed until one is published.
+distributed 0.1.1 binary, or any other release, is affected. This policy
+shipped in 0.1.2. As in the changelog, no released version is claimed patched
+against the advisories.
 
 Several existing protections are unchanged:
 
