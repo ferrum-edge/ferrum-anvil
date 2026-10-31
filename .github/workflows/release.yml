@@ -518,9 +518,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  # The website's Anvil tests at a pinned ferrumedge commit (failure-matrix
-  # REL-006/007/008), re-run on every release run. A draft release needs them
-  # to pass.
+  # The website's tests at a pinned ferrumedge commit (failure-matrix
+  # REL-006/007/008), re-run on every release run. It runs beside the build
+  # and never gates the draft release: a failure (or a missing
+  # FERRUMEDGE_READ_TOKEN, which fails the job rather than skipping it) shows
+  # in the run without blocking publishing.
   website:
     name: Website evidence
     needs: preflight
@@ -534,7 +536,7 @@ jobs:
   release:
     name: Create draft release
     if: needs.preflight.outputs.tag != ''
-    needs: [preflight, publish, website]
+    needs: [preflight, publish]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
