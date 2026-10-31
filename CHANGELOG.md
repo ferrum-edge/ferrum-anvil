@@ -51,6 +51,26 @@
 
 ### Changed
 
+- The generic HTTP status findings (`http.*`) now quote an RFC 9457 problem
+  report (`application/problem+json`) when the error response carries one:
+  its `type`, `title`, `detail`, `status` and `instance` are recorded as
+  body evidence; the explanation quotes the type (unless `about:blank`),
+  title and detail as escaped JSON strings; a remediation step names the
+  type and instance to quote to the API owner; and a status that differs
+  from the response status is stated, with an intermediary change and an
+  inconsistent report as alternatives. `type` and `instance` are redacted as
+  URLs, and appear in the wording only when they are URI references. A
+  member that is over its length limit or carries a control, line-separator
+  or invisible formatting character is withheld whole and named
+  (`body.problem.withheld`); no member is cut or rewritten. Two 503s a
+  Ferrum Alloy service sends for different reasons (a handler deadline,
+  `request-timeout`, and a full admission limit, `overloaded`) were
+  previously the same "Service unavailable" finding with no body evidence,
+  as were a Ferrum Edge `openapi_validator` 400 and any other 400. The
+  report never changes a finding's code, confidence, scope, owner or
+  severity: any server on the path can send one. Generic finding wording no
+  longer collapses spaces inside a substituted value, so quoted response text
+  keeps its spacing. Diagnostics catalog version 2026.10.31-1.
 - `--env` on `anvil send`, `run` and `mcp-discover` takes an environment's
   id as well as its name (`send` and `mcp-discover` took only a name), and
   one that names no environment lists the workspace's environments. A name two environments of

@@ -27,3 +27,10 @@ d64da595172a550838586dfbb1c291ccaaa88879:crates/anvil-engine/tests/mcp.rs:generi
 # next commit renames the host so the generic rule no longer matches. CI scans full
 # history, hence this fingerprint.
 4f83130f8c24acd410c36a764a734c7069d9a8e7:apps/desktop/src-tauri/src/draft_authority.rs:generic-api-key:275
+
+# Exact-fingerprint ignore for a planted redaction canary in
+# crates/anvil-engine/tests/engine_scenarios.rs, first pushed in commit 1e7d5153 on
+# branch fix/problem-details-evidence. The value is fake; the next commit switches it
+# to the allowlisted tok-SENSITIVE- canary prefix. CI scans full history, hence this
+# single fingerprint.
+1e7d5153af10c28f38ea2b271a58294044185da6:crates/anvil-engine/tests/engine_scenarios.rs:generic-api-key:772

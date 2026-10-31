@@ -129,7 +129,7 @@ pub const RULES: &[RuleMeta] = &[
     },
     RuleMeta {
         id: "http.status",
-        version: 1,
+        version: 2,
         summary: "Generic HTTP status meaning without origin inference",
         fixtures: &["GW-006", "GW-007", "GW-016", "GW-017", "TRUST-006", "AUTH-003"],
     },

@@ -58,12 +58,60 @@ and every record names the findings catalog and Ferrum catalog it used.
 | `response.*` | 4 | incomplete body, idle/total body timeouts, stream reset mid-body |
 | `request.*` | 5 | canceled; processing uncertain; an earlier attempt may have processed; `425 Too Early` with the retry outcome |
 | `early_data.*` | 4 | TLS 1.3 / QUIC 0-RTT: accepted (with the replay note), rejected and re-sent by the transport, no session ticket, tickets without early data |
-| `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings) |
+| `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings), quoting an RFC 9457 problem report when the body is one |
 | `ferrum.*` | 30 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
 | `app.*`, `auth.*` | 13 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
 | `grpc.*`, `grpc_web.*` | 2 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
 | `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 20 | close codes, idle/cancel, abnormal close, WebSocket permessage-deflate (offered but not negotiated, a refused extension answer, compressed frames never negotiated, undecodable data, the local limit reached after decompression), no UDP response observed, PROXY header possibly rejected |
+
+### RFC 9457 problem reports
+
+When an error response is `application/problem+json` (the RFC 9457 media
+type, with any parameters; plain `application/json` is not read as one), its
+generic `http.*` finding records the standard members it carries as body
+evidence: `body.problem.type`, `.title`, `.detail`, `.status` and
+`.instance`. No member is ever cut or rewritten. A member longer than its
+limit (256 characters for `title`, 1024 for `detail`, 2048 for `type` and
+`instance`), or one that carries a control character, a Unicode line or
+paragraph separator, or an invisible formatting character (bidirectional
+marks, overrides and isolates, zero-width, interlinear annotation, tag and
+variation-selector characters, blank fillers), is withheld whole: it is
+named in `body.problem.withheld` and the explanation says the response body
+has its text. A cut or a changed character would leave text the record's
+redaction could no longer match against a secret (including one a runner
+extraction learns after diagnosis), and quoting hidden characters could
+break or disguise the wording. `title` and `detail` are scrubbed of known
+secrets. `type` and `instance` are not scrubbed before the record redacts
+them as URLs, so that pass sees their original structure (a known secret
+replaced inside a query name would hide what it has to withhold). A member
+of the wrong JSON type is ignored, as RFC 9457 §3.1 requires; `status` is
+read in any JSON number form of an integer from 100 to 599 (`503`, `503.0`),
+and extension members are not read.
+
+The explanation states the type (unless it is `about:blank`), title and
+detail, each quoted as a JSON string: a quote or backslash in the body is
+escaped, so the body's text cannot close its quotation and read as Anvil's
+own words. A status member that differs from the response status is stated
+too, with an intermediary change and an inconsistent report as alternatives.
+When the report names a type or an instance, a remediation step tells the
+caller to quote them to the API owner. `type` and `instance` are redacted as
+URLs (a sensitive query value such as `access_token` is withheld) in the
+evidence, the explanation and the remediation, and a value that is not a URI
+reference (anything but printable ASCII, or spaces, quotes, angle brackets
+and the other characters RFC 3986 excludes) stays in the evidence only.
+
+The report is what the responding server says, so it adds evidence and
+wording only (rule `http.status` is now version 2): its code,
+confidence, scope, owner and severity are the same as for any body with that
+status, and "does not prove" says that any server
+on the path can send one. It is often what separates causes the status
+cannot. A Ferrum Alloy service answers a handler that missed its deadline
+(`…/alloy/problem/request-timeout`, "The service did not produce a response
+in time.") and a full admission limit (`…/alloy/problem/overloaded`) with the
+same 503, and Ferrum Edge's `openapi_validator` answers a malformed body, a
+schema violation and an unknown operation with 400 reports that differ only
+in title and detail.
 
 ## TLS identity: host names, SPIFFE IDs and SNI
 
