@@ -6,9 +6,8 @@
   "verified_test": 74,
   "verified_live": 100,
   "not_applicable": 2,
-  "blocked": 1,
-  "verified_check": 1,
-  "partial": 4
+  "partial": 5,
+  "verified_check": 1
  },
  "cases": [
   {
@@ -7866,11 +7865,11 @@
    "id": "REL-001",
    "category": "Installer, updater and website release",
    "title": "Clean native installs",
-   "status": "blocked",
+   "status": "partial",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2."
+   "note": "Hosted release smoke (.github/workflows/release-smoke.yml) against the published, unsigned anvil-v0.1.5 assets (each checked against SHA256SUMS): run 41189324002 on PR head adb4d3f, the same per-target result as the earlier run 41185287833 on head 7f17212. This evidence comes from pull_request-triggered runs against the published assets; once the workflow is on main, the run that publishing a release starts (release: published) is the routine check. For each target, the smoke installs the package natively on a fresh runner and launches the installed app (window and webview process observed). It then imports samples/workspaces/anvil-samples.anvil, sends its Healthy/OK request to a loopback listener (HTTP 200) and relaunches the app; a target stops at its first failed step. Six targets pass every step: macOS arm64 DMG (macos-15), macOS x86_64 DMG (native Intel macos-15-intel), Windows x64 NSIS and MSI (windows-2025), Linux x64 .deb (Ubuntu 26.04) and .rpm (Fedora 44). The x64 AppImage fails at its first launch (a package failure): the app starts and shows its window, but its WebKit web process aborts with EGL_BAD_PARAMETER, so it never reached the import, the call or the relaunch. An AppImage fix is in progress. The GUI was not driven: the import and the call go through the release CLI archive on the app's data directory. Recorded bypasses: Gatekeeper and SmartScreen were never consulted (the assets carried no quarantine attribute or Mark-of-the-Web); the DMG license was accepted non-interactively; the installers ran silently, the MSI as an administrator without a UAC prompt; local .deb/.rpm packages and the AppImage ran without a package-signature check. Still blocked: signed and notarized first-run acceptance on macOS and Windows (Gatekeeper, SmartScreen, Keychain), which needs owner credentials (ferrum-edge/ferrum-anvil#2). Linux has no platform code signing, so it waits on no credentials."
   },
   {
    "id": "REL-002",
