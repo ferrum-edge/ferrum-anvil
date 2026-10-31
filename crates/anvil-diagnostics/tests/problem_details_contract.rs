@@ -345,9 +345,14 @@ fn quoted_texts_are_redacted() {
         redact: Some(&scrub),
     });
     let f = finding(&d, "http.unauthorized");
-    let all = format!("{} {:?} {:?}", f.explanation, f.evidence, f.remediation);
-    assert!(!all.contains(SECRET), "{all}");
-    assert!(f.explanation.contains("bad key [REDACTED]"), "{}", f.explanation);
+    // Title and detail are scrubbed here, before they are cut.
+    assert_eq!(evidence(f, "body.problem.title"), Some("bad key [REDACTED]"));
+    assert_eq!(evidence(f, "body.problem.detail"), Some("[REDACTED]"));
+    assert!(f.explanation.contains(r#"titled "bad key [REDACTED]", with detail "[REDACTED]""#), "{}", f.explanation);
+    // Type and instance are left whole for the record's URL redaction
+    // (anvil-engine `Redactor::finding`), which scrubs them in the evidence,
+    // the explanation and the remediation together.
+    assert_eq!(evidence(f, "body.problem.instance"), Some(format!("/x/{SECRET}").as_str()));
 }
 
 #[test]

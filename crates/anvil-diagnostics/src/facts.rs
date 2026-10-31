@@ -91,9 +91,10 @@ pub struct BodyFacts {
 }
 
 /// The standard members of an RFC 9457 problem report, as the response
-/// carries them. Each text is a redacted [`excerpt`] with control, separator
-/// and invisible format characters replaced by spaces; `type` and `instance`
-/// are never cut (one over 2048 characters is not read). A member that is absent or not of its RFC 9457 type is
+/// carries them, with control, separator and invisible format characters
+/// replaced by spaces. `title` and `detail` are redacted [`excerpt`]s;
+/// `type` and `instance` are kept whole and unscrubbed for the record's URL
+/// redaction (one over 2048 characters is not read). A member that is absent or not of its RFC 9457 type is
 /// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
 /// not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,15 +299,18 @@ fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Red
         let one_line: String = excerpt(redact, v, max).chars().map(|c| if is_hidden(c) { ' ' } else { c }).collect();
         Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
     };
-    // A URI is never cut: the record's URL redaction must see its whole
-    // structure (a cut inside userinfo or a query value would hide what it
-    // has to withhold). One longer than the limit is not read at all.
+    // A URI is neither cut nor scrubbed here: the record redacts it as a URL
+    // (`body.problem.type` and `.instance` are URL evidence), which needs its
+    // whole, original structure. A cut inside userinfo or a query value, or
+    // a known secret replaced inside a query name, would hide what that pass
+    // has to withhold. One longer than the limit is not read at all.
     let uri = |key: &str| {
         let v = obj.get(key)?.as_str()?;
         if v.chars().count() > MAX_PROBLEM_URI_CHARS {
             return None;
         }
-        text(key, MAX_PROBLEM_URI_CHARS)
+        let one_line: String = v.chars().map(|c| if is_hidden(c) { ' ' } else { c }).collect();
+        Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
     };
     let p = ProblemDetails {
         type_uri: uri("type"),
@@ -504,7 +508,8 @@ mod tests {
         let p = f.problem.expect("a problem report");
         assert_eq!(p.title.as_deref(), Some("line one line two"));
         assert_eq!(p.detail, Some(format!("{pad}{REDACTED}")));
-        assert_eq!(p.instance, Some(format!("/req/{REDACTED}")));
+        // A URI is left whole for the record's URL redaction.
+        assert_eq!(p.instance, Some(format!("/req/{SECRET}")));
         assert_eq!((p.type_uri.as_deref(), p.status), (Some("tag:x"), Some(503)));
         // Out-of-range status and blank texts are ignored.
         let f = body_facts(Some("application/problem+json"), br#"{"status":1000,"title":" \u0001 ","detail":"d"}"#);

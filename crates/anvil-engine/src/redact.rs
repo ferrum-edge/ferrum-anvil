@@ -527,7 +527,8 @@ impl Redactor {
     /// reversibly encoded secret in it is withheld like in the metadata.
     pub fn finding(&self, f: &mut DiagnosticFinding) {
         f.title = self.metadata_text(&f.title);
-        let mut explanation = f.explanation.clone();
+        // (original, redacted) for each URL-valued evidence item that changed.
+        let mut urls: Vec<(String, String)> = Vec::new();
         for e in &mut f.evidence {
             if !URL_EVIDENCE.contains(&e.key.as_str()) {
                 e.value = self.metadata_text(&e.value);
@@ -535,14 +536,14 @@ impl Redactor {
             }
             let redacted = self.url(&e.value);
             if !e.value.is_empty() && redacted != e.value {
-                explanation = explanation.replace(e.value.as_str(), &redacted);
-                for remediation in &mut f.remediation {
-                    remediation.text = remediation.text.replace(e.value.as_str(), &redacted);
-                }
+                urls.push((e.value.clone(), redacted.clone()));
             }
             e.value = redacted;
         }
-        f.explanation = self.metadata_text(&explanation);
+        f.explanation = self.metadata_text(&replace_each_once(&f.explanation, &urls));
+        for remediation in &mut f.remediation {
+            remediation.text = replace_each_once(&remediation.text, &urls);
+        }
         for a in f.alternatives.iter_mut().chain(f.does_not_prove.iter_mut()).chain(f.confirm_with.iter_mut()) {
             *a = self.metadata_text(a);
         }
@@ -1033,6 +1034,33 @@ fn anchor_value_start(s: &str) -> Option<usize> {
     })
 }
 
+/// `text` with every occurrence of each `(from, to)` pair's `from` replaced,
+/// in one pass over the original text: at each position the longest `from`
+/// that starts there wins, and replaced text is never searched again. One
+/// URL that is a prefix of another (a problem report's `type` and
+/// `instance` on the same host) cannot leave part of the longer one behind.
+fn replace_each_once(text: &str, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return text.to_string();
+    }
+    let mut by_length: Vec<&(String, String)> = pairs.iter().collect();
+    by_length.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(ch) = rest.chars().next() {
+        for (from, to) in &by_length {
+            if rest.starts_with(from.as_str()) {
+                out.push_str(to);
+                rest = &rest[from.len()..];
+                continue 'scan;
+            }
+        }
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1076,6 +1104,33 @@ mod tests {
         g.remediation[0].text = format!("quote the problem report's instance \"{long}\"");
         r.finding(&mut g);
         assert!(!format!("{:?} {}", g.evidence, g.remediation[0].text).contains("SSSS"), "{:?}", g.evidence);
+
+        // A type that is a prefix of the instance cannot leave the instance's
+        // own sensitive value behind.
+        let ty = "https://e.test/p?token=A";
+        let inst = "https://e.test/p?token=A&access_token=private-value";
+        let mut h = f.clone();
+        h.evidence = vec![
+            Evidence { source: EvidenceSource::BodyContent, key: "body.problem.type".into(), value: ty.into(), attempt: Some(0) },
+            Evidence { source: EvidenceSource::BodyContent, key: "body.problem.instance".into(), value: inst.into(), attempt: Some(0) },
+        ];
+        h.explanation = format!("The body is an RFC 9457 problem report of type \"{ty}\", titled \"t\".");
+        h.remediation[0].text = format!("quote the problem report's type \"{ty}\" and instance \"{inst}\": they name it.");
+        r.finding(&mut h);
+        let all = format!("{:?} {} {}", h.evidence, h.explanation, h.remediation[0].text);
+        assert!(!all.contains("private-value") && !all.contains("token=A"), "{all}");
+
+        // A known secret that is also a sensitive query name: the URL is
+        // redacted structurally first, so the unknown value is withheld too.
+        let r = Redactor::new(vec!["token".into()], vec![]);
+        let inst = "https://trace.test/occ?token=fresh-credential-Q9";
+        let mut k = f.clone();
+        k.evidence[0].value = inst.into();
+        k.explanation = "The body is an RFC 9457 problem report.".into();
+        k.remediation[0].text = format!("quote the problem report's instance \"{inst}\": they name it.");
+        r.finding(&mut k);
+        let all = format!("{:?} {}", k.evidence, k.remediation[0].text);
+        assert!(!all.contains("fresh-credential-Q9"), "{all}");
     }
 
     #[test]

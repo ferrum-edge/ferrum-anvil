@@ -760,3 +760,31 @@ async fn a_problem_report_is_quoted_and_its_uris_are_redacted_in_the_record() {
     assert!(instance.value.starts_with("https://trace.example/occ/9?access_token="), "{}", instance.value);
     assert!(h.remediation.iter().any(|r| r.text.contains("https://trace.example/occ/9?access_token=")), "{:?}", h.remediation);
 }
+
+#[tokio::test]
+async fn a_problem_report_echoing_a_secret_keeps_it_out_of_the_record() {
+    // The report echoes a secret the request sent in every member, and its
+    // `type` is a prefix of its `instance`. Nothing of either, and no
+    // unknown token after a sensitive query name, reaches the record.
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let secret = "ECHOED-SECRET-5h2k";
+    let problem = format!(
+        r#"{{"type":"https://e.test/p/{secret}?token=A","title":"bad {secret}","status":503,"detail":"{secret}","instance":"https://e.test/p/{secret}?token=A&access_token=private-value-7m3q"}}"#
+    );
+    let url =
+        f.url(&format!("/status/503?note={{{{planted}}}}&ct={}&body={}", url_encode("application/problem+json"), url_encode(&problem)));
+    let mut ctx = ctx_for(&url);
+    ctx.var_layers = vec![VarLayer {
+        label: "environment:lab".into(),
+        vars: vec![VarEntry { name: "planted".into(), value: secret.into(), secret: true, literal: false }],
+    }];
+    let o = run(&e, &ctx).await;
+    let h = finding(&o, "http.service_unavailable");
+    assert!(h.evidence.iter().any(|e| e.key == "body.problem.instance"), "{:?}", h.evidence);
+    let json = serde_json::to_string(&o.record).unwrap();
+    for leaked in [secret, "private-value-7m3q", "token=A"] {
+        assert!(!json.contains(leaked), "{leaked} leaked into the execution record");
+    }
+}
