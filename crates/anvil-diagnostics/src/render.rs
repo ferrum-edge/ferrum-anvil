@@ -58,42 +58,51 @@ fn owner(s: &str) -> Owner {
 /// Substitute `{name}` placeholders. Unknown placeholders are removed so a
 /// missing value never leaks template syntax; tests assert every placeholder
 /// used by a rule is supplied.
+///
+/// Doubled spaces and a space before a period, left by empty optional
+/// placeholders, are removed where the template's own text is involved. A run
+/// inside one substituted value is kept as is: a value may quote a response's
+/// text, which the wording must not alter.
 pub fn fill(t: &str, vars: &[(&'static str, String)]) -> String {
-    let mut out = String::with_capacity(t.len() + 32);
+    // Each piece is template text (`false`) or one substituted value (`true`).
+    let mut pieces: Vec<(&str, bool)> = Vec::new();
     let mut rest = t;
     while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
+        pieces.push((&rest[..open], false));
         let after = &rest[open + 1..];
         match after.find('}') {
             Some(close) if after[..close].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
                 let key = &after[..close];
                 if let Some((_, v)) = vars.iter().rev().find(|(k, _)| *k == key) {
-                    out.push_str(v);
+                    pieces.push((v, true));
                 }
                 rest = &after[close + 1..];
             }
             _ => {
-                out.push('{');
+                pieces.push(("{", false));
                 rest = after;
             }
         }
     }
-    out.push_str(rest);
-    // Collapse doubled spaces left by empty optional placeholders.
-    let mut collapsed = String::with_capacity(out.len());
-    let mut prev_space = false;
-    for ch in out.chars() {
-        if ch == ' ' {
-            if !prev_space {
-                collapsed.push(ch);
+    pieces.push((rest, false));
+    let mut out = String::with_capacity(t.len() + 32);
+    // The piece the last kept character came from.
+    let mut last_piece: Option<usize> = None;
+    for (index, (piece, is_value)) in pieces.iter().enumerate() {
+        for ch in piece.chars() {
+            let inside_one_value = *is_value && last_piece == Some(index);
+            if !inside_one_value && (ch == ' ' || ch == '.') {
+                // Spaces left before another space or a period, where the
+                // template's text meets them.
+                while out.ends_with(' ') {
+                    out.pop();
+                }
             }
-            prev_space = true;
-        } else {
-            prev_space = false;
-            collapsed.push(ch);
+            out.push(ch);
+            last_piece = Some(index);
         }
     }
-    collapsed.trim().replace(" .", ".")
+    out.trim().to_string()
 }
 
 pub fn render(d: Draft) -> DiagnosticFinding {
@@ -135,5 +144,26 @@ pub fn render(d: Draft) -> DiagnosticFinding {
         remediation,
         owner: d.owner,
         confirm_with,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fill;
+
+    #[test]
+    fn empty_placeholders_leave_no_doubled_space_but_values_keep_theirs() {
+        let vars = vec![
+            ("empty", String::new()),
+            ("quote", "\"a  b .\"".to_string()),
+            ("tail", "end ".to_string()),
+            ("tails", "timed out   ".to_string()),
+        ];
+        assert_eq!(fill("One. {empty} Two {empty}.", &vars), "One. Two.");
+        assert_eq!(fill("Said {quote} {empty} then {tail}.", &vars), "Said \"a  b .\" then end.");
+        assert_eq!(fill("Failed: {tails}.", &vars), "Failed: timed out.");
+        assert_eq!(fill("Failed: {tails} {empty} now", &vars), "Failed: timed out now");
+        assert_eq!(fill("  {missing}  x  ", &vars), "x");
+        assert_eq!(fill("{not a key} {x", &vars), "{not a key} {x");
     }
 }

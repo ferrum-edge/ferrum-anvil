@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.15-1",
+  "version": "2026.10.31-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1259,7 +1259,7 @@
     },
     "http.unauthorized": {
       "title": "Authentication was refused (401)",
-      "explanation": "The response status is 401: the request was missing credentials or they were not accepted.",
+      "explanation": "The response status is 401: the request was missing credentials or they were not accepted. {problem}",
       "alternatives": [
         "A gateway authentication plugin rejected the credential.",
         "The application rejected the credential.",
@@ -1281,7 +1281,7 @@
     },
     "http.forbidden": {
       "title": "The request was refused (403)",
-      "explanation": "The service refused this request with 403. A 403 alone does not tell whether gateway authorization, a WAF/policy block or the application refused it.",
+      "explanation": "The service refused this request with 403. A 403 alone does not tell whether gateway authorization, a WAF/policy block or the application refused it. {problem}",
       "alternatives": [
         "Gateway access control (ACL, IP/geo restriction, OPA).",
         "A WAF or bot-detection policy.",
@@ -1307,7 +1307,7 @@
     },
     "http.not_found": {
       "title": "Not found (404)",
-      "explanation": "The response status is 404.",
+      "explanation": "The response status is 404. {problem}",
       "alternatives": [
         "No gateway route matches this host/path.",
         "The application has no such resource."
@@ -1325,7 +1325,7 @@
     },
     "http.method_not_allowed": {
       "title": "Method not allowed (405)",
-      "explanation": "The response status is 405. {allow}",
+      "explanation": "The response status is 405. {allow} {problem}",
       "alternatives": [
         "The gateway route restricts methods.",
         "The application does not implement this method."
@@ -1344,7 +1344,7 @@
     },
     "http.proxy_auth_required": {
       "title": "Proxy authentication required (407)",
-      "explanation": "The response status is 407.",
+      "explanation": "The response status is 407. {problem}",
       "alternatives": [],
       "does_not_prove": [],
       "remediation": [
@@ -1357,7 +1357,7 @@
     },
     "http.request_timeout": {
       "title": "Request timeout (408)",
-      "explanation": "The response status is 408: the server gave up waiting for the complete request.",
+      "explanation": "The response status is 408: the server gave up waiting for the complete request. {problem}",
       "alternatives": [
         "The request body was sent too slowly.",
         "A gateway's request-body read timeout fired."
@@ -1373,7 +1373,7 @@
     },
     "http.payload_too_large": {
       "title": "The request body is too large (413)",
-      "explanation": "The response status is 413: a size limit on the path refused the request body.",
+      "explanation": "The response status is 413: a size limit on the path refused the request body. {problem}",
       "alternatives": [
         "A gateway request-size limit.",
         "The application's own limit."
@@ -1391,7 +1391,7 @@
     },
     "http.unsupported_media_type": {
       "title": "Unsupported media type (415)",
-      "explanation": "The response status is 415: the Content-Type of the request is not accepted.",
+      "explanation": "The response status is 415: the Content-Type of the request is not accepted. {problem}",
       "alternatives": [
         "A gateway contract validator.",
         "The application."
@@ -1407,7 +1407,7 @@
     },
     "http.too_many_requests": {
       "title": "Rate limited (429)",
-      "explanation": "The response status is 429: a rate or concurrency limit refused the request. {retry_after}",
+      "explanation": "The response status is 429: a rate or concurrency limit refused the request. {retry_after} {problem}",
       "alternatives": [
         "A gateway rate-limiting plugin.",
         "The application's own rate limit.",
@@ -1426,7 +1426,7 @@
     },
     "http.client_error": {
       "title": "Client error ({status})",
-      "explanation": "The response status is {status} {reason}: the request was not accepted as sent.",
+      "explanation": "The response status is {status} {reason}: the request was not accepted as sent. {problem}",
       "alternatives": [],
       "does_not_prove": [
         "Which component returned the status."
@@ -1441,7 +1441,7 @@
     },
     "http.bad_gateway": {
       "title": "Bad gateway (502)",
-      "explanation": "The response status is 502: a proxy or gateway on the path could not get a valid response from the next hop — or an application returned 502 itself.",
+      "explanation": "The response status is 502: a proxy or gateway on the path could not get a valid response from the next hop — or an application returned 502 itself. {problem}",
       "alternatives": [
         "A gateway could not connect to its backend.",
         "The backend closed or reset its connection.",
@@ -1463,7 +1463,7 @@
     },
     "http.service_unavailable": {
       "title": "Service unavailable (503)",
-      "explanation": "The response status is 503: a component on the path is temporarily unable to handle the request. {retry_after}",
+      "explanation": "The response status is 503: a component on the path is temporarily unable to handle the request. {retry_after} {problem}",
       "alternatives": [
         "Gateway admission control (overload, circuit breaker, stale configuration, capacity limits).",
         "The application is overloaded or in maintenance."
@@ -1482,7 +1482,7 @@
     },
     "http.gateway_timeout": {
       "title": "Gateway timeout (504)",
-      "explanation": "The response status is 504: a proxy or gateway did not get a response from the next hop in time — or an application returned 504 itself.",
+      "explanation": "The response status is 504: a proxy or gateway did not get a response from the next hop in time — or an application returned 504 itself. {problem}",
       "alternatives": [
         "The backend was slow to respond.",
         "The backend was slow to read the upload.",
@@ -1502,7 +1502,7 @@
     },
     "http.server_error": {
       "title": "Server error ({status})",
-      "explanation": "The response status is {status} {reason}.",
+      "explanation": "The response status is {status} {reason}. {problem}",
       "alternatives": [
         "The application failed.",
         "A gateway or proxy generated the error."

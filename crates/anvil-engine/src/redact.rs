@@ -44,8 +44,9 @@ const MAX_DECODE_ROUNDS: usize = 3;
 const URL_HEADERS: &[&str] = &["location", "content-location", "referer"];
 
 /// Diagnostic evidence keys whose values are URLs, or `host/path` without a
-/// scheme.
-const URL_EVIDENCE: &[&str] = &["redirect.authorization_endpoint"];
+/// scheme. An RFC 9457 problem report's `type` and `instance` are URI
+/// references (a server can put a trace URL with a token in `instance`).
+const URL_EVIDENCE: &[&str] = &["redirect.authorization_endpoint", "body.problem.type", "body.problem.instance"];
 
 const SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
@@ -520,12 +521,14 @@ impl Redactor {
     }
 
     /// A diagnostic finding with its values redacted. URL-valued evidence is
-    /// redacted as a URL, and so is its copy in the explanation. Other text
+    /// redacted as a URL, and so are its copies in the explanation and the
+    /// remediation steps. Other text
     /// can quote response metadata (header values, the reason phrase), so a
     /// reversibly encoded secret in it is withheld like in the metadata.
     pub fn finding(&self, f: &mut DiagnosticFinding) {
         f.title = self.metadata_text(&f.title);
-        let mut explanation = f.explanation.clone();
+        // (original, redacted) for each URL-valued evidence item that changed.
+        let mut urls: Vec<(String, String)> = Vec::new();
         for e in &mut f.evidence {
             if !URL_EVIDENCE.contains(&e.key.as_str()) {
                 e.value = self.metadata_text(&e.value);
@@ -533,11 +536,14 @@ impl Redactor {
             }
             let redacted = self.url(&e.value);
             if !e.value.is_empty() && redacted != e.value {
-                explanation = explanation.replace(e.value.as_str(), &redacted);
+                urls.push((e.value.clone(), redacted.clone()));
             }
             e.value = redacted;
         }
-        f.explanation = self.metadata_text(&explanation);
+        f.explanation = self.metadata_text(&replace_each_once(&f.explanation, &urls));
+        for remediation in &mut f.remediation {
+            remediation.text = replace_each_once(&remediation.text, &urls);
+        }
         for a in f.alternatives.iter_mut().chain(f.does_not_prove.iter_mut()).chain(f.confirm_with.iter_mut()) {
             *a = self.metadata_text(a);
         }
@@ -1028,8 +1034,105 @@ fn anchor_value_start(s: &str) -> Option<usize> {
     })
 }
 
+/// `text` with every occurrence of each `(from, to)` pair's `from` replaced,
+/// in one pass over the original text: at each position the longest `from`
+/// that starts there wins, and replaced text is never searched again. One
+/// URL that is a prefix of another (a problem report's `type` and
+/// `instance` on the same host) cannot leave part of the longer one behind.
+fn replace_each_once(text: &str, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return text.to_string();
+    }
+    let mut by_length: Vec<&(String, String)> = pairs.iter().collect();
+    by_length.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(ch) = rest.chars().next() {
+        for (from, to) in &by_length {
+            if rest.starts_with(from.as_str()) {
+                out.push_str(to);
+                rest = &rest[from.len()..];
+                continue 'scan;
+            }
+        }
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_problem_report_uri_is_redacted_as_a_url_wherever_a_finding_quotes_it() {
+        use super::*;
+        use anvil_domain::diagnostics::{
+            Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Remediation, Severity, SourceScope,
+        };
+        let r = Redactor::new(vec![], vec![]);
+        let instance = "https://trace.example/occ/9?access_token=tok-live-5k2r&page=2";
+        let mut f = DiagnosticFinding {
+            code: "http.service_unavailable".into(),
+            rule_id: "http.status".into(),
+            rule_version: 1,
+            title: "Service unavailable (503)".into(),
+            explanation: format!("The body is an RFC 9457 problem report of type \"tag:x\", titled \"t\". {instance:?}"),
+            scope: SourceScope::Unknown,
+            confidence: Confidence::Confirmed,
+            severity: Severity::Error,
+            evidence: vec![Evidence {
+                source: EvidenceSource::BodyContent,
+                key: "body.problem.instance".into(),
+                value: instance.into(),
+                attempt: Some(0),
+            }],
+            alternatives: vec![],
+            does_not_prove: vec![],
+            remediation: vec![Remediation { text: format!("quote the problem report's instance \"{instance}\""), owner: Owner::Caller }],
+            owner: Owner::Unknown,
+            confirm_with: vec![],
+        };
+        r.finding(&mut f);
+        let all = format!("{} {} {}", f.evidence[0].value, f.explanation, f.remediation[0].text);
+        assert!(!all.contains("tok-live-5k2r"), "{all}");
+        assert!(f.evidence[0].value.contains("page=2"), "{}", f.evidence[0].value);
+        assert!(f.remediation[0].text.contains("https://trace.example/occ/9?access_token="), "{}", f.remediation[0].text);
+        // Userinfo in a long, uncut URI is withheld too.
+        let long = format!("https://user:{}@trace.example/occ", "S".repeat(300));
+        let mut g = f.clone();
+        g.evidence[0].value = long.clone();
+        g.remediation[0].text = format!("quote the problem report's instance \"{long}\"");
+        r.finding(&mut g);
+        assert!(!format!("{:?} {}", g.evidence, g.remediation[0].text).contains("SSSS"), "{:?}", g.evidence);
+
+        // A type that is a prefix of the instance cannot leave the instance's
+        // own sensitive value behind.
+        let ty = "https://e.test/p?token=A";
+        let inst = "https://e.test/p?token=A&access_token=private-value";
+        let mut h = f.clone();
+        h.evidence = vec![
+            Evidence { source: EvidenceSource::BodyContent, key: "body.problem.type".into(), value: ty.into(), attempt: Some(0) },
+            Evidence { source: EvidenceSource::BodyContent, key: "body.problem.instance".into(), value: inst.into(), attempt: Some(0) },
+        ];
+        h.explanation = format!("The body is an RFC 9457 problem report of type \"{ty}\", titled \"t\".");
+        h.remediation[0].text = format!("quote the problem report's type \"{ty}\" and instance \"{inst}\": they name it.");
+        r.finding(&mut h);
+        let all = format!("{:?} {} {}", h.evidence, h.explanation, h.remediation[0].text);
+        assert!(!all.contains("private-value") && !all.contains("token=A"), "{all}");
+
+        // A known secret that is also a sensitive query name: the URL is
+        // redacted structurally first, so the unknown value is withheld too.
+        let r = Redactor::new(vec!["token".into()], vec![]);
+        let inst = "https://trace.test/occ?token=fresh-credential-Q9";
+        let mut k = f.clone();
+        k.evidence[0].value = inst.into();
+        k.explanation = "The body is an RFC 9457 problem report.".into();
+        k.remediation[0].text = format!("quote the problem report's instance \"{inst}\": they name it.");
+        r.finding(&mut k);
+        let all = format!("{:?} {}", k.evidence, k.remediation[0].text);
+        assert!(!all.contains("fresh-credential-Q9"), "{all}");
+    }
+
     #[test]
     fn cookie_structure_is_examined_before_case_folded_name_scrubbing() {
         use super::*;
