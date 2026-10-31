@@ -1,0 +1,245 @@
+# REL-003 (signed update integrity) against a built desktop bundle: the
+# AppImage on Linux and the .app on macOS, built with the test-only `e2e`
+# feature (embedded WebDriver), a minisign key generated for the run and a
+# loopback update endpoint. Only `plugins.updater.pubkey`, its endpoint (plain
+# HTTP on 127.0.0.1) and, for the update build, the version and
+# `createUpdaterArtifacts` differ from the shipped config; `requireSignedVersion`
+# stays on. WebdriverIO calls the app's real `update_install` command
+# (apps/desktop/e2e/updater/):
+#   run 1  an update signed by another key, one with a corrupted signature and
+#          one altered after signing are refused; bundle, version and profile unchanged
+#   run 2  relaunched, the bundle is unchanged; a validly signed update installs
+#   run 3  relaunched, the bundle reports the updated version
+# Two bundle builds per OS make this slow, so it runs only when the update
+# path, its tests or this workflow change, weekly, and on demand.
+name: Updater E2E
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/src-tauri/src/cmd_update.rs"
+      - "apps/desktop/src-tauri/src/cmd_update/**"
+      # Registers the updater plugin and the update commands.
+      - "apps/desktop/src-tauri/src/lib.rs"
+      - "apps/desktop/src-tauri/tauri.conf.json"
+      - "apps/desktop/src-tauri/Cargo.toml"
+      - "apps/desktop/e2e/updater/**"
+      - "apps/desktop/e2e/helpers.ts"
+      - "apps/desktop/wdio.conf.ts"
+      - "scripts/updater-manifest.mjs"
+      - "scripts/tests/updater-manifest.test.mjs"
+      - ".github/workflows/updater-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/src-tauri/src/cmd_update.rs"
+      - "apps/desktop/src-tauri/src/cmd_update/**"
+      # Registers the updater plugin and the update commands.
+      - "apps/desktop/src-tauri/src/lib.rs"
+      - "apps/desktop/src-tauri/tauri.conf.json"
+      - "apps/desktop/src-tauri/Cargo.toml"
+      - "apps/desktop/e2e/updater/**"
+      - "apps/desktop/e2e/helpers.ts"
+      - "apps/desktop/wdio.conf.ts"
+      - "scripts/updater-manifest.mjs"
+      - "scripts/tests/updater-manifest.test.mjs"
+      - ".github/workflows/updater-e2e.yml"
+  # Weekly, so Cargo.lock bumps of tauri-plugin-updater are covered too.
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Smaller debug bundles (the update artifact is downloaded into memory).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  UPDATE_PORT: "18797"
+  OFFERED: "0.2.0"
+
+jobs:
+  updater-e2e:
+    name: Updater E2E · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            bundles: appimage
+          - os: macos-15
+            bundles: app
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      BUNDLES: ${{ matrix.bundles }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          xvfb: "true"
+          cache-key: updater-e2e
+      # Supporting checks of the release manifest's signature verification
+      # (also in ci.yml's Supply chain job).
+      - name: Updater signature verifier tests (latest.json)
+        run: node --test scripts/tests/updater-manifest.test.mjs
+      - name: AppImage bundling tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends libfuse2
+
+      - name: Test updater keys and build configs
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/rel003"
+          mkdir -p "$work/keys" "$work/fixtures" "$work/install" "$work/sign"
+          # Throw-away keys for this run only; nothing here is a release key.
+          pw="$(openssl rand -hex 16)"
+          pass="$(openssl rand -hex 16)"
+          echo "::add-mask::$pw"
+          echo "::add-mask::$pass"
+          npx tauri signer generate --ci -p "$pw" -w "$work/keys/updater.key" -f > /dev/null
+          npx tauri signer generate --ci -p "$pw" -w "$work/keys/other.key" -f > /dev/null
+          PUBKEY="$(tr -d '[:space:]' < "$work/keys/updater.key.pub")" WORK="$work" node -e '
+            const fs = require("node:fs");
+            const shipped = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).plugins.updater;
+            if (shipped.requireSignedVersion !== true) throw new Error("the shipped updater config must require a signed version");
+            const updater = { pubkey: process.env.PUBKEY, endpoints: [`http://127.0.0.1:${process.env.UPDATE_PORT}/latest.json`], dangerousInsecureTransportProtocol: true };
+            const base = { plugins: { updater } };
+            const update = { version: process.env.OFFERED, bundle: { createUpdaterArtifacts: true }, plugins: { updater } };
+            fs.writeFileSync(`${process.env.WORK}/base.json`, JSON.stringify(base));
+            fs.writeFileSync(`${process.env.WORK}/update.json`, JSON.stringify(update));
+          '
+          {
+            echo "REL003=$work"
+            echo "REL003_KEY_PASSWORD=$pw"
+            echo "ANVIL_E2E_PASSPHRASE=$pass"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the installed bundle (shipped version, e2e feature, test key)
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          rm -rf ../../target/debug/bundle
+          npx tauri build --ci --debug --features e2e --bundles "$BUNDLES" --config "$REL003/base.json"
+          if [ "$RUNNER_OS" = Linux ]; then
+            shopt -s nullglob; found=(../../target/debug/bundle/appimage/*.AppImage)
+            [ "${#found[@]}" = 1 ] || { echo "::error::expected one AppImage, found ${#found[@]}"; exit 1; }
+            installed="$REL003/install/Ferrum Anvil.AppImage"
+            cp "${found[0]}" "$installed"
+            chmod 755 "$installed"
+            app="$installed"
+          else
+            shopt -s nullglob; found=(../../target/debug/bundle/macos/*.app)
+            [ "${#found[@]}" = 1 ] || { echo "::error::expected one .app, found ${#found[@]}"; exit 1; }
+            cp -R "${found[0]}" "$REL003/install/"
+            installed="$REL003/install/$(basename "${found[0]}")"
+            app="$installed/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$installed/Contents/Info.plist")"
+          fi
+          [ -x "$app" ] || { echo "::error::$app is not executable"; exit 1; }
+          { echo "ANVIL_E2E_UPDATE_INSTALLED=$installed"; echo "ANVIL_E2E_APP=$app"; } >> "$GITHUB_ENV"
+          ls -la "$REL003/install"
+
+      - name: Build the update bundle (offered version, signed updater artifact)
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          rm -rf ../../target/debug/bundle
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$REL003/keys/updater.key")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$REL003_KEY_PASSWORD" \
+            npx tauri build --ci --debug --features e2e --bundles "$BUNDLES" --config "$REL003/update.json"
+          shopt -s nullglob
+          if [ "$RUNNER_OS" = Linux ]; then
+            found=(../../target/debug/bundle/appimage/*_"$OFFERED"_*.AppImage)
+          else
+            found=(../../target/debug/bundle/macos/*.app.tar.gz)
+            apps=(../../target/debug/bundle/macos/*.app)
+            cp -R "${apps[0]}" "$REL003/fixtures/expected.app"
+          fi
+          [ "${#found[@]}" = 1 ] || { echo "::error::expected one updater artifact, found ${#found[@]}"; exit 1; }
+          [ -f "${found[0]}.sig" ] || { echo "::error::${found[0]} has no signature"; exit 1; }
+          cp "${found[0]}" "$REL003/fixtures/update.bin"
+          cp "${found[0]}.sig" "$REL003/fixtures/update.sig"
+          ls -la "$REL003/fixtures"
+
+      - name: Signatures for the refusal cases
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          # The control signature verifies against the compiled-in key and
+          # records the offered version (the release manifest's own checks).
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { checkSignedVersion, verifyUpdaterSignature } from "../../scripts/updater-manifest.mjs";
+            const f = (n) => readFileSync(`${process.env.REL003}/${n}`);
+            const pubkey = f("keys/updater.key.pub").toString().replace(/\s/g, "");
+            checkSignedVersion(verifyUpdaterSignature(f("fixtures/update.bin"), f("fixtures/update.sig").toString(), pubkey), process.env.OFFERED);
+            console.log("control signature verifies and records", process.env.OFFERED);
+          '
+          # The same artifact signed by another key, for the same version.
+          cp "$REL003/fixtures/update.bin" "$REL003/sign/wrong-key.bin"
+          npx tauri signer sign -f "$REL003/keys/other.key" -p "$REL003_KEY_PASSWORD" --app-version "$OFFERED" "$REL003/sign/wrong-key.bin" > /dev/null
+          cp "$REL003/sign/wrong-key.bin.sig" "$REL003/fixtures/wrong-key.sig"
+
+      - name: Run 1 — tampered updates are refused
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          ANVIL_DATA_DIR: ${{ runner.temp }}/rel003/data
+          ANVIL_E2E_PROFILE: REL-003 E2E
+          ANVIL_E2E_UPDATE_FIXTURES: ${{ runner.temp }}/rel003/fixtures
+          ANVIL_E2E_UPDATE_PORT: ${{ env.UPDATE_PORT }}
+          # The AppImage runtime extracts and runs it (no FUSE), and still sets APPIMAGE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          trap 'pkill -f anvil-desktop || true; pkill -f "$ANVIL_E2E_APP" || true; sleep 2' EXIT
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-1-refusal.e2e.ts
+          else npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-1-refusal.e2e.ts; fi
+
+      - name: Run 2 — the relaunched bundle is unchanged; a valid update installs
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          ANVIL_DATA_DIR: ${{ runner.temp }}/rel003/data
+          ANVIL_E2E_PROFILE: REL-003 E2E
+          ANVIL_E2E_UPDATE_FIXTURES: ${{ runner.temp }}/rel003/fixtures
+          ANVIL_E2E_UPDATE_PORT: ${{ env.UPDATE_PORT }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          trap 'pkill -f anvil-desktop || true; pkill -f "$ANVIL_E2E_APP" || true; sleep 2' EXIT
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-2-install.e2e.ts
+          else npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-2-install.e2e.ts; fi
+
+      - name: Run 3 — the relaunched bundle runs the update
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          ANVIL_DATA_DIR: ${{ runner.temp }}/rel003/data
+          ANVIL_E2E_PROFILE: REL-003 E2E
+          ANVIL_E2E_UPDATE_FIXTURES: ${{ runner.temp }}/rel003/fixtures
+          ANVIL_E2E_UPDATE_PORT: ${{ env.UPDATE_PORT }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          trap 'pkill -f anvil-desktop || true; pkill -f "$ANVIL_E2E_APP" || true; sleep 2' EXIT
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-3-installed.e2e.ts
+          else npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-3-installed.e2e.ts; fi
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: updater-e2e-screenshots-${{ matrix.os }}-${{ github.run_id }}
+          path: apps/desktop/e2e/screenshots/*.png
+          if-no-files-found: ignore
+          retention-days: 30
