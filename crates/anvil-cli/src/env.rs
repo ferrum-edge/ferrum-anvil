@@ -169,7 +169,7 @@ fn target(app: &App, ws: &Workspace, name: Option<&str>) -> Result<Environment> 
     }
     let active = ws.active_environment_id.and_then(|id| all.into_iter().find(|e| e.meta.id == id));
     active
-        .ok_or_else(|| anyhow!("workspace '{}' has no active environment; name one with --env (`anvil env list` shows them)", t(&ws.name)))
+        .ok_or_else(|| anyhow!("workspace '{}' has no active environment; name the environment (`anvil env list` shows them)", t(&ws.name)))
 }
 
 /// The imported collections (their root folders' names) that brought each

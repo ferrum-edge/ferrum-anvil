@@ -429,7 +429,7 @@ struct RunArgs {
     /// Folder to run, like `Orders/Refunds` (`/` = every request of the workspace).
     #[arg(long)]
     folder: Option<String>,
-    /// Environment name (defaults to the workspace's active environment).
+    /// Environment id or name (defaults to the workspace's active environment).
     #[arg(long)]
     env: Option<String>,
     /// CSV or JSON (array of objects) dataset file; replaces the scenario's dataset.

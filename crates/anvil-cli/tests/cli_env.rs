@@ -279,3 +279,31 @@ async fn names_are_never_guessed_and_hints_stay_runnable() {
     let o = anvil_with_stdin(&data, &args, Some(TOKEN), &[]).await;
     assert_eq!(o.status.code(), Some(0), "{hint}: {}", text(&o));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hints_follow_server_and_say_where_to_fill_in_without_an_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    ProfileManager::new(&data).create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+    assert_eq!(anvil(&data, &["workspace", "create", "Shop"]).await.status.code(), Some(0));
+    let file = dir.path().join("openapi.yaml");
+    std::fs::write(&file, spec("http://127.0.0.1:9")).unwrap();
+
+    // Under an import root, the hint fills in the environment --server picked.
+    let o = anvil(&data, &["import-spec", "Shop", "--file", file.to_str().unwrap(), "--server", "1"]).await;
+    let out = text(&o);
+    assert!(out.contains("anvil env set Shop bearer --env staging --secret --value-stdin"), "{out}");
+
+    // A cURL command brings no environment: in a new workspace, create one;
+    // under an import root, the folder (an environment would not apply).
+    let curl = dir.path().join("curl.txt");
+    std::fs::write(&curl, "curl -H 'Authorization: Bearer abc' http://127.0.0.1:9/x\n").unwrap();
+    let o = anvil(&data, &["import-spec", "--new-workspace", "--file", curl.to_str().unwrap()]).await;
+    let out = text(&o);
+    assert!(out.contains("fill in {{Authorization}}") && out.contains("`anvil env create \"cURL import\" <name> --use`"), "{out}");
+    assert!(!out.contains("anvil env set \""), "{out}");
+    let o = anvil(&data, &["import-spec", "Shop", "--file", curl.to_str().unwrap()]).await;
+    let out = text(&o);
+    assert!(out.contains("set them on its folder in the desktop app, or import it with --new-workspace"), "{out}");
+    assert!(!out.contains("anvil env create"), "{out}");
+}

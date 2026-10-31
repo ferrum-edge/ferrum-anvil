@@ -122,7 +122,7 @@ fn setting_a_variable_keeps_secrets_in_the_vault_and_one_value_per_name() {
     assert!(v.secret && matches!(v.value, SensitiveValue::Secret { .. }), "{v:?}");
 
     // Names that cannot be referenced are refused, with nothing written.
-    for bad in ["", " token", "{{token}}"] {
+    for bad in ["", " token", "{{token}}", "$uuid"] {
         assert!(app.set_environment_variable(&env.meta.id, bad, "x", false).is_err(), "{bad:?}");
     }
     assert_eq!(app.environments(&ws.meta.id).unwrap()[0].variables.len(), 2);

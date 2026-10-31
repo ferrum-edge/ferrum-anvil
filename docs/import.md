@@ -294,10 +294,11 @@ when there is one, prints a ready-to-run `anvil env set` command under each
 `required_variables` entry (a secret's command reads the value from stdin; a
 plain one ends in `<value>` for you to replace). The command targets the
 active environment of a new workspace, or, under an import root (whose
-environments are not active in the destination), the first environment the
-import brought in the source's order, with `--env`. Each argument reads the
-same in a POSIX shell, PowerShell and `cmd.exe`: a name of letters, digits,
-`_ . - : /` and spaces is printed as is (double-quoted when it has spaces).
+environments are not active in the destination), the environment the
+import's `--server` picks (the first by default) in the source's order, with
+`--env`. Each argument reads the same in a POSIX shell, PowerShell and
+`cmd.exe`: a name of ASCII letters, digits, `_ . - : /` and spaces is printed
+as is (double-quoted when it has spaces).
 A workspace or environment whose name is anything else, starts with `-`,
 reads as an id or is shared is named by its id, and a variable whose name is
 anything else gets no command. These lines only read what the import wrote:

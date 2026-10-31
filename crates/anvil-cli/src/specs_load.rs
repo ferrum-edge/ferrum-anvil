@@ -110,7 +110,7 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
     let ws = app.workspace(&r.workspace_id).ok();
     let named = ws.as_ref().map(|w| format!("'{}' ", t(&w.name))).unwrap_or_default();
     println!("imported {} request(s) into workspace {named}({}) (import {}); nothing was sent", r.requests, r.workspace_id, r.import_id);
-    match ws.ok_or_else(|| anyhow!("the workspace did not read")).and_then(|ws| fill_in_hints(app, &r, &ws)) {
+    match ws.ok_or_else(|| anyhow!("the workspace did not read")).and_then(|ws| fill_in_hints(app, &r, &ws, a.server)) {
         Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
         Err(e) => {
             for v in &r.report.required_variables {
@@ -127,7 +127,14 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
 
 /// After an import, the lines to print: the environments it brought and,
 /// for each variable to fill in, a ready-to-run `anvil env set` command.
-fn fill_in_hints(app: &App, r: &anvil_app::specs::SpecImported, ws: &anvil_domain::workspace::Workspace) -> Result<Vec<String>> {
+/// `server` is the import's `--server`: under an import root, the
+/// environment of that index in the source's order is the one to fill in.
+fn fill_in_hints(
+    app: &App,
+    r: &anvil_app::specs::SpecImported,
+    ws: &anvil_domain::workspace::Workspace,
+    server: usize,
+) -> Result<Vec<String>> {
     let mut out = Vec::new();
     // All of a new workspace's environments, or those its import root lists,
     // in the root's order, which is the source's (OpenAPI: its servers'). An
@@ -155,7 +162,7 @@ fn fill_in_hints(app: &App, r: &anvil_app::specs::SpecImported, ws: &anvil_domai
     };
     let same_ws = app.workspaces()?.iter().filter(|w| w.name.eq_ignore_ascii_case(&ws.name)).count();
     let ws_arg = by_name(&ws.name, &ws.meta.id, same_ws);
-    let env_arg = match (active, envs.first()) {
+    let env_arg = match (active, envs.get(server).or(envs.first())) {
         (None, Some(e)) => {
             let same = all.iter().filter(|x| x.name.eq_ignore_ascii_case(&e.name)).count();
             format!(" --env {}", by_name(&e.name, &e.meta.id, same))

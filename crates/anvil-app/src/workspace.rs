@@ -734,7 +734,8 @@ impl App {
     /// desktop moves a value into it: a desktop draft or an export being
     /// written may still name it.
     pub fn set_environment_variable(&self, env: &Id, name: &str, value: &str, secret: bool) -> Result<Environment> {
-        if name.is_empty() || name.trim() != name || name.contains("{{") || name.contains("}}") {
+        // `{{$name}}` is a dynamic value, never a variable.
+        if name.is_empty() || name.trim() != name || name.starts_with('$') || name.contains("{{") || name.contains("}}") {
             return Err(AppError::Invalid(format!("'{name}' is not a variable name")));
         }
         self.store.atomically(|s| {
