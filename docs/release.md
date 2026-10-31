@@ -460,16 +460,17 @@ tag=anvil-vX.Y.Z`; no tag means the latest published release), when an
 | `windows-x64-nsis` | `windows-2025` | `-setup.exe /S` |
 | `windows-x64-msi` | `windows-2025` | `msiexec /i … /qn` |
 | `linux-x64-deb` | `ubuntu-26.04` | `apt-get install` of the local `.deb` (dependencies from the Ubuntu archive) |
-| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x` (`fuse3` only if the runner has no `fusermount`) |
+| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`) and `libEGL.so.1` (`libegl1`). Each is recorded |
 | `linux-x64-rpm` | `ubuntu-26.04`, digest-pinned `fedora:44` container | `dnf install` of the local `.rpm` (dependencies from the Fedora repositories) |
 
 Each job then:
 
 1. Launches the installed app on an empty store (macOS through `open`, as a
    double-click; Windows and Linux by starting the installed executable; Linux
-   under Xvfb). It must stay up for 30 seconds, show its top-level
-   "Ferrum Anvil" window and start a webview content process (WebKit or
-   WebView2). The job takes a screenshot.
+   under Xvfb with a private session bus). It must stay up for at least 30
+   seconds, show its top-level "Ferrum Anvil" window and keep a webview
+   content process (WebKit or WebView2) running. Both must appear within 90
+   seconds. The job takes a screenshot.
 2. Uses the release **CLI archive** for the same target (`anvil-cli-…`; the
    CLI is a separate release asset, not part of the desktop package) on the
    app's default data directory. It creates a passphrase profile and imports

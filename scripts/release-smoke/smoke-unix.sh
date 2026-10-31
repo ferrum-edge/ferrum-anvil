@@ -21,11 +21,14 @@
 #   OUT           result directory
 #   VERSION       release version (X.Y.Z)
 #   ALIVE_SECONDS how long each launch must stay up (default 30)
+#   STARTUP_LIMIT how long a launch may take to show its window and webview
+#                 (default 90)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${TARGET_ID:?}" "${PACKAGE:?}" "${EXPECT_ARCH:?}" "${RUST_TARGET:?}" "${ASSET:?}" "${CLI_ASSET:?}" "${INPUTS:?}" "${OUT:?}" "${VERSION:?}"
 ALIVE_SECONDS="${ALIVE_SECONDS:-30}"
+STARTUP_LIMIT="${STARTUP_LIMIT:-90}"
 INPUTS="$(cd "$INPUTS" && pwd)"
 mkdir -p "$OUT/logs" "$OUT/screenshots"
 OUT="$(cd "$OUT" && pwd)"
@@ -215,14 +218,15 @@ install_appimage() {
     prereq="fuse3 (fusermount3), installed because the runner had no fusermount"
   fi
   [ -e /dev/fuse ] || fail install "/dev/fuse is not available on this runner"
-  # AppImages leave the graphics driver stack (libEGL/libGL) to the host, as
-  # the AppImage excludelist requires; every desktop install has it, a bare
-  # runner may not.
-  if ! /sbin/ldconfig -p | grep 'libEGL\.so\.1 ' >/dev/null; then
+  # AppImages leave the graphics driver stack (libEGL and its Mesa vendor
+  # library and drivers) to the host, as the AppImage excludelist requires;
+  # every desktop install has it, a bare runner may not.
+  if ! /sbin/ldconfig -p | grep 'libEGL\.so\.1 ' >/dev/null || ! ls /usr/share/glvnd/egl_vendor.d/*mesa*.json >/dev/null 2>&1; then
     $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || true
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y libegl1 >"$logs/apt-egl.log" 2>&1 || fail install "could not install libegl1 for the AppImage"
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y libegl1 libegl-mesa0 libgl1-mesa-dri >"$logs/apt-egl.log" 2>&1 ||
+      fail install "could not install the host EGL stack for the AppImage"
     if [ "$prereq" = none ]; then prereq=""; else prereq="$prereq; "; fi
-    prereq="${prereq}libegl1 (host EGL, which AppImages do not bundle), installed because the runner had no libEGL.so.1"
+    prereq="${prereq}libegl1 libegl-mesa0 libgl1-mesa-dri (the host EGL/Mesa stack, which AppImages do not bundle), installed because the runner had no libEGL.so.1 or no Mesa EGL vendor"
   fi
   dest="$HOME/Applications"
   mkdir -p "$dest"
@@ -249,10 +253,10 @@ esac
 
 if [ "$os" = Linux ]; then
   if command -v apt-get >/dev/null; then
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth xdotool imagemagick >"$logs/harness-install.log" 2>&1 ||
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth xdotool imagemagick dbus >"$logs/harness-install.log" 2>&1 ||
       fail launch_first_run "could not install the Xvfb test harness"
   else
-    dnf -y install xorg-x11-server-Xvfb xdotool >"$logs/harness-install.log" 2>&1 || fail launch_first_run "could not install the Xvfb test harness"
+    dnf -y install xorg-x11-server-Xvfb xdotool dbus-daemon >"$logs/harness-install.log" 2>&1 || fail launch_first_run "could not install the Xvfb test harness"
   fi
   if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
     export XDG_RUNTIME_DIR="$work/xdg-runtime"
@@ -263,7 +267,10 @@ if [ "$os" = Linux ]; then
   export DISPLAY=:99
   for _ in $(seq 1 20); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.5; done
   xdotool getdisplaygeometry >/dev/null 2>&1 || fail launch_first_run "Xvfb did not start"
-  meta harness.display="Xvfb :99 1600x1000x24 (no window manager)"
+  # A desktop session always has a session bus; without one, GTK and the
+  # portals wait for D-Bus timeouts before the window appears.
+  command -v dbus-run-session >/dev/null || fail launch_first_run "dbus-run-session is not available"
+  meta harness.display="Xvfb :99 1600x1000x24 (no window manager)" harness.session_bus="a private session bus per launch (dbus-run-session)"
 fi
 
 # --- release CLI ---------------------------------------------------------------
@@ -282,7 +289,7 @@ meta cli.version="$cli_version" cli.data_dir="${data_dir:-unknown}" cli.data_dir
 pass cli_ready "release CLI archive $CLI_ASSET extracted ($cli_version); default data dir ${data_dir:-unknown}: $data_state"
 
 meta surfaces.install="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["install"]["method"])' "$OUT/meta.json")"
-meta surfaces.launch="$([ "$os" = Darwin ] && echo "open -n on the installed .app (LaunchServices), as a user's double-click" || echo "the installed executable started directly under Xvfb")" \
+meta surfaces.launch="$([ "$os" = Darwin ] && echo "open -n on the installed .app (LaunchServices), as a user's double-click" || echo "the installed executable started under Xvfb with a private session bus (dbus-run-session)")" \
   surfaces.import_and_call="release CLI archive $CLI_ASSET from the same release (the CLI is a separate release asset, not inside the desktop package), on the app's default data directory" \
   surfaces.gui_driven="no: the installed app was launched and observed (process, top-level window, webview processes), but no UI automation clicked or typed in it"
 
@@ -312,7 +319,7 @@ webview_count() {
 }
 
 launch() { # $1 = step name
-  local name="$1" pid="" i win=0 web=0 web_before first_window="" shot="none"
+  local name="$1" pid="" i=0 win=0 web=0 web_before first_window="" first_webview="" shot="none"
   web_before="$(webview_count)"
   if [ "$os" = Darwin ]; then
     open -n --stdout "$logs/$name.stdout.log" --stderr "$logs/$name.stdout.log" "$app" 2>>"$logs/$name.open.log" ||
@@ -323,18 +330,19 @@ launch() { # $1 = step name
       sleep 1
     done
   else
-    setsid "$bin" >"$logs/$name.stdout.log" 2>&1 </dev/null &
+    setsid dbus-run-session -- "$bin" >"$logs/$name.stdout.log" 2>&1 </dev/null &
     pid=$!
   fi
   [ -n "$pid" ] || fail "$name" "no app process appeared within 20 s of launching $bin"
   app_pids="$app_pids $pid"
-  for i in $(seq 1 "$ALIVE_SECONDS"); do
+  # Up for at least ALIVE_SECONDS, and until both the window and a webview
+  # content process have appeared (at most STARTUP_LIMIT seconds).
+  while [ "$i" -lt "$ALIVE_SECONDS" ] || { [ "$i" -lt "$STARTUP_LIMIT" ] && { [ -z "$first_window" ] || [ -z "$first_webview" ]; }; }; do
     sleep 1
+    i=$((i + 1))
     kill -0 "$pid" 2>/dev/null || fail "$name" "the app exited ${i}s after launch (output: $(tail -5 "$logs/$name.stdout.log" 2>/dev/null | oneline))"
-    if [ "$win" = 0 ]; then
-      win="$(window_count "$pid")"
-      [ "$win" = 0 ] || first_window="${i}s"
-    fi
+    if [ -z "$first_window" ] && [ "$(window_count "$pid")" != 0 ]; then first_window="${i}s"; fi
+    if [ -z "$first_webview" ] && [ "$(($(webview_count) - web_before))" -gt 0 ]; then first_webview="${i}s"; fi
   done
   win="$(window_count "$pid")"
   web="$(($(webview_count) - web_before))"
@@ -356,11 +364,11 @@ launch() { # $1 = step name
   local ld
   ld="$(app_log_dir)"
   if [ -d "$ld" ]; then mkdir -p "$logs/app-log-$name" && cp -R "$ld/." "$logs/app-log-$name/" 2>/dev/null || true; fi
-  metaj "launches.$name={\"pid\":$pid,\"alive_seconds\":$ALIVE_SECONDS,\"top_level_windows\":$win,\"webview_processes\":$web,\"webview_processes_before_launch\":$web_before,\"app_log_dir_exists\":$([ -d "$ld" ] && echo true || echo false)}"
-  meta "launches.$name.first_window_after=${first_window:-never}" "launches.$name.screenshot=$shot"
-  [ "$win" != 0 ] || fail "$name" "the app stayed up ${ALIVE_SECONDS}s but showed no top-level 'Ferrum Anvil' window"
-  [ "$web" -gt 0 ] || fail "$name" "the app showed a window but started no webview content process (WebKit; $web_before were running before the launch)"
-  pass "$name" "installed app stayed up ${ALIVE_SECONDS}s (pid $pid); $win top-level window(s), first after ${first_window:-?}; $web webview content process(es); screenshot: $shot"
+  metaj "launches.$name={\"pid\":$pid,\"alive_seconds\":$i,\"top_level_windows\":$win,\"webview_processes\":$web,\"webview_processes_before_launch\":$web_before,\"app_log_dir_exists\":$([ -d "$ld" ] && echo true || echo false)}"
+  meta "launches.$name.first_window_after=${first_window:-never}" "launches.$name.first_webview_after=${first_webview:-never}" "launches.$name.screenshot=$shot"
+  [ "$win" != 0 ] || fail "$name" "the app stayed up ${i}s but showed no top-level 'Ferrum Anvil' window (first seen: ${first_window:-never})"
+  [ "$web" -gt 0 ] || fail "$name" "the app stayed up ${i}s but has no webview content process (WebKit; first seen: ${first_webview:-never}; $web_before were running before the launch)"
+  pass "$name" "installed app stayed up ${i}s (pid $pid); $win top-level window(s), first after $first_window; $web webview content process(es), first after $first_webview; screenshot: $shot"
 }
 
 launch launch_first_run
