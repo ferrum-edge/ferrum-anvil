@@ -14,11 +14,10 @@ updates:
       - dependency-name: h3-quinn
       - dependency-name: tungstenite
       - dependency-name: tokio-tungstenite
-      # dimpl 0.8+ cannot finish a DTLS 1.3 mTLS handshake with any supported
-      # Ferrum Edge release; see the comment on `dimpl` in Cargo.toml.
+      # Patched local copy too (vendor/README.md). This also covers the
+      # `dimpl-edge` test dependency, which must stay on 0.6.1: it is the DTLS
+      # stack of the supported Ferrum Edge releases.
       - dependency-name: dimpl
-        versions:
-          - ">= 0.8"
       # Tauri's Rust crate and JavaScript CLI must move together by hand.
       # Patch skew is supported; major/minor changes need a coordinated bump.
       - dependency-name: tauri*

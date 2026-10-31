@@ -416,7 +416,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytes",
- "dimpl 0.7.6",
+ "dimpl 0.8.0",
  "flate2",
  "futures",
  "h2",
@@ -633,7 +633,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dimpl 0.6.1",
- "dimpl 0.7.6",
+ "dimpl 0.8.0",
  "dns-lookup",
  "flate2",
  "futures",
@@ -2094,9 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "dimpl"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e769119713c7cf11efb6dd594258095c4a5959fa2bb8d4a7f89978efbd0c08b"
+version = "0.8.0"
 dependencies = [
  "aes 0.8.4",
  "arrayvec",

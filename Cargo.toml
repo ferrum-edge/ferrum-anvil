@@ -126,19 +126,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tempfile = "3.27.0"
 proptest = "1.11.0"
 httpdate = "1.0.3"
-# Held on 0.7: from 0.8.0 the DTLS 1.3 client rejects a CertificateRequest
-# whose certificate_authorities extension is empty, and drops it without an
-# alert. Every supported Ferrum Edge release (dimpl 0.6.1) sends exactly that
-# when its DTLS listener requires client certificates, so a 0.8+ client times
-# out against them (lab PROTO-022 in the `tls` profile;
-# crates/anvil-transport/tests/dtls_edge_interop.rs). Staying on 0.7 forgoes
-# 0.8's client fixes, notably ignoring DTLS 1.3 NewSessionTicket (dimpl #182):
-# a third-party DTLS 1.3 server that sends one still ends the session, as in
-# every Anvil release so far; neither Ferrum Edge nor dimpl's server sends one.
-# Lift the pin when a dimpl release accepts the empty list, or when every
-# supported Edge release no longer sends it (then also drop the dimpl ignore
-# in .github/dependabot.yml and the `dimpl-edge` dev-dependency's test).
-dimpl = { version = "0.7.6", default-features = false, features = ["aws-lc-rs"] }
+# Patched below (vendor/dimpl-0.8.0-empty-ca): see vendor/README.md.
+dimpl = { version = "0.8.0", default-features = false, features = ["aws-lc-rs"] }
 parking_lot = "0.12.5"
 libc = "0.2.189"
 # Walk chosen paths one folder at a time without following a link (openat, renameat).
@@ -168,8 +157,12 @@ result_large_err = "allow"
 # (hyperium/h3#236), unreleased as of 0.0.8; h3-quinn 0.0.10 with
 # `stop_sending` applied while a read is outstanding (it panicked); tungstenite
 # 0.30.0 plus an RFC 7692 permessage-deflate codec, which no tungstenite release
-# has. See vendor/README.md for the provenance and when to remove these.
+# has; dimpl 0.8.0 accepting the empty certificate_authorities list that every
+# Ferrum Edge DTLS 1.3 listener sends when it requires a client certificate
+# (0.8.0 drops that CertificateRequest and the handshake stalls). See
+# vendor/README.md for the provenance and when to remove these.
 [patch.crates-io]
 h3 = { path = "vendor/h3-0.0.8-rfc9220" }
 h3-quinn = { path = "vendor/h3-quinn-0.0.10-stop-sending" }
 tungstenite = { path = "vendor/tungstenite-0.30.0-deflate" }
+dimpl = { path = "vendor/dimpl-0.8.0-empty-ca" }
