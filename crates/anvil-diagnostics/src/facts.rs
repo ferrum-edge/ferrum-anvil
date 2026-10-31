@@ -63,6 +63,12 @@ pub struct DiagnosticInput<'a> {
     /// Redacts every excerpt a finding quotes before it is cut ([`excerpt`]).
     /// The record redacts findings again afterwards, but by then a secret
     /// that crossed a cut has lost its tail and no longer matches.
+    ///
+    /// Exception: a problem report's `type` and `instance` are never cut and
+    /// are left unscrubbed here, because the record redacts them as URLs and
+    /// needs their original structure ([`ProblemDetails`]). Findings are
+    /// therefore not safe to expose before that record redaction
+    /// (`anvil-engine`'s `Redactor::finding`).
     pub redact: Redact<'a>,
 }
 
@@ -94,7 +100,8 @@ pub struct BodyFacts {
 /// carries them, with control, separator and invisible format characters
 /// replaced by spaces. `title` and `detail` are redacted [`excerpt`]s;
 /// `type` and `instance` are kept whole and unscrubbed for the record's URL
-/// redaction (one over 2048 characters is not read). A member that is absent or not of its RFC 9457 type is
+/// redaction; one over 2048 characters, or with a control, separator or
+/// format character, is not read. A member that is absent or not of its RFC 9457 type is
 /// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
 /// not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,14 +310,16 @@ fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Red
     // (`body.problem.type` and `.instance` are URL evidence), which needs its
     // whole, original structure. A cut inside userinfo or a query value, or
     // a known secret replaced inside a query name, would hide what that pass
-    // has to withhold. One longer than the limit is not read at all.
+    // has to withhold. One longer than the limit, or with a character no
+    // URI contains (a control, separator or format character, which the
+    // record could no longer match against a secret once replaced), is not
+    // read at all.
     let uri = |key: &str| {
-        let v = obj.get(key)?.as_str()?;
-        if v.chars().count() > MAX_PROBLEM_URI_CHARS {
+        let v = obj.get(key)?.as_str()?.trim();
+        if v.is_empty() || v.chars().count() > MAX_PROBLEM_URI_CHARS || v.chars().any(is_hidden) {
             return None;
         }
-        let one_line: String = v.chars().map(|c| if is_hidden(c) { ' ' } else { c }).collect();
-        Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
+        Some(v.to_string())
     };
     let p = ProblemDetails {
         type_uri: uri("type"),

@@ -78,7 +78,7 @@ spaces. `title` and `detail` are redacted excerpts. `type` and `instance` are
 neither cut nor scrubbed before the record redacts them as URLs, so that pass
 sees their whole structure (a cut inside userinfo, or a known secret replaced
 inside a query name, would hide what it has to withhold); one over 2048
-characters is not read. A member of the wrong JSON type is ignored, as
+characters, or with a control, separator or format character, is not read. A member of the wrong JSON type is ignored, as
 RFC 9457 §3.1 requires; `status` is read in any JSON number form of an
 integer from 100 to 599 (`503`, `503.0`), and extension members are not read.
 
@@ -91,7 +91,8 @@ When the report names a type or an instance, a remediation step tells the
 caller to quote them to the API owner. `type` and `instance` are redacted as
 URLs (a sensitive query value such as `access_token` is withheld) in the
 evidence, the explanation and the remediation, and a value that is not a URI
-reference (spaces, quotes, angle brackets) stays in the evidence only.
+reference (anything but printable ASCII, or spaces, quotes, angle brackets
+and the other characters RFC 3986 excludes) stays in the evidence only.
 
 The report is what the responding server says, so it adds evidence and
 wording only (the finding's `rule_version` becomes 2): its code,

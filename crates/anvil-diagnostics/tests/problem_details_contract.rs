@@ -413,3 +413,18 @@ fn a_uri_member_is_never_cut() {
     assert_eq!(evidence(f, "body.problem.instance"), None);
     assert!(f.remediation.iter().all(|r| !r.text.contains("problem report")), "{:?}", f.remediation);
 }
+
+#[test]
+fn a_uri_member_with_a_hidden_character_is_not_read() {
+    // Replacing the newline would leave `alpha-secret omega-secret`, which the
+    // record could no longer match against the known secret
+    // `alpha-secret\nomega-secret`: the member is dropped instead.
+    for instance in ["/trace/alpha-secret\\nomega-secret", "/trace/a\\u2028b", "/trace/a\\u200Bb"] {
+        let body = format!(r#"{{"title":"t","type":"tag:t","instance":"{instance}"}}"#);
+        let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+        let f = finding(&d, "http.service_unavailable");
+        assert_eq!(evidence(f, "body.problem.instance"), None, "{instance}");
+        assert_eq!(evidence(f, "body.problem.type"), Some("tag:t"), "{instance}");
+        assert!(f.remediation.iter().all(|r| !r.text.contains("/trace/")), "{instance}: {:?}", f.remediation);
+    }
+}
