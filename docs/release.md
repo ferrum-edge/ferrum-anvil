@@ -4,7 +4,8 @@ Releases are built by `.github/workflows/release.yml` and always end as a
 **draft** GitHub release whose body is already the final
 [release notes](#release-notes), generated from `CHANGELOG.md`. Publishing the
 draft, announcing it and updating the website are manual owner steps, taken
-only after the [owner checklist](#owner-checklist-before-publishing-a-draft) is met.
+only after the [owner checklist](#owner-checklist-before-publishing-a-draft) is met;
+the [after-publishing checks](#after-publishing) follow publication.
 
 ## Cutting a release
 
@@ -460,17 +461,27 @@ tag=anvil-vX.Y.Z`; no tag means the latest published release), when an
 | `windows-x64-nsis` | `windows-2025` | `-setup.exe /S` |
 | `windows-x64-msi` | `windows-2025` | `msiexec /i … /qn` |
 | `linux-x64-deb` | `ubuntu-26.04` | `apt-get install` of the local `.deb` (dependencies from the Ubuntu archive) |
-| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`) and `libEGL.so.1` (`libegl1`). Each is recorded |
+| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`), and the EGL/Mesa stack (`libegl1 libegl-mesa0 libgl1-mesa-dri`) when `libEGL.so.1` or a Mesa EGL vendor is absent. Each addition is recorded |
 | `linux-x64-rpm` | `ubuntu-26.04`, digest-pinned `fedora:44` container | `dnf install` of the local `.rpm` (dependencies from the Fedora repositories) |
 
 Each job then:
 
-1. Launches the installed app on an empty store (macOS through `open`, as a
-   double-click; Windows and Linux by starting the installed executable; Linux
-   under Xvfb with a private session bus). It must stay up for at least 30
-   seconds, show its top-level "Ferrum Anvil" window and keep a webview
-   content process (WebKit or WebView2) running. Both must appear within 90
-   seconds. The job takes a screenshot.
+1. Launches the installed app (macOS through `open`, as a double-click;
+   Windows and Linux by starting the installed executable; Linux under Xvfb
+   with a private session bus). The job records the default data directory's
+   state before this launch; on a fresh runner it is absent. What must hold
+   differs by OS:
+
+   | OS | Up for | Window | Webview |
+   | --- | --- | --- | --- |
+   | macOS | at least 30 s; the window and the webview may take up to 90 s | an on-screen, normal-layer window owned by the app's process (the title is not compared) | a `com.apple.WebKit.WebContent` process started after the launch is running at the end |
+   | Linux | at least 30 s; the window and the webview may take up to 90 s | a visible X window titled `Ferrum Anvil` | a `WebKitWebProcess` started after the launch is running at the end |
+   | Windows | exactly 30 s; there is no longer startup allowance | the app process's main window, titled `Ferrum Anvil`, within those 30 s | a WebView2 (`msedgewebview2.exe`) process descended from the app is running at the end |
+
+   Screenshots are best-effort and not a required step. macOS
+   (`screencapture`), Windows (a .NET screen copy) and Ubuntu (ImageMagick
+   `import`) attach them when the capture works. The Fedora container
+   installs no capture tool, so the RPM target never has screenshots.
 2. Uses the release **CLI archive** for the same target (`anvil-cli-…`; the
    CLI is a separate release asset, not part of the desktop package) on the
    app's default data directory. It creates a passphrase profile and imports
@@ -491,10 +502,12 @@ What it does **not** cover:
   CLI. The installed app is only launched and observed. The release build has
   no WebDriver, by design (see the release check).
 - **The first-run experience of a signed app.** The assets are fetched
-  through the GitHub API, not a browser. They carry no
-  `com.apple.quarantine` attribute and no Mark-of-the-Web, so Gatekeeper and
-  SmartScreen are never consulted. The installers run silently, and the DMG
-  license prompt is answered by `yes`. Each result records this as a bypass.
+  through the GitHub API, not a browser, so the job does not expect a
+  `com.apple.quarantine` attribute or a Mark-of-the-Web. It records the
+  actual state of each (absent on every hosted run so far) and does not
+  remove either. Without them, Gatekeeper and SmartScreen are never
+  consulted. The installers run silently, and the DMG license prompt is
+  answered by `yes`. Each result records this as a bypass.
   Gatekeeper, SmartScreen and Keychain acceptance of signed packages stays
   with ferrum-edge/ferrum-anvil#2.
 - Lock and unlock, uninstall, in-app update, and Linux distributions other
@@ -517,11 +530,14 @@ What it does **not** cover:
       `updater.platforms` covers every target; otherwise `updater.manifest` is
       `null` and users update from the release page. Publishing makes
       `latest.json` live for every installed app with the key.
-- [ ] Clean-install smoke test of each installer: the
-      [release smoke](#clean-install-smoke-rel-001) passed for the published
-      release (install, launch, profile, example import, local call), plus by
-      hand on the signed packages: first run through Gatekeeper/SmartScreen,
-      lock/unlock, uninstall; screenshots attached.
+- [ ] Clean-install smoke test of each installer, by hand on the draft's
+      packages: install, first run (through Gatekeeper/SmartScreen if
+      signed), create a profile, send a request, lock/unlock, uninstall;
+      screenshots attached. The automated
+      [release smoke](#clean-install-smoke-rel-001) cannot stand in for this.
+      It tests only published releases: a draft's assets are listed only to
+      tokens with push access, and the smoke keeps `contents: read`. See
+      [After publishing](#after-publishing).
 - [ ] Advisory ignores in `deny.toml` re-reviewed.
 - [ ] The release body is the release notes, not a draft placeholder: it starts
       with the signing warning (or line), has the summary, upgrade notes and the
@@ -531,6 +547,26 @@ What it does **not** cover:
       after the last edit.
 - [ ] Website changes follow only after publishing and link the exact artifact
       URLs and checksums.
+
+## After publishing
+
+- [ ] The [release smoke](#clean-install-smoke-rel-001) run that publishing
+      starts (`release: published`) passed for every target. Its summary is in
+      the run's `rel001-summary` artifact. To re-run it:
+      `gh workflow run release-smoke.yml -f tag=anvil-vX.Y.Z`.
+- [ ] If a target failed, the published package for that OS, architecture and
+      format does not install, launch, import or call as advertised. Within
+      the day, do both of the following:
+      - Delete that asset from the release, or mark the release a pre-release
+        (`gh release edit anvil-vX.Y.Z --prerelease`).
+      - Add a "Known issues" note to the release body naming the failing
+        target and the `result.json` step. Remove the package from the
+        website download table too.
+
+      If the failing package has an updater entry in `latest.json` (AppImage,
+      NSIS, MSI, macOS `.app.tar.gz`), also remove that platform from
+      `latest.json`, so installed apps are not offered a broken update. Ship
+      the fix as a new patch release.
 
 ## Open items
 
@@ -545,8 +581,16 @@ What it does **not** cover:
 - **Sign-in providers** (owner): Google/GitHub/Facebook registrations and an
   identity broker before application login can use them:
   ferrum-edge/ferrum-anvil#3.
-- **Packaged-app smoke tests** (install, first run, dialogs, uninstall) are not
-  automated; the native E2E suite runs against the instrumented debug build.
+- **Packaged-app smoke tests:** install, launch, example import and a local
+  call through the release CLI are automated for the published unsigned
+  packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
+  (run 41185287833), six of seven targets pass. The AppImage fails: its
+  WebKit web process aborts with `EGL_BAD_PARAMETER`. Not automated:
+  - GUI-driven import and send;
+  - first run through Gatekeeper/SmartScreen;
+  - native dialogs, lock/unlock, uninstall.
+
+  The native E2E suite runs against the instrumented debug build.
 - The advisory ignores in `deny.toml` (see above).
 - After merging dependency changes, regenerate `THIRD_PARTY_LICENSES.md`
   (`node scripts/licenses.mjs`); CI fails while it is stale.

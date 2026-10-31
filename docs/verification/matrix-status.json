@@ -13,8 +13,8 @@
   "reason": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM) but a live multi-stream graceful-shutdown fixture is not built yet."
  },
  "REL-001": {
-  "status": "blocked",
-  "reason": "Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2."
+  "status": "partial",
+  "reason": "Hosted release smoke (.github/workflows/release-smoke.yml) run 41185287833 on head 7f17212 against the published, unsigned anvil-v0.1.5 assets (each checked against SHA256SUMS). Each target installs the package natively on a fresh runner, launches the installed app (window and webview process observed), imports samples/workspaces/anvil-samples.anvil and sends its Healthy/OK request to a loopback listener (HTTP 200), then relaunches the app. Six targets pass: macOS arm64 DMG (macos-15), macOS x86_64 DMG (native Intel macos-15-intel), Windows x64 NSIS and MSI (windows-2025), Linux x64 .deb (Ubuntu 26.04) and .rpm (Fedora 44). The x64 AppImage fails: the app starts and shows its window, but its WebKit web process aborts with EGL_BAD_PARAMETER; a product fix is in progress in a separate PR. The GUI was not driven: the import and the call go through the release CLI archive on the app's data directory. Recorded bypasses: Gatekeeper and SmartScreen were never consulted (the assets carried no quarantine attribute or Mark-of-the-Web); the DMG license was accepted non-interactively; the installers ran silently, the MSI as an administrator without a UAC prompt; local .deb/.rpm packages were installed without a package-signature check. Still blocked: signed and notarized first-run acceptance on macOS and Windows (Gatekeeper, SmartScreen, Keychain), which needs owner credentials (ferrum-edge/ferrum-anvil#2). Linux has no platform code signing, so it waits on no credentials."
  },
  "REL-003": {
   "status": "partial",

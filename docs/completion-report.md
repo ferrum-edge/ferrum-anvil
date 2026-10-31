@@ -100,12 +100,17 @@ results 2026-10-26); current hosted qualification is in
   - 100 live against the real gateway (including TRUST-009/010/011, the G01 lookup cases);
   - 74 automated tests;
   - 1 executed release check.
-- **1 is blocked:**
-  - REL-001 needs signed installers.
+- **None is blocked.**
 - **2 are not applicable:**
   - TRUST-012: Anvil does not correlate gateway logs.
   - LOAD-012: the optional JMeter adapter was not built.
-- **4 are partial:**
+- **5 are partial:**
+  - REL-001, clean native installs. Release smoke run [41185287833](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41185287833) (head `7f17212`) tested the published unsigned `anvil-v0.1.5` packages on fresh hosted runners. Each target installs natively, launches the app, imports the sample workspace through the release CLI and makes a loopback call.
+    - Six targets pass: macOS arm64 and native Intel DMG, Windows NSIS and MSI, Ubuntu 26.04 `.deb`, Fedora 44 `.rpm`.
+    - The AppImage fails: its WebKit web process aborts with `EGL_BAD_PARAMETER`. A fix is in a separate PR.
+    - The GUI was not driven.
+    - Gatekeeper and SmartScreen were never consulted (no quarantine attribute or Mark-of-the-Web), and installers ran silently. Each result records these bypasses.
+    - Still blocked: signed and notarized first run on macOS and Windows, which needs owner credentials (ferrum-edge/ferrum-anvil#2).
   - REL-003: a valid signed in-app update (0.1.0 to 0.1.1, macOS arm64) was executed; refusing an invalidly signed or altered update was not.
   - REL-006, download manifest match: the website repository's tests at ferrum-edge/ferrumedge commit e4fe8b9 tie each download row's OS, architecture and package to the linked asset and the release evidence, and compare the 33 listed asset digests with SHA256SUMS, whose recorded lines match GitHub's digest of the published file. It stays partial until Anvil's own release CI (`website-evidence.yml`) re-runs those tests at that commit and a hosted run passes.
   - REL-007/008, website navigation and feature truth: the website repository's tests at ferrum-edge/ferrumedge commit e4fe8b9 check the Anvil navigation (root, nested, extensionless, mobile and footer links, with aria-current, aria-controls and alt text; not a full accessibility audit) and the capability and limitation claims. They stay partial until Anvil's own release CI (`website-evidence.yml`) re-runs those tests at that commit and a hosted run passes.
