@@ -7,7 +7,9 @@ Evidence is discovered, not declared:
     apps/desktop/e2e/ and apps/desktop/src/**/*.test.*;
   * the latest real-gateway lab results (results/lab/*/<ID>.json);
   * explicit, reasoned statuses in docs/verification/matrix-status.json for
-    cases that are blocked or not applicable (never counted as passed).
+    cases that are blocked or not applicable (never counted as passed). A
+    status with `requires` (evidence kinds, e.g. ["native_e2e"]) keeps the
+    case at that status until a reference of one of those kinds exists.
 
 Outputs docs/verification/matrix-coverage.{json,md}. Exit code 1 if any case
 has no evidence and no reasoned status (use --allow-gaps to report only).
@@ -160,7 +162,11 @@ def classify(case, refs, lab, overrides):
         status = "verified_live"
     elif lab_statuses and not any(k != "lab" for k in kinds):
         status = "skipped_live"
-    elif any(k in ("integration_test", "unit_test", "native_e2e", "renderer_test") for k in kinds):
+    elif any(k in ("integration_test", "unit_test", "native_e2e", "renderer_test") for k in kinds) and (
+        not (ov and ov.get("requires")) or any(k in ov["requires"] for k in kinds)
+    ):
+        # A reasoned status may name the evidence kinds that settle the case
+        # (`requires`); other test references alone then leave it as recorded.
         status = "verified_test"
     elif ov:
         status = ov["status"]

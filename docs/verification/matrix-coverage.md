@@ -7,11 +7,11 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 100 |
-| ✅ automated test | 74 |
+| ✅ automated test | 75 |
 | ✅ executed check script | 1 |
 | ⛔ blocked — see reason | 1 |
 | ➖ not applicable — see reason | 2 |
-| ◐ partial — see reason | 4 |
+| ◐ partial — see reason | 3 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -239,7 +239,7 @@ A skip or block is never counted as a pass.
 |---|---|---|---|
 | REL-001 | Clean native installs | ⛔ blocked — see reason — Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2. | — |
 | REL-002 | Production driver absence | ✅ executed check script — 2026-09-25, macOS arm64, commit cf3a61c: `npx tauri build --ci --bundles app,dmg` and `cargo build --release --locked -p anvil-cli`, then `scripts/release-check.sh --runtime-probe --probe-seconds 15` over the .app, the .dmg, the raw anvil-desktop binary and the anvil CLI → pass (graph: no tauri-plugin-wdio-webdriver / e2e feature; 0 of 11 hook strings; runtime probe: no WebDriver listener on TAURI_WEBDRIVER_PORT, no env-driven profile unlock). Negative control: the e2e debug build fails with all 11 strings. The release workflow runs the same check on every installer and archive. | — |
-| REL-003 | Signed update integrity | ◐ partial — see reason — Only the valid path is executed: on macOS arm64 a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. The refusal scenario (an invalidly signed or altered update refused without mutation) has not been executed. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing. | — |
+| REL-003 | Signed update integrity | ✅ automated test — Refusal is automated against built bundles: .github/workflows/updater-e2e.yml builds the e2e-instrumented desktop bundle (AppImage on ubuntu-26.04, .app on macos-15) with a minisign key generated for the run and a loopback update endpoint (requireSignedVersion stays on), and drives the app's update_install command through WebDriver (apps/desktop/e2e/updater/). An update signed by another key, one with a corrupted signature and one altered after signing are refused after the full download, with the bundle's file hashes, the reported version and the profile files unchanged, also after a relaunch; a validly signed update installs and the relaunched bundle reports the new version. The rel_003_* unit tests run more signature variants through the same updater path on Tauri's mock runtime. Not covered: Windows (MSI/NSIS), release-profile bundles without the e2e feature, TLS and the published latest.json, .deb/.rpm (no in-app update). The valid path was also run by hand on macOS arm64 from 0.1.0 to 0.1.1 (release runs 36827029766 and 36835226571, updater key BFE08514FEC0E65A); macOS may re-prompt for Keychain access after an update of an unsigned build (ferrum-edge/ferrum-anvil#2). | `apps/desktop/e2e/updater/rel003-1-refusal.e2e.ts`, `apps/desktop/e2e/updater/rel003-2-install.e2e.ts`, `apps/desktop/e2e/updater/rel003-3-installed.e2e.ts` |
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
 | REL-005 | Offline no-account smoke | ✅ automated test | `apps/desktop/e2e/specs/09-offline-no-account.e2e.ts` |
 | REL-006 | Download manifest match | ◐ partial — see reason — Checked in the website repository at ferrum-edge/ferrumedge commit 82a8534435e07b817871cd7ee6a31c689dc9a409 (main): its README records the anvil-v0.1.5 audit (35 assets, 33 matching SHA256SUMS); tests/fixtures/release-audit.json records the release inventory with a SHA-256 digest for every asset; tests/anvil.test.js requires every displayed Anvil download link to be a published asset of that tag and every asset to have a recorded digest. Website CI run 41141073895 passed those tests. The site displays no hashes and points to SHA256SUMS. Partial because no test checks the displayed platform labels against the linked asset names, and the evidence is the website repository's tests. | — |

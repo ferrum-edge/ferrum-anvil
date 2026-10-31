@@ -1,5 +1,5 @@
 {
- "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists. 'blocked', 'partial' and 'not_applicable' are never counted as passed; 'verified_check' records an executed check script (exact command, artifacts and result) that CI re-runs on every release artifact.",
+ "_comment": "Reasoned statuses for failure-matrix cases that cannot be executed as live or automated tests yet. Used by scripts/matrix-coverage.py only when no test/lab evidence exists, or, for an entry with 'requires' (evidence kinds such as native_e2e), until evidence of one of those kinds exists; the reason is shown as the case's note either way. 'blocked', 'partial' and 'not_applicable' are never counted as passed; 'verified_check' records an executed check script (exact command, artifacts and result) that CI re-runs on every release artifact.",
  "TRUST-012": {
   "status": "not_applicable",
   "reason": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
@@ -18,7 +18,8 @@
  },
  "REL-003": {
   "status": "partial",
-  "reason": "Only the valid path is executed: on macOS arm64 a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. The refusal scenario (an invalidly signed or altered update refused without mutation) has not been executed. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing."
+  "requires": ["native_e2e"],
+  "reason": "Refusal is automated against built bundles: .github/workflows/updater-e2e.yml builds the e2e-instrumented desktop bundle (AppImage on ubuntu-26.04, .app on macos-15) with a minisign key generated for the run and a loopback update endpoint (requireSignedVersion stays on), and drives the app's update_install command through WebDriver (apps/desktop/e2e/updater/). An update signed by another key, one with a corrupted signature and one altered after signing are refused after the full download, with the bundle's file hashes, the reported version and the profile files unchanged, also after a relaunch; a validly signed update installs and the relaunched bundle reports the new version. The rel_003_* unit tests run more signature variants through the same updater path on Tauri's mock runtime. Not covered: Windows (MSI/NSIS), release-profile bundles without the e2e feature, TLS and the published latest.json, .deb/.rpm (no in-app update). The valid path was also run by hand on macOS arm64 from 0.1.0 to 0.1.1 (release runs 36827029766 and 36835226571, updater key BFE08514FEC0E65A); macOS may re-prompt for Keychain access after an update of an unsigned build (ferrum-edge/ferrum-anvil#2)."
  },
  "REL-006": {
   "status": "partial",
