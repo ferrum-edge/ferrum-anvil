@@ -100,13 +100,14 @@ results 2026-10-26); current hosted qualification is in
   - 100 live against the real gateway (including TRUST-009/010/011, the G01 lookup cases);
   - 74 automated tests;
   - 1 executed release check.
-- **2 are blocked:**
-  - REL-001/006 need signed installers.
+- **1 is blocked:**
+  - REL-001 needs signed installers.
 - **2 are not applicable:**
   - TRUST-012: Anvil does not correlate gateway logs.
   - LOAD-012: the optional JMeter adapter was not built.
-- **3 are partial:**
+- **4 are partial:**
   - REL-003: a valid signed in-app update (0.1.0 to 0.1.1, macOS arm64) was executed; refusing an invalidly signed or altered update was not.
+  - REL-006, download manifest match: the website repository's tests check every displayed download link and asset digest against the anvil-v0.1.5 inventory; displayed platform labels are not checked.
   - REL-007/008, website navigation and feature truth: they are live on the website with unsigned-preview status and stay partial while the installers are unsigned.
 - **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.
 

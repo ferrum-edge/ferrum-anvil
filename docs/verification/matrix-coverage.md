@@ -9,9 +9,9 @@ A skip or block is never counted as a pass.
 | ✅ live (real gateway) | 100 |
 | ✅ automated test | 74 |
 | ✅ executed check script | 1 |
-| ⛔ blocked — see reason | 2 |
+| ⛔ blocked — see reason | 1 |
 | ➖ not applicable — see reason | 2 |
-| ◐ partial — see reason | 3 |
+| ◐ partial — see reason | 4 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -242,6 +242,6 @@ A skip or block is never counted as a pass.
 | REL-003 | Signed update integrity | ◐ partial — see reason — Only the valid path is executed: on macOS arm64 a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. The refusal scenario (an invalidly signed or altered update refused without mutation) has not been executed. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing. | — |
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
 | REL-005 | Offline no-account smoke | ✅ automated test | `apps/desktop/e2e/specs/09-offline-no-account.e2e.ts` |
-| REL-006 | Download manifest match | ⛔ blocked — see reason — The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches the release evidence is recorded. Updater artifacts are signed, but the installers have no platform code signing or notarization yet. Blocked on installer signing (ferrum-edge/ferrum-anvil#2). | — |
+| REL-006 | Download manifest match | ◐ partial — see reason — Checked in the website repository at ferrum-edge/ferrumedge commit 82a8534435e07b817871cd7ee6a31c689dc9a409 (main): its README records the anvil-v0.1.5 audit (35 assets, 33 matching SHA256SUMS); tests/fixtures/release-audit.json records the release inventory with a SHA-256 digest for every asset; tests/anvil.test.js requires every displayed Anvil download link to be a published asset of that tag and every asset to have a recorded digest. Website CI run 41141073895 passed those tests. The site displays no hashes and points to SHA256SUMS. Partial because no test checks the displayed platform labels against the linked asset names, and the evidence is the website repository's tests. | — |
 | REL-007 | Website navigation | ◐ partial — see reason — Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests passed on that PR; link checker OK incl. external). Partial because the evidence is the website repository's tests and the installers it links are unsigned previews (ferrum-edge/ferrum-anvil#2). | — |
 | REL-008 | Website feature truth | ◐ partial — see reason — Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: copy limited to built and tested capabilities with limitations, E2E screenshots labelled as historical pre-release captures, and website tests (tests/anvil.test.js) that check the unsigned-preview statements beside downloads. Partial because the installers remain unsigned previews (ferrum-edge/ferrum-anvil#2). | — |

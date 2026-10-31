@@ -21,8 +21,8 @@
   "reason": "Only the valid path is executed: on macOS arm64 a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. The refusal scenario (an invalidly signed or altered update refused without mutation) has not been executed. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing."
  },
  "REL-006": {
-  "status": "blocked",
-  "reason": "The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches the release evidence is recorded. Updater artifacts are signed, but the installers have no platform code signing or notarization yet. Blocked on installer signing (ferrum-edge/ferrum-anvil#2)."
+  "status": "partial",
+  "reason": "Checked in the website repository at ferrum-edge/ferrumedge commit 82a8534435e07b817871cd7ee6a31c689dc9a409 (main): its README records the anvil-v0.1.5 audit (35 assets, 33 matching SHA256SUMS); tests/fixtures/release-audit.json records the release inventory with a SHA-256 digest for every asset; tests/anvil.test.js requires every displayed Anvil download link to be a published asset of that tag and every asset to have a recorded digest. Website CI run 41141073895 passed those tests. The site displays no hashes and points to SHA256SUMS. Partial because no test checks the displayed platform labels against the linked asset names, and the evidence is the website repository's tests."
  },
  "REL-007": {
   "status": "partial",

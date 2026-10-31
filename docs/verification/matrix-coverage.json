@@ -6,9 +6,9 @@
   "verified_test": 74,
   "verified_live": 100,
   "not_applicable": 2,
-  "blocked": 2,
+  "blocked": 1,
   "verified_check": 1,
-  "partial": 3
+  "partial": 4
  },
  "cases": [
   {
@@ -7942,11 +7942,11 @@
    "id": "REL-006",
    "category": "Installer, updater and website release",
    "title": "Download manifest match",
-   "status": "blocked",
+   "status": "partial",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches the release evidence is recorded. Updater artifacts are signed, but the installers have no platform code signing or notarization yet. Blocked on installer signing (ferrum-edge/ferrum-anvil#2)."
+   "note": "Checked in the website repository at ferrum-edge/ferrumedge commit 82a8534435e07b817871cd7ee6a31c689dc9a409 (main): its README records the anvil-v0.1.5 audit (35 assets, 33 matching SHA256SUMS); tests/fixtures/release-audit.json records the release inventory with a SHA-256 digest for every asset; tests/anvil.test.js requires every displayed Anvil download link to be a published asset of that tag and every asset to have a recorded digest. Website CI run 41141073895 passed those tests. The site displays no hashes and points to SHA256SUMS. Partial because no test checks the displayed platform labels against the linked asset names, and the evidence is the website repository's tests."
   },
   {
    "id": "REL-007",
