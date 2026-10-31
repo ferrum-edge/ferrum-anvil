@@ -200,3 +200,46 @@ async fn an_import_into_an_existing_workspace_names_its_environment() {
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("2 environments of workspace 'Shop' are named 'local'"), "{}", text(&o));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn names_are_never_guessed_and_hints_stay_runnable() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    ProfileManager::new(&data).create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+
+    // create: printed id, --use, a duplicate refused.
+    assert_eq!(anvil(&data, &["workspace", "create", "Solo"]).await.status.code(), Some(0));
+    let o = anvil(&data, &["env", "create", "Solo", "dev", "--use"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let o = anvil(&data, &["env", "list", "solo"]).await;
+    assert!(text(&o).lines().any(|l| l.starts_with(&format!("* {id}  dev"))), "{}", text(&o));
+    let o = anvil(&data, &["env", "create", "Solo", "DEV"]).await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("already has an environment named 'DEV'"), "{}", text(&o));
+    let o = anvil(&data, &["env", "set", "Solo", "host", "example.com"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let o = anvil(&data, &["env", "set", "Solo", "token", "--secret", "--value-env", "CLI_ENV_UNSET_VARIABLE"]).await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("'CLI_ENV_UNSET_VARIABLE' is not set"), "{}", text(&o));
+
+    // Two workspaces of one name: the env commands refuse the name.
+    for _ in 0..2 {
+        assert_eq!(anvil(&data, &["workspace", "create", "Twin"]).await.status.code(), Some(0));
+    }
+    let o = anvil_with_stdin(&data, &["env", "set", "twin", "token", "--secret", "--value-stdin"], Some(TOKEN), &[]).await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("2 workspaces are named 'twin'"), "{}", text(&o));
+
+    // A server description that reads as an option is named by id.
+    let file = dir.path().join("openapi.yaml");
+    std::fs::write(&file, spec("http://127.0.0.1:9").replace("description: local", "description: \"-local\"")).unwrap();
+    let o = anvil(&data, &["import-spec", "Solo", "--file", file.to_str().unwrap()]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let out = text(&o);
+    let hint = out.lines().find(|l| l.contains("anvil env set")).unwrap_or_else(|| panic!("{out}"));
+    assert!(!hint.contains("--env -local") && !hint.contains("--env '-local'"), "{out}");
+    let args: Vec<&str> = hint.split_whitespace().skip(1).collect();
+    let o = anvil_with_stdin(&data, &args, Some(TOKEN), &[]).await;
+    assert_eq!(o.status.code(), Some(0), "{hint}: {}", text(&o));
+}

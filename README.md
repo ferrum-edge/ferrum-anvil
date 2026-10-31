@@ -70,7 +70,8 @@ anvil workspace create Demo
 anvil add Demo "Health" --url https://example.com/health --folder Smoke
 anvil send Health --workspace Demo
 anvil import-spec Demo --file openapi.yaml
-anvil env set Demo token --secret --value-env API_TOKEN   # fill in {{token}}
+anvil env list Demo                                        # the environments the import brought
+anvil env set Demo token --env local --secret --value-env API_TOKEN   # fill in {{token}}; import-spec prints the command
 anvil lint-spec openapi.yaml --ruleset api-standards.yaml
 anvil spec-drift openapi.yaml --har traffic.har --revised openapi.revised.yaml
 anvil run Demo --folder Smoke --junit report.xml

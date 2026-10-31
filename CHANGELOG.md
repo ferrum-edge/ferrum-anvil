@@ -8,10 +8,11 @@
   command line (`list`, `show`, `create`, `use`, `set`, `unset`), so the
   variables an import asks for can be filled in without the desktop app.
   `anvil env set NAME --secret` reads the value from stdin or a process
-  environment variable, never from an argument, and keeps it in the vault.
-  `anvil import-spec` now names the workspace and the environments it
-  brought and prints the `anvil env set` command for each variable to fill
-  in.
+  environment variable, never from an argument, and keeps it in the vault;
+  a secret is never made plain, and the vault entry a replaced or removed
+  variable held is deleted once nothing references it. `anvil import-spec`
+  now names the workspace and the environments it brought and prints the
+  `anvil env set` command for each variable to fill in.
 
 ### Security
 

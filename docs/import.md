@@ -289,15 +289,17 @@ opening or closing the import root does not drop a token already acquired.
 
 ### Filling in required variables from the CLI
 
-`anvil import-spec` prints each `required_variables` entry with a
-ready-to-run `anvil env set` command. It targets an environment the import
-brought: the active one in a new workspace, or (under an import root, whose
-environments are not active in the destination) the first one with
-`--env`. A name another workspace or environment shares is replaced by the
-id. A secret is read from stdin (`--value-stdin`) or from a process
-environment variable (`--value-env VAR`), never from an argument, and is
-kept in the profile's vault, owned by the workspace; the environment holds
-only the reference, as with **Store in vault** in the desktop.
+After an import, `anvil import-spec` lists the environments it brought and,
+when there is one, prints a ready-to-run `anvil env set` command under each
+`required_variables` entry (a secret's command reads the value from stdin; a
+plain one ends in `<value>` for you to replace). The command targets the
+active environment of a new workspace, or, under an import root (whose
+environments are not active in the destination), the first environment the
+import brought, with `--env`. The workspace and environment are named by id
+when the name is shared, has control characters or starts with `-`; a
+variable whose name has control characters gets no command. These lines
+only read what the import wrote: if a read fails, the command still exits 0
+(the import is committed) and prints a note.
 
 ```bash
 anvil import-spec Shop --file openapi.yaml
@@ -308,13 +310,30 @@ anvil env set Shop bearer --env local --secret --value-env API_TOKEN
 anvil send "Orders API/orders/listOrders" --workspace Shop --env local
 ```
 
+`anvil env set` sets a variable in the environment `--env` names, or in the
+active one. The variable is enabled, and other variables of the same name in
+that environment are removed, so the value set is the one that resolves. A
+secret (`--secret`, or a variable of that name that is already secret or
+held in the vault) is read from stdin (`--value-stdin`, after the passphrase
+line when `--passphrase-stdin` unlocks a passphrase profile) or from a process
+environment variable (`--value-env VAR`), never from an argument. It is kept
+in the profile's vault, owned by the workspace, and the environment holds only
+the reference, as with **Store in vault** in the desktop. A secret is never
+made plain by `set`. The vault entry a replaced or removed (`anvil env unset`)
+variable held is deleted when no stored object of the profile references it
+any more; restore points keep their own copies, as for any change.
+
 `anvil env list` marks the active environment with `*` and names the
 imported collection that brought each one; `anvil env show` prints a
 variable's value unless it is secret; `anvil env use` (or `--none`) picks the
-active environment; `anvil env create` and `anvil env unset` add an
-environment and remove a variable. `--env` on `send`, `run`, `mcp-discover`
-and `env` takes an environment's id or its name, case ignored; a name two
-environments of the workspace share is refused with their ids.
+active environment; `anvil env create` adds an environment (`--use` also
+makes it active), refused when the workspace has one of that name. The `env`
+commands name the workspace by its id or by a name, case ignored, that no
+other workspace has. `--env` on `send`, `run`, `mcp-discover`, `env set` and
+`env unset`, and the environment argument of `env show` and `env use`, take an
+environment's id or its name, case ignored; a name two environments of the
+workspace share is refused with their ids, and a name that matches none lists
+the names there are.
 
 Under an import root, only the environments the import brought apply (see
 [The import root](#the-import-root)): a variable set in another environment

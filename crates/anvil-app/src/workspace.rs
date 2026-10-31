@@ -694,13 +694,44 @@ impl App {
         Ok(())
     }
 
-    /// Set variable `name` of environment `env` to `value`, enabled, in one
+    /// Create an environment named `name` (trimmed) in `ws`, refused when
+    /// the workspace has one of that name (case ignored), and make it the
+    /// active one when `activate`: one transaction.
+    pub fn create_named_environment(&self, ws: &Id, name: &str, activate: bool) -> Result<Environment> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::Invalid("an environment needs a name".into()));
+        }
+        self.store.atomically(|s| {
+            let Some(mut w) = s.get::<Workspace>(kind::WORKSPACE, ws)? else {
+                return Ok(Err(AppError::NotFound(format!("workspace '{ws}'"))));
+            };
+            if s.list::<Environment>(kind::ENVIRONMENT, Some(ws))?.iter().any(|e| e.name.trim().eq_ignore_ascii_case(name)) {
+                return Ok(Err(AppError::Invalid(format!("workspace '{}' already has an environment named '{name}'", w.name))));
+            }
+            let e = Environment { meta: Meta::new(), workspace_id: *ws, name: name.into(), variables: vec![] };
+            s.put(kind::ENVIRONMENT, &e.meta.id, Some(ws), None, 0.0, &e)?;
+            if activate {
+                w.active_environment_id = Some(e.meta.id);
+                w.meta.updated_at = chrono::Utc::now();
+                s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
+            }
+            Ok(Ok(e))
+        })?
+    }
+
+    /// Set variable `name` of environment `env` to `value`, in one
     /// transaction with the environment read again inside it, so a
-    /// concurrent edit of its other variables is not lost. A variable that
-    /// is secret, or is made secret here, keeps its value in the vault, owned
-    /// by the environment's workspace: the environment holds only the
-    /// reference. A secret variable stays secret. Further variables of the
-    /// same name are removed, so the value set is the one that resolves.
+    /// concurrent edit of its other variables is not lost. The variable is
+    /// enabled, and further variables of the same name are removed, so the
+    /// value set is the one that resolves.
+    ///
+    /// A secret keeps its value in the vault, owned by the environment's
+    /// workspace: the environment holds only the reference. The variable is
+    /// secret when `secret` asks for it or any variable of the name is
+    /// secret or held in the vault: it is never made plain here. A vault
+    /// entry the variables held before is deleted when no stored object
+    /// references it any more ([`release_secrets`]).
     pub fn set_environment_variable(&self, env: &Id, name: &str, value: &str, secret: bool) -> Result<Environment> {
         if name.is_empty() || name.trim() != name || name.contains("{{") || name.contains("}}") {
             return Err(AppError::Invalid(format!("'{name}' is not a variable name")));
@@ -709,8 +740,8 @@ impl App {
             let Some(mut e) = s.get::<Environment>(kind::ENVIRONMENT, env)? else {
                 return Ok(Err(AppError::NotFound("environment".into())));
             };
-            let at = e.variables.iter().position(|v| v.name == name);
-            let secret = secret || at.is_some_and(|i| e.variables[i].secret);
+            let displaced = vault_refs(e.variables.iter().filter(|v| v.name == name));
+            let secret = secret || e.variables.iter().any(|v| v.name == name && v.is_secret());
             let stored = if secret {
                 let id = Id::new();
                 s.put_secret(&id, Some(&e.workspace_id), name, value)?;
@@ -718,7 +749,7 @@ impl App {
             } else {
                 SensitiveValue::template(value)
             };
-            match at {
+            match e.variables.iter().position(|v| v.name == name) {
                 Some(i) => {
                     let v = &mut e.variables[i];
                     v.value = stored;
@@ -731,23 +762,28 @@ impl App {
             }
             e.meta.updated_at = chrono::Utc::now();
             s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
+            release_secrets(s, &e.workspace_id, displaced)?;
             Ok(Ok(e))
         })?
     }
 
     /// Remove every variable named `name` from environment `env`, in one
-    /// transaction. Returns the environment and whether anything was removed.
+    /// transaction, and the vault entries they held that no stored object
+    /// references any more. Returns the environment and whether anything was
+    /// removed.
     pub fn unset_environment_variable(&self, env: &Id, name: &str) -> Result<(Environment, bool)> {
         self.store.atomically(|s| {
             let Some(mut e) = s.get::<Environment>(kind::ENVIRONMENT, env)? else {
                 return Ok(Err(AppError::NotFound("environment".into())));
             };
+            let displaced = vault_refs(e.variables.iter().filter(|v| v.name == name));
             let before = e.variables.len();
             e.variables.retain(|v| v.name != name);
             let removed = e.variables.len() != before;
             if removed {
                 e.meta.updated_at = chrono::Utc::now();
                 s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
+                release_secrets(s, &e.workspace_id, displaced)?;
             }
             Ok(Ok((e, removed)))
         })?
@@ -1343,4 +1379,39 @@ pub(crate) fn attachment_index_id(sha: &str) -> Id {
     let mut b = [0u8; 16];
     b.copy_from_slice(&d[..16]);
     Id(uuid::Builder::from_custom_bytes(b).into_uuid())
+}
+
+/// The vault entries `vars` reference.
+fn vault_refs<'a>(vars: impl Iterator<Item = &'a Variable>) -> Vec<Id> {
+    vars.filter_map(|v| match &v.value {
+        SensitiveValue::Secret { secret } => Some(secret.id),
+        SensitiveValue::Template { .. } => None,
+    })
+    .collect()
+}
+
+/// Delete the vault entries among `ids` that workspace `ws` owns and no
+/// stored object of any workspace references (request revisions
+/// included), inside the caller's transaction. When a stored object does
+/// not read, every entry is kept: it may be the one that references it.
+/// Restore points keep their own copies, as for any other change.
+fn release_secrets(s: &StoreTx<'_>, ws: &Id, ids: Vec<Id>) -> std::result::Result<(), StoreError> {
+    let mut ids: Vec<Id> = ids.into_iter().filter(|id| s.as_read().get_workspace_secret(id, ws).ok().flatten().is_some()).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    for k in kind::ALL {
+        let Ok(objects) = s.list::<serde_json::Value>(k, None) else { return Ok(()) };
+        for o in &objects {
+            let text = o.to_string();
+            ids.retain(|id| !text.contains(&id.to_string()));
+        }
+        if ids.is_empty() {
+            return Ok(());
+        }
+    }
+    for id in ids {
+        s.delete_secret(&id)?;
+    }
+    Ok(())
 }
