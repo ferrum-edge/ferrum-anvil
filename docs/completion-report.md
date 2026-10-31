@@ -13,7 +13,7 @@ pass.
 | Website | `ferrum-edge/ferrumedge`, branch `main`, live; as of 2026-10-31 the Anvil pages describe the published unsigned preview. |
 | Gateway compatibility targets | Ferrum Edge v0.9.15 (source `25b3739`, `lab/gateway/RELEASE.lock`, hosted Anvil qualification recorded), v0.9.14 (source `9bd4d5f`, `lab/gateway/releases/v0.9.14.lock`, hosted Anvil qualification recorded), v0.9.11 (source `c764084`, `lab/gateway/releases/v0.9.11.lock`, hosted Anvil qualification recorded), v0.9.10 release binary (source `ee040d5`, `lab/gateway/releases/v0.9.10.lock`), v0.9.9 (source `234717c`, `lab/gateway/releases/v0.9.9.lock`), v0.9.8 (source `e27f210`, `lab/gateway/releases/v0.9.8.lock`), v0.9.7 (source `8fed134`, `lab/gateway/releases/v0.9.7.lock`) and v0.9.5 (source `20e7603`, `lab/gateway/releases/v0.9.5.lock`), each checksum-pinned; each has its own source-audited catalog |
 | Gateway changes | G01, the authorized diagnostic reference, ships in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and `ferrum-contracts` `contracts-edge-0.9.9` publishes its header and `ferrum.diagnostic_ref.v1` schema (that tag also covers v0.9.10, which changed no contract source). Anvil looks references up for gateway profiles that configure the lookup; only a record bound to the response raises a finding above "likely". The contract is in `docs/g01-gateway-diagnostic-contract.md`; Anvil's use of it is in `docs/diagnostics.md`. |
-| Published preview assets and checksums | The current public release, [`anvil-v0.1.5`](https://github.com/ferrum-edge/ferrum-anvil/releases/latest), has downloadable CLI and desktop installers, `SHA256SUMS`, SBOMs and `latest.json` with minisign updater signatures, as did the first public preview, `anvil-v0.1.1`. The installers are unsigned previews: platform code signing and notarization are still blocked on owner credentials, and the release workflow creates a draft an owner publishes by hand (see `docs/release.md`). |
+| Published preview assets and checksums | The current public release, [`anvil-v0.1.5`](https://github.com/ferrum-edge/ferrum-anvil/releases/tag/anvil-v0.1.5), has downloadable CLI and desktop installers, `SHA256SUMS`, SBOMs and `latest.json` with minisign updater signatures, as did the first public preview, `anvil-v0.1.0`. The installers are unsigned previews: platform code signing and notarization are still blocked on owner credentials, and the release workflow creates a draft an owner publishes by hand (see `docs/release.md`). |
 
 ## Implemented
 
@@ -96,8 +96,8 @@ results and reasoned statuses. Its lab evidence is hosted Lab run
 results 2026-10-26); current hosted qualification is in
 [lab/README.md](lab/README.md).
 
-- **176 cases have executed evidence:**
-  - 101 live: 100 against the real gateway (including TRUST-009/010/011, the G01 lookup cases) and REL-003 (a signed in-app update on macOS arm64);
+- **175 cases have executed evidence:**
+  - 100 live against the real gateway (including TRUST-009/010/011, the G01 lookup cases);
   - 74 automated tests;
   - 1 executed release check.
 - **2 are blocked:**
@@ -105,7 +105,9 @@ results 2026-10-26); current hosted qualification is in
 - **2 are not applicable:**
   - TRUST-012: Anvil does not correlate gateway logs.
   - LOAD-012: the optional JMeter adapter was not built.
-- **2 are partial:** REL-007/008, website navigation and feature truth. They are live on the website with unsigned-preview status and stay partial while the installers are unsigned.
+- **3 are partial:**
+  - REL-003: a valid signed in-app update (0.1.0 to 0.1.1, macOS arm64) was executed; refusing an invalidly signed or altered update was not.
+  - REL-007/008, website navigation and feature truth: they are live on the website with unsigned-preview status and stay partial while the installers are unsigned.
 - **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.
 
 ## Defects found and fixed during verification (selection)
@@ -128,7 +130,7 @@ results 2026-10-26); current hosted qualification is in
 
 ## Known limitations and unimplemented features
 
-- **Installers are unsigned previews.** The current published release ([`anvil-v0.1.5`](https://github.com/ferrum-edge/ferrum-anvil/releases/latest); the first public preview was `anvil-v0.1.1`) has CLI and desktop installers, `SHA256SUMS`, SBOMs and signed updater artifacts, but no platform code signing or notarization, so macOS Gatekeeper and Windows SmartScreen warn. The website describes Anvil as an unsigned preview. Owner steps: ferrum-edge/ferrum-anvil#2.
+- **Installers are unsigned previews.** The current published release ([`anvil-v0.1.5`](https://github.com/ferrum-edge/ferrum-anvil/releases/tag/anvil-v0.1.5); the first public preview was `anvil-v0.1.0`) has CLI and desktop installers, `SHA256SUMS`, SBOMs and signed updater artifacts, but no platform code signing or notarization, so macOS Gatekeeper and Windows SmartScreen warn. The website describes Anvil as an unsigned preview. Owner steps: ferrum-edge/ferrum-anvil#2.
 - **Platforms.** Only macOS arm64 was built and exercised locally. Linux and Windows are covered by CI only. No minimum OS versions have been established.
 - **Confirmed gateway attribution needs the G01 lookup** (Ferrum Edge v0.9.9 and later, `ferrum-edge/ferrum-edge#5767`): it is off by default on the gateway (`FERRUM_DIAGNOSTIC_REFS`) and needs a dedicated `diagnostics:read` token with an `ns` claim in the gateway profile. Without both, or for a reference that expired, gateway attribution stays at "likely". Anvil looks a reference up only as the response arrives; there is no later re-lookup from the history view (see [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)).
 - **Social sign-in is unavailable.** Google, GitHub and Facebook stay explicitly unavailable until the owner registers the apps and runs an identity broker. See `docs/identity.md` and ferrum-edge/ferrum-anvil#3.

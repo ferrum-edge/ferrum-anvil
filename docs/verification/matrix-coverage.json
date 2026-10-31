@@ -4,11 +4,11 @@
  "total": 182,
  "totals": {
   "verified_test": 74,
-  "verified_live": 101,
+  "verified_live": 100,
   "not_applicable": 2,
   "blocked": 2,
   "verified_check": 1,
-  "partial": 2
+  "partial": 3
  },
  "cases": [
   {
@@ -7886,11 +7886,11 @@
    "id": "REL-003",
    "category": "Installer, updater and website release",
    "title": "Signed update integrity",
-   "status": "verified_live",
+   "status": "partial",
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Verified on macOS arm64: a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing."
+   "note": "Only the valid path is executed: on macOS arm64 a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. The refusal scenario (an invalidly signed or altered update refused without mutation) has not been executed. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing."
   },
   {
    "id": "REL-004",
@@ -7946,7 +7946,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches signed release evidence is recorded, and no signed artifacts exist yet. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
+   "note": "The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches the release evidence is recorded. Updater artifacts are signed, but the installers have no platform code signing or notarization yet. Blocked on installer signing (ferrum-edge/ferrum-anvil#2)."
   },
   {
    "id": "REL-007",

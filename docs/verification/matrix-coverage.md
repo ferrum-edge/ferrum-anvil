@@ -6,12 +6,12 @@ A skip or block is never counted as a pass.
 
 | Status | Cases |
 |---|---|
-| ✅ live (real gateway) | 101 |
+| ✅ live (real gateway) | 100 |
 | ✅ automated test | 74 |
 | ✅ executed check script | 1 |
 | ⛔ blocked — see reason | 2 |
 | ➖ not applicable — see reason | 2 |
-| ◐ partial — see reason | 2 |
+| ◐ partial — see reason | 3 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -239,9 +239,9 @@ A skip or block is never counted as a pass.
 |---|---|---|---|
 | REL-001 | Clean native installs | ⛔ blocked — see reason — Needs signed installers per OS/architecture; signing/notarization credentials are owner-supplied and not configured. Unsigned debug bundles were launched and exercised on macOS only. Owner steps: ferrum-edge/ferrum-anvil#2. | — |
 | REL-002 | Production driver absence | ✅ executed check script — 2026-09-25, macOS arm64, commit cf3a61c: `npx tauri build --ci --bundles app,dmg` and `cargo build --release --locked -p anvil-cli`, then `scripts/release-check.sh --runtime-probe --probe-seconds 15` over the .app, the .dmg, the raw anvil-desktop binary and the anvil CLI → pass (graph: no tauri-plugin-wdio-webdriver / e2e feature; 0 of 11 hook strings; runtime probe: no WebDriver listener on TAURI_WEBDRIVER_PORT, no env-driven profile unlock). Negative control: the e2e debug build fails with all 11 strings. The release workflow runs the same check on every installer and archive. | — |
-| REL-003 | Signed update integrity | ✅ live (real gateway) — Verified on macOS arm64: a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing. | — |
+| REL-003 | Signed update integrity | ◐ partial — see reason — Only the valid path is executed: on macOS arm64 a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. The refusal scenario (an invalidly signed or altered update refused without mutation) has not been executed. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing. | — |
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
 | REL-005 | Offline no-account smoke | ✅ automated test | `apps/desktop/e2e/specs/09-offline-no-account.e2e.ts` |
-| REL-006 | Download manifest match | ⛔ blocked — see reason — The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches signed release evidence is recorded, and no signed artifacts exist yet. Blocked on signing (ferrum-edge/ferrum-anvil#2). | — |
+| REL-006 | Download manifest match | ⛔ blocked — see reason — The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches the release evidence is recorded. Updater artifacts are signed, but the installers have no platform code signing or notarization yet. Blocked on installer signing (ferrum-edge/ferrum-anvil#2). | — |
 | REL-007 | Website navigation | ◐ partial — see reason — Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests passed on that PR; link checker OK incl. external). Partial because the evidence is the website repository's tests and the installers it links are unsigned previews (ferrum-edge/ferrum-anvil#2). | — |
 | REL-008 | Website feature truth | ◐ partial — see reason — Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: copy limited to built and tested capabilities with limitations, E2E screenshots labelled as historical pre-release captures, and website tests (tests/anvil.test.js) that check the unsigned-preview statements beside downloads. Partial because the installers remain unsigned previews (ferrum-edge/ferrum-anvil#2). | — |
