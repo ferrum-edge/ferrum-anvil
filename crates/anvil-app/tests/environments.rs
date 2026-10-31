@@ -86,3 +86,115 @@ async fn collection_run_reports_when_a_dangling_default_is_ignored() {
     assert!(report.passed(), "{report:#?}");
     assert!(report.notes.iter().any(|note| note.contains("no environment was used")), "{:?}", report.notes);
 }
+
+#[test]
+fn setting_a_variable_keeps_secrets_in_the_vault_and_one_value_per_name() {
+    use anvil_domain::secret::SensitiveValue;
+    use anvil_domain::workspace::Variable;
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "environment-set");
+    let ws = app.create_workspace("Workspace").unwrap();
+    let dup = |v: &str| Variable { enabled: false, ..Variable::plain("token", v) };
+    let env = app.create_environment(&ws.meta.id, "dev", vec![Variable::plain("base", "http://x"), dup("a"), dup("b")]).unwrap();
+
+    // A plain value replaces the first variable of the name, enabled, and
+    // drops the others; the other variables stay as they were.
+    let e = app.set_environment_variable(&env.meta.id, "token", "plain", false).unwrap();
+    let names: Vec<_> = e.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["base", "token"]);
+    assert_eq!(e.variables[1].value, SensitiveValue::template("plain"));
+    assert!(e.variables[1].enabled && !e.variables[1].secret);
+
+    // Made secret: the environment holds only a reference to a vault entry
+    // the workspace owns.
+    let e = app.set_environment_variable(&env.meta.id, "token", "s3cret-value", true).unwrap();
+    let v = e.variables.iter().find(|v| v.name == "token").unwrap();
+    assert!(v.secret);
+    let SensitiveValue::Secret { secret } = &v.value else { panic!("not in the vault: {v:?}") };
+    let (_, stored) = app.store.get_workspace_secret(&secret.id, &ws.meta.id).unwrap().unwrap();
+    assert_eq!(stored.as_str(), "s3cret-value");
+    let raw = serde_json::to_string(&app.environments(&ws.meta.id).unwrap()).unwrap();
+    assert!(!raw.contains("s3cret-value"), "{raw}");
+
+    // A secret stays secret when set again without asking for it.
+    let e = app.set_environment_variable(&env.meta.id, "token", "next-value", false).unwrap();
+    let v = e.variables.iter().find(|v| v.name == "token").unwrap();
+    assert!(v.secret && matches!(v.value, SensitiveValue::Secret { .. }), "{v:?}");
+
+    // Names that cannot be referenced are refused, with nothing written.
+    for bad in ["", " token", "{{token}}", "$uuid"] {
+        assert!(app.set_environment_variable(&env.meta.id, bad, "x", false).is_err(), "{bad:?}");
+    }
+    assert_eq!(app.environments(&ws.meta.id).unwrap()[0].variables.len(), 2);
+
+    // Unset removes it, and reports a name that is not there.
+    let (e, removed) = app.unset_environment_variable(&env.meta.id, "token").unwrap();
+    assert!(removed && e.variables.iter().all(|v| v.name != "token"));
+    assert!(!app.unset_environment_variable(&env.meta.id, "token").unwrap().1);
+}
+
+#[test]
+fn the_active_environment_must_belong_to_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "environment-use");
+    let ws = app.create_workspace("Workspace").unwrap();
+    let other = app.create_workspace("Other").unwrap();
+    let mine = app.create_environment(&ws.meta.id, "mine", vec![]).unwrap();
+    let theirs = app.create_environment(&other.meta.id, "theirs", vec![]).unwrap();
+
+    assert_eq!(app.set_active_environment(&ws.meta.id, Some(&mine.meta.id)).unwrap().active_environment_id, Some(mine.meta.id));
+    assert!(app.set_active_environment(&ws.meta.id, Some(&theirs.meta.id)).is_err());
+    assert!(app.set_active_environment(&ws.meta.id, Some(&anvil_domain::Id::new())).is_err());
+    assert_eq!(app.workspace(&ws.meta.id).unwrap().active_environment_id, Some(mine.meta.id));
+    assert_eq!(app.set_active_environment(&ws.meta.id, None).unwrap().active_environment_id, None);
+}
+
+#[test]
+fn a_secret_is_never_made_plain_and_a_replaced_vault_entry_still_reads() {
+    use anvil_domain::secret::SensitiveValue;
+    use anvil_domain::workspace::Variable;
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "environment-secret-sticky");
+    let ws = app.create_workspace("Workspace").unwrap();
+    let vault = |v: &str| {
+        let r = app.set_secret(&ws.meta.id, "token", v).unwrap();
+        (r.clone(), SensitiveValue::Secret { secret: r })
+    };
+    let stored = |id: &anvil_domain::Id| app.store.get_workspace_secret(id, &ws.meta.id).unwrap().map(|(_, v)| v.to_string());
+
+    // A plain duplicate before a secret one, and a vault value whose flag
+    // is off: either way the value set goes to the vault.
+    let (old_a, held_a) = vault("old-a");
+    let plain_then_secret =
+        vec![Variable::plain("token", "plain"), Variable { secret: true, value: held_a, ..Variable::plain("token", "") }];
+    let a = app.create_environment(&ws.meta.id, "a", plain_then_secret).unwrap();
+    let (old_b, held_b) = vault("old-b");
+    let b =
+        app.create_environment(&ws.meta.id, "b", vec![Variable { secret: false, value: held_b, ..Variable::plain("token", "") }]).unwrap();
+    for (env, old) in [(&a, &old_a), (&b, &old_b)] {
+        let e = app.set_environment_variable(&env.meta.id, "token", "new", false).unwrap();
+        let tokens: Vec<_> = e.variables.iter().filter(|v| v.name == "token").collect();
+        assert_eq!(tokens.len(), 1);
+        assert!(tokens[0].secret, "{:?}", tokens[0]);
+        let SensitiveValue::Secret { secret } = &tokens[0].value else { panic!("not in the vault: {:?}", tokens[0]) };
+        assert_eq!(stored(&secret.id).as_deref(), Some("new"));
+        // The entry it held stays readable: a desktop draft or an export
+        // being written may still name it.
+        assert!(stored(&old.id).is_some());
+    }
+}
+
+#[test]
+fn a_named_environment_is_created_once_and_optionally_made_active() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "environment-create");
+    let ws = app.create_workspace("Workspace").unwrap();
+    let dev = app.create_named_environment(&ws.meta.id, "  dev ", false).unwrap();
+    assert_eq!(dev.name, "dev");
+    assert_eq!(app.workspace(&ws.meta.id).unwrap().active_environment_id, None);
+    assert!(app.create_named_environment(&ws.meta.id, "DEV", true).is_err());
+    assert!(app.create_named_environment(&ws.meta.id, "  ", false).is_err());
+    let prod = app.create_named_environment(&ws.meta.id, "prod", true).unwrap();
+    assert_eq!(app.workspace(&ws.meta.id).unwrap().active_environment_id, Some(prod.meta.id));
+    assert_eq!(app.environments(&ws.meta.id).unwrap().len(), 2);
+}
