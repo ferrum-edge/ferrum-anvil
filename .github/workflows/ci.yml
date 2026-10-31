@@ -182,6 +182,8 @@ jobs:
         run: node scripts/licenses.mjs --check
       - name: Release notes generator tests
         run: node --test scripts/tests/release-notes.test.mjs
+      - name: Updater signature verifier tests (latest.json)
+        run: node --test scripts/tests/updater-manifest.test.mjs
       - name: Release dependency graph has no WebDriver plugin / e2e feature
         run: scripts/release-check.sh
 
