@@ -32,6 +32,12 @@
 #   --runtime-probe     run check 3 on desktop executables
 #   --probe-seconds N   how long the probe watches the port (default 20)
 #   --report <file>     write a JSON report
+#   --list-appimage <f> run no checks; print every file and empty directory in
+#                       the Type 2 AppImage <f>, one per line relative to its
+#                       root (`unsquashfs -lc`), read the same way as check 2
+#                       (trusted python3 and unsquashfs >= 4.5.1, never
+#                       executed). Takes no other artifact or option. Exit 2
+#                       if it cannot be read.
 #
 # Exit status: 0 = all checks passed, 1 = a check failed (test hooks found),
 # 2 = usage error or an artifact could not be inspected (never a pass).
@@ -43,23 +49,33 @@ graph=1
 probe=0
 probe_seconds=20
 report=""
+list_appimage=""
+check_options=0
 artifacts=()
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --features) features="${2:-}"; shift 2 ;;
-    --no-graph) graph=0; shift ;;
-    --runtime-probe) probe=1; shift ;;
-    --probe-seconds) probe_seconds="${2:-20}"; shift 2 ;;
-    --report) report="${2:-}"; shift 2 ;;
+    --features) features="${2:-}"; check_options=1; shift 2 ;;
+    --no-graph) graph=0; check_options=1; shift ;;
+    --runtime-probe) probe=1; check_options=1; shift ;;
+    --probe-seconds) probe_seconds="${2:-20}"; check_options=1; shift 2 ;;
+    --report) report="${2:-}"; check_options=1; shift 2 ;;
+    --list-appimage) list_appimage="${2:-}"; [ -n "$list_appimage" ] || usage; shift 2 ;;
     --) shift; artifacts+=("$@"); break ;;
     -h|--help) usage ;;
     -*) echo "unknown option $1" >&2; usage ;;
     *) artifacts+=("$1"); shift ;;
   esac
 done
-[ ${#artifacts[@]} -gt 0 ] || [ "$graph" = 1 ] || usage
+if [ -n "$list_appimage" ]; then
+  if [ ${#artifacts[@]} -gt 0 ] || [ "$check_options" = 1 ]; then
+    echo "--list-appimage runs no checks and takes no other artifact or option" >&2
+    exit 2
+  fi
+  graph=0
+fi
+[ ${#artifacts[@]} -gt 0 ] || [ "$graph" = 1 ] || [ -n "$list_appimage" ] || usage
 
 # Strings that exist only in builds with the embedded WebDriver plugin or the
 # E2E unlock (see apps/desktop/src-tauri/src/lib.rs and the plugin sources).
@@ -241,6 +257,23 @@ if match is None or tuple(int(part or 0) for part in match.groups()) < (4, 5, 1)
     sys.exit(1)
 PY
 }
+
+# --list-appimage: list the filesystem without extracting or running anything.
+if [ -n "$list_appimage" ]; then
+  [ -f "$list_appimage" ] && [ -r "$list_appimage" ] || { echo "cannot read AppImage $list_appimage" >&2; exit 2; }
+  command -v python3 >/dev/null || { echo "trusted python3 required for $list_appimage" >&2; exit 2; }
+  command -v unsquashfs >/dev/null || { echo "trusted unsquashfs (squashfs-tools) required for $list_appimage" >&2; exit 2; }
+  appimage_extractor_version || exit 2
+  list_offset="$(appimage_offset "$list_appimage")" || exit 2
+  if ! LC_ALL=C unsquashfs -no-progress -lc -o "$list_offset" "$list_appimage" >"$work/appimage-list" 2>"$work/appimage-list.err"; then
+    echo "could not list $list_appimage: $(tr '\n' ' ' <"$work/appimage-list.err" | cut -c1-300)" >&2
+    exit 2
+  fi
+  # unsquashfs prefixes every path with its default destination directory.
+  grep -q '^squashfs-root/' "$work/appimage-list" || { echo "could not list $list_appimage: empty filesystem listing" >&2; exit 2; }
+  sed 's|^squashfs-root/||' "$work/appimage-list"
+  exit 0
+fi
 
 # find -P never follows extracted links. Also reject escaping links, including
 # AppRun, before a file test or an explicit probe could follow one onto the host.

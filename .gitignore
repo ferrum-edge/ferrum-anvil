@@ -11,3 +11,5 @@
 .DS_Store
 /results/tmp
 /results/lab
+__pycache__/
+*.pyc
