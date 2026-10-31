@@ -53,7 +53,8 @@ rusqlite.workspace = true
 # REL-003 (src/cmd_update/signed_update_tests.rs): the mock runtime, and a
 # minisign signer and `.tar.gz` packer for test update artifacts.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
-tauri = { version = "2.11.6", features = ["test"] }
+# Any 2.x: the version is the one [dependencies] pins; this only adds `test`.
+tauri = { version = "2", features = ["test"] }
 aws-lc-rs.workspace = true
 blake2 = { version = "0.11.0", default-features = false }
 flate2.workspace = true

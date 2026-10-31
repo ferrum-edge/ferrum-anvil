@@ -11,10 +11,14 @@
 //! generated for the test, the endpoint is a loopback HTTP server that serves
 //! the manifest (`latest.json` in the static `platforms` format releases
 //! publish) and the artifact, and plain HTTP is allowed for that endpoint.
+//! The updater builder also gets `executable_path` (below) and `no_proxy`, so
+//! a proxy configured on the machine cannot intercept the loopback endpoint.
 //!
 //! The plugin installs into a sandbox instead of over the test binary: an app
 //! bundle on macOS (the `.app` the plugin replaces from a `.app.tar.gz`) and
-//! an AppImage on Linux (replaced from an `.AppImage.tar.gz`). A real profile
+//! an AppImage on Linux (replaced from an `.AppImage.tar.gz`), both with
+//! placeholder contents. Built bundles are covered by
+//! `.github/workflows/updater-e2e.yml`. A real profile
 //! vault, made by the profile manager, sits next to it. The valid control
 //! installs and the snapshot sees it; a refusal must leave every file and
 //! folder of the install and the profile with the same SHA-256, size, mode,
