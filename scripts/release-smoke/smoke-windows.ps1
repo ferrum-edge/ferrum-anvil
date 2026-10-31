@@ -281,3 +281,7 @@ try {
   foreach ($p in $script:appPids) { & taskkill.exe /PID $p /T /F *> $null }
   if ($script:serverProc) { Stop-Process -Id $script:serverProc.Id -Force -ErrorAction SilentlyContinue }
 }
+# Reached only when every step passed (Fail exits 1 above). The cleanup's
+# taskkill of already-stopped processes leaves a non-zero $LASTEXITCODE that
+# would otherwise become the step's exit code.
+exit 0

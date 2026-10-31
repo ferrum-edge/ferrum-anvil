@@ -215,6 +215,15 @@ install_appimage() {
     prereq="fuse3 (fusermount3), installed because the runner had no fusermount"
   fi
   [ -e /dev/fuse ] || fail install "/dev/fuse is not available on this runner"
+  # AppImages leave the graphics driver stack (libEGL/libGL) to the host, as
+  # the AppImage excludelist requires; every desktop install has it, a bare
+  # runner may not.
+  if ! /sbin/ldconfig -p | grep 'libEGL\.so\.1 ' >/dev/null; then
+    $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || true
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y libegl1 >"$logs/apt-egl.log" 2>&1 || fail install "could not install libegl1 for the AppImage"
+    if [ "$prereq" = none ]; then prereq=""; else prereq="$prereq; "; fi
+    prereq="${prereq}libegl1 (host EGL, which AppImages do not bundle), installed because the runner had no libEGL.so.1"
+  fi
   dest="$HOME/Applications"
   mkdir -p "$dest"
   cp "$INPUTS/$ASSET" "$dest/$ASSET"
@@ -222,7 +231,7 @@ install_appimage() {
   bin="$dest/$ASSET"
   file -L "$bin" >"$logs/binary-file.txt"
   meta install.method="copied to ~/Applications and marked executable (chmod +x)" install.executable="$bin" install.prerequisites="$prereq"
-  pass install "copied $ASSET to ~/Applications and marked it executable; FUSE prerequisite: $prereq"
+  pass install "copied $ASSET to ~/Applications and marked it executable; host prerequisites installed: $prereq"
   info signing "the .AppImage.sig asset is the in-app updater (minisign) signature, which the OS does not check; Linux has no platform code signing; integrity was checked against SHA256SUMS"
 }
 
@@ -289,7 +298,8 @@ window_count() { # $1 = app pid
     w="$(osascript -l JavaScript "$here/mac-windows.js" "$1" 2>>"$logs/window-probe.err" || echo '[]')"
     python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1] or "[]")))' "$w" 2>/dev/null || echo 0
   else
-    xdotool search --onlyvisible --name '^Ferrum Anvil$' 2>/dev/null | wc -l | tr -d ' '
+    # xdotool exits 1 when nothing matches yet.
+    { xdotool search --onlyvisible --name '^Ferrum Anvil$' 2>/dev/null || true; } | wc -l | tr -d ' '
   fi
 }
 
