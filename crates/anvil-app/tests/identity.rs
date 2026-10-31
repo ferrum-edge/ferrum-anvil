@@ -161,6 +161,8 @@ async fn data_018_fresh_login_policy_is_enforced_in_the_backend() {
         policy_err(ProfileManager::unlock_with_fresh_login(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await)),
         IdentityPolicyError::IdentityMismatch { .. }
     ));
+
+    // DATA-019: provider unavailable/offline — the recovery key still unlocks.
     drop(idp);
     let (h, key) = ProfileManager::unlock(&dir, Unlock::RecoveryKey(&rk)).unwrap();
     assert!(App::open(dir, h, key).unwrap().find_workspace("after fresh login").is_ok());
