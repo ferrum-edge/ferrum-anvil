@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `anvil env` lists, shows and edits a workspace's environments from the
+  command line (`list`, `show`, `create`, `use`, `set`, `unset`), so the
+  variables an import asks for can be filled in without the desktop app.
+  `anvil env set NAME --secret` reads the value from stdin or a process
+  environment variable, never from an argument, and keeps it in the vault;
+  a secret is never made plain. `anvil import-spec`
+  now names the workspace and the environments it brought and prints the
+  `anvil env set` command for each variable to fill in.
+
 ### Security
 
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
@@ -60,7 +71,11 @@
   severity: any server on the path can send one. Generic finding wording no
   longer collapses spaces inside a substituted value, so quoted response text
   keeps its spacing. Diagnostics catalog version 2026.10.31-1.
-
+- `--env` on `anvil send`, `run` and `mcp-discover` takes an environment's
+  id as well as its name (`send` and `mcp-discover` took only a name), and
+  one that names no environment lists the workspace's environments. A name two environments of
+  the workspace share (two imports of one spec each bring a `local`) is
+  refused with their ids; before, the first one found was used.
 - Schema checks of examples, drift bodies and custom ruleset values charge
   `uniqueItems`, text-reading assertions (`pattern`, `enum`, `const`, length
   and format checks), property-name lookups and `format: regex` only where
@@ -139,6 +154,14 @@
 
 ### Fixed
 
+- DTLS to a Ferrum Edge listener that requires client certificates works
+  again. dimpl 0.8.0 (taken on 2026-10-26) made Anvil's DTLS 1.3 client drop
+  a CertificateRequest with an empty `certificate_authorities` extension
+  without an alert, which every supported Ferrum Edge release sends, so the
+  handshake timed out (`client.dtls.handshake_timeout`) instead of presenting
+  the client identity. Anvil now builds a vendored dimpl 0.8.0 that accepts
+  the empty list (`vendor/dimpl-0.8.0-empty-ca`, see `vendor/README.md`),
+  keeping 0.8.0's other client fixes.
 - `anvil import` no longer reads a whole file before checking it against the
   import limits: as in the desktop, the file's start decides how much is read
   (a full backup's header is checked first, and anything else is read only up

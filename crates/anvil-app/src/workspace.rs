@@ -7,7 +7,7 @@ use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::request::{AttachmentRef, Protocol, RequestSpec};
-use anvil_domain::secret::SecretRef;
+use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workspace::*;
 use anvil_storage::{StoreError, StoreRead, StoreTx, kind};
@@ -692,6 +692,119 @@ impl App {
             Ok(())
         })?;
         Ok(())
+    }
+
+    /// Create an environment named `name` (trimmed) in `ws`, refused when
+    /// the workspace has one of that name (case ignored), and make it the
+    /// active one when `activate`: one transaction.
+    pub fn create_named_environment(&self, ws: &Id, name: &str, activate: bool) -> Result<Environment> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::Invalid("an environment needs a name".into()));
+        }
+        self.store.atomically(|s| {
+            let Some(mut w) = s.get::<Workspace>(kind::WORKSPACE, ws)? else {
+                return Ok(Err(AppError::NotFound(format!("workspace '{ws}'"))));
+            };
+            if s.list::<Environment>(kind::ENVIRONMENT, Some(ws))?.iter().any(|e| e.name.trim().eq_ignore_ascii_case(name)) {
+                return Ok(Err(AppError::Invalid(format!("the workspace already has an environment named '{name}'"))));
+            }
+            let e = Environment { meta: Meta::new(), workspace_id: *ws, name: name.into(), variables: vec![] };
+            s.put(kind::ENVIRONMENT, &e.meta.id, Some(ws), None, 0.0, &e)?;
+            if activate {
+                w.active_environment_id = Some(e.meta.id);
+                w.meta.updated_at = chrono::Utc::now();
+                s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
+            }
+            Ok(Ok(e))
+        })?
+    }
+
+    /// Set variable `name` of environment `env` to `value`, in one
+    /// transaction with the environment read again inside it, so a
+    /// concurrent edit of its other variables is not lost. The variable is
+    /// enabled, and further variables of the same name are removed, so the
+    /// value set is the one that resolves.
+    ///
+    /// A secret keeps its value in the vault, owned by the environment's
+    /// workspace: the environment holds only the reference. The variable is
+    /// secret when `secret` asks for it or any variable of the name is
+    /// secret or held in the vault: it is never made plain here. The vault
+    /// entry a replaced variable held stays in the vault, as when the
+    /// desktop moves a value into it: a desktop draft or an export being
+    /// written may still name it.
+    pub fn set_environment_variable(&self, env: &Id, name: &str, value: &str, secret: bool) -> Result<Environment> {
+        // `{{$name}}` is a dynamic value, never a variable.
+        if name.is_empty() || name.trim() != name || name.starts_with('$') || name.contains("{{") || name.contains("}}") {
+            return Err(AppError::Invalid(format!("'{name}' is not a variable name")));
+        }
+        self.store.atomically(|s| {
+            let Some(mut e) = s.get::<Environment>(kind::ENVIRONMENT, env)? else {
+                return Ok(Err(AppError::NotFound("environment".into())));
+            };
+            let secret = secret || e.variables.iter().any(|v| v.name == name && v.is_secret());
+            let stored = if secret {
+                let id = Id::new();
+                s.put_secret(&id, Some(&e.workspace_id), name, value)?;
+                SensitiveValue::Secret { secret: SecretRef { id, label: name.into() } }
+            } else {
+                SensitiveValue::template(value)
+            };
+            match e.variables.iter().position(|v| v.name == name) {
+                Some(i) => {
+                    let v = &mut e.variables[i];
+                    v.value = stored;
+                    v.secret = secret;
+                    v.enabled = true;
+                    let mut seen = false;
+                    e.variables.retain(|v| v.name != name || !std::mem::replace(&mut seen, true));
+                }
+                None => e.variables.push(Variable { name: name.into(), value: stored, secret, enabled: true, description: String::new() }),
+            }
+            e.meta.updated_at = chrono::Utc::now();
+            s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
+            Ok(Ok(e))
+        })?
+    }
+
+    /// Remove every variable named `name` from environment `env`, in one
+    /// transaction. Returns the environment and whether anything was
+    /// removed. Vault entries they held stay, as for `set`.
+    pub fn unset_environment_variable(&self, env: &Id, name: &str) -> Result<(Environment, bool)> {
+        self.store.atomically(|s| {
+            let Some(mut e) = s.get::<Environment>(kind::ENVIRONMENT, env)? else {
+                return Ok(Err(AppError::NotFound("environment".into())));
+            };
+            let before = e.variables.len();
+            e.variables.retain(|v| v.name != name);
+            let removed = e.variables.len() != before;
+            if removed {
+                e.meta.updated_at = chrono::Utc::now();
+                s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
+            }
+            Ok(Ok((e, removed)))
+        })?
+    }
+
+    /// Make `env` the active environment of workspace `ws` (`None`: no
+    /// environment is active), in one transaction. The environment must
+    /// belong to the workspace.
+    pub fn set_active_environment(&self, ws: &Id, env: Option<&Id>) -> Result<Workspace> {
+        self.store.atomically(|s| {
+            let Some(mut w) = s.get::<Workspace>(kind::WORKSPACE, ws)? else {
+                return Ok(Err(AppError::NotFound(format!("workspace '{ws}'"))));
+            };
+            if let Some(env) = env {
+                match s.get::<Environment>(kind::ENVIRONMENT, env)? {
+                    Some(e) if e.workspace_id == *ws => {}
+                    _ => return Ok(Err(AppError::NotFound("environment in this workspace".into()))),
+                }
+            }
+            w.active_environment_id = env.copied();
+            w.meta.updated_at = chrono::Utc::now();
+            s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
+            Ok(Ok(w))
+        })?
     }
 
     // ------------------------------------------------------------ secrets

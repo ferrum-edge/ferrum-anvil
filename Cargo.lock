@@ -416,7 +416,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytes",
- "dimpl",
+ "dimpl 0.8.0",
  "flate2",
  "futures",
  "h2",
@@ -632,7 +632,8 @@ dependencies = [
  "brotli 9.0.0",
  "bytes",
  "chrono",
- "dimpl",
+ "dimpl 0.6.1",
+ "dimpl 0.8.0",
  "dns-lookup",
  "flate2",
  "futures",
@@ -2068,9 +2069,32 @@ dependencies = [
 
 [[package]]
 name = "dimpl"
-version = "0.8.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df69b372e2de9011f8c22a58d1b5f5afa1752041bc5c0ae6b8a126aadaea5ed2"
+checksum = "ef7eed0cf766b110880acdd89a860061dee42ed5f64df0fa43c80203e4f60916"
+dependencies = [
+ "aes 0.8.4",
+ "arrayvec",
+ "aws-lc-rs",
+ "ccm",
+ "der 0.7.10",
+ "log",
+ "nom 8.0.0",
+ "once_cell",
+ "pkcs8 0.10.2",
+ "rand 0.9.5",
+ "rcgen",
+ "sec1 0.7.3",
+ "signature 2.2.0",
+ "spki 0.7.3",
+ "subtle",
+ "time",
+ "x509-cert 0.2.5",
+]
+
+[[package]]
+name = "dimpl"
+version = "0.8.0"
 dependencies = [
  "aes 0.8.4",
  "arrayvec",
@@ -5561,6 +5585,7 @@ version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
+ "aws-lc-rs",
  "pem 4.0.0",
  "ring",
  "rustls-pki-types",
@@ -8725,6 +8750,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs",
+ "aws-lc-rs",
  "data-encoding",
  "der-parser",
  "lazy_static",
