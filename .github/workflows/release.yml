@@ -660,3 +660,280 @@ jobs:
             echo
             cat notes/notes.md
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # TEMPORARY evidence jobs for the AppImage EGL fix (dry runs only; dropped
+  # before merge). They run the REL-001 clean-install smoke from
+  # ferrum-edge/ferrum-anvil#450 (scripts/release-smoke at 7f172125, unchanged)
+  # against this run's dry-run packages, and launch extracted AppImages on
+  # Ubuntu 26.04 and Fedora 44 hosts.
+  evidence-smoke:
+    name: Evidence smoke · ${{ matrix.id }}
+    needs: [preflight, build, publish]
+    if: needs.preflight.outputs.tag == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x64-appimage
+            package: appimage
+            asset: "Ferrum-Anvil_{0}_amd64.AppImage"
+          - id: linux-x64-deb
+            package: deb
+            asset: "Ferrum-Anvil_{0}_amd64.deb"
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      TARGET_ID: ${{ matrix.id }}
+      OUT: rel001-result
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - name: REL-001 smoke scripts (ferrum-edge/ferrum-anvil#450 head)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 7f17212581d6e83ffb7fea10a7d81373b29a85a9
+          path: rel450
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: rel001-inputs
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-evidence-${{ needs.preflight.outputs.version }}
+          path: evidence
+      - name: Smoke inputs from this dry run
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cp evidence/SHA256SUMS rel001-inputs/
+          cp samples/workspaces/anvil-samples.anvil rel001-inputs/
+          python3 -I - "$GITHUB_REPOSITORY" "$VERSION" "$COMMIT" "$RUN_URL" <<'PY'
+          import hashlib, json, os, sys
+          repo, version, commit, url = sys.argv[1:5]
+          ex = "rel001-inputs/anvil-samples.anvil"
+          json.dump({"repository": repo, "tag": "", "version": version, "commit": commit, "url": url,
+                     "published_at": None, "is_draft": True, "is_prerelease": False,
+                     "source": "release.yml dry run (unpublished packages)"}, open("rel001-inputs/release.json", "w"))
+          json.dump({"path": "samples/workspaces/anvil-samples.anvil", "ref": commit,
+                     "source": "repository file at the dry-run commit",
+                     "sha256": hashlib.sha256(open(ex, "rb").read()).hexdigest(), "size": os.path.getsize(ex)},
+                    open("rel001-inputs/example.json", "w"))
+          PY
+          ls -la rel001-inputs
+      - name: Install, launch, import the example and make a local call
+        env:
+          PACKAGE: ${{ matrix.package }}
+          EXPECT_ARCH: x86_64
+          RUST_TARGET: x86_64-unknown-linux-gnu
+          ASSET: ${{ format(matrix.asset, needs.preflight.outputs.version) }}
+          CLI_ASSET: ${{ format('anvil-cli-{0}-x86_64-unknown-linux-gnu.tar.gz', needs.preflight.outputs.version) }}
+          INPUTS: rel001-inputs
+          VERSION: ${{ needs.preflight.outputs.version }}
+          RUNNER_LABEL: ubuntu-26.04
+        run: rel450/scripts/release-smoke/smoke-unix.sh
+      - name: Write the per-target result
+        if: always()
+        run: python3 -I rel450/scripts/release-smoke/record.py finalize --dir "$OUT" --target "$TARGET_ID" --out "$OUT/result.json"
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-rel001-${{ matrix.id }}
+          path: rel001-result/
+          if-no-files-found: warn
+          retention-days: 30
+
+  evidence-smoke-rpm:
+    name: Evidence smoke · linux-x64-rpm
+    needs: [preflight, build, publish]
+    if: needs.preflight.outputs.tag == ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container:
+      image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET_ID: linux-x64-rpm
+      OUT: rel001-result
+    steps:
+      - name: Job tools (not the package's dependencies)
+        run: dnf -y install python3 procps-ng findutils file util-linux tar gzip grep sed
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - name: REL-001 smoke scripts (ferrum-edge/ferrum-anvil#450 head)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 7f17212581d6e83ffb7fea10a7d81373b29a85a9
+          path: rel450
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: rel001-inputs
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-evidence-${{ needs.preflight.outputs.version }}
+          path: evidence
+      - name: Smoke inputs from this dry run
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cp evidence/SHA256SUMS rel001-inputs/
+          cp samples/workspaces/anvil-samples.anvil rel001-inputs/
+          python3 -I - "$GITHUB_REPOSITORY" "$VERSION" "$COMMIT" "$RUN_URL" <<'PY'
+          import hashlib, json, os, sys
+          repo, version, commit, url = sys.argv[1:5]
+          ex = "rel001-inputs/anvil-samples.anvil"
+          json.dump({"repository": repo, "tag": "", "version": version, "commit": commit, "url": url,
+                     "published_at": None, "is_draft": True, "is_prerelease": False,
+                     "source": "release.yml dry run (unpublished packages)"}, open("rel001-inputs/release.json", "w"))
+          json.dump({"path": "samples/workspaces/anvil-samples.anvil", "ref": commit,
+                     "source": "repository file at the dry-run commit",
+                     "sha256": hashlib.sha256(open(ex, "rb").read()).hexdigest(), "size": os.path.getsize(ex)},
+                    open("rel001-inputs/example.json", "w"))
+          PY
+      - name: Install, launch, import the example and make a local call
+        env:
+          PACKAGE: rpm
+          EXPECT_ARCH: x86_64
+          RUST_TARGET: x86_64-unknown-linux-gnu
+          ASSET: ${{ format('Ferrum-Anvil-{0}-1.x86_64.rpm', needs.preflight.outputs.version) }}
+          CLI_ASSET: ${{ format('anvil-cli-{0}-x86_64-unknown-linux-gnu.tar.gz', needs.preflight.outputs.version) }}
+          INPUTS: rel001-inputs
+          VERSION: ${{ needs.preflight.outputs.version }}
+          RUNNER_LABEL: ubuntu-26.04
+          SMOKE_CONTAINER: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+        run: rel450/scripts/release-smoke/smoke-unix.sh
+      - name: Write the per-target result
+        if: always()
+        run: python3 -I rel450/scripts/release-smoke/record.py finalize --dir "$OUT" --target "$TARGET_ID" --out "$OUT/result.json"
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-rel001-linux-x64-rpm
+          path: rel001-result/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The published 0.1.5 AppImage (built on Ubuntu 22.04), the same with its
+  # bundled libwayland-client (or all libwayland-*) removed, the dry-run
+  # AppImage of #361 (main's Ubuntu 26.04 build, before this fix; run
+  # 37895040897) and this run's AppImage, each extracted and launched.
+  evidence-hosts-ubuntu:
+    name: Evidence hosts · ubuntu-26.04
+    needs: [preflight, build]
+    if: needs.preflight.outputs.tag == ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: fix
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: control
+          run-id: 37895040897
+          github-token: ${{ github.token }}
+      - name: Published 0.1.5 AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download anvil-v0.1.5 --repo "$GITHUB_REPOSITORY" -p 'Ferrum-Anvil_0.1.5_amd64.AppImage' -D v015
+      - name: Host packages (display harness and the host EGL/Mesa stack)
+        run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xvfb xauth xdotool imagemagick dbus binutils libegl1 libegl-mesa0 libgl1-mesa-dri
+      - name: Launch each AppImage
+        env:
+          OUT: evidence-hosts
+          EXPECT: v015=fail v015-noclient=pass fix=pass
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          scripts/evidence/appimage-hosts.sh \
+            "v015=v015/Ferrum-Anvil_0.1.5_amd64.AppImage" \
+            "control=control/Ferrum-Anvil_0.1.5_amd64.AppImage" \
+            "fix=fix/Ferrum-Anvil_${VERSION}_amd64.AppImage"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-hosts-ubuntu-26.04
+          path: evidence-hosts/
+          retention-days: 30
+
+  evidence-hosts-fedora:
+    name: Evidence hosts · fedora-44
+    needs: [preflight, build]
+    if: needs.preflight.outputs.tag == ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    container:
+      image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Host packages (display harness, GTK 3 and the host EGL/Mesa stack)
+        run: |
+          dnf -y install python3 procps-ng findutils util-linux file binutils tar gzip grep sed \
+            xorg-x11-server-Xvfb xdotool dbus-daemon ImageMagick gtk3 mesa-dri-drivers mesa-libEGL mesa-libgbm gh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: fix
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: control
+          run-id: 37895040897
+          github-token: ${{ github.token }}
+      - name: Published 0.1.5 AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download anvil-v0.1.5 --repo "$GITHUB_REPOSITORY" -p 'Ferrum-Anvil_0.1.5_amd64.AppImage' -D v015
+      - name: Launch each AppImage
+        env:
+          OUT: evidence-hosts
+          EXPECT: fix=pass
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          scripts/evidence/appimage-hosts.sh \
+            "v015=v015/Ferrum-Anvil_0.1.5_amd64.AppImage" \
+            "control=control/Ferrum-Anvil_0.1.5_amd64.AppImage" \
+            "fix=fix/Ferrum-Anvil_${VERSION}_amd64.AppImage"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-hosts-fedora-44
+          path: evidence-hosts/
+          retention-days: 30
