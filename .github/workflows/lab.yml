@@ -3,9 +3,14 @@
 # plus controllable fixtures, running the failure-matrix scenarios through
 # Anvil's engine with and without the destination declared as a trusted
 # Ferrum profile.
-#   PR (engine/diagnostics/lab changes): core profile, default pin
+#   PR (engine/diagnostics/lab changes): default pin; all profiles, core only on macOS
 #   nightly:                             all profiles, default pin + every earlier supported release
 #   manual:                              chosen profile and release
+# PRs run every profile (except on macOS, to spare its runners) so a change
+# that breaks a non-core scenario shows on the PR, not first in the nightly
+# run: a dependency bump that broke DTLS mTLS (PROTO-022 in `tls`) once merged
+# green on core alone. Lab is not a required check (it is path-filtered); when
+# it runs on a PR it must pass before merging (docs/ci.md).
 name: Lab
 
 on:
@@ -13,6 +18,7 @@ on:
     paths:
       - "crates/**"
       - "lab/**"
+      - "vendor/**"
       - "catalog/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -75,7 +81,7 @@ jobs:
         run: cargo run --locked -p anvil-lab -- verify
       - name: Run lab
         env:
-          PROFILE: ${{ github.event_name == 'pull_request' && 'core' || inputs.profile || 'all' }}
+          PROFILE: ${{ github.event_name == 'pull_request' && (runner.os == 'macOS' && 'core' || 'all') || inputs.profile || 'all' }}
         run: |
           ulimit -n 4096 2>/dev/null || true
           echo "profile: $PROFILE"

@@ -14,6 +14,11 @@ updates:
       - dependency-name: h3-quinn
       - dependency-name: tungstenite
       - dependency-name: tokio-tungstenite
+      # Patched local copy too (vendor/README.md). This also covers the
+      # `dimpl-edge` test dependency, which must stay on 0.6.1: it is the DTLS
+      # stack of the supported Ferrum Edge releases.
+      - dependency-name: dimpl
+      - dependency-name: dimpl-edge
       # Tauri's Rust crate and JavaScript CLI must move together by hand.
       # Patch skew is supported; major/minor changes need a coordinated bump.
       - dependency-name: tauri*

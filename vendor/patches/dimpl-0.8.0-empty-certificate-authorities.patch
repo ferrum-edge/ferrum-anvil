@@ -1,0 +1,16 @@
+--- a/src/dtls13/message/certificate_request.rs
++++ b/src/dtls13/message/certificate_request.rs
+@@ -50,7 +50,12 @@
+                     }
+                     seen_authorities = true;
+                     let (names, length) = be_u16(data)?;
+-                    if length == 0 || names.len() != length as usize {
++                    // Anvil: accept an empty list (RFC 8446 requires at least
++                    // one name). Every Ferrum Edge release's DTLS 1.3 server
++                    // (dimpl 0.6.1) sends one when it requires a client
++                    // certificate; rejecting it drops the CertificateRequest
++                    // and the handshake stalls. An empty list names no CA.
++                    if names.len() != length as usize {
+                         return Err(Err::Failure(Error::new(names, ErrorKind::LengthValue)));
+                     }
+                     let mut names = names;
