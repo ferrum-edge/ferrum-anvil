@@ -24,6 +24,8 @@ on:
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
+      - "scripts/updater-manifest.mjs"
+      - "scripts/tests/updater-manifest.test.mjs"
       - ".github/workflows/updater-e2e.yml"
   push:
     branches: [main]
@@ -35,6 +37,8 @@ on:
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
+      - "scripts/updater-manifest.mjs"
+      - "scripts/tests/updater-manifest.test.mjs"
       - ".github/workflows/updater-e2e.yml"
   # Weekly, so Cargo.lock bumps of tauri-plugin-updater are covered too.
   schedule:
@@ -79,6 +83,10 @@ jobs:
         with:
           xvfb: "true"
           cache-key: updater-e2e
+      # Supporting checks of the release manifest's signature verification
+      # (also in ci.yml's Supply chain job).
+      - name: Updater signature verifier tests (latest.json)
+        run: node --test scripts/tests/updater-manifest.test.mjs
       - name: AppImage bundling tools (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y --no-install-recommends libfuse2
