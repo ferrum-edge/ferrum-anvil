@@ -769,7 +769,7 @@ async fn a_problem_report_echoing_a_secret_keeps_it_out_of_the_record() {
     init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let e = Engine::new();
-    let secret = "ECHOED-SECRET-5h2k";
+    let secret = "tok-SENSITIVE-echoed-5h2k";
     let problem = format!(
         r#"{{"type":"https://e.test/p/{secret}?token=A","title":"bad {secret}","status":503,"detail":"{secret}","instance":"https://e.test/p/{secret}?token=A&access_token=private-value-7m3q"}}"#
     );
@@ -784,7 +784,7 @@ async fn a_problem_report_echoing_a_secret_keeps_it_out_of_the_record() {
     let h = finding(&o, "http.service_unavailable");
     assert!(h.evidence.iter().any(|e| e.key == "body.problem.instance"), "{:?}", h.evidence);
     let json = serde_json::to_string(&o.record).unwrap();
-    for leaked in [secret, "private-value-7m3q", "token=A"] {
-        assert!(!json.contains(leaked), "{leaked} leaked into the execution record");
+    for (i, leaked) in [secret, "private-value-7m3q", "token=A"].into_iter().enumerate() {
+        assert!(!json.contains(leaked), "value {i} leaked into the execution record");
     }
 }
