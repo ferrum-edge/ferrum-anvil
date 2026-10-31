@@ -116,6 +116,15 @@
   and summary, with an unknown `###` heading or with an empty Breaking section. The owner
   checklist in `docs/release.md` checks the body before publishing (#356).
 
+- In-app update refusal is now covered by automated tests (REL-003). On macOS
+  and Linux CI, the in-app install path runs through the pinned updater
+  plugin against a local server: it reads the manifest, downloads an artifact
+  signed with a test key and verifies it. A validly signed update installs.
+  An update signed by another key, with a corrupted signature or an edited
+  trusted comment, or altered after signing, is refused before install, and
+  the installed app and the profile keep the same files, hashes and inodes.
+  Windows is not covered.
+
 ### Fixed
 
 - `anvil import` no longer reads a whole file before checking it against the

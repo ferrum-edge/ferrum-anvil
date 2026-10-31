@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Updater, UpdaterBuilder, UpdaterExt};
 
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/ferrum-edge/ferrum-anvil/releases/latest";
 const RELEASES_PAGE: &str = "https://github.com/ferrum-edge/ferrum-anvil/releases";
@@ -142,33 +142,40 @@ pub async fn update_install(handle: AppHandle, version: String) -> R<()> {
     }
     let _done = Done;
     // `_done` clears INSTALLING on every return below, errors and timeouts included.
-    let updater = handle.updater_builder().timeout(CHECK_TIMEOUT).build().map_err(|x| format!("The updater is not available: {x}"))?;
+    let updater = build_updater(handle.updater_builder())?;
+    let (mut downloaded, mut reported) = (0u64, 0u64);
+    let events = handle.clone();
+    install_offered(&updater, &wanted, &handle.package_info().version, move |chunk, total| {
+        downloaded += chunk as u64;
+        if downloaded - reported >= PROGRESS_STEP || Some(downloaded) == total {
+            reported = downloaded;
+            let _ = events.emit("update-progress", UpdateProgress { downloaded, total });
+        }
+    })
+    .await
+}
+
+/// The updater `update_install` runs: the plugin's configuration (endpoint,
+/// public key, `requireSignedVersion`) with the check timeout.
+fn build_updater(builder: UpdaterBuilder) -> R<Updater> {
+    builder.timeout(CHECK_TIMEOUT).build().map_err(|x| format!("The updater is not available: {x}"))
+}
+
+/// Read `updater`'s manifest and install the update it offers when that is
+/// `wanted`. The plugin downloads the artifact and verifies its minisign
+/// signature (and the version it was signed for) before it replaces anything,
+/// so a refused update leaves the installed app as it was.
+async fn install_offered(updater: &Updater, wanted: &Version, current: &Version, on_chunk: impl FnMut(usize, Option<u64>)) -> R<()> {
     let mut update = updater.check().await.map_err(|x| format!("Could not read the update manifest: {x}"))?.ok_or_else(|| {
         format!(
-            "The update manifest does not offer a version newer than {} yet (it may not be published). Try again later or download the release from its page.",
-            handle.package_info().version
+            "The update manifest does not offer a version newer than {current} yet (it may not be published). Try again later or download the release from its page."
         )
     })?;
     update.timeout = Some(DOWNLOAD_TIMEOUT);
-    if Version::parse(&update.version).ok() != Some(wanted) {
+    if Version::parse(&update.version).ok().as_ref() != Some(wanted) {
         return Err(format!("The release offered changed to {} since the check. Check again.", update.version));
     }
-    let (mut downloaded, mut reported) = (0u64, 0u64);
-    let events = handle.clone();
-    update
-        .download_and_install(
-            move |chunk, total| {
-                downloaded += chunk as u64;
-                if downloaded - reported >= PROGRESS_STEP || Some(downloaded) == total {
-                    reported = downloaded;
-                    let _ = events.emit("update-progress", UpdateProgress { downloaded, total });
-                }
-            },
-            || {},
-        )
-        .await
-        .map_err(|x| format!("The update was not installed: {x}"))?;
-    Ok(())
+    update.download_and_install(on_chunk, || {}).await.map_err(|x| format!("The update was not installed: {x}"))
 }
 
 /// Restart into the installed update.
@@ -510,6 +517,10 @@ fn autolink(c: &[char], open: usize) -> Option<(String, usize)> {
     let url: String = c[open + 1..close].iter().collect();
     (c[close] == '>' && ["https://", "http://", "mailto:"].iter().any(|p| url.starts_with(p))).then_some((url, close + 1))
 }
+
+/// REL-003: tampered updates are refused through the real updater path.
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod signed_update_tests;
 
 #[cfg(test)]
 mod tests {
