@@ -726,6 +726,14 @@ jobs:
                     open("rel001-inputs/example.json", "w"))
           PY
           ls -la rel001-inputs
+      # libepoxy in the AppImage dlopens the host's libGLESv2.so.2 (glvnd, like
+      # libEGL); #450's smoke installs only libegl1/libegl-mesa0/libgl1-mesa-dri.
+      - name: Host libGLESv2 for the AppImage (not recorded by the smoke)
+        if: matrix.package == 'appimage'
+        run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgles2
+          dpkg-query -W libgles2 libglvnd0
       - name: Install, launch, import the example and make a local call
         env:
           PACKAGE: ${{ matrix.package }}
@@ -864,11 +872,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xvfb xauth xdotool imagemagick dbus binutils libegl1 libegl-mesa0 libgl1-mesa-dri
+            xvfb xauth xdotool imagemagick dbus binutils libegl1 libegl-mesa0 libgl1-mesa-dri libgles2
       - name: Launch each AppImage
         env:
           OUT: evidence-hosts
-          EXPECT: v015=fail v015-noclient=pass fix=pass
+          EXPECT: v015=fail v015-noclient=pass control=pass fix=pass
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           scripts/evidence/appimage-hosts.sh \
@@ -901,7 +909,7 @@ jobs:
       - name: Host packages (display harness, GTK 3 and the host EGL/Mesa stack)
         run: |
           dnf -y install python3 procps-ng findutils util-linux file binutils tar gzip grep sed \
-            xorg-x11-server-Xvfb xdotool dbus-daemon ImageMagick gtk3 mesa-dri-drivers mesa-libEGL mesa-libgbm gh
+            xorg-x11-server-Xvfb xdotool dbus-daemon ImageMagick gtk3 mesa-dri-drivers mesa-libEGL mesa-libgbm libglvnd-gles gh
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.ref }}
