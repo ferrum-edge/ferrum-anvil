@@ -872,3 +872,19 @@ fn load_preflight_judges_every_proxy_profile_after_no_proxy() {
     assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via HBONE proxy mesh.example.test:15008".to_string()]);
     assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
 }
+
+#[test]
+fn a_variable_set_in_an_imported_environment_survives_a_reimport() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let done = app.spec_import(SPEC_V1.as_bytes(), "orders.yaml", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+    let env = app.environments(&done.workspace_id).unwrap().remove(0);
+    app.set_environment_variable(&env.meta.id, "bearer", "user-token-1", true).unwrap();
+
+    app.spec_reimport_apply(&done.import_id, SPEC_V2.as_bytes(), "spec-v2.yaml", &ReimportApproval::default()).unwrap();
+    let after = app.environments(&done.workspace_id).unwrap().into_iter().find(|e| e.meta.id == env.meta.id).unwrap();
+    let v = after.variables.iter().find(|v| v.name == "bearer").expect("the user's variable is a preserved edit");
+    let SensitiveValue::Secret { secret } = &v.value else { panic!("not in the vault: {v:?}") };
+    assert_eq!(app.store.get_workspace_secret(&secret.id, &done.workspace_id).unwrap().unwrap().1.as_str(), "user-token-1");
+    assert!(after.variables.iter().any(|v| v.name == "baseUrl"), "{after:?}");
+}

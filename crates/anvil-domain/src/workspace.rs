@@ -48,6 +48,11 @@ impl Variable {
     pub fn plain(name: &str, value: &str) -> Self {
         Variable { name: name.into(), value: SensitiveValue::template(value), secret: false, enabled: true, description: String::new() }
     }
+
+    /// Marked secret, or its value is a vault reference.
+    pub fn is_secret(&self) -> bool {
+        self.secret || matches!(self.value, SensitiveValue::Secret { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
