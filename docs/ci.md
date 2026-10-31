@@ -165,7 +165,7 @@ artifact per OS and release.
 | cargo-deny / cargo-cyclonedx | 0.20.2 / 0.5.9 |
 | gitleaks | 8.30.1 (linux x64 SHA-256 `551f6fc8…f2470eb`) |
 | @cyclonedx/cyclonedx-npm | 6.0.1 (release workflow, via `npx`) |
-| WebdriverIO / @wdio/tauri-service | 9.32.0 / 1.5.0 (lockfile) |
+| WebdriverIO / @wdio/tauri-service | 9.32.0 / 1.5.0 (direct `devDependencies` in `apps/desktop/package.json`, locked in `package-lock.json`; `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 bring a nested WebdriverIO 10.1.0, see [release.md](release.md)) |
 | Rust | `stable` from `rust-toolchain.toml` (not pinned; the exact `rustc` of each release build is recorded in its `build-info.json` and `release-evidence.json`) |
 
 ## Not yet exercised

@@ -64,7 +64,7 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 | `max_bytes` (input size) | 32 MiB | `ImportError::TooLarge` |
 | `max_nodes`: parsed JSON/YAML nodes (charged during deserialization, alias expansions included, so YAML alias bombs are refused) and XML nodes | 2,000,000 | `ImportError::LimitExceeded` |
 | String bytes a parsed JSON/YAML document keeps (values and map keys, alias expansions included) | 2 × `max_bytes` | `LimitExceeded` |
-| JSON/YAML nesting depth | 200 | `LimitExceeded` |
+| JSON/YAML nesting depth (Anvil's guard; the JSON and YAML parsers' own recursion limits can refuse deeper input first) | 200 | `LimitExceeded`; a parser's own limit gives `ImportError::Syntax` |
 | `max_operations` | 5,000 | later operations skipped, `operation_limit` warning |
 | `max_ref_depth` (direct `$ref`s and those followed while merging `allOf`) | 32 | not expanded, `ref_depth_limit` warning |
 | `max_ref_expansions` (whole import) | 250,000 | not expanded, `ref_budget_exhausted` warning |
