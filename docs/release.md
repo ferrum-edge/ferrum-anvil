@@ -64,10 +64,24 @@ Each build job:
    updater signing credentials; the certificate is removed afterwards. This is
    defense in depth, not isolation: both steps share the runner, and bundling
    itself runs third-party tools (the AppImage bundler downloads unpinned
-   `linuxdeploy` tools while the key is present). Signing the updater artifacts
+   `linuxdeploy` plugins and its `AppRun` while the key is present). Signing the updater artifacts
    in a separate job with `tauri signer sign` would be stronger. With the
    owner's updater key a tagged release also writes signed updater artifacts
    (see [In-app updates](#in-app-updates)).
+
+   On Linux, `linuxdeploy` itself is pinned: the job places the
+   `linuxdeploy-07333c6` build that Tauri CLI 2.12 uses (SHA-256 checked) in
+   Tauri's tool cache before bundling, and sets
+   `LINUXDEPLOY_EXCLUDED_LIBRARIES=libwayland-client.so*`. The AppImage then
+   leaves `libwayland-client` to the host, like `libEGL` and the rest of the
+   graphics stack. The CLI 2.11 default `linuxdeploy` copies the build host's
+   `libwayland-client` into the AppImage; on a host whose Mesa needs a newer
+   one, Mesa's EGL driver cannot load and WebKit's web process aborts with
+   `Could not create default EGL display: EGL_BAD_PARAMETER` (0.1.5 on
+   Ubuntu 26.04). After bundling, the job lists the AppImage with the
+   trusted `unsquashfs` and fails if it contains `libwayland-client`. Remove
+   the tool-cache step with the coordinated Tauri 2.12 bump (CLI 2.12 pins
+   the same `linuxdeploy` under another file name); keep the check.
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone

@@ -118,6 +118,13 @@
 
 ### Fixed
 
+- The Linux AppImage no longer bundles `libwayland-client`. With the bundled
+  copy, a host whose Mesa needs a newer `libwayland-client` (Ubuntu 26.04 for
+  the 0.1.5 AppImage) could not load its EGL driver: the window opened, but
+  WebKit's web process aborted with `Could not create default EGL display:
+  EGL_BAD_PARAMETER` and the app stayed blank. The AppImage now uses the
+  host's `libwayland-client`, which every system with Mesa EGL has. The
+  `.deb` and `.rpm` already used the host's copy.
 - `anvil import` no longer reads a whole file before checking it against the
   import limits: as in the desktop, the file's start decides how much is read
   (a full backup's header is checked first, and anything else is read only up
