@@ -1,0 +1,153 @@
+# Website release evidence: re-run the Ferrum Edge website's tests for its Anvil
+# pages (navigation, download labels and digests, capability claims) at a
+# pinned commit of ferrum-edge/ferrumedge, and record the result. This is the
+# check behind failure-matrix cases REL-006, REL-007 and REL-008.
+#
+#   release.yml (every release run, tagged or dry run) -> workflow_call
+#   manual                                             -> workflow_dispatch
+#   PR / push to main changing this file (e.g. the pin) -> pull_request / push
+#
+# ferrumedge is a private repository, so the checkout needs the repository
+# secret FERRUMEDGE_READ_TOKEN: a fine-grained token (or GitHub App token)
+# with read-only Contents access to ferrum-edge/ferrumedge and nothing else.
+# Without it the job fails; it never falls back to an unpinned or cached copy.
+#
+# The tests run exactly as the website's own .github/workflows/test.yml runs
+# them (`node --test "tests/**/*.test.js"`, Node 22, RUN_LIVE_ASSET_CHECKS
+# unset, so no live network asset checks). This repository is public, so the
+# log and the artifact carry only the counts and the names of failing tests,
+# not the private repository's full test output.
+name: Website evidence
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Anvil release tag under test (empty for a dry run)
+        required: false
+        type: string
+        default: ""
+    secrets:
+      FERRUMEDGE_READ_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Anvil release tag under test, if any (recorded only)
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/website-evidence.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/website-evidence.yml"
+
+permissions: {}
+
+env:
+  # Pin by full commit SHA, never a branch. e4fe8b9 is ferrumedge main after
+  # ferrum-edge/ferrumedge#105 (download labels and digests tied to the release).
+  FERRUMEDGE_REPOSITORY: ferrum-edge/ferrumedge
+  FERRUMEDGE_SHA: e4fe8b9a1b1de6b8dfeb021111bea262828fe57c
+  TEST_COMMAND: node --test --test-reporter=tap "tests/**/*.test.js"
+
+jobs:
+  website-tests:
+    name: Website tests (pinned ferrumedge)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Read token configured
+        env:
+          TOKEN_SET: ${{ secrets.FERRUMEDGE_READ_TOKEN != '' }}
+        run: |
+          if [ "$TOKEN_SET" != "true" ]; then
+            echo "::error::FERRUMEDGE_READ_TOKEN is not configured: add a read-only (Contents: read) token for $FERRUMEDGE_REPOSITORY as a repository secret"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.FERRUMEDGE_REPOSITORY }}
+          ref: ${{ env.FERRUMEDGE_SHA }}
+          token: ${{ secrets.FERRUMEDGE_READ_TOKEN }}
+          path: ferrumedge
+          persist-credentials: false
+      - name: Checked out the pinned commit
+        working-directory: ferrumedge
+        run: '[ "$(git rev-parse HEAD)" = "$FERRUMEDGE_SHA" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the pinned $FERRUMEDGE_SHA"; exit 1; }'
+      # As the website's test.yml (node-version '22', no package cache), at the
+      # exact Node 22 release the rest of this repository uses.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.3
+          package-manager-cache: false
+      - name: Run the website tests
+        id: tests
+        working-directory: ferrumedge
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ANVIL_COMMIT: ${{ github.sha }}
+        run: |
+          tap="$RUNNER_TEMP/website-tests.tap"
+          out="$RUNNER_TEMP/website-evidence"
+          mkdir -p "$out"
+          unset RUN_LIVE_ASSET_CHECKS
+          set +e
+          node --test --test-reporter=tap "tests/**/*.test.js" > "$tap" 2>&1
+          code=$?
+          set -e
+          echo "exit code: $code"
+          # Failing test names only (see the header).
+          grep -E '^[[:space:]]*not ok ' "$tap" || true
+          count() { sed -n "s/^# $1 \([0-9][0-9]*\)\$/\1/p" "$tap" | tail -n 1; }
+          # shellcheck disable=SC2016 # JavaScript source, not shell
+          node -e '
+            const [file, code, tests, pass, fail, cancelled, skipped, todo] = process.argv.slice(1);
+            const n = (v) => (v === "" ? null : Number(v));
+            const counts = { tests: n(tests), pass: n(pass), fail: n(fail), cancelled: n(cancelled), skipped: n(skipped), todo: n(todo) };
+            const ok = Number(code) === 0 && counts.tests > 0 && counts.pass > 0 && counts.fail === 0 && counts.cancelled === 0;
+            const result = {
+              check: "ferrumedge website tests (failure matrix REL-006, REL-007, REL-008)",
+              ferrumedge_repository: process.env.FERRUMEDGE_REPOSITORY,
+              ferrumedge_sha: process.env.FERRUMEDGE_SHA,
+              command: process.env.TEST_COMMAND,
+              live_asset_checks: false,
+              node: process.version,
+              anvil_release_tag: process.env.RELEASE_TAG || null,
+              anvil_commit: process.env.ANVIL_COMMIT,
+              run_url: process.env.RUN_URL,
+              exit_code: Number(code),
+              counts,
+              result: ok ? "pass" : "fail",
+            };
+            require("node:fs").writeFileSync(file, JSON.stringify(result, null, 2) + "\n");
+            console.log(JSON.stringify(result, null, 2));
+            process.exitCode = ok ? 0 : 1;
+          ' "$out/website-evidence.json" "$code" "$(count tests)" "$(count pass)" "$(count fail)" "$(count cancelled)" "$(count skipped)" "$(count todo)"
+      - name: Summary
+        if: always() && steps.tests.outcome != 'skipped'
+        run: |
+          f="$RUNNER_TEMP/website-evidence/website-evidence.json"
+          [ -f "$f" ] || exit 0
+          {
+            echo "### Website release evidence"
+            echo
+            echo "\`$FERRUMEDGE_REPOSITORY@$FERRUMEDGE_SHA\`: \`$TEST_COMMAND\`"
+            echo
+            echo '```json'
+            cat "$f"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload result
+        if: always() && steps.tests.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: website-evidence
+          path: ${{ runner.temp }}/website-evidence/website-evidence.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
