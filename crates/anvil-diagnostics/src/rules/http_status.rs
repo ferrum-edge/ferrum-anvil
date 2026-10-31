@@ -1,10 +1,17 @@
 //! Generic HTTP status meaning. These findings state what the status means
 //! and — explicitly — that the status alone does not identify which
 //! component (gateway, WAF, application, intermediary) produced it.
+//!
+//! An RFC 9457 problem report in the body is quoted as evidence and in the
+//! explanation, because its type, title and detail often separate causes the
+//! status cannot (a 503 for draining, a full admission queue or a handler
+//! deadline). It never changes the code, confidence, scope or owner: any
+//! server on the path can send one.
 
 use super::Ctx;
 use crate::Draft;
-use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity, SourceScope};
+use crate::facts::ProblemDetails;
+use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Remediation, Severity, SourceScope};
 
 pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     let Some(r) = ctx.input.response else { return };
@@ -57,5 +64,63 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     if let Some(e) = &ctx.body.json_error {
         d = d.ev_at(E::BodyContent, "body.error", e.clone(), idx);
     }
+    d = match &ctx.body.problem {
+        Some(p) => problem(d, p, s, idx),
+        None => d.var("problem", String::new()),
+    };
     out.push(d);
+}
+
+/// Quotes an RFC 9457 problem report: evidence, a sentence for `{problem}`,
+/// what it does not prove, and who to give its identifiers to.
+fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
+    for (key, value) in [
+        ("body.problem.type", &p.type_uri),
+        ("body.problem.title", &p.title),
+        ("body.problem.detail", &p.detail),
+        ("body.problem.instance", &p.instance),
+    ] {
+        if let Some(v) = value {
+            d = d.ev_at(E::BodyContent, key, v.clone(), idx);
+        }
+    }
+    if let Some(n) = p.status {
+        d = d.ev_at(E::BodyContent, "body.problem.status", n.to_string(), idx);
+    }
+    // RFC 9457 §3.1.1: an absent type means `about:blank`, which adds
+    // nothing beyond the status.
+    let named_type = p.type_uri.as_deref().filter(|t| *t != "about:blank");
+    let mut sentence = String::from("The body is an RFC 9457 problem report");
+    if let Some(t) = named_type {
+        sentence.push_str(&format!(" of type {t}"));
+    }
+    if let Some(t) = &p.title {
+        sentence.push_str(&format!(", titled \"{t}\""));
+    }
+    if let Some(t) = &p.detail {
+        sentence.push_str(&format!(", with detail \"{t}\""));
+    }
+    sentence.push('.');
+    if let Some(n) = p.status.filter(|n| *n != status) {
+        sentence.push_str(&format!(" It states status {n}, but the response status is {status}."));
+        d = d.alt(format!(
+            "An intermediary changed the status: the problem report states {n} (RFC 9457 requires the generator to send the same status)."
+        ));
+    }
+    d = d.var("problem", sentence).not_proven(
+        "That the problem report is accurate, or which component on the path wrote it: any server can send application/problem+json.",
+    );
+    let ids = match (named_type, &p.instance) {
+        (Some(t), Some(i)) => Some(format!("its type ({t}) and instance ({i})")),
+        (Some(t), None) => Some(format!("its type ({t})")),
+        (None, Some(i)) => Some(format!("its instance ({i})")),
+        (None, None) => None,
+    };
+    if let Some(ids) = ids {
+        d.extra_remediation.push(Remediation {
+            text: format!("When you ask the API's owner about this response, quote the problem report's {ids}: they name the condition the server reported."),
+            owner: Owner::Caller,
+        });
+    }
+    d
 }

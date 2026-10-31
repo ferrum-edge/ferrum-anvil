@@ -86,6 +86,24 @@ pub struct BodyFacts {
     /// The body is a JSON-RPC result of an MCP tool call that reports a
     /// tool-level failure (`result.isError: true`).
     pub mcp_tool_error: Option<McpToolError>,
+    /// The body is an RFC 9457 problem report (`application/problem+json`).
+    pub problem: Option<ProblemDetails>,
+}
+
+/// The standard members of an RFC 9457 problem report, as the response
+/// carries them. Each text is a redacted [`excerpt`] with control characters
+/// replaced by spaces. A member that is absent or not of its RFC 9457 type is
+/// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
+/// not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemDetails {
+    /// `type`: the problem type URI. Absent means `about:blank`.
+    pub type_uri: Option<String>,
+    pub title: Option<String>,
+    /// `status`: the status code the generator says it used.
+    pub status: Option<u16>,
+    pub detail: Option<String>,
+    pub instance: Option<String>,
 }
 
 /// A JSON-RPC 2.0 error, as the response carries it.
@@ -212,6 +230,9 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
                 }
                 f.jsonrpc_error = jsonrpc_error(obj, redact);
                 f.mcp_tool_error = mcp_tool_error(obj, redact);
+                if is_problem_json(&ct) {
+                    f.problem = problem_details(obj, redact);
+                }
                 if let Some(errs) = obj.get("errors").and_then(|e| e.as_array())
                     && !errs.is_empty()
                     && errs.iter().all(|e| e.get("message").is_some())
@@ -259,6 +280,32 @@ fn mcp_tool_error(obj: &serde_json::Map<String, serde_json::Value>, redact: Reda
     let blocks = result.get("content").and_then(|c| c.as_array());
     let text = blocks.and_then(|b| b.iter().find_map(|x| x.get("text").and_then(|t| t.as_str()))).unwrap_or("");
     Some(McpToolError { text: excerpt(redact, text, 300) })
+}
+
+/// Whether the media type (lowercased) is RFC 9457's `application/problem+json`.
+/// Only the registered media type marks a problem report: plain JSON with a
+/// `title` member is too common to be read as one.
+fn is_problem_json(content_type: &str) -> bool {
+    content_type.split(';').next().map(str::trim) == Some("application/problem+json")
+}
+
+/// The RFC 9457 standard members of a problem report; `None` when it has
+/// none of them.
+fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Redact<'_>) -> Option<ProblemDetails> {
+    let text = |key: &str, max: usize| {
+        let v = obj.get(key)?.as_str()?;
+        let one_line: String = excerpt(redact, v, max).chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
+    };
+    let p = ProblemDetails {
+        type_uri: text("type", 256),
+        title: text("title", 200),
+        status: obj.get("status").and_then(|v| v.as_u64()).and_then(|v| u16::try_from(v).ok()).filter(|v| (100..=599).contains(v)),
+        detail: text("detail", 300),
+        instance: text("instance", 256),
+    };
+    let any = p.type_uri.is_some() || p.title.is_some() || p.status.is_some() || p.detail.is_some() || p.instance.is_some();
+    any.then_some(p)
 }
 
 fn trim_ascii(b: &[u8]) -> &[u8] {
@@ -390,6 +437,24 @@ mod tests {
         // Cut first, the secret's prefix is left where no exact-value redaction can match it.
         let f = body_facts(Some("application/json"), json.as_bytes());
         assert!(f.json_error.is_some_and(|e| e.ends_with(&SECRET[..4])));
+    }
+
+    #[test]
+    fn problem_report_texts_are_redacted_and_kept_on_one_line() {
+        let redact: Redact<'_> = Some(&scrub);
+        let pad = "d".repeat(296);
+        let json =
+            format!(r#"{{"type":"tag:x","title":"line one\nline\ttwo","status":503,"detail":"{pad}{SECRET}","instance":"/req/{SECRET}"}}"#);
+        let f = body_facts_redacted(Some("application/problem+json"), json.as_bytes(), redact);
+        let p = f.problem.expect("a problem report");
+        assert_eq!(p.title.as_deref(), Some("line one line two"));
+        assert_eq!(p.detail, Some(format!("{pad}{REDACTED}")));
+        assert_eq!(p.instance, Some(format!("/req/{REDACTED}")));
+        assert_eq!((p.type_uri.as_deref(), p.status), (Some("tag:x"), Some(503)));
+        // Out-of-range status and blank texts are ignored.
+        let f = body_facts(Some("application/problem+json"), br#"{"status":1000,"title":" \u0001 ","detail":"d"}"#);
+        let p = f.problem.expect("detail is a standard member");
+        assert_eq!((p.status, p.title, p.detail.as_deref()), (None, None, Some("d")));
     }
 
     #[test]
