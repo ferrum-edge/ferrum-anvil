@@ -154,8 +154,13 @@ try {
     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
   )
-  $entries = @(Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Ferrum Anvil' })
+  # An empty result is a finding (no entry: package); a registry read error is
+  # the runner's. A missing Uninstall key is neither: it just has no entries.
+  $regErr = @()
+  $entries = @(Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue -ErrorVariable +regErr | Where-Object { $_.DisplayName -eq 'Ferrum Anvil' })
+  $regFaults = @($regErr | Where-Object { $_.Exception -isnot [System.Management.Automation.ItemNotFoundException] })
   $entries | Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation, DisplayIcon, UninstallString, PSPath | Format-List | Out-String | Set-Content (Join-Path $Logs 'uninstall-entries.txt')
+  if (-not $entries -and $regFaults) { HFail 'install' "reading the Uninstall registry keys failed: $($regFaults[0].Exception.Message)" }
   if (-not $entries) { Fail 'install' 'no "Ferrum Anvil" entry under Apps & features (Uninstall registry keys) after the install' }
   $dirs = @()
   foreach ($e in $entries) {
@@ -164,12 +169,16 @@ try {
   }
   $dirs += @((Join-Path $env:LOCALAPPDATA 'Ferrum Anvil'), (Join-Path $env:ProgramFiles 'Ferrum Anvil'))
   $exe = $null
+  $lsErr = @()
   foreach ($d in ($dirs | Where-Object { $_ } | Select-Object -Unique)) {
     if (Test-Path $d) {
-      $exe = Get-ChildItem -Path $d -Filter '*.exe' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '^(uninstall|unins)' } | Select-Object -First 1
+      $exe = Get-ChildItem -Path $d -Filter '*.exe' -File -ErrorAction SilentlyContinue -ErrorVariable +lsErr | Where-Object { $_.Name -notmatch '^(uninstall|unins)' } | Select-Object -First 1
       if ($exe) { break }
     }
   }
+  # None found by listings that worked is the package's; a listing that failed
+  # proves nothing.
+  if (-not $exe -and $lsErr) { HFail 'install' "listing the install directories failed: $($lsErr[0].Exception.Message)" }
   if (-not $exe) { Fail 'install' "no installed application executable under: $(($dirs | Select-Object -Unique) -join '; ')" }
   $exe = $exe.FullName
   # PE machine type: 0x8664 = x64.
@@ -228,10 +237,11 @@ try {
     'surfaces.gui_driven=no: the installed app was launched and observed (process, top-level window, WebView2 processes), but no UI automation clicked or typed in it'
 
   # --- launch ------------------------------------------------------------------
-  # Returns $null when the process query itself fails (a probe error, not
-  # "no webview").
+  # Returns Ok = $false when the process query itself fails (a probe error)
+  # and Ok = $true with a possibly empty Children array when it worked: an
+  # empty array returned bare from a function would arrive as $null.
   function Get-WebViewChildren($appPid) {
-    try { $all = Get-CimInstance Win32_Process } catch { return $null }
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch { return [pscustomobject]@{ Ok = $false; Children = @(); Error = $_.Exception.Message } }
     $ids = @($appPid)
     $found = @()
     for ($round = 0; $round -lt 4; $round++) {
@@ -240,7 +250,7 @@ try {
       $found += $kids
       $ids += $kids.ProcessId
     }
-    @($found | Where-Object { $_.Name -eq 'msedgewebview2.exe' })
+    [pscustomobject]@{ Ok = $true; Children = @($found | Where-Object { $_.Name -eq 'msedgewebview2.exe' }); Error = $null }
   }
 
   function Launch($name) {
@@ -257,9 +267,9 @@ try {
     }
     $proc.Refresh()
     if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { $win = $true; $title = $proc.MainWindowTitle }
-    $children = Get-WebViewChildren $proc.Id
-    $probeError = $null -eq $children
-    $web = if ($probeError) { 0 } else { @($children).Count }
+    $query = Get-WebViewChildren $proc.Id
+    $probeError = -not $query.Ok
+    $web = @($query.Children).Count
     $shot = 'none'
     try {
       Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -280,7 +290,7 @@ try {
     MetaJson "launches.$name" @{ pid = $proc.Id; alive_seconds = $Alive; top_level_window = $win; window_title = $title; first_window_after = $first; webview_processes = $web; app_log_dir_exists = $hasLog; screenshot = $shot }
     if (-not $win) { Fail $name "the app stayed up ${Alive}s but showed no top-level window" }
     if ($title -ne 'Ferrum Anvil') { Fail $name "the top-level window is titled '$title', expected 'Ferrum Anvil'" }
-    if ($web -lt 1 -and $probeError) { HFail $name 'the process query (Get-CimInstance Win32_Process) failed, so a missing WebView2 process proves nothing' }
+    if ($web -lt 1 -and $probeError) { HFail $name "the process query (Get-CimInstance Win32_Process) failed, so a missing WebView2 process proves nothing: $($query.Error)" }
     if ($web -lt 1) { Fail $name 'the app showed a window but started no WebView2 (msedgewebview2.exe) child process' }
     Pass $name "installed app stayed up ${Alive}s (pid $($proc.Id)); top-level window '$title' after $first; $web WebView2 process(es); screenshot: $shot"
   }
@@ -323,12 +333,22 @@ try {
     try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 -Uri 'http://127.0.0.1:18080/__ready' | Out-Null; $up = $true } catch { Start-Sleep -Milliseconds 500 }
   }
   if (-not $up) { HFail 'local_call' 'the loopback listener on 127.0.0.1:18080 did not start' }
-  try { $before = [int](& python -I $RecordPy requests --log $reqLog --method GET --path /ok/echo) } catch { HFail 'local_call' "cannot read the listener's request log: $($_.Exception.Message)" }
+  # The helper prints a count (0 when nothing was logged); no output or a
+  # non-zero exit is a helper failure, not "nothing logged".
+  function Get-ListenerCount {
+    $n = & python -I $RecordPy requests --log $reqLog --method GET --path /ok/echo
+    if ($LASTEXITCODE -or "$n" -notmatch '^\d+$') { HFail 'local_call' "cannot read the listener's request log (exit $LASTEXITCODE, output '$n')" }
+    [int]$n
+  }
+  $before = Get-ListenerCount
   try { & $cli send 'Healthy/OK' --workspace $WS --json 2> (Join-Path $Logs 'send.stderr') | Set-Content (Join-Path $Logs 'send.json') } catch { Fail 'local_call' "the release CLI could not run: $($_.Exception.Message)" }
   $rc = $LASTEXITCODE
   $listenerAlive = -not $script:serverProc.HasExited
-  try { $after = [int](& python -I $RecordPy requests --log $reqLog --method GET --path /ok/echo) } catch { HFail 'local_call' "cannot read the listener's request log: $($_.Exception.Message)" }
-  $statuses = (& python -I $RecordPy statuses (Join-Path $Logs 'send.json') 2>$null) -join ' '
+  $after = Get-ListenerCount
+  # Exit 3: send.json is no JSON execution record (the CLI's output: package);
+  # another non-zero exit is the helper's (harness). An empty list is valid.
+  $statuses = (& python -I $RecordPy statuses (Join-Path $Logs 'send.json') 2>(Join-Path $Logs 'statuses.err')) -join ' '
+  $statusesExit = $LASTEXITCODE
   try { & $cli history -n 5 --workspace $WS *> (Join-Path $Logs 'history.txt') } catch { }
   Stop-Process -Id $script:serverProc.Id -Force -ErrorAction SilentlyContinue
   $script:serverProc = $null
@@ -336,6 +356,8 @@ try {
   if (-not $listenerAlive) { HFail 'local_call' "the loopback listener exited during the call: $(Tail (Join-Path $Logs 'local-server.log') 3)" }
   if ($rc -ne 0) { FailUnlessRunner 'local_call' (Tail (Join-Path $Logs 'send.stderr') 20) "anvil send exited ${rc}: $(Tail (Join-Path $Logs 'send.stderr'))" }
   if ($after -le $before) { Fail 'local_call' 'the loopback listener logged no GET /ok/echo' }
+  if ($statusesExit -eq 3) { Fail 'local_call' "anvil send --json printed no JSON execution record: $(Tail (Join-Path $Logs 'statuses.err') 2)" }
+  if ($statusesExit) { HFail 'local_call' "reading the execution record failed (exit $statusesExit): $(Tail (Join-Path $Logs 'statuses.err') 2)" }
   if (" $statuses " -notlike '* 200 *') { Fail 'local_call' "the execution record shows no HTTP 200 (statuses found: $statuses)" }
   try { $ua = ((Get-Content $reqLog | Where-Object { $_ -like '*/ok/echo*' } | Select-Object -Last 1) | ConvertFrom-Json).user_agent } catch { $ua = 'unknown' }
   Meta "local_call.request=Healthy/OK in '$WS'" 'local_call.url=http://127.0.0.1:18080/ok/echo' "local_call.user_agent=$ua"

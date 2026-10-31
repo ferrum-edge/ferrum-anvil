@@ -177,7 +177,10 @@ install_dmg() {
   fi
   bypass dmg_license_prompt "The DMG's license agreement was accepted non-interactively (yes piped into hdiutil attach); no person read or clicked it."
   ls -la "$mp" >"$logs/dmg-contents.txt" 2>&1 || true
-  src="$(find "$mp" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1 || true)"
+  # find failing on the mounted image (its file system unreadable) and find
+  # succeeding with no .app are both the DMG's; the error is kept.
+  src="$(find "$mp" -maxdepth 1 -name '*.app' -type d 2>"$logs/dmg-find.err")" || fail install "cannot list the mounted DMG: $(oneline <"$logs/dmg-find.err")"
+  src="${src%%$'\n'*}"
   [ -n "$src" ] || fail install "no .app at the top level of the DMG"
   dest="/Applications/$(basename "$src")"
   [ ! -e "$dest" ] || hfail install "$dest already exists on this runner; it is not clean"
@@ -209,7 +212,7 @@ install_dmg() {
 }
 
 install_deb() {
-  local f="$INPUTS/$ASSET" pkg dver darch st n
+  local f="$INPUTS/$ASSET" pkg dver darch st n files
   pkg="$(dpkg-deb -f "$f" Package 2>&1)" || fail install "dpkg-deb cannot read $ASSET: $pkg"
   dver="$(dpkg-deb -f "$f" Version 2>&1)" || fail install "dpkg-deb cannot read the Version of $ASSET: $dver"
   darch="$(dpkg-deb -f "$f" Architecture 2>&1)" || fail install "dpkg-deb cannot read the Architecture of $ASSET: $darch"
@@ -224,7 +227,9 @@ install_deb() {
   n="$(wc -l <"$logs/apt-new-packages.txt" | tr -d ' ')"
   st="$(dpkg-query -W -f '${Status} ${Version}' "$pkg" 2>&1)" || fail install "apt-get succeeded but dpkg does not know $pkg: $st"
   case "$st" in "install ok installed $VERSION"*) ;; *) fail install "dpkg reports '$st' for $pkg" ;; esac
-  bin="$(dpkg -L "$pkg" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
+  # dpkg -L failing is a tool fault; succeeding without a /usr/bin entry is the package's.
+  files="$(dpkg -L "$pkg" 2>&1)" || hfail install "dpkg -L $pkg failed: $(printf '%s' "$files" | tail -2 | oneline)"
+  bin="$(printf '%s\n' "$files" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
   [ -n "$bin" ] && [ -x "$bin" ] || fail install "package $pkg installed no executable under /usr/bin"
   file -L "$bin" >"$logs/binary-file.txt" 2>&1 || hfail install "file(1) failed on $bin"
   grep -q 'x86-64' "$logs/binary-file.txt" || fail install "$bin is not an x86-64 executable: $(cat "$logs/binary-file.txt")"
@@ -237,7 +242,7 @@ install_deb() {
 }
 
 install_rpm() {
-  local f="$INPUTS/$ASSET" name rver n
+  local f="$INPUTS/$ASSET" name rver n files
   name="$(rpm -qp --qf '%{NAME}' "$f" 2>/dev/null)" || fail install "rpm cannot read $ASSET"
   rver="$(rpm -qp --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "$f" 2>/dev/null)" || fail install "rpm cannot read the version of $ASSET"
   rpm -qpR "$f" >"$logs/rpm-requires.txt" 2>&1 || true
@@ -255,7 +260,9 @@ install_rpm() {
   comm -13 "$work/pkgs-before" "$work/pkgs-after" >"$logs/dnf-new-packages.txt" || hfail install "comm failed"
   n="$(wc -l <"$logs/dnf-new-packages.txt" | tr -d ' ')"
   rpm -q "$name" >/dev/null || fail install "rpm -q $name: not installed"
-  bin="$(rpm -ql "$name" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
+  # rpm -ql failing is a tool fault; succeeding without a /usr/bin entry is the package's.
+  files="$(rpm -ql "$name" 2>&1)" || hfail install "rpm -ql $name failed: $(printf '%s' "$files" | tail -2 | oneline)"
+  bin="$(printf '%s\n' "$files" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
   [ -n "$bin" ] && [ -x "$bin" ] || fail install "package $name installed no executable under /usr/bin"
   file -L "$bin" >"$logs/binary-file.txt" 2>&1 || hfail install "file(1) failed on $bin"
   grep -q 'x86-64' "$logs/binary-file.txt" || fail install "$bin is not an x86-64 executable: $(cat "$logs/binary-file.txt")"
@@ -419,8 +426,12 @@ launch() { # $1 = step name
     # `open` failing means LaunchServices could not start the installed app.
     open -n --stdout "$logs/$name.stdout.log" --stderr "$logs/$name.stdout.log" "$app" 2>>"$logs/$name.open.log" ||
       open -n "$app" 2>>"$logs/$name.open.log" || fail "$name" "open -n '$app' failed: $(oneline <"$logs/$name.open.log")"
+    # pgrep exits 1 when nothing matches (keep waiting); 2 or 3 is a probe error.
+    local prc
     for _ in $(seq 1 20); do
-      pid="$(pgrep -nf "$bin" || true)"
+      prc=0
+      pid="$(pgrep -nf "$bin" 2>>"$logs/webview-probe.err")" || prc=$?
+      [ "$prc" -le 1 ] || hfail "$name" "pgrep, looking for the app process, exited $prc: $(tail -1 "$logs/webview-probe.err" | oneline)"
       [ -n "$pid" ] && break
       sleep 1
     done
@@ -530,7 +541,10 @@ rc=0
 listener_alive=true
 kill -0 "$server_pid" 2>/dev/null || listener_alive=false
 after="$(py requests --log "$logs/local-server-requests.jsonl" --method GET --path /ok/echo)" || hfail local_call "cannot read the listener's request log"
-statuses="$(py statuses "$logs/send.json" 2>/dev/null || true)"
+# Exit 3: send.json is no JSON execution record (the CLI's output: package);
+# another non-zero exit is the helper's (harness). An empty list is valid.
+srx=0
+statuses="$(py statuses "$logs/send.json" 2>"$logs/statuses.err")" || srx=$?
 "$cli" history -n 5 --workspace "$WS" >"$logs/history.txt" 2>&1 || true
 kill "$server_pid" 2>/dev/null || true
 server_pid=""
@@ -538,6 +552,8 @@ server_pid=""
 [ "$listener_alive" = true ] || hfail local_call "the loopback listener exited during the call: $(tail -3 "$logs/local-server.log" | oneline)"
 [ "$rc" = 0 ] || fail_unless_runner local_call "$logs/send.stderr" "anvil send exited $rc: $(tail -5 "$logs/send.stderr" | oneline)"
 [ "$after" -gt "$before" ] || fail local_call "the loopback listener logged no GET /ok/echo"
+[ "$srx" != 3 ] || fail local_call "anvil send --json printed no JSON execution record: $(tail -2 "$logs/statuses.err" | oneline)"
+[ "$srx" = 0 ] || hfail local_call "reading the execution record failed (exit $srx): $(tail -2 "$logs/statuses.err" | oneline)"
 case " $statuses " in *" 200 "*) ;; *) fail local_call "the execution record shows no HTTP 200 (statuses found: ${statuses:-none})" ;; esac
 ua="$(python3 -I -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[1]) if "/ok/echo" in l][-1].get("user_agent"))' "$logs/local-server-requests.jsonl")" || ua="unknown"
 meta local_call.request="Healthy/OK in '$WS'" local_call.url="http://127.0.0.1:18080/ok/echo" local_call.user_agent="$ua"

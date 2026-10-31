@@ -152,9 +152,21 @@ def statuses(obj, out):
     return out
 
 
+# Exit status of `statuses` when the file holds no JSON execution record:
+# the release CLI's output is at fault (package). Any other failure of this
+# helper is the harness's.
+NOT_A_RECORD = 3
+
+
 def cmd_statuses(a):
-    with open(a.file, encoding="utf-8-sig") as f:
-        print(" ".join(str(s) for s in statuses(json.load(f), [])))
+    try:
+        with open(a.file, encoding="utf-8-sig") as f:
+            doc = json.load(f)
+    except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        print(f"{a.file} holds no JSON execution record: {e}", file=sys.stderr)
+        sys.exit(NOT_A_RECORD)
+    # An empty list is a valid answer: the record names no HTTP status.
+    print(" ".join(str(s) for s in statuses(doc, [])))
 
 
 def cmd_requests(a):
