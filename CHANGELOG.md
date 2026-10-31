@@ -123,8 +123,11 @@
   a CertificateRequest with an empty `certificate_authorities` extension
   without an alert, which every supported Ferrum Edge release sends, so the
   handshake timed out (`client.dtls.handshake_timeout`) instead of presenting
-  the client identity. Anvil is back on dimpl 0.7.5 and Dependabot no longer
-  proposes 0.8 or later.
+  the client identity. Anvil is back on dimpl 0.7 (0.7.6) and Dependabot no
+  longer proposes 0.8 or later. As in every Anvil release so far, a
+  third-party DTLS 1.3 server that sends a NewSessionTicket after the
+  handshake still ends the session (dimpl 0.8 ignores it); Ferrum Edge does
+  not send one.
 - `anvil import` no longer reads a whole file before checking it against the
   import limits: as in the desktop, the file's start decides how much is read
   (a full backup's header is checked first, and anything else is read only up

@@ -56,6 +56,9 @@ rcgen.workspace = true
 anvil-fixtures = { path = "../anvil-fixtures" }
 anvil-auth.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# The DTLS stack of every supported Ferrum Edge release, for the cross-version
+# handshake in tests/dtls_edge_interop.rs (see the dimpl pin in the root Cargo.toml).
+dimpl-edge = { package = "dimpl", version = "=0.6.1" }
 
 [lints]
 workspace = true
