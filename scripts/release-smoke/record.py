@@ -214,7 +214,24 @@ def cmd_finalize(a):
         sys.exit(1)
 
 
+def cmd_fetch_asset(a):
+    """Print the fetch job's status and detail for one asset, tab-separated
+    (`missing` when fetch.json does not name it)."""
+    for e in read_json(a.fetch, {}).get("assets", []):
+        if e.get("name") == a.name:
+            print(f"{e.get('status')}\t{e.get('detail')}")
+            return
+    print("missing\tthe fetch result does not name this asset")
+
+
 def cmd_summarize(a):
+    fetch = read_json(a.fetch, None) if a.fetch else None
+    fetch_ok = a.fetch_job_result in (None, "success")
+    if fetch is None and not fetch_ok:
+        # The fetch job stopped before writing its result (for example while
+        # resolving the release): nothing about the assets is known.
+        fetch = {"failure_class": "harness", "harness_error": f"the fetch job ended '{a.fetch_job_result}' without a result", "package_failures": []}
+    fetch_class = (fetch or {}).get("failure_class")
     results = []
     for root, _dirs, files in os.walk(a.input):
         if "result.json" in files:
@@ -222,15 +239,24 @@ def cmd_summarize(a):
     results.sort(key=lambda r: r.get("target", ""))
     seen = {r.get("target") for r in results}
     absent = [t for t in a.expect if t not in seen]
-    overall = "pass" if results and not absent and all(r.get("result") == "pass" for r in results) else "fail"
+    overall = "pass" if fetch_ok and not fetch_class and results and not absent and all(r.get("result") == "pass" for r in results) else "fail"
     summary = {
         "schema": SCHEMA + ".summary",
         "case": "REL-001",
         "result": overall,
         "targets_expected": a.expect,
         "targets_without_result": absent,
-        "package_failures": [r.get("target") for r in results if r.get("failure_class") == "package"],
-        "harness_or_unclassified_failures": [r.get("target") for r in results if r.get("failure_class") in ("harness", "unclassified")]
+        "fetch": {
+            "job_result": a.fetch_job_result,
+            "failure_class": fetch_class,
+            "harness_error": (fetch or {}).get("harness_error"),
+            "package_failures": (fetch or {}).get("package_failures", []),
+            "assets": (fetch or {}).get("assets", []),
+        },
+        "package_failures": [f"fetch:{n}" for n in (fetch or {}).get("package_failures", [])]
+        + [r.get("target") for r in results if r.get("failure_class") == "package"],
+        "harness_or_unclassified_failures": (["fetch"] if fetch_class == "harness" else [])
+        + [r.get("target") for r in results if r.get("failure_class") in ("harness", "unclassified")]
         + absent,
         "targets": [
             {
@@ -252,6 +278,17 @@ def cmd_summarize(a):
         "## REL-001 clean-install smoke",
         "",
         f"Overall: **{overall}**" + (f" (no result from: {', '.join(absent)})" if absent else ""),
+        "",
+        "Fetch: "
+        + (
+            f"**harness** failure, no target ran: {summary['fetch']['harness_error']}"
+            if fetch_class == "harness"
+            else f"**package** problems with published assets: {', '.join(summary['fetch']['package_failures'])}"
+            if fetch_class == "package"
+            else "every asset matched SHA256SUMS"
+            if fetch
+            else "no result"
+        ),
         "",
         "| Target | Result | Failure class | Asset | sha256 | Runner | Failed / missing steps |",
         "| --- | --- | --- | --- | --- | --- | --- |",
@@ -319,6 +356,11 @@ def main():
     s.add_argument("--path", required=True)
     s.set_defaults(fn=cmd_requests)
 
+    s = sub.add_parser("fetch-asset")
+    s.add_argument("--fetch", required=True)
+    s.add_argument("--name", required=True)
+    s.set_defaults(fn=cmd_fetch_asset)
+
     s = sub.add_parser("finalize")
     s.add_argument("--dir", required=True)
     s.add_argument("--target", required=True)
@@ -329,6 +371,8 @@ def main():
     s.add_argument("--input", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--expect", nargs="*", default=[])
+    s.add_argument("--fetch", help="fetch.json written by fetch.sh")
+    s.add_argument("--fetch-job-result", help="the fetch job's result (success, failure, ...)")
     s.set_defaults(fn=cmd_summarize)
 
     a = p.parse_args()

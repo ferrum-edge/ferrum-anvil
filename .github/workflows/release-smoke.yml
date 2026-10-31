@@ -72,29 +72,20 @@ jobs:
             "$RUNNER_TEMP/release-view.json" > rel001-inputs/release.json
           cat rel001-inputs/release.json
           { echo "tag=$tag"; echo "version=${tag#anvil-v}"; } >> "$GITHUB_OUTPUT"
-      - name: Download the packages, CLI archives and SHA256SUMS
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A published asset that is missing or does not match SHA256SUMS is a
+      # package failure: recorded in fetch.json, the run continues and the
+      # affected targets fail. An API or download failure is a harness
+      # failure and stops the run here.
+      - name: Download and check the packages, CLI archives and SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.resolve.outputs.tag }}
           V: ${{ steps.resolve.outputs.version }}
-        run: |
-          names=(
-            "Ferrum-Anvil_${V}_aarch64.dmg" "Ferrum-Anvil_${V}_x64.dmg"
-            "Ferrum-Anvil_${V}_x64-setup.exe" "Ferrum-Anvil_${V}_x64_en-US.msi"
-            "Ferrum-Anvil_${V}_amd64.deb" "Ferrum-Anvil-${V}-1.x86_64.rpm" "Ferrum-Anvil_${V}_amd64.AppImage"
-            "anvil-cli-${V}-aarch64-apple-darwin.tar.gz" "anvil-cli-${V}-x86_64-apple-darwin.tar.gz"
-            "anvil-cli-${V}-x86_64-pc-windows-msvc.zip" "anvil-cli-${V}-x86_64-unknown-linux-gnu.tar.gz"
-          )
-          args=(-p SHA256SUMS)
-          for n in "${names[@]}"; do args+=(-p "$n"); done
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir rel001-inputs "${args[@]}"
-          for n in "${names[@]}"; do
-            [ -f "rel001-inputs/$n" ] || { echo "::error::$TAG has no asset $n"; exit 1; }
-            want="$(awk -v n="$n" '$2 == n || $2 == "*" n { print $1 }' rel001-inputs/SHA256SUMS)"
-            got="$(sha256sum "rel001-inputs/$n" | cut -d' ' -f1)"
-            [ -n "$want" ] && [ "$want" = "$got" ] || { echo "::error::$n: sha256 $got, SHA256SUMS ${want:-<missing>}"; exit 1; }
-            echo "ok  $got  $n"
-          done
+          DIR: rel001-inputs
+        run: scripts/release-smoke/fetch.sh
       - name: Fetch the example workspace at the release tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,6 +107,15 @@ jobs:
           path: rel001-inputs/
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
+      - name: Upload the fetch result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-fetch
+          path: rel001-inputs/fetch.json
+          if-no-files-found: warn
+          retention-days: 90
           overwrite: true
 
   smoke-unix:
@@ -294,7 +294,8 @@ jobs:
   summary:
     name: Summary
     needs: [fetch, smoke-unix, smoke-rpm, smoke-windows]
-    if: always() && needs.fetch.result == 'success'
+    # Also when fetch failed, so the summary reports why and with which class.
+    if: ${{ !cancelled() && needs.fetch.result != 'skipped' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -302,16 +303,25 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: rel001-fetch
+          path: rel001-fetch
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.fetch.result == 'success'
         with:
           pattern: rel001-result-*
           path: rel001-results
-      - name: Merge the per-target results
+      - name: Merge the fetch result and the per-target results
+        env:
+          FETCH_JOB_RESULT: ${{ needs.fetch.result }}
         run: |
-          mkdir -p rel001-summary
+          mkdir -p rel001-summary rel001-results
           python3 -I scripts/release-smoke/record.py summarize --input rel001-results --out rel001-summary/summary.json \
+            --fetch rel001-fetch/fetch.json --fetch-job-result "$FETCH_JOB_RESULT" \
             --expect macos-arm64-dmg macos-x64-dmg linux-x64-deb linux-x64-appimage linux-x64-rpm windows-x64-nsis windows-x64-msi
       - name: Upload the summary
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rel001-summary

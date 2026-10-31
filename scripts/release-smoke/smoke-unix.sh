@@ -59,7 +59,7 @@ hfail() { fail_as harness "$1" "$2"; }
 # error is the harness's, anything else (unmet dependencies, a broken package)
 # is the package's. $1 step, $2 log, $3 detail.
 fail_pkg_install() {
-  if grep -qiE "Temporary failure resolving|Could not resolve|Failed to fetch|Unable to fetch|Could not connect|Connection (timed out|refused|reset)|Hash Sum mismatch|Curl error|Cannot download|Failed to download|Status code: 5[0-9][0-9]|Network is unreachable|timed out" "$2"; then
+  if grep -qiE "Temporary failure resolving|Could not resolve|Failed to fetch|Unable to fetch|Could not connect|Connection (timed out|refused|reset)|Hash Sum mismatch|Curl error|Cannot download|Failed to download|Status code: 5[0-9][0-9]|Network is unreachable|Connection timed out|Operation timed out|Timeout was reached" "$2"; then
     hfail "$1" "$3 (package mirror or network error)"
   fi
   fail "$1" "$3"
@@ -85,11 +85,20 @@ metaj "release=$(cat "$INPUTS/release.json")" "example=$(cat "$INPUTS/example.js
 meta target_triple="$RUST_TARGET" package="$PACKAGE"
 
 check_asset() { # $1 file name, $2 meta key
-  local f="$INPUTS/$1" want got size
-  [ -f "$f" ] || hfail asset_integrity "$1 was not downloaded"
-  want="$(py sums --sums "$INPUTS/SHA256SUMS" --name "$1")" || fail asset_integrity "$1 is not listed in the release's SHA256SUMS"
+  local f="$INPUTS/$1" fetched status detail want got size
+  # The fetch job checked the published asset against SHA256SUMS (fetch.sh):
+  # a problem it found is the published release's, a package failure.
+  fetched="$(py fetch-asset --fetch "$INPUTS/fetch.json" --name "$1")"
+  status="${fetched%%$'\t'*}"
+  detail="${fetched#*$'\t'}"
+  [ "$status" != missing ] || hfail asset_integrity "$1: $detail"
+  [ "$status" = ok ] || fail asset_integrity "published asset $1: $detail (fetch status $status)"
+  # Here the check is of the hand-over between jobs: a difference now is a
+  # transfer error, a harness failure.
+  [ -f "$f" ] || hfail asset_integrity "$1 did not arrive from the fetch job"
+  want="$(py sums --sums "$INPUTS/SHA256SUMS" --name "$1")" || hfail asset_integrity "SHA256SUMS from the fetch job does not list $1"
   got="$(py sha256 "$f")"
-  [ "$want" = "$got" ] || fail asset_integrity "$1 sha256 $got does not match SHA256SUMS ($want)"
+  [ "$want" = "$got" ] || hfail asset_integrity "$1 changed between the fetch job and this one (sha256 $got, SHA256SUMS $want)"
   size="$(wc -c <"$f" | tr -d ' ')"
   meta "$2.name=$1" "$2.sha256=$got"
   metaj "$2.size=$size" "$2.sha256sums_match=true"
@@ -142,12 +151,12 @@ install_dmg() {
   ditto "$src" "$dest" || fail install "ditto to /Applications failed"
   hdiutil detach "$mp" -quiet || hdiutil detach "$mp" -force -quiet || true
   app="$dest"
-  exe="$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist")"
-  ver="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")"
+  exe="$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist" 2>&1)" || fail install "the app's Info.plist has no CFBundleExecutable: $exe"
+  ver="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist" 2>&1)" || fail install "the app's Info.plist has no CFBundleShortVersionString: $ver"
   bin="$app/Contents/MacOS/$exe"
   [ -x "$bin" ] || fail install "$bin is missing or not executable"
   [ "$ver" = "$VERSION" ] || fail install "installed app version $ver, expected $VERSION"
-  archs="$(lipo -archs "$bin")"
+  archs="$(lipo -archs "$bin" 2>&1)" || fail install "lipo cannot read $bin: $archs"
   case " $archs " in *" $EXPECT_ARCH "*) ;; *) fail install "the installed binary is built for '$archs', not $EXPECT_ARCH" ;; esac
   xq2="$(xattr -p com.apple.quarantine "$app" 2>/dev/null || true)"
   meta install.method="hdiutil attach, then ditto of the .app to /Applications (the drag-to-Applications install)" \
@@ -168,7 +177,7 @@ install_dmg() {
 
 install_deb() {
   local f="$INPUTS/$ASSET" pkg dver darch st n
-  pkg="$(dpkg-deb -f "$f" Package)"
+  pkg="$(dpkg-deb -f "$f" Package 2>&1)" || fail install "dpkg-deb cannot read $ASSET: $pkg"
   dver="$(dpkg-deb -f "$f" Version)"
   darch="$(dpkg-deb -f "$f" Architecture)"
   dpkg-deb -f "$f" Depends >"$logs/deb-depends.txt" || true
@@ -196,7 +205,7 @@ install_deb() {
 
 install_rpm() {
   local f="$INPUTS/$ASSET" name rver n
-  name="$(rpm -qp --qf '%{NAME}' "$f" 2>/dev/null)"
+  name="$(rpm -qp --qf '%{NAME}' "$f" 2>/dev/null)" || fail install "rpm cannot read $ASSET"
   rver="$(rpm -qp --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "$f" 2>/dev/null)"
   rpm -qpR "$f" >"$logs/rpm-requires.txt" 2>&1 || true
   rpm -Kv "$f" >"$logs/rpm-checksig.txt" 2>&1 || true
@@ -249,6 +258,7 @@ install_appimage() {
   chmod +x "$dest/$ASSET"
   bin="$dest/$ASSET"
   file -L "$bin" >"$logs/binary-file.txt"
+  grep -q 'ELF 64-bit.*x86-64' "$logs/binary-file.txt" || fail install "$ASSET is not an x86-64 ELF executable: $(cat "$logs/binary-file.txt")"
   meta install.method="copied to ~/Applications and marked executable (chmod +x)" install.executable="$bin" install.prerequisites="$prereq"
   pass install "copied $ASSET to ~/Applications and marked it executable; host prerequisites installed: $prereq"
   info signing "the .AppImage.sig asset is the in-app updater (minisign) signature, which the OS does not check; Linux has no platform code signing; integrity was checked against SHA256SUMS"
@@ -392,6 +402,10 @@ launch() { # $1 = step name
   meta "launches.$name.first_window_after=${first_window:-never}" "launches.$name.first_webview_after=${first_webview:-never}" "launches.$name.screenshot=$shot"
   local wanted="a top-level window titled 'Ferrum Anvil'"
   [ "$os" = Darwin ] && wanted="an on-screen window owned by the app process"
+  # No window found because the probe itself failed says nothing about the app.
+  if [ "$win" = 0 ] && [ "$os" = Darwin ] && [ -s "$logs/window-probe.err" ]; then
+    hfail "$name" "the window probe (osascript) failed: $(tail -2 "$logs/window-probe.err" | oneline)"
+  fi
   [ "$win" != 0 ] || fail "$name" "the app stayed up ${i}s but showed no $wanted (first seen: ${first_window:-never})"
   [ "$web" -gt 0 ] || fail "$name" "the app stayed up ${i}s but has no webview content process (WebKit; first seen: ${first_webview:-never}; $web_before were running before the launch)"
   pass "$name" "installed app stayed up ${i}s (pid $pid); $win top-level window(s), first after $first_window; $web webview content process(es), first after $first_webview; screenshot: $shot"

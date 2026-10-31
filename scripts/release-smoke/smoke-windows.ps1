@@ -65,11 +65,18 @@ try {
   foreach ($pair in @(@($Asset, 'asset'), @($CliAsset, 'cli_asset'))) {
     $name, $key = $pair
     $f = Join-Path $Inputs $name
-    if (-not (Test-Path $f)) { HFail 'asset_integrity' "$name was not downloaded" }
+    # The fetch job checked the published asset against SHA256SUMS (fetch.sh):
+    # a problem it found is the published release's, a package failure.
+    $fetched = @((Get-Content -Raw (Join-Path $Inputs 'fetch.json') | ConvertFrom-Json).assets | Where-Object { $_.name -eq $name })
+    if (-not $fetched) { Fail 'asset_integrity' "the fetch result does not name $name" 'harness' }
+    if ($fetched[0].status -ne 'ok') { Fail 'asset_integrity' "published asset ${name}: $($fetched[0].detail) (fetch status $($fetched[0].status))" }
+    # Here the check is of the hand-over between jobs: a difference now is a
+    # transfer error, a harness failure.
+    if (-not (Test-Path $f)) { HFail 'asset_integrity' "$name did not arrive from the fetch job" }
     $want = (& python -I $RecordPy sums --sums $sums --name $name)
-    if ($LASTEXITCODE) { Fail 'asset_integrity' "$name is not listed in the release's SHA256SUMS" }
+    if ($LASTEXITCODE) { HFail 'asset_integrity' "SHA256SUMS from the fetch job does not list $name" }
     $got = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
-    if ($want -ne $got) { Fail 'asset_integrity' "$name sha256 $got does not match SHA256SUMS ($want)" }
+    if ($want -ne $got) { HFail 'asset_integrity' "$name changed between the fetch job and this one (sha256 $got, SHA256SUMS $want)" }
     Meta "$key.name=$name" "$key.sha256=$got"
     MetaJson "$key.size" (Get-Item $f).Length
     MetaJson "$key.sha256sums_match" $true
@@ -140,14 +147,18 @@ try {
   if (-not $exe) { Fail 'install' "no installed application executable under: $(($dirs | Select-Object -Unique) -join '; ')" }
   $exe = $exe.FullName
   # PE machine type: 0x8664 = x64.
-  $fs = [IO.File]::OpenRead($exe)
+  # A malformed installed executable is the package's failure, not an
+  # unclassified script error.
   try {
-    $br = New-Object IO.BinaryReader($fs)
-    $fs.Seek(0x3C, 'Begin') | Out-Null
-    $pe = $br.ReadInt32()
-    $fs.Seek($pe + 4, 'Begin') | Out-Null
-    $machine = $br.ReadUInt16()
-  } finally { $fs.Dispose() }
+    $fs = [IO.File]::OpenRead($exe)
+    try {
+      $br = New-Object IO.BinaryReader($fs)
+      $fs.Seek(0x3C, 'Begin') | Out-Null
+      $pe = $br.ReadInt32()
+      $fs.Seek($pe + 4, 'Begin') | Out-Null
+      $machine = $br.ReadUInt16()
+    } finally { $fs.Dispose() }
+  } catch { Fail 'install' "cannot read the PE header of ${exe}: $($_.Exception.Message)" }
   if ($machine -ne 0x8664) { Fail 'install' ("{0} is not an x64 PE (machine 0x{1:X4})" -f $exe, $machine) }
   $fileVersion = (Get-Item $exe).VersionInfo.ProductVersion
   $displayVersion = ($entries | Select-Object -First 1).DisplayVersion

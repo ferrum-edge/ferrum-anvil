@@ -502,20 +502,37 @@ the surface driven and every OS protection that was not exercised. The
 Every failure carries a class, and `result.json` (`failure_class`) and the
 summary table show it:
 
-- `package`: the shipped asset is at fault. Its checksum does not match
-  `SHA256SUMS`, it does not install, or the installed app does not launch,
-  show its window or start its webview. The release CLI fails to run,
-  import or call. A package manager that cannot resolve the package's own
-  dependencies is also a package failure.
+- `package`: the published release or the shipped asset is at fault. Any
+  of these is a package failure:
+  - an advertised asset is not in the release;
+  - the release has no `SHA256SUMS`, or `SHA256SUMS` does not list the asset;
+  - the asset GitHub stores does not match `SHA256SUMS`;
+  - the package does not install;
+  - the installed app does not launch, show its window or start its webview;
+  - the release CLI fails to run, import or call;
+  - a package manager cannot resolve the package's own dependencies.
 - `harness`: the test environment is at fault. Examples are the runner's
   architecture or state, installing a test tool (Xvfb, `fuse3`, the EGL
-  stack), a package-mirror or network error, the artifact fetch, or the
-  loopback listener. It says nothing about the asset.
+  stack), or a package-mirror or network error. Others are a release-API or
+  download failure, and downloaded bytes that differ from the digest GitHub
+  stores for the asset (a transfer error, retried first). An asset that
+  changes between jobs, a window probe that errors, and the loopback
+  listener are harness failures too. They say nothing about the asset.
 - `unclassified`: the job stopped without recording a failure, for example
   in checkout or artifact download. Treat it like `harness` until a person
   has read the log.
 
-A failed `fetch` job is always a harness failure; no target runs.
+The `fetch` job (`scripts/release-smoke/fetch.sh`) applies the same rule
+and writes `fetch.json` (artifact `rel001-fetch`):
+
+- **Package problem:** a missing asset, or one without a matching
+  `SHA256SUMS` line. The job records it and the run continues. The targets
+  that install the affected asset fail their `asset_integrity` step as a
+  package failure, and the other targets still run.
+- **Harness problem:** a release-API or download failure. The fetch job
+  fails, and no target runs.
+
+The summary job runs either way and reports the fetch result with its class.
 
 What it does **not** cover:
 
@@ -576,13 +593,15 @@ What it does **not** cover:
       the run's `rel001-summary` artifact. To re-run it:
       `gh workflow run release-smoke.yml -f tag=anvil-vX.Y.Z`.
 - [ ] If a target failed, read its `failure_class` in the summary first.
-      - `harness` or `unclassified` (or a failed `fetch` job): re-run the failed
-        jobs (`gh run rerun <run-id> --failed`), and repair the harness if it
+      - `harness` or `unclassified`, including a fetch that failed with
+        class `harness`: re-run the failed jobs
+        (`gh run rerun <run-id> --failed`), and repair the harness if it
         fails again. A harness failure is never, on its own, grounds to pull
         an asset or change the release.
-      - `package`: open the failed step in that target's `result.json` and its
-        logs, and confirm that the step's detail describes the shipped
-        package. If it does, that package does not install, launch, import
+      - `package`, including a fetch package problem: open the failed step in
+        that target's `result.json` (or the asset's entry in `fetch.json`)
+        and its logs, and confirm that the step's detail describes the
+        shipped package. If it does, that package does not install, launch, import
         or call as advertised for its OS, architecture and format; go to the
         next item. If the evidence points at the runner instead, handle it as
         a harness failure.
