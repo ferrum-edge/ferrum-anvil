@@ -113,13 +113,12 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
         sentence.push('.');
     }
     if !p.withheld.is_empty() {
-        let (members, verb) = match p.withheld.as_slice() {
-            [one] => (format!("{one} member"), "carries"),
-            many => (format!("{} members", many.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")), "carry"),
+        let (members, subject) = match p.withheld.as_slice() {
+            [one] => (format!("{one} member is"), "it is"),
+            many => (format!("{} members are", many.join(", ")), "each is"),
         };
         sentence.push_str(&format!(
-            " Its {members} {verb} control or invisible formatting characters and {} not quoted; the response body has the text.",
-            if verb == "carries" { "is" } else { "are" }
+            " Its {members} not quoted: {subject} too long or carries control or invisible formatting characters; the response body has the text."
         ));
     }
     if let Some(n) = p.status.filter(|n| *n != status) {

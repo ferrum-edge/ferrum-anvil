@@ -97,18 +97,20 @@ pub struct BodyFacts {
 }
 
 /// The standard members of an RFC 9457 problem report, as the response
-/// carries them. `title` and `detail` are redacted [`excerpt`]s. `type` and
-/// `instance` are kept whole and unscrubbed for the record's URL redaction;
-/// one over 2048 characters is not read. A member that is absent or not of
-/// its RFC 9457 type is `None` (RFC 9457 §3.1: such a member is ignored);
-/// extension members are not read.
+/// carries them. A member that is absent or not of its RFC 9457 type is
+/// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
+/// not read.
 ///
-/// A text member that carries a control, line or paragraph separator or
-/// invisible formatting character (`is_hidden`) is withheld whole and
-/// named in `withheld`: changing those characters would leave text the
-/// record's redaction could no longer match against a secret (including one
-/// learned after diagnosis), and quoting them could break or disguise the
-/// finding's wording.
+/// No member is ever cut or rewritten. `title` and `detail` are scrubbed of
+/// known secrets ([`excerpt`] with nothing to cut); `type` and `instance` are
+/// kept unscrubbed for the record's URL redaction, which needs their original
+/// structure. A member over its length limit, or that carries a control,
+/// line or paragraph separator or invisible formatting character
+/// (`is_hidden`), is withheld whole and named in `withheld`: a cut or a
+/// changed character would leave text the record's redaction could no
+/// longer match against a secret (including one a runner extraction learns
+/// after diagnosis), and quoting hidden characters could break or disguise
+/// the finding's wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProblemDetails {
     /// `type`: the problem type URI. Absent means `about:blank`.
@@ -118,7 +120,8 @@ pub struct ProblemDetails {
     pub status: Option<u16>,
     pub detail: Option<String>,
     pub instance: Option<String>,
-    /// Members withheld for a hidden character, in member order.
+    /// Members withheld for their length or a hidden character, in member
+    /// order.
     pub withheld: Vec<&'static str>,
 }
 
@@ -309,24 +312,24 @@ fn is_problem_json(content_type: &str) -> bool {
 /// none of them.
 fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Redact<'_>) -> Option<ProblemDetails> {
     let mut withheld = Vec::new();
-    // The member's string, unless it is blank or carries a hidden character.
-    let mut raw = |key: &'static str| {
+    // The member's whole string, unless it is blank, longer than `max`
+    // characters or carries a hidden character.
+    let mut read = |key: &'static str, max: usize| {
         let v = obj.get(key)?.as_str()?;
-        if v.chars().any(is_hidden) {
+        if v.chars().count() > max || v.chars().any(is_hidden) {
             withheld.push(key);
             return None;
         }
         Some(v).filter(|v| !v.trim().is_empty())
     };
-    // A URI is neither cut nor scrubbed here: the record redacts it as a URL
+    // A URI is not scrubbed here: the record redacts it as a URL
     // (`body.problem.type` and `.instance` are URL evidence), which needs its
-    // whole, original structure. A cut inside userinfo or a query value, or
-    // a known secret replaced inside a query name, would hide what that pass
-    // has to withhold.
-    let type_uri = raw("type").filter(|v| v.chars().count() <= MAX_PROBLEM_URI_CHARS).map(str::to_string);
-    let title = raw("title").map(|v| excerpt(redact, v, 200));
-    let detail = raw("detail").map(|v| excerpt(redact, v, 300));
-    let instance = raw("instance").filter(|v| v.chars().count() <= MAX_PROBLEM_URI_CHARS).map(str::to_string);
+    // original structure. A known secret replaced inside a query name would
+    // hide the value that pass has to withhold.
+    let type_uri = read("type", MAX_PROBLEM_URI_CHARS).map(str::to_string);
+    let title = read("title", MAX_PROBLEM_TITLE_CHARS).map(|v| excerpt(redact, v, MAX_PROBLEM_TITLE_CHARS));
+    let detail = read("detail", MAX_PROBLEM_DETAIL_CHARS).map(|v| excerpt(redact, v, MAX_PROBLEM_DETAIL_CHARS));
+    let instance = read("instance", MAX_PROBLEM_URI_CHARS).map(str::to_string);
     let p = ProblemDetails { type_uri, title, status: obj.get("status").and_then(problem_status), detail, instance, withheld };
     let any = p.type_uri.is_some()
         || p.title.is_some()
@@ -339,6 +342,10 @@ fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Red
 
 /// Longest problem-report `type` or `instance` read (characters).
 const MAX_PROBLEM_URI_CHARS: usize = 2048;
+/// Longest problem-report `title` read (characters).
+const MAX_PROBLEM_TITLE_CHARS: usize = 256;
+/// Longest problem-report `detail` read (characters).
+const MAX_PROBLEM_DETAIL_CHARS: usize = 1024;
 
 /// A problem report's `status`: a JSON number (`503`, `503.0` or `5.03e2`)
 /// that is an integer from 100 to 599.
@@ -365,7 +372,7 @@ fn is_hidden(c: char) -> bool {
                 | '\u{070F}'
                 | '\u{0890}'..='\u{0891}'
                 | '\u{08E2}'
-                | '\u{180E}'
+                | '\u{180B}'..='\u{180F}'
                 | '\u{200B}'..='\u{200F}'
                 | '\u{2028}'..='\u{202E}'
                 | '\u{2060}'..='\u{2064}'

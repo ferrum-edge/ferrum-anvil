@@ -186,6 +186,7 @@ fn without_a_problem_report_the_wording_is_unchanged() {
     let d = run(503, "application/json", r#"{"error":"Service Unavailable"}"#, FerrumTrust::NotConfigured);
     let f = finding(&d, "http.service_unavailable");
     assert_eq!(f.explanation, "The response status is 503: a component on the path is temporarily unable to handle the request.");
+    assert_eq!(f.rule_version, 2, "the rule's version, with or without a report");
 }
 
 #[test]
@@ -376,21 +377,21 @@ fn a_member_with_a_hidden_character_is_withheld_and_named() {
     assert_eq!(f.rule_version, 2);
     assert!(
         f.explanation.ends_with(
-            "The body is an RFC 9457 problem report. Its title, detail members carry control or invisible formatting characters and are not quoted; the response body has the text."
+            "The body is an RFC 9457 problem report. Its title, detail members are not quoted: each is too long or carries control or invisible formatting characters; the response body has the text."
         ),
         "{}",
         f.explanation
     );
     assert!(!f.explanation.contains(['\u{202E}', '\u{2028}']), "{}", f.explanation);
     // Every hidden character withholds, wherever it is in the member.
-    for c in ['\u{0007}', '\u{2029}', '\u{061C}', '\u{200B}', '\u{E0069}', '\u{FE0F}', '\u{3164}'] {
+    for c in ['\u{0007}', '\u{2029}', '\u{061C}', '\u{200B}', '\u{E0069}', '\u{FE0F}', '\u{3164}', '\u{180B}', '\u{180F}'] {
         for text in [format!("{c}lead"), format!("trail{c}"), format!("in{c}side")] {
             let body = serde_json::json!({ "detail": text }).to_string();
             let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
             let f = finding(&d, "http.service_unavailable");
             assert_eq!(evidence(f, "body.problem.detail"), None, "{c:?} {text:?}");
             assert_eq!(evidence(f, "body.problem.withheld"), Some("detail"), "{c:?} {text:?}");
-            assert!(f.explanation.contains("Its detail member carries"), "{}", f.explanation);
+            assert!(f.explanation.contains("Its detail member is not quoted: it is too long or carries"), "{}", f.explanation);
         }
     }
 }
@@ -454,6 +455,23 @@ fn a_uri_member_with_a_hidden_character_is_not_read() {
         let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
         let f = finding(&d, "http.service_unavailable");
         assert_eq!(evidence(f, "body.problem.withheld"), Some(member));
-        assert!(f.explanation.contains(&format!("Its {member} member carries")), "{}", f.explanation);
+        assert!(f.explanation.contains(&format!("Its {member} member is not quoted")), "{}", f.explanation);
+    }
+}
+
+#[test]
+fn an_oversized_text_member_is_withheld_not_cut() {
+    // Cut, its tail could hold the prefix of a secret the runner learns only
+    // later (a sensitive extraction), which no full-value match would find.
+    for (member, limit) in [("title", 256), ("detail", 1024)] {
+        let fits = "x".repeat(limit);
+        let over = "x".repeat(limit + 1);
+        let d = run(503, PROBLEM_JSON, &serde_json::json!({ member: fits }).to_string(), FerrumTrust::NotConfigured);
+        assert_eq!(evidence(finding(&d, "http.service_unavailable"), &format!("body.problem.{member}")), Some(fits.as_str()));
+        let d = run(503, PROBLEM_JSON, &serde_json::json!({ member: over, "status": 503 }).to_string(), FerrumTrust::NotConfigured);
+        let f = finding(&d, "http.service_unavailable");
+        assert_eq!(evidence(f, &format!("body.problem.{member}")), None, "{member}");
+        assert_eq!(evidence(f, "body.problem.withheld"), Some(member));
+        assert!(!f.explanation.contains("xxxx"), "{}", f.explanation);
     }
 }

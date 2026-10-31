@@ -71,20 +71,23 @@ When an error response is `application/problem+json` (the RFC 9457 media
 type, with any parameters; plain `application/json` is not read as one), its
 generic `http.*` finding records the standard members it carries as body
 evidence: `body.problem.type`, `.title`, `.detail`, `.status` and
-`.instance`. A member that carries a control character, a Unicode line or
+`.instance`. No member is ever cut or rewritten. A member longer than its
+limit (256 characters for `title`, 1024 for `detail`, 2048 for `type` and
+`instance`), or one that carries a control character, a Unicode line or
 paragraph separator, or an invisible formatting character (bidirectional
 marks, overrides and isolates, zero-width, interlinear annotation, tag and
-variation-selector characters, blank fillers) is withheld whole: it is named
-in `body.problem.withheld` and the explanation says the response body has
-its text. Changing those characters would leave text the record's redaction
-could no longer match against a secret, and quoting them could break or
-disguise the wording. `title` and `detail` are redacted excerpts. `type` and
-`instance` are neither cut nor scrubbed before the record redacts them as
-URLs, so that pass sees their whole structure (a cut inside userinfo, or a
-known secret replaced inside a query name, would hide what it has to
-withhold); one over 2048 characters is not read. A member of the wrong JSON
-type is ignored, as RFC 9457 §3.1 requires; `status` is read in any JSON number form of an
-integer from 100 to 599 (`503`, `503.0`), and extension members are not read.
+variation-selector characters, blank fillers), is withheld whole: it is
+named in `body.problem.withheld` and the explanation says the response body
+has its text. A cut or a changed character would leave text the record's
+redaction could no longer match against a secret (including one a runner
+extraction learns after diagnosis), and quoting hidden characters could
+break or disguise the wording. `title` and `detail` are scrubbed of known
+secrets. `type` and `instance` are not scrubbed before the record redacts
+them as URLs, so that pass sees their original structure (a known secret
+replaced inside a query name would hide what it has to withhold). A member
+of the wrong JSON type is ignored, as RFC 9457 §3.1 requires; `status` is
+read in any JSON number form of an integer from 100 to 599 (`503`, `503.0`),
+and extension members are not read.
 
 The explanation states the type (unless it is `about:blank`), title and
 detail, each quoted as a JSON string: a quote or backslash in the body is
