@@ -71,15 +71,19 @@ When an error response is `application/problem+json` (the RFC 9457 media
 type, with any parameters; plain `application/json` is not read as one), its
 generic `http.*` finding records the standard members it carries as body
 evidence: `body.problem.type`, `.title`, `.detail`, `.status` and
-`.instance`. Control characters, the Unicode line and paragraph separators
-and the Unicode format characters (bidirectional marks, overrides and
-isolates, zero-width, interlinear annotation and tag characters) become
-spaces. `title` and `detail` are redacted excerpts. `type` and `instance` are
-neither cut nor scrubbed before the record redacts them as URLs, so that pass
-sees their whole structure (a cut inside userinfo, or a known secret replaced
-inside a query name, would hide what it has to withhold); one over 2048
-characters, or with a control, separator or format character, is not read. A member of the wrong JSON type is ignored, as
-RFC 9457 §3.1 requires; `status` is read in any JSON number form of an
+`.instance`. A member that carries a control character, a Unicode line or
+paragraph separator, or an invisible formatting character (bidirectional
+marks, overrides and isolates, zero-width, interlinear annotation, tag and
+variation-selector characters, blank fillers) is withheld whole: it is named
+in `body.problem.withheld` and the explanation says the response body has
+its text. Changing those characters would leave text the record's redaction
+could no longer match against a secret, and quoting them could break or
+disguise the wording. `title` and `detail` are redacted excerpts. `type` and
+`instance` are neither cut nor scrubbed before the record redacts them as
+URLs, so that pass sees their whole structure (a cut inside userinfo, or a
+known secret replaced inside a query name, would hide what it has to
+withhold); one over 2048 characters is not read. A member of the wrong JSON
+type is ignored, as RFC 9457 §3.1 requires; `status` is read in any JSON number form of an
 integer from 100 to 599 (`503`, `503.0`), and extension members are not read.
 
 The explanation states the type (unless it is `about:blank`), title and
@@ -95,7 +99,7 @@ reference (anything but printable ASCII, or spaces, quotes, angle brackets
 and the other characters RFC 3986 excludes) stays in the evidence only.
 
 The report is what the responding server says, so it adds evidence and
-wording only (the finding's `rule_version` becomes 2): its code,
+wording only (rule `http.status` is now version 2): its code,
 confidence, scope, owner and severity are the same as for any body with that
 status, and "does not prove" says that any server
 on the path can send one. It is often what separates causes the status

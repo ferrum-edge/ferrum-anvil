@@ -97,13 +97,18 @@ pub struct BodyFacts {
 }
 
 /// The standard members of an RFC 9457 problem report, as the response
-/// carries them, with control, separator and invisible format characters
-/// replaced by spaces. `title` and `detail` are redacted [`excerpt`]s;
-/// `type` and `instance` are kept whole and unscrubbed for the record's URL
-/// redaction; one over 2048 characters, or with a control, separator or
-/// format character, is not read. A member that is absent or not of its RFC 9457 type is
-/// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
-/// not read.
+/// carries them. `title` and `detail` are redacted [`excerpt`]s. `type` and
+/// `instance` are kept whole and unscrubbed for the record's URL redaction;
+/// one over 2048 characters is not read. A member that is absent or not of
+/// its RFC 9457 type is `None` (RFC 9457 §3.1: such a member is ignored);
+/// extension members are not read.
+///
+/// A text member that carries a control, line or paragraph separator or
+/// invisible formatting character (`is_hidden`) is withheld whole and
+/// named in `withheld`: changing those characters would leave text the
+/// record's redaction could no longer match against a secret (including one
+/// learned after diagnosis), and quoting them could break or disguise the
+/// finding's wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProblemDetails {
     /// `type`: the problem type URI. Absent means `about:blank`.
@@ -113,6 +118,8 @@ pub struct ProblemDetails {
     pub status: Option<u16>,
     pub detail: Option<String>,
     pub instance: Option<String>,
+    /// Members withheld for a hidden character, in member order.
+    pub withheld: Vec<&'static str>,
 }
 
 /// A JSON-RPC 2.0 error, as the response carries it.
@@ -301,34 +308,32 @@ fn is_problem_json(content_type: &str) -> bool {
 /// The RFC 9457 standard members of a problem report; `None` when it has
 /// none of them.
 fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Redact<'_>) -> Option<ProblemDetails> {
-    let text = |key: &str, max: usize| {
+    let mut withheld = Vec::new();
+    // The member's string, unless it is blank or carries a hidden character.
+    let mut raw = |key: &'static str| {
         let v = obj.get(key)?.as_str()?;
-        let one_line: String = excerpt(redact, v, max).chars().map(|c| if is_hidden(c) { ' ' } else { c }).collect();
-        Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
+        if v.chars().any(is_hidden) {
+            withheld.push(key);
+            return None;
+        }
+        Some(v).filter(|v| !v.trim().is_empty())
     };
     // A URI is neither cut nor scrubbed here: the record redacts it as a URL
     // (`body.problem.type` and `.instance` are URL evidence), which needs its
     // whole, original structure. A cut inside userinfo or a query value, or
     // a known secret replaced inside a query name, would hide what that pass
-    // has to withhold. One longer than the limit, or with a character no
-    // URI contains (a control, separator or format character, which the
-    // record could no longer match against a secret once replaced), is not
-    // read at all.
-    let uri = |key: &str| {
-        let v = obj.get(key)?.as_str()?.trim();
-        if v.is_empty() || v.chars().count() > MAX_PROBLEM_URI_CHARS || v.chars().any(is_hidden) {
-            return None;
-        }
-        Some(v.to_string())
-    };
-    let p = ProblemDetails {
-        type_uri: uri("type"),
-        title: text("title", 200),
-        status: obj.get("status").and_then(problem_status),
-        detail: text("detail", 300),
-        instance: uri("instance"),
-    };
-    let any = p.type_uri.is_some() || p.title.is_some() || p.status.is_some() || p.detail.is_some() || p.instance.is_some();
+    // has to withhold.
+    let type_uri = raw("type").filter(|v| v.chars().count() <= MAX_PROBLEM_URI_CHARS).map(str::to_string);
+    let title = raw("title").map(|v| excerpt(redact, v, 200));
+    let detail = raw("detail").map(|v| excerpt(redact, v, 300));
+    let instance = raw("instance").filter(|v| v.chars().count() <= MAX_PROBLEM_URI_CHARS).map(str::to_string);
+    let p = ProblemDetails { type_uri, title, status: obj.get("status").and_then(problem_status), detail, instance, withheld };
+    let any = p.type_uri.is_some()
+        || p.title.is_some()
+        || p.status.is_some()
+        || p.detail.is_some()
+        || p.instance.is_some()
+        || !p.withheld.is_empty();
     any.then_some(p)
 }
 
@@ -342,12 +347,13 @@ fn problem_status(v: &serde_json::Value) -> Option<u16> {
     (n.fract() == 0.0 && (100.0..=599.0).contains(&n)).then_some(n as u16)
 }
 
-/// Characters a quoted text must not carry into a finding: controls and the
-/// Unicode line and paragraph separators (line breaks, escapes), and the
-/// format characters (general category Cf, Unicode 16) that reorder, hide or
-/// smuggle text: bidirectional marks, overrides and isolates, zero-width
-/// characters, the byte-order mark, interlinear annotation and tag
-/// characters.
+/// Characters a quoted problem-report member must not carry into a finding:
+/// controls and the Unicode line and paragraph separators (line breaks,
+/// escapes), the format characters (general category Cf, Unicode 16) that
+/// reorder, hide or smuggle text (bidirectional marks, overrides and
+/// isolates, zero-width characters, the byte-order mark, interlinear
+/// annotation and tag characters), variation selectors, the combining
+/// grapheme joiner and the blank Hangul and Braille fillers.
 fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -373,6 +379,13 @@ fn is_hidden(c: char) -> bool {
                 | '\u{1D173}'..='\u{1D17A}'
                 | '\u{E0001}'
                 | '\u{E0020}'..='\u{E007F}'
+                | '\u{034F}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FFA0}'
+                | '\u{E0100}'..='\u{E01EF}'
         )
 }
 
@@ -508,14 +521,15 @@ mod tests {
     }
 
     #[test]
-    fn problem_report_texts_are_redacted_and_kept_on_one_line() {
+    fn problem_report_texts_are_redacted_or_withheld() {
         let redact: Redact<'_> = Some(&scrub);
         let pad = "d".repeat(296);
         let json =
             format!(r#"{{"type":"tag:x","title":"line one\nline\ttwo","status":503,"detail":"{pad}{SECRET}","instance":"/req/{SECRET}"}}"#);
         let f = body_facts_redacted(Some("application/problem+json"), json.as_bytes(), redact);
         let p = f.problem.expect("a problem report");
-        assert_eq!(p.title.as_deref(), Some("line one line two"));
+        // A line break withholds the member whole.
+        assert_eq!((p.title.as_deref(), p.withheld.as_slice()), (None, &["title"][..]));
         assert_eq!(p.detail, Some(format!("{pad}{REDACTED}")));
         // A URI is left whole for the record's URL redaction.
         assert_eq!(p.instance, Some(format!("/req/{SECRET}")));
@@ -524,6 +538,9 @@ mod tests {
         let f = body_facts(Some("application/problem+json"), br#"{"status":1000,"title":" \u0001 ","detail":"d"}"#);
         let p = f.problem.expect("detail is a standard member");
         assert_eq!((p.status, p.title, p.detail.as_deref()), (None, None, Some("d")));
+        assert_eq!(p.withheld, ["title"]);
+        let f = body_facts(Some("application/problem+json"), br#"{"status":503,"title":"   "}"#);
+        assert_eq!(f.problem.map(|p| (p.title, p.withheld.is_empty())), Some((None, true)), "a blank member is absent");
     }
 
     #[test]

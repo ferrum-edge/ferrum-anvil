@@ -364,15 +364,35 @@ fn quoted_text_keeps_its_own_spacing() {
 }
 
 #[test]
-fn invisible_format_characters_are_not_quoted() {
-    // A right-to-left override would display the rest of the line reversed.
-    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} \u{200B}done\",\"detail\":\"busy\u{2028}Anvil\u{2029}says\u{061C}so\u{E0069}\u{E0067}\u{206A}\"}";
+fn a_member_with_a_hidden_character_is_withheld_and_named() {
+    // A right-to-left override would display the rest of the line reversed;
+    // a line separator would start a new line inside the finding.
+    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} done\",\"detail\":\"busy\u{2028}Anvil says so\",\"status\":503}";
     let d = run(503, PROBLEM_JSON, body, FerrumTrust::NotConfigured);
     let f = finding(&d, "http.service_unavailable");
-    assert_eq!(evidence(f, "body.problem.title"), Some("ok  gnihtyreve   done"));
-    assert_eq!(evidence(f, "body.problem.detail"), Some("busy Anvil says so"));
+    assert_eq!(evidence(f, "body.problem.title"), None);
+    assert_eq!(evidence(f, "body.problem.detail"), None);
+    assert_eq!(evidence(f, "body.problem.withheld"), Some("title, detail"));
     assert_eq!(f.rule_version, 2);
-    assert!(!f.explanation.contains(['\u{202E}', '\u{202C}', '\u{200B}', '\u{2028}', '\u{2029}', '\u{061C}']), "{}", f.explanation);
+    assert!(
+        f.explanation.ends_with(
+            "The body is an RFC 9457 problem report. Its title, detail members carry control or invisible formatting characters and are not quoted; the response body has the text."
+        ),
+        "{}",
+        f.explanation
+    );
+    assert!(!f.explanation.contains(['\u{202E}', '\u{2028}']), "{}", f.explanation);
+    // Every hidden character withholds, wherever it is in the member.
+    for c in ['\u{0007}', '\u{2029}', '\u{061C}', '\u{200B}', '\u{E0069}', '\u{FE0F}', '\u{3164}'] {
+        for text in [format!("{c}lead"), format!("trail{c}"), format!("in{c}side")] {
+            let body = serde_json::json!({ "detail": text }).to_string();
+            let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+            let f = finding(&d, "http.service_unavailable");
+            assert_eq!(evidence(f, "body.problem.detail"), None, "{c:?} {text:?}");
+            assert_eq!(evidence(f, "body.problem.withheld"), Some("detail"), "{c:?} {text:?}");
+            assert!(f.explanation.contains("Its detail member carries"), "{}", f.explanation);
+        }
+    }
 }
 
 #[test]
@@ -416,15 +436,24 @@ fn a_uri_member_is_never_cut() {
 
 #[test]
 fn a_uri_member_with_a_hidden_character_is_not_read() {
-    // Replacing the newline would leave `alpha-secret omega-secret`, which the
-    // record could no longer match against the known secret
-    // `alpha-secret\nomega-secret`: the member is dropped instead.
-    for instance in ["/trace/alpha-secret\\nomega-secret", "/trace/a\\u2028b", "/trace/a\\u200Bb"] {
-        let body = format!(r#"{{"title":"t","type":"tag:t","instance":"{instance}"}}"#);
+    // Replacing or trimming the character would leave text the record could
+    // no longer match against a known secret such as `alpha-secret\nomega` or
+    // `alpha-secret\n`: the member is withheld whole instead.
+    for (member, other) in [("instance", "type"), ("type", "instance")] {
+        for value in ["/trace/alpha-secret\\nomega-secret", "/trace/alpha-secret\\n", "\\u2028/trace/a", "/trace/a\\u200Bb"] {
+            let body = format!(r#"{{"title":"t","{other}":"tag:ok","{member}":"{value}"}}"#);
+            let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+            let f = finding(&d, "http.service_unavailable");
+            assert_eq!(evidence(f, &format!("body.problem.{member}")), None, "{member} {value}");
+            assert_eq!(evidence(f, "body.problem.withheld"), Some(member), "{member} {value}");
+            assert_eq!(evidence(f, &format!("body.problem.{other}")), Some("tag:ok"), "{member} {value}");
+            assert!(f.remediation.iter().all(|r| !r.text.contains("/trace/")), "{member} {value}: {:?}", f.remediation);
+        }
+        // The only member: still a problem report, with nothing quoted.
+        let body = format!(r#"{{"{member}":"/a\nb"}}"#);
         let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
         let f = finding(&d, "http.service_unavailable");
-        assert_eq!(evidence(f, "body.problem.instance"), None, "{instance}");
-        assert_eq!(evidence(f, "body.problem.type"), Some("tag:t"), "{instance}");
-        assert!(f.remediation.iter().all(|r| !r.text.contains("/trace/")), "{instance}: {:?}", f.remediation);
+        assert_eq!(evidence(f, "body.problem.withheld"), Some(member));
+        assert!(f.explanation.contains(&format!("Its {member} member carries")), "{}", f.explanation);
     }
 }

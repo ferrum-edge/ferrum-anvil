@@ -48,7 +48,9 @@
   type and instance to quote to the API owner; and a status that differs
   from the response status is stated, with an intermediary change and an
   inconsistent report as alternatives. `type` and `instance` are redacted as
-  URLs, and appear in the wording only when they are URI references. Two 503s a
+  URLs, and appear in the wording only when they are URI references. A
+  member carrying a control, line-separator or invisible formatting
+  character is withheld and named (`body.problem.withheld`). Two 503s a
   Ferrum Alloy service sends for different reasons (a handler deadline,
   `request-timeout`, and a full admission limit, `overloaded`) were
   previously the same "Service unavailable" finding with no body evidence,

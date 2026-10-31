@@ -46,6 +46,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
         .var("status", s.to_string())
         .var("reason", r.reason.clone().unwrap_or_default())
         .var("host", ctx.target_host());
+    // Version 2: quotes an RFC 9457 problem report.
+    d.rule_version = 2;
     for h in ["www-authenticate", "retry-after", "allow", "x-ratelimit-remaining", "ratelimit-remaining"] {
         for v in r.header_values(h) {
             d = d.ev_at(E::HttpHeader, &format!("header.{h}"), v.to_string(), idx);
@@ -65,11 +67,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
         d = d.ev_at(E::BodyContent, "body.error", e.clone(), idx);
     }
     d = match &ctx.body.problem {
-        Some(p) => {
-            // Version 2: quotes an RFC 9457 problem report.
-            d.rule_version = 2;
-            problem(d, p, s, idx)
-        }
+        Some(p) => problem(d, p, s, idx),
         None => d.var("problem", String::new()),
     };
     out.push(d);
@@ -91,6 +89,9 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
     if let Some(n) = p.status {
         d = d.ev_at(E::BodyContent, "body.problem.status", n.to_string(), idx);
     }
+    if !p.withheld.is_empty() {
+        d = d.ev_at(E::BodyContent, "body.problem.withheld", p.withheld.join(", "), idx);
+    }
     // RFC 9457 §3.1.1: an absent type means `about:blank`, which adds
     // nothing beyond the status. `type` and `instance` are URI references:
     // one that is not is evidence only, never part of the wording.
@@ -110,6 +111,16 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
     let last_quoted = p.detail.as_deref().or(p.title.as_deref()).or(named_type).unwrap_or("");
     if !(sentence.ends_with('"') && last_quoted.ends_with(['.', '!', '?'])) {
         sentence.push('.');
+    }
+    if !p.withheld.is_empty() {
+        let (members, verb) = match p.withheld.as_slice() {
+            [one] => (format!("{one} member"), "carries"),
+            many => (format!("{} members", many.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")), "carry"),
+        };
+        sentence.push_str(&format!(
+            " Its {members} {verb} control or invisible formatting characters and {} not quoted; the response body has the text.",
+            if verb == "carries" { "is" } else { "are" }
+        ));
     }
     if let Some(n) = p.status.filter(|n| *n != status) {
         sentence.push_str(&format!(" It states status {n}, but the response status is {status}."));
