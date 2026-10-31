@@ -189,6 +189,30 @@ jobs:
       - name: Trusted AppImage extractor (pinned source, hosted build only)
         uses: ./.github/actions/trusted-appimage-extractor
         if: runner.os == 'Linux'
+      - name: Pinned linuxdeploy for the AppImage (Linux)
+        if: runner.os == 'Linux'
+        env:
+          # Tauri CLI 2.11 bundles the AppImage with tauri-apps/binary-releases'
+          # `linuxdeploy` build from July 2024, whose built-in excludelist
+          # predates libwayland-client.so.0. It copies the build host's
+          # libwayland-client into the AppImage, and a host Mesa built against a
+          # newer libwayland then cannot load its EGL driver against it:
+          # WebKit's web process aborts with EGL_BAD_PARAMETER. This is the
+          # linuxdeploy build that Tauri CLI 2.12 pins (tauri-apps/tauri#16062).
+          # CLI 2.11 uses a cached linuxdeploy-x86_64.AppImage instead of
+          # downloading one; CLI 2.12 looks for another file name and ignores
+          # this one, so drop this step with the coordinated Tauri 2.12 bump.
+          LINUXDEPLOY_URL: https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-x86_64.AppImage
+          LINUXDEPLOY_SHA256: 36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62
+        run: |
+          tools="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+          mkdir -p "$tools"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
+            --silent --show-error --retry 3 --connect-timeout 15 --max-time 300 \
+            --output "$tools/linuxdeploy-download" "$LINUXDEPLOY_URL"
+          echo "$LINUXDEPLOY_SHA256  $tools/linuxdeploy-download" | sha256sum --check --strict -
+          mv "$tools/linuxdeploy-download" "$tools/linuxdeploy-x86_64.AppImage"
+          chmod 0755 "$tools/linuxdeploy-x86_64.AppImage"
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-cyclonedx@0.5.9
@@ -279,6 +303,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           BUNDLES: ${{ matrix.bundles }}
+          # The AppImage leaves libwayland-client to the host, like libEGL and
+          # the rest of the graphics stack (AppImageCommunity excludelist; Mesa
+          # loads its EGL driver against the host's copy). Read by linuxdeploy.
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: libwayland-client.so*
         run: |
           # Unset empty credentials so Tauri never attempts a half-configured signing.
           for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
@@ -301,6 +329,34 @@ jobs:
             $c = Get-Item -Path "Cert:\CurrentUser\My\$t" -ErrorAction SilentlyContinue
             if ($c -and $c.HasPrivateKey) { Remove-Item -Path $c.PSPath -DeleteKey } elseif ($c) { Remove-Item -Path $c.PSPath }
           }
+
+      - name: AppImage leaves libwayland-client to the host (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          shopt -s nullglob
+          images=(target/"$TARGET"/release/bundle/appimage/*.AppImage)
+          [ "${#images[@]}" -gt 0 ] || { echo "::error::no AppImage was bundled"; exit 1; }
+          for a in "${images[@]}"; do
+            # The SquashFS starts where the Type 2 runtime's ELF ends (its section headers).
+            # shellcheck disable=SC2016 # Python source, not shell
+            offset="$(python3 -I -c '
+          import struct, sys
+          with open(sys.argv[1], "rb") as f:
+              h = f.read(64)
+              if h[:5] != b"\x7fELF\x02": sys.exit("not a 64-bit ELF AppImage")
+              off = struct.unpack_from("<Q", h, 0x28)[0] + struct.unpack_from("<H", h, 0x3A)[0] * struct.unpack_from("<H", h, 0x3C)[0]
+              f.seek(off)
+              if f.read(4) != b"hsqs": sys.exit("no SquashFS after the runtime")
+          print(off)
+          ' "$a")"
+            listing="$(unsquashfs -o "$offset" -lc "$a")"
+            [ -n "$listing" ] || { echo "::error::could not list $a"; exit 1; }
+            if grep -E '/libwayland-client\.so' <<<"$listing"; then
+              echo "::error::$(basename "$a") bundles libwayland-client; the host's Mesa EGL cannot load against an older copy (WebKit aborts with EGL_BAD_PARAMETER)"
+              exit 1
+            fi
+            echo "ok: $(basename "$a") bundles no libwayland-client ($(grep -c . <<<"$listing") files)"
+          done
 
       - name: Build CLI
         shell: bash
