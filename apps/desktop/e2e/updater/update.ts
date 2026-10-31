@@ -119,8 +119,8 @@ export interface UpdateServer {
 /** The update endpoint the bundle was built with: a static-format latest.json and the artifact. */
 export async function startUpdateServer(): Promise<UpdateServer> {
   const port = Number(required("ANVIL_E2E_UPDATE_PORT"));
-  let manifest = Buffer.alloc(0);
-  let artifact = Buffer.alloc(0);
+  let manifest: Buffer = Buffer.alloc(0);
+  let artifact: Buffer = Buffer.alloc(0);
   const requests: string[] = [];
   const server: Server = createServer((req, res) => {
     requests.push(req.url ?? "");
