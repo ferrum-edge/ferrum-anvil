@@ -359,6 +359,14 @@ launch() { # $1 = step name
     kill -KILL "$pid" 2>/dev/null || true
   else
     kill -KILL -- "-$pid" 2>/dev/null || true
+  fi
+  # Webview processes can outlive the app (macOS WebContent XPC services);
+  # clear them so the next launch counts only its own. On this single-purpose
+  # runner no other app uses WebKit.
+  for _ in $(seq 1 10); do [ "$(webview_count)" -le "$web_before" ] && break; sleep 1; done
+  if [ "$os" = Darwin ]; then
+    pkill -KILL -f 'com.apple.WebKit.WebContent' 2>/dev/null || true
+  else
     pkill -KILL -f 'WebKit(Web|Network)Process' 2>/dev/null || true
   fi
   local ld
