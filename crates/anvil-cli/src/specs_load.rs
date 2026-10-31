@@ -104,14 +104,77 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
         SpecTarget::Workspace { workspace_id: app.find_workspace(ws)?.meta.id }
     };
     let r = app.spec_import(&bytes, &name, &opts, target)?;
-    println!("imported {} request(s) into workspace {} (import {}); nothing was sent", r.requests, r.workspace_id, r.import_id);
+    let ws = app.workspace(&r.workspace_id)?;
+    println!(
+        "imported {} request(s) into workspace '{}' ({}) (import {}); nothing was sent",
+        r.requests, ws.name, r.workspace_id, r.import_id
+    );
+    // The environments the import brought: all of a new workspace's, or
+    // those its import root lists. An import root's apply only when chosen.
+    // In the root's order, which is the source's (OpenAPI: its servers').
+    let envs: Vec<_> = match r.root_folder_id {
+        Some(root) => {
+            let all = app.environments(&r.workspace_id)?;
+            app.folder(&root)?.import_environment_ids.iter().filter_map(|id| all.iter().find(|e| e.meta.id == *id).cloned()).collect()
+        }
+        None => crate::env::sorted(app.environments(&r.workspace_id)?),
+    };
+    let active = envs.iter().find(|e| ws.active_environment_id == Some(e.meta.id));
+    if !envs.is_empty() {
+        let names = envs.iter().map(|e| format!("'{}'", e.name)).collect::<Vec<_>>().join(", ");
+        match active {
+            Some(a) => println!("  environments: {names} ('{}' is active)", a.name),
+            None => println!("  environments: {names} (not active here: pick one with --env, or `anvil env use`)"),
+        }
+    }
+    // A ready-to-run command per variable. The workspace and environment
+    // are named by id when the name is shared or has control characters.
+    let by_name = |name: &str, id: &Id, same: usize| {
+        if same > 1 || name.chars().any(char::is_control) { id.to_string() } else { shell_word(name) }
+    };
+    let same_ws = app.workspaces()?.iter().filter(|w| w.name.eq_ignore_ascii_case(&ws.name)).count();
+    let ws_arg = by_name(&ws.name, &ws.meta.id, same_ws);
+    let env_arg = match (active, envs.first()) {
+        (None, Some(e)) => {
+            let same = app.environments(&r.workspace_id)?.iter().filter(|x| x.name.eq_ignore_ascii_case(&e.name)).count();
+            format!(" --env {}", by_name(&e.name, &e.meta.id, same))
+        }
+        _ => String::new(),
+    };
     for v in &r.report.required_variables {
         println!("  fill in {{{{{}}}}}{} — {}", v.name, if v.secret { " (secret)" } else { "" }, v.reason);
+        if envs.is_empty() || v.name.chars().any(char::is_control) {
+            continue;
+        }
+        let value = if v.secret { "--secret --value-stdin" } else { "<value>" };
+        println!("    anvil env set {ws_arg} {}{env_arg} {value}", shell_word(&v.name));
+    }
+    if envs.is_empty() && !r.report.required_variables.is_empty() {
+        if r.root_folder_id.is_some() {
+            // An import root resolves only its own scope: an environment
+            // created here would not apply to it.
+            println!(
+                "  the import brought no environment, and its requests resolve only their own scope: set them on its folder in the desktop app, or import it with --new-workspace"
+            );
+        } else {
+            println!(
+                "  the import brought no environment for them: `anvil env create {ws_arg} <name> --use` adds one and `anvil env set` fills it in"
+            );
+        }
     }
     for w in r.report.unsupported.iter().take(20) {
         println!("  not imported: {} ({})", w.message, w.pointer);
     }
     Ok(0)
+}
+
+/// `s` as one POSIX shell word: as is when it is plain, else single-quoted.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 #[derive(Subcommand)]

@@ -3,7 +3,6 @@
 use super::{Dimension, DsFormat, RunArgs, ScenarioCmd};
 use anvil_app::App;
 use anvil_app::runner::RunSettings;
-use anvil_domain::Id;
 use anvil_domain::runner::{FailOn, RunEvent, RunReport, RunStepStatus, RunnerCompletion};
 use anvil_domain::workspace::{DatasetFormat, ScenarioStep};
 use anvil_runner::RunDataset;
@@ -11,18 +10,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-fn environment_id(app: &App, ws: &Id, name: Option<&str>) -> Result<Option<Id>> {
-    let Some(name) = name else { return Ok(None) };
-    Ok(Some(
-        app.environments(ws)?
-            .into_iter()
-            .find(|e| e.name.eq_ignore_ascii_case(name) || e.meta.id.to_string() == name)
-            .ok_or_else(|| anyhow!("environment '{name}' not found"))?
-            .meta
-            .id,
-    ))
-}
 
 fn dataset_format(path: &Path, explicit: Option<DsFormat>) -> Result<DatasetFormat> {
     match explicit {
@@ -198,7 +185,7 @@ pub async fn run_collection(app: &App, a: &RunArgs) -> Result<i32> {
         }))
     };
     let settings = RunSettings {
-        environment: environment_id(app, &ws.meta.id, a.env.as_deref())?,
+        environment: crate::env::environment_id(app, &ws, a.env.as_deref())?,
         iterations: a.iterations,
         stop_on_failure: if a.stop_on_failure {
             Some(true)
