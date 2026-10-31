@@ -101,7 +101,8 @@ jobs:
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           path=samples/workspaces/anvil-samples.anvil
-          gh api -H "Accept: application/vnd.github.raw+json" "repos/$GITHUB_REPOSITORY/contents/$path?ref=$TAG" > rel001-inputs/anvil-samples.anvil
+          # The contents API returns the (small, binary) file base64-encoded.
+          gh api "repos/$GITHUB_REPOSITORY/contents/$path?ref=$TAG" --jq .content | base64 -d > rel001-inputs/anvil-samples.anvil
           [ "$(head -c 2 rel001-inputs/anvil-samples.anvil)" = "PK" ] || { echo "::error::$path at $TAG is not an Anvil bundle"; exit 1; }
           jq -n --arg path "$path" --arg ref "$TAG" --arg sha "$(sha256sum rel001-inputs/anvil-samples.anvil | cut -d' ' -f1)" \
             --argjson size "$(wc -c < rel001-inputs/anvil-samples.anvil)" \
