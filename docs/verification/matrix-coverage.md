@@ -7,12 +7,11 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 101 |
-| ✅ automated test | 73 |
+| ✅ automated test | 74 |
 | ✅ executed check script | 1 |
 | ⛔ blocked — see reason | 2 |
 | ➖ not applicable — see reason | 2 |
 | ◐ partial — see reason | 2 |
-| ⚠ not covered | 1 |
 | **Total** | **182** |
 
 ## Client preparation and local failures
@@ -212,7 +211,7 @@ A skip or block is never counted as a pass.
 | DATA-016 | OS lock active load | ✅ automated test | `crates/anvil-load/tests/load_scenarios.rs` |
 | DATA-017 | Lost vault key recovery | ✅ automated test | `crates/anvil-storage/src/vault.rs` |
 | DATA-018 | Social identity versus vault | ✅ automated test | `crates/anvil-app/tests/identity.rs` |
-| DATA-019 | Provider outage/offline start | ⚠ not covered | — |
+| DATA-019 | Provider outage/offline start | ✅ automated test | `crates/anvil-app/tests/identity.rs` |
 | DATA-020 | Redaction across artifacts | ✅ automated test | `crates/anvil-engine/src/redact.rs`, `crates/anvil-engine/tests/engine_scenarios.rs` |
 
 ## Load correctness and report durability
@@ -243,6 +242,6 @@ A skip or block is never counted as a pass.
 | REL-003 | Signed update integrity | ✅ live (real gateway) — Verified on macOS arm64: a signed in-app update installed and relaunched Anvil from 0.1.0 to 0.1.1. Release runs 36827029766 and 36835226571 produced the update; latest.json signatures verify against updater key BFE08514FEC0E65A. Windows and Linux were not exercised. macOS may re-prompt for Keychain access after an update, especially with unsigned builds; see ferrum-edge/ferrum-anvil#2 for Developer ID signing. | — |
 | REL-004 | Update/migration rollback | ✅ automated test | `crates/anvil-storage/tests/store_security.rs` |
 | REL-005 | Offline no-account smoke | ✅ automated test | `apps/desktop/e2e/specs/09-offline-no-account.e2e.ts` |
-| REL-006 | Download manifest match | ⛔ blocked — see reason — No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. Blocked on signing (ferrum-edge/ferrum-anvil#2). | — |
-| REL-007 | Website navigation | ◐ partial — see reason — Staged in draft PR ferrum-edge/ferrumedge#54: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests pass; link checker OK incl. external). Partial because it must not be published before an Anvil release. | — |
-| REL-008 | Website feature truth | ◐ partial — see reason — Staged in draft PR ferrum-edge/ferrumedge#54: copy limited to built and tested capabilities with limitations, real E2E screenshots, and a test that fails on 'available now', Anvil release/asset links or a missing pre-release notice. Publication is gated on release evidence (signed artifacts). | — |
+| REL-006 | Download manifest match | ⛔ blocked — see reason — The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches signed release evidence is recorded, and no signed artifacts exist yet. Blocked on signing (ferrum-edge/ferrum-anvil#2). | — |
+| REL-007 | Website navigation | ◐ partial — see reason — Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests passed on that PR; link checker OK incl. external). Partial because the evidence is the website repository's tests and the installers it links are unsigned previews (ferrum-edge/ferrum-anvil#2). | — |
+| REL-008 | Website feature truth | ◐ partial — see reason — Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: copy limited to built and tested capabilities with limitations, E2E screenshots labelled as historical pre-release captures, and website tests (tests/anvil.test.js) that check the unsigned-preview statements beside downloads. Partial because the installers remain unsigned previews (ferrum-edge/ferrum-anvil#2). | — |

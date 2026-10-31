@@ -3,10 +3,9 @@
  "gateway_release": "v0.9.15",
  "total": 182,
  "totals": {
-  "verified_test": 73,
+  "verified_test": 74,
   "verified_live": 101,
   "not_applicable": 2,
-  "not_covered": 1,
   "blocked": 2,
   "verified_check": 1,
   "partial": 2
@@ -7437,9 +7436,17 @@
    "id": "DATA-019",
    "category": "Persistence, import, settings and protection",
    "title": "Provider outage/offline start",
-   "status": "not_covered",
-   "evidence_kinds": [],
-   "references": [],
+   "status": "verified_test",
+   "evidence_kinds": [
+    "integration_test"
+   ],
+   "references": [
+    {
+     "path": "crates/anvil-app/tests/identity.rs",
+     "line": 165,
+     "kind": "integration_test"
+    }
+   ],
    "lab": null,
    "note": null
   },
@@ -7939,7 +7946,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
+   "note": "The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches signed release evidence is recorded, and no signed artifacts exist yet. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
   },
   {
    "id": "REL-007",
@@ -7949,7 +7956,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Staged in draft PR ferrum-edge/ferrumedge#54: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests pass; link checker OK incl. external). Partial because it must not be published before an Anvil release."
+   "note": "Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests passed on that PR; link checker OK incl. external). Partial because the evidence is the website repository's tests and the installers it links are unsigned previews (ferrum-edge/ferrum-anvil#2)."
   },
   {
    "id": "REL-008",
@@ -7959,7 +7966,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Staged in draft PR ferrum-edge/ferrumedge#54: copy limited to built and tested capabilities with limitations, real E2E screenshots, and a test that fails on 'available now', Anvil release/asset links or a missing pre-release notice. Publication is gated on release evidence (signed artifacts)."
+   "note": "Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: copy limited to built and tested capabilities with limitations, E2E screenshots labelled as historical pre-release captures, and website tests (tests/anvil.test.js) that check the unsigned-preview statements beside downloads. Partial because the installers remain unsigned previews (ferrum-edge/ferrum-anvil#2)."
   }
  ]
 }

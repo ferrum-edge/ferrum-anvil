@@ -22,15 +22,15 @@
  },
  "REL-006": {
   "status": "blocked",
-  "reason": "No published release assets exist yet; the staged website PR contains no download links or hashes until real signed artifacts exist. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
+  "reason": "The website (ferrum-edge/ferrumedge main, merged from ferrum-edge/ferrumedge#54) is live and lists the anvil-v0.1.5 unsigned-preview downloads with a pointer to SHA256SUMS. No check that every displayed artifact matches signed release evidence is recorded, and no signed artifacts exist yet. Blocked on signing (ferrum-edge/ferrum-anvil#2)."
  },
  "REL-007": {
   "status": "partial",
-  "reason": "Staged in draft PR ferrum-edge/ferrumedge#54: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests pass; link checker OK incl. external). Partial because it must not be published before an Anvil release."
+  "reason": "Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: Anvil in desktop/mobile Tools navigation, footer and active state, with tests for root and nested pages, extensionless links and anchors (133 site tests passed on that PR; link checker OK incl. external). Partial because the evidence is the website repository's tests and the installers it links are unsigned previews (ferrum-edge/ferrum-anvil#2)."
  },
  "REL-008": {
   "status": "partial",
-  "reason": "Staged in draft PR ferrum-edge/ferrumedge#54: copy limited to built and tested capabilities with limitations, real E2E screenshots, and a test that fails on 'available now', Anvil release/asset links or a missing pre-release notice. Publication is gated on release evidence (signed artifacts)."
+  "reason": "Live on ferrum-edge/ferrumedge main (merged from ferrum-edge/ferrumedge#54) with unsigned-preview status: copy limited to built and tested capabilities with limitations, E2E screenshots labelled as historical pre-release captures, and website tests (tests/anvil.test.js) that check the unsigned-preview statements beside downloads. Partial because the installers remain unsigned previews (ferrum-edge/ferrum-anvil#2)."
  },
  "REL-002": {
   "status": "verified_check",

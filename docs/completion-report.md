@@ -96,17 +96,16 @@ results and reasoned statuses. Its lab evidence is hosted Lab run
 results 2026-10-26); current hosted qualification is in
 [lab/README.md](lab/README.md).
 
-- **175 cases have executed evidence:**
+- **176 cases have executed evidence:**
   - 101 live: 100 against the real gateway (including TRUST-009/010/011, the G01 lookup cases) and REL-003 (a signed in-app update on macOS arm64);
-  - 73 automated tests;
+  - 74 automated tests;
   - 1 executed release check.
 - **2 are blocked:**
   - REL-001/006 need signed installers.
 - **2 are not applicable:**
   - TRUST-012: Anvil does not correlate gateway logs.
   - LOAD-012: the optional JMeter adapter was not built.
-- **2 are partial:** REL-007/008, website navigation and feature truth. They are staged in the website PR and cannot be published before a release.
-- **1 is not covered:** DATA-019 (provider outage/offline start) has no test or lab reference that names it.
+- **2 are partial:** REL-007/008, website navigation and feature truth. They are live on the website with unsigned-preview status and stay partial while the installers are unsigned.
 - **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.
 
 ## Defects found and fixed during verification (selection)
