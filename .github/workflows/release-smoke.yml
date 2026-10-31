@@ -47,6 +47,10 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
     steps:
+      # First: checkout cleans the workspace, which would delete release.json.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Resolve the release
         id: resolve
         env:
@@ -72,9 +76,6 @@ jobs:
             "$RUNNER_TEMP/release-view.json" > rel001-inputs/release.json
           cat rel001-inputs/release.json
           { echo "tag=$tag"; echo "version=${tag#anvil-v}"; } >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       # A published asset that is missing or does not match SHA256SUMS is a
       # package failure: recorded in fetch.json, the run continues and the
       # affected targets fail. An API or download failure is a harness
