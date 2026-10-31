@@ -441,6 +441,65 @@ first-run and dialog smoke tests on the signed packages are still required for
 the release gate. `e2e.yml` also runs `scripts/release-check.sh` against the
 E2E build and requires it to fail.
 
+## Clean-install smoke (REL-001)
+
+`.github/workflows/release-smoke.yml` installs the **published** release
+packages on fresh GitHub-hosted runners, one job per advertised OS,
+architecture and package. Nothing is built: each job takes the exact release
+asset, checks it against the release's `SHA256SUMS`, installs it natively,
+launches the installed app, imports the example workspace and makes a
+loopback call. It runs on demand (`gh workflow run release-smoke.yml -f
+tag=anvil-vX.Y.Z`; no tag means the latest published release), when an
+`anvil-v*` release is published, and on PRs that change the workflow or
+`scripts/release-smoke/`.
+
+| Target | Runner | Package and install |
+| --- | --- | --- |
+| `macos-arm64-dmg` | `macos-15` (Apple silicon) | `_aarch64.dmg`: `hdiutil attach`, `ditto` of the `.app` to `/Applications` |
+| `macos-x64-dmg` | `macos-15-intel` (native Intel) | `_x64.dmg`, the same way. The release cross-builds this DMG and never launches it; this job does |
+| `windows-x64-nsis` | `windows-2025` | `-setup.exe /S` |
+| `windows-x64-msi` | `windows-2025` | `msiexec /i … /qn` |
+| `linux-x64-deb` | `ubuntu-26.04` | `apt-get install` of the local `.deb` (dependencies from the Ubuntu archive) |
+| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x` (`fuse3` only if the runner has no `fusermount`) |
+| `linux-x64-rpm` | `ubuntu-26.04`, digest-pinned `fedora:44` container | `dnf install` of the local `.rpm` (dependencies from the Fedora repositories) |
+
+Each job then:
+
+1. Launches the installed app on an empty store (macOS through `open`, as a
+   double-click; Windows and Linux by starting the installed executable; Linux
+   under Xvfb). It must stay up for 30 seconds, show its top-level
+   "Ferrum Anvil" window and start a webview content process (WebKit or
+   WebView2). The job takes a screenshot.
+2. Uses the release **CLI archive** for the same target (`anvil-cli-…`; the
+   CLI is a separate release asset, not part of the desktop package) on the
+   app's default data directory. It creates a passphrase profile and imports
+   `samples/workspaces/anvil-samples.anvil` from the release tag. Then it
+   sends the sample's `Healthy/OK` request to a listener on `127.0.0.1:18080`
+   that logs every request. The send must exit 0 with HTTP 200, and the
+   listener must log the request.
+3. Launches the installed app again on the store that now holds the import.
+
+Each target uploads `rel001-result-<target>`. Its `result.json` names the
+asset and its sha256, the runner OS and architecture, every step's result,
+the surface driven and every OS protection that was not exercised. The
+`rel001-summary` artifact merges them.
+
+What it does **not** cover:
+
+- **The GUI is not driven.** The import and the call go through the shipped
+  CLI. The installed app is only launched and observed. The release build has
+  no WebDriver, by design (see the release check).
+- **The first-run experience of a signed app.** The assets are fetched
+  through the GitHub API, not a browser. They carry no
+  `com.apple.quarantine` attribute and no Mark-of-the-Web, so Gatekeeper and
+  SmartScreen are never consulted. The installers run silently, and the DMG
+  license prompt is answered by `yes`. Each result records this as a bypass.
+  Gatekeeper, SmartScreen and Keychain acceptance of signed packages stays
+  with ferrum-edge/ferrum-anvil#2.
+- Lock and unlock, uninstall, in-app update, and Linux distributions other
+  than Ubuntu 26.04 and Fedora 44. GitHub-hosted images are fresh VMs but
+  not minimal installs. The Fedora container is minimal.
+
 ## Owner checklist before publishing a draft
 
 - [ ] Preflight, every build job and publish succeeded; `release-evidence.json`
@@ -457,8 +516,11 @@ E2E build and requires it to fail.
       `updater.platforms` covers every target; otherwise `updater.manifest` is
       `null` and users update from the release page. Publishing makes
       `latest.json` live for every installed app with the key.
-- [ ] Clean-install smoke test of each installer (install, first run, create a
-      profile, send a request, lock/unlock, uninstall); screenshots attached.
+- [ ] Clean-install smoke test of each installer: the
+      [release smoke](#clean-install-smoke-rel-001) passed for the published
+      release (install, launch, profile, example import, local call), plus by
+      hand on the signed packages: first run through Gatekeeper/SmartScreen,
+      lock/unlock, uninstall; screenshots attached.
 - [ ] Advisory ignores in `deny.toml` re-reviewed.
 - [ ] The release body is the release notes, not a draft placeholder: it starts
       with the signing warning (or line), has the summary, upgrade notes and the

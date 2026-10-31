@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Result recorder for the clean-install release smoke (REL-001).
+
+Used by .github/workflows/release-smoke.yml through smoke-unix.sh and
+smoke-windows.ps1. Each target keeps its record in one directory:
+
+  steps.jsonl     one line per step: name, result (pass/fail/info), detail
+  bypasses.jsonl  every OS protection that was not exercised or was overridden
+  meta.json       asset, runner, surfaces and other facts about the run
+
+`finalize` turns that directory into result.json; `summarize` merges the
+result.json files of every target. Standard library only; run with `-I`.
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import sys
+
+SCHEMA = "anvil.release-smoke.v1"
+
+# A target passes only if every one of these steps ran and passed.
+REQUIRED_STEPS = [
+    "asset_integrity",
+    "native_arch",
+    "install",
+    "cli_ready",
+    "launch_first_run",
+    "profile_create",
+    "example_import",
+    "local_call",
+    "launch_with_example",
+]
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def append(path, obj):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def read_lines(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def read_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def set_path(obj, dotted, value):
+    keys = dotted.split(".")
+    for k in keys[:-1]:
+        obj = obj.setdefault(k, {})
+    obj[keys[-1]] = value
+
+
+def cmd_step(a):
+    os.makedirs(a.dir, exist_ok=True)
+    append(os.path.join(a.dir, "steps.jsonl"), {"name": a.name, "result": a.result, "detail": a.detail, "at": now()})
+    print(f"[{a.result}] {a.name}: {a.detail}")
+
+
+def cmd_bypass(a):
+    os.makedirs(a.dir, exist_ok=True)
+    append(os.path.join(a.dir, "bypasses.jsonl"), {"protection": a.protection, "what": a.what})
+    print(f"[bypass] {a.protection}: {a.what}")
+
+
+def cmd_meta(a):
+    os.makedirs(a.dir, exist_ok=True)
+    path = os.path.join(a.dir, "meta.json")
+    meta = read_json(path, {})
+    for kv in a.pairs:
+        key, sep, value = kv.partition("=")
+        if not sep:
+            sys.exit(f"meta: expected key=value, got {kv!r}")
+        if a.json:
+            value = json.loads(value)
+        set_path(meta, key, value)
+    write_json(path, meta)
+
+
+def cmd_sha256(a):
+    h = hashlib.sha256()
+    with open(a.file, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    print(h.hexdigest())
+
+
+def cmd_sums(a):
+    """Print the SHA256SUMS digest recorded for one file name (exit 1 if none)."""
+    with open(a.sums, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 2 and parts[1].lstrip("*") == a.name:
+                print(parts[0].lower())
+                return
+    sys.exit(1)
+
+
+def statuses(obj, out):
+    """Integer values of keys named like an HTTP status anywhere in obj."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, int) and not isinstance(v, bool) and k.lower() in ("status", "status_code", "http_status"):
+                out.append(v)
+            else:
+                statuses(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            statuses(v, out)
+    return out
+
+
+def cmd_statuses(a):
+    with open(a.file, encoding="utf-8-sig") as f:
+        print(" ".join(str(s) for s in statuses(json.load(f), [])))
+
+
+def cmd_requests(a):
+    """Count requests the local server logged for a method and path."""
+    n = 0
+    for r in read_lines(a.log):
+        if r.get("method") == a.method and r.get("path") == a.path:
+            n += 1
+    print(n)
+
+
+def cmd_finalize(a):
+    steps = read_lines(os.path.join(a.dir, "steps.jsonl"))
+    meta = read_json(os.path.join(a.dir, "meta.json"), {})
+    bypasses = read_lines(os.path.join(a.dir, "bypasses.jsonl"))
+    by_name = {}
+    for s in steps:
+        by_name.setdefault(s["name"], []).append(s["result"])
+    missing = [n for n in REQUIRED_STEPS if n not in by_name]
+    failed = sorted({s["name"] for s in steps if s["result"] == "fail"})
+    not_passed = [n for n in REQUIRED_STEPS if n in by_name and "pass" not in by_name[n]]
+    result = "pass" if not missing and not failed and not not_passed else "fail"
+    env = os.environ
+    doc = {
+        "schema": SCHEMA,
+        "case": "REL-001",
+        "target": a.target,
+        "result": result,
+        "missing_required_steps": missing,
+        "failed_steps": failed,
+        "required_steps": REQUIRED_STEPS,
+        **meta,
+        "bypasses": bypasses,
+        "steps": steps,
+        "workflow_run": {
+            "repository": env.get("GITHUB_REPOSITORY"),
+            "workflow": env.get("GITHUB_WORKFLOW"),
+            "event": env.get("GITHUB_EVENT_NAME"),
+            "run_id": env.get("GITHUB_RUN_ID"),
+            "run_attempt": env.get("GITHUB_RUN_ATTEMPT"),
+            "job": env.get("GITHUB_JOB"),
+            "workflow_sha": env.get("GITHUB_SHA"),
+            "url": f"{env.get('GITHUB_SERVER_URL')}/{env.get('GITHUB_REPOSITORY')}/actions/runs/{env.get('GITHUB_RUN_ID')}",
+        },
+        "finalized_at": now(),
+    }
+    write_json(a.out, doc)
+    print(f"{a.target}: {result}" + (f" (missing: {', '.join(missing)})" if missing else "") + (f" (failed: {', '.join(failed)})" if failed else ""))
+    if result != "pass":
+        sys.exit(1)
+
+
+def cmd_summarize(a):
+    results = []
+    for root, _dirs, files in os.walk(a.input):
+        if "result.json" in files:
+            results.append(read_json(os.path.join(root, "result.json"), {}))
+    results.sort(key=lambda r: r.get("target", ""))
+    seen = {r.get("target") for r in results}
+    absent = [t for t in a.expect if t not in seen]
+    overall = "pass" if results and not absent and all(r.get("result") == "pass" for r in results) else "fail"
+    summary = {
+        "schema": SCHEMA + ".summary",
+        "case": "REL-001",
+        "result": overall,
+        "targets_expected": a.expect,
+        "targets_without_result": absent,
+        "targets": [
+            {
+                "target": r.get("target"),
+                "result": r.get("result"),
+                "asset": (r.get("asset") or {}).get("name"),
+                "sha256": (r.get("asset") or {}).get("sha256"),
+                "runner": r.get("runner"),
+                "failed_steps": r.get("failed_steps"),
+                "missing_required_steps": r.get("missing_required_steps"),
+            }
+            for r in results
+        ],
+        "generated_at": now(),
+    }
+    write_json(a.out, summary)
+    lines = [
+        "## REL-001 clean-install smoke",
+        "",
+        f"Overall: **{overall}**" + (f" (no result from: {', '.join(absent)})" if absent else ""),
+        "",
+        "| Target | Result | Asset | sha256 | Runner | Failed / missing steps |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for t in summary["targets"]:
+        run = t.get("runner") or {}
+        bad = ", ".join((t.get("failed_steps") or []) + (t.get("missing_required_steps") or [])) or "none"
+        lines.append(
+            f"| {t['target']} | {t['result']} | `{t['asset']}` | `{(t['sha256'] or '')[:16]}…` | {run.get('label')} ({run.get('os')} {run.get('machine')}) | {bad} |"
+        )
+    text = "\n".join(lines) + "\n"
+    print(text)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write(text)
+    if overall != "pass":
+        sys.exit(1)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("step")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--name", required=True)
+    s.add_argument("--result", required=True, choices=["pass", "fail", "info"])
+    s.add_argument("--detail", required=True)
+    s.set_defaults(fn=cmd_step)
+
+    s = sub.add_parser("bypass")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--protection", required=True)
+    s.add_argument("--what", required=True)
+    s.set_defaults(fn=cmd_bypass)
+
+    s = sub.add_parser("meta")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--json", action="store_true", help="values are JSON")
+    s.add_argument("pairs", nargs="+", metavar="key.path=value")
+    s.set_defaults(fn=cmd_meta)
+
+    s = sub.add_parser("sha256")
+    s.add_argument("file")
+    s.set_defaults(fn=cmd_sha256)
+
+    s = sub.add_parser("sums")
+    s.add_argument("--sums", required=True)
+    s.add_argument("--name", required=True)
+    s.set_defaults(fn=cmd_sums)
+
+    s = sub.add_parser("statuses")
+    s.add_argument("file")
+    s.set_defaults(fn=cmd_statuses)
+
+    s = sub.add_parser("requests")
+    s.add_argument("--log", required=True)
+    s.add_argument("--method", required=True)
+    s.add_argument("--path", required=True)
+    s.set_defaults(fn=cmd_requests)
+
+    s = sub.add_parser("finalize")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--target", required=True)
+    s.add_argument("--out", required=True)
+    s.set_defaults(fn=cmd_finalize)
+
+    s = sub.add_parser("summarize")
+    s.add_argument("--input", required=True)
+    s.add_argument("--out", required=True)
+    s.add_argument("--expect", nargs="*", default=[])
+    s.set_defaults(fn=cmd_summarize)
+
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
