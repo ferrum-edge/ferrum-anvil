@@ -85,7 +85,7 @@ async fn an_imported_bearer_is_filled_in_from_the_command_line() {
     let o = anvil(&data, &["import-spec", "--new-workspace", "--file", file]).await;
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     let out = text(&o);
-    assert!(out.contains("into workspace 'Echo API 1'"), "{out}");
+    assert!(out.contains("\n  workspace: 'Echo API 1'\n"), "{out}");
     assert!(out.contains("environments: 'local', 'staging' ('local' is active)"), "{out}");
     assert!(out.contains(r#"anvil env set "Echo API 1" bearer --secret --value-stdin"#), "{out}");
     let ws = "Echo API 1";

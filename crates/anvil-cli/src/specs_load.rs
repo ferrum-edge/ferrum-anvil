@@ -107,17 +107,17 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
     let r = app.spec_import(&bytes, &name, &opts, target)?;
     // The import is committed: what follows only reads for display, and a
     // failed read is a note, never a failed command a script would retry.
-    let ws = app.workspace(&r.workspace_id).ok();
-    let named = ws.as_ref().map(|w| format!("'{}' ", t(&w.name))).unwrap_or_default();
-    println!("imported {} request(s) into workspace {named}({}) (import {}); nothing was sent", r.requests, r.workspace_id, r.import_id);
-    match ws.ok_or_else(|| anyhow!("the workspace did not read")).and_then(|ws| fill_in_hints(app, &r, &ws, a.server)) {
-        Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+    println!("imported {} request(s) into workspace {} (import {}); nothing was sent", r.requests, r.workspace_id, r.import_id);
+    let hints = app.workspace(&r.workspace_id).map_err(anyhow::Error::from).and_then(|ws| fill_in_hints(app, &r, &ws, a.server));
+    let lines = match hints {
+        Ok(lines) => lines,
         Err(e) => {
-            for v in &r.report.required_variables {
-                println!("  fill in {{{{{}}}}}{} — {}", t(&v.name), if v.secret { " (secret)" } else { "" }, t(&v.reason));
-            }
             eprintln!("note: the import's environments could not be listed ({e:#}); `anvil env list` shows them");
+            r.report.required_variables.iter().map(fill_in_line).collect()
         }
+    };
+    for l in &lines {
+        println!("{l}");
     }
     for w in r.report.unsupported.iter().take(20) {
         println!("  not imported: {} ({})", w.message, w.pointer);
@@ -125,7 +125,13 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
     Ok(0)
 }
 
-/// After an import, the lines to print: the environments it brought and,
+/// The "fill in" line of a variable the import asks for.
+fn fill_in_line(v: &anvil_import::RequiredVariable) -> String {
+    format!("  fill in {{{{{}}}}}{} — {}", t(&v.name), if v.secret { " (secret)" } else { "" }, t(&v.reason))
+}
+
+/// After an import, the lines to print: the workspace's name, the
+/// environments it brought and,
 /// for each variable to fill in, a ready-to-run `anvil env set` command.
 /// `server` is the import's `--server`: under an import root, the
 /// environment of that index in the source's order is the one to fill in.
@@ -135,7 +141,7 @@ fn fill_in_hints(
     ws: &anvil_domain::workspace::Workspace,
     server: usize,
 ) -> Result<Vec<String>> {
-    let mut out = Vec::new();
+    let mut out = vec![format!("  workspace: '{}'", t(&ws.name))];
     // All of a new workspace's environments, or those its import root lists,
     // in the root's order, which is the source's (OpenAPI: its servers'). An
     // import root's apply only when chosen.
@@ -170,7 +176,7 @@ fn fill_in_hints(
         _ => String::new(),
     };
     for v in &r.report.required_variables {
-        out.push(format!("  fill in {{{{{}}}}}{} — {}", t(&v.name), if v.secret { " (secret)" } else { "" }, t(&v.reason)));
+        out.push(fill_in_line(v));
         // A variable whose name is not a plain argument gets no command.
         let Some(var) = shell_arg(&v.name).filter(|_| !envs.is_empty()) else { continue };
         let value = if v.secret { " --secret --value-stdin" } else { " <value>" };
