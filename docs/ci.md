@@ -1,6 +1,6 @@
 # Continuous integration
 
-Ferrum Anvil runs four GitHub Actions workflows. Every third-party action is
+Ferrum Anvil runs five GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
 The release `publish` job gets `actions: read` (to list the test runs for the
@@ -13,6 +13,7 @@ run, gets `contents: write` (to create the draft release).
 | `lab.yml` | PRs touching `crates/`, `lab/`, `catalog/`, Cargo files or the workflow (core profile); nightly and manual (all profiles by default) | Ubuntu 26.04, macOS 15 | Failure-matrix scenarios against the real, checksum-pinned Ferrum Edge release binary, with and without a trusted Ferrum profile |
 | `e2e.yml` | PRs touching the desktop app, crates, catalog, `lab/` or the release check; push to `main`; manual | macOS 15, Windows 2025, Ubuntu 26.04 (under Xvfb) | The native app, built with the test-only `e2e` feature, works end to end through the real Rust engine (and, on macOS and Linux, through the core lab gateway), and the release check rejects that build |
 | `release.yml` | tag `anvil-v*`; manual (dry run by default; set `dry_run: false` from a tag for a draft release) | macOS 15 (arm64 + x86_64 cross), Ubuntu 26.04, Windows 2025 | Installers and CLI binaries without test hooks, checksums, SBOMs, license report, release evidence, and optionally a **draft** release. See [release.md](release.md) |
+| `bundle-resources.yml` | PRs touching `crates/anvil-portability/**`, `crates/anvil-app/src/port.rs`, `crates/anvil-app/tests/bundle_import.rs` or the workflow itself; manual | Ubuntu 26.04, macOS 15 | Peak-memory regression ceilings for bundle preview/import against the policy and two baselines. See [bundle-resource-policy.md](security/bundle-resource-policy.md#hosted-qualification) |
 
 The `ci.yml` jobs are the required checks enforced on `main` by the "Main
 required checks" ruleset. `e2e.yml` only runs for PRs that touch its paths, so
@@ -49,10 +50,11 @@ packages together by hand, then update both lockfiles in the same change.
 
 | Job | Steps |
 | --- | --- |
-| **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast` → `cargo test --locked -p anvil-desktop --lib` (not on Windows) → `cargo test -p anvil-storage --test os_keychain -- --ignored` (the real OS credential store; on Linux inside a D-Bus session with an unlocked gnome-keyring) |
+| **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo check --target x86_64-apple-darwin -p anvil-auth -p anvil-transport` (macOS only, the AWS-LC crates for the cross-built release target) → `cargo check -p anvil-auth` (Windows only, the crate on its own) → `cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast` → `cargo test --locked -p anvil-desktop --lib` (not on Windows) → `cargo test -p anvil-storage --test os_keychain -- --ignored` (the real OS credential store; on Linux inside a D-Bus session with an unlocked gnome-keyring) |
 | **Frontend** | `npm ci` → `npm run typecheck` → `npm run e2e:typecheck` → `npm test` (vitest, jsdom) → `npm run build` → `npm audit --omit=dev --audit-level=high` |
 | **Contract & catalog drift** | `cargo run -p anvil-cli -- schema --out contracts/schemas` and `npm run contracts`, then fail if `contracts/` or `apps/desktop/src/generated/` changed; `cargo test -p anvil-diagnostics --test catalog_drift` |
 | **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `node --test scripts/tests/release-notes.test.mjs` (release notes generator, including the current version's CHANGELOG section); `scripts/release-check.sh` (dependency-graph check only) |
+| **Release checker** (Ubuntu 26.04) | the pinned trusted AppImage extractor (`.github/actions/trusted-appimage-extractor`) → `python3 -I scripts/tests/test_release_check.py` |
 | **Secret scan** | gitleaks 8.30.1 (downloaded and SHA-256 verified) over the full history of the checked-out commit and over the working tree, with `.gitleaks.toml`. For a PR the commit is its merge commit, so the PR's commits and all of `main` are scanned; other branches are not |
 
 The catalog drift test (`crates/anvil-diagnostics/tests/catalog_drift.rs`)
@@ -83,7 +85,7 @@ Build settings that keep the Rust lanes fast:
 
 ## Reproducing locally
 
-Prerequisites: rustup, Node.js ≥ 22, and on Linux the libraries listed above.
+Prerequisites: rustup, Node.js ≥ 22.12, and on Linux the libraries listed above.
 From the repository root:
 
 ```sh
@@ -93,6 +95,8 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo check --locked -p anvil-desktop
 cargo check --locked -p anvil-desktop --features e2e
+rustup target add x86_64-apple-darwin && cargo check --locked --target x86_64-apple-darwin -p anvil-auth -p anvil-transport   # macOS only
+cargo check --locked -p anvil-auth       # Windows only
 ulimit -n 4096; cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast
 cargo test --locked -p anvil-desktop --lib   # not on Windows
 cargo test --locked -p anvil-storage --test os_keychain -- --ignored   # uses your real OS credential store
@@ -152,16 +156,16 @@ artifact per OS and release.
 | Item | Version |
 | --- | --- |
 | actions/checkout | v7.0.1 `3d3c42e5aac5ba805825da76410c181273ba90b1` |
-| actions/setup-node | v7.0.0 `820762786026740c76f36085b0efc47a31fe5020` |
-| actions/upload-artifact | v7.0.1 `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
-| actions/download-artifact | v8.0.1 `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` |
-| Swatinem/rust-cache | v2.9.2 `6323deb102c322ba6fcbdcafc7e3dddab59af2b6` |
-| taiki-e/install-action | v2.87.20 `9983c65e42da123ff25d1f78505eb6de315aa172` |
+| actions/setup-node | v7.1.0 `949feb2413d6458794dcd2491c4babbbce0c15c1` |
+| actions/upload-artifact | v7.0.2 `cf430e030ddbb5b0abf93d22962f4752f3646cd9` |
+| actions/download-artifact | v8.0.2 `9000827ccba6bdab643e8b6fd33ac0654aef8333` |
+| Swatinem/rust-cache | v2.9.3 `d1527c8f67ef9af357290475d4af4b0fab8f12e0` |
+| taiki-e/install-action | v2.87.31 `1e29709c0ec63babbe8f266397a465f29a825f91` |
 | Node.js | 22.23.3 |
 | cargo-deny / cargo-cyclonedx | 0.20.2 / 0.5.9 |
 | gitleaks | 8.30.1 (linux x64 SHA-256 `551f6fc8…f2470eb`) |
 | @cyclonedx/cyclonedx-npm | 6.0.1 (release workflow, via `npx`) |
-| WebdriverIO / @wdio/tauri-service | 9.30.1 / 1.4.0 (lockfile) |
+| WebdriverIO / @wdio/tauri-service | 9.32.0 / 1.5.0 (direct `devDependencies` in `apps/desktop/package.json`, locked in `package-lock.json`; `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 bring a nested WebdriverIO 10.1.0, see [release.md](release.md)) |
 | Rust | `stable` from `rust-toolchain.toml` (not pinned; the exact `rustc` of each release build is recorded in its `build-info.json` and `release-evidence.json`) |
 
 ## Not yet exercised

@@ -35,20 +35,14 @@ company ruleset.
   under the importer's bounds (size, node count, nesting depth, see
   [import.md](import.md#trust-and-safety-policy)). External `$ref`s are never
   fetched; `extends` names built-in rulesets only.
-- **Bounded.** `$ref` chains (32 deep), rules per rule set (2,000), ruleset
-  size (1 MiB), example validations (1,000 per lint), property nesting (24
-  levels) and findings are capped, and every walk over the document is
-  linear in its size. A member name longer than 4 KiB, or member names whose
-  JSON Pointers add up to more than 64 MiB, refuse the spec (positions and
-  targets keep one pointer per member). Each `$ref` string is followed
-  once per spec and remembered, so many references that share a chain
-  follow it once, and a Path Item that many paths `$ref` is read once. Each
-  use of a reference still reads the value it ends at and copies its
-  pointer: that is charged, with the reference, to the budgets below before
-  it is done. Regular expressions, in rules and
-  in the `pattern`/`patternProperties` of schemas, use the linear-time
-  `regex` crate with a size limit; a schema whose pattern needs look-around
-  or a back-reference is not used to check examples.
+- **Bounded.** `$ref` chains, rule sets, examples and findings are capped
+  (see [Limits](#limits)), property nesting is capped at 24 levels, and
+  every walk over the document is linear in its size. A member name longer
+  than 4 KiB, or member names whose JSON Pointers add up to more than
+  64 MiB, refuse the spec. Regular expressions, in rules and in the
+  `pattern`/`patternProperties` of schemas, use the linear-time `regex`
+  crate with a size limit; a schema whose pattern needs look-around or a
+  back-reference is not used to check examples.
 - **Example schemas are checked before use.** References are followed
   without recursion, and a schema is not used when:
   - references form a cycle that does not descend into the value
@@ -79,52 +73,22 @@ company ruleset.
     items (a large `enum` passes; a pathological one is not scanned on
     every compile), or more than 16 MiB of member names and strings. These
     limits also apply with each reference expanded: error collection may
-    copy a large subschema for every repeated reference. A recursive region
-    is charged for a complete lap, regardless of its entry point. Inline
-    `not` adds the cost of each retained child-schema copy, including data
-    in literals and annotations; deep negation cannot multiply a large
-    payload past these limits without references either.
+    copy a large subschema for every repeated reference.
 
   Examples behind such a schema are counted in `examples_not_checked`. A
-  schema is compiled once however many media types `$ref` it, and all the
-  compiles of a lint scan 20,000,000 members and items, and 320 MiB of
-  names and strings, at most; examples past that are counted as not checked
-  too. Both the original schema and the completed converted bundle are
-  measured and charged before validator construction; copied targets cannot
-  activate unmeasured keywords at the bundle root. Compilation also limits
-  retained schema locations to 64 MiB, schema member names and standalone
-  root URIs to 4 KiB, property-pattern pairs and union-discriminator scans
-  to 1 million each, distinct regexes to 128 (each with 128 KiB size and DFA
-  limits), aggregate regex-translation work to 32 MiB, and repeated
-  legacy-dependency payload copies to 32 MiB. `required`, array `type`,
-  array-form `dependencies`, and `dependentRequired` must contain strings
-  before metaschema or compiler uniqueness checks. A single property-pattern precomputation may scan at
-  most 32 MiB of property-name text. Union-discriminator preflight also
-  limits required-name bytes multiplied by property maps to 32 MiB, since
-  even an absent long name is hashed against every map.
-  Each instance has a 50-million-unit validation-work limit, a 256 MiB
-  text-scan/input work limit (including repeated property-name lookups and
-  the quadratic named-group work of `format: "regex"` on values and object
-  keys), and a conservative 4-million-unit uniqueness-comparison limit
-  that counts repeated schema applications. These start as products over
-  the whole instance; when one is over its limit, each keyword is charged
-  only for the values it can apply to (every union branch and property
-  pattern counted, a bounded walk of at most 2 million applications and
-  values sized for them), so a `uniqueItems` tag list or a large `enum` no
-  longer makes an unrelated part of a large body unchecked. Schemas with
-  both recursion and `uniqueItems` always use that walk: hashing or comparing
-  nested arrays reads descendant subtrees again at each level, which a
-  one-lap schema estimate does not bound. Error details are collected only
-  when possible retained copies, including repeated instance paths and
-  cached prefixes of nested references, fit an
-  8 MiB allowance. Otherwise an invalid value has a generic mismatch;
-  a value exceeding validation-work limits is counted as not checked.
-  References must remain plain document-local pointers. Modern `$id`,
-  anchors, dynamic/recursive references and nested dialect changes are
-  refused, as are references to the bundle root or root validation keywords
-  that copying would activate. Legacy identifiers are removed by conversion.
-  Literal data and unknown annotations are counted for size, but their
-  members are not schema keywords unless a reference targets them.
+  schema is compiled once however many media types `$ref` it. Compiles,
+  validation and error collection also have work budgets, for all the
+  compiles of a lint together and for each instance; they are documented
+  with their constants in `crates/anvil-contract/src/schema.rs` and
+  `lint.rs`. An example past a compile budget, or a value past a
+  validation-work budget, is counted as not checked. When detailed errors
+  could retain too much data, an invalid value gets a generic mismatch.
+  `required`, array `type`, array-form `dependencies` and
+  `dependentRequired` must contain strings. References must remain plain
+  document-local pointers: modern `$id`, anchors, dynamic/recursive
+  references and nested dialect changes are refused, as are references to
+  the bundle root or root validation keywords that copying would activate.
+  Legacy identifiers are removed by conversion.
 - **Operations are bounded too.** They look at 2 million parameters,
   responses and media types at most in all. Inherited path-level
   parameters, the document's security requirements and a shared response's
@@ -149,6 +113,27 @@ company ruleset.
   error naming the rule, never a rule that silently passes.
 - **Deterministic.** The same spec and rules give the same report, sorted by
   severity, then line, column and rule.
+
+### Limits
+
+| Limit | Value | When it is reached |
+|---|---|---|
+| `$ref` chain | 32 references | the `$ref` is not followed (`unresolved_refs`); an example schema is not used |
+| Rules in one merged rule set | 2,000 | the ruleset is refused |
+| Stored ruleset size | 1 MiB | the ruleset is refused |
+| Example validations per lint | 1,000 | later examples are counted in `examples_not_checked` |
+| Lint findings kept (`max_findings`, configurable) | default 5,000 | the most severe are kept, the rest counted (`dropped`) |
+| Drift HAR capture size | 64 MiB | the capture is refused |
+| Drift HAR capture entries | 10,000 | later entries are not read; a note says how many |
+| Drift history records (`--limit`) | default 500, at most 1,000 | older records are not read |
+
+Unchecked examples and dropped findings are counted but do not make a lint
+report `incomplete`. A report is `incomplete` when targets were left out
+(parameters, responses, schemas, properties or security schemes past the
+budgets above) or a custom schema check was skipped (see
+[Checks](#checks)). `anvil lint-spec` exits with 3 when operations were
+skipped (`skipped_operations`) or the report is `incomplete`, unless
+`--allow-incomplete` is passed. A drift limit adds a note.
 
 ## Rulesets
 
@@ -351,8 +336,8 @@ block mappings and sequences are located to the key or item, and a value
 inside a flow collection (`{…}`, `[…]`) or a multi-line scalar is located to
 its enclosing member.
 
-At most `max_findings` (default 5,000) are kept, most severe first; the rest
-are still counted (`dropped`).
+At most `max_findings` are kept, most severe first; the rest are still
+counted (`dropped`, see [Limits](#limits)).
 
 **Not covered.** Webhooks and callbacks are not targets (their operations
 are not walked). A Swagger 2.0 document without `schemes` is taken to be
@@ -482,25 +467,17 @@ while the analysis has parsed less than 32 MiB of bodies in all; otherwise a
 note says why (history set to keep no response bodies, say). Schema
 compiles have budgets the size of the linter's (members and items, and
 bytes of names and strings), counted for the analysis on its own; a schema
-refused for its size gets a note of its own. Body walks for suggestions
-stop after 2,000,000 values or 1 GiB of references followed and schema
-pointers copied on the way; most of those copies last only while a body is
-walked. What walks keep until the analysis ends (the pointers, names and
-owners of suggested fixes, of required-property tallies and of their links
-to findings, and the enum values to add) is capped at 256 MiB; past that,
-walks record nothing new, but the calls each recorded fix or tally was seen
-in are still counted exactly. Each of these limits adds a note when it is
-reached. The operations an analysis matches against are capped at 256 MiB
-of their paths, pointers and
-declared statuses (an operation reached through several paths counts for
-each); past that, the rest are left out with a note, and calls to them are
-reported as undeclared. Each operation's parameters, request body,
-responses and required headers are resolved once, however many paths and
-calls reach it, and what that costs (the references followed and what is
-copied out of them) is capped at 256 MiB too; past that, calls to the
-operations not yet resolved are not checked and their declared statuses
-are not listed, each with a note. `spec.operations` counts the operations
-left out of matching as well.
+refused for its size gets a note of its own. The analysis also has work
+budgets, documented with their constants in
+`crates/anvil-contract/src/drift.rs`; each adds a note when it is reached.
+Once walking bodies is spent, later bodies get no schema suggestions. Once
+what walks keep until the analysis ends is spent, later bodies add no new
+suggestions, but the calls each recorded fix or tally was seen in are still
+counted exactly. Once the operations to match against are spent, the rest
+are left out and calls to them are reported as undeclared
+(`spec.operations` counts them as well). Once resolving operations is spent,
+calls to the operations not yet resolved are not checked and their declared
+statuses are not listed.
 
 **Keeping observed values out.** Findings, suggestions and the
 undeclared-endpoint list carry names, status codes, media types, sizes and
@@ -605,9 +582,8 @@ values extend the `type` and `enum` lists rather than replacing them, so
 they hold together in any order. The digest is of the description and the
 revised text.
 
-A HAR capture is read up to 64 MiB and 10,000 entries (a note says how many
-were left out). Parsed bodies are also capped at 1,000,000 JSON values per
-analysis. When detailed validation errors could retain too much data (many
+A HAR capture is read up to its [limits](#limits). Parsed bodies are also
+capped at 1,000,000 JSON values per analysis. When detailed validation errors could retain too much data (many
 objects against a long `required` list, for example), an invalid body gets
 a generic schema mismatch without details, with a note. A body beyond the
 validation-work limit is recorded as not checked instead.
@@ -615,8 +591,8 @@ validation-work limit is recorded as not checked instead.
 ### History, the desktop and the CLI
 
 For an imported spec, the exchanges are the newest sends (up to 500 in the
-desktop, `--limit` in the CLI, at most 1,000, found among the workspace's
-newest 20,000 history entries) of its collection: saved
+desktop, `--limit` in the CLI, see [Limits](#limits); found among the
+workspace's newest 20,000 history entries) of its collection: saved
 requests imported from it (under the current or an earlier import id),
 requests under its import root, or, when the import made its own workspace,
 every request of that workspace, so endpoints added by hand are checked

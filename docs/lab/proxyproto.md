@@ -1,15 +1,10 @@
 # Failure lab: `proxyproto` profile
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
 This profile runs Anvil's shared engine as a **load balancer that speaks the PROXY protocol**
-against the **real, pinned Ferrum Edge release binary** (v0.9.15 default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with
-`--release`).
+against the **real, pinned Ferrum Edge release binary** (the default pin or, with `--release`, any supported release).
 Every stream proxy sets `stream_proxy_protocol: true`: `tcp` and `tcp_tls` listeners require a
 PROXY v1/v2 header at the head of each connection, and `udp` / `dtls` listeners require the
 PROXY v2 `DGRAM` envelope on every datagram. There are no gateway mocks.
@@ -112,14 +107,10 @@ second per listener, so each drop scenario waits 1.1 s before sending.
 
 ## 4. Results
 
-| Date | Release | Runs | Result per run |
-|---|---|---|---|
-| before PP-HTTP (21 scenarios) | v0.9.7 | 3 consecutive, macOS 26 aarch64 | 42 passed, 0 failed, 0 skipped |
-| 2026-09-26, `run all` (21 scenarios) | v0.9.7 and v0.9.5 | 1 each | 42/0/0 |
-| 2026-09-26, with PP-HTTP-001/002 (23 scenarios) | v0.9.7 | 3 consecutive | 46/0/0 |
-| 2026-09-26, 23 scenarios | v0.9.5 | 1 | 46/0/0 |
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/proxyproto.md#4-results).
 
-Each result counts both the trusted and the untrusted pass. In every run PP-HTTP-001 was observed
+In every run PP-HTTP-001 was observed
 as a close before any response and PP-HTTP-002 as a `decode_error` alert.
 
 ## 5. Observations

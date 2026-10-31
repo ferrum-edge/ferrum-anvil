@@ -6,15 +6,10 @@ CLI, the collection runner and the load worker all use that core. The
 webview never performs network I/O, never sees a vault key, and renders only
 redacted results.
 
-Shared diagnostic preview uses the published `contracts-edge-0.9.15` pin and the
-accepted unchanged shared v1 freeze. It remains a stateless read-only boundary:
-producer claims are unverified with unknown confidence, with no storage, network,
-apply, trusted escalation or timing attribution. See
-[shared diagnostic import](architecture/shared-diagnostics-import.md).
-Gateway catalogs/default selection include the separate source-audited Edge 0.9.15
-release, with [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status)
-recorded; all historical catalogs/locks remain available, including the hosted-qualified
-0.9.14 and 0.9.11 releases.
+Shared diagnostic preview is a stateless read-only boundary: producer claims
+stay unverified with unknown confidence. See
+[shared diagnostic import](architecture/shared-diagnostics-import.md) and
+[ferrum-contracts.md](ferrum-contracts.md).
 
 ## Process and trust boundaries
 
@@ -266,8 +261,8 @@ secrets its requests reference. See [load.md](load.md#worker-process-and-ipc).
 | Crate | Responsibility |
 |---|---|
 | `anvil-domain` | Versioned data contracts (serde + JSON Schema): requests, auth, settings, TLS/proxy/integration profiles, execution records and evidence, findings, load plans/reports, events. `contracts/schemas/*.schema.json` and the TypeScript bindings are generated from it. |
-| `anvil-transport` | Instrumented connections: DNS (system/custom), TCP happy-eyeballs, HTTP CONNECT / SOCKS5 proxies, rustls with an observing verifier and client-cert resolver, HTTP/1.1 and HTTP/2 (hyper), HTTP/3 (quinn + h3), and WS/gRPC/SSE/TCP/UDP/DTLS session adapters. Records typed phases, byte counts, connection reuse, TLS evidence and a dispatch state derived from bytes actually written. |
-| `anvil-auth` | Auth applied to the final bytes: API key, Basic, Bearer, JWT (HS/RS/ES), OAuth2 (client credentials, refresh, auth-code + PKCE helpers, single-flight token cache), Ferrum HMAC v2 (legacy v1 opt-in only), DPoP, WS-Security UsernameToken and user-supplied SAML, and multi-auth. |
+| `anvil-transport` | Instrumented connections: DNS (system/custom), TCP happy-eyeballs, HTTP CONNECT / SOCKS5 proxies, rustls with an observing verifier and client-cert resolver, HTTP/1.1 and HTTP/2 (hyper), HTTP/3 (quinn + h3), and WS/gRPC/SSE/TCP/UDP/DTLS session adapters; HBONE and MASQUE CONNECT-UDP tunnels, PROXY protocol headers, SPIFFE ID verification and the Workload API client, 0-RTT session tickets, and destination pinning (see [security/http-state-and-destination-policy.md](security/http-state-and-destination-policy.md)). Records typed phases, byte counts, connection reuse, TLS evidence and a dispatch state derived from bytes actually written. |
+| `anvil-auth` | Auth applied to the final bytes: API key, Basic, Bearer, JWT (HS/RS/ES), OAuth2 (client credentials, refresh, auth-code + PKCE helpers, single-flight token cache), Ferrum HMAC v2 (legacy v1 opt-in only), DPoP, WS-Security UsernameToken and user-supplied SAML, JWT-SVID checks, body digest headers, and multi-auth. |
 | `anvil-engine` | Variable resolution (precedence, cycles, helpers), request preparation and lint, per-send auth, redirects with cross-origin credential stripping, safe-retry rules, assertions and extraction, redaction by name and by exact secret value, the effective-request preview, session execution, and record assembly. |
 | `anvil-diagnostics` | Deterministic rules over typed evidence that produce findings with confidence, scope, owner, evidence, alternatives, "does not prove" statements, remediation and confirm-with steps. Includes Ferrum catalog matching with trust and confidence ceilings. Wording lives in `catalog/diagnostics/findings.en.json`. |
 | `anvil-storage` | SQLite store in which every payload is sealed with XChaCha20-Poly1305 and a record-bound AAD. Data keys are wrapped by an Argon2id passphrase key and a recovery key, or held in the OS keychain. Covers migrations, checkpoints and the plaintext-leak audit. |
@@ -364,5 +359,6 @@ fails on drift.
 - [threat-model.md](threat-model.md): assets, trust boundaries and mitigations.
 - [diagnostics.md](diagnostics.md): the evidence model, confidence rules and the Ferrum catalog.
 - [storage-and-recovery.md](storage-and-recovery.md): the vault, recovery, backups and migration.
+- [ferrum-contracts.md](ferrum-contracts.md): the vendored Ferrum Edge contracts and pinned releases.
 - [g01-gateway-diagnostic-contract.md](g01-gateway-diagnostic-contract.md): the gateway diagnostic contract (implemented in Ferrum Edge v0.9.9; Anvil looks references up for profiles that configure it).
 - [protocols.md](protocols.md), [import.md](import.md), [contract.md](contract.md), [load.md](load.md), [runner.md](runner.md), [identity.md](identity.md), [lab/](lab/).

@@ -17,44 +17,29 @@ backend path parameters are involved.
 
 ## Contract and producer pins
 
-The published canonical pin is `contracts-edge-0.9.15`, full commit
-`6fb64c5dc2e014204c17609fc717d976f3b4589e`. Every previously adopted path is
-vendored byte-exact and covered by `contracts/ferrum-contracts/PIN`. Token/class/
-header parity, reference-reader qualification and all original precise negative
-expectations remain strict. The expanded manifest's other scopes do not add imports.
-The diagnostic-report schema and every earlier report, finding and reference fixture are
-byte-identical to `contracts-edge-0.9.11`, which first published the shared v1 freeze.
-`contracts-edge-0.9.15` adds one valid and one invalid diagnostic-ref fixture for the
-`route_protocol_admission` label (accepted in `rejection.phase`, refused in
-`detail.rejection_phase`); both are vendored and exercised by the reader and schema gates.
-
-That freeze is EXISTING/implemented shared v1: root accepted the unchanged freeze
-at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e` after owner/consumer
-qualification. Wire fields, bounds, fixtures and reader behavior stay unchanged.
-Owner descriptions still include historical PROPOSED wording; those paired bytes
-must remain exact after removing only `$id`/`x-contract`. Preparation-time pending
-publication text in immutable metadata is historical; actual canonical publication
-is verified in [the adoption record](../ferrum-contracts.md). Owner crate availability
-remains unreleased, and the new Anvil head still needs hosted gates.
-
-Alloy is unreleased (`publish = false`). The producer inspected is immutable
-commit `0c260f5379939ff46d681666bfbcd65b8518b08d`. Tests pin its exact CLI
-`diagnose.rs` and report schema, and compare the schema with the canonical copy
-after removing only contract metadata and restoring the producer `$id`.
-
-The producer golden is real hosted exporter output, copied without modification
-from `e2e/diagnosis.json` in artifact `11305688717`,
-`edge-e2e-evidence-v0.9.10`, from
-[Alloy run 37208769030](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37208769030).
-GitHub identifies that artifact's head as the exact producer commit above. Its
-archive SHA-256 is
-`159bef8a6b7b021b8498a93a12172ba8cd2dd227172ced4659af6902bd3965d9`.
-The immutable Edge E2E driver serializes the assembled report and findings with
-`serde_json::to_string_pretty`, the report representation the CLI exporter also
-uses. The golden's SHA-256 and source copies are pinned in
-`crates/anvil-diagnostics/tests/fixtures/alloy/PIN`. This is an actual exported
-report, not a captured CLI stdout envelope; the envelope test uses the exact
-shape from the pinned CLI source around those real facts.
+- **Contract.** `contracts-edge-0.9.15`, full commit
+  `6fb64c5dc2e014204c17609fc717d976f3b4589e`, vendored byte-exact and covered
+  by `contracts/ferrum-contracts/PIN` (see [ferrum-contracts.md](../ferrum-contracts.md)).
+  The diagnostic-report schema and every earlier report, finding and reference
+  fixture are byte-identical to `contracts-edge-0.9.11`, which first published
+  the shared v1 freeze. `contracts-edge-0.9.15` adds one valid and one invalid
+  diagnostic-ref fixture for the `route_protocol_admission` label (accepted in
+  `rejection.phase`, refused in `detail.rejection_phase`). Owner descriptions
+  keep historical PROPOSED wording; those paired bytes must remain exact after
+  removing only `$id`/`x-contract`.
+- **Producer.** Alloy is unreleased (`publish = false`). Tests pin the exact CLI
+  `diagnose.rs` and report schema of immutable commit
+  `0c260f5379939ff46d681666bfbcd65b8518b08d`, and compare the schema with the
+  canonical copy after removing only contract metadata and restoring the
+  producer `$id`.
+- **Golden.** `crates/anvil-diagnostics/tests/fixtures/alloy/diagnosis-edge-0.9.10.json`
+  is real hosted exporter output, copied without modification from
+  `e2e/diagnosis.json` in artifact `11305688717` of
+  [Alloy run 37208769030](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37208769030),
+  whose head is the producer commit above. Its archive SHA-256 and source copies
+  are pinned in `crates/anvil-diagnostics/tests/fixtures/alloy/PIN`. It is an
+  actual exported report, not a captured CLI stdout envelope; the envelope test
+  wraps those real facts in the exact shape from the pinned CLI source.
 
 ## Bounds and schema semantics
 
@@ -136,45 +121,33 @@ are created from imported content. Rendering tests exercise forged claims,
 HTML, `javascript:` and `file:` strings, browser file bounds, malformed Unicode,
 stale replies, the real import-dialog entry point and zero mutation/lookup calls.
 
-All canonical positive and negative fixtures exercise both the production parser
-and dedicated IPC DTO/command. Independent schema tests check each canonical
-negative's expected location and keyword, as well as exact fixture presence.
-The real hosted golden preserves all reported facts and both telemetry source
-families without granting trust. The existing native WDIO runner launches the
-actual Tauri E2E app for the diagnostic spec: all 27 shared fixtures, the actual
-Alloy report and source-derived CLI envelope cross native IPC. The golden's
-timestamp lexemes are compared as strings through IPC and the real dialog. The
-spec also covers forged provenance/authentication, credential echoes, truncated
-input, discovery count/byte caps, duplicate keys, invalid credential attributes,
-extra capabilities, presentation truncation, bidi escaping and clearing. It
-compares profile/workspace/history/settings state and hashes the throw-away
-profile's persisted bytes (including vault/database/WAL), without decrypting
-secrets. A loopback fixture observes no fetches to the supplied credential and
-markup URLs; this is a targeted network control, not a capture of all OS traffic.
-Native qualification at code commit `925e96253d36ea69a5f52a83a9c21602bb7557e4`,
-against main `4254ea84c101bdc9231a4c6f455421e22468d0ec`, passed all fourteen
-cases of the diagnostic-import spec on Linux, macOS and Windows. Root read the
-actual logs for [Linux job 111471676088](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471676088),
-[macOS job 111471675865](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471675865)
-and [Windows job 111471676069](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471676069).
-Each runner completed all eleven native spec files. The duplicate-key cases use
-an otherwise valid report, including an escaped alias, and require the fixed JSON
-error; caps, schema failures, oversized real IPC input and rejected capabilities
-are independent cases. The shared-fixture, real golden timestamp and credential
-no-effect cases also passed. Root separately verified the downloaded producer
-archive and its GitHub source identity, every golden/source digest and the
-canonical contract pins. This is native fixture and producer evidence; final
-landing still requires all fresh hosted checks for the final documentation head.
-This is historical native/producer evidence. Root subsequently accepted the unchanged
-shared v1 freeze, recorded in the published contracts-edge-0.9.11 pin; fresh hosted
-qualification of this adoption head remains pending.
+## Tests
 
-Local validation is static only; formatting, compile, lint and execution gates
-belong to GitHub-hosted CI.
+- All canonical positive and negative fixtures exercise both the production
+  parser and the dedicated IPC DTO/command. Independent schema tests check each
+  canonical negative's expected location and keyword, as well as exact fixture
+  presence.
+- The real hosted golden preserves all reported facts and both telemetry source
+  families without granting trust.
+- The native E2E spec (`apps/desktop/e2e/specs/11-diagnostic-import.e2e.ts`,
+  fourteen cases) runs in the actual Tauri E2E app: all 29 shared fixtures, the
+  actual Alloy report and the source-derived CLI envelope cross native IPC, and
+  the golden's timestamp lexemes are compared as strings through IPC and the
+  real dialog. It also covers forged provenance/authentication, credential
+  echoes, truncated input, discovery count/byte caps, duplicate keys, invalid
+  credential attributes, extra capabilities, presentation truncation, bidi
+  escaping and clearing. It compares profile/workspace/history/settings state
+  and hashes the throw-away profile's persisted bytes (including
+  vault/database/WAL), without decrypting secrets. A loopback fixture observes
+  no fetches to the supplied credential and markup URLs; this is a targeted
+  network control, not a capture of all OS traffic.
+- Historical native qualification: the spec at code commit
+  `925e96253d36ea69a5f52a83a9c21602bb7557e4` passed all fourteen cases on
+  Linux, macOS and Windows in
+  [run 37214333011](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011)
+  (jobs [111471676088](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471676088),
+  [111471675865](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471675865)
+  and [111471676069](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/37214333011/job/111471676069)).
 
 This implements Anvil's consumer portion of
 [ferrum-alloy#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
-The accepted unchanged shared v1 freeze is EXISTING/implemented in canonical metadata.
-This does not claim new producer bytes, Nexus completion or Anvil native acceptance:
-root owns downstream issue state and exact-head hosted qualification. The real golden
-above remains the same historical Edge 0.9.10 export.

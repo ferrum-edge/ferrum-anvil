@@ -39,7 +39,10 @@ A *slot* is a virtual user (closed), a concurrency lane (iterations) or an
 in-flight slot (open). Each slot lazily gets its own `Engine`, so connection
 pools, gRPC channels and cookie jars are per slot (like per-VU state in other
 tools), while all slots share **one** OAuth `TokenCache`, so token refresh
-is single-flight across the whole run. Open-workload slots are reused LIFO,
+is single-flight across the whole run. That cache is private to the run,
+created when the run starts and dropped when it ends, so a workspace restored
+with the same id never reads a token from it; deleting the workspace stops the
+run. Open-workload slots are reused LIFO,
 so only as many engines exist as the peak concurrency needed. A slot's pools
 keep as many idle connections as the plan has distinct requests (at least 4,
 at most 64), so a persistent chain reuses each step's connection across
@@ -109,9 +112,7 @@ run exactly as in automation: the request's scripted messages are sent, the
 client stream is half-closed, and the call is read until its terminal
 status, so each call has one completion. A load-run counts the messages it
 sent (the half-close is not a message); it never claims the server
-processed them, and it pairs no reply with a sent message. gRPC-Web cannot
-carry these modes, so such a plan is refused before any traffic
-(`grpc_unsupported_combination`).
+processed them, and it pairs no reply with a sent message.
 
 **Datagram tunnels.** UDP and DTLS exchanges through a MASQUE (CONNECT-UDP)
 proxy or a mesh HBONE proxy open **one tunnel per exchange** (a QUIC
@@ -134,13 +135,8 @@ traffic reaches the proxy first, and warns that traffic leaves this machine
 when either the target or the proxy cannot be proven to use only loopback
 addresses (each host is judged on its own).
 
-gRPC calls the engine refuses on every send (native gRPC with HTTP/1.1-only,
-gRPC over HTTP/3 with a cleartext URL or through a proxy, gRPC-Web client or
-bidirectional streams) are refused before traffic as
-`grpc_unsupported_combination`, and UDP through a MASQUE proxy while a proxy
-profile routes the request as `masque_through_proxy`. Other combinations the
-engine itself refuses keep failing per send with `unsupported_combination`
-before any bytes are written; they are local failures in the ledger, never
+Combinations outside the refusal table that the engine itself refuses keep
+failing per send with `unsupported_combination` before any bytes are written; they are local failures in the ledger, never
 successes. An abort rule stops such a run early.
 
 **Connection modes per unit.** For HTTP requests and gRPC calls/streams,
@@ -635,16 +631,11 @@ Observations that shaped the implementation:
 ## Limitations
 
 * **LOAD-012** (optional JMeter adapter) is not implemented.
-* **Refused protocol combinations** (table above): gRPC-Web client-streaming
-  and bidirectional streams, gRPC with server reflection, SSE with
-  reconnection, UDP/DTLS through MASQUE while another proxy profile also
-  routes the request (`masque_through_proxy`; direct MASQUE tunnels are
-  supported), HTTP/gRPC through HBONE in persistent
-  mode, and mixed-protocol plans. Native client-streaming and bidirectional
-  gRPC are supported load units (`grpc_client_stream`, `grpc_bidi_stream`);
-  only their gRPC-Web forms are refused (gRPC-Web has no client stream).
-  There is no "long-lived stream" load action yet (sessions held open while
-  messages are sent at a rate); a WebSocket session unit is connect →
+* **Refused protocol combinations**: see the table above. Native
+  client-streaming and bidirectional gRPC are supported load units
+  (`grpc_client_stream`, `grpc_bidi_stream`). There is no "long-lived
+  stream" load action yet (sessions held open while messages are sent at a
+  rate); a WebSocket session unit is connect →
   scripted messages → close.
 * WebSocket round trips pair the i-th scripted data message with the i-th
   data message received (the adapter sends the whole script, then reads), so
@@ -714,4 +705,5 @@ independent ground truth:
   reports 20 sent and 10 received as separate counts with no delivery claim,
   while the backend's own log shows all 20 arrived.
 
-Each runs in the trusted and untrusted passes, on v0.9.7 and v0.9.5.
+Each runs in the trusted and untrusted passes against the default lab pin
+(`lab/gateway/RELEASE.lock`) and, nightly, every earlier supported release.

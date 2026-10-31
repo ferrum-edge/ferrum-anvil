@@ -1,15 +1,11 @@
 # Failure lab: `streams` and `cpdp` profiles
 
-The v0.9.15 default is a source-audited release with
-[hosted Anvil qualification](../audit/gateway-0.9.15-delta.md#qualification-status) recorded.
-Results and observations below remain historical; see
-[the 0.9.15 source delta](../audit/gateway-0.9.15-delta.md) and, for the retained v0.9.14 and
-v0.9.11, their hosted qualification ([0.9.14](../audit/gateway-0.9.14-delta.md),
-[0.9.11](../audit/gateway-0.9.11-delta.md)).
+Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is
+named; supported releases and their qualification: [README](README.md).
 
 These two profiles run Anvil's shared engine against a **real, pinned Ferrum Edge release
-binary** (v0.9.15 default, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 or v0.9.5 with `--release`), with no gateway mocks. Every
-scenario passes on both releases with the same expectations; observations recorded below as
+binary** (the default pin or, with `--release`, any supported release), with no gateway mocks. Every
+scenario passes on v0.9.5 and v0.9.7 with the same expectations; observations recorded below as
 "0.9.5" were re-observed on 0.9.7.
 
 - `streams` sends every protocol Anvil advertises *through* the gateway: HTTP/1.1, HTTP/2
@@ -185,19 +181,8 @@ Items 2–4 are rules in `crates/anvil-diagnostics/src/rules/protocols.rs`, with
 
 ## 5. Stability
 
-All runs are `run <profile> --untrusted-pass` (or `run all`) on macOS arm64. Counts cover both
-passes; v0.9.7 is sha256 `f3bd0027…`, v0.9.5 `6a531f2c…`. The streams scenario count grew as
-features landed; the current profile has 49 scenarios.
-
-| Date | Scope | Release | Runs | streams per run | cpdp per run |
-|---|---|---|---|---|---|
-| 2026-09-25 | 29 streams scenarios + PROTO-013 skipped | v0.9.5 | 5 streams, 3 cpdp | 58 passed, 0 failed, 1 skipped (~24 s) | 10 passed, 0 failed (~47 s) |
-| 2026-09-25 | + RFC 9220 (31 scenarios) | v0.9.5 | 3 | 62/0/0 | — |
-| 2026-09-26 | `run all` | v0.9.7 and v0.9.5 | 1 each | 62/0/0 | 10/0/0 |
-| 2026-09-26 | + gRPC over HTTP/3 and gRPC-Web (42 scenarios) | v0.9.7 | 3 | 84/0/0 (~30–40 s) | — |
-| 2026-09-26 | all protocol branches merged, `run all` | v0.9.7 and v0.9.5 | 1 each | 84/0/0 | 10/0/0 |
-| 2026-09-26 | + LOAD-013 (45 scenarios) | v0.9.7 (3), v0.9.5 (1) | 4 | 90/0/0 | — |
-| 2026-09-26 | + WS-DEFLATE (46 scenarios) | v0.9.7 (3), v0.9.5 (1) | 4 | 92/0/0 (~30 s) | — |
+Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
+[repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/streams-cpdp.md#5-stability).
 
 What these runs showed:
 

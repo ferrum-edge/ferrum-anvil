@@ -1,5 +1,11 @@
 # Upgrade guide
 
+## 0.1.5
+
+0.1.5 keeps the database schema and the bundle and backup formats of 0.1.4;
+no migration action is needed. Ferrum Edge v0.9.15 becomes the lab and
+new-profile default.
+
 ## 0.1.4
 
 0.1.4 keeps database schema 3 and the bundle and backup formats of 0.1.3.
@@ -49,6 +55,34 @@ imports into an earlier build.
   first.
 
 ## 0.1.2
+
+### Behaviour changes
+
+These changes may need action; the
+[HTTP state and destination policy](security/http-state-and-destination-policy.md#compatibility-changes)
+has the full list, including the remaining network-zone restrictions.
+
+- **Cookies.** Jars are bounded: eviction and output omission can end
+  sessions or change load results. Cookies with an unknown suffix are
+  host-only.
+- **OAuth token endpoints** must be HTTPS, or `http://` to a literal loopback
+  address on a direct connection: `localhost`, DNS names, DNS overrides and
+  proxied routes are refused for HTTP. A load plan whose unit depends on a
+  vault variable deferred for OAuth is refused before traffic.
+- **Redirects and destinations.** Redirects through any proxy, redirect
+  answers that mix public and non-public zones, returns to a non-public zone
+  after a public hop, and fake-IP redirects that do not return to the
+  original host are refused, as are original requests to special or reserved
+  addresses (including `0.0.0.0`).
+- **Bundles** over 256 MiB in total inflated bytes, with an entry over
+  128 MiB, or holding more than 4 Mi JSON values (object keys included) no
+  longer import, and a file over 128 MiB can no longer be attached. To move
+  such a workspace, open it in the Anvil that exported it and export again in
+  smaller parts: one workspace per bundle, without history, or with large
+  files linked rather than attached. See the
+  [bundle resource policy](security/bundle-resource-policy.md).
+
+### Desktop IPC commands
 
 This release changes two groups of desktop IPC commands. Both changes only
 affect code that calls the desktop's Tauri commands directly: the bundled
