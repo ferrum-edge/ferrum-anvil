@@ -53,7 +53,7 @@ async fn edge_dtls_echo(view: Arc<ServerView>) -> std::net::SocketAddr {
         let _ = server.handle_timeout(Instant::now());
         let mut peer = None;
         let mut next: Option<Instant> = None; // set by every drain (it ends at Timeout)
-        let mut buf = vec![0u8; 2048];
+        let mut buf = vec![0u8; 65_535];
         let mut out = vec![0u8; 4096];
         loop {
             let wait = next.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_millis(100));

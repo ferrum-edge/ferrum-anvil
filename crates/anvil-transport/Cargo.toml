@@ -58,7 +58,8 @@ anvil-auth.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # The DTLS stack of every supported Ferrum Edge release, for the cross-version
 # handshake in tests/dtls_edge_interop.rs (see vendor/README.md, dimpl-0.8.0-empty-ca).
-dimpl-edge = { package = "dimpl", version = "=0.6.1" }
+# `rcgen` for the server's self-signed certificate (it implies `aws-lc-rs`).
+dimpl-edge = { package = "dimpl", version = "=0.6.1", default-features = false, features = ["aws-lc-rs", "rcgen"] }
 
 [lints]
 workspace = true
