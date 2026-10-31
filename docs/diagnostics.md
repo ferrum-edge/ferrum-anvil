@@ -71,16 +71,24 @@ When an error response is `application/problem+json` (the RFC 9457 media
 type, with any parameters; plain `application/json` is not read as one), its
 generic `http.*` finding records the standard members it carries as body
 evidence: `body.problem.type`, `.title`, `.detail`, `.status` and
-`.instance`, each a redacted excerpt on one line. A member of the wrong JSON
-type is ignored, as RFC 9457 §3.1 requires, and extension members are not
-read. The explanation states the type (unless it is `about:blank`), title
-and detail. A status member that differs from the response status is stated
-too, with "an intermediary changed the status" as an alternative. When the
-report names a type or an instance, a remediation step tells the caller to
-quote them to the API owner.
+`.instance`. Each text is a redacted excerpt with control characters and
+invisible Unicode format characters (bidirectional overrides and isolates,
+zero-width characters) replaced by spaces. A member of the wrong JSON type is
+ignored, as RFC 9457 §3.1 requires; `status` is read in any JSON number form
+of an integer from 100 to 599 (`503`, `503.0`), and extension members are
+not read. The explanation states the type (unless it is `about:blank`),
+title and detail, each quoted as a JSON string: a quote or backslash in the
+body is escaped, so the body's text cannot close its quotation and read as
+Anvil's own words. A status member that differs from the response status is
+stated too, with an intermediary change and an inconsistent report as
+alternatives. When the report names a type or an instance, a remediation step
+tells the caller to quote them to the API owner. `type` and `instance` are
+redacted as URLs (a sensitive query value such as `access_token` is withheld)
+in the evidence, the explanation and the remediation, and a value that is not
+a URI reference (spaces, quotes, angle brackets) stays in the evidence only.
 
 The report is what the responding server says, so it adds evidence and
-wording only: the finding's code, confidence, scope and owner are the same
+wording only: the finding's code, confidence, scope, owner and severity are the same
 as for any body with that status, and "does not prove" says that any server
 on the path can send one. It is often what separates causes the status
 cannot. A Ferrum Alloy service answers a handler that missed its deadline

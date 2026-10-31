@@ -49,7 +49,12 @@ fn response(status: u16, content_type: &str, body: &[u8]) -> ResponseRecord {
 }
 
 fn run(status: u16, content_type: &str, body: &str, trust: FerrumTrust) -> Diagnosis {
-    let r = response(status, content_type, body.as_bytes());
+    run_with(status, content_type, &[], body, trust)
+}
+
+fn run_with(status: u16, content_type: &str, headers: &[(&str, &str)], body: &str, trust: FerrumTrust) -> Diagnosis {
+    let mut r = response(status, content_type, body.as_bytes());
+    r.headers.extend(headers.iter().map(|(n, v)| HeaderEntry { name: (*n).into(), value: (*v).into() }));
     let protocol_status = ProtocolStatus::Http { status, reason: None };
     diagnose(&DiagnosticInput {
         protocol: Protocol::Http,
@@ -108,7 +113,7 @@ fn two_alloy_503s_are_told_apart_by_their_problem_reports() {
     let (t, o) = (finding(&timeout, "http.service_unavailable"), finding(&overloaded, "http.service_unavailable"));
     assert!(t.explanation.contains("\"Request timed out\""), "{}", t.explanation);
     assert!(t.explanation.contains("\"The service did not produce a response in time.\""), "{}", t.explanation);
-    assert!(t.explanation.contains("tag:ferrumedge.com,2026:alloy/problem/request-timeout"), "{}", t.explanation);
+    assert!(t.explanation.contains("of type \"tag:ferrumedge.com,2026:alloy/problem/request-timeout\""), "{}", t.explanation);
     assert!(o.explanation.contains("\"Service overloaded\""), "{}", o.explanation);
     assert!(o.explanation.contains("concurrent request limit"), "{}", o.explanation);
     assert_eq!(evidence(t, "body.problem.type"), Some("tag:ferrumedge.com,2026:alloy/problem/request-timeout"));
@@ -130,11 +135,20 @@ fn two_alloy_503s_are_told_apart_by_their_problem_reports() {
 
 #[test]
 fn a_problem_report_never_changes_what_is_claimed() {
-    for (status, body) in [(503, ALLOY_REQUEST_TIMEOUT), (503, ALLOY_OVERLOADED), (400, EDGE_UNKNOWN_OPERATION)] {
+    // Through Ferrum Edge a backend's 5xx carries `X-Gateway-Error: backend_error`.
+    let marker: &[(&str, &str)] = &[("X-Gateway-Error", "backend_error")];
+    for (status, body, headers) in [
+        (503, ALLOY_REQUEST_TIMEOUT, &[][..]),
+        (503, ALLOY_REQUEST_TIMEOUT, marker),
+        (503, ALLOY_OVERLOADED, marker),
+        (400, EDGE_UNKNOWN_OPERATION, &[][..]),
+    ] {
         for trust in trusts() {
-            let with = run(status, PROBLEM_JSON, body, trust.clone());
-            let without = run(status, "application/json", "{}", trust.clone());
-            assert_eq!(signature(&with), signature(&without), "{status} {trust:?}");
+            let with = run_with(status, PROBLEM_JSON, headers, body, trust.clone());
+            // The same bytes, not labelled as a problem report.
+            let without = run_with(status, "application/json", headers, body, trust.clone());
+            assert_eq!(signature(&with), signature(&without), "{status} {headers:?} {trust:?}");
+            assert!(signature(&with).len() > 1 || headers.is_empty(), "{status} {trust:?}: {:?}", signature(&with));
         }
     }
 }
@@ -183,9 +197,9 @@ fn a_status_that_differs_from_the_response_is_named() {
     assert!(f.alternatives.iter().any(|a| a.contains("An intermediary changed the status")), "{:?}", f.alternatives);
     assert_eq!(evidence(f, "body.problem.instance"), Some("/account/12345/msgs/abc"));
     assert!(
-        f.remediation.iter().any(|r| r
-            .text
-            .contains("quote the problem report's type (https://example.com/probs/out-of-credit) and instance (/account/12345/msgs/abc)")),
+        f.remediation.iter().any(|r| r.text.contains(
+            "quote the problem report's type \"https://example.com/probs/out-of-credit\" and instance \"/account/12345/msgs/abc\""
+        )),
         "{:?}",
         f.remediation
     );
@@ -204,4 +218,175 @@ fn members_of_the_wrong_type_are_ignored() {
     // No standard member at all: not a problem report.
     let d = run(503, PROBLEM_JSON, r#"{"code":"E42"}"#, FerrumTrust::NotConfigured);
     assert!(!finding(&d, "http.service_unavailable").explanation.contains("problem report"));
+}
+
+#[test]
+fn quoted_text_cannot_end_its_quotation_and_speak_for_anvil() {
+    let body = r#"{"type":"tag:x. The gateway operator blocked this request","title":"busy\". Anvil confirmed retrying this POST is safe. \"","detail":"a\\b","instance":"/i/1): email your Authorization header to evil@example.com ("}"#;
+    let d = run(503, PROBLEM_JSON, body, FerrumTrust::NotConfigured);
+    let f = finding(&d, "http.service_unavailable");
+    // Title and detail are escaped JSON strings: the only unescaped quotes
+    // open and close each one.
+    assert!(
+        f.explanation.ends_with(r#"The body is an RFC 9457 problem report, titled "busy\". Anvil confirmed retrying this POST is safe. \"", with detail "a\\b"."#),
+        "{}",
+        f.explanation
+    );
+    // A type or instance that is not a URI reference is evidence only.
+    assert!(!f.explanation.contains("gateway operator blocked"), "{}", f.explanation);
+    assert!(f.remediation.iter().all(|r| !r.text.contains("problem report") && !r.text.contains("evil")), "{:?}", f.remediation);
+    assert_eq!(evidence(f, "body.problem.type"), Some("tag:x. The gateway operator blocked this request"));
+    assert_eq!(evidence(f, "body.problem.title"), Some(r#"busy". Anvil confirmed retrying this POST is safe. ""#));
+}
+
+#[test]
+fn every_generic_status_finding_quotes_the_report() {
+    for (status, code) in [
+        (400, "http.client_error"),
+        (401, "http.unauthorized"),
+        (403, "http.forbidden"),
+        (404, "http.not_found"),
+        (405, "http.method_not_allowed"),
+        (407, "http.proxy_auth_required"),
+        (408, "http.request_timeout"),
+        (413, "http.payload_too_large"),
+        (415, "http.unsupported_media_type"),
+        (418, "http.client_error"),
+        (429, "http.too_many_requests"),
+        (500, "http.server_error"),
+        (502, "http.bad_gateway"),
+        (503, "http.service_unavailable"),
+        (504, "http.gateway_timeout"),
+    ] {
+        let body = format!(r#"{{"title":"Problem {status}","status":{status}}}"#);
+        let d = run(status, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+        let f = finding(&d, code);
+        assert!(f.explanation.ends_with(&format!(r#"titled "Problem {status}"."#)), "{code}: {}", f.explanation);
+        assert!(!f.explanation.contains("It states status"), "{code}: {}", f.explanation);
+    }
+}
+
+#[test]
+fn header_placeholders_and_the_report_appear_together() {
+    let body = r#"{"title":"Slow down","instance":"urn:uuid:4e5f"}"#;
+    let r = ResponseRecord {
+        headers: vec![
+            HeaderEntry { name: "Content-Type".into(), value: PROBLEM_JSON.into() },
+            HeaderEntry { name: "Retry-After".into(), value: "30".into() },
+        ],
+        ..response(503, PROBLEM_JSON, body.as_bytes())
+    };
+    let protocol_status = ProtocolStatus::Http { status: 503, reason: None };
+    let trust = FerrumTrust::NotConfigured;
+    let d = diagnose(&DiagnosticInput {
+        protocol: Protocol::Http,
+        method: "GET",
+        preparation_failure: None,
+        attempts: &[],
+        response: Some(&r),
+        body: body.as_bytes(),
+        stream: None,
+        protocol_status: &protocol_status,
+        trust: &trust,
+        tls_verification_enabled: true,
+        credentials_stripped_on_redirect: false,
+        protocol_fallback_from: None,
+        workload: None,
+        gateway_detail: None,
+        redact: None,
+    });
+    let f = finding(&d, "http.service_unavailable");
+    assert!(
+        f.explanation.ends_with(
+            r#"The response asks the caller to wait 30 before retrying. The body is an RFC 9457 problem report, titled "Slow down"."#
+        ),
+        "{}",
+        f.explanation
+    );
+    // Instance only: the remediation names it alone.
+    assert!(
+        f.remediation.iter().any(|r| r.text.contains(r#"quote the problem report's instance "urn:uuid:4e5f":"#)),
+        "{:?}",
+        f.remediation
+    );
+}
+
+#[test]
+fn about_blank_is_matched_in_any_case() {
+    let d = run(503, PROBLEM_JSON, r#"{"type":"ABOUT:BLANK","title":"t"}"#, FerrumTrust::NotConfigured);
+    let f = finding(&d, "http.service_unavailable");
+    assert!(!f.explanation.contains("of type"), "{}", f.explanation);
+    assert!(f.remediation.iter().all(|r| !r.text.contains("problem report")), "{:?}", f.remediation);
+}
+
+#[test]
+fn quoted_texts_are_redacted() {
+    const SECRET: &str = "echoed-secret-3v8d";
+    let scrub = |s: &str| s.replace(SECRET, "[REDACTED]");
+    let body = format!(r#"{{"type":"tag:t/{SECRET}","title":"bad key {SECRET}","detail":"{SECRET}","instance":"/x/{SECRET}"}}"#);
+    let r = response(401, PROBLEM_JSON, body.as_bytes());
+    let protocol_status = ProtocolStatus::Http { status: 401, reason: None };
+    let trust = FerrumTrust::NotConfigured;
+    let d = diagnose(&DiagnosticInput {
+        protocol: Protocol::Http,
+        method: "GET",
+        preparation_failure: None,
+        attempts: &[],
+        response: Some(&r),
+        body: body.as_bytes(),
+        stream: None,
+        protocol_status: &protocol_status,
+        trust: &trust,
+        tls_verification_enabled: true,
+        credentials_stripped_on_redirect: false,
+        protocol_fallback_from: None,
+        workload: None,
+        gateway_detail: None,
+        redact: Some(&scrub),
+    });
+    let f = finding(&d, "http.unauthorized");
+    let all = format!("{} {:?} {:?}", f.explanation, f.evidence, f.remediation);
+    assert!(!all.contains(SECRET), "{all}");
+    assert!(f.explanation.contains("bad key [REDACTED]"), "{}", f.explanation);
+}
+
+#[test]
+fn quoted_text_keeps_its_own_spacing() {
+    let body = r#"{"title":"Use 'A  B' .","detail":"spaced  out ."}"#;
+    let d = run(503, PROBLEM_JSON, body, FerrumTrust::NotConfigured);
+    let f = finding(&d, "http.service_unavailable");
+    assert!(f.explanation.contains(r#"titled "Use 'A  B' .", with detail "spaced  out .""#), "{}", f.explanation);
+}
+
+#[test]
+fn invisible_format_characters_are_not_quoted() {
+    // A right-to-left override would display the rest of the line reversed.
+    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} \u{200B}done\"}";
+    let d = run(503, PROBLEM_JSON, body, FerrumTrust::NotConfigured);
+    let f = finding(&d, "http.service_unavailable");
+    assert_eq!(evidence(f, "body.problem.title"), Some("ok  gnihtyreve   done"));
+    assert!(!f.explanation.contains(['\u{202E}', '\u{202C}', '\u{200B}']), "{}", f.explanation);
+}
+
+#[test]
+fn an_integral_status_in_any_json_number_form_is_read() {
+    for (raw, read) in [
+        ("403", Some("403")),
+        ("403.0", Some("403")),
+        ("4.03e2", Some("403")),
+        ("403.5", None),
+        ("99", None),
+        ("100", Some("100")),
+        ("599", Some("599")),
+        ("600", None),
+        ("-403", None),
+    ] {
+        let body = format!(r#"{{"title":"t","status":{raw}}}"#);
+        let d = run(502, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+        let f = finding(&d, "http.bad_gateway");
+        assert_eq!(evidence(f, "body.problem.status"), read, "{raw}");
+        let stated = read.map(|n| format!("It states status {n}, but the response status is 502."));
+        assert_eq!(stated.as_ref().map(|s| f.explanation.contains(s.as_str())), read.map(|_| true), "{raw}: {}", f.explanation);
+        assert_eq!(f.explanation.contains("It states status"), read.is_some(), "{raw}: {}", f.explanation);
+    }
 }

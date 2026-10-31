@@ -88,35 +88,40 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
         d = d.ev_at(E::BodyContent, "body.problem.status", n.to_string(), idx);
     }
     // RFC 9457 §3.1.1: an absent type means `about:blank`, which adds
-    // nothing beyond the status.
-    let named_type = p.type_uri.as_deref().filter(|t| *t != "about:blank");
+    // nothing beyond the status. `type` and `instance` are URI references:
+    // one that is not is evidence only, never part of the wording.
+    let named_type = p.type_uri.as_deref().filter(|t| !t.eq_ignore_ascii_case("about:blank") && is_uri_reference(t));
+    let instance = p.instance.as_deref().filter(|i| is_uri_reference(i));
     let mut sentence = String::from("The body is an RFC 9457 problem report");
     if let Some(t) = named_type {
-        sentence.push_str(&format!(" of type {t}"));
+        sentence.push_str(&format!(" of type {}", quoted(t)));
     }
     if let Some(t) = &p.title {
-        sentence.push_str(&format!(", titled \"{t}\""));
+        sentence.push_str(&format!(", titled {}", quoted(t)));
     }
     if let Some(t) = &p.detail {
-        sentence.push_str(&format!(", with detail \"{t}\""));
+        sentence.push_str(&format!(", with detail {}", quoted(t)));
     }
     // A quoted text that already ends a sentence ends this one too.
-    if !sentence.trim_end_matches('"').ends_with(['.', '!', '?']) {
+    let last_quoted = p.detail.as_deref().or(p.title.as_deref()).or(named_type).unwrap_or("");
+    if !(sentence.ends_with('"') && last_quoted.ends_with(['.', '!', '?'])) {
         sentence.push('.');
     }
     if let Some(n) = p.status.filter(|n| *n != status) {
         sentence.push_str(&format!(" It states status {n}, but the response status is {status}."));
-        d = d.alt(format!(
-            "An intermediary changed the status: the problem report states {n} (RFC 9457 requires the generator to send the same status)."
-        ));
+        d = d
+            .alt(format!(
+                "An intermediary changed the status: the problem report states {n} (RFC 9457 requires the generator to send the same status)."
+            ))
+            .alt("The server that wrote the problem report sent a status that does not match it.");
     }
     d = d.var("problem", sentence).not_proven(
         "That the problem report is accurate, or which component on the path wrote it: any server can send application/problem+json.",
     );
-    let ids = match (named_type, &p.instance) {
-        (Some(t), Some(i)) => Some(format!("type ({t}) and instance ({i})")),
-        (Some(t), None) => Some(format!("type ({t})")),
-        (None, Some(i)) => Some(format!("instance ({i})")),
+    let ids = match (named_type, instance) {
+        (Some(t), Some(i)) => Some(format!("type {} and instance {}", quoted(t), quoted(i))),
+        (Some(t), None) => Some(format!("type {}", quoted(t))),
+        (None, Some(i)) => Some(format!("instance {}", quoted(i))),
         (None, None) => None,
     };
     if let Some(ids) = ids {
@@ -126,4 +131,17 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
         });
     }
     d
+}
+
+/// Whether `s` can be an RFC 3986 URI reference: no whitespace, quotes,
+/// angle brackets or other characters a URI never contains unencoded.
+fn is_uri_reference(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}'))
+}
+
+/// `s` as a JSON string: in double quotes, with any quote or backslash in it
+/// escaped, so the response's text cannot end the quotation and continue as
+/// Anvil's own words.
+fn quoted(s: &str) -> String {
+    serde_json::Value::from(s).to_string()
 }

@@ -43,15 +43,20 @@
 - The generic HTTP status findings (`http.*`) now quote an RFC 9457 problem
   report (`application/problem+json`) when the error response carries one:
   its `type`, `title`, `detail`, `status` and `instance` are recorded as
-  body evidence and stated in the explanation, a remediation step names the
-  type and instance to quote to the API owner, and a status that differs
-  from the response status is listed as an intermediary change. Two 503s a
+  body evidence; the explanation quotes the type (unless `about:blank`),
+  title and detail as escaped JSON strings; a remediation step names the
+  type and instance to quote to the API owner; and a status that differs
+  from the response status is stated, with an intermediary change and an
+  inconsistent report as alternatives. `type` and `instance` are redacted as
+  URLs, and appear in the wording only when they are URI references. Two 503s a
   Ferrum Alloy service sends for different reasons (a handler deadline,
   `request-timeout`, and a full admission limit, `overloaded`) were
   previously the same "Service unavailable" finding with no body evidence,
   as were a Ferrum Edge `openapi_validator` 400 and any other 400. The
-  report never changes a finding's code, confidence, scope or owner: any
-  server on the path can send one. Diagnostics catalog version 2026.10.31-1.
+  report never changes a finding's code, confidence, scope, owner or
+  severity: any server on the path can send one. Generic finding wording no
+  longer collapses spaces inside a substituted value, so quoted response text
+  keeps its spacing. Diagnostics catalog version 2026.10.31-1.
 
 - Schema checks of examples, drift bodies and custom ruleset values charge
   `uniqueItems`, text-reading assertions (`pattern`, `enum`, `const`, length

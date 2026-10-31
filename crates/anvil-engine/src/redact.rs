@@ -44,8 +44,9 @@ const MAX_DECODE_ROUNDS: usize = 3;
 const URL_HEADERS: &[&str] = &["location", "content-location", "referer"];
 
 /// Diagnostic evidence keys whose values are URLs, or `host/path` without a
-/// scheme.
-const URL_EVIDENCE: &[&str] = &["redirect.authorization_endpoint"];
+/// scheme. An RFC 9457 problem report's `type` and `instance` are URI
+/// references (a server can put a trace URL with a token in `instance`).
+const URL_EVIDENCE: &[&str] = &["redirect.authorization_endpoint", "body.problem.type", "body.problem.instance"];
 
 const SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
@@ -520,7 +521,8 @@ impl Redactor {
     }
 
     /// A diagnostic finding with its values redacted. URL-valued evidence is
-    /// redacted as a URL, and so is its copy in the explanation. Other text
+    /// redacted as a URL, and so are its copies in the explanation and the
+    /// remediation steps. Other text
     /// can quote response metadata (header values, the reason phrase), so a
     /// reversibly encoded secret in it is withheld like in the metadata.
     pub fn finding(&self, f: &mut DiagnosticFinding) {
@@ -534,6 +536,9 @@ impl Redactor {
             let redacted = self.url(&e.value);
             if !e.value.is_empty() && redacted != e.value {
                 explanation = explanation.replace(e.value.as_str(), &redacted);
+                for remediation in &mut f.remediation {
+                    remediation.text = remediation.text.replace(e.value.as_str(), &redacted);
+                }
             }
             e.value = redacted;
         }
@@ -1030,6 +1035,42 @@ fn anchor_value_start(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_problem_report_uri_is_redacted_as_a_url_wherever_a_finding_quotes_it() {
+        use super::*;
+        use anvil_domain::diagnostics::{
+            Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Remediation, Severity, SourceScope,
+        };
+        let r = Redactor::new(vec![], vec![]);
+        let instance = "https://trace.example/occ/9?access_token=tok-live-5k2r&page=2";
+        let mut f = DiagnosticFinding {
+            code: "http.service_unavailable".into(),
+            rule_id: "http.status".into(),
+            rule_version: 1,
+            title: "Service unavailable (503)".into(),
+            explanation: format!("The body is an RFC 9457 problem report of type \"tag:x\", titled \"t\". {instance:?}"),
+            scope: SourceScope::Unknown,
+            confidence: Confidence::Confirmed,
+            severity: Severity::Error,
+            evidence: vec![Evidence {
+                source: EvidenceSource::BodyContent,
+                key: "body.problem.instance".into(),
+                value: instance.into(),
+                attempt: Some(0),
+            }],
+            alternatives: vec![],
+            does_not_prove: vec![],
+            remediation: vec![Remediation { text: format!("quote the problem report's instance \"{instance}\""), owner: Owner::Caller }],
+            owner: Owner::Unknown,
+            confirm_with: vec![],
+        };
+        r.finding(&mut f);
+        let all = format!("{} {} {}", f.evidence[0].value, f.explanation, f.remediation[0].text);
+        assert!(!all.contains("tok-live-5k2r"), "{all}");
+        assert!(f.evidence[0].value.contains("page=2"), "{}", f.evidence[0].value);
+        assert!(f.remediation[0].text.contains("https://trace.example/occ/9?access_token="), "{}", f.remediation[0].text);
+    }
+
     #[test]
     fn cookie_structure_is_examined_before_case_folded_name_scrubbing() {
         use super::*;

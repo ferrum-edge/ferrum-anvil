@@ -91,8 +91,8 @@ pub struct BodyFacts {
 }
 
 /// The standard members of an RFC 9457 problem report, as the response
-/// carries them. Each text is a redacted [`excerpt`] with control characters
-/// replaced by spaces. A member that is absent or not of its RFC 9457 type is
+/// carries them. Each text is a redacted [`excerpt`] with control and
+/// invisible format characters replaced by spaces. A member that is absent or not of its RFC 9457 type is
 /// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
 /// not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,18 +294,33 @@ fn is_problem_json(content_type: &str) -> bool {
 fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Redact<'_>) -> Option<ProblemDetails> {
     let text = |key: &str, max: usize| {
         let v = obj.get(key)?.as_str()?;
-        let one_line: String = excerpt(redact, v, max).chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let one_line: String = excerpt(redact, v, max).chars().map(|c| if is_hidden(c) { ' ' } else { c }).collect();
         Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
     };
     let p = ProblemDetails {
         type_uri: text("type", 256),
         title: text("title", 200),
-        status: obj.get("status").and_then(|v| v.as_u64()).and_then(|v| u16::try_from(v).ok()).filter(|v| (100..=599).contains(v)),
+        status: obj.get("status").and_then(problem_status),
         detail: text("detail", 300),
         instance: text("instance", 256),
     };
     let any = p.type_uri.is_some() || p.title.is_some() || p.status.is_some() || p.detail.is_some() || p.instance.is_some();
     any.then_some(p)
+}
+
+/// A problem report's `status`: a JSON number (`503`, `503.0` or `5.03e2`)
+/// that is an integer from 100 to 599.
+fn problem_status(v: &serde_json::Value) -> Option<u16> {
+    let n = v.as_f64()?;
+    (n.fract() == 0.0 && (100.0..=599.0).contains(&n)).then_some(n as u16)
+}
+
+/// Characters a quoted text must not carry into a finding: controls
+/// (line breaks, escapes) and the invisible Unicode format characters that
+/// reorder or hide text (bidirectional overrides and isolates, zero-width
+/// characters, the byte-order mark).
+fn is_hidden(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
 }
 
 fn trim_ascii(b: &[u8]) -> &[u8] {
