@@ -399,13 +399,22 @@ window_count() { # $1 = app pid; prints the count, records probe errors
   fi
 }
 
-webview_count() { # prints the count of webview content processes, records probe errors
+webview_pids() { # prints the PIDs of webview content processes (sorted), records probe errors
   local pat out rc=0
   if [ "$os" = Darwin ]; then pat='com.apple.WebKit.WebContent'; else pat='WebKitWebProcess'; fi
   out="$(pgrep -f "$pat" 2>>"$logs/webview-probe.err")" || rc=$?
   # pgrep exits 1 when nothing matches; 2 and 3 are errors.
   [ "$rc" -le 1 ] || probe_error "pgrep exited $rc: $(tail -1 "$logs/webview-probe.err" | oneline)"
-  if [ -n "$out" ]; then printf '%s\n' "$out" | wc -l | tr -d ' '; else echo 0; fi
+  [ -z "$out" ] || printf '%s\n' "$out" | sort
+}
+
+# Webview processes started since the launch: PIDs present now that were not
+# before it. Other WebKit users on the runner (they come and go) never count.
+new_webviews() {
+  local now
+  now="$(webview_pids)"
+  [ -n "$now" ] || { echo 0; return; }
+  comm -13 <(printf '%s\n' "$web_before_pids" | sed '/^$/d') <(printf '%s\n' "$now") | wc -l | tr -d ' '
 }
 
 display_ok() { [ "$os" = Darwin ] || xdotool getdisplaygeometry >/dev/null 2>&1; }
@@ -417,11 +426,12 @@ harness_cause() { # $1 = app output log
 }
 
 launch() { # $1 = step name
-  local name="$1" pid="" i=0 win=0 web=0 web_before first_window="" first_webview="" shot="none" cause
+  local name="$1" pid="" i=0 win=0 web=0 web_before web_before_pids first_window="" first_webview="" shot="none" cause
   current_step="$name"
   : >"$logs/probe-errors.log"
   display_ok || hfail "$name" "the X display ($DISPLAY) is not answering before the launch"
-  web_before="$(webview_count)"
+  web_before_pids="$(webview_pids)"
+  web_before="$(printf '%s' "$web_before_pids" | grep -c . || true)"
   if [ "$os" = Darwin ]; then
     # `open` failing means LaunchServices could not start the installed app.
     open -n --stdout "$logs/$name.stdout.log" --stderr "$logs/$name.stdout.log" "$app" 2>>"$logs/$name.open.log" ||
@@ -453,10 +463,10 @@ launch() { # $1 = step name
       fail "$name" "the app exited ${i}s after launch (output: $(tail -5 "$logs/$name.stdout.log" 2>/dev/null | oneline))"
     fi
     if [ -z "$first_window" ] && [ "$(window_count "$pid")" != 0 ]; then first_window="${i}s"; fi
-    if [ -z "$first_webview" ] && [ "$(($(webview_count) - web_before))" -gt 0 ]; then first_webview="${i}s"; fi
+    if [ -z "$first_webview" ] && [ "$(new_webviews)" -gt 0 ]; then first_webview="${i}s"; fi
   done
   win="$(window_count "$pid")"
-  web="$(($(webview_count) - web_before))"
+  web="$(new_webviews)"
   local display_alive=true
   display_ok || display_alive=false
   # Screenshots are best-effort: never a reason to fail.
@@ -474,15 +484,14 @@ launch() { # $1 = step name
   else
     kill -KILL -- "-$pid" 2>/dev/null || true
   fi
-  # Webview processes can outlive the app (macOS WebContent XPC services);
-  # clear them so the next launch counts only its own. On this single-purpose
-  # runner no other app uses WebKit.
-  for _ in $(seq 1 10); do [ "$(webview_count)" -le "$web_before" ] && break; sleep 1; done
-  if [ "$os" = Darwin ]; then
-    pkill -KILL -f 'com.apple.WebKit.WebContent' 2>/dev/null || true
-  else
-    pkill -KILL -f 'WebKit(Web|Network)Process' 2>/dev/null || true
-  fi
+  # Webview processes can outlive the app (macOS WebContent XPC services):
+  # give this launch's own ones time to exit, then stop any left, so they
+  # are not running when the next launch takes its "before" list.
+  local left p
+  for _ in $(seq 1 10); do [ "$(new_webviews)" = 0 ] && break; sleep 1; done
+  left="$(comm -13 <(printf '%s\n' "$web_before_pids" | sed '/^$/d') <(webview_pids) || true)"
+  for p in $left; do kill -KILL "$p" 2>/dev/null || true; done
+  [ "$os" = Darwin ] || pkill -KILL -f 'WebKitNetworkProcess' 2>/dev/null || true
   local ld
   ld="$(app_log_dir)"
   if [ -d "$ld" ]; then { mkdir -p "$logs/app-log-$name" && cp -R "$ld/." "$logs/app-log-$name/"; } 2>/dev/null || true; fi
