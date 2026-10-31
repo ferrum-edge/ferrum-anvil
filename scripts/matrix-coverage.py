@@ -3,8 +3,8 @@
 
 Evidence is discovered, not declared:
   * test functions / lab scenario ids / E2E specs that name the scenario id
-    (forms: UP-001, up_001, up001) under crates/, apps/desktop/e2e/ and
-    apps/desktop/src/**/*.test.*;
+    (forms: UP-001, up_001, up001) under crates/, apps/desktop/src-tauri/src/,
+    apps/desktop/e2e/ and apps/desktop/src/**/*.test.*;
   * the latest real-gateway lab results (results/lab/*/<ID>.json);
   * explicit, reasoned statuses in docs/verification/matrix-status.json for
     cases that are blocked or not applicable (never counted as passed).
@@ -26,6 +26,8 @@ OUT_DIR = os.path.join(ROOT, "docs/verification")
 
 SCAN_GLOBS = [
     "crates/**/*.rs",
+    # The desktop shell's Rust; as in crates/, only function names count.
+    "apps/desktop/src-tauri/src/**/*.rs",
     "apps/desktop/e2e/**/*.ts",
     "apps/desktop/e2e/**/*.js",
     "apps/desktop/src/**/*.test.ts",
