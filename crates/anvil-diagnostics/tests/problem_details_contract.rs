@@ -121,6 +121,8 @@ fn two_alloy_503s_are_told_apart_by_their_problem_reports() {
         "{:?}",
         t.remediation
     );
+    // One sentence end, even when the quoted detail has its own.
+    assert!(t.explanation.ends_with("in time.\"") && !t.explanation.contains(".\"."), "{}", t.explanation);
     assert!(t.does_not_prove.iter().any(|s| s.contains("which component on the path wrote it")), "{:?}", t.does_not_prove);
     // The claims themselves are the same: the reports only add evidence.
     assert_eq!(signature(&timeout), signature(&overloaded));
@@ -144,6 +146,7 @@ fn about_blank_quotes_title_and_detail_but_names_no_type() {
     assert!(f.explanation.contains("\"Unknown OpenAPI operation\""), "{}", f.explanation);
     assert!(f.explanation.contains("\"No OpenAPI operation matched this request\""), "{}", f.explanation);
     assert!(!f.explanation.contains("about:blank"), "{}", f.explanation);
+    assert!(f.explanation.ends_with("matched this request\"."), "{}", f.explanation);
     assert_eq!(evidence(f, "body.problem.type"), Some("about:blank"));
     // Nothing identifies the condition beyond the status, so nothing to quote.
     assert!(f.remediation.iter().all(|r| !r.text.contains("problem report")), "{:?}", f.remediation);
@@ -180,7 +183,9 @@ fn a_status_that_differs_from_the_response_is_named() {
     assert!(f.alternatives.iter().any(|a| a.contains("An intermediary changed the status")), "{:?}", f.alternatives);
     assert_eq!(evidence(f, "body.problem.instance"), Some("/account/12345/msgs/abc"));
     assert!(
-        f.remediation.iter().any(|r| r.text.contains("out-of-credit") && r.text.contains("/account/12345/msgs/abc")),
+        f.remediation.iter().any(|r| r
+            .text
+            .contains("quote the problem report's type (https://example.com/probs/out-of-credit) and instance (/account/12345/msgs/abc)")),
         "{:?}",
         f.remediation
     );

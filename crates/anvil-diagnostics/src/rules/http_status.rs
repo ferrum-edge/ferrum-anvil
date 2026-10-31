@@ -100,7 +100,10 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
     if let Some(t) = &p.detail {
         sentence.push_str(&format!(", with detail \"{t}\""));
     }
-    sentence.push('.');
+    // A quoted text that already ends a sentence ends this one too.
+    if !sentence.trim_end_matches('"').ends_with(['.', '!', '?']) {
+        sentence.push('.');
+    }
     if let Some(n) = p.status.filter(|n| *n != status) {
         sentence.push_str(&format!(" It states status {n}, but the response status is {status}."));
         d = d.alt(format!(
@@ -111,9 +114,9 @@ fn problem(mut d: Draft, p: &ProblemDetails, status: u16, idx: u32) -> Draft {
         "That the problem report is accurate, or which component on the path wrote it: any server can send application/problem+json.",
     );
     let ids = match (named_type, &p.instance) {
-        (Some(t), Some(i)) => Some(format!("its type ({t}) and instance ({i})")),
-        (Some(t), None) => Some(format!("its type ({t})")),
-        (None, Some(i)) => Some(format!("its instance ({i})")),
+        (Some(t), Some(i)) => Some(format!("type ({t}) and instance ({i})")),
+        (Some(t), None) => Some(format!("type ({t})")),
+        (None, Some(i)) => Some(format!("instance ({i})")),
         (None, None) => None,
     };
     if let Some(ids) = ids {
