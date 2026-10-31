@@ -1,11 +1,17 @@
 # Continuous integration
 
-Ferrum Anvil runs six GitHub Actions workflows. Every third-party action is
+Ferrum Anvil runs seven GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
 The release `publish` job gets `actions: read` (to list the test runs for the
 release commit). Only the `release` job, which runs for a tag and not for a dry
 run, gets `contents: write` (to create the draft release).
+`website-evidence.yml` requests no token permissions. `ferrum-edge/ferrumedge`
+is private and this repository is public, so `GITHUB_TOKEN` cannot read it: the
+job needs the repository secret `FERRUMEDGE_READ_TOKEN`, a fine-grained token
+with read-only Contents access to `ferrum-edge/ferrumedge` only. Without the
+secret the job fails (it never skips), so a missing secret is never read as a
+pass.
 
 | Workflow | Trigger | Runs on | What it proves |
 | --- | --- | --- | --- |
@@ -14,6 +20,7 @@ run, gets `contents: write` (to create the draft release).
 | `e2e.yml` | PRs touching the desktop app, crates, catalog, `lab/` or the release check; push to `main`; manual | macOS 15, Windows 2025, Ubuntu 26.04 (under Xvfb) | The native app, built with the test-only `e2e` feature, works end to end through the real Rust engine (and, on macOS and Linux, through the core lab gateway), and the release check rejects that build |
 | `release.yml` | tag `anvil-v*`; manual (dry run by default; set `dry_run: false` from a tag for a draft release) | macOS 15 (arm64 + x86_64 cross), Ubuntu 26.04, Windows 2025 | Installers and CLI binaries without test hooks, checksums, SBOMs, license report, release evidence, and optionally a **draft** release. See [release.md](release.md) |
 | `bundle-resources.yml` | PRs touching `crates/anvil-portability/**`, `crates/anvil-app/src/port.rs`, `crates/anvil-app/tests/bundle_import.rs` or the workflow itself; manual | Ubuntu 26.04, macOS 15 | Peak-memory regression ceilings for bundle preview/import against the policy and two baselines. See [bundle-resource-policy.md](security/bundle-resource-policy.md#hosted-qualification) |
+| `website-evidence.yml` | every release run (called from `release.yml`, tagged or dry run, beside the build; it does not gate the draft release); manual; PRs and pushes to `main` that change the workflow (e.g. the pin) | Ubuntu 26.04 | The website's JavaScript tests, including its Anvil navigation, download and capability tests (`node --test "tests/**/*.test.js"`, as its own `test.yml` runs them, no live network checks) pass at the pinned `ferrum-edge/ferrumedge` commit; uploads `website-evidence.json` (website SHA, command, counts, Anvil release tag). Failure-matrix REL-006, REL-007, REL-008 |
 | `updater-e2e.yml` | PRs touching the update command (`cmd_update.rs`, `cmd_update/`), `tauri.conf.json`, the desktop `Cargo.toml`, `apps/desktop/e2e/updater/`, the E2E driver config or the workflow; push to `main` (same paths); weekly; manual | Ubuntu 26.04 (AppImage, under Xvfb), macOS 15 (.app) | REL-003 on built bundles: the E2E-instrumented bundle, built with a test updater key and a loopback endpoint, refuses an update signed by another key, with a corrupted signature or altered after signing through its real `update_install` command, with the bundle, its reported version and the profile unchanged, and installs a validly signed one. See [release.md](release.md#signed-update-refusal-e2e-rel-003) |
 
 The `ci.yml` jobs are the required checks enforced on `main` by the "Main
