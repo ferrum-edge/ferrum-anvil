@@ -2,8 +2,9 @@
 // signed by another key, one with a corrupted signature and one altered after
 // signing. Each attempt goes through the app's real `update_install` command
 // (pinned tauri-plugin-updater, the bundle's compiled-in test key and
-// endpoint), after the whole artifact was downloaded, and leaves the bundle,
-// the reported version and the profile unchanged.
+// endpoint), after the app requested the manifest and the artifact, and
+// leaves the bundle, the reported version and the persistent profile files
+// (SQLite's -shm read index aside) unchanged.
 import { expect } from "@wdio/globals";
 import { writeFileSync } from "node:fs";
 import { invoke, profileName, waitForWorkbench } from "../helpers";
@@ -41,8 +42,12 @@ describe("REL-003: the built bundle refuses tampered updates", () => {
     const status = await invoke<{ state: string; profile?: string }>("app_status");
     expect(status.ok?.state).toBe("unlocked");
     expect(status.ok?.profile).toBe(profileName());
-    // Run 2 relaunches this bundle and compares it with this record.
-    writeFileSync(statePath(), JSON.stringify({ installed: contents(installed()) }));
+    // Run 2 relaunches this bundle and compares it, and the profile's
+    // workspaces as the app reads them, with this record.
+    const workspaces = await invoke<unknown[]>("workspaces_list");
+    expect(workspaces.err).toBeUndefined();
+    expect(workspaces.ok?.length).toBeGreaterThan(0);
+    writeFileSync(statePath(), JSON.stringify({ installed: contents(installed()), workspaces: workspaces.ok }));
   });
 
   const cases: [string, () => string, () => Buffer, string][] = [
@@ -59,8 +64,8 @@ describe("REL-003: the built bundle refuses tampered updates", () => {
       const r = await invoke<null>("update_install", { version: OFFERED });
 
       expect(r.err).toBe(`The update was not installed: ${why}`);
-      // The app read the manifest and downloaded the whole artifact: the
-      // refusal is the signature check on the downloaded bytes.
+      // The app read the manifest and requested the artifact: the refusal is
+      // the signature check (the plugin verifies after the download).
       expect(server.requests).toEqual(["/latest.json", "/update"]);
       expect(snapshot(installed())).toEqual(bundleBefore);
       expect(snapshot(required("ANVIL_DATA_DIR"), notShm)).toEqual(profileBefore);

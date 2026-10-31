@@ -1,8 +1,9 @@
 // REL-003, built bundle, run 2 of 3: relaunched after the refusals, the
 // bundle is byte-for-byte what was installed, reports its own version and
-// unlocks the same profile. Then the control: an update signed by the
-// bundle's key for the version it is offered as installs through the same
-// `update_install` command and replaces the bundle with the 0.2.0 build.
+// unlocks the same profile with the same workspaces. Then the control: an
+// update signed by the bundle's key for the version it is offered as installs
+// through the same `update_install` command and replaces the bundle with the
+// 0.2.0 build.
 import { expect } from "@wdio/globals";
 import { readFileSync } from "node:fs";
 import { invoke, profileName, waitForWorkbench } from "../helpers";
@@ -14,12 +15,13 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
   });
 
   it("relaunches the untouched bundle at its own version with the same profile", async () => {
-    const recorded = JSON.parse(readFileSync(statePath(), "utf8")).installed;
-    expect(contents(installed())).toEqual(recorded);
+    const recorded = JSON.parse(readFileSync(statePath(), "utf8"));
+    expect(contents(installed())).toEqual(recorded.installed);
     expect(await appVersion()).toBe(INSTALLED_VERSION);
     const status = await invoke<{ state: string; profile?: string }>("app_status");
     expect(status.ok?.state).toBe("unlocked");
     expect(status.ok?.profile).toBe(profileName());
+    expect((await invoke<unknown[]>("workspaces_list")).ok).toEqual(recorded.workspaces);
   });
 
   it("installs a validly signed update", async () => {

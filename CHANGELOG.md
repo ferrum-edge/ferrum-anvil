@@ -120,10 +120,12 @@
   Updater E2E workflow builds the desktop bundle (AppImage on Linux, `.app` on
   macOS) with the test-only `e2e` feature, a test updater key and a local
   update endpoint, and calls the app's own install command. An update signed by
-  another key, with a corrupted signature or altered after signing is refused,
-  and the bundle, the version it reports and the profile stay unchanged, also
-  after a relaunch; a validly signed update installs and the relaunched app
-  reports the new version. Unit tests run more signature variants through the
+  another key, with a corrupted signature or altered after signing is refused;
+  during each refusal the bundle, the version it reports and the persistent
+  profile files (SQLite's `-shm` read index aside) stay unchanged, and after a
+  relaunch the bundle is unchanged and the same profile unlocks with the same
+  workspaces. A validly signed update installs and the relaunched app reports
+  the new version. Unit tests run more signature variants through the
   same updater code against a placeholder bundle. Windows and release-profile
   bundles are not covered.
 

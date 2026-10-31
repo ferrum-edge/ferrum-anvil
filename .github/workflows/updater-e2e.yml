@@ -19,6 +19,8 @@ on:
     paths:
       - "apps/desktop/src-tauri/src/cmd_update.rs"
       - "apps/desktop/src-tauri/src/cmd_update/**"
+      # Registers the updater plugin and the update commands.
+      - "apps/desktop/src-tauri/src/lib.rs"
       - "apps/desktop/src-tauri/tauri.conf.json"
       - "apps/desktop/src-tauri/Cargo.toml"
       - "apps/desktop/e2e/updater/**"
@@ -32,6 +34,8 @@ on:
     paths:
       - "apps/desktop/src-tauri/src/cmd_update.rs"
       - "apps/desktop/src-tauri/src/cmd_update/**"
+      # Registers the updater plugin and the update commands.
+      - "apps/desktop/src-tauri/src/lib.rs"
       - "apps/desktop/src-tauri/tauri.conf.json"
       - "apps/desktop/src-tauri/Cargo.toml"
       - "apps/desktop/e2e/updater/**"

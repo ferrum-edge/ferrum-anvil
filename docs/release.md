@@ -465,8 +465,8 @@ endpoint, and call the app's `update_install` command:
 
 | Run | Checks |
 | --- | --- |
-| `rel003-1-refusal` | the bundle reports its own version; an update signed by the other key, one with a corrupted signature and one altered after signing are each refused with the plugin's minisign error after the manifest and the whole artifact were fetched; the bundle (SHA-256, mode, size, inode, mtime of every entry), the version the app reports and the profile files are unchanged |
-| `rel003-2-install` | relaunched, the bundle is byte for byte as before and reports its own version with the same profile unlocked; the validly signed update installs: the AppImage file, or the `.app` folder, now holds the 0.2.0 build, and the profile files are unchanged |
+| `rel003-1-refusal` | the bundle reports its own version; an update signed by the other key, one with a corrupted signature and one altered after signing are each refused with the plugin's minisign error after the app requested the manifest and the artifact; during each refusal the bundle (SHA-256, mode, size, inode, mtime of every entry), the version the app reports and the profile files (SHA-256, mode, size, inode, mtime; SQLite's `-shm` read index excluded) are unchanged |
+| `rel003-2-install` | relaunched, the bundle is byte for byte as recorded before the refusals and reports its own version, and the same profile unlocks with the same workspaces (`workspaces_list`); the validly signed update installs: the AppImage file, or the `.app` folder, now holds the 0.2.0 build, and the profile files (`-shm` excluded) are unchanged during the install |
 | `rel003-3-installed` | relaunched, the bundle reports 0.2.0 and unlocks the same profile |
 
 The bundles carry the `e2e` feature (embedded WebDriver) and a debug build, so

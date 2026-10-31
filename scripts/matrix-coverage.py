@@ -9,7 +9,9 @@ Evidence is discovered, not declared:
   * explicit, reasoned statuses in docs/verification/matrix-status.json for
     cases that are blocked or not applicable (never counted as passed). A
     status with `requires` (evidence kinds, e.g. ["native_e2e"]) keeps the
-    case at that status until a reference of one of those kinds exists.
+    case at that status until a test definition of one of those kinds names
+    it (a Rust `fn`, or a `describe(`/`it(`/`test(` line), not a comment or
+    helper string.
 
 Outputs docs/verification/matrix-coverage.{json,md}. Exit code 1 if any case
 has no evidence and no reasoned status (use --allow-gaps to report only).
@@ -60,6 +62,16 @@ def id_patterns(case_id: str):
     ]
 
 
+# A line that defines a test: a Rust function, or a describe/it/test call
+# (comment lines never do).
+TEST_DEFINITION = re.compile(r"\bfn\s+\w+|\b(?:describe|it|test)(?:\.\w+)?\s*\(")
+
+
+def defined_kinds(refs):
+    """Evidence kinds among `refs` that come from a test definition line."""
+    return {r["kind"] for r in refs if r.get("_definition")}
+
+
 def scan(cases):
     files = []
     for g in SCAN_GLOBS:
@@ -84,7 +96,10 @@ def scan(cases):
                 continue
             for cid, ps in pats.items():
                 if any(p.search(line) for p in ps):
-                    refs[cid].append({"path": rel, "line": i, "kind": kind})
+                    ref = {"path": rel, "line": i, "kind": kind}
+                    if TEST_DEFINITION.search(line) and not line.lstrip().startswith(("//", "/*", "*", "#")):
+                        ref["_definition"] = True
+                    refs[cid].append(ref)
     return refs
 
 
@@ -163,10 +178,11 @@ def classify(case, refs, lab, overrides):
     elif lab_statuses and not any(k != "lab" for k in kinds):
         status = "skipped_live"
     elif any(k in ("integration_test", "unit_test", "native_e2e", "renderer_test") for k in kinds) and (
-        not (ov and ov.get("requires")) or any(k in ov["requires"] for k in kinds)
+        not (ov and ov.get("requires")) or any(k in ov["requires"] for k in defined_kinds(refs))
     ):
         # A reasoned status may name the evidence kinds that settle the case
-        # (`requires`); other test references alone then leave it as recorded.
+        # (`requires`): only a test definition of such a kind promotes it;
+        # other references alone leave it as recorded.
         status = "verified_test"
     elif ov:
         status = ov["status"]
@@ -180,7 +196,7 @@ def classify(case, refs, lab, overrides):
         "title": case.get("title"),
         "status": status,
         "evidence_kinds": kinds,
-        "references": refs[:12],
+        "references": [{k: v for k, v in r.items() if not k.startswith("_")} for r in refs[:12]],
         "lab": labres,
         "note": (ov or {}).get("reason"),
     }
