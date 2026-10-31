@@ -5,6 +5,7 @@ Used by .github/workflows/release-smoke.yml through smoke-unix.sh and
 smoke-windows.ps1. Each target keeps its record in one directory:
 
   steps.jsonl     one line per step: name, result (pass/fail/info), detail
+                  and, for a failure, its class (see FAILURE_CLASSES)
   bypasses.jsonl  every OS protection that was not exercised or was overridden
   meta.json       asset, runner, surfaces and other facts about the run
 
@@ -20,6 +21,16 @@ import os
 import sys
 
 SCHEMA = "anvil.release-smoke.v1"
+
+# Why a step failed. Only a `package` failure says something about the
+# shipped asset; a `harness` failure (runner setup, test tools, package
+# mirrors, artifact fetch) says nothing about it and is re-run first. A target
+# that failed without a recorded failure (the script stopped unexpectedly) is
+# `unclassified` and is handled like a harness failure until examined.
+FAILURE_CLASSES = {
+    "package": "the shipped asset failed its checksum, install, launch, import or local call",
+    "harness": "runner setup, a test tool, a package mirror or the artifact fetch failed; says nothing about the asset",
+}
 
 # A target passes only if every one of these steps ran and passed.
 REQUIRED_STEPS = [
@@ -75,8 +86,13 @@ def set_path(obj, dotted, value):
 
 def cmd_step(a):
     os.makedirs(a.dir, exist_ok=True)
-    append(os.path.join(a.dir, "steps.jsonl"), {"name": a.name, "result": a.result, "detail": a.detail, "at": now()})
-    print(f"[{a.result}] {a.name}: {a.detail}")
+    if (a.result == "fail") != (a.failure_class is not None):
+        sys.exit("step: --failure-class is required for a failed step and only for one")
+    entry = {"name": a.name, "result": a.result, "detail": a.detail, "at": now()}
+    if a.failure_class:
+        entry["failure_class"] = a.failure_class
+    append(os.path.join(a.dir, "steps.jsonl"), entry)
+    print(f"[{a.result}{'/' + a.failure_class if a.failure_class else ''}] {a.name}: {a.detail}")
 
 
 def cmd_bypass(a):
@@ -157,12 +173,23 @@ def cmd_finalize(a):
     failed = sorted({s["name"] for s in steps if s["result"] == "fail"})
     not_passed = [n for n in REQUIRED_STEPS if n in by_name and "pass" not in by_name[n]]
     result = "pass" if not missing and not failed and not not_passed else "fail"
+    classes = {s.get("failure_class") for s in steps if s["result"] == "fail"}
+    if result == "pass":
+        failure_class = None
+    elif "package" in classes:
+        failure_class = "package"
+    elif "harness" in classes:
+        failure_class = "harness"
+    else:
+        failure_class = "unclassified"
     env = os.environ
     doc = {
         "schema": SCHEMA,
         "case": "REL-001",
         "target": a.target,
         "result": result,
+        "failure_class": failure_class,
+        "failure_classes": FAILURE_CLASSES,
         "missing_required_steps": missing,
         "failed_steps": failed,
         "required_steps": REQUIRED_STEPS,
@@ -182,7 +209,7 @@ def cmd_finalize(a):
         "finalized_at": now(),
     }
     write_json(a.out, doc)
-    print(f"{a.target}: {result}" + (f" (missing: {', '.join(missing)})" if missing else "") + (f" (failed: {', '.join(failed)})" if failed else ""))
+    print(f"{a.target}: {result}" + (f" [{failure_class}]" if failure_class else "") + (f" (missing: {', '.join(missing)})" if missing else "") + (f" (failed: {', '.join(failed)})" if failed else ""))
     if result != "pass":
         sys.exit(1)
 
@@ -202,10 +229,14 @@ def cmd_summarize(a):
         "result": overall,
         "targets_expected": a.expect,
         "targets_without_result": absent,
+        "package_failures": [r.get("target") for r in results if r.get("failure_class") == "package"],
+        "harness_or_unclassified_failures": [r.get("target") for r in results if r.get("failure_class") in ("harness", "unclassified")]
+        + absent,
         "targets": [
             {
                 "target": r.get("target"),
                 "result": r.get("result"),
+                "failure_class": r.get("failure_class"),
                 "asset": (r.get("asset") or {}).get("name"),
                 "sha256": (r.get("asset") or {}).get("sha256"),
                 "runner": r.get("runner"),
@@ -222,15 +253,20 @@ def cmd_summarize(a):
         "",
         f"Overall: **{overall}**" + (f" (no result from: {', '.join(absent)})" if absent else ""),
         "",
-        "| Target | Result | Asset | sha256 | Runner | Failed / missing steps |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Target | Result | Failure class | Asset | sha256 | Runner | Failed / missing steps |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for t in summary["targets"]:
         run = t.get("runner") or {}
         bad = ", ".join((t.get("failed_steps") or []) + (t.get("missing_required_steps") or [])) or "none"
         lines.append(
-            f"| {t['target']} | {t['result']} | `{t['asset']}` | `{(t['sha256'] or '')[:16]}…` | {run.get('label')} ({run.get('os')} {run.get('machine')}) | {bad} |"
+            f"| {t['target']} | {t['result']} | {t.get('failure_class') or '-'} | `{t['asset']}` | `{(t['sha256'] or '')[:16]}…` | {run.get('label')} ({run.get('os')} {run.get('machine')}) | {bad} |"
         )
+    lines += [
+        "",
+        "A `package` failure concerns the shipped asset. A `harness` or `unclassified` failure says nothing about it:",
+        "re-run the failed jobs first (docs/release.md, After publishing).",
+    ]
     text = "\n".join(lines) + "\n"
     print(text)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -249,6 +285,7 @@ def main():
     s.add_argument("--name", required=True)
     s.add_argument("--result", required=True, choices=["pass", "fail", "info"])
     s.add_argument("--detail", required=True)
+    s.add_argument("--failure-class", choices=sorted(FAILURE_CLASSES))
     s.set_defaults(fn=cmd_step)
 
     s = sub.add_parser("bypass")

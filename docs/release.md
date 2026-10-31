@@ -491,10 +491,31 @@ Each job then:
    listener must log the request.
 3. Launches the installed app again on the store that now holds the import.
 
+A target stops at its first failed step; the steps after it are recorded as
+missing, not as passed.
+
 Each target uploads `rel001-result-<target>`. Its `result.json` names the
 asset and its sha256, the runner OS and architecture, every step's result,
 the surface driven and every OS protection that was not exercised. The
 `rel001-summary` artifact merges them.
+
+Every failure carries a class, and `result.json` (`failure_class`) and the
+summary table show it:
+
+- `package`: the shipped asset is at fault. Its checksum does not match
+  `SHA256SUMS`, it does not install, or the installed app does not launch,
+  show its window or start its webview. The release CLI fails to run,
+  import or call. A package manager that cannot resolve the package's own
+  dependencies is also a package failure.
+- `harness`: the test environment is at fault. Examples are the runner's
+  architecture or state, installing a test tool (Xvfb, `fuse3`, the EGL
+  stack), a package-mirror or network error, the artifact fetch, or the
+  loopback listener. It says nothing about the asset.
+- `unclassified`: the job stopped without recording a failure, for example
+  in checkout or artifact download. Treat it like `harness` until a person
+  has read the log.
+
+A failed `fetch` job is always a harness failure; no target runs.
 
 What it does **not** cover:
 
@@ -554,9 +575,19 @@ What it does **not** cover:
       starts (`release: published`) passed for every target. Its summary is in
       the run's `rel001-summary` artifact. To re-run it:
       `gh workflow run release-smoke.yml -f tag=anvil-vX.Y.Z`.
-- [ ] If a target failed, the published package for that OS, architecture and
-      format does not install, launch, import or call as advertised. Within
-      the day, do both of the following:
+- [ ] If a target failed, read its `failure_class` in the summary first.
+      - `harness` or `unclassified` (or a failed `fetch` job): re-run the failed
+        jobs (`gh run rerun <run-id> --failed`), and repair the harness if it
+        fails again. A harness failure is never, on its own, grounds to pull
+        an asset or change the release.
+      - `package`: open the failed step in that target's `result.json` and its
+        logs, and confirm that the step's detail describes the shipped
+        package. If it does, that package does not install, launch, import
+        or call as advertised for its OS, architecture and format; go to the
+        next item. If the evidence points at the runner instead, handle it as
+        a harness failure.
+- [ ] For a confirmed package failure, within the day, do both of the
+      following:
       - Delete that asset from the release, or mark the release a pre-release
         (`gh release edit anvil-vX.Y.Z --prerelease`).
       - Add a "Known issues" note to the release body naming the failing
@@ -584,8 +615,10 @@ What it does **not** cover:
 - **Packaged-app smoke tests:** install, launch, example import and a local
   call through the release CLI are automated for the published unsigned
   packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
-  (run 41185287833), six of seven targets pass. The AppImage fails: its
-  WebKit web process aborts with `EGL_BAD_PARAMETER`. Not automated:
+  (PR runs 41189324002 and 41185287833), six of seven targets pass. The
+  AppImage fails at its first launch: its WebKit web process aborts with
+  `EGL_BAD_PARAMETER` (a package failure; a fix is in progress). Not
+  automated:
   - GUI-driven import and send;
   - first run through Gatekeeper/SmartScreen;
   - native dialogs, lock/unlock, uninstall.

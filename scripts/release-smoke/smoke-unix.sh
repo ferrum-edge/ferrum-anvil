@@ -44,10 +44,25 @@ py() { python3 -I "$here/record.py" "$@"; }
 step() { py step --dir "$OUT" --name "$1" --result "$2" --detail "$3"; }
 pass() { step "$1" pass "$2"; }
 info() { step "$1" info "$2"; }
-fail() {
-  step "$1" fail "$2"
-  echo "::error title=$TARGET_ID $1::$2"
+# Every failure is classified (record.py FAILURE_CLASSES): `fail` when the
+# shipped asset is at fault (checksum, install, launch, import, local call),
+# `hfail` when the harness is (runner, test tools, package mirrors, artifact
+# fetch). Only a package failure is grounds to act on a published asset.
+fail_as() { # $1 class, $2 step, $3 detail
+  py step --dir "$OUT" --name "$2" --result fail --failure-class "$1" --detail "$3"
+  echo "::error title=$TARGET_ID $2 ($1 failure)::$3"
   exit 1
+}
+fail() { fail_as package "$1" "$2"; }
+hfail() { fail_as harness "$1" "$2"; }
+# A package-manager install of the shipped package failed: a mirror or network
+# error is the harness's, anything else (unmet dependencies, a broken package)
+# is the package's. $1 step, $2 log, $3 detail.
+fail_pkg_install() {
+  if grep -qiE "Temporary failure resolving|Could not resolve|Failed to fetch|Unable to fetch|Could not connect|Connection (timed out|refused|reset)|Hash Sum mismatch|Curl error|Cannot download|Failed to download|Status code: 5[0-9][0-9]|Network is unreachable|timed out" "$2"; then
+    hfail "$1" "$3 (package mirror or network error)"
+  fi
+  fail "$1" "$3"
 }
 bypass() { py bypass --dir "$OUT" --protection "$1" --what "$2"; }
 meta() { py meta --dir "$OUT" "$@"; }
@@ -71,7 +86,7 @@ meta target_triple="$RUST_TARGET" package="$PACKAGE"
 
 check_asset() { # $1 file name, $2 meta key
   local f="$INPUTS/$1" want got size
-  [ -f "$f" ] || fail asset_integrity "$1 was not downloaded"
+  [ -f "$f" ] || hfail asset_integrity "$1 was not downloaded"
   want="$(py sums --sums "$INPUTS/SHA256SUMS" --name "$1")" || fail asset_integrity "$1 is not listed in the release's SHA256SUMS"
   got="$(py sha256 "$f")"
   [ "$want" = "$got" ] || fail asset_integrity "$1 sha256 $got does not match SHA256SUMS ($want)"
@@ -83,7 +98,7 @@ check_asset "$ASSET" asset
 check_asset "$CLI_ASSET" cli_asset
 example_sha="$(py sha256 "$INPUTS/anvil-samples.anvil")"
 want_example="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$INPUTS/example.json")"
-[ "$example_sha" = "$want_example" ] || fail asset_integrity "the example bundle changed after it was fetched ($example_sha, expected $want_example)"
+[ "$example_sha" = "$want_example" ] || hfail asset_integrity "the example bundle changed after it was fetched ($example_sha, expected $want_example)"
 pass asset_integrity "$ASSET and $CLI_ASSET match the release's SHA256SUMS; example bundle sha256 $example_sha"
 
 machine="$(uname -m)"
@@ -100,8 +115,8 @@ fi
 meta runner.label="${RUNNER_LABEL:-unknown}" runner.os="$osver" runner.kernel="$(uname -sr)" runner.machine="$machine" \
   runner.cpu="$cpu" runner.image="${ImageOS:-container}/${ImageVersion:-n/a}" runner.container="${SMOKE_CONTAINER:-none}"
 metaj "runner.rosetta_translated=$([ "$translated" = 1 ] && echo true || echo false)"
-[ "$machine" = "$EXPECT_ARCH" ] || fail native_arch "runner machine is $machine, expected $EXPECT_ARCH"
-[ "$translated" = 0 ] || fail native_arch "this shell runs under Rosetta translation"
+[ "$machine" = "$EXPECT_ARCH" ] || hfail native_arch "runner machine is $machine, expected $EXPECT_ARCH"
+[ "$translated" = 0 ] || hfail native_arch "this shell runs under Rosetta translation"
 pass native_arch "$osver on $machine ($cpu), not translated"
 
 # --- install ---------------------------------------------------------------
@@ -123,7 +138,7 @@ install_dmg() {
   src="$(find "$mp" -maxdepth 1 -name '*.app' -type d | head -1)"
   [ -n "$src" ] || fail install "no .app at the top level of the DMG"
   dest="/Applications/$(basename "$src")"
-  [ ! -e "$dest" ] || fail install "$dest already exists on this runner; it is not clean"
+  [ ! -e "$dest" ] || hfail install "$dest already exists on this runner; it is not clean"
   ditto "$src" "$dest" || fail install "ditto to /Applications failed"
   hdiutil detach "$mp" -quiet || hdiutil detach "$mp" -force -quiet || true
   app="$dest"
@@ -158,9 +173,9 @@ install_deb() {
   darch="$(dpkg-deb -f "$f" Architecture)"
   dpkg-deb -f "$f" Depends >"$logs/deb-depends.txt" || true
   dpkg-query -W -f '${Package}\n' | sort >"$work/pkgs-before"
-  $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || fail install "apt-get update failed"
+  $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || hfail install "apt-get update failed"
   if ! $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$f" >"$logs/apt-install.log" 2>&1; then
-    fail install "apt-get install of $ASSET failed: $(tail -5 "$logs/apt-install.log" | oneline)"
+    fail_pkg_install install "$logs/apt-install.log" "apt-get install of $ASSET failed: $(tail -5 "$logs/apt-install.log" | oneline)"
   fi
   dpkg-query -W -f '${Package}\n' | sort >"$work/pkgs-after"
   comm -13 "$work/pkgs-before" "$work/pkgs-after" >"$logs/apt-new-packages.txt"
@@ -190,9 +205,9 @@ install_rpm() {
     :
   elif grep -qiE 'gpg|openpgp|signature|not signed' "$logs/dnf-install.log"; then
     bypass rpm_signature "dnf refused the unsigned local RPM; it was installed with --nogpgcheck."
-    dnf -y install --nogpgcheck "$f" >>"$logs/dnf-install.log" 2>&1 || fail install "dnf install --nogpgcheck failed: $(tail -5 "$logs/dnf-install.log" | oneline)"
+    dnf -y install --nogpgcheck "$f" >>"$logs/dnf-install.log" 2>&1 || fail_pkg_install install "$logs/dnf-install.log" "dnf install --nogpgcheck failed: $(tail -5 "$logs/dnf-install.log" | oneline)"
   else
-    fail install "dnf install of $ASSET failed: $(tail -5 "$logs/dnf-install.log" | oneline)"
+    fail_pkg_install install "$logs/dnf-install.log" "dnf install of $ASSET failed: $(tail -5 "$logs/dnf-install.log" | oneline)"
   fi
   rpm -qa --qf '%{NAME}\n' | sort >"$work/pkgs-after"
   comm -13 "$work/pkgs-before" "$work/pkgs-after" >"$logs/dnf-new-packages.txt"
@@ -214,17 +229,17 @@ install_appimage() {
   local dest prereq="none"
   if ! command -v fusermount3 >/dev/null && ! command -v fusermount >/dev/null; then
     $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || true
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y fuse3 >"$logs/apt-fuse.log" 2>&1 || fail install "could not install fuse3 (fusermount) for the AppImage"
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y fuse3 >"$logs/apt-fuse.log" 2>&1 || hfail install "could not install fuse3 (fusermount) for the AppImage"
     prereq="fuse3 (fusermount3), installed because the runner had no fusermount"
   fi
-  [ -e /dev/fuse ] || fail install "/dev/fuse is not available on this runner"
+  [ -e /dev/fuse ] || hfail install "/dev/fuse is not available on this runner"
   # AppImages leave the graphics driver stack (libEGL and its Mesa vendor
   # library and drivers) to the host, as the AppImage excludelist requires;
   # every desktop install has it, a bare runner may not.
   if ! /sbin/ldconfig -p | grep 'libEGL\.so\.1 ' >/dev/null || ! ls /usr/share/glvnd/egl_vendor.d/*mesa*.json >/dev/null 2>&1; then
     $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || true
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y libegl1 libegl-mesa0 libgl1-mesa-dri >"$logs/apt-egl.log" 2>&1 ||
-      fail install "could not install the host EGL stack for the AppImage"
+      hfail install "could not install the host EGL stack for the AppImage"
     if [ "$prereq" = none ]; then prereq=""; else prereq="$prereq; "; fi
     prereq="${prereq}libegl1 libegl-mesa0 libgl1-mesa-dri (the host EGL/Mesa stack, which AppImages do not bundle), installed because the runner had no libEGL.so.1 or no Mesa EGL vendor"
   fi
@@ -237,6 +252,7 @@ install_appimage() {
   meta install.method="copied to ~/Applications and marked executable (chmod +x)" install.executable="$bin" install.prerequisites="$prereq"
   pass install "copied $ASSET to ~/Applications and marked it executable; host prerequisites installed: $prereq"
   info signing "the .AppImage.sig asset is the in-app updater (minisign) signature, which the OS does not check; Linux has no platform code signing; integrity was checked against SHA256SUMS"
+  bypass package_signature "the AppImage is run directly: nothing checks a signature at launch (the .AppImage.sig asset is the in-app updater's minisign signature, not checked by the OS); the only integrity check was the release's SHA256SUMS."
 }
 
 case "$PACKAGE" in
@@ -244,7 +260,7 @@ case "$PACKAGE" in
   deb) install_deb ;;
   rpm) install_rpm ;;
   appimage) install_appimage ;;
-  *) fail install "unknown package kind $PACKAGE" ;;
+  *) hfail install "unknown package kind $PACKAGE" ;;
 esac
 
 # --- test harness (Linux display) -------------------------------------------
@@ -254,9 +270,9 @@ esac
 if [ "$os" = Linux ]; then
   if command -v apt-get >/dev/null; then
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth xdotool imagemagick dbus >"$logs/harness-install.log" 2>&1 ||
-      fail launch_first_run "could not install the Xvfb test harness"
+      hfail harness_setup "could not install the Xvfb test harness"
   else
-    dnf -y install xorg-x11-server-Xvfb xdotool dbus-daemon >"$logs/harness-install.log" 2>&1 || fail launch_first_run "could not install the Xvfb test harness"
+    dnf -y install xorg-x11-server-Xvfb xdotool dbus-daemon >"$logs/harness-install.log" 2>&1 || hfail harness_setup "could not install the Xvfb test harness"
   fi
   if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
     export XDG_RUNTIME_DIR="$work/xdg-runtime"
@@ -266,10 +282,10 @@ if [ "$os" = Linux ]; then
   Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp >"$logs/xvfb.log" 2>&1 &
   export DISPLAY=:99
   for _ in $(seq 1 20); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.5; done
-  xdotool getdisplaygeometry >/dev/null 2>&1 || fail launch_first_run "Xvfb did not start"
+  xdotool getdisplaygeometry >/dev/null 2>&1 || hfail harness_setup "Xvfb did not start"
   # A desktop session always has a session bus; without one, GTK and the
   # portals wait for D-Bus timeouts before the window appears.
-  command -v dbus-run-session >/dev/null || fail launch_first_run "dbus-run-session is not available"
+  command -v dbus-run-session >/dev/null || hfail harness_setup "dbus-run-session is not available"
   meta harness.display="Xvfb :99 1600x1000x24 (no window manager)" harness.session_bus="a private session bus per launch (dbus-run-session)"
 fi
 
@@ -374,7 +390,9 @@ launch() { # $1 = step name
   if [ -d "$ld" ]; then mkdir -p "$logs/app-log-$name" && cp -R "$ld/." "$logs/app-log-$name/" 2>/dev/null || true; fi
   metaj "launches.$name={\"pid\":$pid,\"alive_seconds\":$i,\"top_level_windows\":$win,\"webview_processes\":$web,\"webview_processes_before_launch\":$web_before,\"app_log_dir_exists\":$([ -d "$ld" ] && echo true || echo false)}"
   meta "launches.$name.first_window_after=${first_window:-never}" "launches.$name.first_webview_after=${first_webview:-never}" "launches.$name.screenshot=$shot"
-  [ "$win" != 0 ] || fail "$name" "the app stayed up ${i}s but showed no top-level 'Ferrum Anvil' window (first seen: ${first_window:-never})"
+  local wanted="a top-level window titled 'Ferrum Anvil'"
+  [ "$os" = Darwin ] && wanted="an on-screen window owned by the app process"
+  [ "$win" != 0 ] || fail "$name" "the app stayed up ${i}s but showed no $wanted (first seen: ${first_window:-never})"
   [ "$web" -gt 0 ] || fail "$name" "the app stayed up ${i}s but has no webview content process (WebKit; first seen: ${first_webview:-never}; $web_before were running before the launch)"
   pass "$name" "installed app stayed up ${i}s (pid $pid); $win top-level window(s), first after $first_window; $web webview content process(es), first after $first_webview; screenshot: $shot"
 }
@@ -403,7 +421,7 @@ python3 -I "$here/local-server.py" --port 18080 --log "$logs/local-server-reques
 server_pid=$!
 ready() { python3 -I -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18080/__ready", timeout=1).read()' 2>/dev/null; }
 for _ in $(seq 1 30); do ready && break; sleep 0.5; done
-ready || fail local_call "the loopback listener on 127.0.0.1:18080 did not start"
+ready || hfail local_call "the loopback listener on 127.0.0.1:18080 did not start"
 before="$(py requests --log "$logs/local-server-requests.jsonl" --method GET --path /ok/echo)"
 rc=0
 "$cli" send "Healthy/OK" --workspace "$WS" --json >"$logs/send.json" 2>"$logs/send.stderr" || rc=$?

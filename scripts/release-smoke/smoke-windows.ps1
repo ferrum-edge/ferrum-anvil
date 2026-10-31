@@ -38,11 +38,16 @@ function Rec([string[]]$argv) { & python -I $RecordPy @argv; if ($LASTEXITCODE) 
 function Step($name, $result, $detail) { Rec @('step', '--dir', $Out, '--name', $name, '--result', $result, '--detail', $detail) }
 function Pass($name, $detail) { Step $name 'pass' $detail }
 function Info($name, $detail) { Step $name 'info' $detail }
-function Fail($name, $detail) {
-  Step $name 'fail' $detail
-  Write-Host "::error title=$($env:TARGET_ID) ${name}::$detail"
+# Every failure is classified (record.py FAILURE_CLASSES): Fail when the
+# shipped asset is at fault (checksum, install, launch, import, local call),
+# HFail when the harness is (runner, test tools, artifact fetch). Only a
+# package failure is grounds to act on a published asset.
+function Fail($name, $detail, $class = 'package') {
+  Rec @('step', '--dir', $Out, '--name', $name, '--result', 'fail', '--failure-class', $class, '--detail', $detail)
+  Write-Host "::error title=$($env:TARGET_ID) $name ($class failure)::$detail"
   exit 1
 }
+function HFail($name, $detail) { Fail $name $detail 'harness' }
 function Bypass($protection, $what) { Rec @('bypass', '--dir', $Out, '--protection', $protection, '--what', $what) }
 function Meta { Rec (@('meta', '--dir', $Out) + [string[]]$args) }
 function MetaJson($key, $value) { Rec @('meta', '--dir', $Out, '--json', "$key=$($value | ConvertTo-Json -Compress -Depth 6)") }
@@ -60,7 +65,7 @@ try {
   foreach ($pair in @(@($Asset, 'asset'), @($CliAsset, 'cli_asset'))) {
     $name, $key = $pair
     $f = Join-Path $Inputs $name
-    if (-not (Test-Path $f)) { Fail 'asset_integrity' "$name was not downloaded" }
+    if (-not (Test-Path $f)) { HFail 'asset_integrity' "$name was not downloaded" }
     $want = (& python -I $RecordPy sums --sums $sums --name $name)
     if ($LASTEXITCODE) { Fail 'asset_integrity' "$name is not listed in the release's SHA256SUMS" }
     $got = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
@@ -72,7 +77,7 @@ try {
   $example = Join-Path $Inputs 'anvil-samples.anvil'
   $exampleSha = (Get-FileHash -Algorithm SHA256 $example).Hash.ToLowerInvariant()
   $wantExample = (Get-Content -Raw (Join-Path $Inputs 'example.json') | ConvertFrom-Json).sha256
-  if ($exampleSha -ne $wantExample) { Fail 'asset_integrity' "the example bundle changed after it was fetched ($exampleSha, expected $wantExample)" }
+  if ($exampleSha -ne $wantExample) { HFail 'asset_integrity' "the example bundle changed after it was fetched ($exampleSha, expected $wantExample)" }
   Pass 'asset_integrity' "$Asset and $CliAsset match the release's SHA256SUMS; example bundle sha256 $exampleSha"
 
   $osInfo = Get-CimInstance Win32_OperatingSystem
@@ -82,7 +87,7 @@ try {
   Meta "runner.label=$($env:RUNNER_LABEL)" "runner.os=$($osInfo.Caption) $($osInfo.Version) (build $($osInfo.BuildNumber))" "runner.machine=$($env:PROCESSOR_ARCHITECTURE)" `
     "runner.cpu=$cpu" "runner.image=$($env:ImageOS)/$($env:ImageVersion)" "runner.os_architecture=$osArch" "runner.container=none"
   if ($osArch -ne 'X64' -or $procArch -ne 'X64' -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-    Fail 'native_arch' "runner is $osArch (process $procArch, PROCESSOR_ARCHITECTURE $($env:PROCESSOR_ARCHITECTURE)), expected native X64"
+    HFail 'native_arch' "runner is $osArch (process $procArch, PROCESSOR_ARCHITECTURE $($env:PROCESSOR_ARCHITECTURE)), expected native X64"
   }
   Pass 'native_arch' "$($osInfo.Caption) $($osInfo.Version) on $osArch ($cpu), native x64 process"
 
@@ -103,10 +108,12 @@ try {
   } elseif ($env:PACKAGE -eq 'msi') {
     $log = Join-Path $Logs 'msiexec-install.log'
     $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart', '/l*v', "`"$log`"") -Wait -PassThru
+    # 1618: another installation is already in progress on the runner.
+    if ($p.ExitCode -eq 1618) { HFail 'install' "msiexec /i /qn exited 1618 (another installation in progress on the runner)" }
     if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { Fail 'install' "msiexec /i /qn exited $($p.ExitCode): $(Tail $log 8)" }
     $method = 'msiexec /i /qn /norestart (Windows Installer, per-machine, run as the runner administrator)'
   } else {
-    Fail 'install' "unknown package kind $($env:PACKAGE)"
+    HFail 'install' "unknown package kind $($env:PACKAGE)"
   }
 
   $uninstallKeys = @(
@@ -257,7 +264,7 @@ try {
   for ($i = 0; $i -lt 30 -and -not $up; $i++) {
     try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 -Uri 'http://127.0.0.1:18080/__ready' | Out-Null; $up = $true } catch { Start-Sleep -Milliseconds 500 }
   }
-  if (-not $up) { Fail 'local_call' 'the loopback listener on 127.0.0.1:18080 did not start' }
+  if (-not $up) { HFail 'local_call' 'the loopback listener on 127.0.0.1:18080 did not start' }
   $before = [int](& python -I $RecordPy requests --log $reqLog --method GET --path /ok/echo)
   & $cli send 'Healthy/OK' --workspace $WS --json 2> (Join-Path $Logs 'send.stderr') | Set-Content (Join-Path $Logs 'send.json')
   $rc = $LASTEXITCODE
