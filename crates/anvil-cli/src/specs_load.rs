@@ -2,6 +2,7 @@
 
 use anvil_app::App;
 use anvil_app::specs::SpecTarget;
+use anvil_contract::terminal_safe as t;
 use anvil_domain::Id;
 use anvil_domain::load::{AbortRule, ConnectionMode, LoadPlan, RunCompletion, Stage, Workload};
 use anvil_import::{GroupBy, ImportOptions, SampleMode};
@@ -104,14 +105,109 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
         SpecTarget::Workspace { workspace_id: app.find_workspace(ws)?.meta.id }
     };
     let r = app.spec_import(&bytes, &name, &opts, target)?;
+    // The import is committed: what follows only reads for display, and a
+    // failed read is a note, never a failed command a script would retry.
     println!("imported {} request(s) into workspace {} (import {}); nothing was sent", r.requests, r.workspace_id, r.import_id);
-    for v in &r.report.required_variables {
-        println!("  fill in {{{{{}}}}}{} — {}", v.name, if v.secret { " (secret)" } else { "" }, v.reason);
+    let hints = app.workspace(&r.workspace_id).map_err(anyhow::Error::from).and_then(|ws| fill_in_hints(app, &r, &ws, a.server));
+    let lines = match hints {
+        Ok(lines) => lines,
+        Err(e) => {
+            eprintln!("note: the import's environments could not be listed ({e:#}); `anvil env list` shows them");
+            r.report.required_variables.iter().map(fill_in_line).collect()
+        }
+    };
+    for l in &lines {
+        println!("{l}");
     }
     for w in r.report.unsupported.iter().take(20) {
         println!("  not imported: {} ({})", w.message, w.pointer);
     }
     Ok(0)
+}
+
+/// The "fill in" line of a variable the import asks for.
+fn fill_in_line(v: &anvil_import::RequiredVariable) -> String {
+    format!("  fill in {{{{{}}}}}{} — {}", t(&v.name), if v.secret { " (secret)" } else { "" }, t(&v.reason))
+}
+
+/// After an import, the lines to print: the workspace's name, the
+/// environments it brought and,
+/// for each variable to fill in, a ready-to-run `anvil env set` command.
+/// `server` is the import's `--server`: under an import root, the
+/// environment of that index in the source's order is the one to fill in.
+fn fill_in_hints(
+    app: &App,
+    r: &anvil_app::specs::SpecImported,
+    ws: &anvil_domain::workspace::Workspace,
+    server: usize,
+) -> Result<Vec<String>> {
+    let mut out = vec![format!("  workspace: '{}'", t(&ws.name))];
+    // All of a new workspace's environments, or those its import root lists,
+    // in the root's order, which is the source's (OpenAPI: its servers'). An
+    // import root's apply only when chosen.
+    let all = app.environments(&r.workspace_id)?;
+    let envs: Vec<_> = match r.root_folder_id {
+        Some(root) => {
+            app.folder(&root)?.import_environment_ids.iter().filter_map(|id| all.iter().find(|e| e.meta.id == *id).cloned()).collect()
+        }
+        None => crate::env::sorted(all.clone()),
+    };
+    let active = envs.iter().find(|e| ws.active_environment_id == Some(e.meta.id));
+    if !envs.is_empty() {
+        let names = envs.iter().map(|e| format!("'{}'", t(&e.name))).collect::<Vec<_>>().join(", ");
+        match active {
+            Some(a) => out.push(format!("  environments: {names} ('{}' is active)", t(&a.name))),
+            None => out.push(format!("  environments: {names} (not active here: pick one with --env, or `anvil env use`)")),
+        }
+    }
+    // The workspace and environment are named by id when the name is
+    // shared, reads as an id, or is not a plain argument (`shell_arg`).
+    let by_name = |name: &str, id: &Id, same: usize| match shell_arg(name) {
+        Some(arg) if same == 1 && name.parse::<Id>().is_err() => arg,
+        _ => id.to_string(),
+    };
+    let same_ws = app.workspaces()?.iter().filter(|w| w.name.eq_ignore_ascii_case(&ws.name)).count();
+    let ws_arg = by_name(&ws.name, &ws.meta.id, same_ws);
+    let env_arg = match (active, envs.get(server).or(envs.first())) {
+        (None, Some(e)) => {
+            let same = all.iter().filter(|x| x.name.eq_ignore_ascii_case(&e.name)).count();
+            format!(" --env {}", by_name(&e.name, &e.meta.id, same))
+        }
+        _ => String::new(),
+    };
+    for v in &r.report.required_variables {
+        out.push(fill_in_line(v));
+        // A variable whose name is not a plain argument gets no command.
+        let Some(var) = shell_arg(&v.name).filter(|_| !envs.is_empty()) else { continue };
+        let value = if v.secret { " --secret --value-stdin" } else { " <value>" };
+        out.push(format!("    anvil env set {ws_arg} {var}{env_arg}{value}"));
+    }
+    if envs.is_empty() && !r.report.required_variables.is_empty() {
+        if r.root_folder_id.is_some() {
+            // An import root resolves only its own scope: an environment
+            // created here would not apply to it.
+            out.push(
+                "  the import brought no environment, and its requests resolve only their own scope: set them on its folder in the desktop app, or import it with --new-workspace"
+                    .to_string(),
+            );
+        } else {
+            out.push(format!(
+                "  the import brought no environment for them: `anvil env create {ws_arg} <name> --use` adds one and `anvil env set` fills it in"
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `s` as one argument that reads the same in a POSIX shell, PowerShell and
+/// `cmd.exe`: as is, or double-quoted when it has spaces. `None` when it has
+/// anything else, starts with `-` (an option) or is empty.
+fn shell_arg(s: &str) -> Option<String> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_.-:/".contains(c);
+    if s.is_empty() || s.starts_with('-') || s.trim() != s || !s.chars().all(|c| plain(c) || c == ' ') {
+        return None;
+    }
+    Some(if s.contains(' ') { format!("\"{s}\"") } else { s.to_string() })
 }
 
 #[derive(Subcommand)]

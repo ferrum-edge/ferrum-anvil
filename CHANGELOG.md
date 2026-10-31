@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `anvil env` lists, shows and edits a workspace's environments from the
+  command line (`list`, `show`, `create`, `use`, `set`, `unset`), so the
+  variables an import asks for can be filled in without the desktop app.
+  `anvil env set NAME --secret` reads the value from stdin or a process
+  environment variable, never from an argument, and keeps it in the vault;
+  a secret is never made plain. `anvil import-spec`
+  now names the workspace and the environments it brought and prints the
+  `anvil env set` command for each variable to fill in.
+
 ### Security
 
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
@@ -40,6 +51,31 @@
 
 ### Changed
 
+- The generic HTTP status findings (`http.*`) now quote an RFC 9457 problem
+  report (`application/problem+json`) when the error response carries one:
+  its `type`, `title`, `detail`, `status` and `instance` are recorded as
+  body evidence; the explanation quotes the type (unless `about:blank`),
+  title and detail as escaped JSON strings; a remediation step names the
+  type and instance to quote to the API owner; and a status that differs
+  from the response status is stated, with an intermediary change and an
+  inconsistent report as alternatives. `type` and `instance` are redacted as
+  URLs, and appear in the wording only when they are URI references. A
+  member that is over its length limit or carries a control, line-separator
+  or invisible formatting character is withheld whole and named
+  (`body.problem.withheld`); no member is cut or rewritten. Two 503s a
+  Ferrum Alloy service sends for different reasons (a handler deadline,
+  `request-timeout`, and a full admission limit, `overloaded`) were
+  previously the same "Service unavailable" finding with no body evidence,
+  as were a Ferrum Edge `openapi_validator` 400 and any other 400. The
+  report never changes a finding's code, confidence, scope, owner or
+  severity: any server on the path can send one. Generic finding wording no
+  longer collapses spaces inside a substituted value, so quoted response text
+  keeps its spacing. Diagnostics catalog version 2026.10.31-1.
+- `--env` on `anvil send`, `run` and `mcp-discover` takes an environment's
+  id as well as its name (`send` and `mcp-discover` took only a name), and
+  one that names no environment lists the workspace's environments. A name two environments of
+  the workspace share (two imports of one spec each bring a `local`) is
+  refused with their ids; before, the first one found was used.
 - Schema checks of examples, drift bodies and custom ruleset values charge
   `uniqueItems`, text-reading assertions (`pattern`, `enum`, `const`, length
   and format checks), property-name lookups and `format: regex` only where
@@ -116,8 +152,29 @@
   and summary, with an unknown `###` heading or with an empty Breaking section. The owner
   checklist in `docs/release.md` checks the body before publishing (#356).
 
+- In-app update refusal is now covered by automated tests (REL-003). The new
+  Updater E2E workflow builds the desktop bundle (AppImage on Linux, `.app` on
+  macOS) with the test-only `e2e` feature, a test updater key and a local
+  update endpoint, and calls the app's own install command. An update signed by
+  another key, with a corrupted signature or altered after signing is refused;
+  during each refusal the bundle, the version it reports and the persistent
+  profile files (SQLite's `-shm` read index aside) stay unchanged, and after a
+  relaunch the bundle is unchanged and the same profile unlocks with the same
+  workspaces. A validly signed update installs and the relaunched app reports
+  the new version. Unit tests run more signature variants through the
+  same updater code against a placeholder bundle. Windows and release-profile
+  bundles are not covered.
+
 ### Fixed
 
+- DTLS to a Ferrum Edge listener that requires client certificates works
+  again. dimpl 0.8.0 (taken on 2026-10-26) made Anvil's DTLS 1.3 client drop
+  a CertificateRequest with an empty `certificate_authorities` extension
+  without an alert, which every supported Ferrum Edge release sends, so the
+  handshake timed out (`client.dtls.handshake_timeout`) instead of presenting
+  the client identity. Anvil now builds a vendored dimpl 0.8.0 that accepts
+  the empty list (`vendor/dimpl-0.8.0-empty-ca`, see `vendor/README.md`),
+  keeping 0.8.0's other client fixes.
 - `anvil import` no longer reads a whole file before checking it against the
   import limits: as in the desktop, the file's start decides how much is read
   (a full backup's header is checked first, and anything else is read only up

@@ -1,6 +1,6 @@
 # Continuous integration
 
-Ferrum Anvil runs six GitHub Actions workflows. Every third-party action is
+Ferrum Anvil runs eight GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
 The release `publish` job gets `actions: read` (to list the test runs for the
@@ -16,17 +16,32 @@ pass.
 | Workflow | Trigger | Runs on | What it proves |
 | --- | --- | --- | --- |
 | `ci.yml` | every PR, push to `main`, manual | Ubuntu 26.04, macOS 15, Windows 2025 (Rust); Ubuntu (the rest) | Formatting, clippy `-D warnings`, workspace tests, both desktop feature sets compile, the OS credential store round trip, renderer tests and build, contracts and the diagnostic catalog in sync, supply-chain policy, no secrets |
-| `lab.yml` | PRs touching `crates/`, `lab/`, `catalog/`, Cargo files or the workflow (core profile); nightly and manual (all profiles by default) | Ubuntu 26.04, macOS 15 | Failure-matrix scenarios against the real, checksum-pinned Ferrum Edge release binary, with and without a trusted Ferrum profile |
+| `lab.yml` | PRs touching `crates/`, `lab/`, `catalog/`, Cargo files, `vendor/`, the workflow or the setup action (all profiles; core profile on macOS); nightly and manual (all profiles by default) | Ubuntu 26.04, macOS 15 | Failure-matrix scenarios against the real, checksum-pinned Ferrum Edge release binary, with and without a trusted Ferrum profile |
 | `e2e.yml` | PRs touching the desktop app, crates, catalog, `lab/` or the release check; push to `main`; manual | macOS 15, Windows 2025, Ubuntu 26.04 (under Xvfb) | The native app, built with the test-only `e2e` feature, works end to end through the real Rust engine (and, on macOS and Linux, through the core lab gateway), and the release check rejects that build |
 | `release.yml` | tag `anvil-v*`; manual (dry run by default; set `dry_run: false` from a tag for a draft release) | macOS 15 (arm64 + x86_64 cross), Ubuntu 26.04, Windows 2025 | Installers and CLI binaries without test hooks, checksums, SBOMs, license report, release evidence, and optionally a **draft** release. See [release.md](release.md) |
 | `release-smoke.yml` | manual; an `anvil-v*` release is published; PRs touching the workflow or `scripts/release-smoke/` | macOS 15 (arm64), macOS 15 Intel, Windows 2025 (NSIS, MSI), Ubuntu 26.04 (`.deb`, AppImage), Fedora 44 container (`.rpm`) | The published, unsigned packages install natively on fresh runners, the installed app launches with its window and webview, and the release CLI imports the example and makes a loopback call (REL-001). See [release.md](release.md#clean-install-smoke-rel-001) |
 | `bundle-resources.yml` | PRs touching `crates/anvil-portability/**`, `crates/anvil-app/src/port.rs`, `crates/anvil-app/tests/bundle_import.rs` or the workflow itself; manual | Ubuntu 26.04, macOS 15 | Peak-memory regression ceilings for bundle preview/import against the policy and two baselines. See [bundle-resource-policy.md](security/bundle-resource-policy.md#hosted-qualification) |
 | `website-evidence.yml` | every release run (called from `release.yml`, tagged or dry run, beside the build; it does not gate the draft release); manual; PRs and pushes to `main` that change the workflow (e.g. the pin) | Ubuntu 26.04 | The website's JavaScript tests, including its Anvil navigation, download and capability tests (`node --test "tests/**/*.test.js"`, as its own `test.yml` runs them, no live network checks) pass at the pinned `ferrum-edge/ferrumedge` commit; uploads `website-evidence.json` (website SHA, command, counts, Anvil release tag). Failure-matrix REL-006, REL-007, REL-008 |
+| `updater-e2e.yml` | PRs touching the update command (`cmd_update.rs`, `cmd_update/`), the plugin and command registration (`src-tauri/src/lib.rs`), `tauri.conf.json`, the desktop `Cargo.toml`, `apps/desktop/e2e/updater/`, the E2E helpers and driver config (`e2e/helpers.ts`, `wdio.conf.ts`), `scripts/updater-manifest.mjs` or its tests, or the workflow; push to `main` (same paths); weekly; manual | Ubuntu 26.04 (AppImage, under Xvfb), macOS 15 (.app) | REL-003 on built bundles: the E2E-instrumented bundle, built with a test updater key and a loopback endpoint, refuses an update signed by another key, with a corrupted signature or altered after signing through its real `update_install` command, with the bundle, its reported version and the persistent profile files (SQLite's `-shm` aside) unchanged during each refusal, and installs a validly signed one. Also runs `scripts/tests/updater-manifest.test.mjs`. See [release.md](release.md#signed-update-refusal-e2e-rel-003) |
 
 The `ci.yml` jobs are the required checks enforced on `main` by the "Main
 required checks" ruleset. `e2e.yml` only runs for PRs that touch its paths, so
 the ruleset cannot require it; when it runs, it must pass before merging. The
 nightly lab run does not replace either.
+
+`lab.yml` is path-filtered too, so the ruleset cannot require it either; when
+it runs on a PR, it must pass before merging. A pull request's Ubuntu lab job
+runs every profile against the default pin (about 11 to 12 minutes, inside the
+time the Rust jobs already take), and its macOS job runs the core profile. The
+nightly run adds every earlier supported release on both systems. Before this,
+pull requests ran only the core profile, so a dependency bump that broke the
+`tls` profile's DTLS mTLS scenario (PROTO-022) merged green and failed every
+nightly job afterwards. A failing scenario is read from the job's uploaded
+`lab-results-*` artifact before anything is re-run; re-run a job only for a
+failure shown to be unrelated to the change, and open an issue for a scenario
+that fails that way more than once. The cross-version DTLS mTLS handshake
+behind that failure is also a required Rust test
+(`crates/anvil-transport/tests/dtls_edge_interop.rs`).
 
 The existing macOS Rust job also compiles the standalone Swift branding helper
 with `swift build --package-path apps/desktop/scripts`. Its small SwiftPM
@@ -61,7 +76,7 @@ packages together by hand, then update both lockfiles in the same change.
 | **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo check --target x86_64-apple-darwin -p anvil-auth -p anvil-transport` (macOS only, the AWS-LC crates for the cross-built release target) → `cargo check -p anvil-auth` (Windows only, the crate on its own) → `cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast` → `cargo test --locked -p anvil-desktop --lib` (not on Windows) → `cargo test -p anvil-storage --test os_keychain -- --ignored` (the real OS credential store; on Linux inside a D-Bus session with an unlocked gnome-keyring) |
 | **Frontend** | `npm ci` → `npm run typecheck` → `npm run e2e:typecheck` → `npm test` (vitest, jsdom) → `npm run build` → `npm audit --omit=dev --audit-level=high` |
 | **Contract & catalog drift** | `cargo run -p anvil-cli -- schema --out contracts/schemas` and `npm run contracts`, then fail if `contracts/` or `apps/desktop/src/generated/` changed; `cargo test -p anvil-diagnostics --test catalog_drift` |
-| **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `node --test scripts/tests/release-notes.test.mjs` (release notes generator, including the current version's CHANGELOG section); `scripts/release-check.sh` (dependency-graph check only) |
+| **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `node --test scripts/tests/release-notes.test.mjs` (release notes generator, including the current version's CHANGELOG section); `node --test scripts/tests/updater-manifest.test.mjs` (the signature checks behind `latest.json` refuse another key, a bad signature, an altered artifact and a wrong signed version); `scripts/release-check.sh` (dependency-graph check only) |
 | **Release checker** (Ubuntu 26.04) | the pinned trusted AppImage extractor (`.github/actions/trusted-appimage-extractor`) → `python3 -I scripts/tests/test_release_check.py` |
 | **Secret scan** | gitleaks 8.30.1 (downloaded and SHA-256 verified) over the full history of the checked-out commit and over the working tree, with `.gitleaks.toml`. For a PR the commit is its merge commit, so the PR's commits and all of `main` are scanned; other branches are not |
 
@@ -123,6 +138,7 @@ cargo install --locked cargo-deny@0.20.2
 cargo deny --locked check
 node scripts/licenses.mjs --check        # regenerate with: node scripts/licenses.mjs
 node --test scripts/tests/release-notes.test.mjs
+node --test scripts/tests/updater-manifest.test.mjs
 scripts/release-check.sh                 # graph check only
 gitleaks git --config .gitleaks.toml --log-opts="--full-history --diff-filter=tuxdb HEAD" --redact .   # gitleaks 8.30.1
 

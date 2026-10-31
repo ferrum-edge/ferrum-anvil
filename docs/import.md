@@ -287,6 +287,69 @@ the workspace, folder or request that defines the profile (`token_cache_id`).
 An imported profile is therefore cached apart from the workspace's own, and
 opening or closing the import root does not drop a token already acquired.
 
+### Filling in required variables from the CLI
+
+After an import, `anvil import-spec` lists the environments it brought and,
+when there is one, prints a ready-to-run `anvil env set` command under each
+`required_variables` entry (a secret's command reads the value from stdin; a
+plain one ends in `<value>` for you to replace). The command targets the
+active environment of a new workspace, or, under an import root (whose
+environments are not active in the destination), the environment the
+import's `--server` picks (the first by default) in the source's order, with
+`--env`. Each argument reads the same in a POSIX shell, PowerShell and
+`cmd.exe`: a name of ASCII letters, digits, `_ . - : /` and spaces is printed
+as is (double-quoted when it has spaces).
+A workspace or environment whose name is anything else, starts with `-`,
+reads as an id or is shared is named by its id, and a variable whose name is
+anything else gets no command. These lines only read what the import wrote:
+if a read fails, the command still exits 0 (the import is committed) and
+prints a note.
+
+```bash
+anvil import-spec Shop --file openapi.yaml
+#   environments: 'local', 'staging' (not active here: pick one with --env, or `anvil env use`)
+#   fill in {{bearer}} (secret) — bearer token for security scheme 'bearer'
+#     anvil env set Shop bearer --env local --secret --value-stdin
+anvil env set Shop bearer --env local --secret --value-env API_TOKEN
+anvil send "Orders API/orders/listOrders" --workspace Shop --env local
+```
+
+`anvil env set` sets a variable in the environment `--env` names, or in the
+active one. The variable is enabled, and other variables of the same name in
+that environment are removed, so the value set is the one that resolves. A
+secret (`--secret`, or a variable of that name that is already secret or
+held in the vault) is read from stdin (`--value-stdin`, after the passphrase
+line when `--passphrase-stdin` unlocks a passphrase profile) or from a process
+environment variable (`--value-env VAR`), never from an argument; an empty
+value from either is refused. It is kept in the profile's vault, owned by the
+workspace, and the environment holds only the reference, as with **Store in
+vault** in the desktop. A secret is never made plain by `set`.
+
+The vault entry a replaced or removed (`anvil env unset`) variable held stays
+in the vault, as when the desktop moves a value into it, so it is still in
+an encrypted bundle or backup of the workspace. Deleting it at once is not
+safe: a desktop draft, or an export reading the workspace, may still name
+it. Rotating a compromised credential therefore means revoking it where it
+was issued.
+
+`anvil env list` marks the active environment with `*` and, for an import
+into an existing workspace, names the collection that brought each one; `anvil env show` prints a
+variable's value unless it is secret; `anvil env use` (or `--none`) picks the
+active environment; `anvil env create` adds an environment (`--use` also
+makes it active), refused when the workspace has one of that name. The `env`
+commands name the workspace by its id or by a name, case ignored, that no
+other workspace has. `--env` on `send`, `run`, `mcp-discover`, `env set` and
+`env unset`, and the environment argument of `env show` and `env use`, take an
+environment's id or its name, case ignored; a name two environments of the
+workspace share is refused with their ids, and a name that matches none lists
+the names there are.
+
+Under an import root, only the environments the import brought apply (see
+[The import root](#the-import-root)): a variable set in another environment
+of the destination stays unresolved there. When the import brought no
+environment, `import-spec` says so and points to the folder's variables in
+the desktop app, or to `--new-workspace`.
+
 ## Reimport
 
 `reimport_diff(previous, fresh, scope)` links requests by operation key and

@@ -16,6 +16,7 @@
 
 mod collection;
 mod drift;
+mod env;
 mod input;
 mod lint;
 mod specs_load;
@@ -70,6 +71,12 @@ enum Cmd {
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
+    },
+    /// List, inspect and edit a workspace's environments and their
+    /// variables (where `send` and `run` find `{{variables}}`).
+    Env {
+        #[command(subcommand)]
+        cmd: env::EnvCmd,
     },
     /// Save a request into a workspace.
     Add(AddArgs),
@@ -422,7 +429,7 @@ struct RunArgs {
     /// Folder to run, like `Orders/Refunds` (`/` = every request of the workspace).
     #[arg(long)]
     folder: Option<String>,
-    /// Environment name (defaults to the workspace's active environment).
+    /// Environment id or name (defaults to the workspace's active environment).
     #[arg(long)]
     env: Option<String>,
     /// CSV or JSON (array of objects) dataset file; replaces the scenario's dataset.
@@ -1022,13 +1029,7 @@ async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
         Some(w) => app.find_workspace(w)?,
         None => app.workspaces()?.into_iter().next().ok_or_else(|| anyhow!("no workspace"))?,
     };
-    let env = match &a.env {
-        Some(e) => {
-            let found = app.environments(&ws.meta.id)?.into_iter().find(|x| x.name.eq_ignore_ascii_case(e));
-            Some(found.ok_or_else(|| anyhow!("environment '{e}' not found"))?.meta.id)
-        }
-        None => None,
-    };
+    let env = env::environment_id(app, &ws, a.env.as_deref())?;
     let request = app.find_request(&ws.meta.id, &a.request)?;
     let opts = SendOptions { environment: env, record_history: !a.no_history, ..Default::default() };
     let d = app.mcp_discover_tools(&ws.meta.id, &request.meta.id, opts, CancellationToken::new()).await.context("discover tools")?;
@@ -1138,17 +1139,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     None => app.create_workspace("Default")?,
                 },
             };
-            let env = match &s.env {
-                Some(e) => Some(
-                    app.environments(&ws.meta.id)?
-                        .into_iter()
-                        .find(|x| x.name.eq_ignore_ascii_case(e))
-                        .ok_or_else(|| anyhow!("environment '{e}' not found"))?
-                        .meta
-                        .id,
-                ),
-                None => None,
-            };
+            let env = env::environment_id(&app, &ws, s.env.as_deref())?;
             if let Some(host) = &s.trust_ferrum
                 && !app
                     .integrations(&ws.meta.id)?
@@ -1221,6 +1212,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 0
             })
         }
+        Cmd::Env { cmd } => env::env_cmd(&app, cmd),
         Cmd::McpDiscover(a) => mcp_discover(&app, a).await,
         Cmd::Run(a) => collection::run_collection(&app, a).await,
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
