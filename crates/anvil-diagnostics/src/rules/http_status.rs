@@ -65,7 +65,11 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
         d = d.ev_at(E::BodyContent, "body.error", e.clone(), idx);
     }
     d = match &ctx.body.problem {
-        Some(p) => problem(d, p, s, idx),
+        Some(p) => {
+            // Version 2: quotes an RFC 9457 problem report.
+            d.rule_version = 2;
+            problem(d, p, s, idx)
+        }
         None => d.var("problem", String::new()),
     };
     out.push(d);

@@ -737,3 +737,26 @@ async fn a_secret_in_a_redirect_location_is_not_recoverable_from_the_record() {
     let json = serde_json::to_string(&o.record).unwrap();
     assert!(!reveals(&json, secret), "the Location header is recoverable from the execution record");
 }
+
+#[tokio::test]
+async fn a_problem_report_is_quoted_and_its_uris_are_redacted_in_the_record() {
+    // A real response through the engine: the http.* finding quotes the
+    // report, and the record's URL redaction withholds a sensitive query
+    // value of `type` and `instance` (an unknown token, not a known secret)
+    // wherever the finding quotes them.
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let problem = r#"{"type":"https://errors.example/request-timeout?token=type-tok-8c1f","title":"Request timed out","status":503,"detail":"The service did not produce a response in time.","instance":"https://trace.example/occ/9?access_token=inst-tok-4d7e"}"#;
+    let url = f.url(&format!("/status/503?ct={}&body={}", url_encode("application/problem+json"), url_encode(problem)));
+    let o = run(&e, &ctx_for(&url)).await;
+    let h = finding(&o, "http.service_unavailable");
+    assert!(h.explanation.contains(r#"titled "Request timed out""#), "{}", h.explanation);
+    let shown = format!("{} {:?} {:?}", h.explanation, h.evidence, h.remediation);
+    for token in ["type-tok-8c1f", "inst-tok-4d7e"] {
+        assert!(!shown.contains(token), "{token}: {shown}");
+    }
+    let instance = h.evidence.iter().find(|e| e.key == "body.problem.instance").expect("instance evidence");
+    assert!(instance.value.starts_with("https://trace.example/occ/9?access_token="), "{}", instance.value);
+    assert!(h.remediation.iter().any(|r| r.text.contains("https://trace.example/occ/9?access_token=")), "{:?}", h.remediation);
+}

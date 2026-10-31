@@ -72,9 +72,9 @@ type, with any parameters; plain `application/json` is not read as one), its
 generic `http.*` finding records the standard members it carries as body
 evidence: `body.problem.type`, `.title`, `.detail`, `.status` and
 `.instance`. Each text is a redacted excerpt with control characters, the
-Unicode line and paragraph separators and invisible format characters
-(bidirectional marks, overrides and isolates, zero-width characters) replaced
-by spaces. `type` and `instance` are never cut, so the record's URL redaction
+Unicode line and paragraph separators and the Unicode format characters
+(bidirectional marks, overrides and isolates, zero-width, interlinear
+annotation and tag characters) replaced by spaces. `type` and `instance` are never cut, so the record's URL redaction
 sees their whole structure; one over 2048 characters is not read. A member of the wrong JSON type is
 ignored, as RFC 9457 §3.1 requires; `status` is read in any JSON number form
 of an integer from 100 to 599 (`503`, `503.0`), and extension members are
@@ -90,7 +90,7 @@ in the evidence, the explanation and the remediation, and a value that is not
 a URI reference (spaces, quotes, angle brackets) stays in the evidence only.
 
 The report is what the responding server says, so it adds evidence and
-wording only: the finding's code, confidence, scope, owner and severity are the same
+wording only (the finding's `rule_version` becomes 2): the finding's code, confidence, scope, owner and severity are the same
 as for any body with that status, and "does not prove" says that any server
 on the path can send one. It is often what separates causes the status
 cannot. A Ferrum Alloy service answers a handler that missed its deadline

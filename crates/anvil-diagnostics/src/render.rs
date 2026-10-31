@@ -86,20 +86,20 @@ pub fn fill(t: &str, vars: &[(&'static str, String)]) -> String {
     }
     pieces.push((rest, false));
     let mut out = String::with_capacity(t.len() + 32);
-    // The last character kept, whether it is a space, and which piece it came from.
-    let mut prev: Option<(bool, usize)> = None;
+    // The piece the last kept character came from.
+    let mut last_piece: Option<usize> = None;
     for (index, (piece, is_value)) in pieces.iter().enumerate() {
         for ch in piece.chars() {
-            let same_value = |(_, at): (bool, usize)| *is_value && at == index;
-            if let Some(p @ (true, _)) = prev
-                && !same_value(p)
-                && (ch == ' ' || ch == '.')
-            {
-                // A space the template left before another space or a period.
-                out.pop();
+            let inside_one_value = *is_value && last_piece == Some(index);
+            if !inside_one_value && (ch == ' ' || ch == '.') {
+                // Spaces left before another space or a period, where the
+                // template's text meets them.
+                while out.ends_with(' ') {
+                    out.pop();
+                }
             }
             out.push(ch);
-            prev = Some((ch == ' ', index));
+            last_piece = Some(index);
         }
     }
     out.trim().to_string()
@@ -153,9 +153,16 @@ mod tests {
 
     #[test]
     fn empty_placeholders_leave_no_doubled_space_but_values_keep_theirs() {
-        let vars = vec![("empty", String::new()), ("quote", "\"a  b .\"".to_string()), ("tail", "end ".to_string())];
+        let vars = vec![
+            ("empty", String::new()),
+            ("quote", "\"a  b .\"".to_string()),
+            ("tail", "end ".to_string()),
+            ("tails", "timed out   ".to_string()),
+        ];
         assert_eq!(fill("One. {empty} Two {empty}.", &vars), "One. Two.");
         assert_eq!(fill("Said {quote} {empty} then {tail}.", &vars), "Said \"a  b .\" then end.");
+        assert_eq!(fill("Failed: {tails}.", &vars), "Failed: timed out.");
+        assert_eq!(fill("Failed: {tails} {empty} now", &vars), "Failed: timed out now");
         assert_eq!(fill("  {missing}  x  ", &vars), "x");
         assert_eq!(fill("{not a key} {x", &vars), "{not a key} {x");
     }

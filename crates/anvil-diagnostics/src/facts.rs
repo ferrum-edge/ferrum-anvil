@@ -331,14 +331,35 @@ fn problem_status(v: &serde_json::Value) -> Option<u16> {
 
 /// Characters a quoted text must not carry into a finding: controls and the
 /// Unicode line and paragraph separators (line breaks, escapes), and the
-/// invisible format characters that reorder or hide text (the Arabic letter
-/// mark, bidirectional marks, overrides and isolates, zero-width characters,
-/// the byte-order mark).
+/// format characters (general category Cf, Unicode 16) that reorder, hide or
+/// smuggle text: bidirectional marks, overrides and isolates, zero-width
+/// characters, the byte-order mark, interlinear annotation and tag
+/// characters.
 fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
         )
 }
 

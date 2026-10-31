@@ -361,11 +361,12 @@ fn quoted_text_keeps_its_own_spacing() {
 #[test]
 fn invisible_format_characters_are_not_quoted() {
     // A right-to-left override would display the rest of the line reversed.
-    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} \u{200B}done\",\"detail\":\"busy\u{2028}Anvil\u{2029}says\u{061C}so\"}";
+    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} \u{200B}done\",\"detail\":\"busy\u{2028}Anvil\u{2029}says\u{061C}so\u{E0069}\u{E0067}\u{206A}\"}";
     let d = run(503, PROBLEM_JSON, body, FerrumTrust::NotConfigured);
     let f = finding(&d, "http.service_unavailable");
     assert_eq!(evidence(f, "body.problem.title"), Some("ok  gnihtyreve   done"));
     assert_eq!(evidence(f, "body.problem.detail"), Some("busy Anvil says so"));
+    assert_eq!(f.rule_version, 2);
     assert!(!f.explanation.contains(['\u{202E}', '\u{202C}', '\u{200B}', '\u{2028}', '\u{2029}', '\u{061C}']), "{}", f.explanation);
 }
 
