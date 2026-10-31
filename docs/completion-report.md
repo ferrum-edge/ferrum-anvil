@@ -107,7 +107,7 @@ results 2026-10-26); current hosted qualification is in
   - LOAD-012: the optional JMeter adapter was not built.
 - **4 are partial:**
   - REL-003: a valid signed in-app update (0.1.0 to 0.1.1, macOS arm64) was executed; refusing an invalidly signed or altered update was not.
-  - REL-006, download manifest match: the website repository's tests check every displayed download link and asset digest against the anvil-v0.1.5 inventory; displayed platform labels are not checked.
+  - REL-006, download manifest match: the website repository's tests check every displayed download link against the anvil-v0.1.5 inventory and require a recorded SHA-256 digest for every asset, but do not compare those digests with the release or check displayed platform labels.
   - REL-007/008, website navigation and feature truth: they are live on the website with unsigned-preview status and stay partial while the installers are unsigned.
 - **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.
 
