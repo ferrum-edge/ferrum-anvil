@@ -148,9 +148,10 @@ fn fill_in_hints(app: &App, r: &anvil_app::specs::SpecImported, ws: &anvil_domai
         }
     }
     // The workspace and environment are named by id when the name is
-    // shared, has control characters or would read as an option.
-    let by_name = |name: &str, id: &Id, same: usize| {
-        if same > 1 || name.starts_with('-') || name.chars().any(char::is_control) { id.to_string() } else { shell_word(name) }
+    // shared, reads as an id, or is not a plain argument (`shell_arg`).
+    let by_name = |name: &str, id: &Id, same: usize| match shell_arg(name) {
+        Some(arg) if same == 1 && name.parse::<Id>().is_err() => arg,
+        _ => id.to_string(),
     };
     let same_ws = app.workspaces()?.iter().filter(|w| w.name.eq_ignore_ascii_case(&ws.name)).count();
     let ws_arg = by_name(&ws.name, &ws.meta.id, same_ws);
@@ -163,18 +164,10 @@ fn fill_in_hints(app: &App, r: &anvil_app::specs::SpecImported, ws: &anvil_domai
     };
     for v in &r.report.required_variables {
         out.push(format!("  fill in {{{{{}}}}}{} — {}", t(&v.name), if v.secret { " (secret)" } else { "" }, t(&v.reason)));
-        if envs.is_empty() || v.name.chars().any(char::is_control) {
-            continue;
-        }
-        let var = shell_word(&v.name);
-        let value = if v.secret { " --secret --value-stdin" } else { "" };
-        let plain = if v.secret { "" } else { " <value>" };
-        if v.name.starts_with('-') {
-            // After `--`, a name that starts with `-` stays an argument.
-            out.push(format!("    anvil env set{env_arg}{value} -- {ws_arg} {var}{plain}"));
-        } else {
-            out.push(format!("    anvil env set {ws_arg} {var}{env_arg}{value}{plain}"));
-        }
+        // A variable whose name is not a plain argument gets no command.
+        let Some(var) = shell_arg(&v.name).filter(|_| !envs.is_empty()) else { continue };
+        let value = if v.secret { " --secret --value-stdin" } else { " <value>" };
+        out.push(format!("    anvil env set {ws_arg} {var}{env_arg}{value}"));
     }
     if envs.is_empty() && !r.report.required_variables.is_empty() {
         if r.root_folder_id.is_some() {
@@ -193,13 +186,15 @@ fn fill_in_hints(app: &App, r: &anvil_app::specs::SpecImported, ws: &anvil_domai
     Ok(out)
 }
 
-/// `s` as one POSIX shell word: as is when it is plain, else single-quoted.
-fn shell_word(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
+/// `s` as one argument that reads the same in a POSIX shell, PowerShell and
+/// `cmd.exe`: as is, or double-quoted when it has spaces. `None` when it has
+/// anything else, starts with `-` (an option) or is empty.
+fn shell_arg(s: &str) -> Option<String> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_.-:/".contains(c);
+    if s.is_empty() || s.starts_with('-') || s.trim() != s || !s.chars().all(|c| plain(c) || c == ' ') {
+        return None;
     }
+    Some(if s.contains(' ') { format!("\"{s}\"") } else { s.to_string() })
 }
 
 #[derive(Subcommand)]

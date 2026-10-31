@@ -150,21 +150,17 @@ fn the_active_environment_must_belong_to_the_workspace() {
 }
 
 #[test]
-fn a_secret_is_never_made_plain_and_displaced_vault_entries_are_released() {
-    use anvil_domain::secret::{SecretRef, SensitiveValue};
+fn a_secret_is_never_made_plain_and_a_replaced_vault_entry_still_reads() {
+    use anvil_domain::secret::SensitiveValue;
     use anvil_domain::workspace::Variable;
     let root = tempfile::tempdir().unwrap();
-    let app = new_app(root.path(), "environment-secret-release");
+    let app = new_app(root.path(), "environment-secret-sticky");
     let ws = app.create_workspace("Workspace").unwrap();
     let vault = |v: &str| {
         let r = app.set_secret(&ws.meta.id, "token", v).unwrap();
         (r.clone(), SensitiveValue::Secret { secret: r })
     };
-    let secret_ref = |e: &anvil_domain::workspace::Environment| match &e.variables.iter().find(|v| v.name == "token").unwrap().value {
-        SensitiveValue::Secret { secret } => secret.clone(),
-        v => panic!("not in the vault: {v:?}"),
-    };
-    let stored = |r: &SecretRef| app.store.get_workspace_secret(&r.id, &ws.meta.id).unwrap().map(|(_, v)| v.to_string());
+    let stored = |id: &anvil_domain::Id| app.store.get_workspace_secret(id, &ws.meta.id).unwrap().map(|(_, v)| v.to_string());
 
     // A plain duplicate before a secret one, and a vault value whose flag
     // is off: either way the value set goes to the vault.
@@ -177,29 +173,15 @@ fn a_secret_is_never_made_plain_and_displaced_vault_entries_are_released() {
         app.create_environment(&ws.meta.id, "b", vec![Variable { secret: false, value: held_b, ..Variable::plain("token", "") }]).unwrap();
     for (env, old) in [(&a, &old_a), (&b, &old_b)] {
         let e = app.set_environment_variable(&env.meta.id, "token", "new", false).unwrap();
-        assert_eq!(e.variables.iter().filter(|v| v.name == "token").count(), 1);
-        let now = secret_ref(&e);
-        assert!(e.variables.iter().all(|v| v.name != "token" || v.secret));
-        assert_eq!(stored(&now).as_deref(), Some("new"));
-        // Nothing else referenced the old entry: it is gone.
-        assert_eq!(stored(old), None);
+        let tokens: Vec<_> = e.variables.iter().filter(|v| v.name == "token").collect();
+        assert_eq!(tokens.len(), 1);
+        assert!(tokens[0].secret, "{:?}", tokens[0]);
+        let SensitiveValue::Secret { secret } = &tokens[0].value else { panic!("not in the vault: {:?}", tokens[0]) };
+        assert_eq!(stored(&secret.id).as_deref(), Some("new"));
+        // The entry it held stays readable: a desktop draft or an export
+        // being written may still name it.
+        assert!(stored(&old.id).is_some());
     }
-
-    // An entry another object still references is kept; unset releases
-    // the last reference.
-    let shared = secret_ref(&app.environments(&ws.meta.id).unwrap().into_iter().find(|e| e.name == "a").unwrap());
-    let copy = app
-        .create_environment(
-            &ws.meta.id,
-            "copy",
-            vec![Variable { secret: true, value: SensitiveValue::Secret { secret: shared.clone() }, ..Variable::plain("token", "") }],
-        )
-        .unwrap();
-    app.set_environment_variable(&a.meta.id, "token", "rotated", true).unwrap();
-    assert_eq!(stored(&shared).as_deref(), Some("new"), "still referenced by 'copy'");
-    let (_, removed) = app.unset_environment_variable(&copy.meta.id, "token").unwrap();
-    assert!(removed);
-    assert_eq!(stored(&shared), None);
 }
 
 #[test]

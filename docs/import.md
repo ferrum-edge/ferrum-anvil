@@ -295,11 +295,14 @@ when there is one, prints a ready-to-run `anvil env set` command under each
 plain one ends in `<value>` for you to replace). The command targets the
 active environment of a new workspace, or, under an import root (whose
 environments are not active in the destination), the first environment the
-import brought, with `--env`. The workspace and environment are named by id
-when the name is shared, has control characters or starts with `-`; a
-variable whose name has control characters gets no command. These lines
-only read what the import wrote: if a read fails, the command still exits 0
-(the import is committed) and prints a note.
+import brought in the source's order, with `--env`. Each argument reads the
+same in a POSIX shell, PowerShell and `cmd.exe`: a name of letters, digits,
+`_ . - : /` and spaces is printed as is (double-quoted when it has spaces).
+A workspace or environment whose name is anything else, starts with `-`,
+reads as an id or is shared is named by its id, and a variable whose name is
+anything else gets no command. These lines only read what the import wrote:
+if a read fails, the command still exits 0 (the import is committed) and
+prints a note.
 
 ```bash
 anvil import-spec Shop --file openapi.yaml
@@ -316,15 +319,20 @@ that environment are removed, so the value set is the one that resolves. A
 secret (`--secret`, or a variable of that name that is already secret or
 held in the vault) is read from stdin (`--value-stdin`, after the passphrase
 line when `--passphrase-stdin` unlocks a passphrase profile) or from a process
-environment variable (`--value-env VAR`), never from an argument. It is kept
-in the profile's vault, owned by the workspace, and the environment holds only
-the reference, as with **Store in vault** in the desktop. A secret is never
-made plain by `set`. The vault entry a replaced or removed (`anvil env unset`)
-variable held is deleted when no stored object of the profile references it
-any more; restore points keep their own copies, as for any change.
+environment variable (`--value-env VAR`), never from an argument; an empty
+value from either is refused. It is kept in the profile's vault, owned by the
+workspace, and the environment holds only the reference, as with **Store in
+vault** in the desktop. A secret is never made plain by `set`.
 
-`anvil env list` marks the active environment with `*` and names the
-imported collection that brought each one; `anvil env show` prints a
+The vault entry a replaced or removed (`anvil env unset`) variable held stays
+in the vault, as when the desktop moves a value into it, so it is still in
+an encrypted bundle or backup of the workspace. Deleting it at once is not
+safe: a desktop draft, or an export reading the workspace, may still name
+it. Rotating a compromised credential therefore means revoking it where it
+was issued.
+
+`anvil env list` marks the active environment with `*` and, for an import
+into an existing workspace, names the collection that brought each one; `anvil env show` prints a
 variable's value unless it is secret; `anvil env use` (or `--none`) picks the
 active environment; `anvil env create` adds an environment (`--use` also
 makes it active), refused when the workspace has one of that name. The `env`

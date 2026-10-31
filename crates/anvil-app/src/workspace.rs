@@ -707,7 +707,7 @@ impl App {
                 return Ok(Err(AppError::NotFound(format!("workspace '{ws}'"))));
             };
             if s.list::<Environment>(kind::ENVIRONMENT, Some(ws))?.iter().any(|e| e.name.trim().eq_ignore_ascii_case(name)) {
-                return Ok(Err(AppError::Invalid(format!("workspace '{}' already has an environment named '{name}'", w.name))));
+                return Ok(Err(AppError::Invalid(format!("the workspace already has an environment named '{name}'"))));
             }
             let e = Environment { meta: Meta::new(), workspace_id: *ws, name: name.into(), variables: vec![] };
             s.put(kind::ENVIRONMENT, &e.meta.id, Some(ws), None, 0.0, &e)?;
@@ -729,9 +729,10 @@ impl App {
     /// A secret keeps its value in the vault, owned by the environment's
     /// workspace: the environment holds only the reference. The variable is
     /// secret when `secret` asks for it or any variable of the name is
-    /// secret or held in the vault: it is never made plain here. A vault
-    /// entry the variables held before is deleted when no stored object
-    /// references it any more ([`release_secrets`]).
+    /// secret or held in the vault: it is never made plain here. The vault
+    /// entry a replaced variable held stays in the vault, as when the
+    /// desktop moves a value into it: a desktop draft or an export being
+    /// written may still name it.
     pub fn set_environment_variable(&self, env: &Id, name: &str, value: &str, secret: bool) -> Result<Environment> {
         if name.is_empty() || name.trim() != name || name.contains("{{") || name.contains("}}") {
             return Err(AppError::Invalid(format!("'{name}' is not a variable name")));
@@ -740,7 +741,6 @@ impl App {
             let Some(mut e) = s.get::<Environment>(kind::ENVIRONMENT, env)? else {
                 return Ok(Err(AppError::NotFound("environment".into())));
             };
-            let displaced = vault_refs(e.variables.iter().filter(|v| v.name == name));
             let secret = secret || e.variables.iter().any(|v| v.name == name && v.is_secret());
             let stored = if secret {
                 let id = Id::new();
@@ -762,28 +762,24 @@ impl App {
             }
             e.meta.updated_at = chrono::Utc::now();
             s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
-            release_secrets(s, &e.workspace_id, displaced)?;
             Ok(Ok(e))
         })?
     }
 
     /// Remove every variable named `name` from environment `env`, in one
-    /// transaction, and the vault entries they held that no stored object
-    /// references any more. Returns the environment and whether anything was
-    /// removed.
+    /// transaction. Returns the environment and whether anything was
+    /// removed. Vault entries they held stay, as for `set`.
     pub fn unset_environment_variable(&self, env: &Id, name: &str) -> Result<(Environment, bool)> {
         self.store.atomically(|s| {
             let Some(mut e) = s.get::<Environment>(kind::ENVIRONMENT, env)? else {
                 return Ok(Err(AppError::NotFound("environment".into())));
             };
-            let displaced = vault_refs(e.variables.iter().filter(|v| v.name == name));
             let before = e.variables.len();
             e.variables.retain(|v| v.name != name);
             let removed = e.variables.len() != before;
             if removed {
                 e.meta.updated_at = chrono::Utc::now();
                 s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
-                release_secrets(s, &e.workspace_id, displaced)?;
             }
             Ok(Ok((e, removed)))
         })?
@@ -1379,39 +1375,4 @@ pub(crate) fn attachment_index_id(sha: &str) -> Id {
     let mut b = [0u8; 16];
     b.copy_from_slice(&d[..16]);
     Id(uuid::Builder::from_custom_bytes(b).into_uuid())
-}
-
-/// The vault entries `vars` reference.
-fn vault_refs<'a>(vars: impl Iterator<Item = &'a Variable>) -> Vec<Id> {
-    vars.filter_map(|v| match &v.value {
-        SensitiveValue::Secret { secret } => Some(secret.id),
-        SensitiveValue::Template { .. } => None,
-    })
-    .collect()
-}
-
-/// Delete the vault entries among `ids` that workspace `ws` owns and no
-/// stored object of any workspace references (request revisions
-/// included), inside the caller's transaction. When a stored object does
-/// not read, every entry is kept: it may be the one that references it.
-/// Restore points keep their own copies, as for any other change.
-fn release_secrets(s: &StoreTx<'_>, ws: &Id, ids: Vec<Id>) -> std::result::Result<(), StoreError> {
-    let mut ids: Vec<Id> = ids.into_iter().filter(|id| s.as_read().get_workspace_secret(id, ws).ok().flatten().is_some()).collect();
-    if ids.is_empty() {
-        return Ok(());
-    }
-    for k in kind::ALL {
-        let Ok(objects) = s.list::<serde_json::Value>(k, None) else { return Ok(()) };
-        for o in &objects {
-            let text = o.to_string();
-            ids.retain(|id| !text.contains(&id.to_string()));
-        }
-        if ids.is_empty() {
-            return Ok(());
-        }
-    }
-    for id in ids {
-        s.delete_secret(&id)?;
-    }
-    Ok(())
 }

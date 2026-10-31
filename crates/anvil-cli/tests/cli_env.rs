@@ -87,7 +87,7 @@ async fn an_imported_bearer_is_filled_in_from_the_command_line() {
     let out = text(&o);
     assert!(out.contains("into workspace 'Echo API 1'"), "{out}");
     assert!(out.contains("environments: 'local', 'staging' ('local' is active)"), "{out}");
-    assert!(out.contains("anvil env set 'Echo API 1' bearer --secret --value-stdin"), "{out}");
+    assert!(out.contains(r#"anvil env set "Echo API 1" bearer --secret --value-stdin"#), "{out}");
     let ws = "Echo API 1";
 
     // Not sent until it is.
@@ -222,6 +222,26 @@ async fn names_are_never_guessed_and_hints_stay_runnable() {
     let o = anvil(&data, &["env", "set", "Solo", "token", "--secret", "--value-env", "CLI_ENV_UNSET_VARIABLE"]).await;
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("'CLI_ENV_UNSET_VARIABLE' is not set"), "{}", text(&o));
+    // Nothing piped after the passphrase line: refused, not an empty token.
+    let o = anvil_with_stdin(
+        &data,
+        &["--passphrase-stdin", "env", "set", "Solo", "token", "--secret", "--value-stdin"],
+        Some(&format!("{PASS}\n")),
+        &[("ANVIL_PASSPHRASE", "")],
+    )
+    .await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("the value on stdin is empty"), "{}", text(&o));
+    let o = anvil_with_stdin(
+        &data,
+        &["env", "set", "Solo", "token", "--secret", "--value-env", "CLI_ENV_EMPTY"],
+        None,
+        &[("CLI_ENV_EMPTY", "")],
+    )
+    .await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    let o = anvil(&data, &["env", "show", "Solo"]).await;
+    assert!(!text(&o).contains("token"), "{}", text(&o));
 
     // Two workspaces of one name: the env commands refuse the name.
     for _ in 0..2 {
@@ -230,6 +250,22 @@ async fn names_are_never_guessed_and_hints_stay_runnable() {
     let o = anvil_with_stdin(&data, &["env", "set", "twin", "token", "--secret", "--value-stdin"], Some(TOKEN), &[]).await;
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("2 workspaces are named 'twin'"), "{}", text(&o));
+
+    // Names that are not plain arguments everywhere (an option, shell or
+    // bidi characters, an id of another environment) are named by id.
+    let other = open(&data).environments(&open(&data).find_workspace("Solo").unwrap().meta.id).unwrap()[0].meta.id.to_string();
+    for (description, shown) in [("x&calc&y", "x&calc"), (r"a\u202eb", "\u{202e}"), (other.as_str(), other.as_str())] {
+        let file = dir.path().join("odd.yaml");
+        std::fs::write(&file, spec("http://127.0.0.1:9").replace("description: local", &format!("description: \"{description}\"")))
+            .unwrap();
+        let o = anvil(&data, &["import-spec", "Solo", "--file", file.to_str().unwrap()]).await;
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        let out = text(&o);
+        let hint = out.lines().find(|l| l.contains("anvil env set")).unwrap_or_else(|| panic!("{out}"));
+        assert!(!hint.contains(shown) && !hint.contains('\u{202e}'), "{description:?}: {hint}");
+        let env = hint.split_whitespace().skip_while(|a| *a != "--env").nth(1).unwrap();
+        assert_ne!(env, other, "the hint must not name another environment: {hint}");
+    }
 
     // A server description that reads as an option is named by id.
     let file = dir.path().join("openapi.yaml");

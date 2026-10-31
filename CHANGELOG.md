@@ -9,8 +9,7 @@
   variables an import asks for can be filled in without the desktop app.
   `anvil env set NAME --secret` reads the value from stdin or a process
   environment variable, never from an argument, and keeps it in the vault;
-  a secret is never made plain, and the vault entry a replaced or removed
-  variable held is deleted once nothing references it. `anvil import-spec`
+  a secret is never made plain. `anvil import-spec`
   now names the workspace and the environments it brought and prints the
   `anvil env set` command for each variable to fill in.
 
@@ -52,8 +51,9 @@
 
 ### Changed
 
-- `--env` on `anvil send`, `run` and `mcp-discover` that names no
-  environment lists the workspace's environments. A name two environments of
+- `--env` on `anvil send`, `run` and `mcp-discover` takes an environment's
+  id as well as its name (`send` and `mcp-discover` took only a name), and
+  one that names no environment lists the workspace's environments. A name two environments of
   the workspace share (two imports of one spec each bring a `local`) is
   refused with their ids; before, the first one found was used.
 - Schema checks of examples, drift bodies and custom ruleset values charge

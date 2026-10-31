@@ -19,7 +19,8 @@ const MAX_VALUE_BYTES: u64 = 1024 * 1024;
 #[derive(Subcommand)]
 pub enum EnvCmd {
     /// List the workspace's environments: `*` marks the active one, and an
-    /// environment an imported collection brought names that collection.
+    /// environment a collection imported into this existing workspace
+    /// brought names that collection.
     List {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
@@ -58,8 +59,7 @@ pub enum EnvCmd {
     /// variable is enabled, and other variables of the same name in the
     /// environment are removed. A secret is kept in the profile's encrypted
     /// vault and must not be an argument; a variable that is secret stays
-    /// secret, and the vault entry it held is deleted unless something else
-    /// references it.
+    /// secret.
     Set {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
@@ -75,17 +75,17 @@ pub enum EnvCmd {
         /// reports and safe-share exports.
         #[arg(long)]
         secret: bool,
-        /// Read the value from stdin: all of it, less one trailing newline.
-        /// With --passphrase-stdin on a passphrase profile, the value
-        /// follows the passphrase line.
+        /// Read the value from stdin: all of it, less one trailing newline
+        /// (an empty value is refused). With --passphrase-stdin on a
+        /// passphrase profile, the value follows the passphrase line.
         #[arg(long, conflicts_with = "value_env")]
         value_stdin: bool,
-        /// Read the value from this process environment variable.
+        /// Read the value from this process environment variable (an empty
+        /// one is refused).
         #[arg(long, value_name = "VAR")]
         value_env: Option<String>,
     },
-    /// Remove a variable from an environment (default: the active one), and
-    /// the vault entry it held unless something else references it.
+    /// Remove a variable from an environment (default: the active one).
     Unset {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
@@ -194,7 +194,11 @@ fn read_value(value: Option<&str>, value_stdin: bool, value_env: Option<&str>, s
         return Ok(v.to_string());
     }
     if let Some(var) = value_env {
-        return std::env::var(var).map_err(|_| anyhow!("the environment variable '{}' is not set (or is not valid UTF-8)", t(var)));
+        let v = std::env::var(var).map_err(|_| anyhow!("the environment variable '{}' is not set (or is not valid UTF-8)", t(var)))?;
+        if v.is_empty() {
+            bail!("the environment variable '{}' is empty; nothing was set", t(var));
+        }
+        return Ok(v);
     }
     debug_assert!(value_stdin);
     let mut bytes = Vec::new();
@@ -208,6 +212,10 @@ fn read_value(value: Option<&str>, value_stdin: bool, value_env: Option<&str>, s
         if s.ends_with('\r') {
             s.pop();
         }
+    }
+    // Most likely nothing was piped after the passphrase line.
+    if s.is_empty() {
+        bail!("the value on stdin is empty; nothing was set");
     }
     Ok(s)
 }
