@@ -24,12 +24,16 @@ SCHEMA = "anvil.release-smoke.v1"
 
 # Why a step failed. Only a `package` failure says something about the
 # shipped asset; a `harness` failure (runner setup, test tools, package
-# mirrors, artifact fetch) says nothing about it and is re-run first. A target
-# that failed without a recorded failure (the script stopped unexpectedly) is
-# `unclassified` and is handled like a harness failure until examined.
+# mirrors, artifact fetch) says nothing about it and is re-run first. The
+# full command-by-command mapping is in docs/release.md. `unclassified` is
+# recorded only by the scripts' safety nets for an error no mapping
+# anticipated (with the step, line and command), or by `finalize` when a job
+# stopped before its script recorded anything; it is handled like a harness
+# failure until a person has read the log.
 FAILURE_CLASSES = {
     "package": "the shipped asset failed its checksum, install, launch, import or local call",
     "harness": "runner setup, a test tool, a package mirror or the artifact fetch failed; says nothing about the asset",
+    "unclassified": "an error no mapping anticipated, or a job that stopped before recording; read the log",
 }
 
 # A target passes only if every one of these steps ran and passed.
@@ -125,7 +129,7 @@ def cmd_sha256(a):
 
 def cmd_sums(a):
     """Print the SHA256SUMS digest recorded for one file name (exit 1 if none)."""
-    with open(a.sums, encoding="utf-8") as f:
+    with open(a.sums, encoding="utf-8", errors="replace") as f:
         for line in f:
             parts = line.split()
             if len(parts) == 2 and parts[1].lstrip("*") == a.name:
@@ -181,7 +185,7 @@ def cmd_finalize(a):
     elif "harness" in classes:
         failure_class = "harness"
     else:
-        failure_class = "unclassified"
+        failure_class = "unclassified"  # recorded as such, or no failure recorded at all
     env = os.environ
     doc = {
         "schema": SCHEMA,
@@ -231,6 +235,10 @@ def cmd_summarize(a):
         # The fetch job stopped before writing its result (for example while
         # resolving the release): nothing about the assets is known.
         fetch = {"failure_class": "harness", "harness_error": f"the fetch job ended '{a.fetch_job_result}' without a result", "package_failures": []}
+    if fetch is not None and not fetch_ok and not fetch.get("failure_class"):
+        # The asset check passed, then a later fetch step failed (the example
+        # bundle from the repository, or the upload): not a shipped asset.
+        fetch = {**fetch, "failure_class": "harness", "harness_error": f"the fetch job ended '{a.fetch_job_result}' after its asset check passed"}
     fetch_class = (fetch or {}).get("failure_class")
     results = []
     for root, _dirs, files in os.walk(a.input):

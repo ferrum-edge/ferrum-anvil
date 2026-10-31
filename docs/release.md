@@ -461,7 +461,7 @@ tag=anvil-vX.Y.Z`; no tag means the latest published release), when an
 | `windows-x64-nsis` | `windows-2025` | `-setup.exe /S` |
 | `windows-x64-msi` | `windows-2025` | `msiexec /i … /qn` |
 | `linux-x64-deb` | `ubuntu-26.04` | `apt-get install` of the local `.deb` (dependencies from the Ubuntu archive) |
-| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`), and the EGL/Mesa stack (`libegl1 libegl-mesa0 libgl1-mesa-dri`) when `libEGL.so.1` or a Mesa EGL vendor is absent. Each addition is recorded |
+| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`), and the EGL/GLES/Mesa stack (`libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri`) when `libEGL.so.1`, `libGLESv2.so.2` (which the bundled libepoxy loads) or a Mesa EGL vendor is absent. Each addition is recorded |
 | `linux-x64-rpm` | `ubuntu-26.04`, digest-pinned `fedora:44` container | `dnf install` of the local `.rpm` (dependencies from the Fedora repositories) |
 
 Each job then:
@@ -499,40 +499,33 @@ asset and its sha256, the runner OS and architecture, every step's result,
 the surface driven and every OS protection that was not exercised. The
 `rel001-summary` artifact merges them.
 
-Every failure carries a class, and `result.json` (`failure_class`) and the
-summary table show it:
+### Failure classes
 
-- `package`: the published release or the shipped asset is at fault. Any
-  of these is a package failure:
-  - an advertised asset is not in the release;
-  - the release has no `SHA256SUMS`, or `SHA256SUMS` does not list the asset;
-  - the asset GitHub stores does not match `SHA256SUMS`;
-  - the package does not install;
-  - the installed app does not launch, show its window or start its webview;
-  - the release CLI fails to run, import or call;
-  - a package manager cannot resolve the package's own dependencies.
-- `harness`: the test environment is at fault. Examples are the runner's
-  architecture or state, installing a test tool (Xvfb, `fuse3`, the EGL
-  stack), or a package-mirror or network error. Others are a release-API or
-  download failure, and downloaded bytes that differ from the digest GitHub
-  stores for the asset (a transfer error, retried first). An asset that
-  changes between jobs, a window probe that errors, and the loopback
-  listener are harness failures too. They say nothing about the asset.
-- `unclassified`: the job stopped without recording a failure, for example
-  in checkout or artifact download. Treat it like `harness` until a person
-  has read the log.
+Every failed step carries a class. Both `result.json` (`failure_class`) and the summary table show it. Only a `package` failure says something about the shipped asset.
 
-The `fetch` job (`scripts/release-smoke/fetch.sh`) applies the same rule
-and writes `fetch.json` (artifact `rel001-fetch`):
+| Stage | `package` (the shipped asset or the published release) | `harness` (says nothing about the asset) |
+| --- | --- | --- |
+| Fetch (`fetch.sh`) | An advertised asset is missing from the release, the release has no `SHA256SUMS`, `SHA256SUMS` does not list the asset, or the stored asset does not match `SHA256SUMS`. The run continues: the affected targets fail and the other targets run. | Release-API or download failure, or downloaded bytes that still differ from GitHub's stored digest after 3 attempts. The fetch job fails. A failure after the asset check passed (the example bundle from the repository) is also harness. |
+| Inputs (`asset_integrity`) | A problem `fetch.json` recorded for this target's asset | An input that did not arrive or changed between jobs, or an input that cannot be read (`release.json`, `example.json`, `fetch.json`, `SHA256SUMS`, the example) |
+| Runner (`native_arch`) | — | Wrong architecture, Rosetta, or OS/CPU query errors |
+| Install, DMG | `hdiutil attach` fails (image not recognized or corrupt), no `.app`, `ditto` fails, `Info.plist` or binary unreadable, wrong version or architecture | Disk-image subsystem busy or unavailable, `/Applications` not clean, full disk |
+| Install, `.deb`/`.rpm` | `dpkg-deb`/`rpm` cannot read it, the install fails (for example on unmet dependencies), the package is not registered afterwards, no `/usr/bin` executable, wrong architecture | `apt-get update`, a package-mirror or network error, a held or interrupted package-manager lock, listing the runner's packages, full disk, `file(1)` errors |
+| Install, AppImage | Not an x86-64 ELF | `fuse3` or EGL/GLES/Mesa host install, `/dev/fuse` missing, copy or `chmod` into `~/Applications` |
+| Install, NSIS/MSI | Windows cannot start the installer. The installer exits non-zero. No Apps & features entry, no executable, unreadable PE header or version resource, not x64, wrong version. | `msiexec.exe` cannot be started; exit codes 1618 and 1601; full disk |
+| Harness (`harness_setup`) | — | Installing Xvfb, xdotool, dbus or ImageMagick; a missing `pgrep`/`pkill`/`ps`/`python3`/`osascript`/`xdotool`/`setsid`/`Xvfb`; Xvfb not answering; `dbus-run-session -- true` failing |
+| CLI (`cli_ready`) | The archive does not extract. Windows cannot run the CLI. No executable, wrong `--version`. | Full disk, creating the extraction directory |
+| Launch (`launch_*`) | `open` fails, no process, the app exits, or no window or webview process while the probes and the display worked | The app's output names a session-bus or FUSE-mount fault. Also a probe that errored (osascript, xdotool, pgrep, the Windows process query), an X display not answering, or the app's own probes failing. |
+| CLI steps (`profile_create`, `example_import`, `local_call`) | The CLI cannot run or exits non-zero, a sample request is missing, no HTTP 200, the request is not logged | Full disk, the listener does not start or exits during the call, the listener's log cannot be read |
+| Best-effort, never fails a target | — | Screenshots, `codesign`/`spctl`/Authenticode readings, `anvil doctor`, `anvil history`, `ps`/process lists, app log copies, process cleanup |
 
-- **Package problem:** a missing asset, or one without a matching
-  `SHA256SUMS` line. The job records it and the run continues. The targets
-  that install the affected asset fail their `asset_integrity` step as a
-  package failure, and the other targets still run.
-- **Harness problem:** a release-API or download failure. The fetch job
-  fails, and no target runs.
+`fetch.sh` writes `fetch.json` (artifact `rel001-fetch`). The summary job runs even when fetch fails, and reports the fetch result with its class.
 
-The summary job runs either way and reports the fetch result with its class.
+`unclassified` is only ever recorded in two cases:
+
+- **A safety-net catch:** the bash `EXIT` trap or the PowerShell top-level `catch` records an error no row above anticipated, with its step and command or message.
+- **A job that stopped before recording anything**, such as checkout or artifact download. `finalize` sets this one.
+
+Treat it like `harness` until a person has read the log. The scripts (`scripts/release-smoke/`) are the authority; keep this table in step with them.
 
 What it does **not** cover:
 
@@ -636,7 +629,8 @@ What it does **not** cover:
   packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
   (PR runs 41189324002 and 41185287833), six of seven targets pass. The
   AppImage fails at its first launch: its WebKit web process aborts with
-  `EGL_BAD_PARAMETER` (a package failure; a fix is in progress). Not
+  `EGL_BAD_PARAMETER` (a package failure, fixed by ferrum-edge/ferrum-anvil#463,
+  not merged yet). Not
   automated:
   - GUI-driven import and send;
   - first run through Gatekeeper/SmartScreen;
