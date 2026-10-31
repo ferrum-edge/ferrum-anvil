@@ -71,9 +71,11 @@ When an error response is `application/problem+json` (the RFC 9457 media
 type, with any parameters; plain `application/json` is not read as one), its
 generic `http.*` finding records the standard members it carries as body
 evidence: `body.problem.type`, `.title`, `.detail`, `.status` and
-`.instance`. Each text is a redacted excerpt with control characters and
-invisible Unicode format characters (bidirectional overrides and isolates,
-zero-width characters) replaced by spaces. A member of the wrong JSON type is
+`.instance`. Each text is a redacted excerpt with control characters, the
+Unicode line and paragraph separators and invisible format characters
+(bidirectional marks, overrides and isolates, zero-width characters) replaced
+by spaces. `type` and `instance` are never cut, so the record's URL redaction
+sees their whole structure; one over 2048 characters is not read. A member of the wrong JSON type is
 ignored, as RFC 9457 §3.1 requires; `status` is read in any JSON number form
 of an integer from 100 to 599 (`503`, `503.0`), and extension members are
 not read. The explanation states the type (unless it is `about:blank`),

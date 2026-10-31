@@ -1069,6 +1069,13 @@ mod tests {
         assert!(!all.contains("tok-live-5k2r"), "{all}");
         assert!(f.evidence[0].value.contains("page=2"), "{}", f.evidence[0].value);
         assert!(f.remediation[0].text.contains("https://trace.example/occ/9?access_token="), "{}", f.remediation[0].text);
+        // Userinfo in a long, uncut URI is withheld too.
+        let long = format!("https://user:{}@trace.example/occ", "S".repeat(300));
+        let mut g = f.clone();
+        g.evidence[0].value = long.clone();
+        g.remediation[0].text = format!("quote the problem report's instance \"{long}\"");
+        r.finding(&mut g);
+        assert!(!format!("{:?} {}", g.evidence, g.remediation[0].text).contains("SSSS"), "{:?}", g.evidence);
     }
 
     #[test]

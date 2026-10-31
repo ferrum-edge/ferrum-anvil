@@ -361,11 +361,12 @@ fn quoted_text_keeps_its_own_spacing() {
 #[test]
 fn invisible_format_characters_are_not_quoted() {
     // A right-to-left override would display the rest of the line reversed.
-    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} \u{200B}done\"}";
+    let body = "{\"title\":\"ok \u{202E}gnihtyreve\u{202C} \u{200B}done\",\"detail\":\"busy\u{2028}Anvil\u{2029}says\u{061C}so\"}";
     let d = run(503, PROBLEM_JSON, body, FerrumTrust::NotConfigured);
     let f = finding(&d, "http.service_unavailable");
     assert_eq!(evidence(f, "body.problem.title"), Some("ok  gnihtyreve   done"));
-    assert!(!f.explanation.contains(['\u{202E}', '\u{202C}', '\u{200B}']), "{}", f.explanation);
+    assert_eq!(evidence(f, "body.problem.detail"), Some("busy Anvil says so"));
+    assert!(!f.explanation.contains(['\u{202E}', '\u{202C}', '\u{200B}', '\u{2028}', '\u{2029}', '\u{061C}']), "{}", f.explanation);
 }
 
 #[test]
@@ -389,4 +390,20 @@ fn an_integral_status_in_any_json_number_form_is_read() {
         assert_eq!(stated.as_ref().map(|s| f.explanation.contains(s.as_str())), read.map(|_| true), "{raw}: {}", f.explanation);
         assert_eq!(f.explanation.contains("It states status"), read.is_some(), "{raw}: {}", f.explanation);
     }
+}
+
+#[test]
+fn a_uri_member_is_never_cut() {
+    // Cut at a fixed length, the userinfo below would lose its `@` and no
+    // URL redaction could recognize it.
+    let long = format!("https://user:{}@trace.example/occ", "S".repeat(300));
+    let body = format!(r#"{{"title":"t","instance":"{long}"}}"#);
+    let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+    assert_eq!(evidence(finding(&d, "http.service_unavailable"), "body.problem.instance"), Some(long.as_str()));
+    // Over the limit, the member is not read.
+    let body = format!(r#"{{"title":"t","instance":"/{}"}}"#, "i".repeat(2048));
+    let d = run(503, PROBLEM_JSON, &body, FerrumTrust::NotConfigured);
+    let f = finding(&d, "http.service_unavailable");
+    assert_eq!(evidence(f, "body.problem.instance"), None);
+    assert!(f.remediation.iter().all(|r| !r.text.contains("problem report")), "{:?}", f.remediation);
 }

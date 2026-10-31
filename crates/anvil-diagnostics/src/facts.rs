@@ -91,8 +91,9 @@ pub struct BodyFacts {
 }
 
 /// The standard members of an RFC 9457 problem report, as the response
-/// carries them. Each text is a redacted [`excerpt`] with control and
-/// invisible format characters replaced by spaces. A member that is absent or not of its RFC 9457 type is
+/// carries them. Each text is a redacted [`excerpt`] with control, separator
+/// and invisible format characters replaced by spaces; `type` and `instance`
+/// are never cut (one over 2048 characters is not read). A member that is absent or not of its RFC 9457 type is
 /// `None` (RFC 9457 §3.1: such a member is ignored); extension members are
 /// not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,16 +298,29 @@ fn problem_details(obj: &serde_json::Map<String, serde_json::Value>, redact: Red
         let one_line: String = excerpt(redact, v, max).chars().map(|c| if is_hidden(c) { ' ' } else { c }).collect();
         Some(one_line.trim().to_string()).filter(|v| !v.is_empty())
     };
+    // A URI is never cut: the record's URL redaction must see its whole
+    // structure (a cut inside userinfo or a query value would hide what it
+    // has to withhold). One longer than the limit is not read at all.
+    let uri = |key: &str| {
+        let v = obj.get(key)?.as_str()?;
+        if v.chars().count() > MAX_PROBLEM_URI_CHARS {
+            return None;
+        }
+        text(key, MAX_PROBLEM_URI_CHARS)
+    };
     let p = ProblemDetails {
-        type_uri: text("type", 256),
+        type_uri: uri("type"),
         title: text("title", 200),
         status: obj.get("status").and_then(problem_status),
         detail: text("detail", 300),
-        instance: text("instance", 256),
+        instance: uri("instance"),
     };
     let any = p.type_uri.is_some() || p.title.is_some() || p.status.is_some() || p.detail.is_some() || p.instance.is_some();
     any.then_some(p)
 }
+
+/// Longest problem-report `type` or `instance` read (characters).
+const MAX_PROBLEM_URI_CHARS: usize = 2048;
 
 /// A problem report's `status`: a JSON number (`503`, `503.0` or `5.03e2`)
 /// that is an integer from 100 to 599.
@@ -315,12 +329,17 @@ fn problem_status(v: &serde_json::Value) -> Option<u16> {
     (n.fract() == 0.0 && (100.0..=599.0).contains(&n)).then_some(n as u16)
 }
 
-/// Characters a quoted text must not carry into a finding: controls
-/// (line breaks, escapes) and the invisible Unicode format characters that
-/// reorder or hide text (bidirectional overrides and isolates, zero-width
-/// characters, the byte-order mark).
+/// Characters a quoted text must not carry into a finding: controls and the
+/// Unicode line and paragraph separators (line breaks, escapes), and the
+/// invisible format characters that reorder or hide text (the Arabic letter
+/// mark, bidirectional marks, overrides and isolates, zero-width characters,
+/// the byte-order mark).
 fn is_hidden(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+        )
 }
 
 fn trim_ascii(b: &[u8]) -> &[u8] {
