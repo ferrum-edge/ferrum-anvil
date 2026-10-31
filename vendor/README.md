@@ -196,3 +196,54 @@ cargo download tungstenite@0.30.0   # or unpack ~/.cargo/registry/src/*/tungsten
 patch -d <unpacked tungstenite-0.30.0> -p1 < vendor/patches/tungstenite-0.30.0-permessage-deflate.patch
 diff -r <unpacked tungstenite-0.30.0> vendor/tungstenite-0.30.0-deflate   # only Cargo.lock and .cargo-ok differ
 ```
+
+## `dimpl-0.8.0-empty-ca/`
+
+`dimpl` 0.8.0 exactly as published on crates.io (checksum
+`df69b372e2de9011f8c22a58d1b5f5afa1752041bc5c0ae6b8a126aadaea5ed2`, built
+from algesten/dimpl `f68b0099eebc6f707436db4413b433b21e5e6c13`), without the
+published `Cargo.lock`, and with one change:
+`patches/dimpl-0.8.0-empty-certificate-authorities.patch`, confined to the
+DTLS 1.3 `CertificateRequest` parser in
+`src/dtls13/message/certificate_request.rs`.
+
+dimpl 0.8.0 began parsing handshake messages before committing them to the
+transcript (dimpl #174), and its `CertificateRequest` parser rejects a
+`certificate_authorities` extension that holds no names. RFC 8446 §4.2.4 asks
+for at least one, but every Ferrum Edge release Anvil supports serves DTLS
+with dimpl 0.6.1, whose DTLS 1.3 server always sends the extension empty
+when its listener requires client certificates (dimpl 0.7.0 stopped sending
+it, #153). The client drops the rejected message without an alert, so it
+never sends its certificate and the handshake times out: lab PROTO-022 in the
+`tls` profile failed on every supported release once 0.8.0 was taken. With
+the patch an empty list parses as naming no CA, as dimpl 0.7 parsed it;
+a malformed length is still refused. The patch is tested as Anvil code,
+against dimpl 0.6.1 itself (the `dimpl-edge` dev-dependency of
+`anvil-transport`, `crates/anvil-transport/tests/dtls_edge_interop.rs`); the
+test times out without the patch.
+
+Vendoring 0.8.0, rather than holding dimpl at 0.7, keeps its client fixes:
+among them, retried ClientHellos keep the original offers after a cookie
+challenge (#184) and DTLS 1.3 session tickets are acknowledged and ignored
+(#182) instead of ending the session.
+
+The workspace uses it through `[patch.crates-io]` in `Cargo.toml`. Dependabot
+ignores `dimpl` (which also keeps the `dimpl-edge` test dependency on 0.6.1).
+The license is upstream's MIT OR Apache-2.0 (`dimpl-0.8.0-empty-ca/LICENSE-MIT.txt`,
+`LICENSE-APACHE.txt`).
+
+**Retire it** when a dimpl release accepts an empty `certificate_authorities`
+list, or when no supported Ferrum Edge release sends one: bump `dimpl` in
+`Cargo.toml`, delete the `[patch.crates-io]` entry, this directory and the
+patch, drop the `dimpl` Dependabot ignore, and regenerate
+`THIRD_PARTY_LICENSES.md`. Keep `dtls_edge_interop.rs` and `dimpl-edge` for as
+long as a supported Edge release serves dimpl 0.6.1. Until then, re-vendor a
+newer dimpl with the same patch to take its fixes.
+
+To check the vendored copy against crates.io:
+
+```bash
+cargo download dimpl@0.8.0   # or unpack ~/.cargo/registry/cache/*/dimpl-0.8.0.crate
+patch -d <unpacked dimpl-0.8.0> -p1 < vendor/patches/dimpl-0.8.0-empty-certificate-authorities.patch
+diff -r <unpacked dimpl-0.8.0> vendor/dimpl-0.8.0-empty-ca   # only Cargo.lock differs
+```

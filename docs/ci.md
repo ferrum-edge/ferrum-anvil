@@ -1,24 +1,45 @@
 # Continuous integration
 
-Ferrum Anvil runs five GitHub Actions workflows. Every third-party action is
+Ferrum Anvil runs six GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
 The release `publish` job gets `actions: read` (to list the test runs for the
 release commit). Only the `release` job, which runs for a tag and not for a dry
 run, gets `contents: write` (to create the draft release).
+`website-evidence.yml` requests no token permissions. `ferrum-edge/ferrumedge`
+is private and this repository is public, so `GITHUB_TOKEN` cannot read it: the
+job needs the repository secret `FERRUMEDGE_READ_TOKEN`, a fine-grained token
+with read-only Contents access to `ferrum-edge/ferrumedge` only. Without the
+secret the job fails (it never skips), so a missing secret is never read as a
+pass.
 
 | Workflow | Trigger | Runs on | What it proves |
 | --- | --- | --- | --- |
 | `ci.yml` | every PR, push to `main`, manual | Ubuntu 26.04, macOS 15, Windows 2025 (Rust); Ubuntu (the rest) | Formatting, clippy `-D warnings`, workspace tests, both desktop feature sets compile, the OS credential store round trip, renderer tests and build, contracts and the diagnostic catalog in sync, supply-chain policy, no secrets |
-| `lab.yml` | PRs touching `crates/`, `lab/`, `catalog/`, Cargo files or the workflow (core profile); nightly and manual (all profiles by default) | Ubuntu 26.04, macOS 15 | Failure-matrix scenarios against the real, checksum-pinned Ferrum Edge release binary, with and without a trusted Ferrum profile |
+| `lab.yml` | PRs touching `crates/`, `lab/`, `catalog/`, Cargo files, `vendor/`, the workflow or the setup action (all profiles; core profile on macOS); nightly and manual (all profiles by default) | Ubuntu 26.04, macOS 15 | Failure-matrix scenarios against the real, checksum-pinned Ferrum Edge release binary, with and without a trusted Ferrum profile |
 | `e2e.yml` | PRs touching the desktop app, crates, catalog, `lab/` or the release check; push to `main`; manual | macOS 15, Windows 2025, Ubuntu 26.04 (under Xvfb) | The native app, built with the test-only `e2e` feature, works end to end through the real Rust engine (and, on macOS and Linux, through the core lab gateway), and the release check rejects that build |
 | `release.yml` | tag `anvil-v*`; manual (dry run by default; set `dry_run: false` from a tag for a draft release) | macOS 15 (arm64 + x86_64 cross), Ubuntu 26.04, Windows 2025 | Installers and CLI binaries without test hooks, checksums, SBOMs, license report, release evidence, and optionally a **draft** release. See [release.md](release.md) |
 | `bundle-resources.yml` | PRs touching `crates/anvil-portability/**`, `crates/anvil-app/src/port.rs`, `crates/anvil-app/tests/bundle_import.rs` or the workflow itself; manual | Ubuntu 26.04, macOS 15 | Peak-memory regression ceilings for bundle preview/import against the policy and two baselines. See [bundle-resource-policy.md](security/bundle-resource-policy.md#hosted-qualification) |
+| `website-evidence.yml` | every release run (called from `release.yml`, tagged or dry run, beside the build; it does not gate the draft release); manual; PRs and pushes to `main` that change the workflow (e.g. the pin) | Ubuntu 26.04 | The website's JavaScript tests, including its Anvil navigation, download and capability tests (`node --test "tests/**/*.test.js"`, as its own `test.yml` runs them, no live network checks) pass at the pinned `ferrum-edge/ferrumedge` commit; uploads `website-evidence.json` (website SHA, command, counts, Anvil release tag). Failure-matrix REL-006, REL-007, REL-008 |
 
 The `ci.yml` jobs are the required checks enforced on `main` by the "Main
 required checks" ruleset. `e2e.yml` only runs for PRs that touch its paths, so
 the ruleset cannot require it; when it runs, it must pass before merging. The
 nightly lab run does not replace either.
+
+`lab.yml` is path-filtered too, so the ruleset cannot require it either; when
+it runs on a PR, it must pass before merging. A pull request's Ubuntu lab job
+runs every profile against the default pin (about 11 to 12 minutes, inside the
+time the Rust jobs already take), and its macOS job runs the core profile. The
+nightly run adds every earlier supported release on both systems. Before this,
+pull requests ran only the core profile, so a dependency bump that broke the
+`tls` profile's DTLS mTLS scenario (PROTO-022) merged green and failed every
+nightly job afterwards. A failing scenario is read from the job's uploaded
+`lab-results-*` artifact before anything is re-run; re-run a job only for a
+failure shown to be unrelated to the change, and open an issue for a scenario
+that fails that way more than once. The cross-version DTLS mTLS handshake
+behind that failure is also a required Rust test
+(`crates/anvil-transport/tests/dtls_edge_interop.rs`).
 
 The existing macOS Rust job also compiles the standalone Swift branding helper
 with `swift build --package-path apps/desktop/scripts`. Its small SwiftPM
