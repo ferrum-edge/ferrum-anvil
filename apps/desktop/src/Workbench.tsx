@@ -652,18 +652,21 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // ------------------------------------------------------------- shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      // Locking works from anywhere, a dialog or a confirmation included.
+      if (mod && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        props.onLock();
+        return;
+      }
       // A confirmation or a dialog is showing: its keys (Escape) are its own.
       if (asking || dialog) return;
-      const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === "Enter") {
         e.preventDefault();
         void send();
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         void saveTab();
-      } else if (mod && e.key.toLowerCase() === "l") {
-        e.preventDefault();
-        props.onLock();
       } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
         void newRequest(null);

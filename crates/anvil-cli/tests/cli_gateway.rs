@@ -170,3 +170,12 @@ async fn the_gateway_argument_never_selects_the_application_profile() {
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert_eq!(saved_gateways(&data), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_name_matches_case_ignored_beyond_ascii() {
+    let (_dir, data, _f) = setup().await;
+    save_gateway(&data, "CAFÉ", "gw.example");
+    let o = anvil(&data, &["gateway", "remove", "Lab", "café"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(saved_gateways(&data), 0);
+}

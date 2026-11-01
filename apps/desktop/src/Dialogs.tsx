@@ -259,6 +259,9 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   const [err, setErr] = useState<string | null>(null);
   const { confirm, prompt, open: asking } = useConfirm();
   const removeButton = useRef<HTMLButtonElement>(null);
+  // The profile whose removal is being written: it cannot be saved (which
+  // would put it back) or removed again meanwhile.
+  const [removing, setRemoving] = useState<string | null>(null);
   // Focus goes back to Remove gateway after a cancelled prompt, once this
   // dialog is no longer inert (an inert element cannot take the focus).
   const [cancelled, setCancelled] = useState(0);
@@ -309,6 +312,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       return;
     }
     setErr(null);
+    setRemoving(id);
     try {
       await api.deleteIntegration(id);
       // Only if the removed profile is still the one being edited: a slow
@@ -318,6 +322,8 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       props.onChanged();
     } catch (e) {
       setErr(String((e as Error).message));
+    } finally {
+      setRemoving(null);
     }
   };
   // While a prompt shows, this dialog is inert (focus and clicks stay in the
@@ -337,13 +343,13 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
                   Back
                 </button>
                 {removable && (
-                  <button className="btn ghost danger" ref={removeButton} onClick={removeIt}>
+                  <button className="btn ghost danger" ref={removeButton} disabled={removing === editing.value.id} onClick={removeIt}>
                     <Icon name="trash" size={14} />
                     Remove gateway
                   </button>
                 )}
                 <span className="spacer" />
-                <button className="btn primary" onClick={saveIt}>
+                <button className="btn primary" disabled={removing === editing.value.id} onClick={saveIt}>
                   Save profile
                 </button>
               </>

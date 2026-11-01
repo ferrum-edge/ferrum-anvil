@@ -306,9 +306,9 @@ catalog whose id equals the profile's `compatibility_id`:
   has) removes one; the desktop app's Connection profiles dialog has
   **Remove gateway** on a saved profile (after an in-window prompt). Sends to
   its hosts are then untrusted unless another profile matches them: trust and
-  the G01 lookup follow the hosts of the profiles that remain. A request's
-  settings that name the profile (`integration_profile_id`) keep the id,
-  which then matches no profile, and a vault secret its lookup credential
+  the G01 lookup follow the hosts of the profiles that remain. Settings that
+  name the profile (`integration_profile_id`, on the workspace, a folder or
+  a request) keep the id, which then matches no profile, and a vault secret its lookup credential
   names is kept.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)

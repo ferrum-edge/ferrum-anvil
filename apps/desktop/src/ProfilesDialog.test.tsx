@@ -112,13 +112,35 @@ describe("Ferrum gateway profiles", () => {
     await screen.findByRole("dialog", { name: "Remove gateway" });
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     await waitFor(() => expect(calls("integration_delete")).toHaveLength(1));
+    // While it is written, the profile cannot be saved back or removed again.
+    expect((screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Remove gateway" }) as HTMLButtonElement).disabled).toBe(true);
     // Back to the list, and a new draft, before the delete returns.
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
     expect(screen.getByRole("button", { name: "Save profile" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement).disabled).toBe(false);
     await act(async () => finish());
     await waitFor(() => expect(calls("integrations_list").length).toBeGreaterThan(1));
     expect(screen.getByRole("button", { name: "Save profile" })).toBeTruthy();
+    expect(calls("integration_save")).toHaveLength(0);
+  });
+
+  it("keeps the profile and its editor when the removal fails", async () => {
+    const answer = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integration_delete") throw "the store is busy";
+      return answer(cmd, args);
+    });
+    const onChanged = await openGateways();
+    fireEvent.click(await screen.findByText(gateway.name));
+    fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+    await screen.findByRole("dialog", { name: "Remove gateway" });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText("the store is busy")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Remove gateway" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeTruthy();
+    expect(onChanged).not.toHaveBeenCalled();
   });
 
   it("names the saved profile, not an unsaved edit of its name", async () => {
