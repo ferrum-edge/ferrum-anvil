@@ -1,5 +1,43 @@
 # Upgrade guide
 
+## 0.1.6
+
+### Database schema 6
+
+0.1.6 moves the profile database from schema 3 to schema 6 the first time it
+opens or unlocks a profile. Earlier builds (0.1.5 and before) then refuse that
+database, and any full backup made by 0.1.6, as written by a newer version.
+Portable bundles keep their format.
+
+- Close every earlier build before upgrading.
+- Before migrating, 0.1.6 copies the database into the profile's
+  `checkpoints` folder as `<time>-before-schema-<version>.db`. If that copy
+  cannot be written, the profile does not open or unlock until space is
+  freed. To go back to an earlier build, restore that checkpoint as described
+  in [Going back to an earlier build](storage-and-recovery.md#going-back-to-an-earlier-build).
+- A password change, a keychain conversion and an identity-policy change now
+  rotate the data key, and a rotation deletes checkpoints sealed with the old
+  key, this one included. Export a portable bundle first if you may want to
+  go back.
+
+### Behaviour changes
+
+These behaviour changes may need action; the [changelog](../CHANGELOG.md)
+has the full list.
+
+- A browser sign-in authorization URL on `http://localhost` is refused. Use
+  `http://127.0.0.1:<port>`, or `https`, for a local test issuer.
+- RSA keys must be 2048–8192 bits: RS256 signing with a shorter key fails, and
+  a JWT-SVID signed by a bundle key outside that range no longer verifies.
+- `--env` on `anvil send`, `run` and `mcp-discover` refuses a name that two
+  environments of the workspace share, listing their ids; pass the id.
+- Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
+  system libraries; Ubuntu 22.04 and 24.04 are no longer release targets. The
+  AppImage uses the host's `libwayland-client`.
+- Rust code: `PolicyRotation` is an enum, and `SecretResolver` methods no
+  longer have default implementations, so a wrapping resolver must forward
+  each one.
+
 ## 0.1.5
 
 0.1.5 keeps the database schema and the bundle and backup formats of 0.1.4;

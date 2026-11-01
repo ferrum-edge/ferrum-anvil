@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-01
+
+Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a
+newer `libwayland-client` (Ubuntu 26.04), DTLS client certificates to Ferrum Edge work again, rustls and
+zip are updated for published advisories, JWT and DTLS signing move to AWS-LC, and `anvil env`
+fills in imported variables from the command line. Profiles move to database schema 6, which
+earlier builds cannot open, and Linux installers now target Ubuntu 26.04. Read the Breaking
+section below before upgrading.
+
 ### Added
 
 - `anvil env` lists, shows and edits a workspace's environments from the
@@ -106,7 +115,6 @@
   acknowledgment before commit. New profiles authenticate explicit policy state;
   missing legacy policy requires deliberate enrollment. Offline portable backups
   remain compatible; complete authentic local snapshot rollback is not prevented.
-
 
 - Update the desktop E2E Tauri service to 1.5.0, whose supported WebdriverIO
   dependencies use patched deepmerge-ts 8.0.2. This removes the development-only
@@ -359,14 +367,6 @@
     including through HBONE, also observes the total deadline); timeline peaks are timestamped under the ledger lock; direct DTLS
     applies one total deadline across DNS, handshake and exchange (and MASQUE
     and HBONE DTLS no longer restart it after the handshake).
-
-- Desktop: an API standards check that left anything unchecked (`incomplete`,
-  skipped operations, `$ref`s not followed, examples not checked) without
-  errors shows "not completely checked" instead of "meets the standards", and
-  no longer says the description meets every rule.
-- Desktop: **Start load** starts one run per confirmation, even on a double
-  click. Every accepted run keeps its own Stop control until it finishes, and a
-  run that finishes before its start reply arrives is not shown as live.
 
 - Key rotation removes the old key's material it kept outside the database once
   the rotation commits: `profile.json` no longer holds passphrase and recovery
