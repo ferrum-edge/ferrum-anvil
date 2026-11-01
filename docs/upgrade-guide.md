@@ -2,23 +2,59 @@
 
 ## 0.1.6
 
+### Before you upgrade
+
+If you may want to go back to 0.1.5 or earlier, close every copy of Anvil and
+copy each profile directory somewhere outside the data directory, or export a
+portable bundle with your current build, before opening the profile with 0.1.6.
+The checkpoint 0.1.6 takes before it migrates the database is deleted when
+enrollment rotates the data key (below), so it is not a way back.
+
+### Policy enrollment
+
+0.1.6 does not unlock a profile created by an earlier build until you enroll
+it, and a recovery-key unlock does not skip this step. Enrollment rotates the
+data key and re-encrypts the profile's active data:
+
+- **Desktop:** the lock screen shows **Enroll legacy policy**. Enter the
+  current passphrase (an OS-keychain profile asks for none), enter a new
+  passphrase twice, confirm the native prompt and save the replacement recovery
+  key it shows before confirming.
+- **CLI:** supply the current passphrase, the new passphrase and the saved
+  replacement recovery key on consecutive stdin lines:
+
+  ```sh
+  anvil --profile PROFILE --passphrase-stdin profile enroll-policy \
+    --confirm-replace-unknown-policy --new-passphrase-stdin
+  ```
+
+  For an OS-keychain profile omit `--passphrase-stdin`; to enroll with the
+  recovery key use `--recovery-key-stdin` instead.
+
+After enrollment only the new passphrase and the new recovery key unlock the
+profile, and an OS-keychain profile becomes a passphrase profile. A verified
+linked identity is kept; a profile linked with a fresh-login requirement
+enrolls with its current recovery key. With no surviving identity policy, you
+confirm replacing it with an unlinked one. Details:
+[Deliberate local key rotation](storage-and-recovery.md#deliberate-local-key-rotation)
+and [Where the binding is stored](identity.md#where-the-binding-is-stored).
+
 ### Database schema 6
 
-0.1.6 moves the profile database from schema 3 to schema 6 the first time it
-opens or unlocks a profile. Earlier builds (0.1.5 and before) then refuse that
-database, and any full backup made by 0.1.6, as written by a newer version.
-Portable bundles keep their format.
+Enrollment moves the profile database from schema 3 to schema 6. Earlier
+builds then refuse that database, and any full backup made by 0.1.6, as
+written by a newer version. Portable bundles keep their format, so a bundle
+exported by 0.1.6 still imports into an earlier build.
 
 - Close every earlier build before upgrading.
 - Before migrating, 0.1.6 copies the database into the profile's
   `checkpoints` folder as `<time>-before-schema-<version>.db`. If that copy
-  cannot be written, the profile does not open or unlock until space is
-  freed. To go back to an earlier build, restore that checkpoint as described
-  in [Going back to an earlier build](storage-and-recovery.md#going-back-to-an-earlier-build).
-- A password change, a keychain conversion and an identity-policy change now
-  rotate the data key, and a rotation deletes checkpoints sealed with the old
-  key, this one included. Export a portable bundle first if you may want to
-  go back.
+  cannot be written, enrollment fails until space is freed. The copy is sealed
+  with the old key, so enrollment's key rotation deletes it, with any older
+  checkpoint.
+- To go back to an earlier build, close every copy of Anvil and put back the
+  profile directory you copied before upgrading, or import the portable bundle
+  into the earlier build. Everything changed since the copy is lost.
 
 ### Behaviour changes
 

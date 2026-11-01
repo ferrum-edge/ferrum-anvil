@@ -5,11 +5,13 @@
 ## [0.1.6] - 2026-11-01
 
 Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a
-newer `libwayland-client` (Ubuntu 26.04), DTLS client certificates to Ferrum Edge work again, rustls and
-zip are updated for published advisories, JWT and DTLS signing move to AWS-LC, and `anvil env`
-fills in imported variables from the command line. Profiles move to database schema 6, which
-earlier builds cannot open, and Linux installers now target Ubuntu 26.04. Read the Breaking
-section below before upgrading.
+newer `libwayland-client` (Ubuntu 26.04), rustls, rustls-webpki, zip and ctutils are updated for
+published advisories, JWT and DTLS signing move to AWS-LC, a collection run no longer sends a vault
+secret in place of an ordinary variable, and `anvil env` fills in imported variables from the
+command line. Each existing profile must be enrolled before first use: enrollment rotates its data
+key, needs a new passphrase and recovery key, and moves the profile to database schema 6, which
+earlier builds cannot open. Linux installers now target Ubuntu 26.04. Read the Breaking section
+below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
 
 ### Added
 
@@ -28,7 +30,13 @@ section below before upgrading.
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange
   downgrade).
-- zip is updated to 9.0.4 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
+- rustls-webpki is updated to 0.103.16 and webpki-root-certs to 1.0.10 for
+  RUSTSEC-2026-0382 and -0383 (paths through, and the root of, the distrusted
+  emSign CA, whose private keys are public). RUSTSEC-2026-0381 is the same
+  issue in `webpki-roots`, which Anvil does not build (#433).
+- ctutils is updated to 0.4.6 for RUSTSEC-2026-0385 (constant-time `Choice`
+  helpers could compile to branches on secret values) (#433).
+- zip is updated from 8.6.0 to 9.1.1 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
   preserving SUID/SGID bits and symlink targets escaping the destination).
   The `zip` 4.6.1 copy held by `tauri-plugin-updater` has no patched 4.x
   release and is a reviewed `deny.toml` ignore: the updater verifies the
@@ -40,13 +48,10 @@ section below before upgrading.
   on secret values) and `rsa` 0.9.10 (RUSTSEC-2023-0071, Marvin timing side
   channel). Both were on the paths that sign ES256/RS256 JWTs, DPoP proofs
   and DTLS handshakes with your keys. The `rsa` ignore in `deny.toml` is
-  removed, and `crypto-bigint` 0.7 is updated to 0.7.7 for the same
+  removed, and `crypto-bigint` 0.7 is updated to 0.7.10 for the same
   advisory. Behavior changes:
-  - RSA keys must be 2048–8192 bits for both signing and verification. RS256
-    signing with a shorter key fails. A JWT-SVID signed by a bundle key under
-    2048 bits (or over 8192) no longer verifies, and Anvil reports
-    "the signature does not verify". Previously keys of any size up to 4096
-    bits verified.
+  - RSA keys must be 2048–8192 bits for both signing and verification; see
+    Breaking.
   - ES256 signatures are randomized rather than RFC 6979 deterministic; both
     are valid ES256.
   - DTLS handshake signatures use each key's native hash only (P-256 with
@@ -57,6 +62,13 @@ section below before upgrading.
   - Building now compiles AWS-LC (C) through `aws-lc-sys`. Every crate that
     reaches it selects `aws-lc-rs/prebuilt-nasm`, so Windows x86_64 needs no
     NASM install.
+- A collection run no longer sends a vault secret in place of an ordinary
+  variable (#362). When a sensitive extraction over 64 KiB removed a variable
+  from later steps, a context with OAuth enabled kept its vault references by
+  the original layer and entry positions, so removing an earlier vault
+  variable could make an ordinary `{{label}}` resolve to that secret and send
+  it without its sensitivity metadata. Surviving variables now keep their own
+  vault identity when others are removed.
 
 ### Changed
 
@@ -83,8 +95,7 @@ section below before upgrading.
 - `--env` on `anvil send`, `run` and `mcp-discover` takes an environment's
   id as well as its name (`send` and `mcp-discover` took only a name), and
   one that names no environment lists the workspace's environments. A name two environments of
-  the workspace share (two imports of one spec each bring a `local`) is
-  refused with their ids; before, the first one found was used.
+  the workspace share is refused; see Breaking.
 - Schema checks of examples, drift bodies and custom ruleset values charge
   `uniqueItems`, text-reading assertions (`pattern`, `enum`, `const`, length
   and format checks), property-name lookups and `format: regex` only where
@@ -99,7 +110,7 @@ section below before upgrading.
   bodies exceeding the 4-million-unit uniqueness budget are not checked.
 - Record-integrity checks now cost what an operation touches instead of the
   profile size. The protected-record catalogue is stored per entry under a
-  bucketed authenticated root (database schema 6), so a write updates only its
+  bucketed authenticated root (database schema 6; see Breaking), so a write updates only its
   entries; the open store keeps the verified catalogue and row verification
   until another connection commits. Restoring a checkpoint into an enrolled
   profile now requires the checkpoint's own catalogue authority, and a damaged
@@ -113,7 +124,7 @@ section below before upgrading.
 - Password changes, keychain conversion and identity-policy mutations now rotate
   the local data key and re-encrypt active data, with replacement recovery-key
   acknowledgment before commit. New profiles authenticate explicit policy state;
-  missing legacy policy requires deliberate enrollment. Offline portable backups
+  existing profiles must be enrolled before use (see Breaking). Offline portable backups
   remain compatible; complete authentic local snapshot rollback is not prevented.
 
 - Update the desktop E2E Tauri service to 1.5.0, whose supported WebdriverIO
@@ -122,8 +133,7 @@ section below before upgrading.
   a major version; production UI dependencies and the WDIO 9.32 runner stay pinned.
 
 - Pin Linux CI and installer builds to Ubuntu 26.04. Linux installers now target
-  modern system libraries; Ubuntu 22.04/24.04 compatibility is no longer a release
-  target.
+  modern system libraries; see Breaking.
 
 - Bounded specification analysis copies less and stops later on large ordinary descriptions (#351):
   - Lint rules on `raw.` fields read the selected value in place instead of copying it once
@@ -175,14 +185,15 @@ section below before upgrading.
 
 ### Fixed
 
-- DTLS to a Ferrum Edge listener that requires client certificates works
-  again. dimpl 0.8.0 (taken on 2026-10-26) made Anvil's DTLS 1.3 client drop
-  a CertificateRequest with an empty `certificate_authorities` extension
-  without an alert, which every supported Ferrum Edge release sends, so the
-  handshake timed out (`client.dtls.handshake_timeout`) instead of presenting
-  the client identity. Anvil now builds a vendored dimpl 0.8.0 that accepts
-  the empty list (`vendor/dimpl-0.8.0-empty-ca`, see `vendor/README.md`),
-  keeping 0.8.0's other client fixes.
+- DTLS to a Ferrum Edge listener that requires client certificates keeps
+  working with dimpl 0.8. dimpl 0.8.0, taken during this release cycle, makes
+  a DTLS 1.3 client drop a CertificateRequest with an empty
+  `certificate_authorities` extension without an alert. Every supported Ferrum
+  Edge release sends one, so the handshake timed out
+  (`client.dtls.handshake_timeout`) instead of presenting the client identity.
+  Anvil now builds a vendored dimpl 0.8.0 that accepts the empty list
+  (`vendor/dimpl-0.8.0-empty-ca`, see `vendor/README.md`), keeping 0.8.0's
+  other client fixes. 0.1.5, which uses dimpl 0.7.4, is not affected.
 - The Linux AppImage no longer bundles `libwayland-client`. With the bundled
   copy, a host whose Mesa needs a newer `libwayland-client` (Ubuntu 26.04 for
   the 0.1.5 AppImage) could not load its EGL driver: the window opened, but
@@ -386,8 +397,8 @@ section below before upgrading.
   `App::rotate_keychain_data_key` and `PolicyRotation::Keychain` (identity link,
   unlink and enrollment) store the new key in a new OS credential entry before the
   commit and retire the old entry after it. Previously every rotation converted the
-  profile to passphrase protection. `PolicyRotation` is now an enum and retired
-  credentials are recorded as `RotationPolicy::retired_keychain`.
+  profile to passphrase protection. `PolicyRotation` is now an enum (see
+  Breaking) and retired credentials are recorded as `RotationPolicy::retired_keychain`.
 
 - `app.mcp_tool_error` no longer says the call reached the tool or assigns
   it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
@@ -417,7 +428,7 @@ section below before upgrading.
   file again resolves the context's deferred vault variables. The resolver that
   carries the acquired token did not forward vault-variable bindings, so such a
   request failed with an unresolved variable. `SecretResolver` methods no longer
-  have default implementations, so a wrapping resolver must forward each one.
+  have default implementations; see Breaking.
 
 - The lab refuses `--scenario` selectors that name no scenario of the selected
   profile (or of any profile for `run all`) before starting fixtures, instead
@@ -433,6 +444,38 @@ section below before upgrading.
 
 ### Breaking
 
+- Enrollment: 0.1.6 does not unlock a profile created by an earlier build until
+  it is enrolled, and recovery unlock does not skip it. Enrollment rotates the
+  data key and re-encrypts active data, and needs a new passphrase and a saved
+  replacement recovery key; the old passphrase and recovery key stop working,
+  and an OS-keychain profile becomes a passphrase profile. A verified linked
+  identity is kept; with no surviving identity policy you confirm replacing it
+  with an unlinked one. Enroll from the desktop lock screen or with
+  `anvil profile enroll-policy`; see the
+  [upgrade guide](docs/upgrade-guide.md#016) (#364, #375).
+- Storage: enrollment moves the profile database from schema 3 to schema 6.
+  Earlier builds (0.1.5 and before) then refuse the database, and a full backup
+  made by 0.1.6, as written by a newer version. Portable bundles keep their
+  format (2), so a bundle exported by 0.1.6 still imports into earlier builds.
+  The `before-schema-<version>` checkpoint taken before the migration is sealed
+  with the old key and deleted when enrollment rotates the key, so it is not a
+  way back. To keep a way back, close every copy of Anvil and copy the profile
+  directory, or export a portable bundle with the earlier build, before opening
+  the profile with 0.1.6 (#375, #377, #378).
+- RSA keys must be 2048–8192 bits for both signing and verification. RS256
+  signing with a shorter key fails. A JWT-SVID signed by a bundle key under
+  2048 bits (or over 8192) no longer verifies, and Anvil reports "the signature
+  does not verify". Previously keys of any size up to 4096 bits verified (#437).
+- `--env` on `anvil send`, `run` and `mcp-discover` refuses a name that two
+  environments of the workspace share (two imports of one spec each bring a
+  `local`), listing their ids; pass the id. Before, the first one found was
+  used (#454).
+- Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
+  system libraries; Ubuntu 22.04 and 24.04 are no longer release targets (#361).
+- Rust consumers: `anvil_app::profiles::PolicyRotation` is now an enum
+  (`Passphrase` or `Keychain`) (#378), and `anvil_engine` `SecretResolver`
+  methods no longer have default implementations, so a wrapping resolver must
+  forward each one (#376).
 - A browser sign-in authorization URL on `http://localhost` is now refused as
   a configuration error. Use `http://127.0.0.1:<port>`, or `https`, for a local
   test issuer (#391). The CI mock provider's authorization, token and userinfo
