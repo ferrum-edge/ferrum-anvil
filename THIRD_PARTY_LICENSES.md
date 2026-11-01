@@ -109,8 +109,8 @@ the modified file under MPL-2.0.
 | atk-sys | 0.18.2 | MIT | https://github.com/gtk-rs/gtk3-rs |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/atomic-waker |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT | https://github.com/cuviper/autocfg |
-| aws-lc-rs | 1.18.2 | ISC AND (Apache-2.0 OR ISC) | https://github.com/aws/aws-lc-rs |
-| aws-lc-sys | 0.46.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | https://github.com/aws/aws-lc-rs |
+| aws-lc-rs | 1.19.0 | ISC AND (Apache-2.0 OR ISC) | https://github.com/aws/aws-lc-rs |
+| aws-lc-sys | 0.47.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | https://github.com/aws/aws-lc-rs |
 | base16ct | 0.2.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/base16ct |
 | base16ct | 1.0.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | base64 | 0.21.7 | MIT OR Apache-2.0 | https://github.com/marshallpierce/rust-base64 |
@@ -129,8 +129,8 @@ the modified file under MPL-2.0.
 | block2 | 0.6.2 | MIT | https://github.com/madsmtm/objc2 |
 | blocking | 1.7.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/blocking |
 | borrow-or-share | 0.2.4 | MIT-0 | https://github.com/yescallop/borrow-or-share |
-| brotli | 9.0.0 | BSD-3-Clause AND MIT | https://github.com/dropbox/rust-brotli |
-| brotli-decompressor | 6.0.1 | BSD-3-Clause/MIT | https://github.com/dropbox/rust-brotli-decompressor |
+| brotli | 9.1.1 | BSD-3-Clause AND MIT | https://github.com/dropbox/rust-brotli |
+| brotli-decompressor | 6.2.0 | BSD-3-Clause/MIT | https://github.com/dropbox/rust-brotli-decompressor |
 | bs58 | 0.5.1 | MIT/Apache-2.0 | https://github.com/Nullus157/bs58-rs |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
 | bytecount | 0.6.9 | Apache-2.0/MIT | https://github.com/llogiq/bytecount |
@@ -351,9 +351,9 @@ the modified file under MPL-2.0.
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
 | json-patch | 4.2.0 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
 | jsonptr | 0.7.1 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
-| jsonschema | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-regex | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-value | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.8.3 | MIT OR Apache-2.0 | https://github.com/rust-windowing/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
@@ -474,7 +474,7 @@ the modified file under MPL-2.0.
 | prost-types | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | protox | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
 | protox-parse | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
-| psl | 2.1.244 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
+| psl | 2.1.245 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
 | psl-types | 2.0.11 | MIT/Apache-2.0 | https://github.com/addr-rs/psl-types |
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
@@ -494,7 +494,7 @@ the modified file under MPL-2.0.
 | rcgen | 0.14.10 | MIT OR Apache-2.0 | https://github.com/rustls/rcgen |
 | ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
-| referencing | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
@@ -503,12 +503,12 @@ the modified file under MPL-2.0.
 | rfc6979 | 0.6.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/signatures |
 | rfd | 0.16.0 | MIT | https://github.com/PolyMeilex/rfd |
 | ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
-| roxmltree | 0.21.1 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
+| roxmltree | 0.21.2 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | rusqlite | 0.41.1 | MIT | https://github.com/rusqlite/rusqlite |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rusticata-macros | 4.1.0 | MIT/Apache-2.0 | https://github.com/rusticata/rusticata-macros.git |
-| rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
+| rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
 | rustls-native-certs | 0.8.5 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
@@ -659,7 +659,7 @@ the modified file under MPL-2.0.
 | urlpattern | 0.6.0 | MIT | https://github.com/denoland/rust-urlpattern |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | https://github.com/alacritty/vte |
-| uuid | 1.28.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
+| uuid | 1.29.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
 | uuid-simd | 0.8.0 | MIT | https://github.com/Nugine/simd |
 | vcpkg | 0.2.15 | MIT/Apache-2.0 | https://github.com/mcgoo/vcpkg-rs |
 | version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
@@ -736,7 +736,7 @@ the modified file under MPL-2.0.
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| zip | 9.1.1 | MIT | https://github.com/zip-rs/zip2 |
+| zip | 9.2.0 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |
