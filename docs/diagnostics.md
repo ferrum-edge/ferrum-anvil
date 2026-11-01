@@ -300,6 +300,12 @@ catalog whose id equals the profile's `compatibility_id`:
   another release's. Anvil reports `ferrum.catalog.unavailable` (confidence
   unknown), does no outcome matching, and reads a token only with the coarse
   meaning every audited release shares.
+- `anvil send --trust-ferrum HOST` declares a profile for that one send
+  (default catalog, plain HTTP allowed, no lookup) and saves nothing: the
+  next send to `HOST` is untrusted unless it passes the flag again. Add
+  `--save-trust` to save the profile in the workspace, which later sends,
+  `anvil run` and exports then use like any other profile. A saved profile
+  for `HOST` takes precedence, and `--save-trust` does not add a second one.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

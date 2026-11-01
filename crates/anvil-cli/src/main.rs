@@ -349,9 +349,16 @@ struct SendArgs {
     data: Option<String>,
     #[arg(long)]
     env: Option<String>,
-    /// Treat this host as a trusted Ferrum gateway for this send (lab use; plain HTTP caps confidence).
+    /// Treat this host as a trusted Ferrum gateway for this send only (lab use;
+    /// plain HTTP caps confidence). Nothing is saved: a later send is not
+    /// trusted unless it passes the flag again or `--save-trust` was given.
     #[arg(long)]
     trust_ferrum: Option<String>,
+    /// With --trust-ferrum: also save the host as a Ferrum gateway profile in
+    /// the workspace, so later sends to it (and exports of the workspace)
+    /// trust it too.
+    #[arg(long, requires = "trust_ferrum")]
+    save_trust: bool,
     /// Print the full execution record as JSON.
     #[arg(long)]
     json: bool,
@@ -1140,6 +1147,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 },
             };
             let env = env::environment_id(&app, &ws, s.env.as_deref())?;
+            let mut trusted_gateways = Vec::new();
             if let Some(host) = &s.trust_ferrum
                 && !app
                     .integrations(&ws.meta.id)?
@@ -1147,7 +1155,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     .any(|i| matches!(&i.kind, IntegrationKind::FerrumGateway { hosts, .. } if hosts.iter().any(|h| h.host == *host)))
             {
                 let now = chrono::Utc::now();
-                app.save_integration(IntegrationProfile {
+                let profile = IntegrationProfile {
                     id: anvil_domain::Id::new(),
                     workspace_id: ws.meta.id,
                     name: format!("Ferrum gateway {host}"),
@@ -1160,7 +1168,13 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     },
                     created_at: now,
                     updated_at: now,
-                })?;
+                };
+                if s.save_trust {
+                    let p = app.save_integration(profile)?;
+                    eprintln!("saved Ferrum gateway profile '{}' in '{}': later sends to {host} are trusted", p.name, ws.name);
+                } else {
+                    trusted_gateways.push(profile);
+                }
             }
             let (rid, draft) = match (&s.request, &s.url) {
                 (Some(_), _) if s.mcp.spec().is_some() => bail!("the --mcp-* options make an ad-hoc --url request an MCP request"),
@@ -1195,6 +1209,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                         record_history: !s.no_history,
                         send_anyway: s.send_anyway,
                         run_override: send_override(s),
+                        trusted_gateways,
                         ..Default::default()
                     },
                     EventCtx::none(),

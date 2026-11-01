@@ -15,6 +15,14 @@
 
 ### Security
 
+- `anvil send --trust-ferrum HOST` trusts `HOST` as a Ferrum gateway for that
+  send only. It used to save a "Ferrum gateway HOST" profile in the
+  workspace without saying so, so every later send, `anvil run` and export
+  trusted the host as well, though the flag's help said "for this send". Pass
+  the new `--save-trust` with `--trust-ferrum` to save the profile on
+  purpose; Anvil then says it saved it. Profiles the old behavior saved stay
+  in their workspace and are still trusted: Anvil has no command to remove a
+  gateway profile yet.
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange

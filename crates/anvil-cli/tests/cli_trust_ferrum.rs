@@ -1,6 +1,7 @@
 //! `anvil send --trust-ferrum` end to end: the real binary, a real profile on
 //! disk and a real fixture server. The flag trusts the host for that one send
-//! and saves nothing, so a later send without it is not trusted.
+//! and saves nothing, so a later send without it is not trusted. Only
+//! `--save-trust` keeps it as a gateway profile in the workspace.
 
 use anvil_app::App;
 use anvil_app::profiles::{ProfileManager, Unlock};
@@ -73,4 +74,25 @@ async fn trust_ferrum_applies_to_one_send_and_saves_nothing() {
     assert_eq!(trusted_as(&data, &url, &["--trust-ferrum", "127.0.0.1"]).await.as_deref(), Some(default));
     assert_eq!(saved_gateways(&data), 0, "--trust-ferrum saved a Ferrum gateway profile");
     assert_eq!(trusted_as(&data, &url, &[]).await, None, "a later send without --trust-ferrum was trusted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_trust_keeps_the_gateway_for_later_sends() {
+    let (_dir, data, f) = setup().await;
+    let url = f.url("/echo");
+    let default = anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID;
+
+    // --save-trust only means something with a host to trust.
+    let o = anvil(&data, &["send", "--workspace", "Lab", "--url", &url, "--save-trust"]).await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("--trust-ferrum"), "{}", text(&o));
+    assert_eq!(saved_gateways(&data), 0);
+
+    assert_eq!(trusted_as(&data, &url, &["--trust-ferrum", "127.0.0.1", "--save-trust"]).await.as_deref(), Some(default));
+    assert_eq!(saved_gateways(&data), 1);
+    assert_eq!(trusted_as(&data, &url, &[]).await.as_deref(), Some(default), "the saved profile is used without the flag");
+
+    // Trusting a host that already has a saved profile adds no second one.
+    assert_eq!(trusted_as(&data, &url, &["--trust-ferrum", "127.0.0.1", "--save-trust"]).await.as_deref(), Some(default));
+    assert_eq!(saved_gateways(&data), 1);
 }
