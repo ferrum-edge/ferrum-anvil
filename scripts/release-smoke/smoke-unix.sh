@@ -282,17 +282,17 @@ install_appimage() {
     prereq="fuse3 (fusermount3), installed because the runner had no fusermount"
   fi
   [ -e /dev/fuse ] || hfail install "/dev/fuse is not available on this runner"
-  # AppImages leave the graphics driver stack (libEGL, libGLESv2, which the
-  # bundled libepoxy dlopens, and the Mesa vendor library and drivers) to the
-  # host, as the AppImage excludelist requires; every desktop install has it,
-  # a bare runner may not.
+  # AppImages leave the graphics stack to the host, as the AppImage
+  # excludelist requires: libEGL, libGLESv2 (which the bundled libepoxy
+  # dlopens), the Mesa vendor library and drivers, and since #463
+  # libwayland-client. Every desktop install has it; a bare runner may not.
   if ! /sbin/ldconfig -p | grep 'libEGL\.so\.1 ' >/dev/null || ! /sbin/ldconfig -p | grep 'libGLESv2\.so\.2 ' >/dev/null ||
-    ! ls /usr/share/glvnd/egl_vendor.d/*mesa*.json >/dev/null 2>&1; then
+    ! /sbin/ldconfig -p | grep 'libwayland-client\.so\.0 ' >/dev/null || ! ls /usr/share/glvnd/egl_vendor.d/*mesa*.json >/dev/null 2>&1; then
     $SUDO apt-get update -qq >"$logs/apt-update.log" 2>&1 || true
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri >"$logs/apt-egl.log" 2>&1 ||
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri libwayland-client0 >"$logs/apt-egl.log" 2>&1 ||
       hfail install "could not install the host EGL stack for the AppImage"
     if [ "$prereq" = none ]; then prereq=""; else prereq="$prereq; "; fi
-    prereq="${prereq}libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri (the host EGL/GLES/Mesa stack, which AppImages do not bundle), installed because the runner lacked libEGL.so.1, libGLESv2.so.2 or a Mesa EGL vendor"
+    prereq="${prereq}libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri libwayland-client0 (the host graphics stack, which AppImages do not bundle), installed because the runner lacked libEGL.so.1, libGLESv2.so.2, libwayland-client.so.0 or a Mesa EGL vendor"
   fi
   dest="$HOME/Applications"
   mkdir -p "$dest" || hfail install "cannot create $dest"

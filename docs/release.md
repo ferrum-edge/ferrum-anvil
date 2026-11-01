@@ -519,7 +519,7 @@ tag=anvil-vX.Y.Z`; no tag means the latest published release), when an
 | `windows-x64-nsis` | `windows-2025` | `-setup.exe /S` |
 | `windows-x64-msi` | `windows-2025` | `msiexec /i … /qn` |
 | `linux-x64-deb` | `ubuntu-26.04` | `apt-get install` of the local `.deb` (dependencies from the Ubuntu archive) |
-| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`), and the EGL/GLES/Mesa stack (`libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri`) when `libEGL.so.1`, `libGLESv2.so.2` (which the bundled libepoxy loads) or a Mesa EGL vendor is absent. Each addition is recorded |
+| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`), and the host graphics stack (`libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri libwayland-client0`) when `libEGL.so.1`, `libGLESv2.so.2` (which the bundled libepoxy loads), `libwayland-client.so.0` (left to the host since #463) or a Mesa EGL vendor is absent. Each addition is recorded |
 | `linux-x64-rpm` | `ubuntu-26.04`, digest-pinned `fedora:44` container | `dnf install` of the local `.rpm` (dependencies from the Fedora repositories) |
 
 Each job then:
@@ -689,8 +689,9 @@ What it does **not** cover:
   packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
   (PR run 41254710916; the same result as the earlier runs 41189324002 and 41185287833), six of seven targets pass. The
   AppImage fails at its first launch: its WebKit web process aborts with
-  `EGL_BAD_PARAMETER` (a package failure, fixed by ferrum-edge/ferrum-anvil#463,
-  not merged yet). Not
+  `EGL_BAD_PARAMETER` (a package failure). The fix, ferrum-edge/ferrum-anvil#463,
+  is merged but not released: 0.1.5's AppImage stays broken until the next
+  release ships a rebuilt one. Not
   automated:
   - GUI-driven import and send;
   - first run through Gatekeeper/SmartScreen;
