@@ -22,7 +22,7 @@ $Version = $env:VERSION
 $Asset = $env:ASSET
 $CliAsset = $env:CLI_ASSET
 $Alive = if ($env:ALIVE_SECONDS) { [int]$env:ALIVE_SECONDS } else { 30 }
-$Inputs = (Resolve-Path $env:INPUTS).Path
+# The result directory comes first, so any later failure can be recorded.
 New-Item -ItemType Directory -Force -Path (Join-Path $env:OUT 'logs'), (Join-Path $env:OUT 'screenshots') | Out-Null
 $Out = (Resolve-Path $env:OUT).Path
 $Logs = Join-Path $Out 'logs'
@@ -75,6 +75,7 @@ try {
   # --- inputs and runner ---------------------------------------------------
   $script:Step = 'asset_integrity'
   try {
+    $Inputs = (Resolve-Path $env:INPUTS).Path
     $releaseJson = Get-Content -Raw (Join-Path $Inputs 'release.json')
     $exampleJson = Get-Content -Raw (Join-Path $Inputs 'example.json')
     $fetchResult = Get-Content -Raw (Join-Path $Inputs 'fetch.json') | ConvertFrom-Json
@@ -205,7 +206,11 @@ try {
   if ($machine -ne 0x8664) { Fail 'install' ("{0} is not an x64 PE (machine 0x{1:X4})" -f $exe, $machine) }
   try { $fileVersion = (Get-Item $exe).VersionInfo.ProductVersion } catch { Fail 'install' "cannot read the version resource of ${exe}: $($_.Exception.Message)" }
   $displayVersion = ($entries | Select-Object -First 1).DisplayVersion
-  if ("$displayVersion" -notlike "$Version*") { Fail 'install' "Apps & features lists version $displayVersion, expected $Version" }
+  # Exact. Both read 0.1.5 for the published 0.1.5; a Windows four-part form
+  # (0.1.5.0) is normalised by dropping one trailing .0.
+  function Normalize-Version($v) { ("$v".Trim()) -replace '^(\d+\.\d+\.\d+)\.0$', '$1' }
+  if ((Normalize-Version $displayVersion) -ne $Version) { Fail 'install' "Apps & features lists version '$displayVersion', expected $Version" }
+  if ((Normalize-Version $fileVersion) -ne $Version) { Fail 'install' "the installed executable's ProductVersion is '$fileVersion', expected $Version" }
   $shortcut = @(Get-ChildItem -Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs", "$env:ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Ferrum Anvil*' }) | Select-Object -First 1
   Meta "install.method=$method" "install.executable=$exe" "install.version=$displayVersion" "install.file_version=$fileVersion" `
     "install.start_menu_shortcut=$(if ($shortcut) { $shortcut.FullName } else { 'none found' })"
@@ -231,7 +236,8 @@ try {
   if (-not (Test-Path $cli)) { Fail 'cli_ready' "$CliAsset has no anvil-cli-$Version-$($env:RUST_TARGET)\anvil.exe" }
   # Windows refusing to load the shipped CLI is the package's failure.
   try { $cliVersion = (& $cli --version 2>&1) -join ' ' } catch { Fail 'cli_ready' "Windows could not run ${cli}: $($_.Exception.Message)" }
-  if ($cliVersion -notlike "*$Version*") { Fail 'cli_ready' "anvil --version printed '$cliVersion', expected $Version" }
+  # Exact: "anvil <version>" (anvil 0.1.5 on the published 0.1.5).
+  if ("$cliVersion".Trim() -ne "anvil $Version") { Fail 'cli_ready' "anvil --version printed '$cliVersion', expected 'anvil $Version'" }
   # Recorded, not checked: best-effort.
   try { & $cli doctor *> (Join-Path $Logs 'cli-doctor-before.txt') } catch { "doctor could not run: $($_.Exception.Message)" | Set-Content (Join-Path $Logs 'cli-doctor-before.txt') }
   $dataDir = ((Get-Content (Join-Path $Logs 'cli-doctor-before.txt') -ErrorAction SilentlyContinue) | Where-Object { $_ -like 'data dir: *' } | Select-Object -First 1) -replace '^data dir: ', ''

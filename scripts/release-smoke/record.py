@@ -74,6 +74,9 @@ def read_json(path, default):
 
 
 def write_json(path, obj):
+    # `finalize` must write result.json even when the script never created
+    # its result directory.
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)

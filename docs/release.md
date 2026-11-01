@@ -571,23 +571,22 @@ Every failed step carries a class. Both `result.json` (`failure_class`) and the 
 | Install, DMG | `hdiutil attach` fails (image not recognized or corrupt), `find` fails on the mounted image or finds no `.app`, `ditto` fails, `Info.plist` or binary unreadable, wrong version or architecture | The mount point cannot be created, the disk-image subsystem is busy or unavailable, `/Applications` not clean, full disk |
 | Install, `.deb`/`.rpm` | `dpkg-deb`/`rpm` cannot read it, the install fails (for example on unmet dependencies), no `/usr/bin` executable, wrong architecture. Version: for the `.deb`, dpkg's record of the installed package is not `install ok installed` at the release version. For the `.rpm`, the version read from the package file (`rpm -qp`) is not the release version, or `rpm -q` finds the package not installed afterwards | `apt-get update`, a package-mirror or network error, a held or interrupted package-manager lock, listing the runner's packages, full disk, `file(1)` errors |
 | Install, AppImage | Not an x86-64 ELF | `fuse3` or EGL/GLES/Mesa host install, `/dev/fuse` missing, copy or `chmod` into `~/Applications` |
-| Install, NSIS/MSI | Windows cannot start the installer. The installer exits non-zero; MSI exit 3010 (reboot required) counts as success and validation continues. No Apps & features entry, no executable, unreadable PE header or version resource, not x64, wrong version. | `msiexec.exe` cannot be started; exit codes 1618 and 1601; full disk (the installer's message, or under 1 GB free on the system drive, for NSIS and MSI alike); a registry or install-directory read error that leaves no entry or executable |
+| Install, NSIS/MSI | Windows cannot start the installer. The installer exits non-zero; MSI exit 3010 (reboot required) counts as success and validation continues. No Apps & features entry, no executable, unreadable PE header or version resource, not x64. `DisplayVersion` or the executable's `ProductVersion` is not exactly the release version (a four-part `X.Y.Z.0` is normalised to `X.Y.Z`; the published 0.1.5 reads `0.1.5` in both). | `msiexec.exe` cannot be started; exit codes 1618 and 1601; full disk: for MSI, a disk-full message in the msiexec log; for NSIS and MSI alike, under 1 GB free on the system drive (NSIS reports no reason on `/S`); a registry or install-directory read error that leaves no entry or executable |
 | Harness (`harness_setup`) | — | Installing Xvfb, xdotool, dbus or ImageMagick; a missing `pgrep`/`pkill`/`ps`/`python3`/`osascript`/`xdotool`/`setsid`/`Xvfb`; Xvfb not answering; `dbus-run-session -- true` failing |
-| CLI (`cli_ready`) | The archive does not extract. Windows cannot run the CLI. No executable, wrong `--version`. | Full disk, creating the extraction directory |
+| CLI (`cli_ready`) | The archive does not extract. Windows cannot run the CLI. No executable, or `anvil --version` is not exactly `anvil <release version>`. | Full disk, creating the extraction directory |
 | Launch (`launch_*`) | `open` fails, no process, the app exits, or no window or webview process of the app's own while the probes and the display worked | The app's output names a session-bus or FUSE-mount fault. Also a probe that errored (osascript, xdotool, pgrep, `ps`, the Windows process query) or an X display not answering. |
 | CLI steps (`profile_create`, `example_import`, `local_call`) | The CLI cannot run or exits non-zero, a sample request is missing, `send --json` prints no JSON execution record, no HTTP 200, the request is not logged | Full disk, the listener does not start or exits during the call, the listener's log or the execution record cannot be read by the helper |
 | Best-effort, never fails a target | — | Screenshots, `codesign`/`spctl`/Authenticode readings, `anvil doctor`, `anvil history`, `ps`/process lists, app log copies, process cleanup |
 
 `fetch.sh` writes `fetch.json` (artifact `rel001-fetch`). The summary job runs even when fetch fails, and reports the fetch result with its class.
 
-`unclassified` is only ever recorded in two cases:
+`unclassified` arises in these cases. Treat it like `harness` until a person has read the log:
 
-- **A safety-net catch:** the bash `EXIT` trap or the PowerShell top-level `catch` records an error no row above anticipated, with its step and command or message.
-- **A job that stopped before recording anything**, such as checkout or artifact download. `finalize` sets this one.
+- **A safety-net catch.** The bash `EXIT` trap or the PowerShell top-level `catch` records an error no row above anticipated, with its step and command or message.
+- **A job that stopped without recording a failure.** This covers a job that failed before the script started (artifact download), was cancelled, or was killed or timed out after some steps had passed. `finalize` runs anyway (`if: always()`) and writes `result.json`, even if the script never created its result directory. That file lists the required steps that never ran under `missing_required_steps`, with class `unclassified`.
+- **No `result.json` at all.** A target whose checkout failed has no `record.py` to finalize with. The summary lists it under `harness_or_unclassified_failures` as a target without a result, never as a package failure.
 
-Treat it like `harness` until a person has read the log.
-
-Across all stages, a probe or query that worked and found nothing is a finding about the asset (`package`). A probe or query that failed is `harness`. The scripts (`scripts/release-smoke/`) are the authority; keep this table in step with them.
+Across all stages, a probe or query that worked and found nothing is a finding about the asset (`package`). A probe or query that failed is `harness`. Reads of the shipped files themselves are not probes: `plutil`, `lipo` and PE-header reads that fail are `package`. OS/CPU queries are harness on Windows; on macOS and Linux a failed one is recorded as `unknown`. The scripts (`scripts/release-smoke/`) are the authority; keep this table in step with them.
 
 What it does **not** cover:
 

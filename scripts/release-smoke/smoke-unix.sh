@@ -29,7 +29,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${TARGET_ID:?}" "${PACKAGE:?}" "${EXPECT_ARCH:?}" "${RUST_TARGET:?}" "${ASSET:?}" "${CLI_ASSET:?}" "${INPUTS:?}" "${OUT:?}" "${VERSION:?}"
 ALIVE_SECONDS="${ALIVE_SECONDS:-30}"
 STARTUP_LIMIT="${STARTUP_LIMIT:-90}"
-INPUTS="$(cd "$INPUTS" && pwd)"
+# The result directory comes first, so any later failure can be recorded.
 mkdir -p "$OUT/logs" "$OUT/screenshots"
 OUT="$(cd "$OUT" && pwd)"
 logs="$OUT/logs"
@@ -106,6 +106,8 @@ trap cleanup EXIT
 # --- inputs and runner ---------------------------------------------------
 
 current_step=asset_integrity
+inputs_abs="$(cd "$INPUTS" 2>/dev/null && pwd)" || hfail asset_integrity "the inputs directory $INPUTS did not arrive from the fetch job"
+INPUTS="$inputs_abs"
 release_json="$(cat "$INPUTS/release.json")" || hfail asset_integrity "release.json did not arrive from the fetch job"
 example_json="$(cat "$INPUTS/example.json")" || hfail asset_integrity "example.json did not arrive from the fetch job"
 metaj "release=$release_json" "example=$example_json"
@@ -226,7 +228,8 @@ install_deb() {
   comm -13 "$work/pkgs-before" "$work/pkgs-after" >"$logs/apt-new-packages.txt" || hfail install "comm failed"
   n="$(wc -l <"$logs/apt-new-packages.txt" | tr -d ' ')"
   st="$(dpkg-query -W -f '${Status} ${Version}' "$pkg" 2>&1)" || fail install "apt-get succeeded but dpkg does not know $pkg: $st"
-  case "$st" in "install ok installed $VERSION"*) ;; *) fail install "dpkg reports '$st' for $pkg" ;; esac
+  # Exact: the installed package at exactly the release version.
+  [ "$st" = "install ok installed $VERSION" ] || fail install "dpkg reports '$st' for $pkg, expected 'install ok installed $VERSION'"
   # dpkg -L failing is a tool fault; succeeding without a /usr/bin entry is the package's.
   files="$(dpkg -L "$pkg" 2>&1)" || hfail install "dpkg -L $pkg failed: $(printf '%s' "$files" | tail -2 | oneline)"
   bin="$(printf '%s\n' "$files" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
@@ -242,9 +245,10 @@ install_deb() {
 }
 
 install_rpm() {
-  local f="$INPUTS/$ASSET" name rver n files
+  local f="$INPUTS/$ASSET" name rver fver iver n files
   name="$(rpm -qp --qf '%{NAME}' "$f" 2>/dev/null)" || fail install "rpm cannot read $ASSET"
   rver="$(rpm -qp --qf '%{VERSION}-%{RELEASE}.%{ARCH}' "$f" 2>/dev/null)" || fail install "rpm cannot read the version of $ASSET"
+  fver="$(rpm -qp --qf '%{VERSION}' "$f" 2>/dev/null)" || fail install "rpm cannot read the version of $ASSET"
   rpm -qpR "$f" >"$logs/rpm-requires.txt" 2>&1 || true
   rpm -Kv "$f" >"$logs/rpm-checksig.txt" 2>&1 || true
   rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort >"$work/pkgs-before" || hfail install "rpm cannot list the runner's packages"
@@ -260,7 +264,10 @@ install_rpm() {
   comm -13 "$work/pkgs-before" "$work/pkgs-after" >"$logs/dnf-new-packages.txt" || hfail install "comm failed"
   n="$(wc -l <"$logs/dnf-new-packages.txt" | tr -d ' ')"
   rpm -q "$name" >/dev/null || fail install "rpm -q $name: not installed"
-  case "$rver" in "$VERSION"-*) ;; *) fail install "the RPM's version is $rver, expected $VERSION" ;; esac
+  # Exact, from the package file and from the installed package.
+  [ "$fver" = "$VERSION" ] || fail install "the RPM file's version is $fver ($rver), expected $VERSION"
+  iver="$(rpm -q --qf '%{VERSION}' "$name" 2>&1)" || fail install "rpm -q cannot read the installed version of $name: $iver"
+  [ "$iver" = "$VERSION" ] || fail install "the installed $name has version $iver, expected $VERSION"
   # rpm -ql failing is a tool fault; succeeding without a /usr/bin entry is the package's.
   files="$(rpm -ql "$name" 2>&1)" || hfail install "rpm -ql $name failed: $(printf '%s' "$files" | tail -2 | oneline)"
   bin="$(printf '%s\n' "$files" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
@@ -357,7 +364,10 @@ tar -xzf "$INPUTS/$CLI_ASSET" -C "$work/cli" >"$logs/cli-extract.log" 2>&1 ||
 cli="$work/cli/anvil-cli-$VERSION-$RUST_TARGET/anvil"
 [ -x "$cli" ] || fail cli_ready "$CLI_ASSET has no executable anvil-cli-$VERSION-$RUST_TARGET/anvil"
 cli_version="$("$cli" --version 2>&1 || true)"
-case "$cli_version" in *"$VERSION"*) ;; *) fail cli_ready "anvil --version printed '$cli_version', expected $VERSION" ;; esac
+# Exact: `anvil --version` prints "anvil <version>" (anvil 0.1.5 on the
+# published 0.1.5); the version token must equal the release version.
+cli_token="$(printf '%s\n' "$cli_version" | sed -n '1s/^anvil \([^[:space:]]*\)$/\1/p')"
+[ "$cli_token" = "$VERSION" ] || fail cli_ready "anvil --version printed '$cli_version', expected 'anvil $VERSION'"
 "$cli" doctor >"$logs/cli-doctor-before.txt" 2>&1 || true
 data_dir="$(sed -n 's/^data dir: //p' "$logs/cli-doctor-before.txt" | head -1)"
 data_state="absent"
