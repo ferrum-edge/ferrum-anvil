@@ -100,12 +100,17 @@ results 2026-10-26); current hosted qualification is in
   - 100 live against the real gateway (including TRUST-009/010/011, the G01 lookup cases);
   - 75 automated tests (REL-003, signed update integrity, among them: built desktop bundles on Linux and macOS refuse an update signed by another key, with a corrupted signature or altered after signing, and install a validly signed one; Windows is not covered);
   - 1 executed release check.
-- **1 is blocked:**
-  - REL-001 needs signed installers.
+- **None is blocked.**
 - **2 are not applicable:**
   - TRUST-012: Anvil does not correlate gateway logs.
   - LOAD-012: the optional JMeter adapter was not built.
-- **3 are partial:**
+- **4 are partial:**
+  - REL-001, clean native installs. The release smoke ran against the published unsigned `anvil-v0.1.5` packages on fresh hosted runners: run [41275148483](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41275148483) on PR head `70dde1b2`, with the same result as the earlier [41273823587](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41273823587), [41270507104](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41270507104), [41255989645](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41255989645), [41254710916](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41254710916), [41189324002](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41189324002) and [41185287833](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41185287833). These are PR-triggered runs; once the workflow is on `main`, the run that publishing a release starts is the routine check. Each target installs natively and launches the app, then imports the sample workspace through the release CLI, makes a loopback call and relaunches; it stops at its first failed step.
+    - Six targets pass every step: macOS arm64 and native Intel DMG, Windows NSIS and MSI, Ubuntu 26.04 `.deb`, Fedora 44 `.rpm`.
+    - The AppImage fails at its first launch (a package failure): its WebKit web process aborts with `EGL_BAD_PARAMETER`. The fix, ferrum-edge/ferrum-anvil#463, is merged but not released: 0.1.5's AppImage stays broken until the next release ships a rebuilt one.
+    - The GUI was not driven.
+    - Gatekeeper and SmartScreen were never consulted (no quarantine attribute or Mark-of-the-Web), and installers ran silently. Each result records these bypasses.
+    - Still blocked: signed and notarized first run on macOS and Windows, which needs owner credentials (ferrum-edge/ferrum-anvil#2).
   - REL-006, download manifest match: the website repository's tests at ferrum-edge/ferrumedge commit e4fe8b9 tie each download row's OS, architecture and package to the linked asset and the release evidence, and compare the 33 listed asset digests with SHA256SUMS, whose recorded lines match GitHub's digest of the published file. It stays partial until Anvil's own release CI (`website-evidence.yml`) re-runs those tests at that commit and a hosted run passes.
   - REL-007/008, website navigation and feature truth: the website repository's tests at ferrum-edge/ferrumedge commit e4fe8b9 check the Anvil navigation (root, nested, extensionless, mobile and footer links, with aria-current, aria-controls and alt text; not a full accessibility audit) and the capability and limitation claims. They stay partial until Anvil's own release CI (`website-evidence.yml`) re-runs those tests at that commit and a hosted run passes.
 - **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.

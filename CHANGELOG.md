@@ -56,6 +56,10 @@
   - Building now compiles AWS-LC (C) through `aws-lc-sys`. Every crate that
     reaches it selects `aws-lc-rs/prebuilt-nasm`, so Windows x86_64 needs no
     NASM install.
+- The desktop E2E toolchain (WebdriverIO, Mocha, archiver) now resolves
+  minimatch 11.0.3 for GHSA-g3hv-75wg-m249 and glob 14.0.3 for
+  GHSA-3g3m-2fjr-6pw4, through nested npm overrides; glob 10/13 cannot use
+  minimatch 11. Development-only; the shipped UI dependencies are unchanged.
 
 ### Changed
 
