@@ -162,6 +162,25 @@ describe("Ferrum gateway profiles", () => {
     expect(calls("integration_save")).toHaveLength(0);
   });
 
+  it("drops a removed profile even when the list cannot be refreshed", async () => {
+    const answer = invoke.getMockImplementation()!;
+    const onChanged = await openGateways();
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integrations_list") throw "the store is busy";
+      return answer(cmd, args);
+    });
+    fireEvent.click(await screen.findByText(gateway.name));
+    fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+    await screen.findByRole("dialog", { name: "Remove gateway" });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText("Removed, but the list could not be refreshed: the store is busy")).toBeTruthy();
+    expect(calls("integration_delete")).toEqual([{ profileId: "gw-1" }]);
+    expect(screen.queryByText(gateway.name)).toBeNull();
+    expect(screen.getByText("No gateways declared.")).toBeTruthy();
+    expect(onChanged).toHaveBeenCalled();
+    expect(calls("integration_save")).toHaveLength(0);
+  });
+
   it("keeps the profile and its editor when the removal fails", async () => {
     const answer = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (cmd: string, args?: Args) => {

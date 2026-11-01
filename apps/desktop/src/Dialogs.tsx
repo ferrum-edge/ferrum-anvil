@@ -314,14 +314,23 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
     setErr(null);
     setRemoving((s) => new Set(s).add(id));
     try {
-      await api.deleteIntegration(id);
-      // Only if the removed profile is still the one being edited: a slow
-      // delete must not close another draft opened meanwhile.
+      try {
+        await api.deleteIntegration(id);
+      } catch (e) {
+        setErr(String((e as Error).message));
+        return;
+      }
+      // Removed: drop it here at once, so a failed refresh cannot leave it
+      // listed (and savable back). Close the editor only if it still shows
+      // it: a slow delete must not close another draft opened meanwhile.
+      setInts((cur) => cur.filter((p) => p.id !== id));
       setEditing((cur) => (cur?.value.id === id ? null : cur));
-      await load();
       props.onChanged();
-    } catch (e) {
-      setErr(String((e as Error).message));
+      try {
+        await load();
+      } catch (e) {
+        setErr(`Removed, but the list could not be refreshed: ${String((e as Error).message)}`);
+      }
     } finally {
       setRemoving((s) => {
         const left = new Set(s);
