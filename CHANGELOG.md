@@ -4,6 +4,14 @@
 
 ### Added
 
+- Ferrum gateway profiles can be removed. `anvil gateway list WORKSPACE`
+  lists a workspace's profiles, `anvil gateway remove WORKSPACE PROFILE`
+  removes one (by id, or by a name no other profile has), and the desktop
+  app's Connection profiles dialog has **Remove gateway** on a saved profile.
+  A send to the removed profile's hosts is no longer trusted as a Ferrum
+  gateway unless another profile matches them. Use it to remove a
+  "Ferrum gateway HOST" profile that `anvil send --trust-ferrum HOST` saved
+  before that flag stopped saving one.
 - `anvil env` lists, shows and edits a workspace's environments from the
   command line (`list`, `show`, `create`, `use`, `set`, `unset`), so the
   variables an import asks for can be filled in without the desktop app.

@@ -577,6 +577,11 @@ pub fn integration_save(st: State<'_, DesktopState>, profile: IntegrationProfile
 }
 
 #[tauri::command]
+pub fn integration_delete(st: State<'_, DesktopState>, profile_id: String) -> R<()> {
+    st.app()?.delete_integration(&id(&profile_id)?).map_err(e)
+}
+
+#[tauri::command]
 pub fn settings_get(st: State<'_, DesktopState>) -> R<AppSettings> {
     st.app()?.settings().map_err(e)
 }

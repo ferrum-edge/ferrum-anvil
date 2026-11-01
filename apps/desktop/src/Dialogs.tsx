@@ -280,6 +280,20 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       setErr(String((e as Error).message));
     }
   };
+  // A saved gateway profile can be removed; a new one is only discarded.
+  const removable = editing?.kind === "ferrum" && ints.some((p) => p.id === editing.value.id);
+  const removeIt = async () => {
+    if (!editing) return;
+    setErr(null);
+    try {
+      await api.deleteIntegration(editing.value.id);
+      setEditing(null);
+      await load();
+      props.onChanged();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    }
+  };
   return (
     <Modal
       title="Connection profiles"
@@ -292,6 +306,12 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
               <Icon name="chevronLeft" size={14} />
               Back
             </button>
+            {removable && (
+              <button className="btn ghost danger" onClick={removeIt}>
+                <Icon name="trash" size={14} />
+                Remove gateway
+              </button>
+            )}
             <span className="spacer" />
             <button className="btn primary" onClick={saveIt}>
               Save profile

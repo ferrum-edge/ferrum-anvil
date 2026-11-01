@@ -300,6 +300,14 @@ catalog whose id equals the profile's `compatibility_id`:
   another release's. Anvil reports `ferrum.catalog.unavailable` (confidence
   unknown), does no outcome matching, and reads a token only with the coarse
   meaning every audited release shares.
+- `anvil gateway list WORKSPACE` lists a workspace's profiles (id, name,
+  catalog, hosts, and whether trust needs verified TLS), and
+  `anvil gateway remove WORKSPACE PROFILE` (id, or a name no other profile
+  has) removes one; the desktop app's Connection profiles dialog has
+  **Remove gateway** on a saved profile. Sends to its hosts are then untrusted
+  unless another profile matches them. A request whose settings select the
+  profile selects none, and a vault secret its lookup credential names is
+  kept.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

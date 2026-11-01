@@ -705,6 +705,7 @@ export const api = {
   saveProxyProfile: (profile: ProxyProfile) => call<ProxyProfile>("proxy_profile_save", { profile }),
   integrations: (workspaceId: string) => call<IntegrationProfile[]>("integrations_list", { workspaceId }),
   saveIntegration: (profile: IntegrationProfile) => call<IntegrationProfile>("integration_save", { profile }),
+  deleteIntegration: (profileId: string) => call<void>("integration_delete", { profileId }),
   settings: () => call<AppSettings>("settings_get"),
   saveSettings: (settings: AppSettings) => call<void>("settings_save", { settings }),
   /** The last storage cleanup (at most once a day when the profile opens); null before the first. */
