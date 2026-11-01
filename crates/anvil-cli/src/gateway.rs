@@ -66,7 +66,8 @@ fn find_profile(app: &App, ws: &Workspace, key: &str) -> Result<IntegrationProfi
     if let Some(i) = all.iter().position(|p| p.id.to_string() == key) {
         return Ok(all.swap_remove(i));
     }
-    let mut named: Vec<IntegrationProfile> = all.into_iter().filter(|p| p.name.eq_ignore_ascii_case(key)).collect();
+    let key_lower = key.to_lowercase();
+    let mut named: Vec<IntegrationProfile> = all.into_iter().filter(|p| p.name.to_lowercase() == key_lower).collect();
     match named.len() {
         1 => Ok(named.remove(0)),
         0 => bail!("workspace '{}' has no Ferrum gateway profile '{}' (`anvil gateway list` shows them)", t(&ws.name), t(key)),

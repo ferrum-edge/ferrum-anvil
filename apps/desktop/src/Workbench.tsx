@@ -652,8 +652,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // ------------------------------------------------------------- shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // A confirmation is showing: its keys (Escape) are its own.
-      if (asking) return;
+      // A confirmation or a dialog is showing: its keys (Escape) are its own.
+      if (asking || dialog) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key === "Enter") {
         e.preventDefault();

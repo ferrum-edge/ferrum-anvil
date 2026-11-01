@@ -1,7 +1,7 @@
 // Connection profiles dialog: a saved Ferrum gateway profile can be removed
 // through `integration_delete` once the in-window prompt is confirmed, and a
 // new one that was never saved offers no removal.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 const invoke = vi.fn();
@@ -96,6 +96,38 @@ describe("Ferrum gateway profiles", () => {
     expect(calls("integration_delete")).toHaveLength(0);
     expect(profiles.closest("[inert]")).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove gateway" }));
+  });
+
+  it("keeps a draft opened while a removal is still being written", async () => {
+    const answer = invoke.getMockImplementation()!;
+    let finish!: () => void;
+    const written = new Promise<void>((resolve) => (finish = resolve));
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integration_delete") await written;
+      return answer(cmd, args);
+    });
+    await openGateways();
+    fireEvent.click(await screen.findByText(gateway.name));
+    fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+    await screen.findByRole("dialog", { name: "Remove gateway" });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(calls("integration_delete")).toHaveLength(1));
+    // Back to the list, and a new draft, before the delete returns.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeTruthy();
+    await act(async () => finish());
+    await waitFor(() => expect(calls("integrations_list").length).toBeGreaterThan(1));
+    expect(screen.getByRole("button", { name: "Save profile" })).toBeTruthy();
+  });
+
+  it("names the saved profile, not an unsaved edit of its name", async () => {
+    await openGateways();
+    fireEvent.click(await screen.findByText(gateway.name));
+    fireEvent.change(screen.getByDisplayValue(gateway.name), { target: { value: "Renamed, not saved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+    const prompt = await screen.findByRole("dialog", { name: "Remove gateway" });
+    expect(prompt.textContent).toContain(`Remove gateway “${gateway.name}”?`);
   });
 
   it("offers no removal for a gateway that was never saved", async () => {

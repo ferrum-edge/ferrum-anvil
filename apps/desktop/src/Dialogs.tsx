@@ -263,7 +263,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   // dialog is no longer inert (an inert element cannot take the focus).
   const [cancelled, setCancelled] = useState(0);
   useEffect(() => {
-    if (cancelled && !asking) removeButton.current?.focus();
+    if (cancelled && !asking) {
+      removeButton.current?.focus();
+      setCancelled(0);
+    }
   }, [cancelled, asking]);
   const load = async () => {
     const [a, b, c] = await Promise.all([api.tlsProfiles(props.workspaceId), api.proxyProfiles(props.workspaceId), api.integrations(props.workspaceId)]);
@@ -293,7 +296,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   const removable = editing?.kind === "ferrum" && ints.some((p) => p.id === editing.value.id);
   const removeIt = async () => {
     if (!editing) return;
-    const ok = await confirm(`Remove gateway “${(editing.value as IntegrationProfile).name}”? Sends to its hosts are no longer trusted as a Ferrum gateway unless another profile matches them.`, {
+    const id = editing.value.id;
+    // The saved name: the one being removed, not an unsaved edit of it.
+    const name = ints.find((p) => p.id === id)?.name ?? (editing.value as IntegrationProfile).name;
+    const ok = await confirm(`Remove gateway “${name}”? Sends to its hosts are no longer trusted as a Ferrum gateway unless another profile matches them.`, {
       title: "Remove gateway",
       kind: "warning",
       okLabel: "Remove",
@@ -304,8 +310,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
     }
     setErr(null);
     try {
-      await api.deleteIntegration(editing.value.id);
-      setEditing(null);
+      await api.deleteIntegration(id);
+      // Only if the removed profile is still the one being edited: a slow
+      // delete must not close another draft opened meanwhile.
+      setEditing((cur) => (cur?.value.id === id ? null : cur));
       await load();
       props.onChanged();
     } catch (e) {

@@ -129,6 +129,13 @@ async fn an_ambiguous_name_is_refused_and_an_id_removes_one() {
     assert!(out.contains(&a.id.to_string()) && out.contains(&b.id.to_string()), "{out}");
     assert_eq!(saved_gateways(&data), 2);
 
+    // Equal names list by id, whatever order they were saved in.
+    let o = anvil(&data, &["gateway", "list", "Lab"]).await;
+    let ids: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().map(|l| l.split("  ").next().unwrap().to_string()).collect();
+    let mut sorted = vec![a.id.to_string(), b.id.to_string()];
+    sorted.sort();
+    assert_eq!(ids, sorted);
+
     let id = b.id.to_string();
     let o = anvil(&data, &["gateway", "remove", "Lab", &id]).await;
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
