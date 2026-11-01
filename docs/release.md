@@ -218,8 +218,43 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
    WebKit helpers retain their environment; the input image's runtime is never
    invoked. This option deliberately executes artifact contents: use it only
    after establishing the artifact's provenance and any required signatures.
-   The probe stops the process it launched and leftover helpers in its own
-   temporary AppImage extraction directory.
+   After each probe the app and the processes it started are stopped, and
+   if they are not gone within about 30 seconds the probe is inconclusive.
+   Every wait on them is bounded. A probe launches only once the previous
+   probe's processes are gone (trying again for about 30 seconds); otherwise
+   it is skipped as inconclusive.
+   - On Linux and macOS the app runs in its own process group, which is
+     stopped as a whole, so helpers left behind when the app exits are found
+     too. The app is also started with a random `RELEASE_CHECK_PROBE_ID`
+     that the processes it starts inherit, also after `setsid` and after the
+     app exits: on Linux every process whose environment carries it is
+     stopped; on macOS such processes are found where `ps -E` shows their
+     environment. Helpers that leave the group are also remembered from
+     launch on (every 100 ms for the first second, then every second).
+     Leftover helpers in the probe's own AppImage extraction directory are
+     stopped as well. A process that clears its environment and leaves the
+     group before it is seen is not found.
+   - On Windows a watcher identifies the app from launch on: the process
+     running the probed executable, started no earlier than the probe, whose
+     parent chain reaches the checker's own shell; another launch of the same
+     executable is not taken for it. Every 250 ms it records, by process ID
+     and creation time, the app and everything descending from it by parent
+     process ID, each process created no earlier than its parent, so a child
+     whose parent has exited is still found and a process that merely reuses
+     an ID is not (the script notes the narrow cases this cannot tell apart,
+     such as a process whose parent started and exited between two looks).
+     That tree includes the app's WebView2 `msedgewebview2.exe` processes,
+     which lock the WebView2 user data folder
+     (`%LOCALAPPDATA%\com.ferrumedge.anvil\EBWebView`) that every launch of
+     the app shares. A launch while another WebView2 browser process holds
+     that lock fails with `0x800700AA` ("The requested resource is in use").
+     The tree is ended with `Stop-Process` (TerminateProcess), never Git
+     Bash's `kill`, which leaves the browser process exiting for 30 seconds
+     or more. The probe waits until the lock is released and the probe's
+     background job has ended, and a probe launches only once the folder is
+     unlocked (waiting up to about 30 seconds); if it is still locked, for
+     example by an Anvil open outside the check, the probe is skipped as
+     inconclusive.
 
 Exit status: `0` pass, `1` test hooks found, `2` usage error or an artifact
 that could not be inspected (never reported as a pass).
