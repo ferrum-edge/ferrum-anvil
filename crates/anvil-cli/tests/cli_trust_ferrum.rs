@@ -14,6 +14,10 @@ use std::process::{Output, Stdio};
 const PASS: &str = "cli-trust-passphrase-1";
 
 async fn anvil(data: &Path, args: &[&str]) -> Output {
+    anvil_with_env(data, args, &[]).await
+}
+
+async fn anvil_with_env(data: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_anvil"))
         .arg("--data-dir")
         .arg(data)
@@ -21,6 +25,7 @@ async fn anvil(data: &Path, args: &[&str]) -> Output {
         .env("ANVIL_PASSPHRASE", PASS)
         .env_remove("ANVIL_PROFILE")
         .env_remove("ANVIL_DATA_DIR")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -231,7 +236,19 @@ async fn the_host_is_compared_as_the_engine_compares_it() {
     let default = anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID;
 
     // A URL, a path or a port is refused before anything is sent or saved.
-    for bad in ["http://127.0.0.1/", "127.0.0.1/echo", "127.0.0.1:8080", "[::1]:8080", " ", "*.0.0.1", "%2A.0.0.1"] {
+    for bad in [
+        "http://127.0.0.1/",
+        "127.0.0.1/echo",
+        "127.0.0.1:8080",
+        "[::1]:8080",
+        " ",
+        "*.0.0.1",
+        "%2A.0.0.1",
+        "127.0.0.1?x=1",
+        "127.0.0.1#f",
+        "127.0.0.1\\health",
+        "user@127.0.0.1",
+    ] {
         let o = anvil(&data, &["send", "--workspace", "Lab", "--url", &url, "--trust-ferrum", bad, "--save-trust"]).await;
         assert_eq!(o.status.code(), Some(3), "{bad:?}: {}", text(&o));
         assert!(text(&o).contains("--trust-ferrum takes a host"), "{bad:?}: {}", text(&o));
@@ -250,4 +267,31 @@ async fn the_host_is_compared_as_the_engine_compares_it() {
     let saved = app.integrations(&ws.meta.id).unwrap();
     let IntegrationKind::FerrumGateway { hosts, .. } = &saved[0].kind;
     assert_eq!((saved.len(), saved[0].name.as_str(), hosts[0].host.as_str()), (1, "Ferrum gateway 127.0.0.1", "127.0.0.1"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redacted_host_never_proves_the_request_reached_host() {
+    let (_dir, data, f) = setup().await;
+    // The request's host is a secret, so the record redacts it.
+    for args in [
+        &["env", "create", "Lab", "local", "--use"][..],
+        &["env", "set", "Lab", "gwhost", "--secret", "--value-env", "GW_HOST"],
+        &["add", "Lab", "Secret host", "--url", &f.url("/echo").replace("127.0.0.1", "{{gwhost}}")],
+    ] {
+        let o = anvil_with_env(&data, args, &[("GW_HOST", "127.0.0.1")]).await;
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", text(&o));
+    }
+    let send = ["send", "Secret host", "--workspace", "Lab", "--json", "--no-history", "--save-trust", "--trust-ferrum"];
+    // The real host, and a HOST spelled like the redaction marker.
+    for host in ["127.0.0.1", anvil_domain::secret::REDACTED] {
+        let mut args = send.to_vec();
+        args.push(host);
+        let o = anvil(&data, &args).await;
+        assert_eq!(o.status.code(), Some(0), "{host}: {}", text(&o));
+        let record: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&o)));
+        assert_eq!(record["outcome"]["dispatch"], "sent", "{record}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("the record redacts the host the request went to"), "{host}: {err}");
+        assert_eq!(saved_gateways(&data), 0, "{host}");
+    }
 }

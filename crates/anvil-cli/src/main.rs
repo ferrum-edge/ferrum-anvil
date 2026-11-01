@@ -693,7 +693,13 @@ fn early_data_line(e: &anvil_domain::execution::EarlyDataObservation) -> String 
 fn trust_host(raw: &str) -> Result<String> {
     let h = raw.trim();
     let h = h.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(h);
-    if h.is_empty() || h.contains("://") || h.contains(['/', '[', ']']) || h.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    // URL parsing would drop a path (`/` or `\`), query, fragment or user
+    // part and keep the host, so they are refused rather than ignored.
+    if h.is_empty()
+        || h.contains("://")
+        || h.contains(['/', '\\', '?', '#', '@', '[', ']'])
+        || h.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
         bail!("--trust-ferrum takes a host name or address, not a URL: '{}'", terminal_safe(raw));
     }
     if h.contains('*') {
@@ -733,10 +739,15 @@ fn dispatched_to(record: &anvil_domain::execution::ExecutionRecord, host: &str) 
     for a in record.attempts.iter().filter(|a| a.dispatch != DispatchState::NotDispatched) {
         let rest = a.url.split_once("://").map_or(a.url.as_str(), |(_, r)| r);
         let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        // A redacted host proves nothing, even one that parses as `host`
+        // (the marker is a valid IDNA label).
+        if authority.contains(anvil_domain::secret::REDACTED) {
+            redacted = true;
+            continue;
+        }
         match anvil_engine::prepare::parse_target(&a.url, SCHEMES, &mut Vec::new()) {
-            Ok(t) if t.host == host => sent_to_host = true,
-            Ok(_) if !authority.contains(anvil_domain::secret::REDACTED) => {}
-            _ => redacted = true,
+            Ok(t) => sent_to_host |= t.host == host,
+            Err(_) => redacted = true,
         }
     }
     (sent_to_host, redacted)
