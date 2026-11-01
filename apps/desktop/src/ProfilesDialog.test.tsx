@@ -1,6 +1,6 @@
 // Connection profiles dialog: a saved Ferrum gateway profile can be removed
-// through `integration_delete`, and a new one that was never saved offers
-// no removal.
+// through `integration_delete` once the in-window prompt is confirmed, and a
+// new one that was never saved offers no removal.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -65,13 +65,33 @@ afterEach(() => {
 });
 
 describe("Ferrum gateway profiles", () => {
-  it("removes a saved gateway profile", async () => {
+  it("removes a saved gateway profile once the prompt is confirmed", async () => {
     const onChanged = await openGateways();
     fireEvent.click(await screen.findByText(gateway.name));
     fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+    const prompt = await screen.findByRole("dialog", { name: "Remove gateway" });
+    expect(prompt.textContent).toContain(`Remove gateway “${gateway.name}”?`);
+    expect(calls("integration_delete")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     await waitFor(() => expect(calls("integration_delete")).toEqual([{ profileId: "gw-1" }]));
     expect(await screen.findByText("No gateways declared.")).toBeTruthy();
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("keeps the profile, and the dialog, when the prompt is cancelled", async () => {
+    const onClose = vi.fn();
+    render(<ProfilesDialog workspaceId="ws-1" onClose={onClose} onChanged={vi.fn()} />);
+    await waitFor(() => expect(calls("integrations_list")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("tab", { name: /Ferrum gateways/ }));
+    fireEvent.click(await screen.findByText(gateway.name));
+    fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+    await screen.findByRole("dialog", { name: "Remove gateway" });
+    // Escape answers the prompt only.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Remove gateway" })).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(calls("integration_delete")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Remove gateway" })).toBeTruthy();
   });
 
   it("offers no removal for a gateway that was never saved", async () => {

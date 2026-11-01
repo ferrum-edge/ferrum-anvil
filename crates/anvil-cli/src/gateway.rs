@@ -13,8 +13,9 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum GatewayCmd {
-    /// List the workspace's Ferrum gateway profiles: id, name, catalog,
-    /// hosts, and whether trust needs verified TLS.
+    /// List the workspace's Ferrum gateway profiles (by name, case ignored,
+    /// then id): id, name, catalog, hosts, and whether trust needs verified
+    /// TLS.
     List {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
@@ -38,7 +39,7 @@ pub fn gateway_cmd(app: &App, cmd: &GatewayCmd) -> Result<i32> {
                 println!("workspace '{}' has no Ferrum gateway profiles", t(&ws.name));
                 return Ok(0);
             }
-            all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            all.sort_by_cached_key(|p| (p.name.to_lowercase(), p.id.to_string()));
             for p in &all {
                 println!("{}", line(p));
             }
