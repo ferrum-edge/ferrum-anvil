@@ -126,6 +126,42 @@ describe("Ferrum gateway profiles", () => {
     expect(calls("integration_save")).toHaveLength(0);
   });
 
+  it("keeps every profile whose removal is still being written from being saved back", async () => {
+    const other: IntegrationProfile = { ...gateway, id: "gw-2", name: "Second gateway" };
+    saved = [gateway, other];
+    const answer = invoke.getMockImplementation()!;
+    const finish = new Map<string, () => void>();
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integration_delete") await new Promise<void>((resolve) => finish.set(args?.profileId as string, resolve));
+      return answer(cmd, args);
+    });
+    const remove = async (name: string) => {
+      fireEvent.click(await screen.findByText(name));
+      fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+      await screen.findByRole("dialog", { name: "Remove gateway" });
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    };
+    const blocked = async (name: string) => {
+      fireEvent.click(await screen.findByText(name));
+      const disabled = ["Save profile", "Remove gateway"].map((n) => (screen.getByRole("button", { name: n }) as HTMLButtonElement).disabled);
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      return disabled;
+    };
+    await openGateways();
+    await remove(gateway.name);
+    await remove(other.name);
+    await waitFor(() => expect(finish.size).toBe(2));
+    // Both stay blocked while both removals are pending.
+    expect(await blocked(gateway.name)).toEqual([true, true]);
+    expect(await blocked(other.name)).toEqual([true, true]);
+    // One settling releases only its own.
+    await act(async () => finish.get("gw-2")!());
+    expect(await blocked(gateway.name)).toEqual([true, true]);
+    await act(async () => finish.get("gw-1")!());
+    expect(calls("integration_save")).toHaveLength(0);
+  });
+
   it("keeps the profile and its editor when the removal fails", async () => {
     const answer = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (cmd: string, args?: Args) => {
