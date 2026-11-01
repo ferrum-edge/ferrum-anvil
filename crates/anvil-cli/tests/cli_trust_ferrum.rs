@@ -148,7 +148,14 @@ async fn a_saved_profile_covering_the_host_is_used_as_it_is() {
         let (o, record) = send(&data, &url, extra).await;
         assert_eq!(record["compatibility_id"].as_str(), Some(OTHER_CATALOG), "{extra:?}: the saved profile is used");
         assert!(!shadowed(&record), "{extra:?}: no second profile was declared: {record}");
-        assert!(!String::from_utf8_lossy(&o.stderr).contains("saved Ferrum gateway profile"), "{}", text(&o));
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(!err.contains("saved Ferrum gateway profile"), "{err}");
+        // --save-trust says why it saved nothing.
+        assert_eq!(
+            err.contains("Ferrum gateway profile 'Saved gateway' already covers 127.0.0.1: nothing saved"),
+            extra.len() == 3,
+            "{err}"
+        );
         assert_eq!(saved_gateways(&data), 1, "{extra:?}");
     }
 }
@@ -195,4 +202,45 @@ async fn save_trust_saves_nothing_when_the_send_fails_locally() {
     assert!(err.contains("did not save Ferrum gateway profile 'Ferrum gateway 127.0.0.1': nothing was sent to 127.0.0.1"), "{err}");
     assert_eq!(saved_gateways(&data), 0);
     assert_eq!(trusted_as(&data, &f.url("/echo"), &[]).await, None, "a later send was trusted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_trust_saves_nothing_when_the_send_went_to_another_host() {
+    let (_dir, data, f) = setup().await;
+    // The URL's host is 127.0.0.1, so the flag's profile never applies.
+    let (o, record) = send(&data, &f.url("/echo"), &["--trust-ferrum", "gw.example.invalid", "--save-trust"]).await;
+    assert_eq!(record["outcome"]["dispatch"], "sent", "{record}");
+    assert_eq!(record["compatibility_id"], serde_json::Value::Null, "{record}");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains(
+            "did not save Ferrum gateway profile 'Ferrum gateway gw.example.invalid': the send was not trusted as gw.example.invalid"
+        ),
+        "{err}"
+    );
+    assert_eq!(saved_gateways(&data), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_host_is_compared_as_the_engine_compares_it() {
+    let (_dir, data, f) = setup().await;
+    let url = f.url("/echo");
+    let default = anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID;
+
+    // A URL, a path or a port is refused before anything is sent or saved.
+    for bad in ["http://127.0.0.1/", "127.0.0.1/echo", "127.0.0.1:8080", "[::1]:8080", " "] {
+        let o = anvil(&data, &["send", "--workspace", "Lab", "--url", &url, "--trust-ferrum", bad, "--save-trust"]).await;
+        assert_eq!(o.status.code(), Some(3), "{bad:?}: {}", text(&o));
+        assert!(text(&o).contains("--trust-ferrum takes a host"), "{bad:?}: {}", text(&o));
+    }
+    assert_eq!(saved_gateways(&data), 0);
+
+    // Brackets and surrounding spaces do not stop a match, and the saved
+    // host is the canonical one.
+    assert_eq!(trusted_as(&data, &url, &["--trust-ferrum", " [127.0.0.1] ", "--save-trust"]).await.as_deref(), Some(default));
+    let app = open(&data);
+    let ws = app.find_workspace("Lab").unwrap();
+    let saved = app.integrations(&ws.meta.id).unwrap();
+    let IntegrationKind::FerrumGateway { hosts, .. } = &saved[0].kind;
+    assert_eq!((saved.len(), saved[0].name.as_str(), hosts[0].host.as_str()), (1, "Ferrum gateway 127.0.0.1", "127.0.0.1"));
 }

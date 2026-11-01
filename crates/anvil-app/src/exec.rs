@@ -321,7 +321,9 @@ pub struct SendOptions {
     pub seed: Option<u64>,
     /// Ferrum gateway profiles trusted for this send only (`anvil send
     /// --trust-ferrum`). They are never saved, and come after the
-    /// workspace's saved profiles, which match first.
+    /// workspace's saved profiles, which match first. Only those of the
+    /// send's workspace are used, and without a diagnostic reference lookup
+    /// (`detail`), so they never bring a credential.
     pub trusted_gateways: Vec<IntegrationProfile>,
 }
 
@@ -516,7 +518,11 @@ impl App {
             proxy_profiles: read.candidates(kind::PROXY_PROFILE, Some(ws_id))?,
             integrations: {
                 let mut saved: Vec<IntegrationProfile> = read.query(kind::INTEGRATION, Some(ws_id), &[])?;
-                saved.extend(opts.trusted_gateways.iter().cloned());
+                saved.extend(opts.trusted_gateways.iter().filter(|p| p.workspace_id == *ws_id).cloned().map(|mut p| {
+                    let IntegrationKind::FerrumGateway { detail, .. } = &mut p.kind;
+                    *detail = None;
+                    p
+                }));
                 saved
             },
             // Replaced below, once the context has passed its checks.

@@ -307,11 +307,16 @@ catalog whose id equals the profile's `compatibility_id`:
   `anvil run` and exports then use like any other profile. A saved profile
   that covers `HOST` on every port (the same name or a `*.suffix` over it,
   case ignored, as the engine matches hosts) is used instead, and
-  `--save-trust` then saves nothing; one bound to a port does not count.
-  The flag's own profile is named "Ferrum gateway HOST (this send only)".
-  `--save-trust` saves the profile after the send, and only if request bytes
-  were sent (dispatch other than `not_dispatched`): a send that fails before
-  anything is sent saves nothing and says so.
+  `--save-trust` then saves nothing and says so; one bound to a port does
+  not count. `HOST` is a host name or address, compared as the engine
+  compares hosts (trimmed, case ignored, an IPv6 address with or without
+  brackets); a URL, a path or `host:port` is refused. Without `--save-trust`
+  the flag's profile is named "Ferrum gateway HOST (this send only)".
+  `--save-trust` saves "Ferrum gateway HOST" after the send, and only if the
+  send was dispatched (not `not_dispatched`) and trusted as a Ferrum gateway,
+  and no profile covering `HOST` was saved meanwhile. A send that fails
+  before anything is sent, or whose host is not `HOST`, saves nothing; when
+  it produced a record, Anvil says why.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 
