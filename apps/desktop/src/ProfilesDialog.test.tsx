@@ -95,7 +95,8 @@ describe("Ferrum gateway profiles", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(calls("integration_delete")).toHaveLength(0);
     expect(profiles.closest("[inert]")).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove gateway" }));
+    // Once the dialog is no longer inert (an effect after the prompt closes).
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove gateway" })));
   });
 
   it("keeps a draft opened while a removal is still being written", async () => {
