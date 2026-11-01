@@ -11,7 +11,10 @@ Evidence is discovered, not declared:
     status with `requires` (evidence kinds, e.g. ["native_e2e"]) keeps the
     case at that status until a test definition of one of those kinds names
     it (a Rust `fn`, or a `describe(`/`it(`/`test(` line), not a comment or
-    helper string.
+    helper string. A status with `"pinned": true` is never promoted by
+    discovered tests or lab passes (its evidence lives outside the scanned
+    paths, e.g. a hosted workflow run); only editing the entry changes it. A
+    failing lab result is still shown.
 
 Outputs docs/verification/matrix-coverage.{json,md}. Exit code 1 if any case
 has no evidence and no reasoned status (use --allow-gaps to report only).
@@ -189,6 +192,9 @@ def classify(case, refs, lab, overrides):
     else:
         status = "not_covered"
     if ov and status in ("not_covered", "skipped_live"):
+        status = ov["status"]
+    if ov and ov.get("pinned") and status.startswith("verified_"):
+        # Pinned: discovered references are listed but never promote it.
         status = ov["status"]
     return {
         "id": cid,

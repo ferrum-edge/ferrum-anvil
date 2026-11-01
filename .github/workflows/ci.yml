@@ -170,7 +170,7 @@ jobs:
           tauri-deps: "false"
           node: "false"
           cache-key: supply-chain
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-deny@0.20.2
       - name: cargo deny (advisories, bans, licenses, sources)
@@ -184,6 +184,10 @@ jobs:
         run: node --test scripts/tests/release-notes.test.mjs
       - name: Updater signature verifier tests (latest.json)
         run: node --test scripts/tests/updater-manifest.test.mjs
+      - name: Release smoke recorder tests (REL-001 failure classes)
+        run: python3 -I scripts/tests/test_release_smoke_record.py
+      - name: Failure-matrix classifier tests (pinned, requires)
+        run: python3 -I scripts/tests/test_matrix_coverage.py
       - name: Release dependency graph has no WebDriver plugin / e2e feature
         run: scripts/release-check.sh
 

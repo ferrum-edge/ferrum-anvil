@@ -4,7 +4,8 @@ Releases are built by `.github/workflows/release.yml` and always end as a
 **draft** GitHub release whose body is already the final
 [release notes](#release-notes), generated from `CHANGELOG.md`. Publishing the
 draft, announcing it and updating the website are manual owner steps, taken
-only after the [owner checklist](#owner-checklist-before-publishing-a-draft) is met.
+only after the [owner checklist](#owner-checklist-before-publishing-a-draft) is met;
+the [after-publishing checks](#after-publishing) follow publication.
 
 ## Cutting a release
 
@@ -69,21 +70,21 @@ Each build job:
    stronger. With the owner's updater key a tagged release also writes signed
    updater artifacts (see [In-app updates](#in-app-updates)).
 
-   On Linux, `linuxdeploy` itself is pinned: the job places the
-   `linuxdeploy-07333c6` build that Tauri CLI 2.12 uses (SHA-256 checked) in
-   Tauri's tool cache before bundling, and sets
-   `LINUXDEPLOY_EXCLUDED_LIBRARIES=libwayland-client.so*`. The AppImage then
-   leaves `libwayland-client` to the host, like `libEGL` and the rest of the
-   graphics stack. The CLI 2.11 default `linuxdeploy` copies the build host's
-   `libwayland-client` into the AppImage; on a host whose Mesa needs a newer
-   one, Mesa's EGL driver cannot load and WebKit's web process aborts with
-   `Could not create default EGL display: EGL_BAD_PARAMETER` (0.1.5 on
-   Ubuntu 26.04). After bundling, the job lists the AppImage with
-   `scripts/release-check.sh --list-appimage` (the checker's own offset reader
-   and trusted `unsquashfs` >= 4.5.1; the image is never run) and fails if it
-   contains `libwayland-client`. Remove the tool-cache step with the
-   coordinated Tauri 2.12 bump (CLI 2.12 pins the same `linuxdeploy` under
-   another file name); keep the check.
+   On Linux, `linuxdeploy` itself is pinned: Tauri CLI 2.12 bundles with the
+   `linuxdeploy-07333c6` build, which it picks by release tag only and
+   downloads unverified, so the job places that build (SHA-256 checked) in
+   Tauri's tool cache as `linuxdeploy-07333c6-x86_64.AppImage` before
+   bundling, and sets `LINUXDEPLOY_EXCLUDED_LIBRARIES=libwayland-client.so*`.
+   The AppImage then leaves `libwayland-client` to the host, like `libEGL` and
+   the rest of the graphics stack. The CLI 2.11 `linuxdeploy` (0.1.5 and
+   earlier) copied the build host's `libwayland-client` into the AppImage; on
+   a host whose Mesa needs a newer one, Mesa's EGL driver could not load and
+   WebKit's web process aborted with `Could not create default EGL display:
+   EGL_BAD_PARAMETER` (0.1.5 on Ubuntu 26.04). After bundling, the job lists
+   the AppImage with `scripts/release-check.sh --list-appimage` (the checker's
+   own offset reader and trusted `unsquashfs` >= 4.5.1; the image is never
+   run) and fails if it contains `libwayland-client`. A Tauri CLI that pins
+   another `linuxdeploy` needs the cached file name and hash updated with it.
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
@@ -380,21 +381,16 @@ release page once.
   exceptions — `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`
   (Tauri's HTML/CSS tooling) and `option-ext` (`dirs`) — all used unmodified.
   Sources: crates.io only. Duplicate crate versions are reported as warnings.
-- **Advisories**: RustSec, with four reviewed ignores. Each carries an exit
+- **Advisories**: RustSec, with one reviewed ignore. It carries an exit
   condition in `deny.toml` and is an open item for the owner:
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
     gtk 0.19+ (glib ≥ 0.20).
-  - `RUSTSEC-2026-0367`, `-0368`, `-0369` — `zip` `extract()` permission and
-    symlink escapes. Anvil's own `zip` is 9.0.4 and never calls `extract()`;
-    the flagged 4.6.1 comes only from `tauri-plugin-updater`, which verifies
-    the release signature before extracting an update archive. Resolves when
-    `tauri-plugin-updater` moves to `zip` ≥ 9.
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E tooling is a mixed WebdriverIO
   graph: `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 (nested WebdriverIO
   10.1.0, Mocha 12.0.3, `chokidar` 5.0.0) alongside the selected 9.32.0 runner
-  packages and `@wdio/tauri-service` 1.5.0 with its nested WebdriverIO 9.31.9.
+  packages and `@wdio/tauri-service` 1.5.1 with its nested WebdriverIO 9.31.9.
   Both lines use `deepmerge-ts` 8.0.2. E2E tooling runs only on developer
   machines and CI against local fixtures and is never shipped. npm `overrides`
   pin `serialize-javascript` to 7.1.3 and move `@puppeteer/browsers` to 3.2.3,
@@ -499,6 +495,112 @@ install step starts the installer and exits the app), TLS and the published
 GitHub `latest.json` are not covered. The workflow runs when the update path,
 its tests or the workflow change, weekly and on demand.
 
+## Clean-install smoke (REL-001)
+
+`.github/workflows/release-smoke.yml` installs the **published** release
+packages on fresh GitHub-hosted runners, one job per advertised OS,
+architecture and package. Nothing is built: each job takes the exact release
+asset, checks it against the release's `SHA256SUMS`, installs it natively,
+launches the installed app, imports the example workspace and makes a
+loopback call. It runs on demand (`gh workflow run release-smoke.yml -f
+tag=anvil-vX.Y.Z`; no tag means the latest published release), when an
+`anvil-v*` release is published, and on PRs that change the workflow or
+`scripts/release-smoke/`.
+
+| Target | Runner | Package and install |
+| --- | --- | --- |
+| `macos-arm64-dmg` | `macos-15` (Apple silicon) | `_aarch64.dmg`: `hdiutil attach`, `ditto` of the `.app` to `/Applications` |
+| `macos-x64-dmg` | `macos-15-intel` (native Intel) | `_x64.dmg`, the same way. The release cross-builds this DMG and never launches it; this job does |
+| `windows-x64-nsis` | `windows-2025` | `-setup.exe /S` |
+| `windows-x64-msi` | `windows-2025` | `msiexec /i … /qn` |
+| `linux-x64-deb` | `ubuntu-26.04` | `apt-get install` of the local `.deb` (dependencies from the Ubuntu archive) |
+| `linux-x64-appimage` | `ubuntu-26.04` | copied to `~/Applications`, `chmod +x`. Host libraries an AppImage leaves to the system are added only if missing: `fusermount` (`fuse3`), and the host graphics stack (`libegl1 libgles2 libegl-mesa0 libgl1-mesa-dri libwayland-client0`) when `libEGL.so.1`, `libGLESv2.so.2` (which the bundled libepoxy loads), `libwayland-client.so.0` (left to the host since #463) or a Mesa EGL vendor is absent. Each addition is recorded |
+| `linux-x64-rpm` | `ubuntu-26.04`, digest-pinned `fedora:44` container | `dnf install` of the local `.rpm` (dependencies from the Fedora repositories) |
+
+Each job then:
+
+1. Launches the installed app (macOS through `open`, as a double-click;
+   Windows and Linux by starting the installed executable; Linux under Xvfb
+   with a private session bus). The job records the default data directory's
+   state before this launch; on a fresh runner it is absent. What must hold
+   differs by OS:
+
+   | OS | Up for | Window | Webview |
+   | --- | --- | --- | --- |
+   | macOS | at least 30 s; the window and the webview may take up to 90 s | an on-screen, normal-layer window owned by the app's process (the title is not compared) | a `com.apple.WebKit.WebContent` process whose responsible process (`sudo launchctl procinfo`, `responsible pid`) is the app is running at the end. If procinfo gives no responsible pid on the runner, the check falls back to WebContent processes that were absent before the launch. That fallback cannot rule out an unrelated WebKit user, and `result.json` records it as a `webview_attribution` bypass |
+   | Linux | at least 30 s; the window and the webview may take up to 90 s | a visible X window titled `Ferrum Anvil` | a `WebKitWebProcess` descending from the launched process (process tree from `ps`) is running at the end |
+   | Windows | exactly 30 s; there is no longer startup allowance | the app process's main window, titled `Ferrum Anvil`, within those 30 s | a WebView2 (`msedgewebview2.exe`) process descended from the app is running at the end |
+
+   On macOS and Linux, `result.json` records the attribution used (`launches.<step>.webview_attribution`), and cleanup stops only the processes attributed to the launch. On Windows, `result.json` records the number of WebView2 (`msedgewebview2.exe`) processes descended from the app process (`launches.<step>.webview_processes`), and `taskkill /T` stops the app's process tree.
+
+   Screenshots are best-effort and not a required step. macOS
+   (`screencapture`), Windows (a .NET screen copy) and Ubuntu (ImageMagick
+   `import`) attach them when the capture works. The Fedora container
+   installs no capture tool, so the RPM target never has screenshots.
+2. Uses the release **CLI archive** for the same target (`anvil-cli-…`; the
+   CLI is a separate release asset, not part of the desktop package) on the
+   app's default data directory. It creates a passphrase profile and imports
+   `samples/workspaces/anvil-samples.anvil` from the release tag. Then it
+   sends the sample's `Healthy/OK` request to a listener on `127.0.0.1:18080`
+   that logs every request. The send must exit 0 with HTTP 200, and the
+   listener must log the request.
+3. Launches the installed app again on the store that now holds the import.
+
+A target stops at its first failed step; the steps after it are recorded as
+missing, not as passed.
+
+Each target uploads `rel001-result-<target>`. Its `result.json` names the
+asset and its sha256, the runner OS and architecture, every step's result,
+the surface driven and every OS protection that was not exercised. The
+`rel001-summary` artifact merges them.
+
+### Failure classes
+
+Every failed step carries a class. Both `result.json` (`failure_class`) and the summary table show it. Only a `package` failure says something about the shipped asset.
+
+| Stage | `package` (the shipped asset or the published release) | `harness` (says nothing about the asset) |
+| --- | --- | --- |
+| Fetch (`fetch.sh`) | An advertised asset is missing from the release, the release has no `SHA256SUMS`, `SHA256SUMS` does not list the asset, or the stored asset does not match `SHA256SUMS`. The run continues: the affected targets fail and the other targets run. | Release-API or download failure, or downloaded bytes that still differ from GitHub's stored digest after 3 attempts. The fetch job fails. A failure after the asset check passed (the example bundle from the repository) is also harness. |
+| Inputs (`asset_integrity`) | A problem `fetch.json` recorded for this target's asset | An input that did not arrive or changed between jobs, or an input that cannot be read (`release.json`, `example.json`, `fetch.json`, `SHA256SUMS`, the example) |
+| Runner (`native_arch`) | — | Wrong architecture or Rosetta. OS/CPU query errors: harness on Windows; on macOS and Linux they are recorded as `unknown` and do not fail the step |
+| Install, DMG | `hdiutil attach` fails (image not recognized or corrupt), `find` fails on the mounted image or finds no `.app`, `ditto` fails, `Info.plist` or binary unreadable, wrong version or architecture | The mount point cannot be created, the disk-image subsystem is busy or unavailable, `/Applications` not clean, full disk |
+| Install, `.deb`/`.rpm` | `dpkg-deb`/`rpm` cannot read it, the install fails (for example on unmet dependencies), no `/usr/bin` executable, wrong architecture. Version: for the `.deb`, dpkg's record of the installed package is not `install ok installed` at the release version. For the `.rpm`, the version read from the package file (`rpm -qp`) is not the release version, or `rpm -q` finds the package not installed afterwards | `apt-get update`, a package-mirror or network error, a held or interrupted package-manager lock, listing the runner's packages, full disk, `file(1)` errors |
+| Install, AppImage | Not an x86-64 ELF | `fuse3` or EGL/GLES/Mesa host install, `/dev/fuse` missing, copy or `chmod` into `~/Applications` |
+| Install, NSIS/MSI | Windows cannot start the installer. The installer exits non-zero; MSI exit 3010 (reboot required) counts as success and validation continues. No Apps & features entry, no executable, unreadable PE header or version resource, not x64. `DisplayVersion` or the executable's `ProductVersion` is not exactly the release version (a four-part `X.Y.Z.0` is normalised to `X.Y.Z`; the published 0.1.5 reads `0.1.5` in both). | `msiexec.exe` cannot be started; exit codes 1618 and 1601; full disk: for MSI, a disk-full message in the msiexec log; for NSIS and MSI alike, under 1 GB free on the system drive (NSIS reports no reason on `/S`); a registry or install-directory read error that leaves no entry or executable |
+| Harness (`harness_setup`) | — | Installing Xvfb, xdotool, dbus or ImageMagick; a missing `pgrep`/`pkill`/`ps`/`python3`/`osascript`/`xdotool`/`setsid`/`Xvfb`; Xvfb not answering; `dbus-run-session -- true` failing |
+| CLI (`cli_ready`) | The archive does not extract. Windows cannot run the CLI. No executable, or `anvil --version` is not exactly `anvil <release version>`. | Full disk, creating the extraction directory |
+| Launch (`launch_*`) | `open` fails, no process, the app exits, or no window or webview process of the app's own while the probes and the display worked | The app's output names a session-bus or FUSE-mount fault. Also a probe that errored (osascript, xdotool, pgrep, `ps`, the Windows process query) or an X display not answering. |
+| CLI steps (`profile_create`, `example_import`, `local_call`) | The CLI cannot run or exits non-zero, a sample request is missing, `send --json` prints no JSON execution record, no HTTP 200, the request is not logged | Full disk, the listener does not start or exits during the call, the listener's log or the execution record cannot be read by the helper |
+| Best-effort, never fails a target | — | Screenshots, `codesign`/`spctl`/Authenticode readings, `anvil doctor`, `anvil history`, `ps`/process lists, app log copies, process cleanup |
+
+`fetch.sh` writes `fetch.json` (artifact `rel001-fetch`). The summary job runs even when fetch fails, and reports the fetch result with its class.
+
+`unclassified` arises in these cases. Treat it like `harness` until a person has read the log:
+
+- **A safety-net catch.** The bash `EXIT` trap or the PowerShell top-level `catch` records an error no row above anticipated, with its step and command or message.
+- **A job that stopped without recording a failure.** This covers a job that failed before the script started (artifact download), was cancelled, or was killed or timed out after some steps had passed. `finalize` runs anyway (`if: always()`) and writes `result.json`, even if the script never created its result directory. That file lists the required steps that never ran under `missing_required_steps`, with class `unclassified`.
+- **No `result.json` at all.** A target whose checkout failed has no `record.py` to finalize with. The summary lists it under `harness_or_unclassified_failures` as a target without a result, never as a package failure.
+
+Across all stages, a probe or query that worked and found nothing is a finding about the asset (`package`). A probe or query that failed is `harness`. Reads of the shipped files themselves are not probes: `plutil`, `lipo` and PE-header reads that fail are `package`. OS/CPU queries are harness on Windows; on macOS and Linux a failed one is recorded as `unknown`. The scripts (`scripts/release-smoke/`) are the authority; keep this table in step with them.
+
+What it does **not** cover:
+
+- **The GUI is not driven.** The import and the call go through the shipped
+  CLI. The installed app is only launched and observed. The release build has
+  no WebDriver, by design (see the release check).
+- **The first-run experience of a signed app.** The assets are fetched
+  through the GitHub API, not a browser, so the job does not expect a
+  `com.apple.quarantine` attribute or a Mark-of-the-Web. It records the
+  actual state of each (absent on every hosted run so far) and does not
+  remove either. Without them, Gatekeeper and SmartScreen are never
+  consulted. The installers run silently, and the DMG license prompt is
+  answered by `yes`. Each result records this as a bypass.
+  Gatekeeper, SmartScreen and Keychain acceptance of signed packages stays
+  with ferrum-edge/ferrum-anvil#2.
+- Lock and unlock, uninstall, in-app update, and Linux distributions other
+  than Ubuntu 26.04 and Fedora 44. GitHub-hosted images are fresh VMs but
+  not minimal installs. The Fedora container is minimal.
+
 ## Owner checklist before publishing a draft
 
 - [ ] Preflight, every build job and publish succeeded; `release-evidence.json`
@@ -515,8 +617,14 @@ its tests or the workflow change, weekly and on demand.
       `updater.platforms` covers every target; otherwise `updater.manifest` is
       `null` and users update from the release page. Publishing makes
       `latest.json` live for every installed app with the key.
-- [ ] Clean-install smoke test of each installer (install, first run, create a
-      profile, send a request, lock/unlock, uninstall); screenshots attached.
+- [ ] Clean-install smoke test of each installer, by hand on the draft's
+      packages: install, first run (through Gatekeeper/SmartScreen if
+      signed), create a profile, send a request, lock/unlock, uninstall;
+      screenshots attached. The automated
+      [release smoke](#clean-install-smoke-rel-001) cannot stand in for this.
+      It tests only published releases: a draft's assets are listed only to
+      tokens with push access, and the smoke keeps `contents: read`. See
+      [After publishing](#after-publishing).
 - [ ] Advisory ignores in `deny.toml` re-reviewed.
 - [ ] The release body is the release notes, not a draft placeholder: it starts
       with the signing warning (or line), has the summary, upgrade notes and the
@@ -526,6 +634,38 @@ its tests or the workflow change, weekly and on demand.
       after the last edit.
 - [ ] Website changes follow only after publishing and link the exact artifact
       URLs and checksums.
+
+## After publishing
+
+- [ ] The [release smoke](#clean-install-smoke-rel-001) run that publishing
+      starts (`release: published`) passed for every target. Its summary is in
+      the run's `rel001-summary` artifact. To re-run it:
+      `gh workflow run release-smoke.yml -f tag=anvil-vX.Y.Z`.
+- [ ] If a target failed, read its `failure_class` in the summary first.
+      - `harness` or `unclassified`, including a fetch that failed with
+        class `harness`: re-run the failed jobs
+        (`gh run rerun <run-id> --failed`), and repair the harness if it
+        fails again. A harness failure is never, on its own, grounds to pull
+        an asset or change the release.
+      - `package`, including a fetch package problem: open the failed step in
+        that target's `result.json` (or the asset's entry in `fetch.json`)
+        and its logs, and confirm that the step's detail describes the
+        shipped package. If it does, that package does not install, launch, import
+        or call as advertised for its OS, architecture and format; go to the
+        next item. If the evidence points at the runner instead, handle it as
+        a harness failure.
+- [ ] For a confirmed package failure, within the day, do both of the
+      following:
+      - Delete that asset from the release, or mark the release a pre-release
+        (`gh release edit anvil-vX.Y.Z --prerelease`).
+      - Add a "Known issues" note to the release body naming the failing
+        target and the `result.json` step. Remove the package from the
+        website download table too.
+
+      If the failing package has an updater entry in `latest.json` (AppImage,
+      NSIS, MSI, macOS `.app.tar.gz`), also remove that platform from
+      `latest.json`, so installed apps are not offered a broken update. Ship
+      the fix as a new patch release.
 
 ## Open items
 
@@ -540,8 +680,22 @@ its tests or the workflow change, weekly and on demand.
 - **Sign-in providers** (owner): Google/GitHub/Facebook registrations and an
   identity broker before application login can use them:
   ferrum-edge/ferrum-anvil#3.
-- **Packaged-app smoke tests** (install, first run, dialogs, uninstall) are not
-  automated; the native E2E suite runs against the instrumented debug build.
+- **Packaged-app smoke tests:** install, launch, example import and a local
+  call through the release CLI are automated for the published unsigned
+  packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
+  (PR run 41275148483; the same result as the earlier runs 41273823587,
+  41270507104, 41255989645, 41254710916, 41189324002 and 41185287833), six of seven
+  targets pass. The AppImage fails at its first launch: its WebKit web
+  process aborts with `EGL_BAD_PARAMETER` (a package failure). The fix,
+  ferrum-edge/ferrum-anvil#463, is merged but not released. The owner's
+  disposition: the fixed AppImage ships in the 0.1.6 patch release (being
+  prepared, not yet published). `anvil-v0.1.5`'s assets and `latest.json`
+  are left unchanged, because 0.1.6 supersedes them. Not automated:
+  - GUI-driven import and send;
+  - first run through Gatekeeper/SmartScreen;
+  - native dialogs, lock/unlock, uninstall.
+
+  The native E2E suite runs against the instrumented debug build.
 - The advisory ignores in `deny.toml` (see above).
 - After merging dependency changes, regenerate `THIRD_PARTY_LICENSES.md`
   (`node scripts/licenses.mjs`); CI fails while it is stale.

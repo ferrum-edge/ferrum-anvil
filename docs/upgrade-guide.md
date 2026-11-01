@@ -1,5 +1,158 @@
 # Upgrade guide
 
+## 0.1.6
+
+### Before you upgrade
+
+If you may want to go back to 0.1.5 or earlier, keep a copy of each profile
+with your current build before opening it with 0.1.6. An earlier build cannot
+open the profile once 0.1.6 has enrolled it, and the checkpoint 0.1.6 takes
+before it migrates the database is deleted when enrollment rotates the data
+key (below), so it is not a way back. Use one of these:
+
+- **Full backup** (any profile): in the desktop, **Export** → **Whole app
+  backup**; in the CLI (omit `--passphrase-stdin` for an OS-keychain profile):
+
+  ```sh
+  ANVIL_EXPORT_PASSPHRASE='<export passphrase>' \
+    anvil --profile PROFILE --passphrase-stdin export --mode backup --out profile.anvilbak
+  ```
+
+  It keeps everything in the profile: workspaces with their vault secrets,
+  attachments, history, load reports, app settings and API standards
+  rulesets. Everything after a short readable header (format version, cipher,
+  and the key-derivation costs and salt) is encrypted and authenticated with
+  the export passphrase. Restoring it needs only that passphrase, not the
+  profile's passphrase, recovery key or OS keychain entry. See
+  [Full backups](storage-and-recovery.md#full-backups).
+- **Encrypted-transfer bundle** (any profile): in the desktop, **Export** →
+  **This workspace** → **Encrypted transfer**, one workspace at a time; in the
+  CLI, `--mode encrypted --out workspaces.anvil` in the command above (every
+  workspace, or one with `--workspace`). It keeps the workspaces but not app
+  settings, load reports or spec-import records. Only its vault is encrypted
+  with the export passphrase: the vault secrets and the literal secrets Anvil
+  took out of sensitive fields. The workspace objects (names, URLs, header and
+  body text), attachments and history are ordinary ZIP entries that anyone
+  holding the file can read, and a credential typed into a body or URL is
+  exported as written. Store the bundle as sensitive. A bundle exported by
+  0.1.6 still imports into an earlier build, so this one can also be made
+  after upgrading. See [Export and import](storage-and-recovery.md#export-and-import).
+- **Copy of the profile directory** (passphrase profiles only): close every
+  copy of Anvil and copy the profile directory somewhere outside the data
+  directory. The copy keeps the old passphrase and recovery-key wraps, so the
+  earlier build unlocks it with the old passphrase or recovery key, with
+  nothing lost. This does not work for an OS-keychain profile: it has no
+  passphrase or recovery-key wrap, only its OS keychain entry, and enrollment
+  deletes that entry (or overwrites it with a keyless marker), so the copy can
+  no longer be unlocked.
+
+Do not rely on a **Share safely** export, the default mode of `anvil export`:
+it leaves out vault secrets and turns literal secrets into placeholders. A
+restored backup or imported bundle names linked local files by path only, so
+choose those files again, and a workspace written by an import or restore does
+not use this device's workload identity until you allow it again in the
+workspace's settings.
+
+To go back, restore the backup or bundle with the earlier build into a new,
+empty profile, with the **Replace** policy. `anvil import` writes into an
+existing profile (the one `--profile` names, or the first one), and its
+default policy, Merge, keeps the target profile's app settings instead of the
+backup's. With the 0.1.5 CLI:
+
+```sh
+# Create the recovery profile: its new passphrase on stdin; save the recovery key it prints.
+anvil --passphrase-stdin profile create rollback
+# Preview, then restore. Each command reads the recovery profile's passphrase on stdin.
+ANVIL_EXPORT_PASSPHRASE='<export passphrase>' \
+  anvil --profile rollback --passphrase-stdin import profile.anvilbak --dry-run
+ANVIL_EXPORT_PASSPHRASE='<export passphrase>' \
+  anvil --profile rollback --passphrase-stdin import profile.anvilbak --policy replace
+```
+
+Replace restores a full backup's app settings only into a profile that holds
+no other workspace. In the desktop, create a new profile, then **Import** the
+file with **Replace existing**; the desktop adds an empty "My workspace" to a
+new profile, so it keeps that profile's app settings, and the CLI restore above
+is the way to bring back the backup's app settings too.
+
+### Policy enrollment
+
+0.1.6 does not unlock a profile created by an earlier build until you enroll
+it, and a recovery-key unlock does not skip this step. Enrollment rotates the
+data key and re-encrypts the profile's active data:
+
+- **Desktop:** the lock screen shows **Enroll legacy policy**. Enter the
+  current passphrase (an OS-keychain profile asks for none), enter a new
+  passphrase twice, confirm the native prompt and save the replacement recovery
+  key it shows before confirming. For a profile linked with a fresh-login
+  requirement, choose **Use recovery key** on the lock screen first and enter
+  the current recovery key: the desktop does not sign in to the provider during
+  enrollment, so it refuses the passphrase for such a profile.
+- **CLI:** supply the current passphrase, the new passphrase and the saved
+  replacement recovery key on consecutive stdin lines:
+
+  ```sh
+  anvil --profile PROFILE --passphrase-stdin profile enroll-policy \
+    --confirm-replace-unknown-policy --new-passphrase-stdin
+  ```
+
+  For an OS-keychain profile omit `--passphrase-stdin`. To enroll with the
+  recovery key, leave out the global `--passphrase-stdin` and pass
+  `--recovery-key-stdin` to `enroll-policy`; the first stdin line is then the
+  current recovery key:
+
+  ```sh
+  anvil --profile PROFILE profile enroll-policy --recovery-key-stdin \
+    --confirm-replace-unknown-policy --new-passphrase-stdin
+  ```
+
+After enrollment only the new passphrase and the new recovery key unlock the
+profile, and an OS-keychain profile becomes a passphrase profile. A verified
+linked identity is kept; a profile linked with a fresh-login requirement
+enrolls with its current recovery key. With no surviving identity policy, you
+confirm replacing it with an unlinked one. Details:
+[Deliberate local key rotation](storage-and-recovery.md#deliberate-local-key-rotation)
+and [Where the binding is stored](identity.md#where-the-binding-is-stored).
+
+### Database schema 6
+
+Enrollment moves the profile database from schema 3 to schema 6. Earlier
+builds then refuse that database, and any full backup made by 0.1.6, as
+written by a newer version. Portable bundles keep their format, so a bundle
+exported by 0.1.6 still imports into an earlier build.
+
+- Close every earlier build before upgrading.
+- Before migrating, 0.1.6 copies the database into the profile's
+  `checkpoints` folder as `<time>-before-schema-<version>.db`. If that copy
+  cannot be written, enrollment fails until space is freed. The copy is sealed
+  with the old key, so enrollment's key rotation deletes it, with any older
+  checkpoint.
+- To go back to an earlier build, close every copy of Anvil and either
+  restore the full backup or the encrypted-transfer bundle into a new, empty
+  profile of the earlier build with the Replace policy, or put back a
+  passphrase profile's directory copy and unlock it with the old passphrase or
+  recovery key (see [Before you upgrade](#before-you-upgrade)). Everything
+  changed since the copy was made is lost.
+
+### Behaviour changes
+
+These behaviour changes may need action; the [changelog](../CHANGELOG.md)
+has the full list.
+
+- A browser sign-in authorization URL on `http://localhost` is refused. Use
+  `http://127.0.0.1:<port>`, or `https`, for a local test issuer.
+- RSA keys must be 2048–8192 bits: RS256 signing with a shorter key fails, and
+  a JWT-SVID signed by a bundle key outside that range no longer verifies.
+- `--env` on `anvil send`, `run` and `mcp-discover` refuses a name that two
+  environments of the workspace share, listing their ids; pass the id.
+- Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
+  system libraries; Ubuntu 22.04 and 24.04 are no longer release targets. The
+  AppImage uses the host's `libwayland-client`.
+- Windows 7 is no longer supported (Tauri 2.12 builds with `windows` 0.62 and
+  `webview2-com` 0.39).
+- Rust code: `SecretResolver` methods no longer have default
+  implementations, so a wrapping resolver must forward each one.
+
 ## 0.1.5
 
 0.1.5 keeps the database schema and the bundle and backup formats of 0.1.4;

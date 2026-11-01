@@ -25,8 +25,11 @@ mod specs_load;
 use anvil_app::exec::SendOptions;
 use anvil_app::port::ImportApproval;
 use anvil_app::profiles::{ProfileManager, Unlock};
+use anvil_app::workspace::GatewaySave;
 use anvil_app::{App, AppError};
+use anvil_contract::terminal_safe;
 use anvil_domain::diagnostics::{Confidence, Severity};
+use anvil_domain::execution::DispatchState;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::{
     ApplicationState, AssertionState, ProtocolStatus, TransportState, WsExtensions, WsNegotiation, WsViolationKind,
@@ -356,9 +359,17 @@ struct SendArgs {
     data: Option<String>,
     #[arg(long)]
     env: Option<String>,
-    /// Treat this host as a trusted Ferrum gateway for this send (lab use; plain HTTP caps confidence).
+    /// Treat this host as a trusted Ferrum gateway for this send only (lab use;
+    /// plain HTTP caps confidence). Nothing is saved: a later send is not
+    /// trusted unless it passes the flag again or `--save-trust` was given.
     #[arg(long)]
     trust_ferrum: Option<String>,
+    /// With --trust-ferrum: also save the host as a Ferrum gateway profile in
+    /// the workspace, so later sends to it (and exports of the workspace)
+    /// trust it too. It is saved after the send, and only if the request was
+    /// sent to that host.
+    #[arg(long, requires = "trust_ferrum")]
+    save_trust: bool,
     /// Print the full execution record as JSON.
     #[arg(long)]
     json: bool,
@@ -681,6 +692,72 @@ fn early_data_line(e: &anvil_domain::execution::EarlyDataObservation) -> String 
     }
     parts.push(format!("{} ticket(s) received", e.tickets_received));
     parts.join(", ")
+}
+
+/// The host `--trust-ferrum` names, as the engine compares hosts: trimmed,
+/// lowercased, an IPv6 address without its brackets. A URL, a path or a
+/// `host:port` is refused: the profile covers the host on every port.
+fn trust_host(raw: &str) -> Result<String> {
+    let h = raw.trim();
+    let h = h.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(h);
+    // URL parsing would drop a path (`/` or `\`), query, fragment or user
+    // part and keep the host, so they are refused rather than ignored.
+    if h.is_empty()
+        || h.contains("://")
+        || h.contains(['/', '\\', '?', '#', '@', '[', ']'])
+        || h.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        bail!("--trust-ferrum takes a host name or address, not a URL: '{}'", terminal_safe(raw));
+    }
+    if h.contains('*') {
+        bail!("--trust-ferrum takes one host, not a pattern: '{}' (a saved profile can name *.suffix)", terminal_safe(raw));
+    }
+    if h.matches(':').count() == 1 {
+        bail!("--trust-ferrum takes a host without a port (its profile covers every port): '{}'", terminal_safe(raw));
+    }
+    // The engine's own URL parsing gives the host as it compares targets
+    // (domains lowercased and punycoded, IPv6 compressed, no brackets).
+    let bracketed = if h.contains(':') { format!("[{h}]") } else { h.to_string() };
+    let host = anvil_engine::prepare::parse_target(&format!("http://{bracketed}/"), &["http"], &mut Vec::new())
+        .map(|t| t.host)
+        .map_err(|_| anyhow!("--trust-ferrum takes a host name or address: '{}' is not one", terminal_safe(raw)))?;
+    // Parsing decodes percent escapes: `%2A.example.com` is `*.example.com`.
+    if host.contains('*') {
+        bail!("--trust-ferrum takes one host, not a pattern: '{}' (a saved profile can name *.suffix)", terminal_safe(raw));
+    }
+    Ok(host)
+}
+
+/// A saved Ferrum gateway profile of `ws` that covers `host` on every port,
+/// as the engine matches hosts.
+fn covering_gateway(app: &App, ws: &anvil_domain::Id, host: &str) -> Result<Option<IntegrationProfile>> {
+    Ok(app.integrations(ws)?.into_iter().find(|i| anvil_app::workspace::covers_host(i, host)))
+}
+
+/// Where the send's dispatched attempts (request bytes written, or maybe
+/// written) went, as far as the record says: whether one went to `host`
+/// itself (not only to another hop, such as a redirect's other host), and
+/// whether one's host cannot be read because the record redacts it (a
+/// secret in the URL's host).
+fn dispatched_to(record: &anvil_domain::execution::ExecutionRecord, host: &str) -> (bool, bool) {
+    const SCHEMES: &[&str] = &["http", "https", "ws", "wss", "grpc", "grpcs", "tcp", "tls", "udp", "dtls"];
+    let mut sent_to_host = false;
+    let mut redacted = false;
+    for a in record.attempts.iter().filter(|a| a.dispatch != DispatchState::NotDispatched) {
+        let rest = a.url.split_once("://").map_or(a.url.as_str(), |(_, r)| r);
+        let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        // A redacted host proves nothing, even one that parses as `host`
+        // (the marker is a valid IDNA label).
+        if authority.contains(anvil_domain::secret::REDACTED) {
+            redacted = true;
+            continue;
+        }
+        match anvil_engine::prepare::parse_target(&a.url, SCHEMES, &mut Vec::new()) {
+            Ok(t) => sent_to_host |= t.host == host,
+            Err(_) => redacted = true,
+        }
+    }
+    (sent_to_host, redacted)
 }
 
 fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
@@ -1147,28 +1224,6 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 },
             };
             let env = env::environment_id(&app, &ws, s.env.as_deref())?;
-            if let Some(host) = &s.trust_ferrum
-                && !app
-                    .integrations(&ws.meta.id)?
-                    .iter()
-                    .any(|i| matches!(&i.kind, IntegrationKind::FerrumGateway { hosts, .. } if hosts.iter().any(|h| h.host == *host)))
-            {
-                let now = chrono::Utc::now();
-                app.save_integration(IntegrationProfile {
-                    id: anvil_domain::Id::new(),
-                    workspace_id: ws.meta.id,
-                    name: format!("Ferrum gateway {host}"),
-                    kind: IntegrationKind::FerrumGateway {
-                        hosts: vec![HostBinding { host: host.clone(), port: None }],
-                        compatibility_id: anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID.into(),
-                        require_verified_tls: false,
-                        detail: None,
-                        console_url: None,
-                    },
-                    created_at: now,
-                    updated_at: now,
-                })?;
-            }
             let (rid, draft) = match (&s.request, &s.url) {
                 (Some(_), _) if s.mcp.spec().is_some() => bail!("the --mcp-* options make an ad-hoc --url request an MCP request"),
                 (Some(r), _) => (Some(app.find_request(&ws.meta.id, r)?.meta.id), None),
@@ -1185,8 +1240,42 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 }
                 (None, None) => bail!("give a saved request or --url"),
             };
+            // A saved profile covering the host on every port (as the engine
+            // matches hosts) is used as it is. Otherwise the flag's profile
+            // applies to this send; with --save-trust it is saved after the
+            // send, and only if an attempt sent the request to that host, so a
+            // send that fails locally, or went to another host, saves nothing.
+            let host = s.trust_ferrum.as_deref().map(trust_host).transpose()?;
+            let (mut trusted_gateways, mut to_save) = (Vec::new(), None);
+            if let Some(host) = &host
+                && let Some(c) = covering_gateway(&app, &ws.meta.id, host)?
+            {
+                if s.save_trust {
+                    eprintln!("Ferrum gateway profile '{}' already covers {host}: nothing saved", terminal_safe(&c.name));
+                }
+            } else if let Some(host) = &host {
+                let now = chrono::Utc::now();
+                let profile = IntegrationProfile {
+                    id: anvil_domain::Id::new(),
+                    workspace_id: ws.meta.id,
+                    name: if s.save_trust { format!("Ferrum gateway {host}") } else { format!("Ferrum gateway {host} (this send only)") },
+                    kind: IntegrationKind::FerrumGateway {
+                        hosts: vec![HostBinding { host: host.clone(), port: None }],
+                        compatibility_id: anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID.into(),
+                        require_verified_tls: false,
+                        detail: None,
+                        console_url: None,
+                    },
+                    created_at: now,
+                    updated_at: now,
+                };
+                if s.save_trust {
+                    to_save = Some(profile.clone());
+                }
+                trusted_gateways.push(profile);
+            }
             let cancel = CancellationToken::new();
-            let c2 = cancel.clone();
+            let (c2, cancelled) = (cancel.clone(), cancel.clone());
             tokio::spawn(async move {
                 if tokio::signal::ctrl_c().await.is_ok() {
                     c2.cancel();
@@ -1202,6 +1291,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                         record_history: !s.no_history,
                         send_anyway: s.send_anyway,
                         run_override: send_override(s),
+                        trusted_gateways,
                         ..Default::default()
                     },
                     EventCtx::none(),
@@ -1211,6 +1301,39 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 .context("send")?;
             print_outcome(&out, s.json);
             let o = &out.record.outcome;
+            if let (Some(p), Some(host)) = (to_save, &host) {
+                if cancelled.is_cancelled() {
+                    eprintln!("did not save Ferrum gateway profile '{}': the send was cancelled", p.name);
+                } else if let (false, redacted) = dispatched_to(&out.record, host) {
+                    if redacted {
+                        eprintln!(
+                            "did not save Ferrum gateway profile '{}': the record redacts the host the request went to, so it cannot show the request reached {host}",
+                            p.name
+                        );
+                    } else {
+                        eprintln!(
+                            "did not save Ferrum gateway profile '{}': no request was sent to {host} (does --trust-ferrum name the URL's host?)",
+                            p.name
+                        );
+                    }
+                } else {
+                    let name = p.name.clone();
+                    match app
+                        .save_gateway_unless_covered(p, host)
+                        .context("the send finished, but saving its Ferrum gateway profile failed")?
+                    {
+                        GatewaySave::Saved(_) => {
+                            eprintln!(
+                                "saved Ferrum gateway profile '{name}' in '{}': later sends to {host} are trusted",
+                                terminal_safe(&ws.name)
+                            )
+                        }
+                        GatewaySave::Covered(c) => {
+                            eprintln!("did not save Ferrum gateway profile '{name}': '{}' now covers {host}", terminal_safe(&c.name))
+                        }
+                    }
+                }
+            }
             Ok(if o.assertions == AssertionState::Fail {
                 2
             } else if o.transport != TransportState::Completed || o.application == ApplicationState::Failure {

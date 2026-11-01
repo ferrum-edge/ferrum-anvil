@@ -5,7 +5,7 @@ use crate::cleanup::{ATTACHMENT_GRACE, UndecodableObject};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
-use anvil_domain::integration::IntegrationProfile;
+use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::request::{AttachmentRef, Protocol, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
@@ -869,6 +869,22 @@ impl App {
         Ok(p)
     }
 
+    /// Save `p` (a Ferrum gateway profile for `host`) unless a saved profile
+    /// of its workspace already covers `host` on every port
+    /// ([`covers_host`]). The check and the save are one write transaction,
+    /// so concurrent saves for one host leave one profile.
+    pub fn save_gateway_unless_covered(&self, mut p: IntegrationProfile, host: &str) -> Result<GatewaySave> {
+        p.updated_at = chrono::Utc::now();
+        Ok(self.store.atomically(|s| {
+            let saved: Vec<IntegrationProfile> = s.list(kind::INTEGRATION, Some(&p.workspace_id))?;
+            if let Some(c) = saved.into_iter().find(|i| covers_host(i, host)) {
+                return Ok(GatewaySave::Covered(c));
+            }
+            s.put(kind::INTEGRATION, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
+            Ok(GatewaySave::Saved(p))
+        })?)
+    }
+
     /// Delete a Ferrum gateway profile: sends to its hosts are no longer
     /// trusted as a Ferrum gateway unless another profile matches them (trust
     /// follows the remaining profiles' hosts). Settings that name it by id
@@ -1327,6 +1343,22 @@ fn attachment_stored_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::
 fn unstored(sha256: &str) -> AppError {
     let short = sha256.get(..12).unwrap_or(sha256);
     AppError::Invalid(format!("an attached file (sha256 {short}...) is no longer stored; attach it again, then save"))
+}
+
+/// What [`App::save_gateway_unless_covered`] did.
+pub enum GatewaySave {
+    /// The profile was saved.
+    Saved(IntegrationProfile),
+    /// This saved profile already covers the host, so nothing was saved.
+    Covered(IntegrationProfile),
+}
+
+/// Whether Ferrum gateway profile `p` covers `host` on every port: a binding
+/// without a port whose host matches as the engine matches hosts (the same
+/// name or a `*.suffix` over it, case ignored).
+pub fn covers_host(p: &IntegrationProfile, host: &str) -> bool {
+    let IntegrationKind::FerrumGateway { hosts, .. } = &p.kind;
+    hosts.iter().any(|h| h.port.is_none() && anvil_engine::http_exec::host_matches(&h.host, host))
 }
 
 /// Delete `requests` with their revisions, then release the stored

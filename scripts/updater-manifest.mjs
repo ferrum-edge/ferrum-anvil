@@ -19,7 +19,7 @@
 // failure exits 1 and no manifest is written. With no updater
 // artifacts the script writes nothing and exits 0.
 //
-// Platform keys follow tauri-plugin-updater 2.12, which looks up
+// Platform keys follow tauri-plugin-updater 2.14, which looks up
 // `{os}-{arch}-{installer}` and then `{os}-{arch}`. Installer-specific keys
 // are always written. The bare `{os}-{arch}` key is written only for macOS,
 // whose sole updater format is the .app archive: on Linux it would hand the

@@ -49,7 +49,9 @@ pub struct Prepared {
     pub epoch: SensitiveEpoch,
 }
 
-fn host_matches(pattern: &str, host: &str) -> bool {
+/// Whether a profile's host `pattern` (a name, or `*.suffix` for any name
+/// under it) matches `host`, case ignored.
+pub fn host_matches(pattern: &str, host: &str) -> bool {
     let p = pattern.to_ascii_lowercase();
     let h = host.to_ascii_lowercase();
     match p.strip_prefix("*.") {
