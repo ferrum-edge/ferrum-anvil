@@ -325,6 +325,16 @@ catalog whose id equals the profile's `compatibility_id`:
   profile. A send that fails before anything is sent, never reached
   `HOST`, or was cancelled (Ctrl-C) saves nothing; when it produced a
   record, Anvil says why.
+- `anvil gateway list WORKSPACE` lists a workspace's profiles (id, name,
+  catalog, hosts, and whether trust needs verified TLS), and `anvil gateway
+  remove WORKSPACE PROFILE` (id, or a name no other profile has) removes
+  one; the desktop app's Connection profiles dialog has **Remove gateway**
+  on a saved profile (after an in-window prompt). Sends to its hosts are
+  then untrusted unless another profile matches them: trust and the G01
+  lookup follow the hosts of the profiles that remain. Settings that name
+  the profile (`integration_profile_id`, on the workspace, a folder or a
+  request) keep the id, which then matches no profile, and a vault secret
+  its lookup credential names is kept.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

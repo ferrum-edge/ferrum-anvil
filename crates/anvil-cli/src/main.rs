@@ -17,6 +17,7 @@
 mod collection;
 mod drift;
 mod env;
+mod gateway;
 mod input;
 mod lint;
 mod specs_load;
@@ -80,6 +81,12 @@ enum Cmd {
     Env {
         #[command(subcommand)]
         cmd: env::EnvCmd,
+    },
+    /// List and remove a workspace's Ferrum gateway profiles (the hosts
+    /// whose Ferrum markers Anvil trusts).
+    Gateway {
+        #[command(subcommand)]
+        cmd: gateway::GatewayCmd,
     },
     /// Save a request into a workspace.
     Add(AddArgs),
@@ -1336,6 +1343,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             })
         }
         Cmd::Env { cmd } => env::env_cmd(&app, cmd),
+        Cmd::Gateway { cmd } => gateway::gateway_cmd(&app, cmd),
         Cmd::McpDiscover(a) => mcp_discover(&app, a).await,
         Cmd::Run(a) => collection::run_collection(&app, a).await,
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),

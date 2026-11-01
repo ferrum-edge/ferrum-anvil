@@ -32,6 +32,7 @@ import type {
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
 import { Modal, SecretField, Tabs, humanize, uid } from "./ui";
+import { useConfirm } from "./Confirm";
 import { Icon, type IconName } from "./icons";
 import { displayPath } from "./LinkedFile";
 import { UpdateSettings } from "./Update";
@@ -256,11 +257,29 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   const [ints, setInts] = useState<IntegrationProfile[]>([]);
   const [editing, setEditing] = useState<{ kind: PTab; value: TlsProfile | ProxyProfile | IntegrationProfile } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const { confirm, prompt, open: asking } = useConfirm();
+  const removeButton = useRef<HTMLButtonElement>(null);
+  // The profiles whose removal is being written: none can be saved (which
+  // would put it back) or removed again until its own removal settles.
+  const [removing, setRemoving] = useState<ReadonlySet<string>>(new Set());
+  // The profiles removed in this dialog: a refresh that read the list before
+  // a removal was written, and answers after it, must not list them again
+  // (Save would then put a removed gateway back).
+  const removed = useRef(new Set<string>());
+  // Focus goes back to Remove gateway after a cancelled prompt, once this
+  // dialog is no longer inert (an inert element cannot take the focus).
+  const [cancelled, setCancelled] = useState(0);
+  useEffect(() => {
+    if (cancelled && !asking) {
+      removeButton.current?.focus();
+      setCancelled(0);
+    }
+  }, [cancelled, asking]);
   const load = async () => {
     const [a, b, c] = await Promise.all([api.tlsProfiles(props.workspaceId), api.proxyProfiles(props.workspaceId), api.integrations(props.workspaceId)]);
     setTls(a);
     setProxy(b);
-    setInts(c);
+    setInts(c.filter((p) => !removed.current.has(p.id)));
   };
   useEffect(() => {
     void load();
@@ -280,84 +299,143 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       setErr(String((e as Error).message));
     }
   };
-  return (
-    <Modal
-      title="Connection profiles"
-      wide
-      onClose={props.onClose}
-      footer={
-        editing ? (
-          <>
-            <button className="btn" onClick={() => setEditing(null)}>
-              <Icon name="chevronLeft" size={14} />
-              Back
-            </button>
-            <span className="spacer" />
-            <button className="btn primary" onClick={saveIt}>
-              Save profile
-            </button>
-          </>
-        ) : undefined
+  // A saved gateway profile can be removed; a new one is only discarded.
+  const removable = editing?.kind === "ferrum" && ints.some((p) => p.id === editing.value.id);
+  const removeIt = async () => {
+    if (!editing) return;
+    const id = editing.value.id;
+    // The saved name: the one being removed, not an unsaved edit of it.
+    const name = ints.find((p) => p.id === id)?.name ?? (editing.value as IntegrationProfile).name;
+    const ok = await confirm(`Remove gateway “${name}”? Sends to its hosts are no longer trusted as a Ferrum gateway unless another profile matches them.`, {
+      title: "Remove gateway",
+      kind: "warning",
+      okLabel: "Remove",
+    });
+    if (!ok) {
+      setCancelled((n) => n + 1);
+      return;
+    }
+    setErr(null);
+    setRemoving((s) => new Set(s).add(id));
+    try {
+      try {
+        await api.deleteIntegration(id);
+      } catch (e) {
+        setErr(String((e as Error).message));
+        return;
       }
-    >
-      {!editing && (
-        <>
-          <Tabs
-            tabs={[
-              { id: "tls" as PTab, label: "TLS & client certificates", count: tls.length },
-              { id: "proxy" as PTab, label: "Proxies", count: proxy.length },
-              { id: "ferrum" as PTab, label: "Ferrum gateways", count: ints.length },
-            ]}
-            value={tab}
-            onChange={setTab}
-          />
-          {tab === "tls" && (
-            <ProfileList
-              icon="shield"
-              newLabel="New TLS profile"
-              empty="No TLS profiles. Requests use the system trust store with verification on."
-              items={tls.map((p) => ({
-                id: p.id,
-                name: p.name,
-                warn: p.verify === false ? "verification off" : undefined,
-                meta: `${p.verify === false ? "verification off" : "verification on"}${spiffeLabel(p)} · ${p.client_identity ? `client cert (${p.client_identity.format})` : "no client cert"} · ${(p.extra_roots_pem ?? []).length} extra CA${p.server_name_override ? ` · SNI ${p.server_name_override}` : ""}`,
-              }))}
-              onEdit={(id) => setEditing({ kind: "tls", value: tls.find((p) => p.id === id)! })}
-              onNew={() => setEditing({ kind: "tls", value: { ...base, name: "New TLS profile", verify: true, use_system_roots: true, extra_roots_pem: [], bindings: [], min_version: "tls12" } })}
-            />
-          )}
-          {tab === "proxy" && (
-            <ProfileList
-              icon="globe"
-              newLabel="New proxy"
-              empty="No proxies. Requests connect directly unless a proxy is chosen."
-              items={proxy.map((p) => ({ id: p.id, name: p.name, meta: `${p.kind === "hbone" ? "HBONE" : p.kind} ${p.address}${p.tls_profile_id ? ` · TLS: ${tls.find((t) => t.id === p.tls_profile_id)?.name ?? "missing profile"}` : ""}${p.no_proxy ? ` · bypass: ${p.no_proxy}` : ""}` }))}
-              onEdit={(id) => setEditing({ kind: "proxy", value: proxy.find((p) => p.id === id)! })}
-              onNew={() => setEditing({ kind: "proxy", value: { ...base, name: "New proxy", kind: "http", address: "127.0.0.1:8080", no_proxy: "localhost,127.0.0.1" } })}
-            />
-          )}
-          {tab === "ferrum" && (
+      // Removed: drop it here at once, and from every later refresh, so a
+      // failed or late refresh cannot leave it listed (and savable back).
+      // Close the editor only if it still shows it: a slow delete must not
+      // close another draft opened meanwhile.
+      removed.current.add(id);
+      setInts((cur) => cur.filter((p) => p.id !== id));
+      setEditing((cur) => (cur?.value.id === id ? null : cur));
+      props.onChanged();
+      try {
+        await load();
+      } catch (e) {
+        setErr(`Removed, but the list could not be refreshed: ${String((e as Error).message)}`);
+      }
+    } finally {
+      setRemoving((s) => {
+        const left = new Set(s);
+        left.delete(id);
+        return left;
+      });
+    }
+  };
+  // While a prompt shows, this dialog is inert (focus and clicks stay in the
+  // prompt), and Escape answers the prompt, not this dialog too.
+  return (
+    <>
+      <div inert={asking}>
+        <Modal
+          title="Connection profiles"
+          wide
+          onClose={() => !asking && props.onClose()}
+          footer={
+            editing ? (
+              <>
+                <button className="btn" onClick={() => setEditing(null)}>
+                  <Icon name="chevronLeft" size={14} />
+                  Back
+                </button>
+                {removable && (
+                  <button className="btn ghost danger" ref={removeButton} disabled={removing.has(editing.value.id)} onClick={removeIt}>
+                    <Icon name="trash" size={14} />
+                    Remove gateway
+                  </button>
+                )}
+                <span className="spacer" />
+                <button className="btn primary" disabled={removing.has(editing.value.id)} onClick={saveIt}>
+                  Save profile
+                </button>
+              </>
+            ) : undefined
+          }
+        >
+          {!editing && (
             <>
-              <p className="hint">
-                Declaring a destination as a Ferrum Edge gateway lets Anvil treat its <code>X-Gateway-Error</code> markers as gateway-authored (still coarse). Without a profile, the same header from any server is only a “Ferrum-like marker”.
-              </p>
-              <ProfileList
-                icon="layers"
-                newLabel="New gateway"
-                empty="No gateways declared."
-                items={ints.map((p) => ({ id: p.id, name: p.name, meta: `${p.compatibility_id} · ${p.hosts.map((h) => h.host + (h.port ? `:${h.port}` : "")).join(", ")}${p.require_verified_tls === false ? " · plain-HTTP trust (lab)" : ""}` }))}
-                onEdit={(id) => setEditing({ kind: "ferrum", value: ints.find((p) => p.id === id)! })}
-                onNew={() => setEditing({ kind: "ferrum", value: { ...base, name: "My gateway", kind: "ferrum_gateway", hosts: [{ host: "gateway.example.com" }], compatibility_id: FERRUM_COMPATIBILITY[0].id, require_verified_tls: true } })}
+              <Tabs
+                tabs={[
+                  { id: "tls" as PTab, label: "TLS & client certificates", count: tls.length },
+                  { id: "proxy" as PTab, label: "Proxies", count: proxy.length },
+                  { id: "ferrum" as PTab, label: "Ferrum gateways", count: ints.length },
+                ]}
+                value={tab}
+                onChange={setTab}
               />
+              {tab === "tls" && (
+                <ProfileList
+                  icon="shield"
+                  newLabel="New TLS profile"
+                  empty="No TLS profiles. Requests use the system trust store with verification on."
+                  items={tls.map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    warn: p.verify === false ? "verification off" : undefined,
+                    meta: `${p.verify === false ? "verification off" : "verification on"}${spiffeLabel(p)} · ${p.client_identity ? `client cert (${p.client_identity.format})` : "no client cert"} · ${(p.extra_roots_pem ?? []).length} extra CA${p.server_name_override ? ` · SNI ${p.server_name_override}` : ""}`,
+                  }))}
+                  onEdit={(id) => setEditing({ kind: "tls", value: tls.find((p) => p.id === id)! })}
+                  onNew={() => setEditing({ kind: "tls", value: { ...base, name: "New TLS profile", verify: true, use_system_roots: true, extra_roots_pem: [], bindings: [], min_version: "tls12" } })}
+                />
+              )}
+              {tab === "proxy" && (
+                <ProfileList
+                  icon="globe"
+                  newLabel="New proxy"
+                  empty="No proxies. Requests connect directly unless a proxy is chosen."
+                  items={proxy.map((p) => ({ id: p.id, name: p.name, meta: `${p.kind === "hbone" ? "HBONE" : p.kind} ${p.address}${p.tls_profile_id ? ` · TLS: ${tls.find((t) => t.id === p.tls_profile_id)?.name ?? "missing profile"}` : ""}${p.no_proxy ? ` · bypass: ${p.no_proxy}` : ""}` }))}
+                  onEdit={(id) => setEditing({ kind: "proxy", value: proxy.find((p) => p.id === id)! })}
+                  onNew={() => setEditing({ kind: "proxy", value: { ...base, name: "New proxy", kind: "http", address: "127.0.0.1:8080", no_proxy: "localhost,127.0.0.1" } })}
+                />
+              )}
+              {tab === "ferrum" && (
+                <>
+                  <p className="hint">
+                    Declaring a destination as a Ferrum Edge gateway lets Anvil treat its <code>X-Gateway-Error</code> markers as gateway-authored (still coarse). Without a profile, the same header from any server is only a “Ferrum-like marker”.
+                  </p>
+                  <ProfileList
+                    icon="layers"
+                    newLabel="New gateway"
+                    empty="No gateways declared."
+                    items={ints.map((p) => ({ id: p.id, name: p.name, meta: `${p.compatibility_id} · ${p.hosts.map((h) => h.host + (h.port ? `:${h.port}` : "")).join(", ")}${p.require_verified_tls === false ? " · plain-HTTP trust (lab)" : ""}` }))}
+                    onEdit={(id) => setEditing({ kind: "ferrum", value: ints.find((p) => p.id === id)! })}
+                    onNew={() => setEditing({ kind: "ferrum", value: { ...base, name: "My gateway", kind: "ferrum_gateway", hosts: [{ host: "gateway.example.com" }], compatibility_id: FERRUM_COMPATIBILITY[0].id, require_verified_tls: true } })}
+                  />
+                </>
+              )}
             </>
           )}
-        </>
-      )}
-      {editing?.kind === "tls" && <TlsForm p={editing.value as TlsProfile} onChange={(value) => setEditing({ kind: "tls", value })} />}
-      {editing?.kind === "proxy" && <ProxyForm p={editing.value as ProxyProfile} tlsProfiles={tls} onChange={(value) => setEditing({ kind: "proxy", value })} />}
-      {editing?.kind === "ferrum" && <FerrumForm p={editing.value as IntegrationProfile} onChange={(value) => setEditing({ kind: "ferrum", value })} />}
-      {err && <div className="bad-box">{err}</div>}
-    </Modal>
+          {editing?.kind === "tls" && <TlsForm p={editing.value as TlsProfile} onChange={(value) => setEditing({ kind: "tls", value })} />}
+          {editing?.kind === "proxy" && <ProxyForm p={editing.value as ProxyProfile} tlsProfiles={tls} onChange={(value) => setEditing({ kind: "proxy", value })} />}
+          {editing?.kind === "ferrum" && <FerrumForm p={editing.value as IntegrationProfile} onChange={(value) => setEditing({ kind: "ferrum", value })} />}
+          {err && <div className="bad-box">{err}</div>}
+        </Modal>
+      </div>
+      {prompt}
+    </>
   );
 }
 

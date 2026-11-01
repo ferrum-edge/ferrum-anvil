@@ -943,6 +943,35 @@ describe("closing a tab with backend work", () => {
     await waitFor(() => expect(openTabs().queryByRole("tab", { name: /Alpha/ })).toBeNull());
   });
 
+  it("leaves a request in flight alone while a dialog takes Escape", async () => {
+    backend();
+    await boot();
+    await openTab("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+    const execId = calls("send_request")[0].executionId;
+
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByRole("dialog", { name: "Connection profiles" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connection profiles" })).toBeNull());
+    expect(calls("cancel_execution")).toHaveLength(0);
+    // With no dialog showing, Escape cancels it.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(calls("cancel_execution")).toEqual([{ executionId: execId }]));
+  });
+
+  it("still locks with ⌘/Ctrl+L while a dialog shows", async () => {
+    backend();
+    const onLock = vi.fn();
+    render(<Workbench onLock={onLock} profileName="test" />);
+    await screen.findByRole("treeitem", { name: /Alpha/ });
+    fireEvent.click(screen.getByRole("button", { name: "Profiles" }));
+    await screen.findByRole("dialog", { name: "Connection profiles" });
+    fireEvent.keyDown(window, { key: "l", ctrlKey: true });
+    expect(onLock).toHaveBeenCalledTimes(1);
+  });
+
   it("stops a live session when its request is deleted", async () => {
     backend({ request_delete: (a) => void delete requests[a.requestId as string] });
     await boot();

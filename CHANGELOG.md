@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- Ferrum gateway profiles can be removed. `anvil gateway list WORKSPACE`
+  lists a workspace's profiles, `anvil gateway remove WORKSPACE PROFILE`
+  removes one (by id, or by a name no other profile has), and the desktop
+  app's Connection profiles dialog has **Remove gateway** on a saved profile.
+  A send to the removed profile's hosts is no longer trusted as a Ferrum
+  gateway unless another profile matches them. Use it to remove a
+  "Ferrum gateway HOST" profile that `anvil send --trust-ferrum HOST` saved
+  before it stopped saving one (see Security).
+
+### Security
+
+- `anvil send --trust-ferrum HOST` trusts `HOST` as a Ferrum gateway for that
+  send only. It used to save a "Ferrum gateway HOST" profile in the workspace
+  without saying so, so every later send, `anvil run` and export trusted the
+  host as well, though the flag's help said "for this send". Pass the new
+  `--save-trust` with `--trust-ferrum` to save the profile on purpose; Anvil
+  then says it saved it, and saves nothing when the send fails before anything
+  is sent or never reaches the host. When a saved profile already covers the
+  host on every port (as the engine matches hosts, wildcards and case
+  included), the flag adds nothing and the saved profiles apply as without it;
+  one bound to another port no longer silently cancels the flag. Profiles the
+  old behavior saved stay in their workspace and are still trusted until
+  removed.
+
 ## [0.1.6] - 2026-11-01
 
 Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a
@@ -27,18 +53,6 @@ before upgrading.
 
 ### Security
 
-- `anvil send --trust-ferrum HOST` trusts `HOST` as a Ferrum gateway for that
-  send only. It used to save a "Ferrum gateway HOST" profile in the workspace
-  without saying so, so every later send, `anvil run` and export trusted the
-  host as well, though the flag's help said "for this send". Pass the new
-  `--save-trust` with `--trust-ferrum` to save the profile on purpose; Anvil
-  then says it saved it, and saves nothing when the send fails before anything
-  is sent or never reaches the host. When a saved profile already covers the
-  host on every port (as the engine matches hosts, wildcards and case
-  included), the flag adds nothing and the saved profiles apply as without it;
-  one bound to another port no longer silently cancels the flag. Profiles the
-  old behavior saved stay in their workspace and are still trusted until
-  removed.
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange

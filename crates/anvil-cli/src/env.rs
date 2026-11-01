@@ -141,7 +141,7 @@ pub fn environment_id(app: &App, ws: &Workspace, name: Option<&str>) -> Result<O
 
 /// The workspace `id_or_name` names: its id, or its name with case ignored
 /// when no other workspace has it. A secret is never written on a guess.
-fn find_workspace(app: &App, id_or_name: &str) -> Result<Workspace> {
+pub(crate) fn find_workspace(app: &App, id_or_name: &str) -> Result<Workspace> {
     let mut all = app.workspaces()?;
     if let Some(i) = all.iter().position(|w| w.meta.id.to_string() == id_or_name) {
         return Ok(all.swap_remove(i));

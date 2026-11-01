@@ -186,6 +186,7 @@ pub fn run() {
             commands::proxy_profile_save,
             commands::integrations_list,
             commands::integration_save,
+            commands::integration_delete,
             commands::settings_get,
             commands::settings_save,
             commands::storage_cleanup_last,
