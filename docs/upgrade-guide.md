@@ -4,22 +4,46 @@
 
 ### Before you upgrade
 
-If you may want to go back to 0.1.5 or earlier, keep a copy before opening
-the profile with 0.1.6:
+If you may want to go back to 0.1.5 or earlier, keep a copy of each profile
+with your current build before opening it with 0.1.6. An earlier build cannot
+open the profile once 0.1.6 has enrolled it, and the checkpoint 0.1.6 takes
+before it migrates the database is deleted when enrollment rotates the data
+key (below), so it is not a way back. Use one of these:
 
-- **Passphrase profile:** close every copy of Anvil and copy the profile
-  directory somewhere outside the data directory, or export a portable bundle
-  with your current build. The copied directory keeps the old passphrase and
-  recovery-key wraps, so the earlier build unlocks it with the old passphrase
-  or recovery key.
-- **OS-keychain profile:** export a portable bundle with your current build. A
-  copy of the directory alone is not enough: the profile has no passphrase or
-  recovery-key wrap, only its OS keychain entry, and enrollment deletes that
-  entry (or overwrites it with a keyless marker), so the copy can no longer be
-  unlocked.
+- **Full backup** (any profile): in the desktop, **Export** → **Whole app
+  backup**; in the CLI, `anvil export --mode backup --out FILE` with the export
+  passphrase in `ANVIL_EXPORT_PASSPHRASE`. It keeps everything in the profile
+  (workspaces with their vault secrets, attachments, history, load reports,
+  app settings and API standards rulesets), encrypted with the export
+  passphrase you choose. Restoring it needs only that passphrase, not the
+  profile's passphrase, recovery key or OS keychain entry. A 0.1.5 build
+  restores it into a new profile (`anvil import FILE` with the same
+  `ANVIL_EXPORT_PASSPHRASE`, or **Import** in the desktop). See
+  [Full backups](storage-and-recovery.md#full-backups).
+- **Encrypted-transfer bundle** (any profile): in the desktop, **Export** →
+  **This workspace** → **Encrypted transfer**, one workspace at a time; in the
+  CLI, `anvil export --mode encrypted --out FILE` (every workspace, or one
+  with `--workspace`) with `ANVIL_EXPORT_PASSPHRASE`. It keeps the workspaces
+  with their vault secrets and literal secrets, encrypted with the export
+  passphrase, but not app settings, load reports or spec-import records. A
+  bundle exported by 0.1.6 still imports into an earlier build, so this one can
+  also be made after upgrading. See
+  [Export and import](storage-and-recovery.md#export-and-import).
+- **Copy of the profile directory** (passphrase profiles only): close every
+  copy of Anvil and copy the profile directory somewhere outside the data
+  directory. The copy keeps the old passphrase and recovery-key wraps, so the
+  earlier build unlocks it with the old passphrase or recovery key, with
+  nothing lost. This does not work for an OS-keychain profile: it has no
+  passphrase or recovery-key wrap, only its OS keychain entry, and enrollment
+  deletes that entry (or overwrites it with a keyless marker), so the copy can
+  no longer be unlocked.
 
-The checkpoint 0.1.6 takes before it migrates the database is deleted when
-enrollment rotates the data key (below), so it is not a way back.
+Do not rely on a **Share safely** export, the default mode of `anvil export`:
+it leaves out vault secrets and turns literal secrets into placeholders. A
+restored backup or imported bundle names linked local files by path only, so
+choose those files again, and a workspace written by an import or restore does
+not use this device's workload identity until you allow it again in the
+workspace's settings.
 
 ### Policy enrollment
 
@@ -42,8 +66,15 @@ data key and re-encrypts the profile's active data:
     --confirm-replace-unknown-policy --new-passphrase-stdin
   ```
 
-  For an OS-keychain profile omit `--passphrase-stdin`; to enroll with the
-  recovery key use `--recovery-key-stdin` instead.
+  For an OS-keychain profile omit `--passphrase-stdin`. To enroll with the
+  recovery key, leave out the global `--passphrase-stdin` and pass
+  `--recovery-key-stdin` to `enroll-policy`; the first stdin line is then the
+  current recovery key:
+
+  ```sh
+  anvil --profile PROFILE profile enroll-policy --recovery-key-stdin \
+    --confirm-replace-unknown-policy --new-passphrase-stdin
+  ```
 
 After enrollment only the new passphrase and the new recovery key unlock the
 profile, and an OS-keychain profile becomes a passphrase profile. A verified
@@ -66,11 +97,12 @@ exported by 0.1.6 still imports into an earlier build.
   cannot be written, enrollment fails until space is freed. The copy is sealed
   with the old key, so enrollment's key rotation deletes it, with any older
   checkpoint.
-- To go back to an earlier build, close every copy of Anvil and either put
-  back a passphrase profile's directory copy (unlock it with the old passphrase
-  or recovery key), or import the portable bundle into the earlier build. A
-  directory copy of an OS-keychain profile cannot be unlocked after enrollment.
-  Everything changed since the copy is lost.
+- To go back to an earlier build, close every copy of Anvil and either
+  restore the full backup or import the encrypted-transfer bundle into a new
+  profile of the earlier build, or put back a passphrase profile's directory
+  copy and unlock it with the old passphrase or recovery key (see
+  [Before you upgrade](#before-you-upgrade)). Everything changed since the
+  copy was made is lost.
 
 ### Behaviour changes
 
@@ -86,6 +118,8 @@ has the full list.
 - Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
   system libraries; Ubuntu 22.04 and 24.04 are no longer release targets. The
   AppImage uses the host's `libwayland-client`.
+- Windows 7 is no longer supported (Tauri 2.12 builds with `windows` 0.62 and
+  `webview2-com` 0.39).
 - Rust code: `SecretResolver` methods no longer have default
   implementations, so a wrapping resolver must forward each one.
 

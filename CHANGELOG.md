@@ -10,8 +10,9 @@ published advisories, JWT and DTLS signing move to AWS-LC, a collection run no l
 secret in place of an ordinary variable, and `anvil env` fills in imported variables from the
 command line. Each existing profile must be enrolled before first use: enrollment rotates its data
 key, needs a new passphrase and recovery key, and moves the profile to database schema 6, which
-earlier builds cannot open. Linux installers now target Ubuntu 26.04. Read the Breaking section
-below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
+earlier builds cannot open. Linux installers now target Ubuntu 26.04, and Windows 7 is no longer
+supported. Read the Breaking section below and the [upgrade guide](docs/upgrade-guide.md#016)
+before upgrading.
 
 ### Added
 
@@ -92,7 +93,7 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   command responses are bound to the webview that created them). Behavior
   changes:
   - Windows builds use `windows` 0.62 and WebView2 `webview2-com` 0.39, which
-    drop Windows 7 support.
+    drop Windows 7 support; see Breaking.
   - The Linux AppImage no longer forces `GDK_BACKEND=x11`: on a Wayland
     session it uses GTK's Wayland backend. Setting `GDK_BACKEND=x11`
     restores the old behavior.
@@ -158,10 +159,12 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   existing profiles must be enrolled before use (see Breaking). Offline portable backups
   remain compatible; complete authentic local snapshot rollback is not prevented.
 
-- Update the desktop E2E Tauri service to 1.5.0, whose supported WebdriverIO
-  dependencies use patched deepmerge-ts 8.0.2. This removes the development-only
-  GHSA-ggr8-5vv4-36mx dependency exception without overriding deepmerge-ts across
-  a major version; production UI dependencies and the WDIO 9.32 runner stay pinned.
+- The desktop E2E Tauri service (`@wdio/tauri-service`, now 1.5.1 with Tauri
+  2.12) uses WebdriverIO dependencies with patched deepmerge-ts 8.0.2. This removes
+  the development-only GHSA-ggr8-5vv4-36mx dependency exception without overriding
+  deepmerge-ts across a major version. Production UI dependencies are unchanged;
+  `@wdio/local-runner`, `@wdio/spec-reporter` and `@wdio/types` stay at 9.32.0,
+  while `@wdio/cli` and `@wdio/mocha-framework` are at 10.1.0.
 
 - Pin Linux CI and installer builds to Ubuntu 26.04. Linux installers now target
   modern system libraries; see Breaking.
@@ -423,13 +426,15 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   blob replaces it in the attachment index, and the old one is released in the
   same transaction.
 
-- An OS-keychain profile can now rotate its data key and stay keychain-protected:
+- An OS-keychain profile can rotate its data key and stay keychain-protected:
   `anvil profile rotate-key --confirm-rotation` without `--new-passphrase-stdin`,
   `App::rotate_keychain_data_key` and `PolicyRotation::Keychain` (identity link,
-  unlink and enrollment) store the new key in a new OS credential entry before the
-  commit and retire the old entry after it. Previously every rotation converted the
-  profile to passphrase protection. `PolicyRotation` is now an enum and retired
-  credentials are recorded as `RotationPolicy::retired_keychain`.
+  unlink and enrollment) store the new key in a new OS credential entry before the commit and
+  retire the old entry after it; retired credentials are recorded as
+  `RotationPolicy::retired_keychain`. Data-key rotation and `PolicyRotation` are
+  new in 0.1.6. The desktop and CLI enroll a legacy profile with a new
+  passphrase, so enrollment there makes an OS-keychain profile a passphrase
+  profile (see Breaking).
 
 - `app.mcp_tool_error` no longer says the call reached the tool or assigns
   it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
@@ -491,13 +496,18 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   format (2), so a bundle exported by 0.1.6 still imports into earlier builds.
   The `before-schema-<version>` checkpoint taken before the migration is sealed
   with the old key and deleted when enrollment rotates the key, so it is not a
-  way back. To keep one, do this before opening the profile with 0.1.6: for a
-  passphrase profile, close every copy of Anvil and copy the profile directory
-  (it keeps the old passphrase and recovery-key wraps), or export a portable
-  bundle with the earlier build; for an OS-keychain profile, export a portable
-  bundle with the earlier build. A directory copy of an OS-keychain profile is
-  not enough: its only unlock credential is the OS keychain entry, which
-  enrollment deletes or overwrites with a keyless marker (#375, #377, #378).
+  way back. To keep one, before opening the profile with 0.1.6 export a full
+  backup with the earlier build (desktop **Export** → **Whole app backup**, or
+  `anvil export --mode backup` with `ANVIL_EXPORT_PASSPHRASE`), which keeps
+  everything and restores into a new profile of the earlier build with only
+  the export passphrase; or export an encrypted-transfer bundle (`--mode
+  encrypted`), which keeps workspaces and their secrets but not app settings
+  or load reports. A **Share safely** export, the CLI default, drops vault
+  secrets. A copy of the profile directory also works for a passphrase profile
+  (it keeps the old passphrase and recovery-key wraps), but not for an
+  OS-keychain profile: its only unlock credential is the OS keychain entry,
+  which enrollment deletes or overwrites with a keyless marker. See the
+  [upgrade guide](docs/upgrade-guide.md#before-you-upgrade) (#375, #377, #378).
 - RSA keys must be 2048–8192 bits for both signing and verification. RS256
   signing with a shorter key fails. A JWT-SVID signed by a bundle key under
   2048 bits (or over 8192) no longer verifies, and Anvil reports "the signature
@@ -508,6 +518,8 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   used (#454).
 - Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
   system libraries; Ubuntu 22.04 and 24.04 are no longer release targets (#361).
+- Windows 7 is no longer supported: Windows builds use `windows` 0.62 and
+  `webview2-com` 0.39 with Tauri 2.12 (#468).
 - Rust consumers: `anvil_engine` `SecretResolver` methods no longer have
   default implementations, so a wrapping resolver must forward each one (#376).
 - A browser sign-in authorization URL on `http://localhost` is now refused as
