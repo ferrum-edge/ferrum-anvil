@@ -24,7 +24,7 @@ members = [
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.90"
 license-file = "LICENSE"
@@ -96,7 +96,7 @@ hex = "0.4.3"
 chacha20poly1305 = "0.11.0"
 argon2 = "0.6.0"
 zeroize = { version = "1.9.0", features = ["derive"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
 keyring = { version = "4.2.0" }
 # Per-entry options for the OS store (Windows credential persistence).
 keyring-core = { version = "1.0.0" }
