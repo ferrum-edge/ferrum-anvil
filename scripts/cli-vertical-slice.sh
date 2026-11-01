@@ -21,7 +21,8 @@ A add Payments "Backend refused" --folder "Gateway/Faults" --url http://127.0.0.
 A workspace tree Payments
 
 step "machine A: send through the real gateway (trusted Ferrum profile over lab HTTP)"
-A send "Gateway/Smoke/Healthy echo" --workspace Payments --trust-ferrum 127.0.0.1 && echo "exit=0"
+# --save-trust: the later sends, the backup and machine B use this profile.
+A send "Gateway/Smoke/Healthy echo" --workspace Payments --trust-ferrum 127.0.0.1 --save-trust && echo "exit=0"
 
 step "machine A: deliberately broken backend — expect a cautious gateway diagnosis"
 set +e; A send "Gateway/Faults/Backend refused" --workspace Payments; code=$?; set -e

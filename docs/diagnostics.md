@@ -300,6 +300,31 @@ catalog whose id equals the profile's `compatibility_id`:
   another release's. Anvil reports `ferrum.catalog.unavailable` (confidence
   unknown), does no outcome matching, and reads a token only with the coarse
   meaning every audited release shares.
+- `anvil send --trust-ferrum HOST` declares a profile for that one send
+  (default catalog, plain HTTP allowed, no lookup) and saves nothing: the
+  next send to `HOST` is untrusted unless it passes the flag again. Add
+  `--save-trust` to save the profile in the workspace, which later sends,
+  `anvil run` and exports then use like any other profile. When a saved
+  profile covers `HOST` on every port (the same name or a `*.suffix` over
+  it, case ignored, as the engine matches hosts), the flag declares nothing:
+  the saved profiles apply exactly as they would without it (the first that
+  matches the target's host and port, a port-bound one included), and
+  `--save-trust` saves nothing and says so. One bound to a port does not
+  cover `HOST`. `HOST` is a host name or address, read as the engine reads a
+  URL's host (trimmed, case ignored, punycode, an IPv6 address in any
+  notation, with or without brackets); a URL, a path, `host:port` or a
+  `*` pattern is refused. Without `--save-trust` the flag's profile is named "Ferrum
+  gateway HOST (this send only)". `--save-trust` saves "Ferrum gateway HOST"
+  after the send, and only if an attempt of the send wrote the request to
+  `HOST` itself (its dispatch is not `not_dispatched`): a send that reached
+  `HOST` and was then redirected elsewhere saves it, one that only reached
+  another host first (a redirect's other end) does not. The evidence is the
+  record's attempts, whose URLs are redacted: when a secret is the URL's
+  host, Anvil cannot show the request reached `HOST` and saves nothing. The check for a covering profile is repeated in the
+  same write transaction as the save, so concurrent saves leave one
+  profile. A send that fails before anything is sent, never reached
+  `HOST`, or was cancelled (Ctrl-C) saves nothing; when it produced a
+  record, Anvil says why.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

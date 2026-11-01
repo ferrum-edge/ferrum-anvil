@@ -69,6 +69,7 @@ anvil profile create me          # passphrase via --passphrase-stdin or ANVIL_PA
 anvil workspace create Demo
 anvil add Demo "Health" --url https://example.com/health --folder Smoke
 anvil send Health --workspace Demo
+anvil send Health --workspace Demo --trust-ferrum example.com   # trust its host as a Ferrum gateway for this send only; --save-trust keeps it
 anvil import-spec Demo --file openapi.yaml
 anvil env list Demo                                        # the environments the import brought
 anvil env set Demo token --env local --secret --value-env API_TOKEN   # fill in {{token}}; import-spec prints the command

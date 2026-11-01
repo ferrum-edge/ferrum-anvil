@@ -7,7 +7,7 @@ use crate::linked_files::{LinkedFileReferrer, read_bound_file};
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
-use anvil_domain::integration::IntegrationKind;
+use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::AppSettings;
@@ -319,6 +319,12 @@ pub struct SendOptions {
     pub send_anyway: bool,
     pub record_history: bool,
     pub seed: Option<u64>,
+    /// Ferrum gateway profiles trusted for this send only (`anvil send
+    /// --trust-ferrum`). They are never saved, and come after the
+    /// workspace's saved profiles, which match first. Only those of the
+    /// send's workspace are used, and without a diagnostic reference lookup
+    /// (`detail`), so they never bring a credential.
+    pub trusted_gateways: Vec<IntegrationProfile>,
 }
 
 impl App {
@@ -510,7 +516,15 @@ impl App {
             var_layers,
             tls_profiles: read.candidates(kind::TLS_PROFILE, Some(ws_id))?,
             proxy_profiles: read.candidates(kind::PROXY_PROFILE, Some(ws_id))?,
-            integrations: read.query(kind::INTEGRATION, Some(ws_id), &[])?,
+            integrations: {
+                let mut saved: Vec<IntegrationProfile> = read.query(kind::INTEGRATION, Some(ws_id), &[])?;
+                saved.extend(opts.trusted_gateways.iter().filter(|p| p.workspace_id == *ws_id).cloned().map(|mut p| {
+                    let IntegrationKind::FerrumGateway { detail, .. } = &mut p.kind;
+                    *detail = None;
+                    p
+                }));
+                saved
+            },
             // Replaced below, once the context has passed its checks.
             secrets: Arc::new(StoreSecrets { store: self.store.clone(), workspace: *ws_id }),
             attachments: Arc::new(anvil_engine::context::MemoryAttachments::default()),
