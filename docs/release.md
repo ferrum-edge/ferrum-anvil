@@ -663,7 +663,7 @@ What it does **not** cover:
 - **Packaged-app smoke tests:** install, launch, example import and a local
   call through the release CLI are automated for the published unsigned
   packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
-  (PR runs 41189324002 and 41185287833), six of seven targets pass. The
+  (PR run 41254710916; the same result as the earlier runs 41189324002 and 41185287833), six of seven targets pass. The
   AppImage fails at its first launch: its WebKit web process aborts with
   `EGL_BAD_PARAMETER` (a package failure, fixed by ferrum-edge/ferrum-anvil#463,
   not merged yet). Not
