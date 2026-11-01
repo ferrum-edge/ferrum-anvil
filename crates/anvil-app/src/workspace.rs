@@ -870,9 +870,10 @@ impl App {
     }
 
     /// Delete a Ferrum gateway profile: sends to its hosts are no longer
-    /// trusted as a Ferrum gateway unless another profile matches them, and
-    /// a request whose settings select it by id selects none. A vault secret
-    /// its lookup credential names is kept, as other deletes keep theirs.
+    /// trusted as a Ferrum gateway unless another profile matches them (trust
+    /// follows the remaining profiles' hosts). Settings that name it by id
+    /// keep the id, which then matches no profile. A vault secret its lookup
+    /// credential names is kept, as other deletes keep theirs.
     pub fn delete_integration(&self, id: &Id) -> Result<()> {
         self.store.delete(kind::INTEGRATION, id)?;
         Ok(())

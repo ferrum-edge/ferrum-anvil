@@ -86,12 +86,16 @@ describe("Ferrum gateway profiles", () => {
     fireEvent.click(await screen.findByText(gateway.name));
     fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
     await screen.findByRole("dialog", { name: "Remove gateway" });
+    // The profiles dialog is inert under the prompt: its Save profile cannot be reached.
+    const profiles = screen.getByRole("dialog", { name: "Connection profiles", hidden: true });
+    expect(profiles.closest("[inert]")).not.toBeNull();
     // Escape answers the prompt only.
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Remove gateway" })).toBeNull());
     expect(onClose).not.toHaveBeenCalled();
     expect(calls("integration_delete")).toHaveLength(0);
-    expect(screen.getByRole("button", { name: "Remove gateway" })).toBeTruthy();
+    expect(profiles.closest("[inert]")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove gateway" }));
   });
 
   it("offers no removal for a gateway that was never saved", async () => {
