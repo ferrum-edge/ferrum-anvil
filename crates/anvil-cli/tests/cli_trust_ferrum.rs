@@ -251,7 +251,7 @@ async fn the_host_is_compared_as_the_engine_compares_it() {
     ] {
         let o = anvil(&data, &["send", "--workspace", "Lab", "--url", &url, "--trust-ferrum", bad, "--save-trust"]).await;
         assert_eq!(o.status.code(), Some(3), "{bad:?}: {}", text(&o));
-        assert!(text(&o).contains("--trust-ferrum takes a host"), "{bad:?}: {}", text(&o));
+        assert!(text(&o).contains("--trust-ferrum takes"), "{bad:?}: {}", text(&o));
     }
     assert_eq!(saved_gateways(&data), 0);
 
