@@ -199,7 +199,7 @@ async fn save_trust_saves_nothing_when_the_send_fails_locally() {
     let record: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&o)));
     assert_eq!(record["outcome"]["dispatch"], "not_dispatched", "{record}");
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(err.contains("did not save Ferrum gateway profile 'Ferrum gateway 127.0.0.1': nothing was sent to 127.0.0.1"), "{err}");
+    assert!(err.contains("did not save Ferrum gateway profile 'Ferrum gateway 127.0.0.1': no request was sent to 127.0.0.1"), "{err}");
     assert_eq!(saved_gateways(&data), 0);
     assert_eq!(trusted_as(&data, &f.url("/echo"), &[]).await, None, "a later send was trusted");
 }
@@ -207,18 +207,21 @@ async fn save_trust_saves_nothing_when_the_send_fails_locally() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn save_trust_saves_nothing_when_the_send_went_to_another_host() {
     let (_dir, data, f) = setup().await;
+    let url = f.url("/echo");
+    let expected = "did not save Ferrum gateway profile 'Ferrum gateway gw.example.invalid': no request was sent to gw.example.invalid";
     // The URL's host is 127.0.0.1, so the flag's profile never applies.
-    let (o, record) = send(&data, &f.url("/echo"), &["--trust-ferrum", "gw.example.invalid", "--save-trust"]).await;
+    let (o, record) = send(&data, &url, &["--trust-ferrum", "gw.example.invalid", "--save-trust"]).await;
     assert_eq!(record["outcome"]["dispatch"], "sent", "{record}");
     assert_eq!(record["compatibility_id"], serde_json::Value::Null, "{record}");
-    let err = String::from_utf8_lossy(&o.stderr);
-    assert!(
-        err.contains(
-            "did not save Ferrum gateway profile 'Ferrum gateway gw.example.invalid': the send was not trusted as gw.example.invalid"
-        ),
-        "{err}"
-    );
+    assert!(String::from_utf8_lossy(&o.stderr).contains(expected), "{}", text(&o));
     assert_eq!(saved_gateways(&data), 0);
+
+    // Also when a saved profile makes the actual destination trusted.
+    save_gateway(&data, "127.0.0.1", None);
+    let (o, record) = send(&data, &url, &["--trust-ferrum", "gw.example.invalid", "--save-trust"]).await;
+    assert_eq!(record["compatibility_id"].as_str(), Some(OTHER_CATALOG), "{record}");
+    assert!(String::from_utf8_lossy(&o.stderr).contains(expected), "{}", text(&o));
+    assert_eq!(saved_gateways(&data), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,6 +237,10 @@ async fn the_host_is_compared_as_the_engine_compares_it() {
         assert!(text(&o).contains("--trust-ferrum takes a host"), "{bad:?}: {}", text(&o));
     }
     assert_eq!(saved_gateways(&data), 0);
+
+    // An IPv6 address is canonical as the engine parses URLs.
+    let (o, _) = send(&data, &url, &["--trust-ferrum", "0:0:0:0:0:0:0:1", "--save-trust"]).await;
+    assert!(String::from_utf8_lossy(&o.stderr).contains("'Ferrum gateway ::1': no request was sent to ::1"), "{}", text(&o));
 
     // Brackets and surrounding spaces do not stop a match, and the saved
     // host is the canonical one.
