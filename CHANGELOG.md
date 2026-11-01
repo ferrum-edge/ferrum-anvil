@@ -397,8 +397,8 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   `App::rotate_keychain_data_key` and `PolicyRotation::Keychain` (identity link,
   unlink and enrollment) store the new key in a new OS credential entry before the
   commit and retire the old entry after it. Previously every rotation converted the
-  profile to passphrase protection. `PolicyRotation` is now an enum (see
-  Breaking) and retired credentials are recorded as `RotationPolicy::retired_keychain`.
+  profile to passphrase protection. `PolicyRotation` is now an enum and retired
+  credentials are recorded as `RotationPolicy::retired_keychain`.
 
 - `app.mcp_tool_error` no longer says the call reached the tool or assigns
   it to the API owner. A Ferrum mcp_gateway OpenAPI bridge writes the same
@@ -449,8 +449,9 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   data key and re-encrypts active data, and needs a new passphrase and a saved
   replacement recovery key; the old passphrase and recovery key stop working,
   and an OS-keychain profile becomes a passphrase profile. A verified linked
-  identity is kept; with no surviving identity policy you confirm replacing it
-  with an unlinked one. Enroll from the desktop lock screen or with
+  identity is kept, and a profile linked with a fresh-login requirement enrolls
+  with its current recovery key; with no surviving identity policy you confirm
+  replacing it with an unlinked one. Enroll from the desktop lock screen or with
   `anvil profile enroll-policy`; see the
   [upgrade guide](docs/upgrade-guide.md#016) (#364, #375).
 - Storage: enrollment moves the profile database from schema 3 to schema 6.
@@ -459,9 +460,13 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   format (2), so a bundle exported by 0.1.6 still imports into earlier builds.
   The `before-schema-<version>` checkpoint taken before the migration is sealed
   with the old key and deleted when enrollment rotates the key, so it is not a
-  way back. To keep a way back, close every copy of Anvil and copy the profile
-  directory, or export a portable bundle with the earlier build, before opening
-  the profile with 0.1.6 (#375, #377, #378).
+  way back. To keep one, do this before opening the profile with 0.1.6: for a
+  passphrase profile, close every copy of Anvil and copy the profile directory
+  (it keeps the old passphrase and recovery-key wraps), or export a portable
+  bundle with the earlier build; for an OS-keychain profile, export a portable
+  bundle with the earlier build. A directory copy of an OS-keychain profile is
+  not enough: its only unlock credential is the OS keychain entry, which
+  enrollment deletes or overwrites with a keyless marker (#375, #377, #378).
 - RSA keys must be 2048–8192 bits for both signing and verification. RS256
   signing with a shorter key fails. A JWT-SVID signed by a bundle key under
   2048 bits (or over 8192) no longer verifies, and Anvil reports "the signature
@@ -472,10 +477,8 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   used (#454).
 - Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
   system libraries; Ubuntu 22.04 and 24.04 are no longer release targets (#361).
-- Rust consumers: `anvil_app::profiles::PolicyRotation` is now an enum
-  (`Passphrase` or `Keychain`) (#378), and `anvil_engine` `SecretResolver`
-  methods no longer have default implementations, so a wrapping resolver must
-  forward each one (#376).
+- Rust consumers: `anvil_engine` `SecretResolver` methods no longer have
+  default implementations, so a wrapping resolver must forward each one (#376).
 - A browser sign-in authorization URL on `http://localhost` is now refused as
   a configuration error. Use `http://127.0.0.1:<port>`, or `https`, for a local
   test issuer (#391). The CI mock provider's authorization, token and userinfo

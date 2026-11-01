@@ -4,9 +4,20 @@
 
 ### Before you upgrade
 
-If you may want to go back to 0.1.5 or earlier, close every copy of Anvil and
-copy each profile directory somewhere outside the data directory, or export a
-portable bundle with your current build, before opening the profile with 0.1.6.
+If you may want to go back to 0.1.5 or earlier, keep a copy before opening
+the profile with 0.1.6:
+
+- **Passphrase profile:** close every copy of Anvil and copy the profile
+  directory somewhere outside the data directory, or export a portable bundle
+  with your current build. The copied directory keeps the old passphrase and
+  recovery-key wraps, so the earlier build unlocks it with the old passphrase
+  or recovery key.
+- **OS-keychain profile:** export a portable bundle with your current build. A
+  copy of the directory alone is not enough: the profile has no passphrase or
+  recovery-key wrap, only its OS keychain entry, and enrollment deletes that
+  entry (or overwrites it with a keyless marker), so the copy can no longer be
+  unlocked.
+
 The checkpoint 0.1.6 takes before it migrates the database is deleted when
 enrollment rotates the data key (below), so it is not a way back.
 
@@ -19,7 +30,10 @@ data key and re-encrypts the profile's active data:
 - **Desktop:** the lock screen shows **Enroll legacy policy**. Enter the
   current passphrase (an OS-keychain profile asks for none), enter a new
   passphrase twice, confirm the native prompt and save the replacement recovery
-  key it shows before confirming.
+  key it shows before confirming. For a profile linked with a fresh-login
+  requirement, choose **Use recovery key** on the lock screen first and enter
+  the current recovery key: the desktop does not sign in to the provider during
+  enrollment, so it refuses the passphrase for such a profile.
 - **CLI:** supply the current passphrase, the new passphrase and the saved
   replacement recovery key on consecutive stdin lines:
 
@@ -52,9 +66,11 @@ exported by 0.1.6 still imports into an earlier build.
   cannot be written, enrollment fails until space is freed. The copy is sealed
   with the old key, so enrollment's key rotation deletes it, with any older
   checkpoint.
-- To go back to an earlier build, close every copy of Anvil and put back the
-  profile directory you copied before upgrading, or import the portable bundle
-  into the earlier build. Everything changed since the copy is lost.
+- To go back to an earlier build, close every copy of Anvil and either put
+  back a passphrase profile's directory copy (unlock it with the old passphrase
+  or recovery key), or import the portable bundle into the earlier build. A
+  directory copy of an OS-keychain profile cannot be unlocked after enrollment.
+  Everything changed since the copy is lost.
 
 ### Behaviour changes
 
@@ -70,9 +86,8 @@ has the full list.
 - Linux installers are built on Ubuntu 26.04 and may need its newer glibc and
   system libraries; Ubuntu 22.04 and 24.04 are no longer release targets. The
   AppImage uses the host's `libwayland-client`.
-- Rust code: `PolicyRotation` is an enum, and `SecretResolver` methods no
-  longer have default implementations, so a wrapping resolver must forward
-  each one.
+- Rust code: `SecretResolver` methods no longer have default
+  implementations, so a wrapping resolver must forward each one.
 
 ## 0.1.5
 
