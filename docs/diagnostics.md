@@ -308,9 +308,10 @@ catalog whose id equals the profile's `compatibility_id`:
   that covers `HOST` on every port (the same name or a `*.suffix` over it,
   case ignored, as the engine matches hosts) is used instead, and
   `--save-trust` then saves nothing; one bound to a port does not count.
-  The flag's own profile is named "Ferrum gateway HOST (this send only)",
-  and `--save-trust` saves only once the request is resolved, so a send that
-  fails before anything is sent saves nothing.
+  The flag's own profile is named "Ferrum gateway HOST (this send only)".
+  `--save-trust` saves the profile after the send, and only if request bytes
+  were sent (dispatch other than `not_dispatched`): a send that fails before
+  anything is sent saves nothing and says so.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

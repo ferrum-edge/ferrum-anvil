@@ -167,9 +167,32 @@ async fn a_profile_bound_to_another_port_does_not_cancel_the_flag() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn save_trust_saves_nothing_when_the_send_fails_locally() {
-    let (_dir, data, _f) = setup().await;
+    let (_dir, data, f) = setup().await;
+    // The request does not resolve.
     let o = anvil(&data, &["send", "No such request", "--workspace", "Lab", "--trust-ferrum", "127.0.0.1", "--save-trust"]).await;
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(!text(&o).contains("saved Ferrum gateway profile"), "{}", text(&o));
     assert_eq!(saved_gateways(&data), 0);
+
+    // The request resolves but is refused while it is prepared: nothing is sent.
+    let args = [
+        "send",
+        "--workspace",
+        "Lab",
+        "--url",
+        "ftp://127.0.0.1/",
+        "--trust-ferrum",
+        "127.0.0.1",
+        "--save-trust",
+        "--json",
+        "--no-history",
+    ];
+    let o = anvil(&data, &args).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    let record: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&o)));
+    assert_eq!(record["outcome"]["dispatch"], "not_dispatched", "{record}");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("did not save Ferrum gateway profile 'Ferrum gateway 127.0.0.1': nothing was sent to 127.0.0.1"), "{err}");
+    assert_eq!(saved_gateways(&data), 0);
+    assert_eq!(trusted_as(&data, &f.url("/echo"), &[]).await, None, "a later send was trusted");
 }

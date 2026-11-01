@@ -26,6 +26,7 @@ use anvil_app::port::ImportApproval;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::{App, AppError};
 use anvil_domain::diagnostics::{Confidence, Severity};
+use anvil_domain::execution::DispatchState;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::outcome::{
     ApplicationState, AssertionState, ProtocolStatus, TransportState, WsExtensions, WsNegotiation, WsViolationKind,
@@ -356,7 +357,8 @@ struct SendArgs {
     trust_ferrum: Option<String>,
     /// With --trust-ferrum: also save the host as a Ferrum gateway profile in
     /// the workspace, so later sends to it (and exports of the workspace)
-    /// trust it too.
+    /// trust it too. It is saved after the send, and only if the request was
+    /// sent.
     #[arg(long, requires = "trust_ferrum")]
     save_trust: bool,
     /// Print the full execution record as JSON.
@@ -1163,10 +1165,12 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 }
                 (None, None) => bail!("give a saved request or --url"),
             };
-            let mut trusted_gateways = Vec::new();
-            // After the request is resolved, so a send that fails locally
-            // saves nothing. A saved profile covering the host on every port
-            // (as the engine matches hosts) is used as it is.
+            // A saved profile covering the host on every port (as the engine
+            // matches hosts) is used as it is. Otherwise the flag's profile
+            // applies to this send; with --save-trust it is saved after the
+            // send, and only if request bytes were sent, so a send that fails
+            // locally saves nothing.
+            let (mut trusted_gateways, mut to_save) = (Vec::new(), None);
             if let Some(host) = &s.trust_ferrum
                 && !app.integrations(&ws.meta.id)?.iter().any(|i| {
                     let IntegrationKind::FerrumGateway { hosts, .. } = &i.kind;
@@ -1189,11 +1193,9 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     updated_at: now,
                 };
                 if s.save_trust {
-                    let p = app.save_integration(profile)?;
-                    eprintln!("saved Ferrum gateway profile '{}' in '{}': later sends to {host} are trusted", p.name, ws.name);
-                } else {
-                    trusted_gateways.push(profile);
+                    to_save = Some(profile.clone());
                 }
+                trusted_gateways.push(profile);
             }
             let cancel = CancellationToken::new();
             let c2 = cancel.clone();
@@ -1222,6 +1224,14 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 .context("send")?;
             print_outcome(&out, s.json);
             let o = &out.record.outcome;
+            if let (Some(p), Some(host)) = (to_save, &s.trust_ferrum) {
+                if o.dispatch == DispatchState::NotDispatched {
+                    eprintln!("did not save Ferrum gateway profile '{}': nothing was sent to {host}", p.name);
+                } else {
+                    let p = app.save_integration(p)?;
+                    eprintln!("saved Ferrum gateway profile '{}' in '{}': later sends to {host} are trusted", p.name, ws.name);
+                }
+            }
             Ok(if o.assertions == AssertionState::Fail {
                 2
             } else if o.transport != TransportState::Completed || o.application == ApplicationState::Failure {
