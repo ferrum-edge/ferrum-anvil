@@ -21,10 +21,6 @@
   downgrade).
 - zip is updated to 9.0.4 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
   preserving SUID/SGID bits and symlink targets escaping the destination).
-  The `zip` 4.6.1 copy held by `tauri-plugin-updater` has no patched 4.x
-  release and is a reviewed `deny.toml` ignore: the updater verifies the
-  release signature before extracting an update archive, and Anvil's own
-  bundle code reads entries in memory without `extract()`.
 - The in-app updater (`tauri-plugin-updater`) is updated from 2.12.0 to
   2.14.1, its first release on `zip` 9 (it shares Anvil's `zip` 9.1.1). This
   removes the `zip` 4.6.1 copy that updater 2.12.0 held (GHSA-m665-v7pm-7grj,
