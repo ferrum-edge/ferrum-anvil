@@ -163,8 +163,8 @@ before upgrading.
   2.12) uses WebdriverIO dependencies with patched deepmerge-ts 8.0.2. This removes
   the development-only GHSA-ggr8-5vv4-36mx dependency exception without overriding
   deepmerge-ts across a major version. Production UI dependencies are unchanged;
-  `@wdio/local-runner`, `@wdio/spec-reporter` and `@wdio/types` stay at 9.32.0,
-  while `@wdio/cli` and `@wdio/mocha-framework` are at 10.1.0.
+  `@wdio/local-runner` and `@wdio/spec-reporter` stay at 9.32.0, while `@wdio/cli`,
+  `@wdio/mocha-framework` and `@wdio/types` are at 10.1.0.
 
 - Pin Linux CI and installer builds to Ubuntu 26.04. Linux installers now target
   modern system libraries; see Breaking.
