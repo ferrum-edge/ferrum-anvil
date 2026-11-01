@@ -705,9 +705,14 @@ fn trust_host(raw: &str) -> Result<String> {
     // The engine's own URL parsing gives the host as it compares targets
     // (domains lowercased and punycoded, IPv6 compressed, no brackets).
     let bracketed = if h.contains(':') { format!("[{h}]") } else { h.to_string() };
-    anvil_engine::prepare::parse_target(&format!("http://{bracketed}/"), &["http"], &mut Vec::new())
+    let host = anvil_engine::prepare::parse_target(&format!("http://{bracketed}/"), &["http"], &mut Vec::new())
         .map(|t| t.host)
-        .map_err(|_| anyhow!("--trust-ferrum takes a host name or address: '{}' is not one", terminal_safe(raw)))
+        .map_err(|_| anyhow!("--trust-ferrum takes a host name or address: '{}' is not one", terminal_safe(raw)))?;
+    // Parsing decodes percent escapes: `%2A.example.com` is `*.example.com`.
+    if host.contains('*') {
+        bail!("--trust-ferrum takes one host, not a pattern: '{}' (a saved profile can name *.suffix)", terminal_safe(raw));
+    }
+    Ok(host)
 }
 
 /// A saved Ferrum gateway profile of `ws` that covers `host` on every port,
@@ -716,14 +721,25 @@ fn covering_gateway(app: &App, ws: &anvil_domain::Id, host: &str) -> Result<Opti
     Ok(app.integrations(ws)?.into_iter().find(|i| anvil_app::workspace::covers_host(i, host)))
 }
 
-/// Whether an attempt of the send wrote request bytes (or may have) to
-/// `host` itself: not only to another hop, such as a redirect's first host.
-fn dispatched_to(record: &anvil_domain::execution::ExecutionRecord, host: &str) -> bool {
+/// Where the send's dispatched attempts (request bytes written, or maybe
+/// written) went, as far as the record says: whether one went to `host`
+/// itself (not only to another hop, such as a redirect's other host), and
+/// whether one's host cannot be read because the record redacts it (a
+/// secret in the URL's host).
+fn dispatched_to(record: &anvil_domain::execution::ExecutionRecord, host: &str) -> (bool, bool) {
     const SCHEMES: &[&str] = &["http", "https", "ws", "wss", "grpc", "grpcs", "tcp", "tls", "udp", "dtls"];
-    record.attempts.iter().any(|a| {
-        a.dispatch != DispatchState::NotDispatched
-            && anvil_engine::prepare::parse_target(&a.url, SCHEMES, &mut Vec::new()).is_ok_and(|t| t.host == host)
-    })
+    let mut sent_to_host = false;
+    let mut redacted = false;
+    for a in record.attempts.iter().filter(|a| a.dispatch != DispatchState::NotDispatched) {
+        let rest = a.url.split_once("://").map_or(a.url.as_str(), |(_, r)| r);
+        let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        match anvil_engine::prepare::parse_target(&a.url, SCHEMES, &mut Vec::new()) {
+            Ok(t) if t.host == host => sent_to_host = true,
+            Ok(_) if !authority.contains(anvil_domain::secret::REDACTED) => {}
+            _ => redacted = true,
+        }
+    }
+    (sent_to_host, redacted)
 }
 
 fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
@@ -1270,11 +1286,18 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             if let (Some(p), Some(host)) = (to_save, &host) {
                 if cancelled.is_cancelled() {
                     eprintln!("did not save Ferrum gateway profile '{}': the send was cancelled", p.name);
-                } else if !dispatched_to(&out.record, host) {
-                    eprintln!(
-                        "did not save Ferrum gateway profile '{}': no request was sent to {host} (does --trust-ferrum name the URL's host?)",
-                        p.name
-                    );
+                } else if let (false, redacted) = dispatched_to(&out.record, host) {
+                    if redacted {
+                        eprintln!(
+                            "did not save Ferrum gateway profile '{}': the record redacts the host the request went to, so it cannot show the request reached {host}",
+                            p.name
+                        );
+                    } else {
+                        eprintln!(
+                            "did not save Ferrum gateway profile '{}': no request was sent to {host} (does --trust-ferrum name the URL's host?)",
+                            p.name
+                        );
+                    }
                 } else {
                     let name = p.name.clone();
                     match app

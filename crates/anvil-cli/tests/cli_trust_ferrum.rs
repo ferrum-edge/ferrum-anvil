@@ -231,7 +231,7 @@ async fn the_host_is_compared_as_the_engine_compares_it() {
     let default = anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID;
 
     // A URL, a path or a port is refused before anything is sent or saved.
-    for bad in ["http://127.0.0.1/", "127.0.0.1/echo", "127.0.0.1:8080", "[::1]:8080", " ", "*.0.0.1"] {
+    for bad in ["http://127.0.0.1/", "127.0.0.1/echo", "127.0.0.1:8080", "[::1]:8080", " ", "*.0.0.1", "%2A.0.0.1"] {
         let o = anvil(&data, &["send", "--workspace", "Lab", "--url", &url, "--trust-ferrum", bad, "--save-trust"]).await;
         assert_eq!(o.status.code(), Some(3), "{bad:?}: {}", text(&o));
         assert!(text(&o).contains("--trust-ferrum takes a host"), "{bad:?}: {}", text(&o));

@@ -316,8 +316,11 @@ catalog whose id equals the profile's `compatibility_id`:
   `*` pattern is refused. Without `--save-trust` the flag's profile is named "Ferrum
   gateway HOST (this send only)". `--save-trust` saves "Ferrum gateway HOST"
   after the send, and only if an attempt of the send wrote the request to
-  `HOST` itself (its dispatch is not `not_dispatched`; a redirect's first
-  hop does not count). The check for a covering profile is repeated in the
+  `HOST` itself (its dispatch is not `not_dispatched`): a send that reached
+  `HOST` and was then redirected elsewhere saves it, one that only reached
+  another host first (a redirect's other end) does not. The evidence is the
+  record's attempts, whose URLs are redacted: when a secret is the URL's
+  host, Anvil cannot show the request reached `HOST` and saves nothing. The check for a covering profile is repeated in the
   same write transaction as the save, so concurrent saves leave one
   profile. A send that fails before anything is sent, never reached
   `HOST`, or was cancelled (Ctrl-C) saves nothing; when it produced a
