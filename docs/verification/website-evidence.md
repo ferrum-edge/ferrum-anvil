@@ -46,11 +46,14 @@ and the same 2 skipped, in these runs:
 
 Between the two pins, the tests REL-006 and REL-007 cite are unchanged in substance:
 - `tests/components.test.js` and `tests/fixtures/release-audit.json` did not change;
-- in `tests/anvil.test.js`, the HTML matching now accepts attributes on `<title>`, `<td>` and `<meta>`;
+- in `tests/anvil.test.js`, the HTML matching now accepts attributes on `<title>`, `<td>` and `<meta>`. The same
+  file's REL-008 assertions were also strengthened: the gRPC-Web load cell, the load guide's units and refusal
+  tables, and the plan-time refusal pins;
 - `tests/releases.test.js` changed only a Docker-registry line.
 
 The new pin adds the capability-evidence tests (REL-008) and a test that no link nests inside another on any
-page with a checked Anvil region.
+page with a checked Anvil region. At this pin, the claim check reads 824 claim elements in 17 regions. The source
+for that figure is `node tests/anvil-claims.js --counts`, run on a checkout of `1f89dfd`.
 
 ## Scope
 
