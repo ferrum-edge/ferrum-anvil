@@ -305,7 +305,12 @@ catalog whose id equals the profile's `compatibility_id`:
   next send to `HOST` is untrusted unless it passes the flag again. Add
   `--save-trust` to save the profile in the workspace, which later sends,
   `anvil run` and exports then use like any other profile. A saved profile
-  for `HOST` takes precedence, and `--save-trust` does not add a second one.
+  that covers `HOST` on every port (the same name or a `*.suffix` over it,
+  case ignored, as the engine matches hosts) is used instead, and
+  `--save-trust` then saves nothing; one bound to a port does not count.
+  The flag's own profile is named "Ferrum gateway HOST (this send only)",
+  and `--save-trust` saves only once the request is resolved, so a send that
+  fails before anything is sent saves nothing.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

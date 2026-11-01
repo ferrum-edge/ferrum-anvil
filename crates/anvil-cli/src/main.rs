@@ -1147,18 +1147,37 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 },
             };
             let env = env::environment_id(&app, &ws, s.env.as_deref())?;
+            let (rid, draft) = match (&s.request, &s.url) {
+                (Some(_), _) if s.mcp.spec().is_some() => bail!("the --mcp-* options make an ad-hoc --url request an MCP request"),
+                (Some(r), _) => (Some(app.find_request(&ws.meta.id, r)?.meta.id), None),
+                (None, Some(u)) => {
+                    let mut spec = RequestSpec::http(&s.method, u);
+                    for h in &s.headers {
+                        spec.headers.push(kv(h)?);
+                    }
+                    if let Some(d) = &s.data {
+                        spec.body = Body::Raw { text: d.clone(), content_type: None };
+                    }
+                    s.mcp.apply(&mut spec);
+                    (None, Some(spec))
+                }
+                (None, None) => bail!("give a saved request or --url"),
+            };
             let mut trusted_gateways = Vec::new();
+            // After the request is resolved, so a send that fails locally
+            // saves nothing. A saved profile covering the host on every port
+            // (as the engine matches hosts) is used as it is.
             if let Some(host) = &s.trust_ferrum
-                && !app
-                    .integrations(&ws.meta.id)?
-                    .iter()
-                    .any(|i| matches!(&i.kind, IntegrationKind::FerrumGateway { hosts, .. } if hosts.iter().any(|h| h.host == *host)))
+                && !app.integrations(&ws.meta.id)?.iter().any(|i| {
+                    let IntegrationKind::FerrumGateway { hosts, .. } = &i.kind;
+                    hosts.iter().any(|h| h.port.is_none() && anvil_engine::http_exec::host_matches(&h.host, host))
+                })
             {
                 let now = chrono::Utc::now();
                 let profile = IntegrationProfile {
                     id: anvil_domain::Id::new(),
                     workspace_id: ws.meta.id,
-                    name: format!("Ferrum gateway {host}"),
+                    name: if s.save_trust { format!("Ferrum gateway {host}") } else { format!("Ferrum gateway {host} (this send only)") },
                     kind: IntegrationKind::FerrumGateway {
                         hosts: vec![HostBinding { host: host.clone(), port: None }],
                         compatibility_id: anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID.into(),
@@ -1176,22 +1195,6 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     trusted_gateways.push(profile);
                 }
             }
-            let (rid, draft) = match (&s.request, &s.url) {
-                (Some(_), _) if s.mcp.spec().is_some() => bail!("the --mcp-* options make an ad-hoc --url request an MCP request"),
-                (Some(r), _) => (Some(app.find_request(&ws.meta.id, r)?.meta.id), None),
-                (None, Some(u)) => {
-                    let mut spec = RequestSpec::http(&s.method, u);
-                    for h in &s.headers {
-                        spec.headers.push(kv(h)?);
-                    }
-                    if let Some(d) = &s.data {
-                        spec.body = Body::Raw { text: d.clone(), content_type: None };
-                    }
-                    s.mcp.apply(&mut spec);
-                    (None, Some(spec))
-                }
-                (None, None) => bail!("give a saved request or --url"),
-            };
             let cancel = CancellationToken::new();
             let c2 = cancel.clone();
             tokio::spawn(async move {

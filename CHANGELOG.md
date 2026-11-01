@@ -20,9 +20,12 @@
   workspace without saying so, so every later send, `anvil run` and export
   trusted the host as well, though the flag's help said "for this send". Pass
   the new `--save-trust` with `--trust-ferrum` to save the profile on
-  purpose; Anvil then says it saved it. Profiles the old behavior saved stay
-  in their workspace and are still trusted: Anvil has no command to remove a
-  gateway profile yet.
+  purpose; Anvil then says it saved it, and saves nothing when the send fails
+  before anything is sent. A saved profile already covering the host on
+  every port (as the engine matches hosts, wildcards and case included) is
+  used instead; one bound to another port no longer silently cancels the
+  flag. Profiles the old behavior saved stay in their workspace and are still
+  trusted until removed.
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange
