@@ -498,12 +498,16 @@ before upgrading.
   with the old key and deleted when enrollment rotates the key, so it is not a
   way back. To keep one, before opening the profile with 0.1.6 export a full
   backup with the earlier build (desktop **Export** → **Whole app backup**, or
-  `anvil export --mode backup` with `ANVIL_EXPORT_PASSPHRASE`), which keeps
-  everything and restores into a new profile of the earlier build with only
-  the export passphrase; or export an encrypted-transfer bundle (`--mode
-  encrypted`), which keeps workspaces and their secrets but not app settings
-  or load reports. A **Share safely** export, the CLI default, drops vault
-  secrets. A copy of the profile directory also works for a passphrase profile
+  `anvil export --mode backup` with `ANVIL_EXPORT_PASSPHRASE`). It keeps
+  everything, is encrypted with the export passphrase apart from a short
+  header, and needs only that passphrase to restore. Restore it with the
+  earlier build into a new, empty profile with `anvil import FILE --policy
+  replace`: the default Merge policy keeps the target profile's app settings.
+  An encrypted-transfer bundle (`--mode encrypted`) keeps workspaces but not
+  app settings or load reports, and encrypts only its vault (vault secrets and
+  extracted sensitive values): workspace text and attachments stay readable,
+  so store it as sensitive. A **Share safely** export, the CLI default, drops
+  vault secrets. A copy of the profile directory also works for a passphrase profile
   (it keeps the old passphrase and recovery-key wraps), but not for an
   OS-keychain profile: its only unlock credential is the OS keychain entry,
   which enrollment deletes or overwrites with a keyless marker. See the

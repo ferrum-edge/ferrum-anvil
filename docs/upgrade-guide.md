@@ -11,24 +11,32 @@ before it migrates the database is deleted when enrollment rotates the data
 key (below), so it is not a way back. Use one of these:
 
 - **Full backup** (any profile): in the desktop, **Export** → **Whole app
-  backup**; in the CLI, `anvil export --mode backup --out FILE` with the export
-  passphrase in `ANVIL_EXPORT_PASSPHRASE`. It keeps everything in the profile
-  (workspaces with their vault secrets, attachments, history, load reports,
-  app settings and API standards rulesets), encrypted with the export
-  passphrase you choose. Restoring it needs only that passphrase, not the
-  profile's passphrase, recovery key or OS keychain entry. A 0.1.5 build
-  restores it into a new profile (`anvil import FILE` with the same
-  `ANVIL_EXPORT_PASSPHRASE`, or **Import** in the desktop). See
+  backup**; in the CLI (omit `--passphrase-stdin` for an OS-keychain profile):
+
+  ```sh
+  ANVIL_EXPORT_PASSPHRASE='<export passphrase>' \
+    anvil --profile PROFILE --passphrase-stdin export --mode backup --out profile.anvilbak
+  ```
+
+  It keeps everything in the profile: workspaces with their vault secrets,
+  attachments, history, load reports, app settings and API standards
+  rulesets. Everything after a short readable header (format version, cipher,
+  and the key-derivation costs and salt) is encrypted and authenticated with
+  the export passphrase. Restoring it needs only that passphrase, not the
+  profile's passphrase, recovery key or OS keychain entry. See
   [Full backups](storage-and-recovery.md#full-backups).
 - **Encrypted-transfer bundle** (any profile): in the desktop, **Export** →
   **This workspace** → **Encrypted transfer**, one workspace at a time; in the
-  CLI, `anvil export --mode encrypted --out FILE` (every workspace, or one
-  with `--workspace`) with `ANVIL_EXPORT_PASSPHRASE`. It keeps the workspaces
-  with their vault secrets and literal secrets, encrypted with the export
-  passphrase, but not app settings, load reports or spec-import records. A
-  bundle exported by 0.1.6 still imports into an earlier build, so this one can
-  also be made after upgrading. See
-  [Export and import](storage-and-recovery.md#export-and-import).
+  CLI, `--mode encrypted --out workspaces.anvil` in the command above (every
+  workspace, or one with `--workspace`). It keeps the workspaces but not app
+  settings, load reports or spec-import records. Only its vault is encrypted
+  with the export passphrase: the vault secrets and the literal secrets Anvil
+  took out of sensitive fields. The workspace objects (names, URLs, header and
+  body text), attachments and history are ordinary ZIP entries that anyone
+  holding the file can read, and a credential typed into a body or URL is
+  exported as written. Store the bundle as sensitive. A bundle exported by
+  0.1.6 still imports into an earlier build, so this one can also be made
+  after upgrading. See [Export and import](storage-and-recovery.md#export-and-import).
 - **Copy of the profile directory** (passphrase profiles only): close every
   copy of Anvil and copy the profile directory somewhere outside the data
   directory. The copy keeps the old passphrase and recovery-key wraps, so the
@@ -44,6 +52,28 @@ restored backup or imported bundle names linked local files by path only, so
 choose those files again, and a workspace written by an import or restore does
 not use this device's workload identity until you allow it again in the
 workspace's settings.
+
+To go back, restore the backup or bundle with the earlier build into a new,
+empty profile, with the **Replace** policy. `anvil import` writes into an
+existing profile (the one `--profile` names, or the first one), and its
+default policy, Merge, keeps the target profile's app settings instead of the
+backup's. With the 0.1.5 CLI:
+
+```sh
+# Create the recovery profile: its new passphrase on stdin; save the recovery key it prints.
+anvil --passphrase-stdin profile create rollback
+# Preview, then restore. Each command reads the recovery profile's passphrase on stdin.
+ANVIL_EXPORT_PASSPHRASE='<export passphrase>' \
+  anvil --profile rollback --passphrase-stdin import profile.anvilbak --dry-run
+ANVIL_EXPORT_PASSPHRASE='<export passphrase>' \
+  anvil --profile rollback --passphrase-stdin import profile.anvilbak --policy replace
+```
+
+Replace restores a full backup's app settings only into a profile that holds
+no other workspace. In the desktop, create a new profile, then **Import** the
+file with **Replace existing**; the desktop adds an empty "My workspace" to a
+new profile, so it keeps that profile's app settings, and the CLI restore above
+is the way to bring back the backup's app settings too.
 
 ### Policy enrollment
 
@@ -98,11 +128,11 @@ exported by 0.1.6 still imports into an earlier build.
   with the old key, so enrollment's key rotation deletes it, with any older
   checkpoint.
 - To go back to an earlier build, close every copy of Anvil and either
-  restore the full backup or import the encrypted-transfer bundle into a new
-  profile of the earlier build, or put back a passphrase profile's directory
-  copy and unlock it with the old passphrase or recovery key (see
-  [Before you upgrade](#before-you-upgrade)). Everything changed since the
-  copy was made is lost.
+  restore the full backup or the encrypted-transfer bundle into a new, empty
+  profile of the earlier build with the Replace policy, or put back a
+  passphrase profile's directory copy and unlock it with the old passphrase or
+  recovery key (see [Before you upgrade](#before-you-upgrade)). Everything
+  changed since the copy was made is lost.
 
 ### Behaviour changes
 
