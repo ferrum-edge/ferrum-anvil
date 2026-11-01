@@ -1,0 +1,349 @@
+# Clean-install smoke of the published, unsigned release packages (failure
+# matrix REL-001): on one fresh GitHub-hosted runner per advertised
+# OS/architecture and package, install the exact release asset natively,
+# launch the installed app, import the sample workspace and make a loopback
+# call, and write a per-target result (asset, sha256, runner, every step,
+# the surface driven and every OS protection not exercised).
+#
+#   manual (workflow_dispatch)     -> the given tag, or the latest published release
+#   release published (anvil-v*)   -> that release
+#   PRs touching this workflow or scripts/release-smoke/ -> the latest published release
+#
+# Nothing is built here: the inputs are the release's own assets, checked
+# against its SHA256SUMS. The packages are unsigned, so Gatekeeper and
+# SmartScreen first-run prompts are not exercised (recorded per target);
+# signed first-run acceptance stays with ferrum-edge/ferrum-anvil#2.
+# See docs/release.md#clean-install-smoke-rel-001.
+name: Release smoke (REL-001)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to test (anvil-vX.Y.Z); empty = the latest published release"
+        required: false
+        default: ""
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - ".github/workflows/release-smoke.yml"
+      - "scripts/release-smoke/**"
+      - "scripts/tests/test_release_smoke_record.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-smoke-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The recorder and classifier unit tests. They also run in ci.yml's
+  # supply-chain job, but CI on PRs runs ci.yml from main (repository
+  # ruleset), so this job is what runs them against a PR's own scripts.
+  unit-tests:
+    name: Recorder and classifier tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release smoke recorder tests (failure classes)
+        run: python3 -I scripts/tests/test_release_smoke_record.py
+      - name: Failure-matrix classifier tests (pinned, requires)
+        run: python3 -I scripts/tests/test_matrix_coverage.py
+
+  fetch:
+    name: Fetch release assets
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'anvil-v')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      # First: checkout cleans the workspace, which would delete release.json.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve the release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${EVENT_TAG:-${INPUT_TAG:-}}"
+          if [ -z "$tag" ]; then
+            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          fi
+          if ! [[ "$tag" =~ ^anvil-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$tag' is not a release tag (anvil-vX.Y.Z)"; exit 1
+          fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,publishedAt,url > "$RUNNER_TEMP/release-view.json"
+          if [ "$(jq -r .isDraft "$RUNNER_TEMP/release-view.json")" != "false" ]; then
+            echo "::error::$tag is a draft; this smoke tests published releases only"; exit 1
+          fi
+          commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+          mkdir -p rel001-inputs
+          jq --arg repo "$GITHUB_REPOSITORY" --arg version "${tag#anvil-v}" --arg commit "$commit" \
+            '{repository: $repo, tag: .tagName, version: $version, commit: $commit, url, published_at: .publishedAt, is_draft: .isDraft, is_prerelease: .isPrerelease}' \
+            "$RUNNER_TEMP/release-view.json" > rel001-inputs/release.json
+          cat rel001-inputs/release.json
+          { echo "tag=$tag"; echo "version=${tag#anvil-v}"; } >> "$GITHUB_OUTPUT"
+      # A published asset that is missing or does not match SHA256SUMS is a
+      # package failure: recorded in fetch.json, the run continues and the
+      # affected targets fail. An API or download failure is a harness
+      # failure and stops the run here.
+      - name: Download and check the packages, CLI archives and SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          V: ${{ steps.resolve.outputs.version }}
+          DIR: rel001-inputs
+        run: scripts/release-smoke/fetch.sh
+      - name: Fetch the example workspace at the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          path=samples/workspaces/anvil-samples.anvil
+          # The contents API returns the (small, binary) file base64-encoded.
+          gh api "repos/$GITHUB_REPOSITORY/contents/$path?ref=$TAG" --jq .content | base64 -d > rel001-inputs/anvil-samples.anvil
+          [ "$(head -c 2 rel001-inputs/anvil-samples.anvil)" = "PK" ] || { echo "::error::$path at $TAG is not an Anvil bundle"; exit 1; }
+          jq -n --arg path "$path" --arg ref "$TAG" --arg sha "$(sha256sum rel001-inputs/anvil-samples.anvil | cut -d' ' -f1)" \
+            --argjson size "$(wc -c < rel001-inputs/anvil-samples.anvil)" \
+            '{path: $path, ref: $ref, source: "repository file at the release tag (the example named in samples/README.md)", sha256: $sha, size: $size}' \
+            > rel001-inputs/example.json
+          cat rel001-inputs/example.json
+          ls -la rel001-inputs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-inputs
+          path: rel001-inputs/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+      - name: Upload the fetch result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-fetch
+          path: rel001-inputs/fetch.json
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+  smoke-unix:
+    name: Smoke · ${{ matrix.id }}
+    needs: fetch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos-arm64-dmg
+            runner: macos-15
+            package: dmg
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+            asset: "Ferrum-Anvil_{0}_aarch64.dmg"
+          # A native Intel runner: the x86_64 DMG is cross-built on arm64 by
+          # release.yml and never launched there.
+          - id: macos-x64-dmg
+            runner: macos-15-intel
+            package: dmg
+            arch: x86_64
+            rust_target: x86_64-apple-darwin
+            asset: "Ferrum-Anvil_{0}_x64.dmg"
+          # Ubuntu 26.04: the Linux baseline the release is built for.
+          - id: linux-x64-deb
+            runner: ubuntu-26.04
+            package: deb
+            arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            asset: "Ferrum-Anvil_{0}_amd64.deb"
+          - id: linux-x64-appimage
+            runner: ubuntu-26.04
+            package: appimage
+            arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            asset: "Ferrum-Anvil_{0}_amd64.AppImage"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      TARGET_ID: ${{ matrix.id }}
+      OUT: rel001-result
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rel001-inputs
+          path: rel001-inputs
+      - name: Install, launch, import the example and make a local call
+        env:
+          PACKAGE: ${{ matrix.package }}
+          EXPECT_ARCH: ${{ matrix.arch }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          ASSET: ${{ format(matrix.asset, needs.fetch.outputs.version) }}
+          CLI_ASSET: ${{ format('anvil-cli-{0}-{1}.tar.gz', needs.fetch.outputs.version, matrix.rust_target) }}
+          INPUTS: rel001-inputs
+          VERSION: ${{ needs.fetch.outputs.version }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: scripts/release-smoke/smoke-unix.sh
+      - name: Write the per-target result
+        if: always()
+        run: python3 -I scripts/release-smoke/record.py finalize --dir "$OUT" --target "$TARGET_ID" --out "$OUT/result.json"
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-result-${{ matrix.id }}
+          path: rel001-result/
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+  # Fedora is the RPM-native distribution: the .rpm is installed with dnf in
+  # a minimal, digest-pinned Fedora container on the Linux runner.
+  smoke-rpm:
+    name: Smoke · linux-x64-rpm
+    needs: fetch
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container:
+      image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET_ID: linux-x64-rpm
+      OUT: rel001-result
+    steps:
+      - name: Job tools (not the package's dependencies)
+        run: dnf -y install python3 procps-ng findutils file util-linux tar gzip grep sed
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rel001-inputs
+          path: rel001-inputs
+      - name: Install, launch, import the example and make a local call
+        env:
+          PACKAGE: rpm
+          EXPECT_ARCH: x86_64
+          RUST_TARGET: x86_64-unknown-linux-gnu
+          ASSET: ${{ format('Ferrum-Anvil-{0}-1.x86_64.rpm', needs.fetch.outputs.version) }}
+          CLI_ASSET: ${{ format('anvil-cli-{0}-x86_64-unknown-linux-gnu.tar.gz', needs.fetch.outputs.version) }}
+          INPUTS: rel001-inputs
+          VERSION: ${{ needs.fetch.outputs.version }}
+          RUNNER_LABEL: ubuntu-26.04
+          SMOKE_CONTAINER: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+        run: scripts/release-smoke/smoke-unix.sh
+      - name: Write the per-target result
+        if: always()
+        run: python3 -I scripts/release-smoke/record.py finalize --dir "$OUT" --target "$TARGET_ID" --out "$OUT/result.json"
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-result-linux-x64-rpm
+          path: rel001-result/
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+  smoke-windows:
+    name: Smoke · ${{ matrix.id }}
+    needs: fetch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x64-nsis
+            package: nsis
+            asset: "Ferrum-Anvil_{0}_x64-setup.exe"
+          - id: windows-x64-msi
+            package: msi
+            asset: "Ferrum-Anvil_{0}_x64_en-US.msi"
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      TARGET_ID: ${{ matrix.id }}
+      OUT: rel001-result
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rel001-inputs
+          path: rel001-inputs
+      - name: Install, launch, import the example and make a local call
+        shell: pwsh
+        env:
+          PACKAGE: ${{ matrix.package }}
+          EXPECT_ARCH: x86_64
+          RUST_TARGET: x86_64-pc-windows-msvc
+          ASSET: ${{ format(matrix.asset, needs.fetch.outputs.version) }}
+          CLI_ASSET: ${{ format('anvil-cli-{0}-x86_64-pc-windows-msvc.zip', needs.fetch.outputs.version) }}
+          INPUTS: rel001-inputs
+          VERSION: ${{ needs.fetch.outputs.version }}
+          RUNNER_LABEL: windows-2025
+        run: ./scripts/release-smoke/smoke-windows.ps1
+      - name: Write the per-target result
+        if: always()
+        shell: pwsh
+        run: python -I scripts/release-smoke/record.py finalize --dir "$env:OUT" --target "$env:TARGET_ID" --out "$env:OUT/result.json"
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-result-${{ matrix.id }}
+          path: rel001-result/
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+  summary:
+    name: Summary
+    needs: [fetch, smoke-unix, smoke-rpm, smoke-windows]
+    # Also when fetch failed, so the summary reports why and with which class.
+    if: ${{ !cancelled() && needs.fetch.result != 'skipped' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: rel001-fetch
+          path: rel001-fetch
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.fetch.result == 'success'
+        with:
+          pattern: rel001-result-*
+          path: rel001-results
+      - name: Merge the fetch result and the per-target results
+        env:
+          FETCH_JOB_RESULT: ${{ needs.fetch.result }}
+        run: |
+          mkdir -p rel001-summary rel001-results
+          python3 -I scripts/release-smoke/record.py summarize --input rel001-results --out rel001-summary/summary.json \
+            --fetch rel001-fetch/fetch.json --fetch-job-result "$FETCH_JOB_RESULT" \
+            --expect macos-arm64-dmg macos-x64-dmg linux-x64-deb linux-x64-appimage linux-x64-rpm windows-x64-nsis windows-x64-msi
+      - name: Upload the summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rel001-summary
+          path: rel001-summary/
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true

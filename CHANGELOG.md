@@ -69,6 +69,10 @@ below and the [upgrade guide](docs/upgrade-guide.md#016) before upgrading.
   variable could make an ordinary `{{label}}` resolve to that secret and send
   it without its sensitivity metadata. Surviving variables now keep their own
   vault identity when others are removed.
+- The desktop E2E toolchain (WebdriverIO, Mocha, archiver) now resolves
+  minimatch 11.0.3 for GHSA-g3hv-75wg-m249 and glob 14.0.3 for
+  GHSA-3g3m-2fjr-6pw4, through nested npm overrides; glob 10/13 cannot use
+  minimatch 11. Development-only; the shipped UI dependencies are unchanged.
 
 ### Changed
 
