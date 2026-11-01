@@ -785,6 +785,73 @@ class ReleaseCheckAppImage(unittest.TestCase):
         self.assertNotIn("trusted unsquashfs >= 4.5.1 required", output)
         self.assert_no_payload_execution()
 
+    def list_appimage(self, *args, env=None):
+        result = hosted_subprocess(
+            ["/bin/bash", str(CHECKER), "--list-appimage", *map(str, args)],
+            env=self.env if env is None else env, cwd=self.case_root,
+            capture_output=True, text=True, timeout=30,
+        )
+        output = result.stdout + result.stderr
+        self.assertFalse(self.runtime_sentinel.exists(), output)
+        self.assert_no_payload_execution()
+        return result, output
+
+    def test_list_appimage_prints_payload_paths_without_running_it(self):
+        runtimes = {"native": None, "elf64-le": data_runtime(),
+                    "elf32-be-section-last": data_runtime(1, ">", 20, True)}
+        for layout, runtime in runtimes.items():
+            with self.subTest(layout=layout):
+                image = self.image(runtime, payload="forbidden", mode=0o644)
+                before = image.read_bytes()
+                result, output = self.list_appimage(image)
+                self.assertEqual(result.returncode, 0, output)
+                self.assertEqual(
+                    sorted(result.stdout.splitlines()),
+                    ["AppRun", "usr/bin/anvil-desktop", "usr/lib/libhooks.so"],
+                )
+                self.assertEqual(before, image.read_bytes())
+                self.assertEqual(stat.S_IMODE(image.stat().st_mode), 0o644)
+
+    def test_list_appimage_fails_closed(self):
+        broken = self.case_root / "broken.AppImage"
+        broken.write_bytes(data_runtime())
+        for args, env, message in (
+            ((broken,), None, "AppImage metadata:"),
+            ((self.case_root / "missing.AppImage",), None, "cannot read AppImage"),
+            ((self.image(), self.image()), None, "takes no other artifact or option"),
+            ((self.image(),), self.restricted_path("unsquashfs"), "trusted unsquashfs"),
+            ((self.image(),), self.restricted_path("python3"), "trusted python3"),
+        ):
+            with self.subTest(message=message):
+                result, output = self.list_appimage(*args, env=env)
+                self.assertEqual(result.returncode, 2, output)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(message, output)
+        for banner in ("unsquashfs version 4.5.0 (2021/07/22)", "unrecognised version"):
+            with self.subTest(banner=banner):
+                env = self.extractor_path(banner)
+                result, output = self.list_appimage(self.image(), env=env)
+                self.assertEqual(result.returncode, 2, output)
+                self.assertIn("trusted unsquashfs >= 4.5.1 required", output)
+                self.assertFalse(Path(env["RELEASE_CHECK_EXTRACTOR_SENTINEL"]).exists())
+        for option in (["--no-graph"], ["--probe-seconds", "1"], ["--runtime-probe"],
+                       ["--features", "e2e"], ["--report", "report.json"]):
+            with self.subTest(option=option):
+                for order in ((*option, "--list-appimage", self.image()),
+                              ("--list-appimage", self.image(), *option)):
+                    result = hosted_subprocess(
+                        ["/bin/bash", str(CHECKER), *map(str, order)],
+                        env=self.env, cwd=self.case_root,
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    output = result.stdout + result.stderr
+                    self.assertEqual(result.returncode, 2, output)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("takes no other artifact or option", output)
+                    self.assertFalse((self.case_root / "report.json").exists())
+                    self.assertFalse(self.runtime_sentinel.exists(), output)
+                    self.assert_no_payload_execution()
+
     def test_explicit_probe_launches_extracted_apprun_only(self):
         evidence, _ = self.check(self.image(), 0, "--runtime-probe", "--probe-seconds", "1")
         self.assertEqual(evidence["artifacts"][0]["runtime_probe"], "pass")

@@ -65,10 +65,26 @@ Each build job:
    updater signing credentials; the certificate is removed afterwards. This is
    defense in depth, not isolation: both steps share the runner, and bundling
    itself runs third-party tools (the AppImage bundler downloads unpinned
-   `linuxdeploy` tools while the key is present). Signing the updater artifacts
-   in a separate job with `tauri signer sign` would be stronger. With the
-   owner's updater key a tagged release also writes signed updater artifacts
-   (see [In-app updates](#in-app-updates)).
+   `linuxdeploy` plugins and its `AppRun` while the key is present). Signing
+   the updater artifacts in a separate job with `tauri signer sign` would be
+   stronger. With the owner's updater key a tagged release also writes signed
+   updater artifacts (see [In-app updates](#in-app-updates)).
+
+   On Linux, `linuxdeploy` itself is pinned: the job places the
+   `linuxdeploy-07333c6` build that Tauri CLI 2.12 uses (SHA-256 checked) in
+   Tauri's tool cache before bundling, and sets
+   `LINUXDEPLOY_EXCLUDED_LIBRARIES=libwayland-client.so*`. The AppImage then
+   leaves `libwayland-client` to the host, like `libEGL` and the rest of the
+   graphics stack. The CLI 2.11 default `linuxdeploy` copies the build host's
+   `libwayland-client` into the AppImage; on a host whose Mesa needs a newer
+   one, Mesa's EGL driver cannot load and WebKit's web process aborts with
+   `Could not create default EGL display: EGL_BAD_PARAMETER` (0.1.5 on
+   Ubuntu 26.04). After bundling, the job lists the AppImage with
+   `scripts/release-check.sh --list-appimage` (the checker's own offset reader
+   and trusted `unsquashfs` >= 4.5.1; the image is never run) and fails if it
+   contains `libwayland-client`. Remove the tool-cache step with the
+   coordinated Tauri 2.12 bump (CLI 2.12 pins the same `linuxdeploy` under
+   another file name); keep the check.
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
@@ -207,6 +223,14 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
 
 Exit status: `0` pass, `1` test hooks found, `2` usage error or an artifact
 that could not be inspected (never reported as a pass).
+
+`scripts/release-check.sh --list-appimage <file>` runs none of the checks: it
+prints every file and empty directory in a Type 2 AppImage's filesystem
+(`unsquashfs -lc`), one per line relative to its root, read the same way as
+the content check (the same offset reader and `unsquashfs` 4.5.1 or later; the
+image is never run). It takes no other artifact or option, and exits `2` when
+the AppImage cannot be read. The Linux release build uses it to check what the
+AppImage bundles.
 
 The Ubuntu 26.04 release build targets modern Linux systems. Installers may
 require its newer glibc and system libraries; Ubuntu 22.04 and 24.04 compatibility
