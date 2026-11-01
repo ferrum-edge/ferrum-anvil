@@ -14,6 +14,10 @@ const PASS: &str = "cli-gateway-passphrase-1";
 const CATALOG: &str = anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID;
 
 async fn anvil(data: &Path, args: &[&str]) -> Output {
+    anvil_with_env(data, args, &[]).await
+}
+
+async fn anvil_with_env(data: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_anvil"))
         .arg("--data-dir")
         .arg(data)
@@ -21,6 +25,7 @@ async fn anvil(data: &Path, args: &[&str]) -> Output {
         .env("ANVIL_PASSPHRASE", PASS)
         .env_remove("ANVIL_PROFILE")
         .env_remove("ANVIL_DATA_DIR")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -33,8 +38,10 @@ fn text(o: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
 
+/// The test's own application profile ("ci"), even when the data directory
+/// holds others.
 fn open(root: &Path) -> App {
-    let s = ProfileManager::new(root).list().into_iter().next().unwrap();
+    let s = ProfileManager::new(root).list().into_iter().find(|s| s.display_name == "ci").unwrap();
     let (h, key) = ProfileManager::unlock(&s.dir, Unlock::Passphrase(PASS)).unwrap();
     App::open(s.dir, h, key).unwrap()
 }
@@ -129,7 +136,9 @@ async fn an_ambiguous_name_is_refused_and_an_id_removes_one() {
     assert!(out.contains(&a.id.to_string()) && out.contains(&b.id.to_string()), "{out}");
     assert_eq!(saved_gateways(&data), 2);
 
-    // Equal names list by id, whatever order they were saved in.
+    // Equal names list by id, not in the order they are stored: saving the
+    // first again stores it after the second.
+    open(&data).save_integration(a.clone()).unwrap();
     let o = anvil(&data, &["gateway", "list", "Lab"]).await;
     let ids: Vec<String> = String::from_utf8_lossy(&o.stdout).lines().map(|l| l.split("  ").next().unwrap().to_string()).collect();
     let mut sorted = vec![a.id.to_string(), b.id.to_string()];
@@ -143,4 +152,21 @@ async fn an_ambiguous_name_is_refused_and_an_id_removes_one() {
     let ws = app.find_workspace("Lab").unwrap();
     let left: Vec<_> = app.integrations(&ws.meta.id).unwrap().into_iter().map(|p| p.id).collect();
     assert_eq!(left, vec![a.id]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_gateway_argument_never_selects_the_application_profile() {
+    let (_dir, data, _f) = setup().await;
+    // Another application profile named like the gateway to remove.
+    ProfileManager::new(&data).create_passphrase("Shared", PASS, KdfParams::testing()).unwrap();
+
+    save_gateway(&data, "Shared", "gw.example");
+    let o = anvil(&data, &["--profile", "ci", "gateway", "remove", "Lab", "Shared"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(saved_gateways(&data), 0);
+
+    save_gateway(&data, "Shared", "gw.example");
+    let o = anvil_with_env(&data, &["gateway", "remove", "Lab", "Shared"], &[("ANVIL_PROFILE", "ci")]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(saved_gateways(&data), 0);
 }

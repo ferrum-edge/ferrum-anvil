@@ -25,8 +25,10 @@ pub enum GatewayCmd {
     Remove {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
-        /// Profile (id, or a name no other profile in the workspace has).
-        profile: String,
+        /// Gateway profile (id, or a name no other profile in the workspace
+        /// has). Its own argument id: `profile` is the global `--profile`.
+        #[arg(value_name = "PROFILE")]
+        gateway: String,
     },
 }
 
@@ -44,9 +46,9 @@ pub fn gateway_cmd(app: &App, cmd: &GatewayCmd) -> Result<i32> {
                 println!("{}", line(p));
             }
         }
-        GatewayCmd::Remove { workspace, profile } => {
+        GatewayCmd::Remove { workspace, gateway } => {
             let ws = find_workspace(app, workspace)?;
-            let p = find_profile(app, &ws, profile)?;
+            let p = find_profile(app, &ws, gateway)?;
             app.delete_integration(&p.id)?;
             println!("removed Ferrum gateway profile '{}' from '{}'", t(&p.name), t(&ws.name));
         }
