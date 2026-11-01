@@ -532,9 +532,11 @@ Each job then:
 
    | OS | Up for | Window | Webview |
    | --- | --- | --- | --- |
-   | macOS | at least 30 s; the window and the webview may take up to 90 s | an on-screen, normal-layer window owned by the app's process (the title is not compared) | a `com.apple.WebKit.WebContent` process started after the launch is running at the end |
-   | Linux | at least 30 s; the window and the webview may take up to 90 s | a visible X window titled `Ferrum Anvil` | a `WebKitWebProcess` started after the launch is running at the end |
+   | macOS | at least 30 s; the window and the webview may take up to 90 s | an on-screen, normal-layer window owned by the app's process (the title is not compared) | a `com.apple.WebKit.WebContent` process whose responsible process (`sudo launchctl procinfo`, `responsible pid`) is the app is running at the end. If procinfo gives no responsible pid on the runner, the check falls back to WebContent processes that were absent before the launch. That fallback cannot rule out an unrelated WebKit user, and `result.json` records it as a `webview_attribution` bypass |
+   | Linux | at least 30 s; the window and the webview may take up to 90 s | a visible X window titled `Ferrum Anvil` | a `WebKitWebProcess` descending from the launched process (process tree from `ps`) is running at the end |
    | Windows | exactly 30 s; there is no longer startup allowance | the app process's main window, titled `Ferrum Anvil`, within those 30 s | a WebView2 (`msedgewebview2.exe`) process descended from the app is running at the end |
+
+   `result.json` records the attribution used (`launches.<step>.webview_attribution`). Cleanup stops only the processes attributed to the launch.
 
    Screenshots are best-effort and not a required step. macOS
    (`screencapture`), Windows (a .NET screen copy) and Ubuntu (ImageMagick
@@ -565,14 +567,14 @@ Every failed step carries a class. Both `result.json` (`failure_class`) and the 
 | --- | --- | --- |
 | Fetch (`fetch.sh`) | An advertised asset is missing from the release, the release has no `SHA256SUMS`, `SHA256SUMS` does not list the asset, or the stored asset does not match `SHA256SUMS`. The run continues: the affected targets fail and the other targets run. | Release-API or download failure, or downloaded bytes that still differ from GitHub's stored digest after 3 attempts. The fetch job fails. A failure after the asset check passed (the example bundle from the repository) is also harness. |
 | Inputs (`asset_integrity`) | A problem `fetch.json` recorded for this target's asset | An input that did not arrive or changed between jobs, or an input that cannot be read (`release.json`, `example.json`, `fetch.json`, `SHA256SUMS`, the example) |
-| Runner (`native_arch`) | — | Wrong architecture, Rosetta, or OS/CPU query errors |
+| Runner (`native_arch`) | — | Wrong architecture or Rosetta. OS/CPU query errors: harness on Windows; on macOS and Linux they are recorded as `unknown` and do not fail the step |
 | Install, DMG | `hdiutil attach` fails (image not recognized or corrupt), no `.app`, `ditto` fails, `Info.plist` or binary unreadable, wrong version or architecture | Disk-image subsystem busy or unavailable, `/Applications` not clean, full disk |
-| Install, `.deb`/`.rpm` | `dpkg-deb`/`rpm` cannot read it, the install fails (for example on unmet dependencies), the package is not registered afterwards, no `/usr/bin` executable, wrong architecture | `apt-get update`, a package-mirror or network error, a held or interrupted package-manager lock, listing the runner's packages, full disk, `file(1)` errors |
+| Install, `.deb`/`.rpm` | `dpkg-deb`/`rpm` cannot read it, the install fails (for example on unmet dependencies), the package is not registered afterwards or has another version, no `/usr/bin` executable, wrong architecture | `apt-get update`, a package-mirror or network error, a held or interrupted package-manager lock, listing the runner's packages, full disk, `file(1)` errors |
 | Install, AppImage | Not an x86-64 ELF | `fuse3` or EGL/GLES/Mesa host install, `/dev/fuse` missing, copy or `chmod` into `~/Applications` |
-| Install, NSIS/MSI | Windows cannot start the installer. The installer exits non-zero. No Apps & features entry, no executable, unreadable PE header or version resource, not x64, wrong version. | `msiexec.exe` cannot be started; exit codes 1618 and 1601; full disk; a registry or install-directory read error that leaves no entry or executable |
+| Install, NSIS/MSI | Windows cannot start the installer. The installer exits non-zero. No Apps & features entry, no executable, unreadable PE header or version resource, not x64, wrong version. | `msiexec.exe` cannot be started; exit codes 1618 and 1601; full disk (the installer's message, or under 1 GB free on the system drive, for NSIS and MSI alike); a registry or install-directory read error that leaves no entry or executable |
 | Harness (`harness_setup`) | — | Installing Xvfb, xdotool, dbus or ImageMagick; a missing `pgrep`/`pkill`/`ps`/`python3`/`osascript`/`xdotool`/`setsid`/`Xvfb`; Xvfb not answering; `dbus-run-session -- true` failing |
 | CLI (`cli_ready`) | The archive does not extract. Windows cannot run the CLI. No executable, wrong `--version`. | Full disk, creating the extraction directory |
-| Launch (`launch_*`) | `open` fails, no process, the app exits, or no window or webview process while the probes and the display worked | The app's output names a session-bus or FUSE-mount fault. Also a probe that errored (osascript, xdotool, pgrep, the Windows process query), an X display not answering, or the app's own probes failing. |
+| Launch (`launch_*`) | `open` fails, no process, the app exits, or no window or webview process of the app's own while the probes and the display worked | The app's output names a session-bus or FUSE-mount fault. Also a probe that errored (osascript, xdotool, pgrep, `ps`, the Windows process query) or an X display not answering. |
 | CLI steps (`profile_create`, `example_import`, `local_call`) | The CLI cannot run or exits non-zero, a sample request is missing, `send --json` prints no JSON execution record, no HTTP 200, the request is not logged | Full disk, the listener does not start or exits during the call, the listener's log or the execution record cannot be read by the helper |
 | Best-effort, never fails a target | — | Screenshots, `codesign`/`spctl`/Authenticode readings, `anvil doctor`, `anvil history`, `ps`/process lists, app log copies, process cleanup |
 

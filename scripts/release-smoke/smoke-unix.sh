@@ -260,6 +260,7 @@ install_rpm() {
   comm -13 "$work/pkgs-before" "$work/pkgs-after" >"$logs/dnf-new-packages.txt" || hfail install "comm failed"
   n="$(wc -l <"$logs/dnf-new-packages.txt" | tr -d ' ')"
   rpm -q "$name" >/dev/null || fail install "rpm -q $name: not installed"
+  case "$rver" in "$VERSION"-*) ;; *) fail install "the RPM's version is $rver, expected $VERSION" ;; esac
   # rpm -ql failing is a tool fault; succeeding without a /usr/bin entry is the package's.
   files="$(rpm -ql "$name" 2>&1)" || hfail install "rpm -ql $name failed: $(printf '%s' "$files" | tail -2 | oneline)"
   bin="$(printf '%s\n' "$files" | grep -E '^/usr/bin/[^/]+$' | head -1 || true)"
@@ -399,7 +400,7 @@ window_count() { # $1 = app pid; prints the count, records probe errors
   fi
 }
 
-webview_pids() { # prints the PIDs of webview content processes (sorted), records probe errors
+all_webview_pids() { # every webview content process on the runner (sorted), records probe errors
   local pat out rc=0
   if [ "$os" = Darwin ]; then pat='com.apple.WebKit.WebContent'; else pat='WebKitWebProcess'; fi
   out="$(pgrep -f "$pat" 2>>"$logs/webview-probe.err")" || rc=$?
@@ -408,14 +409,50 @@ webview_pids() { # prints the PIDs of webview content processes (sorted), record
   [ -z "$out" ] || printf '%s\n' "$out" | sort
 }
 
-# Webview processes started since the launch: PIDs present now that were not
-# before it. Other WebKit users on the runner (they come and go) never count.
-new_webviews() {
-  local now
-  now="$(webview_pids)"
-  [ -n "$now" ] || { echo 0; return; }
-  comm -13 <(printf '%s\n' "$web_before_pids" | sed '/^$/d') <(printf '%s\n' "$now") | wc -l | tr -d ' '
+# Attribution: a webview content process counts for this launch only if it
+# belongs to the launched app, never because it merely appeared meanwhile.
+#   Linux: WebKitWebProcess is a descendant of the launched process (through
+#          the bwrap sandbox); the process tree comes from `ps`.
+#   macOS: WebContent is an XPC service whose parent is launchd; it counts
+#          when `launchctl procinfo` names the app as its responsible process
+#          (`responsible pid`). If procinfo gives no responsible pid on the
+#          runner, the check falls back to the weaker PID delta (WebContent
+#          processes absent before the launch) and records that limitation.
+descendants() { # $1 = root pid; prints the PIDs below it (sorted)
+  local tree rc=0
+  tree="$(ps -A -o pid= -o ppid= 2>>"$logs/webview-probe.err")" || rc=$?
+  if [ "$rc" != 0 ]; then probe_error "ps exited $rc: $(tail -1 "$logs/webview-probe.err" | oneline)"; return 0; fi
+  printf '%s\n' "$tree" | awk -v root="$1" '
+    { parent[$1] = $2 }
+    END {
+      for (c in parent) {
+        x = c; n = 0
+        while ((x in parent) && x != root && n < 128) { x = parent[x]; n++ }
+        if (x == root && c != root) print c
+      }
+    }' | sort
 }
+
+responsible_pid() { # $1 = pid; prints its responsible pid (macOS), or nothing
+  { sudo -n launchctl procinfo "$1" 2>/dev/null || true; } | sed -n 's/^[[:space:]]*responsible pid = \([0-9][0-9]*\).*/\1/p' | sed -n 1p
+}
+
+attributed_webviews() { # $1 = app pid; prints this launch's webview content PIDs
+  local all c
+  all="$(all_webview_pids)"
+  [ -n "$all" ] || return 0
+  if [ "$os" = Linux ]; then
+    comm -12 <(printf '%s\n' "$all") <(descendants "$1")
+  elif [ "$mac_attribution" = responsible ]; then
+    for c in $all; do
+      [ "$(responsible_pid "$c")" != "$1" ] || echo "$c"
+    done
+  else
+    comm -13 <(printf '%s\n' "$web_before_pids" | sed '/^$/d') <(printf '%s\n' "$all")
+  fi
+}
+
+count_lines() { grep -c . || true; }
 
 display_ok() { [ "$os" = Darwin ] || xdotool getdisplaygeometry >/dev/null 2>&1; }
 
@@ -426,12 +463,14 @@ harness_cause() { # $1 = app output log
 }
 
 launch() { # $1 = step name
-  local name="$1" pid="" i=0 win=0 web=0 web_before web_before_pids first_window="" first_webview="" shot="none" cause
+  local name="$1" pid="" i=0 win=0 web=0 web_before web_pids first_window="" first_webview="" shot="none" cause method
   current_step="$name"
   : >"$logs/probe-errors.log"
   display_ok || hfail "$name" "the X display ($DISPLAY) is not answering before the launch"
-  web_before_pids="$(webview_pids)"
-  web_before="$(printf '%s' "$web_before_pids" | grep -c . || true)"
+  # Kept for the macOS fallback and the record; Linux attribution needs no
+  # baseline.
+  web_before_pids="$(all_webview_pids)"
+  web_before="$(printf '%s' "$web_before_pids" | count_lines)"
   if [ "$os" = Darwin ]; then
     # `open` failing means LaunchServices could not start the installed app.
     open -n --stdout "$logs/$name.stdout.log" --stderr "$logs/$name.stdout.log" "$app" 2>>"$logs/$name.open.log" ||
@@ -451,6 +490,19 @@ launch() { # $1 = step name
   fi
   [ -n "$pid" ] || fail "$name" "no app process appeared within 20 s of launching $bin"
   app_pids="$app_pids $pid"
+  if [ "$os" = Linux ]; then
+    method="process tree: WebKitWebProcess descending from the launched pid $pid"
+  else
+    mac_attribution="delta"
+    if [ -n "$(responsible_pid "$pid")" ]; then mac_attribution="responsible"; fi
+    if [ "$mac_attribution" = responsible ]; then
+      method="responsible pid: WebContent whose launchctl procinfo 'responsible pid' is the app's pid $pid"
+    else
+      method="pid delta (weaker): WebContent processes absent before the launch; launchctl procinfo gave no responsible pid on this runner"
+      grep -q '"webview_attribution"' "$OUT/bypasses.jsonl" 2>/dev/null ||
+        bypass webview_attribution "The webview check could not attribute WebContent processes to the app (launchctl procinfo gave no responsible pid), so it counted WebContent processes started after the launch; an unrelated WebKit user starting meanwhile could satisfy it."
+    fi
+  fi
   # Up for at least ALIVE_SECONDS, and until both the window and a webview
   # content process have appeared (at most STARTUP_LIMIT seconds).
   while [ "$i" -lt "$ALIVE_SECONDS" ] || { [ "$i" -lt "$STARTUP_LIMIT" ] && { [ -z "$first_window" ] || [ -z "$first_webview" ]; }; }; do
@@ -463,10 +515,15 @@ launch() { # $1 = step name
       fail "$name" "the app exited ${i}s after launch (output: $(tail -5 "$logs/$name.stdout.log" 2>/dev/null | oneline))"
     fi
     if [ -z "$first_window" ] && [ "$(window_count "$pid")" != 0 ]; then first_window="${i}s"; fi
-    if [ -z "$first_webview" ] && [ "$(new_webviews)" -gt 0 ]; then first_webview="${i}s"; fi
+    if [ -z "$first_webview" ] && [ "$(attributed_webviews "$pid" | count_lines)" -gt 0 ]; then first_webview="${i}s"; fi
   done
   win="$(window_count "$pid")"
-  web="$(new_webviews)"
+  web_pids="$(attributed_webviews "$pid")"
+  web="$(printf '%s' "$web_pids" | count_lines)"
+  if [ "$os" = Darwin ]; then
+    # Evidence for the attribution: every WebContent process with its responsible pid.
+    for c in $(all_webview_pids); do echo "$c responsible=$(responsible_pid "$c")"; done >"$logs/$name.webcontent-attribution.txt" 2>&1 || true
+  fi
   local display_alive=true
   display_ok || display_alive=false
   # Screenshots are best-effort: never a reason to fail.
@@ -484,19 +541,24 @@ launch() { # $1 = step name
   else
     kill -KILL -- "-$pid" 2>/dev/null || true
   fi
-  # Webview processes can outlive the app (macOS WebContent XPC services):
-  # give this launch's own ones time to exit, then stop any left, so they
-  # are not running when the next launch takes its "before" list.
-  local left p
-  for _ in $(seq 1 10); do [ "$(new_webviews)" = 0 ] && break; sleep 1; done
-  left="$(comm -13 <(printf '%s\n' "$web_before_pids" | sed '/^$/d') <(webview_pids) || true)"
-  for p in $left; do kill -KILL "$p" 2>/dev/null || true; done
-  [ "$os" = Darwin ] || pkill -KILL -f 'WebKitNetworkProcess' 2>/dev/null || true
+  # This launch's webview processes can outlive the app (macOS WebContent XPC
+  # services are not in its process group): give them time to exit, then stop
+  # those still running. Only the processes attributed to this launch above
+  # are touched; nothing else on the runner is.
+  local p alive c
+  for _ in $(seq 1 10); do
+    alive=""
+    for p in $web_pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    [ -n "$alive" ] || break
+    sleep 1
+  done
+  for p in $web_pids; do kill -KILL "$p" 2>/dev/null || true; done
   local ld
   ld="$(app_log_dir)"
   if [ -d "$ld" ]; then { mkdir -p "$logs/app-log-$name" && cp -R "$ld/." "$logs/app-log-$name/"; } 2>/dev/null || true; fi
-  metaj "launches.$name={\"pid\":$pid,\"alive_seconds\":$i,\"top_level_windows\":$win,\"webview_processes\":$web,\"webview_processes_before_launch\":$web_before,\"app_log_dir_exists\":$([ -d "$ld" ] && echo true || echo false),\"display_alive_at_end\":$display_alive}"
-  meta "launches.$name.first_window_after=${first_window:-never}" "launches.$name.first_webview_after=${first_webview:-never}" "launches.$name.screenshot=$shot"
+  metaj "launches.$name={\"pid\":$pid,\"alive_seconds\":$i,\"top_level_windows\":$win,\"webview_processes\":$web,\"webview_processes_on_runner_before_launch\":$web_before,\"app_log_dir_exists\":$([ -d "$ld" ] && echo true || echo false),\"display_alive_at_end\":$display_alive}"
+  meta "launches.$name.first_window_after=${first_window:-never}" "launches.$name.first_webview_after=${first_webview:-never}" "launches.$name.screenshot=$shot" \
+    "launches.$name.webview_attribution=$method"
   local wanted="a top-level window titled 'Ferrum Anvil'"
   [ "$os" = Darwin ] && wanted="an on-screen window owned by the app process"
   if [ "$win" = 0 ] || [ "$web" -le 0 ]; then
@@ -509,8 +571,8 @@ launch() { # $1 = step name
     fi
   fi
   [ "$win" != 0 ] || fail "$name" "the app stayed up ${i}s but showed no $wanted (first seen: ${first_window:-never}; the probe ran without errors)"
-  [ "$web" -gt 0 ] || fail "$name" "the app stayed up ${i}s but has no webview content process (WebKit; first seen: ${first_webview:-never}; $web_before were running before the launch; the probe ran without errors)"
-  pass "$name" "installed app stayed up ${i}s (pid $pid); $win top-level window(s), first after $first_window; $web webview content process(es), first after $first_webview; screenshot: $shot"
+  [ "$web" -gt 0 ] || fail "$name" "the app stayed up ${i}s but has no webview content process of its own (WebKit; attribution: $method; first seen: ${first_webview:-never}; the probe ran without errors)"
+  pass "$name" "installed app stayed up ${i}s (pid $pid); $win top-level window(s), first after $first_window; $web webview content process(es) of its own ($method), first after $first_webview; screenshot: $shot"
 }
 
 launch launch_first_run

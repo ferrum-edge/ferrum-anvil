@@ -48,9 +48,15 @@ function Fail($name, $detail, $class = 'package') {
   exit 1
 }
 function HFail($name, $detail) { Fail $name $detail 'harness' }
-# The runner ran out of disk: a harness fault, whatever command hit it.
+# The runner ran out of disk: a harness fault, whatever command hit it. Told
+# by the command's own message, or by less than 1 GB free on the system drive
+# (an installer such as NSIS may exit non-zero without saying why).
 function FailUnlessRunner($name, $text, $detail) {
   if ("$text" -match 'not enough space on the disk|There is not enough space|disk is full') { HFail $name "$detail (runner disk)" }
+  try {
+    $free = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':') -ErrorAction Stop).Free
+    if ($free -lt 1GB) { HFail $name ("{0} (runner disk: {1:N0} MB free on {2})" -f $detail, ($free / 1MB), $env:SystemDrive) }
+  } catch { }
   Fail $name $detail
 }
 # The full command-by-command mapping is in docs/release.md ("Failure
@@ -132,7 +138,9 @@ try {
     # Windows refusing to start the shipped installer is the installer's failure.
     try { $p = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru } catch { Fail 'install' "Windows could not start the NSIS installer: $($_.Exception.Message)" }
     "exit code: $($p.ExitCode)" | Set-Content $log
-    if ($p.ExitCode -ne 0) { Fail 'install' "the NSIS installer /S exited $($p.ExitCode)" }
+    # NSIS reports no reason on /S: a non-zero exit is the installer's unless
+    # the runner's disk is full.
+    if ($p.ExitCode -ne 0) { FailUnlessRunner 'install' '' "the NSIS installer /S exited $($p.ExitCode)" }
     $method = 'NSIS installer run silently (/S), per-user default'
   } elseif ($env:PACKAGE -eq 'msi') {
     $log = Join-Path $Logs 'msiexec-install.log'
