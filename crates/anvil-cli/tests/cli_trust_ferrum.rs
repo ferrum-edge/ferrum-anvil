@@ -137,7 +137,7 @@ async fn save_trust_keeps_the_gateway_for_later_sends() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_saved_profile_covering_the_host_is_used_as_it_is() {
+async fn a_saved_profile_covering_the_host_means_the_flag_adds_nothing() {
     let (_dir, data, f) = setup().await;
     let url = f.url("/echo");
     // A wildcard covers 127.0.0.1 as the engine matches hosts, though the
@@ -231,7 +231,7 @@ async fn the_host_is_compared_as_the_engine_compares_it() {
     let default = anvil_diagnostics::ferrum::DEFAULT_COMPATIBILITY_ID;
 
     // A URL, a path or a port is refused before anything is sent or saved.
-    for bad in ["http://127.0.0.1/", "127.0.0.1/echo", "127.0.0.1:8080", "[::1]:8080", " "] {
+    for bad in ["http://127.0.0.1/", "127.0.0.1/echo", "127.0.0.1:8080", "[::1]:8080", " ", "*.0.0.1"] {
         let o = anvil(&data, &["send", "--workspace", "Lab", "--url", &url, "--trust-ferrum", bad, "--save-trust"]).await;
         assert_eq!(o.status.code(), Some(3), "{bad:?}: {}", text(&o));
         assert!(text(&o).contains("--trust-ferrum takes a host"), "{bad:?}: {}", text(&o));

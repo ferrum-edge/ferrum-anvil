@@ -693,8 +693,11 @@ fn early_data_line(e: &anvil_domain::execution::EarlyDataObservation) -> String 
 fn trust_host(raw: &str) -> Result<String> {
     let h = raw.trim();
     let h = h.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(h);
-    if h.is_empty() || h.contains("://") || h.contains(['/', '[', ']']) || h.chars().any(char::is_whitespace) {
+    if h.is_empty() || h.contains("://") || h.contains(['/', '[', ']']) || h.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("--trust-ferrum takes a host name or address, not a URL: '{}'", terminal_safe(raw));
+    }
+    if h.contains('*') {
+        bail!("--trust-ferrum takes one host, not a pattern: '{}' (a saved profile can name *.suffix)", terminal_safe(raw));
     }
     if h.matches(':').count() == 1 {
         bail!("--trust-ferrum takes a host without a port (its profile covers every port): '{}'", terminal_safe(raw));
@@ -1238,7 +1241,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 trusted_gateways.push(profile);
             }
             let cancel = CancellationToken::new();
-            let c2 = cancel.clone();
+            let (c2, cancelled) = (cancel.clone(), cancel.clone());
             tokio::spawn(async move {
                 if tokio::signal::ctrl_c().await.is_ok() {
                     c2.cancel();
@@ -1265,7 +1268,9 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             print_outcome(&out, s.json);
             let o = &out.record.outcome;
             if let (Some(p), Some(host)) = (to_save, &host) {
-                if !dispatched_to(&out.record, host) {
+                if cancelled.is_cancelled() {
+                    eprintln!("did not save Ferrum gateway profile '{}': the send was cancelled", p.name);
+                } else if !dispatched_to(&out.record, host) {
                     eprintln!(
                         "did not save Ferrum gateway profile '{}': no request was sent to {host} (does --trust-ferrum name the URL's host?)",
                         p.name
@@ -1277,7 +1282,10 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                         .context("the send finished, but saving its Ferrum gateway profile failed")?
                     {
                         GatewaySave::Saved(_) => {
-                            eprintln!("saved Ferrum gateway profile '{name}' in '{}': later sends to {host} are trusted", ws.name)
+                            eprintln!(
+                                "saved Ferrum gateway profile '{name}' in '{}': later sends to {host} are trusted",
+                                terminal_safe(&ws.name)
+                            )
                         }
                         GatewaySave::Covered(c) => {
                             eprintln!("did not save Ferrum gateway profile '{name}': '{}' now covers {host}", terminal_safe(&c.name))

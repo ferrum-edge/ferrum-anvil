@@ -1,12 +1,17 @@
 //! `App::save_gateway_unless_covered` (what `anvil send --save-trust` uses):
 //! a profile is saved only when no saved profile covers its host on every
-//! port, and concurrent saves for one host leave exactly one profile.
+//! port, and concurrent saves for one host leave exactly one profile. Also
+//! what `SendOptions::trusted_gateways` (`--trust-ferrum`) admits into a
+//! send's context.
 
 use anvil_app::App;
+use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::workspace::GatewaySave;
 use anvil_domain::Id;
-use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
+use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
+use anvil_domain::request::RequestSpec;
+use anvil_domain::secret::SensitiveValue;
 use anvil_domain::tls::HostBinding;
 use anvil_storage::KdfParams;
 use std::sync::{Arc, Barrier};
@@ -79,4 +84,28 @@ fn concurrent_saves_for_one_host_leave_one_profile() {
     let saved = savers.into_iter().map(|t| t.join().unwrap()).filter(|s| *s).count();
     assert_eq!(saved, 1);
     assert_eq!(app.integrations(&ws).unwrap().len(), 1);
+}
+
+#[test]
+fn a_per_send_profile_is_kept_to_its_workspace_and_brings_no_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let other = app.create_workspace("Other").unwrap().meta.id;
+    let mut with_lookup = gateway(ws, "gw.example.com", None);
+    let IntegrationKind::FerrumGateway { detail, .. } = &mut with_lookup.kind;
+    *detail = Some(DiagnosticDetailAccess {
+        base_url: "https://gw.example.com:9443".into(),
+        credential: SensitiveValue::Template { value: "a-token".into() },
+        namespace: None,
+    });
+    let opts = SendOptions { trusted_gateways: vec![gateway(other, "gw.example.com", None), with_lookup.clone()], ..Default::default() };
+
+    let ctx = app.build_context(None, &ws, Some(RequestSpec::http("GET", "http://gw.example.com/")), &opts).unwrap();
+    let ids: Vec<Id> = ctx.integrations.iter().map(|p| p.id).collect();
+    assert_eq!(ids, vec![with_lookup.id], "only the send's own workspace's profile is used");
+    let IntegrationKind::FerrumGateway { detail, .. } = &ctx.integrations[0].kind;
+    assert!(detail.is_none(), "a per-send profile brings no diagnostic reference lookup");
+    // Nothing was saved.
+    assert!(app.integrations(&ws).unwrap().is_empty());
 }

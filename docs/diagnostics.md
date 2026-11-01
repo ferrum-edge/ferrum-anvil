@@ -304,21 +304,24 @@ catalog whose id equals the profile's `compatibility_id`:
   (default catalog, plain HTTP allowed, no lookup) and saves nothing: the
   next send to `HOST` is untrusted unless it passes the flag again. Add
   `--save-trust` to save the profile in the workspace, which later sends,
-  `anvil run` and exports then use like any other profile. A saved profile
-  that covers `HOST` on every port (the same name or a `*.suffix` over it,
-  case ignored, as the engine matches hosts) is used instead, and
-  `--save-trust` then saves nothing and says so; one bound to a port does
-  not count. `HOST` is a host name or address, read as the engine reads a
+  `anvil run` and exports then use like any other profile. When a saved
+  profile covers `HOST` on every port (the same name or a `*.suffix` over
+  it, case ignored, as the engine matches hosts), the flag declares nothing:
+  the saved profiles apply exactly as they would without it (the first that
+  matches the target's host and port, a port-bound one included), and
+  `--save-trust` saves nothing and says so. One bound to a port does not
+  cover `HOST`. `HOST` is a host name or address, read as the engine reads a
   URL's host (trimmed, case ignored, punycode, an IPv6 address in any
-  notation, with or without brackets); a URL, a path or `host:port` is
-  refused. Without `--save-trust` the flag's profile is named "Ferrum
+  notation, with or without brackets); a URL, a path, `host:port` or a
+  `*` pattern is refused. Without `--save-trust` the flag's profile is named "Ferrum
   gateway HOST (this send only)". `--save-trust` saves "Ferrum gateway HOST"
   after the send, and only if an attempt of the send wrote the request to
   `HOST` itself (its dispatch is not `not_dispatched`; a redirect's first
   hop does not count). The check for a covering profile is repeated in the
   same write transaction as the save, so concurrent saves leave one
-  profile. A send that fails before anything is sent, or never reached
-  `HOST`, saves nothing; when it produced a record, Anvil says why.
+  profile. A send that fails before anything is sent, never reached
+  `HOST`, or was cancelled (Ctrl-C) saves nothing; when it produced a
+  record, Anvil says why.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 
