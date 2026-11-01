@@ -69,21 +69,21 @@ Each build job:
    stronger. With the owner's updater key a tagged release also writes signed
    updater artifacts (see [In-app updates](#in-app-updates)).
 
-   On Linux, `linuxdeploy` itself is pinned: the job places the
-   `linuxdeploy-07333c6` build that Tauri CLI 2.12 uses (SHA-256 checked) in
-   Tauri's tool cache before bundling, and sets
-   `LINUXDEPLOY_EXCLUDED_LIBRARIES=libwayland-client.so*`. The AppImage then
-   leaves `libwayland-client` to the host, like `libEGL` and the rest of the
-   graphics stack. The CLI 2.11 default `linuxdeploy` copies the build host's
-   `libwayland-client` into the AppImage; on a host whose Mesa needs a newer
-   one, Mesa's EGL driver cannot load and WebKit's web process aborts with
-   `Could not create default EGL display: EGL_BAD_PARAMETER` (0.1.5 on
-   Ubuntu 26.04). After bundling, the job lists the AppImage with
-   `scripts/release-check.sh --list-appimage` (the checker's own offset reader
-   and trusted `unsquashfs` >= 4.5.1; the image is never run) and fails if it
-   contains `libwayland-client`. Remove the tool-cache step with the
-   coordinated Tauri 2.12 bump (CLI 2.12 pins the same `linuxdeploy` under
-   another file name); keep the check.
+   On Linux, `linuxdeploy` itself is pinned: Tauri CLI 2.12 bundles with the
+   `linuxdeploy-07333c6` build, which it picks by release tag only and
+   downloads unverified, so the job places that build (SHA-256 checked) in
+   Tauri's tool cache as `linuxdeploy-07333c6-x86_64.AppImage` before
+   bundling, and sets `LINUXDEPLOY_EXCLUDED_LIBRARIES=libwayland-client.so*`.
+   The AppImage then leaves `libwayland-client` to the host, like `libEGL` and
+   the rest of the graphics stack. The CLI 2.11 `linuxdeploy` (0.1.5 and
+   earlier) copied the build host's `libwayland-client` into the AppImage; on
+   a host whose Mesa needs a newer one, Mesa's EGL driver could not load and
+   WebKit's web process aborted with `Could not create default EGL display:
+   EGL_BAD_PARAMETER` (0.1.5 on Ubuntu 26.04). After bundling, the job lists
+   the AppImage with `scripts/release-check.sh --list-appimage` (the checker's
+   own offset reader and trusted `unsquashfs` >= 4.5.1; the image is never
+   run) and fails if it contains `libwayland-client`. A Tauri CLI that pins
+   another `linuxdeploy` needs the cached file name and hash updated with it.
 2. `cargo build --release -p anvil-cli --target <t>`, packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
@@ -380,16 +380,11 @@ release page once.
   exceptions — `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`
   (Tauri's HTML/CSS tooling) and `option-ext` (`dirs`) — all used unmodified.
   Sources: crates.io only. Duplicate crate versions are reported as warnings.
-- **Advisories**: RustSec, with four reviewed ignores. Each carries an exit
+- **Advisories**: RustSec, with one reviewed ignore. It carries an exit
   condition in `deny.toml` and is an open item for the owner:
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
     gtk 0.19+ (glib ≥ 0.20).
-  - `RUSTSEC-2026-0367`, `-0368`, `-0369` — `zip` `extract()` permission and
-    symlink escapes. Anvil's own `zip` is 9.0.4 and never calls `extract()`;
-    the flagged 4.6.1 comes only from `tauri-plugin-updater`, which verifies
-    the release signature before extracting an update archive. Resolves when
-    `tauri-plugin-updater` moves to `zip` ≥ 9.
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E tooling is a mixed WebdriverIO
   graph: `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 (nested WebdriverIO

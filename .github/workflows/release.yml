@@ -192,18 +192,19 @@ jobs:
       - name: Pinned linuxdeploy for the AppImage (Linux)
         if: runner.os == 'Linux'
         env:
-          # Tauri CLI 2.11 bundles the AppImage with tauri-apps/binary-releases'
-          # `linuxdeploy` build from July 2024, whose built-in excludelist
-          # predates libwayland-client.so.0. It copies the build host's
-          # libwayland-client into the AppImage, and a host Mesa built against a
-          # newer libwayland then cannot load its EGL driver against it:
-          # WebKit's web process aborts with EGL_BAD_PARAMETER. This is the
-          # linuxdeploy build that Tauri CLI 2.12 pins (tauri-apps/tauri#16062).
-          # CLI 2.11 uses a cached linuxdeploy-x86_64.AppImage instead of
-          # downloading one; CLI 2.12 looks for another file name and ignores
-          # this one, so drop this step with the coordinated Tauri 2.12 bump.
+          # Tauri CLI 2.12 bundles the AppImage with tauri-apps/binary-releases'
+          # `linuxdeploy-07333c6` build (tauri-apps/tauri#16062), whose
+          # excludelist knows libwayland-client.so.0 (CLI 2.11's July 2024
+          # build copied the host's into the AppImage, and a host Mesa built
+          # against a newer libwayland then could not load its EGL driver:
+          # WebKit's web process aborted with EGL_BAD_PARAMETER). The CLI picks
+          # that release by tag only and downloads it unverified unless
+          # `linuxdeploy-07333c6-x86_64.AppImage` is already in its tool cache,
+          # so this step places it there after a SHA-256 check. Update the file
+          # name and hash together with a CLI that pins another build.
           LINUXDEPLOY_URL: https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy-07333c6/linuxdeploy-x86_64.AppImage
           LINUXDEPLOY_SHA256: 36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62
+          LINUXDEPLOY_CACHED: linuxdeploy-07333c6-x86_64.AppImage
         run: |
           tools="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
           mkdir -p "$tools"
@@ -211,8 +212,8 @@ jobs:
             --silent --show-error --retry 3 --connect-timeout 15 --max-time 300 \
             --output "$tools/linuxdeploy-download" "$LINUXDEPLOY_URL"
           echo "$LINUXDEPLOY_SHA256  $tools/linuxdeploy-download" | sha256sum --check --strict -
-          mv "$tools/linuxdeploy-download" "$tools/linuxdeploy-x86_64.AppImage"
-          chmod 0755 "$tools/linuxdeploy-x86_64.AppImage"
+          mv "$tools/linuxdeploy-download" "$tools/$LINUXDEPLOY_CACHED"
+          chmod 0755 "$tools/$LINUXDEPLOY_CACHED"
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-cyclonedx@0.5.9

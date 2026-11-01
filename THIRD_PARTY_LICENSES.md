@@ -16,28 +16,26 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-687 Rust crates, 4 npm packages.
+674 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
 | MIT OR Apache-2.0 | 309 |
-| MIT | 154 |
-| Apache-2.0 OR MIT | 97 |
-| MIT/Apache-2.0 | 31 |
+| MIT | 152 |
+| Apache-2.0 OR MIT | 94 |
+| MIT/Apache-2.0 | 26 |
 | Unicode-3.0 | 18 |
 | Apache-2.0 | 10 |
 | Zlib OR Apache-2.0 OR MIT | 10 |
-| BSD-3-Clause | 9 |
 | Unlicense OR MIT | 8 |
+| BSD-3-Clause | 7 |
 | ISC | 5 |
 | MPL-2.0 | 5 |
 | Unlicense/MIT | 4 |
 | Apache-2.0 OR ISC OR MIT | 3 |
 | Apache-2.0/MIT | 3 |
+| MIT OR Apache-2.0 OR Zlib | 3 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 2 |
-| BSD-3-Clause AND MIT | 2 |
-| BSD-3-Clause/MIT | 2 |
-| MIT OR Apache-2.0 OR Zlib | 2 |
 | MIT OR Zlib OR Apache-2.0 | 2 |
 | Zlib | 2 |
 | (MIT OR Apache-2.0) AND Apache-2.0 | 1 |
@@ -49,6 +47,8 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | Apache-2.0 OR BSL-1.0 | 1 |
 | Apache-2.0 WITH LLVM-exception | 1 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 1 |
+| BSD-3-Clause AND MIT | 1 |
+| BSD-3-Clause/MIT | 1 |
 | CC0-1.0 OR MIT-0 OR Apache-2.0 | 1 |
 | ISC AND (Apache-2.0 OR ISC) | 1 |
 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | 1 |
@@ -62,13 +62,13 @@ the modified file under MPL-2.0.
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| cssparser | 0.36.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
-| cssparser-macros | 0.6.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| cssparser | 0.37.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| cssparser-macros | 0.7.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | dtoa-short | 0.3.5 | MPL-2.0 | https://github.com/upsuper/dtoa-short |
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
-| selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
+| selectors | 0.38.0 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (687)
+## Rust crates (674)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -80,9 +80,7 @@ the modified file under MPL-2.0.
 | aes-gcm | 0.11.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/AEADs |
 | ahash | 0.8.12 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
-| alloc-no-stdlib | 2.0.4 | BSD-3-Clause | https://github.com/dropbox/rust-alloc-no-stdlib |
 | alloc-no-stdlib | 3.0.0 | BSD-3-Clause | https://github.com/dropbox/rust-alloc-no-stdlib |
-| alloc-stdlib | 0.2.4 | BSD-3-Clause | https://github.com/dropbox/rust-alloc-no-stdlib |
 | alloc-stdlib | 0.3.0 | BSD-3-Clause | https://github.com/dropbox/rust-alloc-no-stdlib |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | https://github.com/zakarumych/allocator-api2 |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
@@ -131,9 +129,7 @@ the modified file under MPL-2.0.
 | block2 | 0.6.2 | MIT | https://github.com/madsmtm/objc2 |
 | blocking | 1.7.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/blocking |
 | borrow-or-share | 0.2.4 | MIT-0 | https://github.com/yescallop/borrow-or-share |
-| brotli | 8.0.4 | BSD-3-Clause AND MIT | https://github.com/dropbox/rust-brotli |
 | brotli | 9.0.0 | BSD-3-Clause AND MIT | https://github.com/dropbox/rust-brotli |
-| brotli-decompressor | 5.0.3 | BSD-3-Clause/MIT | https://github.com/dropbox/rust-brotli-decompressor |
 | brotli-decompressor | 6.0.1 | BSD-3-Clause/MIT | https://github.com/dropbox/rust-brotli-decompressor |
 | bs58 | 0.5.1 | MIT/Apache-2.0 | https://github.com/Nullus157/bs58-rs |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
@@ -144,12 +140,12 @@ the modified file under MPL-2.0.
 | cairo-sys-rs | 0.18.2 | MIT | https://github.com/gtk-rs/gtk-rs-core |
 | camino | 1.2.6 | MIT OR Apache-2.0 | https://github.com/camino-rs/camino |
 | cargo_metadata | 0.19.2 | MIT | https://github.com/oli-obk/cargo_metadata |
-| cargo_toml | 0.22.3 | Apache-2.0 OR MIT | https://gitlab.com/lib.rs/cargo_toml |
+| cargo_toml | 1.0.1 | Apache-2.0 OR MIT | https://gitlab.com/lib.rs/cargo_toml |
 | cargo-platform | 0.1.9 | MIT OR Apache-2.0 | https://github.com/rust-lang/cargo |
 | cbc | 0.2.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-modes |
 | cc | 1.4.7 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
 | ccm | 0.5.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/AEADs/tree/master/ccm |
-| cfb | 0.7.3 | MIT | https://github.com/mdsteele/rust-cfb |
+| cfb | 0.14.0 | MIT | https://github.com/mdsteele/rust-cfb |
 | cfg_aliases | 0.2.2 | MIT | https://github.com/katharostech/cfg_aliases |
 | cfg-expr | 0.15.8 | MIT OR Apache-2.0 | https://github.com/EmbarkStudios/cfg-expr |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
@@ -187,12 +183,11 @@ the modified file under MPL-2.0.
 | crypto-bigint | 0.7.10 | Apache-2.0 OR MIT | https://github.com/RustCrypto/crypto-bigint |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
-| cssparser | 0.36.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
-| cssparser-macros | 0.6.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| cssparser | 0.37.0 | MPL-2.0 | https://github.com/servo/rust-cssparser |
+| cssparser-macros | 0.7.1 | MPL-2.0 | https://github.com/servo/rust-cssparser |
 | csv | 1.4.0 | Unlicense/MIT | https://github.com/BurntSushi/rust-csv |
 | csv-core | 0.1.13 | Unlicense/MIT | https://github.com/BurntSushi/rust-csv |
-| ctor | 0.8.0 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
-| ctor-proc-macro | 0.0.7 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
+| ctor | 1.0.13 | Apache-2.0 OR MIT | https://github.com/mmastrac/linktime |
 | ctr | 0.9.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-modes |
 | ctr | 0.10.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-modes |
 | ctutils | 0.4.6 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
@@ -216,7 +211,7 @@ the modified file under MPL-2.0.
 | digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | digest | 0.11.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | dimpl | 0.8.0 | MIT OR Apache-2.0 | https://github.com/algesten/dimpl (vendored with a patch: vendor/dimpl-0.8.0-empty-ca) |
-| dirs | 6.0.0 | MIT OR Apache-2.0 | https://github.com/soc/dirs-rs |
+| dirs | 7.0.0 | MIT OR Apache-2.0 | https://codeberg.org/dirs/dirs-rs |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | https://github.com/dirs-dev/dirs-sys-rs |
 | dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 | https://github.com/yaahc/displaydoc |
@@ -224,12 +219,10 @@ the modified file under MPL-2.0.
 | dlopen2_derive | 0.4.3 | MIT | https://github.com/OpenByteDev/dlopen2 |
 | dns-lookup | 4.0.2 | MIT OR Apache-2.0 | https://github.com/keeperofdakeys/dns-lookup/ |
 | document-features | 0.2.12 | MIT OR Apache-2.0 | https://github.com/slint-ui/document-features |
-| dom_query | 0.27.0 | MIT | https://github.com/niklak/dom_query |
+| dom_query | 0.28.0 | MIT | https://github.com/niklak/dom_query |
 | dpi | 0.1.2 | Apache-2.0 AND MIT | https://github.com/rust-windowing/winit |
 | dtoa | 1.0.11 | MIT OR Apache-2.0 | https://github.com/dtolnay/dtoa |
 | dtoa-short | 0.3.5 | MPL-2.0 | https://github.com/upsuper/dtoa-short |
-| dtor | 0.3.0 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
-| dtor-proc-macro | 0.0.6 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://gitlab.com/kornelski/dunce |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
 | ecdsa | 0.17.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/signatures |
@@ -237,7 +230,7 @@ the modified file under MPL-2.0.
 | elliptic-curve | 0.14.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits |
 | email_address | 0.2.9 | MIT | https://github.com/johnstonskj/rust-email_address.git |
 | embed_plist | 1.2.2 | MIT OR Apache-2.0 | https://github.com/nvzqz/embed-plist-rs |
-| embed-resource | 3.0.11 | MIT | https://github.com/nabijaczleweli/rust-embed-resource |
+| embed-resource | 3.0.12 | MIT | https://github.com/nabijaczleweli/rust-embed-resource |
 | endi | 1.1.1 | MIT | https://github.com/zeenix/endi |
 | enumflags2 | 0.7.12 | MIT OR Apache-2.0 | https://github.com/meithecatte/enumflags2 |
 | enumflags2_derive | 0.7.12 | MIT OR Apache-2.0 | https://github.com/meithecatte/enumflags2 |
@@ -314,7 +307,7 @@ the modified file under MPL-2.0.
 | hickory-resolver | 0.26.3 | MIT OR Apache-2.0 | https://github.com/hickory-dns/hickory-dns |
 | hkdf | 0.13.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/KDFs/ |
 | hmac | 0.13.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/MACs |
-| html5ever | 0.38.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
+| html5ever | 0.39.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | http | 1.5.0 | MIT OR Apache-2.0 | https://github.com/hyperium/http |
 | http-body | 1.1.0 | MIT | https://github.com/hyperium/http-body |
 | http-body-util | 0.1.5 | MIT | https://github.com/hyperium/http-body |
@@ -325,7 +318,7 @@ the modified file under MPL-2.0.
 | hyper-rustls | 0.27.10 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/hyper-rustls |
 | hyper-util | 0.1.21 | MIT | https://github.com/hyperium/hyper-util |
 | iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | https://github.com/strawlab/iana-time-zone |
-| ico | 0.5.0 | MIT | https://github.com/mdsteele/rust-ico |
+| ico | 0.6.0 | MIT | https://github.com/mdsteele/rust-ico |
 | icu_collections | 2.3.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_locale_core | 2.3.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_normalizer | 2.3.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
@@ -338,7 +331,7 @@ the modified file under MPL-2.0.
 | idna_adapter | 1.2.2 | Apache-2.0 OR MIT | https://github.com/hsivonen/idna_adapter |
 | indexmap | 1.9.3 | Apache-2.0 OR MIT | https://github.com/bluss/indexmap |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/indexmap |
-| infer | 0.19.0 | MIT | https://github.com/bojand/infer |
+| infer | 0.22.0 | MIT | https://github.com/bojand/infer |
 | inout | 0.1.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | inout | 0.2.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | inventory | 0.3.24 | MIT OR Apache-2.0 | https://github.com/dtolnay/inventory |
@@ -356,13 +349,13 @@ the modified file under MPL-2.0.
 | jiff-tzdb | 0.1.8 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
 | jiff-tzdb-platform | 0.1.3 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
-| json-patch | 3.0.1 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
-| jsonptr | 0.6.3 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
+| json-patch | 4.2.0 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
+| jsonptr | 0.7.1 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
 | jsonschema | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonschema-regex | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonschema-value | 0.60.1 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
-| keyboard-types | 0.7.0 | MIT OR Apache-2.0 | https://github.com/pyfisch/keyboard-types |
+| keyboard-types | 0.8.3 | MIT OR Apache-2.0 | https://github.com/rust-windowing/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
 | keyring-core | 1.0.1 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-core.git |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | https://github.com/rust-lang-nursery/lazy-static.rs |
@@ -381,7 +374,7 @@ the modified file under MPL-2.0.
 | logos-codegen | 0.16.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
 | logos-derive | 0.16.1 | MIT OR Apache-2.0 | https://github.com/maciejhirsz/logos |
 | lru-slab | 0.1.3 | MIT OR Apache-2.0 OR Zlib | https://github.com/Ralith/lru-slab |
-| markup5ever | 0.38.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
+| markup5ever | 0.39.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | memoffset | 0.9.1 | MIT | https://github.com/Gilnaa/memoffset |
 | micromap | 0.3.0 | MIT | https://github.com/yegor256/micromap |
@@ -389,12 +382,12 @@ the modified file under MPL-2.0.
 | miette-derive | 7.6.0 | Apache-2.0 | https://github.com/zkat/miette |
 | mime | 0.3.17 | MIT OR Apache-2.0 | https://github.com/hyperium/mime |
 | minimal-lexical | 0.2.1 | MIT/Apache-2.0 | https://github.com/Alexhuszagh/minimal-lexical |
-| minisign-verify | 0.2.5 | MIT | https://github.com/jedisct1/rust-minisign-verify |
+| minisign-verify | 0.3.0 | MIT | https://github.com/jedisct1/rust-minisign-verify |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | mio | 1.2.3 | MIT | https://github.com/tokio-rs/mio |
 | moka | 0.12.16 | (MIT OR Apache-2.0) AND Apache-2.0 | https://github.com/moka-rs/moka |
-| muda | 0.19.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/muda |
+| muda | 0.20.0 | Apache-2.0 OR MIT | https://github.com/tauri-apps/muda |
 | new_debug_unreachable | 1.0.6 | MIT | https://github.com/mbrubeck/rust-debug-unreachable |
 | nix | 0.31.3 | MIT | https://github.com/nix-rust/nix |
 | nom | 7.1.3 | MIT | https://github.com/Geal/nom |
@@ -457,7 +450,6 @@ the modified file under MPL-2.0.
 | pkcs8 | 0.11.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | pkg-config | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/pkg-config-rs |
 | plist | 1.10.1 | MIT | https://github.com/ebarnard/rust-plist/ |
-| png | 0.17.16 | MIT OR Apache-2.0 | https://github.com/image-rs/image-png |
 | png | 0.18.1 | MIT OR Apache-2.0 | https://github.com/image-rs/image-png |
 | polling | 3.11.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/polling |
 | poly1305 | 0.9.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/universal-hashes |
@@ -538,7 +530,7 @@ the modified file under MPL-2.0.
 | secret-service | 5.2.0 | MIT OR Apache-2.0 | https://github.com/hwchen/secret-service-rs.git |
 | security-framework | 3.7.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
 | security-framework-sys | 2.17.0 | MIT OR Apache-2.0 | https://github.com/kornelski/rust-security-framework |
-| selectors | 0.36.1 | MPL-2.0 | https://github.com/servo/stylo |
+| selectors | 0.38.0 | MPL-2.0 | https://github.com/servo/stylo |
 | semver | 1.0.28 | MIT OR Apache-2.0 | https://github.com/dtolnay/semver |
 | serde | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |
@@ -582,13 +574,14 @@ the modified file under MPL-2.0.
 | spki | 0.7.3 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/spki |
 | spki | 0.8.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
+| static_vcruntime | 3.0.0 | MIT OR Apache-2.0 OR Zlib | https://github.com/ChrisDenton/static_vcruntime |
 | string_cache | 0.9.0 | MIT OR Apache-2.0 | https://github.com/servo/string-cache |
 | string_cache_codegen | 0.6.1 | MIT OR Apache-2.0 | https://github.com/servo/string-cache |
 | strsim | 0.11.1 | MIT | https://github.com/rapidfuzz/strsim-rs |
 | strum | 0.28.0 | MIT | https://github.com/Peternator7/strum |
 | strum_macros | 0.28.0 | MIT | https://github.com/Peternator7/strum |
 | subtle | 2.6.1 | BSD-3-Clause | https://github.com/dalek-cryptography/subtle |
-| swift-rs | 1.0.8 | MIT OR Apache-2.0 | https://github.com/Brendonovich/swift-rs |
+| swift-rs | 1.0.9 | MIT OR Apache-2.0 | https://github.com/Brendonovich/swift-rs |
 | syn | 1.0.109 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | syn | 2.0.119 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | syn | 3.0.6 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
@@ -599,21 +592,21 @@ the modified file under MPL-2.0.
 | system-configuration-sys | 0.6.0 | MIT OR Apache-2.0 | https://github.com/mullvad/system-configuration-rs |
 | system-deps | 6.2.2 | MIT OR Apache-2.0 | https://github.com/gdesmott/system-deps |
 | tagptr | 0.2.0 | MIT/Apache-2.0 | https://github.com/oliver-giersch/tagptr.git |
-| tao | 0.35.3 | Apache-2.0 | https://github.com/tauri-apps/tao |
+| tao | 0.37.2 | Apache-2.0 | https://github.com/tauri-apps/tao |
 | tar | 0.4.46 | MIT OR Apache-2.0 | https://github.com/composefs/tar-rs |
 | target-lexicon | 0.12.16 | Apache-2.0 WITH LLVM-exception | https://github.com/bytecodealliance/target-lexicon |
-| tauri | 2.11.6 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-build | 2.6.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-codegen | 2.6.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-macros | 2.6.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-plugin | 2.6.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri | 2.12.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-build | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-codegen | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-macros | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-plugin | 2.7.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-plugin-dialog | 2.7.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-fs | 2.5.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-plugin-opener | 2.5.5 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
-| tauri-plugin-updater | 2.12.0 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
-| tauri-runtime | 2.11.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-runtime-wry | 2.11.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-utils | 2.9.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-plugin-updater | 2.14.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
+| tauri-runtime | 2.12.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-runtime-wry | 2.12.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-utils | 2.10.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-winres | 0.3.6 | MIT | https://github.com/tauri-apps/winres |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | https://github.com/Stebalien/tempfile |
 | tendril | 0.5.1 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
@@ -632,10 +625,8 @@ the modified file under MPL-2.0.
 | tokio-tungstenite | 0.30.0 | MIT | https://github.com/snapview/tokio-tungstenite |
 | tokio-util | 0.7.20 | MIT | https://github.com/tokio-rs/tokio |
 | toml | 0.8.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_datetime | 0.6.3 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_datetime | 0.7.5+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_datetime | 1.1.1+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_edit | 0.19.15 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_edit | 0.20.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
@@ -649,18 +640,13 @@ the modified file under MPL-2.0.
 | tracing | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-attributes | 0.1.31 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-core | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
-| tray-icon | 0.24.2 | MIT OR Apache-2.0 | https://github.com/tauri-apps/tray-icon |
+| tray-icon | 0.25.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/tray-icon |
 | try-lock | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
 | tungstenite | 0.30.0 | MIT OR Apache-2.0 | https://github.com/snapview/tungstenite-rs (vendored with a patch: vendor/tungstenite-0.30.0-deflate) |
 | typed-path | 0.13.0 | MIT OR Apache-2.0 | https://github.com/chipsenkbeil/typed-path |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | https://github.com/dtolnay/typeid |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | uds_windows | 1.2.1 | MIT | https://github.com/haraldh/rust_uds_windows |
-| unic-char-property | 0.9.0 | MIT/Apache-2.0 | https://github.com/open-i18n/rust-unic/ |
-| unic-char-range | 0.9.0 | MIT/Apache-2.0 | https://github.com/open-i18n/rust-unic/ |
-| unic-common | 0.9.0 | MIT/Apache-2.0 | https://github.com/open-i18n/rust-unic/ |
-| unic-ucd-ident | 0.9.0 | MIT/Apache-2.0 | https://github.com/open-i18n/rust-unic/ |
-| unic-ucd-version | 0.9.0 | MIT/Apache-2.0 | https://github.com/open-i18n/rust-unic/ |
 | unicode-general-category | 1.1.0 | Apache-2.0 | https://github.com/yeslogic/unicode-general-category |
 | unicode-ident | 1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
@@ -670,7 +656,7 @@ the modified file under MPL-2.0.
 | untrusted | 0.7.1 | ISC | https://github.com/briansmith/untrusted |
 | untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | url | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
-| urlpattern | 0.3.0 | MIT | https://github.com/denoland/rust-urlpattern |
+| urlpattern | 0.6.0 | MIT | https://github.com/denoland/rust-urlpattern |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | https://github.com/alacritty/vte |
 | uuid | 1.28.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
@@ -684,48 +670,50 @@ the modified file under MPL-2.0.
 | walkdir | 2.5.0 | Unlicense/MIT | https://github.com/BurntSushi/walkdir |
 | want | 0.3.2 | MIT | https://github.com/seanmonstar/want |
 | web_atoms | 0.2.6 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
+| web-time | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
 | webkit2gtk | 2.0.2 | MIT | https://github.com/tauri-apps/webkit2gtk-rs |
 | webkit2gtk-sys | 2.0.2 | MIT | https://github.com/tauri-apps/webkit2gtk-rs |
-| webview2-com | 0.38.2 | MIT | https://github.com/wravery/webview2-rs |
+| webview2-com | 0.39.1 | MIT | https://github.com/wravery/webview2-rs |
 | webview2-com-macros | 0.8.1 | MIT | https://github.com/wravery/webview2-rs |
-| webview2-com-sys | 0.38.2 | MIT | https://github.com/wravery/webview2-rs |
+| webview2-com-sys | 0.39.1 | MIT | https://github.com/wravery/webview2-rs |
 | widestring | 1.2.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/widestring-rs |
 | winapi | 0.3.9 | MIT/Apache-2.0 | https://github.com/retep998/winapi-rs |
 | winapi-util | 0.1.11 | Unlicense OR MIT | https://github.com/BurntSushi/winapi-util |
-| window-vibrancy | 0.6.0 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri-plugin-vibrancy |
+| window-vibrancy | 0.8.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri-plugin-vibrancy |
 | windows | 0.61.3 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnu | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows | 0.62.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnu | 0.53.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc | 0.53.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-collections | 0.2.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-collections | 0.3.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-core | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-core | 0.62.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-future | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-future | 0.3.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-implement | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-interface | 0.59.3 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-link | 0.1.3 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-link | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-native-keyring-store | 1.1.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/windows-native-keyring-store.git |
 | windows-numerics | 0.2.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-numerics | 0.3.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-registry | 0.6.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-result | 0.3.4 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-result | 0.4.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.4.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows-sys | 0.59.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows-targets | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-targets | 0.53.5 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-threading | 0.1.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-threading | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-version | 0.1.7 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | winnow | 0.5.40 | MIT | https://github.com/winnow-rs/winnow |
-| winnow | 0.7.15 | MIT | https://github.com/winnow-rs/winnow |
 | winnow | 1.0.4 | MIT | https://github.com/winnow-rs/winnow |
-| winreg | 0.55.0 | MIT | https://github.com/gentoo90/winreg-rs |
+| winreg | 0.56.0 | MIT | https://github.com/gentoo90/winreg-rs |
 | wnaf | 0.14.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/elliptic-curves |
 | writeable | 0.6.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| wry | 0.55.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/wry |
+| wry | 0.57.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/wry |
 | x11 | 2.21.0 | MIT | https://github.com/AltF02/x11-rs.git |
 | x11-dl | 2.21.0 | MIT | https://github.com/AltF02/x11-rs.git |
 | x509-cert | 0.2.5 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats/tree/master/x509-cert |
@@ -748,7 +736,6 @@ the modified file under MPL-2.0.
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| zip | 4.6.1 | MIT | https://github.com/zip-rs/zip2.git |
 | zip | 9.1.1 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
@@ -764,7 +751,7 @@ the modified file under MPL-2.0.
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | https://www.npmjs.com/package/@tauri-apps/api/v/2.11.1 |
+| @tauri-apps/api | 2.12.4 | Apache-2.0 OR MIT | https://www.npmjs.com/package/@tauri-apps/api/v/2.12.4 |
 | react | 19.3.1 | MIT | https://www.npmjs.com/package/react/v/19.3.1 |
 | react-dom | 19.3.1 | MIT | https://www.npmjs.com/package/react-dom/v/19.3.1 |
 | scheduler | 0.28.0 | MIT | https://www.npmjs.com/package/scheduler/v/0.28.0 |

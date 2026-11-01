@@ -21,10 +21,18 @@
   downgrade).
 - zip is updated to 9.0.4 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
   preserving SUID/SGID bits and symlink targets escaping the destination).
-  The `zip` 4.6.1 copy held by `tauri-plugin-updater` has no patched 4.x
-  release and is a reviewed `deny.toml` ignore: the updater verifies the
-  release signature before extracting an update archive, and Anvil's own
-  bundle code reads entries in memory without `extract()`.
+- The in-app updater (`tauri-plugin-updater`) is updated from 2.12.0 to
+  2.14.1, which uses `zip` 9 (the same 9.1.1 as Anvil's own code). This
+  removes `zip` 4.6.1 (GHSA-m665-v7pm-7grj, a header parser differential
+  that can overwrite files on extraction; GHSA-q7v9-x93c-xqv3, unbounded
+  symlink targets; GHSA-8hxf-qr8p-62x4, an AES authentication bypass on a
+  truncated entry) and the three `deny.toml` ignores that covered it. The
+  updater still verifies the minisign signature, and with
+  `requireSignedVersion` the version it was signed for, before it extracts
+  or installs anything, and now verifies again before installing. Signature
+  errors read as before. The plugin needs Tauri 2.12, so the desktop app moves
+  to `tauri` 2.12.5 and `@tauri-apps/api` / `@tauri-apps/cli` 2.12.4 (see
+  Changed).
 - JWT signing (`jsonwebtoken`) and DTLS (`dimpl`) now use their AWS-LC
   backends instead of the RustCrypto ones. This removes `crypto-bigint`
   0.5.5 (RUSTSEC-2026-0387: operations meant to be constant-time could branch
@@ -51,6 +59,22 @@
 
 ### Changed
 
+- The desktop app is built with Tauri 2.12 (`tauri` 2.12.5, CLI and
+  `@tauri-apps/api` 2.12.4, `tauri-plugin-updater` 2.14.1). Tauri 2.12
+  includes GHSA-w28w-mhc8-qvjv (queued channel data and large command
+  responses are bound to the webview that created them). Behavior changes:
+  - Windows builds use `windows` 0.62 and WebView2 `webview2-com` 0.39, which
+    drop Windows 7 support.
+  - The Linux AppImage no longer forces `GDK_BACKEND=x11`: on a Wayland
+    session it uses GTK's Wayland backend. Setting `GDK_BACKEND=x11`
+    restores the old behavior.
+  - On macOS, restarting into an installed update relaunches the app through
+    LaunchServices, so the new instance no longer inherits the terminal it
+    was started from. A failed in-app install no longer deletes the installed
+    app: the bundles are swapped in one step, or the previous app is kept as
+    `Ferrum Anvil (previous version).app` and the error says so.
+  - On Linux, an AppImage update that is not an AppImage (or a compressed
+    one) is refused before the installed AppImage is touched.
 - The generic HTTP status findings (`http.*`) now quote an RFC 9457 problem
   report (`application/problem+json`) when the error response carries one:
   its `type`, `title`, `detail`, `status` and `instance` are recorded as
