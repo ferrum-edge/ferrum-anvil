@@ -29,6 +29,7 @@ on:
     paths:
       - ".github/workflows/release-smoke.yml"
       - "scripts/release-smoke/**"
+      - "scripts/tests/test_release_smoke_record.py"
 
 permissions:
   contents: read
@@ -38,6 +39,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The recorder and classifier unit tests. They also run in ci.yml's
+  # supply-chain job, but CI on PRs runs ci.yml from main (repository
+  # ruleset), so this job is what runs them against a PR's own scripts.
+  unit-tests:
+    name: Recorder and classifier tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release smoke recorder tests (failure classes)
+        run: python3 -I scripts/tests/test_release_smoke_record.py
+      - name: Failure-matrix classifier tests (pinned, requires)
+        run: python3 -I scripts/tests/test_matrix_coverage.py
+
   fetch:
     name: Fetch release assets
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'anvil-v')
