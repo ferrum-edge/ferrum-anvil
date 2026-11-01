@@ -262,6 +262,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   // The profiles whose removal is being written: none can be saved (which
   // would put it back) or removed again until its own removal settles.
   const [removing, setRemoving] = useState<ReadonlySet<string>>(new Set());
+  // The profiles removed in this dialog: a refresh that read the list before
+  // a removal was written, and answers after it, must not list them again
+  // (Save would then put a removed gateway back).
+  const removed = useRef(new Set<string>());
   // Focus goes back to Remove gateway after a cancelled prompt, once this
   // dialog is no longer inert (an inert element cannot take the focus).
   const [cancelled, setCancelled] = useState(0);
@@ -275,7 +279,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
     const [a, b, c] = await Promise.all([api.tlsProfiles(props.workspaceId), api.proxyProfiles(props.workspaceId), api.integrations(props.workspaceId)]);
     setTls(a);
     setProxy(b);
-    setInts(c);
+    setInts(c.filter((p) => !removed.current.has(p.id)));
   };
   useEffect(() => {
     void load();
@@ -320,9 +324,11 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
         setErr(String((e as Error).message));
         return;
       }
-      // Removed: drop it here at once, so a failed refresh cannot leave it
-      // listed (and savable back). Close the editor only if it still shows
-      // it: a slow delete must not close another draft opened meanwhile.
+      // Removed: drop it here at once, and from every later refresh, so a
+      // failed or late refresh cannot leave it listed (and savable back).
+      // Close the editor only if it still shows it: a slow delete must not
+      // close another draft opened meanwhile.
+      removed.current.add(id);
       setInts((cur) => cur.filter((p) => p.id !== id));
       setEditing((cur) => (cur?.value.id === id ? null : cur));
       props.onChanged();

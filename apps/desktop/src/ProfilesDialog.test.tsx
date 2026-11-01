@@ -163,6 +163,40 @@ describe("Ferrum gateway profiles", () => {
     expect(calls("integration_save")).toHaveLength(0);
   });
 
+  it("does not list a removed gateway again when an older refresh answers last", async () => {
+    const other: IntegrationProfile = { ...gateway, id: "gw-2", name: "Second gateway" };
+    saved = [gateway, other];
+    const answer = invoke.getMockImplementation()!;
+    await openGateways();
+    // Each refresh reads the list when it is asked, and answers when the test says.
+    const reads: { snapshot: IntegrationProfile[]; answer: (v: IntegrationProfile[]) => void }[] = [];
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integrations_list") {
+        const snapshot = [...saved];
+        return new Promise<IntegrationProfile[]>((resolve) => reads.push({ snapshot, answer: resolve }));
+      }
+      return answer(cmd, args);
+    });
+    const remove = async (name: string) => {
+      fireEvent.click(await screen.findByText(name));
+      fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+      await screen.findByRole("dialog", { name: "Remove gateway" });
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    };
+    // The first removal's refresh reads [second gateway], the second's reads [].
+    await remove(gateway.name);
+    await waitFor(() => expect(reads).toHaveLength(1));
+    await remove(other.name);
+    await waitFor(() => expect(reads).toHaveLength(2));
+    expect(reads.map((r) => r.snapshot.map((p) => p.id))).toEqual([["gw-2"], []]);
+    // The newer answers first, the older last.
+    await act(async () => reads[1].answer(reads[1].snapshot));
+    await act(async () => reads[0].answer(reads[0].snapshot));
+    expect(screen.queryByText(other.name)).toBeNull();
+    expect(screen.getByText("No gateways declared.")).toBeTruthy();
+    expect(calls("integration_save")).toHaveLength(0);
+  });
+
   it("drops a removed profile even when the list cannot be refreshed", async () => {
     const answer = invoke.getMockImplementation()!;
     const onChanged = await openGateways();
