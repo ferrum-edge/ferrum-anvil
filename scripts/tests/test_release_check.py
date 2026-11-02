@@ -5,6 +5,7 @@ native executable that writes a sentinel on *any* invocation, including an
 offset/extraction request. SquashFS payloads are real compressed filesystems.
 """
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -164,11 +166,13 @@ class ReleaseCheckAppImage(unittest.TestCase):
             "RELEASE_CHECK_DESKTOP_SENTINEL": str(self.desktop_sentinel),
         }
         for key in ("RELEASE_CHECK_CREATE_PROFILE", "RELEASE_CHECK_EXIT_EARLY",
-                    "RELEASE_CHECK_SERVE_WEBDRIVER"):
+                    "RELEASE_CHECK_SERVE_WEBDRIVER", "RELEASE_CHECK_SHARED_LOCK",
+                    "RELEASE_CHECK_HELPER_PIDS", "RELEASE_CHECK_EXIT_EARLY_ONCE",
+                    "RELEASE_CHECK_SETSID_HELPER"):
             self.env.pop(key, None)
 
-    def image(self, runtime=None, payload="clean", mode=0o755):
-        image = self.case_root / "untrusted image.AppImage"
+    def image(self, runtime=None, payload="clean", mode=0o755, name="untrusted image.AppImage"):
+        image = self.case_root / name
         prefix = self.native_runtime if runtime is None else runtime
         image.write_bytes(prefix + self.payloads[payload])
         image.chmod(mode)
@@ -887,6 +891,181 @@ class ReleaseCheckAppImage(unittest.TestCase):
         self.assertIn("app exited early", output)
         self.assertTrue(self.apprun_sentinel.exists())
         self.assertTrue(self.desktop_sentinel.exists())
+
+    def shared_lock_env(self):
+        """The fixture app starts a SIGTERM-ignoring helper that holds a lock
+        every launch shares, like WebView2's browser process and its user data
+        folder on Windows; a launch while the lock is held exits early."""
+        helper_pids = self.case_root / "helper-pids"
+        self.addCleanup(self.kill_helpers, helper_pids)
+        return helper_pids, {
+            **self.env,
+            "RELEASE_CHECK_SHARED_LOCK": str(self.case_root / "shared.lock"),
+            "RELEASE_CHECK_HELPER_PIDS": str(helper_pids),
+        }
+
+    @staticmethod
+    def helper_pid_list(helper_pids):
+        return [int(pid) for pid in helper_pids.read_text().split()] if helper_pids.exists() else []
+
+    @staticmethod
+    def running(pid):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        return state != "Z"
+
+    def kill_helpers(self, helper_pids):
+        for pid in self.helper_pid_list(helper_pids):
+            if self.running(pid):
+                os.kill(pid, 9)
+
+    def probe_two_images(self, env):
+        report = self.case_root / "report.json"
+        result = hosted_subprocess(
+            ["/bin/bash", str(CHECKER), "--no-graph", "--report", str(report),
+             "--runtime-probe", "--probe-seconds", "1",
+             str(self.image(name="first.AppImage")), str(self.image(name="second.AppImage"))],
+            env=env, cwd=self.case_root, capture_output=True, text=True, timeout=90,
+        )
+        output = result.stdout + result.stderr
+        self.assertFalse(self.runtime_sentinel.exists(), output)
+        return result, output, json.loads(report.read_text())
+
+    def assert_helpers_gone(self, helper_pids, count, output):
+        pids = self.helper_pid_list(helper_pids)
+        self.assertEqual(len(pids), count, output)
+        deadline = time.monotonic() + 5
+        while any(self.running(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual([pid for pid in pids if self.running(pid)], [], output)
+
+    def test_each_probe_stops_the_apps_helpers_before_the_next_probe(self):
+        helper_pids, env = self.shared_lock_env()
+        result, output, evidence = self.probe_two_images(env)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertEqual(evidence["result"], "pass")
+        self.assertEqual([a["runtime_probe"] for a in evidence["artifacts"]], ["pass", "pass"], output)
+        self.assertNotIn("exited early", output)
+        self.assert_helpers_gone(helper_pids, 2, output)
+
+    def test_helpers_of_an_app_that_exits_early_do_not_poison_the_next_probe(self):
+        # The first launch starts its lock-holding helper and exits at once,
+        # so the helper is reparented before the probe ever looks at it.
+        helper_pids, env = self.shared_lock_env()
+        env["RELEASE_CHECK_EXIT_EARLY_ONCE"] = str(self.case_root / "exited-once")
+        result, output, evidence = self.probe_two_images(env)
+        self.assertEqual(result.returncode, 2, output)
+        self.assertEqual(evidence["result"], "error")
+        self.assertEqual([a["runtime_probe"] for a in evidence["artifacts"]], ["error", "pass"], output)
+        self.assertEqual(output.count("app exited early"), 1, output)
+        self.assertNotIn("shared lock is in use", output)
+        self.assert_helpers_gone(helper_pids, 2, output)
+
+    def test_detached_helpers_of_an_app_that_exits_early_do_not_poison_the_next_probe(self):
+        # The helper leaves the app's session and process group, and the app
+        # exits at once, before the probe could see the helper as its child.
+        helper_pids, env = self.shared_lock_env()
+        env["RELEASE_CHECK_EXIT_EARLY_ONCE"] = str(self.case_root / "exited-once")
+        env["RELEASE_CHECK_SETSID_HELPER"] = "1"
+        result, output, evidence = self.probe_two_images(env)
+        self.assertEqual(result.returncode, 2, output)
+        self.assertEqual([a["runtime_probe"] for a in evidence["artifacts"]], ["error", "pass"], output)
+        self.assertEqual(output.count("app exited early"), 1, output)
+        self.assertNotIn("shared lock is in use", output)
+        self.assert_helpers_gone(helper_pids, 2, output)
+
+    def test_lock_held_outside_the_probe_is_still_an_inconclusive_early_exit(self):
+        helper_pids, env = self.shared_lock_env()
+        with open(self.case_root / "shared.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            evidence, output = self.check(self.image(), 2, "--runtime-probe", "--probe-seconds", "1", env=env)
+        self.assertEqual(evidence["artifacts"][0]["runtime_probe"], "error")
+        self.assertIn("app exited early", output)
+        self.assertIn("shared lock is in use", output)
+        self.assertEqual(self.helper_pid_list(helper_pids), [])
+
+
+def windows_probe_script():
+    """The PowerShell the checker runs on Windows, as the checker writes it."""
+    text = CHECKER.read_text()
+    start = text.index("cat <<'PS1'\n") + len("cat <<'PS1'\n")
+    return text[start:text.index("\nPS1\n", start)] + "\n"
+
+
+class WindowsProbeTreeSelection(unittest.TestCase):
+    """Which processes the Windows cleanup treats as the probed app's tree.
+
+    Runs the checker's own selection function in PowerShell on the hosted
+    Linux runner with process tables given as data (no Windows API involved).
+    """
+
+    CASES = r"""
+function P($id, $parent, $ticks) { [pscustomobject]@{ Id = $id; ParentId = $parent; Ticks = [long]$ticks; Name = "p$id" } }
+$cases = [ordered]@{}
+# The app (100) with its browser (200) and the browser's child (300); an
+# unrelated process (400) and another launch of the same executable (600).
+$cases.running = @{ all = @((P 100 1 1000), (P 200 100 1010), (P 300 200 1020), (P 400 1 1005), (P 600 1 1005)); known = @{ 100 = [long]1000 } }
+# The app exited and an unrelated process reuses its id, with a child of its own.
+$cases.reused_root = @{ all = @((P 100 7 5000), (P 500 100 5100), (P 200 100 1010), (P 300 200 1020)); known = @{ 100 = [long]1000 } }
+# Only a process reusing the app's id is left.
+$cases.reused_root_only = @{ all = @((P 100 7 5000), (P 501 100 5100)); known = @{ 100 = [long]1000 } }
+# A process naming the app's id as parent but older than the app is not its child.
+$cases.older_than_parent = @{ all = @((P 100 1 1000), (P 700 100 900)); known = @{ 100 = [long]1000 } }
+# The browser (200, seen before) exited and its id was reused; its own child (300) remains.
+$cases.reused_helper = @{ all = @((P 100 1 1000), (P 200 9 6000), (P 800 200 6100), (P 300 200 1020)); known = @{ 100 = [long]1000; 200 = [long]1010 } }
+foreach ($k in $cases.Keys) {
+  $c = $cases[$k]
+  $ids = @(Select-ProbeTree $c.all $c.known | ForEach-Object { $_.Id } | Sort-Object)
+  "$k=" + ($ids -join ',')
+}
+# Identifying the app: this checker's shell is 10; the app runs C:\a\anvil-desktop.exe.
+function A($id, $parent, $ticks, $path) { [pscustomobject]@{ Id = $id; ParentId = $parent; Ticks = [long]$ticks; Name = 'anvil-desktop.exe'; Path = $path } }
+function S($id, $parent, $ticks) { [pscustomobject]@{ Id = $id; ParentId = $parent; Ticks = [long]$ticks; Name = 'bash.exe'; Path = 'C:\git\bash.exe' } }
+$isExe = { param($path) $path -eq 'C:\a\anvil-desktop.exe' }
+$finds = [ordered]@{}
+# Ours (shell 10 -> job 20 -> app 30) next to another launch of the same executable (shell 11 -> 21 -> 31).
+$finds.ours = @((S 10 1 100), (S 20 10 200), (A 30 20 300 'C:\a\anvil-desktop.exe'), (S 11 1 100), (S 21 11 200), (A 31 21 250 'C:\a\anvil-desktop.exe'))
+$finds.other_launch_only = @((S 10 1 100), (S 11 1 100), (S 21 11 200), (A 31 21 250 'C:\a\anvil-desktop.exe'))
+# The job's id now belongs to a younger process: the chain is broken.
+$finds.reused_parent = @((S 10 1 100), (S 20 10 400), (A 30 20 300 'C:\a\anvil-desktop.exe'))
+$finds.before_probe = @((S 10 1 100), (S 20 10 120), (A 30 20 140 'C:\a\anvil-desktop.exe'))
+$finds.other_path = @((S 10 1 100), (S 20 10 200), (A 30 20 300 'C:\b\anvil-desktop.exe'))
+foreach ($k in $finds.Keys) {
+  $app = Find-ProbeApp $finds[$k] 10 150 'anvil-desktop.exe' $isExe
+  "find_$k=" + $(if ($app) { $app.Id } else { '' })
+}
+"""
+
+    def test_app_and_tree_are_identified_without_strangers(self):
+        require_github_hosted()
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            raise RuntimeError("hosted fixture dependency missing: pwsh")
+        with tempfile.TemporaryDirectory(prefix="release-check-pwsh-") as temp:
+            script = Path(temp) / "probe-tree.ps1"
+            script.write_text(windows_probe_script())
+            command = "$env:PROBE_MODE = 'library'; . '" + str(script) + "'\n" + self.CASES
+            result = hosted_subprocess(
+                [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True, text=True, timeout=120,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        got = dict(line.split("=", 1) for line in result.stdout.split() if "=" in line)
+        self.assertEqual(got, {
+            "running": "100,200,300",
+            "reused_root": "200,300",
+            "reused_root_only": "",
+            "older_than_parent": "100",
+            "reused_helper": "100,300",
+            "find_ours": "30",
+            "find_other_launch_only": "",
+            "find_reused_parent": "",
+            "find_before_probe": "",
+            "find_other_path": "",
+        }, output)
 
 
 class HostedFixturePolicy(unittest.TestCase):
