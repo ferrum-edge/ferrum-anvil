@@ -24,6 +24,15 @@
 #               TAURI_WEBDRIVER_PORT=<free port> and E2E unlock variables set:
 #               nothing may answer WebDriver /status on that port, and no
 #               profile may be created in the throw-away data directory.
+#               The app and the processes it started (on Windows its
+#               WebView2 msedgewebview2.exe processes) are then stopped. A
+#               WebDriver answer or a created profile is still a failure,
+#               which takes precedence; otherwise, if they are not gone
+#               within about 30 s the probe is inconclusive. A probe
+#               launches only once the previous probe's processes are gone
+#               and, on Windows, the WebView2 user data folder is unlocked,
+#               waiting about 30 s for each; otherwise it is skipped as
+#               inconclusive.
 #               Needs a display (use xvfb-run on Linux CI).
 #
 # Options
@@ -53,7 +62,7 @@ list_appimage=""
 check_options=0
 artifacts=()
 
-usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --features) features="${2:-}"; check_options=1; shift 2 ;;
@@ -518,25 +527,381 @@ free_port() {
   return 1
 }
 
+# The probed app is stopped together with every process it started, and a
+# probe starts only once the previous probe's processes are gone: a helper
+# that outlives the app keeps holding what the app holds. On Windows the
+# app's WebView2 browser process (msedgewebview2.exe, a child of the app)
+# locks the user data folder %LOCALAPPDATA%\com.ferrumedge.anvil\EBWebView
+# that every launch of the app shares, and a launch while another browser
+# process still holds that lock fails with WebView2 0x800700AA ("The requested
+# resource is in use"), which says nothing about the artifact under test.
+# Git Bash's `kill` ends the app in a way that leaves its browser process
+# exiting for 30 s or more (it then also outlasts TerminateProcess), so on
+# Windows the app's process tree is ended with TerminateProcess only
+# (Stop-Process), after which the browser process is gone within a second.
+# Every wait on the probe's processes is bounded; what is still running at
+# the deadline makes the probe inconclusive.
+probe_settle_seconds=30
+probe_windows=0
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) probe_windows=1 ;; esac
+# The current probe: its background job (on Linux and macOS also the ID of
+# the process group the job leads), the AppImage extraction directory, the
+# WebView2 lock file it took, and what identifies its processes (Linux/macOS:
+# an environment token; Windows: this shell's process id, the executable and
+# the launch time). probe_pending=1 while they are not all gone.
+pt_pid="" pt_tree="" pt_lock="" pt_token="" pt_shell="" pt_exe="" pt_since="" pt_watch="" pt_files=""
+probe_pending=0
+probe_count=0
+
+# Windows helper, by PROBE_MODE:
+#   wait-lock  wait (bounded) until the WebView2 user data folder is not
+#              locked; prints "free", or "held" and the WebView2 processes
+#              using that folder.
+#   watch      from launch until PROBE_STOPFILE appears (bounded): identify
+#              the app and record its process tree in PROBE_KNOWN every 250 ms.
+#   stop       stop the recorded tree (identifying the app now if the watch
+#              did not) and wait (bounded) until none of it is left and the
+#              user data folder lock is released. Exit 0 = settled, 1 = not.
+#   library    define the functions only (for tests).
+# The app is the process running the probed executable, started no earlier
+# than the probe, whose parent chain (each parent running and no younger than
+# its child) reaches this checker's own shell, which is running, so its id is
+# its own; another launch of the same executable is not taken for it. Its
+# tree is the app and every process descending from it by parent id, each
+# created no earlier than its parent and, when another process now holds that
+# parent's id, before that process; processes are remembered by id and
+# creation time as they are seen, so a child whose parent has since exited is
+# still found, and a process that merely reuses an id is not. Limits: the
+# app is looked for at most four parents below this checker's shell (on
+# hosted runners it is two: the app, then its Git Bash job); a process
+# whose parent started and exited between two looks (250 ms apart) is not
+# found; and a process whose id was reused while a child of its first holder
+# still ran, by a process that has itself exited, cannot be told apart from
+# that first holder. Each of these fails closed: an app that is not found is
+# not stopped, and its still-running job or a leftover that keeps the
+# WebView2 folder locked makes the probe inconclusive and holds the next
+# probe back.
+probe_windows_ps() {
+  cat <<'PS1'
+$ErrorActionPreference = 'Stop'
+function Select-ProbeTree($all, $known) {
+  # $all: processes as {Id, ParentId, Ticks, Name, Path}; $known: id -> creation
+  # ticks of the verified app and of every descendant seen so far (kept after exit).
+  $byId = @{}
+  foreach ($p in $all) { $byId[[int]$p.Id] = $p }
+  do {
+    $added = $false
+    foreach ($p in $all) {
+      $id = [int]$p.Id; $parent = [int]$p.ParentId
+      if ($known.ContainsKey($id) -or -not $known.ContainsKey($parent)) { continue }
+      if ([long]$p.Ticks -lt [long]$known[$parent]) { continue }
+      $holder = $byId[$parent]
+      if ($holder -and [long]$holder.Ticks -ne [long]$known[$parent] -and [long]$p.Ticks -ge [long]$holder.Ticks) { continue }
+      $known[$id] = [long]$p.Ticks; $added = $true
+    }
+  } while ($added)
+  return @($all | Where-Object { $known.ContainsKey([int]$_.Id) -and [long]$known[[int]$_.Id] -eq [long]$_.Ticks })
+}
+function Find-ProbeApp($all, $shell, $sinceTicks, $name, $isExe) {
+  $byId = @{}
+  foreach ($p in $all) { $byId[[int]$p.Id] = $p }
+  foreach ($p in @($all | Where-Object { $_.Name -ieq $name -and [long]$_.Ticks -ge $sinceTicks } | Sort-Object { [long]$_.Ticks })) {
+    $c = $p; $ours = $false
+    for ($i = 0; $i -lt 4; $i++) {
+      $parent = $byId[[int]$c.ParentId]
+      if (-not $parent -or [long]$parent.Ticks -gt [long]$c.Ticks) { break }
+      if ([int]$parent.Id -eq $shell) { $ours = $true; break }
+      $c = $parent
+    }
+    if ($ours -and $p.Path -and (& $isExe $p.Path)) { return $p }
+  }
+  return $null
+}
+function New-ExeTest($exe) {
+  # Compare as 8.3 paths: %TEMP% on hosted runners is itself an 8.3 path.
+  $fso = New-Object -ComObject Scripting.FileSystemObject
+  $want = $fso.GetFile($exe).ShortPath
+  return { param($path) try { $fso.GetFile($path).ShortPath -ieq $want } catch { $false } }.GetNewClosure()
+}
+function Get-AllProcesses {
+  @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate } | ForEach-Object {
+    [pscustomobject]@{ Id = [int]$_.ProcessId; ParentId = [int]$_.ParentProcessId
+      Ticks = $_.CreationDate.ToUniversalTime().Ticks; Name = $_.Name; Path = $_.ExecutablePath }
+  })
+}
+function Test-LockHeld($lock) {
+  if (-not $lock -or -not (Test-Path -LiteralPath $lock)) { return $false }
+  try { $f = [IO.File]::Open($lock, 'Open', 'Write', 'ReadWrite, Delete'); $f.Close(); return $false }
+  catch { return $true }
+}
+if ($env:PROBE_MODE -eq 'library') { return }
+$lock = $env:PROBE_LOCK
+$deadline = (Get-Date).AddSeconds([int]$env:PROBE_SETTLE)
+if ($env:PROBE_MODE -eq 'wait-lock') {
+  while (Test-LockHeld $lock) {
+    if ((Get-Date) -ge $deadline) {
+      $folder = Split-Path -Parent $lock
+      $users = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
+        Where-Object { ([string]$_.CommandLine).IndexOf($folder, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+        ForEach-Object { 'pid ' + $_.ProcessId + ' started ' + $_.CreationDate.ToString('HH:mm:ss') }) -join ', '
+      if (-not $users) { $users = 'no msedgewebview2.exe names it' }
+      'held (' + $users + ')'
+      exit 0
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  'free'
+  exit 0
+}
+$since = [datetime]::Parse($env:PROBE_SINCE, [Globalization.CultureInfo]::InvariantCulture,
+  [Globalization.DateTimeStyles]'AssumeUniversal,AdjustToUniversal')
+$shell = [int]$env:PROBE_SHELL
+$name = Split-Path -Leaf $env:PROBE_EXE
+$isExe = New-ExeTest $env:PROBE_EXE
+$known = @{}
+$root = $null
+if (Test-Path -LiteralPath $env:PROBE_KNOWN) {
+  foreach ($line in @(Get-Content -LiteralPath $env:PROBE_KNOWN)) {
+    $f = $line -split ' '
+    if ($f.Count -eq 2) { if (-not $root) { $root = $line }; $known[[int]$f[0]] = [long]$f[1] }
+  }
+}
+function Update-Known($all) {
+  if (-not $script:root) {
+    $app = Find-ProbeApp $all $shell $since.Ticks $name $isExe
+    if ($app) { $script:root = '{0} {1}' -f $app.Id, $app.Ticks; $known[[int]$app.Id] = [long]$app.Ticks }
+  }
+  if ($script:root) { return @(Select-ProbeTree $all $known) }
+  return @()
+}
+if ($env:PROBE_MODE -eq 'watch') {
+  while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $env:PROBE_STOPFILE)) {
+    $null = Update-Known (Get-AllProcesses)
+    if ($root) {
+      $lines = @($root) + @($known.Keys | ForEach-Object { '{0} {1}' -f $_, $known[$_] })
+      Set-Content -LiteralPath ($env:PROBE_KNOWN + '.new') -Value $lines
+      Move-Item -Force -LiteralPath ($env:PROBE_KNOWN + '.new') -Destination $env:PROBE_KNOWN
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  exit 0
+}
+$stopped = @{}
+while ($true) {
+  $tree = @(Update-Known (Get-AllProcesses))
+  foreach ($p in $tree) {
+    $stopped[[int]$p.Id] = $p.Name
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+  }
+  $held = Test-LockHeld $lock
+  if ($tree.Count -eq 0 -and -not $held) {
+    $names = @($stopped.Values | Group-Object | ForEach-Object { '{0} x{1}' -f $_.Name, $_.Count }) -join ', '
+    if (-not $root) { $names = 'nothing (the app process was not found running)' }
+    elseif (-not $names) { $names = 'none left' }
+    'stopped: ' + $names + '; WebView2 user data folder free'
+    exit 0
+  }
+  if ((Get-Date) -ge $deadline) {
+    $left = @($tree | ForEach-Object { '{0} (pid {1})' -f $_.Name, $_.Id }) -join ', '
+    if (-not $left) { $left = 'no process of the app' }
+    'still running: ' + $left + '; WebView2 user data folder lock ' + $(if ($held) { 'held' } else { 'free' })
+    exit 1
+  }
+  Start-Sleep -Milliseconds 500
+}
+PS1
+}
+probe_windows_run() { # env PROBE_* set by the caller; prints the script's output
+  local ps script
+  ps="$(command -v powershell || command -v pwsh)" || { echo "PowerShell not found"; return 2; }
+  script="$work/probe-tree.ps1"
+  [ -f "$script" ] || probe_windows_ps >"$script"
+  "$ps" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$script")" 2>&1 | tr -d '\r'
+  return "${PIPESTATUS[0]}"
+}
+
+# Linux/macOS. The probe's job runs in its own process group (the group's ID
+# is the job's pid), which keeps helpers that the app leaves behind findable;
+# neither system reuses a process id while a process group with that ID still
+# has members. The app is also started with a random RELEASE_CHECK_PROBE_ID,
+# which every process it starts inherits, also after `setsid` and after the
+# app exits: on Linux every process whose environment carries it is the
+# probe's (/proc/<pid>/environ), and on macOS where `ps -E` shows it. Helpers
+# that leave the group are also remembered by pid and start time from launch
+# on (every 100 ms for the first second, then every second) and are
+# signalled only while that pid still has that start time.
+probe_ps() { # pid ppid pgid stat start, start with spaces as "_"
+  ps -A -o pid= -o ppid= -o pgid= -o stat= -o lstart= 2>/dev/null |
+    awk '{ s = $5; for (i = 6; i <= NF; i++) s = s "_" $i; print $1, $2, $3, $4, s }'
+}
+probe_token_pids() { # processes whose environment carries this probe's token
+  if [ -r /proc/self/environ ]; then
+    grep -lzxF -- "RELEASE_CHECK_PROBE_ID=$pt_token" /proc/[0-9]*/environ 2>/dev/null |
+      sed -n 's|^/proc/\([0-9]*\)/environ$|\1|p' || true
+  else
+    # The token is passed to awk in pieces so that awk's own line never matches.
+    ps -A -E -ww -o pid= -o command= 2>/dev/null |
+      PROBE_TOKEN="$pt_token" awk 'index($0, "RELEASE_CHECK_PROBE_ID=" ENVIRON["PROBE_TOKEN"]) { print $1 }' || true
+  fi
+}
+probe_remember_helpers() { # the app's descendants (and theirs) outside its process group
+  probe_ps | awk -v root="$pt_pid" -v helpers="$pt_files.helpers" '
+    BEGIN { while ((getline line < helpers) > 0) { split(line, f, " "); seen[f[1] " " f[2]] = 1 } }
+    { parent[$1] = $2; group[$1] = $3; start[$1] = $5; if (($1 " " $5) in seen) found[$1] = 1 }
+    END {
+      if (group[root] == root) found[root] = 1
+      do {
+        added = 0
+        for (p in parent) if (!(p in found) && (parent[p] in found)) { found[p] = 1; added = 1 }
+      } while (added)
+      for (p in found) if ((p in group) && group[p] != root && !((p " " start[p]) in seen)) print p, start[p]
+    }' >>"$pt_files.helpers"
+}
+probe_posix_left() { # live (non-zombie) processes of the probe
+  { probe_token_pids; probe_ps | awk -v root="$pt_pid" -v helpers="$pt_files.helpers" '
+      BEGIN { while ((getline line < helpers) > 0) { split(line, f, " "); seen[f[1] " " f[2]] = 1 } }
+      $4 !~ /^Z/ && ($3 == root || (($1 " " $5) in seen)) { print $1 }'; } | sort -un
+}
+probe_posix_signal() { # $1 = signal
+  local p
+  kill -s "$1" -- "-$pt_pid" 2>/dev/null || true
+  for p in $(probe_posix_left); do kill -s "$1" "$p" 2>/dev/null || true; done
+}
+probe_job_gone() { # $1 = seconds; 0 once the probe's background job has exited (then reaped), 1 at the deadline
+  local end=$((SECONDS + $1)) state
+  while :; do
+    if ! kill -0 "$pt_pid" 2>/dev/null; then break; fi
+    if [ "$probe_windows" = 0 ]; then
+      state="$(ps -o stat= -p "$pt_pid" 2>/dev/null || true)"
+      case "$state" in Z*) break ;; esac
+    fi
+    [ "$SECONDS" -lt "$end" ] || return 1
+    sleep 0.2
+  done
+  wait "$pt_pid" 2>/dev/null || true # it has exited: this returns at once
+  return 0
+}
+probe_windows_watch_end() { # ask the Windows watcher to stop; bounded
+  local i
+  [ -n "$pt_watch" ] || return 0
+  : >"$pt_files.watch-stop"
+  for i in $(seq 1 50); do
+    if ! kill -0 "$pt_watch" 2>/dev/null; then wait "$pt_watch" 2>/dev/null || true; pt_watch=""; return 0; fi
+    sleep 0.2
+  done
+  say "      probe: note: the process-tree watcher is still running; it stops by itself"
+  pt_watch=""
+}
+
+# Stop the current probe's processes and wait until they are gone, at most
+# about probe_settle_seconds; 0 = nothing of them left (and the probe's job
+# has exited), 1 = something still running (or, on Windows, the WebView2 user
+# data folder still locked).
+stop_probe_tree() {
+  local rc=0 summary left deadline
+  deadline=$((SECONDS + probe_settle_seconds))
+  if [ "$probe_windows" = 1 ]; then
+    probe_windows_watch_end
+    summary="$(PROBE_MODE=stop PROBE_SHELL="$pt_shell" PROBE_EXE="$(cygpath -w "$pt_exe")" PROBE_SINCE="$pt_since" \
+      PROBE_KNOWN="$(cygpath -w "$pt_files.known")" PROBE_LOCK="$pt_lock" PROBE_SETTLE="$probe_settle_seconds" \
+      probe_windows_run)" || rc=$?
+    if [ "$rc" != 0 ]; then say "      probe: ${summary:-could not stop the probed app}"; return 1; fi
+    # The app is never signalled through Git Bash (see above): once it is gone
+    # the background job ends by itself.
+    left=$((deadline - SECONDS)); [ "$left" -gt 2 ] || left=2
+    if ! probe_job_gone "$left"; then say "      probe: $summary, but the probe's job is still running"; return 1; fi
+    say "      probe: $summary"
+    return 0
+  fi
+  probe_remember_helpers
+  probe_posix_signal TERM
+  sleep 1
+  probe_posix_signal KILL
+  # A launcher that did not exec the app leaves it running from $tree (the probe's own unpack directory).
+  if [ -n "$pt_tree" ] && command -v pkill >/dev/null; then pkill -KILL -f -- "$pt_tree/" 2>/dev/null || true; fi
+  while :; do
+    left="$(probe_posix_left | tr '\n' ' ')"
+    if [ -z "$left" ]; then
+      rc=$((deadline - SECONDS)); [ "$rc" -gt 1 ] || rc=1
+      probe_job_gone "$rc" && return 0
+      left="the probe's job ($pt_pid)"
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 1
+    probe_posix_signal KILL
+  done
+  say "      probe: still running: $left"
+  return 1
+}
+
 runtime_probe() { # $1 = executable, $2 = optional directory whose leftover processes are stopped; returns 0 pass, 1 fail, 2 inconclusive
-  local exe="$1" tree="${2:-}" port data pid code i alive=1 served=""
+  local exe="$1" tree="${2:-}" port data code i alive=1 served="" state="" settled=1
+  if [ "$probe_pending" = 1 ]; then
+    say "      probe: the previous probe's processes were still running; stopping them again (up to ${probe_settle_seconds}s)"
+    if ! stop_probe_tree; then
+      say "ERROR probe: skipped, inconclusive: the previous probe's processes are still running, so this one could not start clean"
+      return 2
+    fi
+    probe_pending=0
+  fi
   port="$(free_port)" || { say "ERROR probe: no free port"; return 2; }
   data="$work/probe-data.$RANDOM"
   mkdir -p "$data"
+  probe_count=$((probe_count + 1))
+  pt_pid="" pt_tree="$tree" pt_lock="" pt_token="" pt_shell="" pt_exe="$exe" pt_since="" pt_watch=""
+  pt_files="$work/probe-$probe_count" # per probe, so nothing of an earlier probe can mix in
+  : >"$pt_files.helpers"
+  if [ "$probe_windows" = 1 ]; then
+    # Git Bash always sets LOCALAPPDATA and /proc/<pid>/winpid; without them
+    # the lock cannot be checked or the app identified.
+    pt_shell="$(cat "/proc/$$/winpid" 2>/dev/null || true)"
+    if [ -z "${LOCALAPPDATA:-}" ] || [ -z "$pt_shell" ]; then
+      say "ERROR probe: skipped, inconclusive: LOCALAPPDATA or this shell's Windows process id is unavailable"
+      return 2
+    fi
+    # Launch only once the WebView2 user data folder is free (bounded wait).
+    pt_lock="$LOCALAPPDATA\\com.ferrumedge.anvil\\EBWebView\\lockfile"
+    state="$(PROBE_MODE=wait-lock PROBE_LOCK="$pt_lock" PROBE_SETTLE="$probe_settle_seconds" probe_windows_run)" || state=""
+    case "$state" in
+      free) ;;
+      held*)
+        say "ERROR probe: skipped, inconclusive: the WebView2 user data folder is still locked after ${probe_settle_seconds}s ${state#held } (is Anvil open outside this check?)"
+        return 2 ;;
+      *) say "ERROR probe: could not read the WebView2 user data folder state (${state:-no output})"; return 2 ;;
+    esac
+  else
+    pt_token="$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    [ -n "$pt_token" ] || pt_token="$$-$RANDOM$RANDOM$RANDOM-$SECONDS"
+  fi
+  pt_since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   say "      probe: launching $(basename "$exe") with TAURI_WEBDRIVER_PORT=$port for ${probe_seconds}s"
-  TAURI_WEBDRIVER_PORT="$port" ANVIL_DATA_DIR="$data" ANVIL_E2E_PROFILE="release-check-probe" \
-    ANVIL_E2E_PASSPHRASE="probe-$RANDOM-$RANDOM-$RANDOM" "$exe" >"$work/probe.log" 2>&1 &
-  pid=$!
+  if [ "$probe_windows" = 1 ]; then
+    TAURI_WEBDRIVER_PORT="$port" ANVIL_DATA_DIR="$data" ANVIL_E2E_PROFILE="release-check-probe" \
+      ANVIL_E2E_PASSPHRASE="probe-$RANDOM-$RANDOM-$RANDOM" "$exe" >"$work/probe.log" 2>&1 &
+    pt_pid=$!
+    # Identify the app and record its process tree from launch on.
+    PROBE_MODE=watch PROBE_SHELL="$pt_shell" PROBE_EXE="$(cygpath -w "$exe")" PROBE_SINCE="$pt_since" \
+      PROBE_KNOWN="$(cygpath -w "$pt_files.known")" PROBE_STOPFILE="$(cygpath -w "$pt_files.watch-stop")" \
+      PROBE_SETTLE=$((probe_seconds + 60)) probe_windows_run >"$pt_files.watch-log" 2>&1 &
+    pt_watch=$!
+  else
+    set -m # the job gets its own process group
+    RELEASE_CHECK_PROBE_ID="$pt_token" TAURI_WEBDRIVER_PORT="$port" ANVIL_DATA_DIR="$data" \
+      ANVIL_E2E_PROFILE="release-check-probe" ANVIL_E2E_PASSPHRASE="probe-$RANDOM-$RANDOM-$RANDOM" \
+      "$exe" </dev/null >"$work/probe.log" 2>&1 &
+    pt_pid=$!
+    set +m
+    for i in 1 2 3 4 5 6 7 8 9 10; do probe_remember_helpers; sleep 0.1; done
+  fi
   for i in $(seq 1 "$probe_seconds"); do
     sleep 1
+    [ "$probe_windows" = 1 ] || probe_remember_helpers
     code="$(curl -s -m 1 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/status" 2>/dev/null || true)"
     if [ "$code" != "000" ] && [ -n "$code" ]; then served="$code"; break; fi
-    if ! kill -0 "$pid" 2>/dev/null; then alive=0; break; fi
+    if ! kill -0 "$pt_pid" 2>/dev/null; then alive=0; break; fi
   done
-  if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; sleep 1; kill -9 "$pid" 2>/dev/null || true; fi
-  wait "$pid" 2>/dev/null || true
-  # A launcher that did not exec the app leaves it running from $tree (the probe's own unpack directory).
-  if [ -n "$tree" ] && command -v pkill >/dev/null; then pkill -KILL -f -- "$tree/" 2>/dev/null || true; fi
+  stop_probe_tree || { settled=0; probe_pending=1; }
   local profiles=0 profile
   if [ -d "$data/profiles" ]; then
     while IFS= read -r -d '' profile; do
@@ -551,6 +916,9 @@ runtime_probe() { # $1 = executable, $2 = optional directory whose leftover proc
   fi
   if [ "$alive" = 0 ]; then
     say "ERROR probe: the app exited early; result inconclusive (log: $(tail -3 "$work/probe.log" | tr '\n' ' '))"; return 2
+  fi
+  if [ "$settled" = 0 ]; then
+    say "ERROR probe: the probed app's processes did not all exit within ${probe_settle_seconds}s of being stopped; inconclusive, and the next probe starts only once they are gone"; return 2
   fi
   say "ok    probe: no WebDriver listener, no environment-driven profile unlock"
   return 0
