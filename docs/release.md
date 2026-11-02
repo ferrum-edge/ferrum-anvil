@@ -218,8 +218,10 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
    WebKit helpers retain their environment; the input image's runtime is never
    invoked. This option deliberately executes artifact contents: use it only
    after establishing the artifact's provenance and any required signatures.
-   After each probe the app and the processes it started are stopped, and
-   if they are not gone within about 30 seconds the probe is inconclusive.
+   After each probe the app and the processes it started are stopped. A
+   WebDriver answer or a created profile is still a FAIL, which takes
+   precedence; otherwise, if they are not gone within about 30 seconds the
+   probe is inconclusive.
    Every wait on them is bounded. A probe launches only once the previous
    probe's processes are gone (trying again for about 30 seconds); otherwise
    it is skipped as inconclusive.
@@ -236,8 +238,11 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
      group before it is seen is not found.
    - On Windows a watcher identifies the app from launch on: the process
      running the probed executable, started no earlier than the probe, whose
-     parent chain reaches the checker's own shell; another launch of the same
-     executable is not taken for it. Every 250 ms it records, by process ID
+     parent chain reaches the checker's own shell within four parents (two on
+     hosted runners: the app, then its Git Bash job); another launch of the
+     same executable is not taken for it. An app not found this way is not
+     stopped, and the probe fails closed: its still-running job or the locked
+     WebView2 folder makes it inconclusive. Every 250 ms it records, by process ID
      and creation time, the app and everything descending from it by parent
      process ID, each process created no earlier than its parent, so a child
      whose parent has exited is still found and a process that merely reuses

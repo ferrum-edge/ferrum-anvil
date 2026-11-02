@@ -25,12 +25,14 @@
 #               nothing may answer WebDriver /status on that port, and no
 #               profile may be created in the throw-away data directory.
 #               The app and the processes it started (on Windows its
-#               WebView2 msedgewebview2.exe processes) are then stopped; if
-#               they are not gone within about 30 s the probe is
-#               inconclusive. A probe launches only once the previous
-#               probe's processes are gone and, on Windows, the WebView2 user
-#               data folder is unlocked, waiting about 30 s for each;
-#               otherwise it is skipped as inconclusive.
+#               WebView2 msedgewebview2.exe processes) are then stopped. A
+#               WebDriver answer or a created profile is still a failure,
+#               which takes precedence; otherwise, if they are not gone
+#               within about 30 s the probe is inconclusive. A probe
+#               launches only once the previous probe's processes are gone
+#               and, on Windows, the WebView2 user data folder is unlocked,
+#               waiting about 30 s for each; otherwise it is skipped as
+#               inconclusive.
 #               Needs a display (use xvfb-run on Linux CI).
 #
 # Options
@@ -60,7 +62,7 @@ list_appimage=""
 check_options=0
 artifacts=()
 
-usage() { sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --features) features="${2:-}"; check_options=1; shift 2 ;;
@@ -569,12 +571,16 @@ probe_count=0
 # created no earlier than its parent and, when another process now holds that
 # parent's id, before that process; processes are remembered by id and
 # creation time as they are seen, so a child whose parent has since exited is
-# still found, and a process that merely reuses an id is not. Limits: a
-# process whose parent started and exited between two looks (250 ms apart)
-# is not found; and a process whose id was reused while a child of its first
-# holder still ran, by a process that has itself exited, cannot be told apart
-# from that first holder. A leftover that keeps the WebView2 folder locked
-# still holds the next probe back.
+# still found, and a process that merely reuses an id is not. Limits: the
+# app is looked for at most four parents below this checker's shell (on
+# hosted runners it is two: the app, then its Git Bash job); a process
+# whose parent started and exited between two looks (250 ms apart) is not
+# found; and a process whose id was reused while a child of its first holder
+# still ran, by a process that has itself exited, cannot be told apart from
+# that first holder. Each of these fails closed: an app that is not found is
+# not stopped, and its still-running job or a leftover that keeps the
+# WebView2 folder locked makes the probe inconclusive and holds the next
+# probe back.
 probe_windows_ps() {
   cat <<'PS1'
 $ErrorActionPreference = 'Stop'
