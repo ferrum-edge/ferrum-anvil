@@ -47,10 +47,11 @@ on:
 permissions: {}
 
 env:
-  # Pin by full commit SHA, never a branch. e4fe8b9 is ferrumedge main after
-  # ferrum-edge/ferrumedge#105 (download labels and digests tied to the release).
+  # Pin by full commit SHA, never a branch. 1f89dfd is ferrumedge main after
+  # ferrum-edge/ferrumedge#108 (every Anvil capability claim tied to evidence
+  # recorded at anvil-v0.1.5).
   FERRUMEDGE_REPOSITORY: ferrum-edge/ferrumedge
-  FERRUMEDGE_SHA: e4fe8b9a1b1de6b8dfeb021111bea262828fe57c
+  FERRUMEDGE_SHA: 1f89dfd94915aa419b80decf9666dc1bcc769df8
   TEST_COMMAND: node --test --test-reporter=tap "tests/**/*.test.js"
 
 jobs:
