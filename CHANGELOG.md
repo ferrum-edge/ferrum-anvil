@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-02
+
+Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a
+newer `libwayland-client` (Ubuntu 26.04), rustls, rustls-webpki, zip and ctutils are updated for
+published advisories, JWT and DTLS signing move to AWS-LC, a collection run no longer sends a vault
+secret in place of an ordinary variable, `anvil send --trust-ferrum` no longer saves a trusted
+gateway profile without saying so, `anvil env` fills in imported variables from the command line,
+and saved Ferrum gateway profiles can be listed and removed. Each existing profile must be enrolled
+before first use: enrollment rotates its data key, needs a new passphrase and recovery key, and
+moves the profile to database schema 6, which earlier builds cannot open. Linux installers now
+target Ubuntu 26.04, and Windows 7 is no longer supported. Read the Breaking section below and the
+[upgrade guide](docs/upgrade-guide.md#016) before upgrading.
+
 ### Added
 
 - Ferrum gateway profiles can be removed. `anvil gateway list WORKSPACE`
@@ -12,6 +25,14 @@
   gateway unless another profile matches them. Use it to remove a
   "Ferrum gateway HOST" profile that `anvil send --trust-ferrum HOST` saved
   before it stopped saving one (see Security).
+- `anvil env` lists, shows and edits a workspace's environments from the
+  command line (`list`, `show`, `create`, `use`, `set`, `unset`), so the
+  variables an import asks for can be filled in without the desktop app.
+  `anvil env set NAME --secret` reads the value from stdin or a process
+  environment variable, never from an argument, and keeps it in the vault;
+  a secret is never made plain. `anvil import-spec`
+  now names the workspace and the environments it brought and prints the
+  `anvil env set` command for each variable to fill in.
 
 ### Security
 
@@ -27,32 +48,6 @@
   one bound to another port no longer silently cancels the flag. Profiles the
   old behavior saved stay in their workspace and are still trusted until
   removed.
-
-## [0.1.6] - 2026-11-01
-
-Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a
-newer `libwayland-client` (Ubuntu 26.04), rustls, rustls-webpki, zip and ctutils are updated for
-published advisories, JWT and DTLS signing move to AWS-LC, a collection run no longer sends a vault
-secret in place of an ordinary variable, and `anvil env` fills in imported variables from the
-command line. Each existing profile must be enrolled before first use: enrollment rotates its data
-key, needs a new passphrase and recovery key, and moves the profile to database schema 6, which
-earlier builds cannot open. Linux installers now target Ubuntu 26.04, and Windows 7 is no longer
-supported. Read the Breaking section below and the [upgrade guide](docs/upgrade-guide.md#016)
-before upgrading.
-
-### Added
-
-- `anvil env` lists, shows and edits a workspace's environments from the
-  command line (`list`, `show`, `create`, `use`, `set`, `unset`), so the
-  variables an import asks for can be filled in without the desktop app.
-  `anvil env set NAME --secret` reads the value from stdin or a process
-  environment variable, never from an argument, and keeps it in the vault;
-  a secret is never made plain. `anvil import-spec`
-  now names the workspace and the environments it brought and prints the
-  `anvil env set` command for each variable to fill in.
-
-### Security
-
 - rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
   (client session `Debug` output, data buffered across an ECH rejection,
   pre-authentication Brotli certificate decompression and a key-exchange
@@ -63,10 +58,10 @@ before upgrading.
   issue in `webpki-roots`, which Anvil does not build (#433).
 - ctutils is updated to 0.4.6 for RUSTSEC-2026-0385 (constant-time `Choice`
   helpers could compile to branches on secret values) (#433).
-- zip is updated from 8.6.0 to 9.1.1 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
+- zip is updated from 8.6.0 to 9.2.0 for RUSTSEC-2026-0367, -0368 and -0369 (extraction
   preserving SUID/SGID bits and symlink targets escaping the destination).
 - The in-app updater (`tauri-plugin-updater`) is updated from 2.12.0 to
-  2.14.1, its first release on `zip` 9 (it shares Anvil's `zip` 9.1.1). This
+  2.14.1, its first release on `zip` 9 (it shares Anvil's `zip` 9.2.0). This
   removes the `zip` 4.6.1 copy that updater 2.12.0 held (GHSA-m665-v7pm-7grj,
   a header parser differential that can overwrite files on extraction;
   GHSA-q7v9-x93c-xqv3, unbounded symlink targets; GHSA-8hxf-qr8p-62x4, an AES
@@ -189,8 +184,8 @@ before upgrading.
   2.12) uses WebdriverIO dependencies with patched deepmerge-ts 8.0.2. This removes
   the development-only GHSA-ggr8-5vv4-36mx dependency exception without overriding
   deepmerge-ts across a major version. Production UI dependencies are unchanged;
-  `@wdio/local-runner` and `@wdio/spec-reporter` stay at 9.32.0, while `@wdio/cli`,
-  `@wdio/mocha-framework` and `@wdio/types` are at 10.1.0.
+  `@wdio/local-runner` stays at 9.32.0, while `@wdio/cli`, `@wdio/mocha-framework`,
+  `@wdio/spec-reporter` and `@wdio/types` are at 10.1.0.
 
 - Pin Linux CI and installer builds to Ubuntu 26.04. Linux installers now target
   modern system libraries; see Breaking.
@@ -550,6 +545,11 @@ before upgrading.
   system libraries; Ubuntu 22.04 and 24.04 are no longer release targets (#361).
 - Windows 7 is no longer supported: Windows builds use `windows` 0.62 and
   `webview2-com` 0.39 with Tauri 2.12 (#468).
+- `anvil send --trust-ferrum HOST` no longer saves a "Ferrum gateway HOST"
+  profile: later sends, `anvil run` and exports no longer trust the host unless
+  a saved profile covers it. Add `--save-trust` to save the profile on purpose.
+  Profiles saved by earlier builds stay trusted until removed with
+  `anvil gateway remove` or the desktop **Remove gateway** (#464, #465).
 - Rust consumers: `anvil_engine` `SecretResolver` methods no longer have
   default implementations, so a wrapping resolver must forward each one (#376).
 - A browser sign-in authorization URL on `http://localhost` is now refused as
