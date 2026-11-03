@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.1.6] - 2026-11-02
+## [0.1.7] - 2026-11-03
 
 Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a
 newer `libwayland-client` (Ubuntu 26.04), rustls, rustls-webpki, zip and ctutils are updated for
@@ -13,7 +13,9 @@ and saved Ferrum gateway profiles can be listed and removed. Each existing profi
 before first use: enrollment rotates its data key, needs a new passphrase and recovery key, and
 moves the profile to database schema 6, which earlier builds cannot open. Linux installers now
 target Ubuntu 26.04, and Windows 7 is no longer supported. Read the Breaking section below and the
-[upgrade guide](docs/upgrade-guide.md#016) before upgrading.
+[upgrade guide](docs/upgrade-guide.md#017) before upgrading. The `anvil-v0.1.6` tag was never
+released (its release run failed before a draft was made), so 0.1.7 is the first release with these
+changes.
 
 ### Added
 
@@ -453,7 +455,7 @@ target Ubuntu 26.04, and Windows 7 is no longer supported. Read the Breaking sec
   unlink and enrollment) store the new key in a new OS credential entry before the commit and
   retire the old entry after it; retired credentials are recorded as
   `RotationPolicy::retired_keychain`. Data-key rotation and `PolicyRotation` are
-  new in 0.1.6. The desktop and CLI enroll a legacy profile with a new
+  new in 0.1.7. The desktop and CLI enroll a legacy profile with a new
   passphrase, so enrollment there makes an OS-keychain profile a passphrase
   profile (see Breaking).
 
@@ -501,7 +503,7 @@ target Ubuntu 26.04, and Windows 7 is no longer supported. Read the Breaking sec
 
 ### Breaking
 
-- Enrollment: 0.1.6 does not unlock a profile created by an earlier build until
+- Enrollment: 0.1.7 does not unlock a profile created by an earlier build until
   it is enrolled, and recovery unlock does not skip it. Enrollment rotates the
   data key and re-encrypts active data, and needs a new passphrase and a saved
   replacement recovery key; the old passphrase and recovery key stop working,
@@ -510,14 +512,14 @@ target Ubuntu 26.04, and Windows 7 is no longer supported. Read the Breaking sec
   with its current recovery key; with no surviving identity policy you confirm
   replacing it with an unlinked one. Enroll from the desktop lock screen or with
   `anvil profile enroll-policy`; see the
-  [upgrade guide](docs/upgrade-guide.md#016) (#364, #375).
+  [upgrade guide](docs/upgrade-guide.md#017) (#364, #375).
 - Storage: enrollment moves the profile database from schema 3 to schema 6.
   Earlier builds (0.1.5 and before) then refuse the database, and a full backup
-  made by 0.1.6, as written by a newer version. Portable bundles keep their
-  format (2), so a bundle exported by 0.1.6 still imports into earlier builds.
+  made by 0.1.7, as written by a newer version. Portable bundles keep their
+  format (2), so a bundle exported by 0.1.7 still imports into earlier builds.
   The `before-schema-<version>` checkpoint taken before the migration is sealed
   with the old key and deleted when enrollment rotates the key, so it is not a
-  way back. To keep one, before opening the profile with 0.1.6 export a full
+  way back. To keep one, before opening the profile with 0.1.7 export a full
   backup with the earlier build (desktop **Export** → **Whole app backup**, or
   `anvil export --mode backup` with `ANVIL_EXPORT_PASSPHRASE`). It keeps
   everything, is encrypted with the export passphrase apart from a short

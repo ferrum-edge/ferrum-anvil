@@ -1,12 +1,12 @@
 # Upgrade guide
 
-## 0.1.6
+## 0.1.7
 
 ### Before you upgrade
 
 If you may want to go back to 0.1.5 or earlier, keep a copy of each profile
-with your current build before opening it with 0.1.6. An earlier build cannot
-open the profile once 0.1.6 has enrolled it, and the checkpoint 0.1.6 takes
+with your current build before opening it with 0.1.7. An earlier build cannot
+open the profile once 0.1.7 has enrolled it, and the checkpoint 0.1.7 takes
 before it migrates the database is deleted when enrollment rotates the data
 key (below), so it is not a way back. Use one of these:
 
@@ -35,7 +35,7 @@ key (below), so it is not a way back. Use one of these:
   body text), attachments and history are ordinary ZIP entries that anyone
   holding the file can read, and a credential typed into a body or URL is
   exported as written. Store the bundle as sensitive. A bundle exported by
-  0.1.6 still imports into an earlier build, so this one can also be made
+  0.1.7 still imports into an earlier build, so this one can also be made
   after upgrading. See [Export and import](storage-and-recovery.md#export-and-import).
 - **Copy of the profile directory** (passphrase profiles only): close every
   copy of Anvil and copy the profile directory somewhere outside the data
@@ -77,7 +77,7 @@ is the way to bring back the backup's app settings too.
 
 ### Policy enrollment
 
-0.1.6 does not unlock a profile created by an earlier build until you enroll
+0.1.7 does not unlock a profile created by an earlier build until you enroll
 it, and a recovery-key unlock does not skip this step. Enrollment rotates the
 data key and re-encrypts the profile's active data:
 
@@ -117,12 +117,12 @@ and [Where the binding is stored](identity.md#where-the-binding-is-stored).
 ### Database schema 6
 
 Enrollment moves the profile database from schema 3 to schema 6. Earlier
-builds then refuse that database, and any full backup made by 0.1.6, as
+builds then refuse that database, and any full backup made by 0.1.7, as
 written by a newer version. Portable bundles keep their format, so a bundle
-exported by 0.1.6 still imports into an earlier build.
+exported by 0.1.7 still imports into an earlier build.
 
 - Close every earlier build before upgrading.
-- Before migrating, 0.1.6 copies the database into the profile's
+- Before migrating, 0.1.7 copies the database into the profile's
   `checkpoints` folder as `<time>-before-schema-<version>.db`. If that copy
   cannot be written, enrollment fails until space is freed. The copy is sealed
   with the old key, so enrollment's key rotation deletes it, with any older
