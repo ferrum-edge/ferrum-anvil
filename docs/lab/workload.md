@@ -6,7 +6,8 @@ release's mesh inbound listener and a `jwks_auth` route, on the default pin (`la
 with `--release`, any supported release ([README](README.md)). The Workload API code is identical in v0.9.5 and
 v0.9.7 (`src/identity/workload_api/server.rs`, `src/identity/jwt_svid/`); `src/identity/` is unchanged from
 v0.9.8 to v0.9.10 and from v0.9.11 to v0.9.15 (source deltas: [0.9.11](../audit/gateway-0.9.11-delta.md),
-[0.9.14](../audit/gateway-0.9.14-delta.md), [0.9.15](../audit/gateway-0.9.15-delta.md)). v0.9.8 returns
+[0.9.14](../audit/gateway-0.9.14-delta.md), [0.9.15](../audit/gateway-0.9.15-delta.md)), and the Workload API and
+JWT-SVID sources are unchanged in v0.9.20 ([0.9.20](../audit/gateway-0.9.20-delta.md)). v0.9.8 returns
 `ValidateJWTSVIDResponse.claims` as a `google.protobuf.Struct` (#5780), a field Anvil does not read.
 Observations and counts below were recorded on v0.9.5 and v0.9.7 unless a later release is named.
 No SPIRE, no Kubernetes, no control plane.

@@ -5,7 +5,7 @@
 | **Status** | Implemented in Ferrum Edge v0.9.9 (`FERRUM_DIAGNOSTIC_REFS`, default `off`; v0.9.8 and earlier lack it). Adopted by Anvil: a trusted gateway profile can configure the lookup (see [diagnostics.md](diagnostics.md#gateway-diagnostic-references-g01)). |
 | **Owner** | Ferrum Edge maintainers (gateway-owned contract). Anvil is one consumer. |
 | **Tracking** | ferrum-edge/ferrum-edge#5767, ferrum-edge/ferrum-edge#5845 (implementation), ferrum-edge/ferrum-edge#5759 (backend-spoofable markers) |
-| **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8; unchanged through v0.9.15), their statuses and bodies stay unchanged. |
+| **Compatibility** | Additive. The public `X-Gateway-Error` tokens (seven through v0.9.7, eight from v0.9.8 through v0.9.15, nine from v0.9.17 with `loop_detected`), their statuses and bodies are not changed by G01. |
 
 ## Problem
 

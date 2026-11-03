@@ -5,11 +5,14 @@ The failure lab (`crates/anvil-lab`) runs failure-matrix scenarios through Anvil
 gateway response is mocked. Each scenario checks Anvil's conclusion against independent ground
 truth (fixture logs, the gateway's operator log, admin endpoints) that the engine never sees.
 
-The selected default is the source-audited **v0.9.15 release**
-(`lab/gateway/RELEASE.lock`, also `lab/gateway/releases/v0.9.15.lock`), with
-hosted Anvil qualification recorded in
-[the source delta audit](../audit/gateway-0.9.15-delta.md#qualification-status).
-Retained supported releases: **v0.9.14** (`lab/gateway/releases/v0.9.14.lock`, hosted Anvil
+The selected default is the source-audited **v0.9.20 release**
+(`lab/gateway/RELEASE.lock`, also `lab/gateway/releases/v0.9.20.lock`), with
+hosted Anvil qualification pending
+([source delta audit](../audit/gateway-0.9.20-delta.md#qualification-status), which also covers
+v0.9.17 and v0.9.19; v0.9.16 and v0.9.18 were never published).
+Retained supported releases: **v0.9.15** (`lab/gateway/releases/v0.9.15.lock`, hosted Anvil
+qualification recorded in [its audit](../audit/gateway-0.9.15-delta.md#qualification-status)),
+**v0.9.14** (`lab/gateway/releases/v0.9.14.lock`, hosted Anvil
 qualification recorded in [its audit](../audit/gateway-0.9.14-delta.md), which also covers v0.9.12
 and v0.9.13), **v0.9.11** (`lab/gateway/releases/v0.9.11.lock`, hosted Anvil
 qualification recorded in [its audit](../audit/gateway-0.9.11-delta.md)), **v0.9.10**
@@ -38,7 +41,7 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 
 - **Release.** `--release <tag>` (or `$ANVIL_LAB_RELEASE`) selects
   `lab/gateway/releases/<tag>.lock`; otherwise the lab uses `lab/gateway/RELEASE.lock`. The trusted
-  Ferrum profile of every profile declares that release's compatibility id (`ferrum-edge-0.9.15`, `ferrum-edge-0.9.14`, `ferrum-edge-0.9.11`, `ferrum-edge-0.9.10`,
+  Ferrum profile of every profile declares that release's compatibility id (`ferrum-edge-0.9.20`, `ferrum-edge-0.9.15`, `ferrum-edge-0.9.14`, `ferrum-edge-0.9.11`, `ferrum-edge-0.9.10`,
   `ferrum-edge-0.9.9`, `ferrum-edge-0.9.8`, `ferrum-edge-0.9.7` or `ferrum-edge-0.9.5`), so diagnoses use its catalog. `run` and `up` refuse to
   start a release Anvil has no catalog for (or only one audited at another commit).
 - **Binary lookup.** `$ANVIL_LAB_FERRUM_BIN`, then `lab/bin/<release>/<asset>`, then

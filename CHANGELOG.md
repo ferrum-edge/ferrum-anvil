@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Added
+
+- Adopt published `contracts-edge-0.9.20` (`39da322083044c2e92617209e62983c92387f0ad`)
+  byte-exact. Four vendored files change: the gateway error and header vocabularies (v0.9.20
+  provenance; the closed token vocabulary adds `loop_detected`, the 19 error classes and their
+  mappings are unchanged), the diagnostic-ref schema (`loop_detected` in `gateway_error` and
+  `detail.rejection_phase`, accepted by Anvil's reader) and the negative-expectations manifest.
+  Ten new diagnostic-ref fixtures are vendored and exercised, five valid and five invalid, because
+  the manifest names the invalid ones. The pinned vocabulary now covers only the 0.9.20 catalog;
+  the older catalogs keep their own contracts tags.
+- Add the separately source-audited Edge v0.9.20 catalog and release-asset locks at
+  `e4a606a00352674daaef08636e3e359e6c48ba18` (release 432463173), selected as the lab and
+  new-profile default; hosted all-profile Lab qualification is pending. The audit also covers
+  v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18 were tagged but never published). v0.9.15 and the
+  earlier catalogs and locks stay supported, and the nightly lab now also runs v0.9.15. See
+  `docs/audit/gateway-0.9.20-delta.md`.
+- Gateway catalog 0.9.20 has 615 outcomes: the 556 of 0.9.15, less two removed, plus 61 new,
+  among them the proxy hop limit 508 `{"error":"Proxy hop limit exceeded"}` and the malformed
+  `X-Ferrum-Hops` 400, the backend connect timeout's 504 and the pooled connection ceiling's 503
+  (both `connection_failure`), and the OIDC relying party's "state cache full" 503, which v0.9.19
+  answers again. It removes `protocol.grpc.request_body_read_failed` (no emitter since v0.9.17)
+  and `plugin.response_mock.status_101_non_websocket` (a 101 mock is refused at load since
+  v0.9.19).
+- Wording for the ninth `X-Gateway-Error` token, `ferrum.token.loop_detected`: a gateway-admission
+  refusal before routing, owned by the gateway operator, that does not prove a backend was
+  contacted.
+
+### Changed
+
+- New Ferrum gateway profiles and the lab default to Ferrum Edge v0.9.20
+  (`ferrum-edge-0.9.20`); existing profiles keep the release they declare.
+- `auth.browser_session_required` fires on a 401 only when every `WWW-Authenticate` challenge it
+  offers is the OIDC one. From v0.9.19 a route that chains OIDC with another mechanism lists every
+  challenge on each 401, a rejected API key's included, which does not mean a login is needed.
+- Lab: AUTH-001 expects `WWW-Authenticate: ApiKey realm="ferrum-edge"` from v0.9.19. UP-007
+  expects 504 `{"error":"Backend timeout"}` from v0.9.19 and diagnoses it as
+  `upstream.connect.timeout`. UP-018's direct-H1 lane expects 503 `{"error":"Backend connection
+  limit exceeded"}` with `connection_failure` from v0.9.19 and the single outcome
+  `upstream.connection_limit.pooled`. MESH-008 relays to a new workload-only `tcp` port 17808
+  with its own echo fixture, because v0.9.17 refuses a bare CONNECT to the HTTP port 17801. Each
+  earlier release keeps its own expectations.
+- Diagnostics catalog version 2026.11.03-1.
+
 ## [0.1.7] - 2026-11-03
 
 Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a

@@ -130,7 +130,7 @@ The only public signal is the coarse token, so no scenario may claim TLS.
 | UP-005 | UP-005 | Backend certificate for another name | same | same |
 | UP-006 | UP-006 | TLS 1.3 backend requires a client certificate, gateway has none | 502 `backend_error` (`connection_reset`) — the post-connect-alert path | Accepts either documented token; recovery route presents the gateway's backend identity and the backend logs its CN (`anvil-lab-gateway-backend-client`, identity #3, not Anvil's) |
 | UP-006.tls12 | UP-006 | Same on TLS 1.2 | 502 `connection_failure` (`tls_error`) | as UP-006 |
-| UP-007 | UP-007 | Backend never answers the ClientHello (1 s connect budget) | 502 `connection_failure` (`connection_timeout`) | No confirmed timeout/TLS claim; no frontend-TLS finding |
+| UP-007 | UP-007 | Backend never answers the ClientHello (1 s connect budget) | 502 `connection_failure` (`connection_timeout`); from v0.9.19 504 `{"error":"Backend timeout"}`, same token and class, diagnosed as `upstream.connect.timeout` | No confirmed timeout/TLS claim beyond the confirmed 504 status finding; no frontend-TLS finding |
 | UP-008 | UP-008 | Gateway speaks TLS to plaintext | 502 `connection_failure` (`tls_error`) | Never "expired certificate" |
 | UP-008.http-to-tls | UP-008 | Gateway speaks plaintext to TLS | 502 `backend_error` (`request_error`) | as above |
 | UP-016 | UP-016 | UP-006 route five times | every run so far: `connection_reset` → `backend_error` | Every public token matches the operator-side class mapping (pool cancellation ↔ `connection_failure`, reset ↔ `backend_error`); never a confirmed TLS claim |
@@ -139,7 +139,7 @@ The only public signal is the coarse token, so no scenario may claim TLS.
 
 Gateway authentication rejections carry **no** `X-Gateway-Error`; the only
 gateway-specific public signal is the body literal (plus `WWW-Authenticate`
-on some), which a backend can reproduce. With a trusted plain-HTTP profile the
+on some, and on every gateway 401 from v0.9.19), which a backend can reproduce. With a trusted plain-HTTP profile the
 engine may therefore say "likely a gateway <plugin> outcome" and no more.
 Challenge headers are checked with a separate raw probe because execution
 records redact `WWW-Authenticate`.
@@ -147,7 +147,7 @@ records redact `WWW-Authenticate`.
 | Id | Matrix | Stimulus → gateway signal | What passing proves |
 |---|---|---|---|
 | CTRL-AUTH | — | Valid API key → 200 | `hide_credentials`: the backend never saw the key; the key is not in the record |
-| AUTH-001 | AUTH-001 | Right key under `X-API-Key` → 401 `Authentication required` + `WWW-Authenticate: ferrum-edge`; wrong key → 401 `Invalid API key` | Generic 401 plus a gateway-outcome claim capped at likely (ambiguous where several gateway paths share the body); the key never appears in the record; recovery |
+| AUTH-001 | AUTH-001 | Right key under `X-API-Key` → 401 `Authentication required` + `WWW-Authenticate: ferrum-edge` (`ApiKey realm="ferrum-edge"` from v0.9.19); wrong key → 401 `Invalid API key` | Generic 401 plus a gateway-outcome claim capped at likely (ambiguous where several gateway paths share the body); the key never appears in the record; recovery |
 | AUTH-002 | AUTH-002 | Key in the query string | The attempt URL keeps `api_key=` but redacts the value |
 | AUTH-003 | AUTH-003 | Wrong Basic password → 401 `Invalid credentials` + `Basic realm="ferrum-edge"` | Ambiguous with hmac_auth's identical body (unknown); no TLS claim; password not recorded |
 | AUTH-004 | AUTH-004 | Expired HS256 bearer → 401 `Invalid JWT token` | Local `auth.token_expired_locally` (likely, local-client, "decoded, not verified") kept separate from the server verdict |
@@ -231,7 +231,10 @@ or the wrong thing.
 4. **`auth.browser_session_required`** (AUTH-017). Rule `auth.session` emits it
    (likely) from typed evidence only: a followed redirect or a 3xx `Location`
    carrying the RFC 6749 authorization-request parameters (`response_type` and
-   `client_id`), or a 401 challenge naming the `oidc` realm.
+   `client_id`), or a 401 whose `WWW-Authenticate` challenges all name the `oidc`
+   realm. From v0.9.19 a route that chains OIDC with another mechanism lists
+   every challenge on each 401, a rejected API key's included, so an OIDC
+   challenge beside another one is not a login step.
    `Diagnosis.stopped_at_login` then makes the engine record the exchange as
    application *not evaluated* (`crates/anvil-engine/src/record.rs`), so a
    followed login page is never a success. Ordinary redirects, plain bearer
