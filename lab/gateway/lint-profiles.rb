@@ -1,8 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# Structural lint for the Ferrum Anvil gateway lab profiles (every supported ferrum-edge release:
-# v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14, v0.9.15 and v0.9.20).
+# Structural lint for the Ferrum Anvil gateway lab profiles (the supported ferrum-edge release,
+# v0.9.20). v0.9.5 to v0.9.15 are no longer supported; the lists below are still the ones every
+# release from v0.9.5 accepts, which v0.9.20 accepts too. A key that only a newer release accepts
+# (the "older releases reject" notes below) may be added once it is checked at v0.9.20.
 #
 # Why this exists: `ferrum-edge validate` rejects unknown keys on GatewayConfig, Proxy,
 # Consumer, PluginConfig and Upstream (serde deny_unknown_fields), and every plugin used here

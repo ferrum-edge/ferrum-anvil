@@ -706,4 +706,4 @@ independent ground truth:
   while the backend's own log shows all 20 arrived.
 
 Each runs in the trusted and untrusted passes against the default lab pin
-(`lab/gateway/RELEASE.lock`) and, nightly, every earlier supported release.
+(`lab/gateway/RELEASE.lock`, v0.9.20, the only supported release), on pull requests and nightly.

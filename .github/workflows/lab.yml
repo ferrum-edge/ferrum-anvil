@@ -4,7 +4,7 @@
 # Anvil's engine with and without the destination declared as a trusted
 # Ferrum profile.
 #   PR (engine/diagnostics/lab changes): default pin; all profiles, core only on macOS
-#   nightly:                             all profiles, default pin + every earlier supported release
+#   nightly:                             all profiles, default pin (the only supported release)
 #   manual:                              chosen profile and release
 # PRs run every profile (except on macOS, to spare its runners) so a change
 # that breaks a non-core scenario shows on the PR, not first in the nightly
@@ -56,8 +56,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04, macos-15]
-        # "" = the default pin (RELEASE.lock). Nightly also re-runs every earlier supported release.
-        release: ${{ fromJSON(github.event_name == 'schedule' && '["", "v0.9.15", "v0.9.14", "v0.9.11", "v0.9.10", "v0.9.9", "v0.9.8", "v0.9.7", "v0.9.5"]' || format('["{0}"]', inputs.release || '')) }}
+        # "" = the default pin (RELEASE.lock). It is the only supported release
+        # (lab/gateway/releases/), so nightly runs it alone; v0.9.5 to v0.9.15
+        # were retired with the vendored dimpl patch (docs/lab/README.md).
+        release: ${{ fromJSON(format('["{0}"]', inputs.release || '')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:

@@ -45,7 +45,6 @@ cargo run -p anvil-lab -- run admission --untrusted-pass
 cargo run -p anvil-lab -- run drain --untrusted-pass
 cargo run -p anvil-lab -- run policy --scenario GW-013-TIMEOUT   # one scenario
 cargo run -p anvil-lab -- up policy       # keep fixtures + gateway up for manual/desktop use
-cargo run -p anvil-lab -- --release v0.9.5 run policy --untrusted-pass   # the earlier release
 ```
 
 Setup, binary lookup, results layout and the two passes: [README.md](README.md). The drain profile

@@ -10,21 +10,19 @@ The selected default is the source-audited **v0.9.20 release**
 hosted Anvil qualification pending
 ([source delta audit](../audit/gateway-0.9.20-delta.md#qualification-status), which also covers
 v0.9.17 and v0.9.19; v0.9.16 and v0.9.18 were never published).
-Retained supported releases: **v0.9.15** (`lab/gateway/releases/v0.9.15.lock`, hosted Anvil
-qualification recorded in [its audit](../audit/gateway-0.9.15-delta.md#qualification-status)),
-**v0.9.14** (`lab/gateway/releases/v0.9.14.lock`, hosted Anvil
-qualification recorded in [its audit](../audit/gateway-0.9.14-delta.md), which also covers v0.9.12
-and v0.9.13), **v0.9.11** (`lab/gateway/releases/v0.9.11.lock`, hosted Anvil
-qualification recorded in [its audit](../audit/gateway-0.9.11-delta.md)), **v0.9.10**
-(`lab/gateway/releases/v0.9.10.lock`), **v0.9.9**
-(`lab/gateway/releases/v0.9.9.lock`), **v0.9.8** (`lab/gateway/releases/v0.9.8.lock`), **v0.9.7**
-(`lab/gateway/releases/v0.9.7.lock`) and **v0.9.5** (`lab/gateway/releases/v0.9.5.lock`).
+It is the only supported release. v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14 and
+v0.9.15 were retired with Anvil's vendored dimpl: their DTLS 1.3 listeners send an empty
+`certificate_authorities` list when they require a client certificate, which Anvil's DTLS client
+no longer accepts (PROTO-022; [protocols.md §3.6](../protocols.md#36-dtls)). Their locks are
+removed; their audits, catalogs and the observations recorded on them below stay as history.
+Scenario code still keys some expectations on those releases, which is harmless while only
+v0.9.20 runs.
 
 ## Running
 
 ```sh
 lab/scripts/fetch-gateway.sh              # download + verify the default pin into lab/bin/<release>/
-lab/scripts/fetch-gateway.sh v0.9.5       # an earlier supported release
+lab/scripts/fetch-gateway.sh v0.9.20      # a release by tag (lab/gateway/releases/<tag>.lock)
 ulimit -n 4096
 
 cargo run -p anvil-lab -- verify                          # print the verified binary's identity
@@ -33,7 +31,7 @@ cargo run -p anvil-lab -- list <profile>                  # scenario ids of one 
 cargo run -p anvil-lab -- run <profile> --untrusted-pass  # or `run all`
 cargo run -p anvil-lab -- run <profile> --scenario <ID>   # repeatable; an unknown ID is refused
 cargo run -p anvil-lab -- up <profile>                    # keep fixtures + gateway up until Ctrl-C
-cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
+cargo run -p anvil-lab -- --release v0.9.20 run <profile> --untrusted-pass
 ```
 
 `fetch-gateway.sh` needs an authenticated `gh`. CI usage is described in
@@ -41,8 +39,8 @@ cargo run -p anvil-lab -- --release v0.9.5 run <profile> --untrusted-pass
 
 - **Release.** `--release <tag>` (or `$ANVIL_LAB_RELEASE`) selects
   `lab/gateway/releases/<tag>.lock`; otherwise the lab uses `lab/gateway/RELEASE.lock`. The trusted
-  Ferrum profile of every profile declares that release's compatibility id (`ferrum-edge-0.9.20`, `ferrum-edge-0.9.15`, `ferrum-edge-0.9.14`, `ferrum-edge-0.9.11`, `ferrum-edge-0.9.10`,
-  `ferrum-edge-0.9.9`, `ferrum-edge-0.9.8`, `ferrum-edge-0.9.7` or `ferrum-edge-0.9.5`), so diagnoses use its catalog. `run` and `up` refuse to
+  Ferrum profile of every profile declares that release's compatibility id (`ferrum-edge-0.9.20`),
+  so diagnoses use its catalog. `run` and `up` refuse to
   start a release Anvil has no catalog for (or only one audited at another commit).
 - **Binary lookup.** `$ANVIL_LAB_FERRUM_BIN`, then `lab/bin/<release>/<asset>`, then
   `../lab-bin/<release>/<asset>`, then the legacy unversioned `lab/bin/<asset>` and

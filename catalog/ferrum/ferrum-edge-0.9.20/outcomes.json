@@ -34455,7 +34455,7 @@
       "refs": "v0.9.15 -> v0.9.20",
       "client_visible_effect": "The DTLS 1.3 CertificateRequest omits certificate_authorities instead of sending it empty; strict DTLS 1.3 clients (dimpl >= 0.8, BoringSSL) now complete client-certificate handshakes that stalled before.",
       "evidence": "vendor/dimpl-0.6.1-ferrum-patched/src/dtls13/server.rs:1405; docs/frontend_tls.md:223 (#7001)",
-      "anvil_impact": "A DTLS 1.3 handshake timeout against a client-cert listener on v0.9.15-v0.9.19 is not evidence of a certificate refusal; on v0.9.20 it is not explained by the CertificateRequest. Anvil's vendored dimpl 0.8 empty-CA patch stays for older releases.",
+      "anvil_impact": "A DTLS 1.3 handshake timeout against a client-cert listener on v0.9.15-v0.9.19 is not evidence of a certificate refusal; on v0.9.20 it is not explained by the CertificateRequest. Anvil's dimpl 0.8 client refuses the empty list, so those releases are no longer supported.",
       "outcome_ids": [
         "l4.dtls.handshake_refused"
       ]

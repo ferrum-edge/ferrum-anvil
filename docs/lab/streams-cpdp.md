@@ -39,7 +39,6 @@ cargo run -p anvil-lab -- list streams                    # scenario ids and tit
 cargo run -p anvil-lab -- run streams --untrusted-pass    # ~30 s
 cargo run -p anvil-lab -- run cpdp --untrusted-pass       # ~50 s
 cargo run -p anvil-lab -- run streams --scenario PROTO-014 --scenario UP-002-tcp
-cargo run -p anvil-lab -- --release v0.9.5 run streams --untrusted-pass
 cargo run -p anvil-lab -- up streams                      # keep fixtures + gateway up (manual/desktop use)
 cargo run -p anvil-lab -- up cpdp
 ```

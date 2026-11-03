@@ -266,7 +266,10 @@ body.
 
 ## Ferrum Edge catalogs (`catalog/ferrum/<compatibility-id>/outcomes.json`)
 
-Anvil embeds one source-audited catalog per supported gateway release:
+Anvil embeds one source-audited catalog per audited gateway release. v0.9.20 is the only
+supported release. The older catalogs stay embedded so profiles and imports that name them keep
+their diagnoses, but those releases are no longer run by the lab, and Anvil's DTLS 1.3 client
+cannot complete mutual TLS with them ([protocols.md §3.6](protocols.md#36-dtls)).
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
@@ -561,7 +564,7 @@ only presentation; every card shows its own confidence.
   Release notes follow the profile's release, and an unknown release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
-  (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,
+  (`anvil-lab --release <tag> …`; the default is the `RELEASE.lock` pin,
   v0.9.20, source-audited with [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) pending). Every lab profile's trusted profile declares the running release's
   compatibility id, and the lab refuses to run a release without its own
   catalog. Every scenario runs trusted and untrusted: no `ferrum.*`

@@ -210,7 +210,7 @@ the modified file under MPL-2.0.
 | des | 0.9.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/block-ciphers |
 | digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | digest | 0.11.3 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
-| dimpl | 0.8.0 | MIT OR Apache-2.0 | https://github.com/algesten/dimpl (vendored with a patch: vendor/dimpl-0.8.0-empty-ca) |
+| dimpl | 0.8.0 | MIT OR Apache-2.0 | https://github.com/algesten/dimpl |
 | dirs | 7.0.0 | MIT OR Apache-2.0 | https://codeberg.org/dirs/dirs-rs |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | https://github.com/dirs-dev/dirs-sys-rs |
 | dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
