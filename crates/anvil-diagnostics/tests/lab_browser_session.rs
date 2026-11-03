@@ -171,14 +171,26 @@ fn auth_017_oidc_challenge_among_others_is_not_a_login_step() {
     let at = [attempt(0, AttemptReason::Initial, "http://127.0.0.1:18180/auth/multi/echo", 401)];
     for value in [
         r#"ApiKey realm="ferrum-edge", Bearer realm="oidc""#,
+        r#"ApiKey realm = "ferrum-edge", Bearer realm="oidc""#,
+        r#"Negotiate abc==, Bearer realm="oidc""#,
         r#"Bearer realm="oidc", error="invalid_token", Basic realm="ferrum-edge", charset="UTF-8""#,
+        r#"Bearer realm="oidc2""#,
     ] {
         let r = response(401, &[("www-authenticate", value)], "application/json", body);
         let d = run(&at, &r, body, true);
         assert!(!codes(&d).contains(&CODE), "{value}: {:?}", codes(&d));
     }
-    let only = r#"Bearer realm="oidc", error="invalid_token", error_description="a, b""#;
-    let r = response(401, &[("www-authenticate", only)], "application/json", body);
-    let d = run(&at, &r, body, true);
-    assert!(codes(&d).contains(&CODE), "{:?}", codes(&d));
+    // RFC 9110 §11.2: whitespace around `=`, quoted commas and escapes stay
+    // inside one OIDC challenge.
+    for only in [
+        r#"Bearer realm="oidc", error="invalid_token", error_description="a, b""#,
+        r#"Bearer realm="oidc", error = "invalid_token""#,
+        r#"Bearer realm = "oidc""#,
+        r#"Bearer realm=oidc"#,
+        r#"Bearer realm="oidc", error_description="say \"hi\", ok""#,
+    ] {
+        let r = response(401, &[("www-authenticate", only)], "application/json", body);
+        let d = run(&at, &r, body, true);
+        assert!(codes(&d).contains(&CODE), "{only}: {:?}", codes(&d));
+    }
 }

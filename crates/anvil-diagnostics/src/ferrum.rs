@@ -685,6 +685,29 @@ mod tests {
         }
         assert!(catalog_for("ferrum-edge-0.9.20").unwrap().is_known_token("loop_detected"));
         assert!(!shared_tokens().iter().any(|t| t == "loop_detected"));
+
+        // A WebSocket upgrade the backend refused after the request went out
+        // carries backend_error, a pre-wire dial failure connection_failure;
+        // both match the one WebSocket outcome (#6777).
+        let text = r#"{"error":"Backend WebSocket connection failed"}"#;
+        let bf = body_facts(Some("application/json"), text.as_bytes());
+        for token in ["connection_failure", "backend_error"] {
+            let signal = Signal { status: 502, token: Some(token), body_text: text, body: &bf, grpc_status: None };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, ["protocol.ws.backend_connect_failed"], "{token}");
+        }
+
+        // mcp_gateway's default-deny of prompts and resources (#6819): each
+        // message is its own exact outcome.
+        let c = catalog_for("ferrum-edge-0.9.20").unwrap();
+        for (message, expected) in [
+            ("MCP prompt request denied by gateway policy", "plugin.mcp_gateway.prompt_denied"),
+            ("MCP resource read denied by gateway policy", "plugin.mcp_gateway.resource_read_denied"),
+        ] {
+            let m = c.match_jsonrpc_error(&JsonRpcSignal { status: 200, token: None, code: -32001, message, gateway: None });
+            assert_eq!(m.exact.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), [expected], "{message}");
+        }
     }
 
     #[test]
@@ -753,7 +776,8 @@ mod tests {
             [
                 "plugin.a2a_gateway.jsonrpc_method_denied",
                 "plugin.a2a_gateway.operation_class_changed",
-                "plugin.mcp_gateway.prompt_resource_denied"
+                "plugin.mcp_gateway.prompt_denied",
+                "plugin.mcp_gateway.resource_read_denied"
             ],
             "the same code with another message"
         );

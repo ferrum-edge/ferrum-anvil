@@ -5,7 +5,7 @@
 | Baseline | `v0.9.15`, `25b37395ff61bfea0f3ffd189d9011c4984fa755` (source-audited and hosted-qualified in [gateway-0.9.15-delta.md](gateway-0.9.15-delta.md)) |
 | Audited target | `v0.9.20`, `e4a606a00352674daaef08636e3e359e6c48ba18` (merge of Edge #7016), [release 432463173][release], published 2026-11-03T08:58:10Z |
 | Contracts | Published `contracts-edge-0.9.20`, `39da322083044c2e92617209e62983c92387f0ad` |
-| Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 615 outcome IDs: the 556 of 0.9.15 − 2 removed + 61 new |
+| Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 616 outcome IDs: the 556 of 0.9.15 − 2 removed + 62 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.20.lock`; v0.9.15 is retained as an earlier supported release and joins the nightly matrix |
 | Hosted qualification | Pending: the manual all-profile Lab run (`workflow_dispatch`, `profile=all`) on the PR head |
 | Audit date | 2026-11-03 |
@@ -78,7 +78,7 @@ These change what Anvil matches, so they are the ones a diagnosis on 0.9.20 depe
   #6965); `GrpcProxyError::Internal` is INTERNAL (13); 499 maps to CANCELLED.
 - **Plugins**: the `request_size_limiting` 413 body is now the core 413 body; `rate_limiting` and
   `ai_rate_limiter` quota 429s carry `Retry-After`; `mcp_gateway` denies `prompts/get` and
-  `resources/read` by default; WAF, body and OpenAPI validation refuse more by default; 61 new
+  `resources/read` by default; WAF, body and OpenAPI validation refuse more by default; 62 new
   outcomes in all (listed in the catalog with `New in v0.9.NN` notes).
 - **Removed**: `protocol.grpc.request_body_read_failed` (its INTERNAL emitter is gone since v0.9.17,
   #6150) and `plugin.response_mock.status_101_non_websocket` (a 101 mock is refused at load since
@@ -567,7 +567,7 @@ Through v0.9.15 every case was a bare 502 with no token, from the call sites now
 
 **Catalog impact:**
 - `protocol.ws.backend_connect_failed` is modified: the public signal gains `X-Gateway-Error`, the condition excludes timeouts, and the two flagged citations move to `:17362` and `:17056`. The old note "no 504 variant; no X-Gateway-Error" no longer holds.
-- **New outcome** `protocol.ws.backend_connect_timeout`: 504 with `{"error":"Backend timeout"}`, `X-Gateway-Error: connection_failure` (or `backend_timeout`) and `Content-Type: application/json` (`src/proxy/mod.rs:16200`). It shares status, body and token with `upstream.connect.timeout`.
+- **Folded into `upstream.connect.timeout`** (not a separate outcome, since the signal is identical): 504 with `{"error":"Backend timeout"}`, `X-Gateway-Error: connection_failure` (or `backend_timeout`) and `Content-Type: application/json` (`src/proxy/mod.rs:16200`). It shares status, body and token with `upstream.connect.timeout`.
 - The mapper's `BackendConnectionLimit` arm returns 503 `Backend connection limit exceeded` with `connection_failure`. It is not shown to be reachable from a WebSocket dial: the direct path refuses at its pre-dial `maxConnections` check (`src/proxy/mod.rs:16653`, no token). So `protocol.ws.backend_connection_limit` is unchanged.
 
 ### Credential-expired WebSocket 401 carries `WWW-Authenticate` (#6779)
@@ -1986,7 +1986,7 @@ Catalog: notes on three outcomes. Repoint `fail_closed` `:1298 → :1758`.
 
 `prompts/get` and `resources/read` that policy does not allow get HTTP 200 JSON-RPC `-32001` `MCP prompt request denied by gateway policy` (`src/plugins/mcp_gateway.rs:5671`) or `MCP resource read denied by gateway policy` (`:5921`). The family defaults fall back to `policy.default_action`, which defaults to deny (`:11144`), so a v0.9.15 config with no prompt or resource policy now refuses every prompt and resource read. When the resource policy cannot be decided, the answer is `-32006` (`:5909`). An aggregate DELETE without a session header now gets the missing-session 400 (`:8058`) where v0.9.15 answered 200. A tool whose `inputSchema` fails the bounded audit is omitted (`:10461`). Client credentials and the query string no longer reach upstreams chosen by the tool call unless `forward_client_credentials` is set.
 
-Catalog: new outcome `plugin.mcp_gateway.prompt_resource_denied`. `session_or_version_rejected` gets a condition update and source `:8058`. `catalog_unavailable` and `unknown_item` get notes. The `invalid_request` prose citation `rate_limiting.rs:1014` is repointed to `src/plugins/rate_limiting.rs:1617`, which is the same body. Under #6814 rate_limiting now also refuses non-UTF-8 charsets and unparseable bodies that may carry `tools/call` (`:1130`, `:1159`).
+Catalog: new outcomes `plugin.mcp_gateway.prompt_denied` and `plugin.mcp_gateway.resource_read_denied` (the prompt and resource messages are separate outcomes, so each matches exactly). `session_or_version_rejected` gets a condition update and source `:8058`. `catalog_unavailable` and `unknown_item` get notes. The `invalid_request` prose citation `rate_limiting.rs:1014` is repointed to `src/plugins/rate_limiting.rs:1617`, which is the same body. Under #6814 rate_limiting now also refuses non-UTF-8 charsets and unparseable bodies that may carry `tools/call` (`:1130`, `:1159`).
 
 ### mcp_aggregate_sse and the OpenAPI bridge (#6880, #6127)
 

@@ -39,16 +39,21 @@ fn authorization_request(url: &str) -> Option<(String, String)> {
     Some((host, parsed.path().to_string()))
 }
 
+/// Whether a challenge carries the auth-param `realm` with the value `oidc`
+/// (quoted or not; RFC 9110 §11.2 allows whitespace around `=`).
 fn oidc_realm(challenge: &str) -> bool {
-    let c = challenge.to_ascii_lowercase();
-    c.contains("realm=\"oidc\"") || c.contains("realm=oidc")
+    static REALM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    REALM
+        .get_or_init(|| regex::Regex::new(r#"(?i)(?:^|[\s,])realm\s*=\s*(?:"oidc"|oidc)(?:$|[\s,])"#).expect("valid regex"))
+        .is_match(challenge)
 }
 
 /// The challenges of a `WWW-Authenticate` field value (RFC 9110 §11.6.1: a
 /// comma-separated list where auth-params also use commas). An element that
 /// starts with a scheme token followed by whitespace or the end of the
-/// element opens a new challenge; a `name=value` element continues the
-/// current one. Commas inside quoted strings are not separators.
+/// element opens a new challenge; a `name = value` element (whitespace
+/// allowed around `=`) continues the current one. Commas inside quoted
+/// strings are not separators.
 fn challenges(value: &str) -> Vec<String> {
     let mut elements = Vec::new();
     let (mut cur, mut quoted, mut escaped) = (String::new(), false, false);
@@ -70,7 +75,8 @@ fn challenges(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for e in elements.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
         let head = e.find(|c: char| !tchar(c)).unwrap_or(e.len());
-        let opens = head > 0 && e[head..].chars().next().is_none_or(char::is_whitespace);
+        let rest = &e[head..];
+        let opens = head > 0 && rest.chars().next().is_none_or(char::is_whitespace) && !rest.trim_start().starts_with('=');
         match out.last_mut() {
             Some(last) if !opens => {
                 last.push_str(", ");

@@ -18,7 +18,7 @@
   v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18 were tagged but never published). v0.9.15 and the
   earlier catalogs and locks stay supported, and the nightly lab now also runs v0.9.15. See
   `docs/audit/gateway-0.9.20-delta.md`.
-- Gateway catalog 0.9.20 has 615 outcomes: the 556 of 0.9.15, less two removed, plus 61 new,
+- Gateway catalog 0.9.20 has 616 outcomes: the 556 of 0.9.15, less two removed, plus 62 new,
   among them the proxy hop limit 508 `{"error":"Proxy hop limit exceeded"}` and the malformed
   `X-Ferrum-Hops` 400, the backend connect timeout's 504 and the pooled connection ceiling's 503
   (both `connection_failure`), and the OIDC relying party's "state cache full" 503, which v0.9.19
@@ -26,8 +26,9 @@
   and `plugin.response_mock.status_101_non_websocket` (a 101 mock is refused at load since
   v0.9.19).
 - Wording for the ninth `X-Gateway-Error` token, `ferrum.token.loop_detected`: a gateway-admission
-  refusal before routing, owned by the gateway operator, that does not prove a backend was
-  contacted.
+  refusal before routing because the received `X-Ferrum-Hops` count reached the hop limit. It
+  names a routing loop, a long gateway chain and a caller-supplied count as possible causes, and
+  does not claim how many gateways the request passed through.
 
 ### Changed
 

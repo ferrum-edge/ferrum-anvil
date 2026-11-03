@@ -1500,8 +1500,15 @@
         "source": "src/retry.rs:301-311; src/retry.rs:229 (relayed 508); outcomes gateway.capacity.response_buffer, generic.response_phase_5xx.x_gateway_error"
       },
       "loop_detected": {
-        "explanation": "On Ferrum Edge 0.9.20 this value means the gateway that wrote it refused the request with 508 Loop Detected before routing, because the request's X-Ferrum-Hops count had reached the gateway's proxy hop limit (FERRUM_MAX_PROXY_HOPS, default 10): it had already passed through that many Ferrum hops, usually a routing loop. No backend was contacted.",
-        "source": "src/retry.rs:229 OBS_LOOP_DETECTED; src/proxy/mod.rs:34851; outcome gateway.admission.proxy_hop_limit"
+        "explanation": "On Ferrum Edge 0.9.20 this value means the gateway that wrote it refused the request with 508 Loop Detected before routing, because the X-Ferrum-Hops count it received had reached its proxy hop limit (FERRUM_MAX_PROXY_HOPS, default 10). Every Ferrum gateway increments that count when it forwards a request, so a routing loop or a long chain of gateways is the usual cause, but the count is a request header a caller or an intermediary can also set. No backend was contacted by the refusing gateway.",
+        "alternatives": [
+          "The caller, or a proxy in front of the gateway, sent or forwarded an X-Ferrum-Hops value at or above the limit."
+        ],
+        "does_not_prove": [
+          "How many gateways the request actually passed through.",
+          "That a routing loop exists."
+        ],
+        "source": "src/retry.rs:229 OBS_LOOP_DETECTED; src/proxy/hop_limit.rs:211 decide_proxy_hops (reads the received header); src/proxy/mod.rs:34851; outcome gateway.admission.proxy_hop_limit"
       },
       "connection_failure": {
         "explanation": "On Ferrum Edge 0.9.20 the gateway could not get the request onto a backend connection: refused, reset during setup, DNS, TLS setup or pool failure (502), a backend connect timeout (504), or a DestinationRule maxConnections refusal before dialing (503). The request was not sent.",
@@ -6136,9 +6143,9 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [],
-      "minimum_truthful_diagnosis": "A Ferrum Edge gateway refused this request with 508 Loop Detected because its X-Ferrum-Hops count had reached the gateway's proxy hop limit: the request has already passed through that many Ferrum gateway hops, which usually means a routing loop. No backend was contacted by the refusing gateway.",
-      "must_not_claim": "That the backend failed or returned 508, that the gateway is overloaded, or which route or hop forms the loop. When an outer Ferrum hop relays this 508 the header reads backend_error, not loop_detected.",
-      "remediation": "Gateway operator: find the route whose upstream resolves back to a Ferrum gateway (self-referencing target, DNS, mesh egress) and break the cycle; raise FERRUM_MAX_PROXY_HOPS only for a legitimately deep chain. Caller: do not send X-Ferrum-Hops yourself.",
+      "minimum_truthful_diagnosis": "A Ferrum Edge gateway refused this request with 508 Loop Detected before routing because the X-Ferrum-Hops count it received had reached its proxy hop limit; the refusing gateway contacted no backend. Every Ferrum hop increments the count, so a routing loop or a long gateway chain is the usual cause, but the header can also come from the caller or an intermediary.",
+      "must_not_claim": "That the backend failed or returned 508, that the gateway is overloaded, how many gateways the request passed through, that a routing loop exists, or which route or hop forms a loop. When an outer Ferrum hop relays this 508 the header reads backend_error, not loop_detected.",
+      "remediation": "Gateway operator: look for a route whose upstream resolves back to a Ferrum gateway (self-referencing target, DNS, mesh egress) and break the cycle; raise FERRUM_MAX_PROXY_HOPS only for a legitimately deep chain. Caller: do not send X-Ferrum-Hops yourself, and check that no proxy in front of the gateway adds or forwards it.",
       "owner": "gateway_operator",
       "fixture_ids": [],
       "notes": "New in v0.9.17 (#6127, issue #6109; first tagged in the unpublished v0.9.16). Only the refusing hop writes loop_detected; an outer Ferrum hop relaying the 508 labels it backend_error (src/retry.rs:229 doc) and never retries a backend 508 whatever retryable_status_codes lists (src/retry.rs:2006). gRPC-Web on HTTP/1.1, HTTP/2 and HTTP/3 gets the plain JSON 508 (src/proxy/mod.rs:34851; src/http3/server.rs:20778). No transaction summary is emitted for this fence, so no metric row carries the token; a diagnostic reference records rejection.phase proxy_hop_limit with a null detail.rejection_phase. Stream proxies (tcp, tcp_tls, udp, dtls) are not covered. A mesh inbound route to the local workload checks but does not increment the count (src/proxy/hop_limit.rs:420). Request-scoped plugin calls carry the count from v0.9.17 (#6132), so a plugin target that loops back is refused the same way. Distinguishability: unique status, body and token."
@@ -7756,20 +7763,18 @@
           "sha": "e4a606a"
         }
       ],
-      "condition": "Backend WebSocket dial or upgrade handshake fails with any class other than a timeout or a connection-ceiling refusal: DNS, TCP refused/reset, TLS, port exhaustion, a denied literal-IP backend, or the backend answered the upgrade with a non-101/200 status or protocol error. A connect or handshake timeout is protocol.ws.backend_connect_timeout (504) since v0.9.19.",
+      "condition": "Backend WebSocket dial or upgrade handshake fails with any class other than a timeout or a connection-ceiling refusal: DNS, TCP refused/reset, TLS, port exhaustion, a denied literal-IP backend, or the backend answered the upgrade with a non-101/200 status or protocol error. A connect or handshake timeout is upstream.connect.timeout (504) since v0.9.19.",
       "error_class": null,
       "public_signal": {
         "http_status": 502,
-        "x_gateway_error": "connection_failure",
+        "x_gateway_error": "connection_failure | backend_error",
         "other_headers": {
-          "content-type": "application/json",
-          "x-gateway-error": "connection_failure | backend_error"
+          "content-type": "application/json"
         },
         "body_shape": "{\"error\":\"Backend WebSocket connection failed\"}",
         "grpc_status": null,
         "ws_close_code": null,
-        "transport": "HTTP response pre-upgrade; X-Gateway-Error connection_failure for a pre-wire dial failure (DNS, refused, TLS), backend_error when the backend received the upgrade and refused it (non-101/200, protocol error) or the gateway's egress policy denied the literal IP",
-        "x_gateway_error_note": "connection_failure | backend_error"
+        "transport": "HTTP response pre-upgrade; X-Gateway-Error connection_failure for a pre-wire dial failure (DNS, refused, TLS), backend_error when the backend received the upgrade and refused it (non-101/200, protocol error) or the gateway's egress policy denied the literal IP"
       },
       "evidence_visibility": "public_coarse",
       "shared_signal_with": [],
@@ -7783,7 +7788,7 @@
         "UP-004",
         "PROTO-010"
       ],
-      "notes": "Backend's own rejection status/body is NOT relayed; no 504 variant; no X-Gateway-Error. H3 sends {\"error\":\"DNS resolution for backend failed\"} for DNS failures. v0.9.9 (#5875, PR #5877): an upgrade the gateway refuses by its own dial policy (unsafe Unix-socket authority, unparsable mesh target, denied literal-IP backend, unsupported backend TLS SNI override) is refused before an attempt begins; the client gets the same 502. v0.9.19 (#6777, issues #6770/#6773; first tagged v0.9.18): both WebSocket frontends take status and body from the shared mapper (src/proxy/mod.rs:16241 -> :50113) and stamp X-Gateway-Error (src/proxy/mod.rs:16214; H3 src/http3/websocket.rs:433). The earlier notes 'no 504 variant; no X-Gateway-Error' no longer hold: a timeout is now the separate 504 outcome protocol.ws.backend_connect_timeout. Token: connection_failure when !request_reached_wire (src/retry.rs:471) and the class is not DispatchPolicyRejected, else backend_error (a backend non-101 answer is WsError::Http -> RequestError, src/retry.rs:844). H3 still answers DNS failures with 502 {\"error\":\"DNS resolution for backend failed\"} (src/http3/websocket.rs:1528), now with X-Gateway-Error connection_failure. The mapper's BackendConnectionLimit arm (503 {\"error\":\"Backend connection limit exceeded\"} with X-Gateway-Error connection_failure) is reachable only if a WS dial error carries a backend_conn_limit refusal (src/retry.rs:1399); not settled for the WS dial paths."
+      "notes": "Backend's own rejection status/body is NOT relayed; no 504 variant; no X-Gateway-Error. H3 sends {\"error\":\"DNS resolution for backend failed\"} for DNS failures. v0.9.9 (#5875, PR #5877): an upgrade the gateway refuses by its own dial policy (unsafe Unix-socket authority, unparsable mesh target, denied literal-IP backend, unsupported backend TLS SNI override) is refused before an attempt begins; the client gets the same 502. v0.9.19 (#6777, issues #6770/#6773; first tagged v0.9.18): both WebSocket frontends take status and body from the shared mapper (src/proxy/mod.rs:16241 -> :50113) and stamp X-Gateway-Error (src/proxy/mod.rs:16214; H3 src/http3/websocket.rs:433). The earlier notes 'no 504 variant; no X-Gateway-Error' no longer hold: a timeout is now the 504 of upstream.connect.timeout. Token: connection_failure when !request_reached_wire (src/retry.rs:471) and the class is not DispatchPolicyRejected, else backend_error (a backend non-101 answer is WsError::Http -> RequestError, src/retry.rs:844). H3 still answers DNS failures with 502 {\"error\":\"DNS resolution for backend failed\"} (src/http3/websocket.rs:1528), now with X-Gateway-Error connection_failure. The mapper's BackendConnectionLimit arm (503 {\"error\":\"Backend connection limit exceeded\"} with X-Gateway-Error connection_failure) is reachable only if a WS dial error carries a backend_conn_limit refusal (src/retry.rs:1399); not settled for the WS dial paths."
     },
     {
       "id": "protocol.ws.backend_connection_limit",
@@ -33148,7 +33153,7 @@
       "notes": "New in v0.9.9. A tool result with isError: true is otherwise the tool's own failure (Anvil app.mcp_tool_error); through the bridge the gateway writes it, and the class comes from the typed dispatch record, never from a backend's X-Gateway-Error header. mcp.bridge.upstream_status and mcp.bridge.gateway_error are operator metadata. Not matched by body pattern: the text embeds the status and an excerpt. v0.9.17 (#6127): the gateway's proxy-hop-limit refusal class loop_detected is a known bridge class (src/plugins/mcp_openapi_bridge.rs:1385), so a looped bridge call reads '(gateway error: loop_detected)'."
     },
     {
-      "id": "plugin.mcp_gateway.prompt_resource_denied",
+      "id": "plugin.mcp_gateway.prompt_denied",
       "family": "ai_policy",
       "protocols": [
         "http1",
@@ -33164,18 +33169,12 @@
         },
         {
           "path": "src/plugins/mcp_gateway.rs",
-          "line": 5921,
-          "symbol": "route_resource_read (resource policy)",
-          "sha": "e4a606a"
-        },
-        {
-          "path": "src/plugins/mcp_gateway.rs",
           "line": 11144,
           "symbol": "default_prompt_action / default_resource_action fall back to default_action",
           "sha": "e4a606a"
         }
       ],
-      "condition": "aggregate_router mode: prompts/get for a prompt, or resources/read for a resource, whose policy.prompts / policy.resources action is not allow. The family defaults fall back to policy.default_action (default deny), so with no prompt/resource policy every prompts/get and resources/read is refused. A read is denied when any binding of its upstream URI is denied unless the public URI has its own entry.",
+      "condition": "aggregate_router mode: prompts/get for a prompt whose policy.prompts action is not allow. default_prompt_action falls back to policy.default_action (default deny), so with no prompt policy every prompts/get is refused.",
       "error_class": null,
       "public_signal": {
         "http_status": 200,
@@ -33190,12 +33189,56 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its mcp_gateway plugin produced this outcome; the condition is: aggregate_router mode: prompts/get for a prompt, or resources/read for a resource, whose policy.prompts / policy.resources action is not allow. The family defaults fall back to policy.default_action (default deny), so with no prompt/resource policy every prompts/get and resources/read is refused. A read is denied when any binding of its upstream URI is denied unless the public URI has its own entry.",
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its mcp_gateway plugin refused this prompts/get by gateway policy (the prompt's policy action, or the default action, is not allow); no upstream MCP server was asked.",
       "must_not_claim": "That the backend application produced this response (unless the destination is not a trusted Ferrum endpoint, in which case the body alone proves nothing).",
-      "remediation": "Gateway operator: add policy.prompts / policy.resources entries or set default_prompt_action / default_resource_action to allow.",
+      "remediation": "Gateway operator: add a policy.prompts entry for this prompt or set default_prompt_action to allow.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6819, BREAKING). Resource variant message: 'MCP resource read denied by gateway policy'. The list methods are filtered by the same policy. No data member. Distinguishability: tool_denied uses the same code with 'MCP tool call denied by gateway policy'. Body family: jsonrpc_error"
+      "notes": "New in v0.9.19 (#6819, BREAKING): prompts/get is governed by policy and defaults to deny. The list methods are filtered by the same policy. No data member. Distinguishability: plugin.mcp_gateway.resource_read_denied and tool_denied use the same code with their own messages. Body family: jsonrpc_error"
+    },
+    {
+      "id": "plugin.mcp_gateway.resource_read_denied",
+      "family": "ai_policy",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/plugins/mcp_gateway.rs",
+          "line": 5921,
+          "symbol": "route_resource_read (resource policy)",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/plugins/mcp_gateway.rs",
+          "line": 11144,
+          "symbol": "default_prompt_action / default_resource_action fall back to default_action",
+          "sha": "e4a606a"
+        }
+      ],
+      "condition": "aggregate_router mode: resources/read for a resource whose policy.resources action is not allow. default_resource_action falls back to policy.default_action (default deny), so with no resource policy every resources/read is refused. A read is denied when any binding of its upstream URI is denied unless the public URI has its own entry.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 200,
+        "x_gateway_error": null,
+        "other_headers": {
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{\"code\":-32001,\"message\":\"MCP resource read denied by gateway policy\"}}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its mcp_gateway plugin refused this resources/read by gateway policy (the resource's policy action, or the default action, is not allow); no upstream MCP server was asked.",
+      "must_not_claim": "That the backend application produced this response (unless the destination is not a trusted Ferrum endpoint, in which case the body alone proves nothing).",
+      "remediation": "Gateway operator: add a policy.resources entry for this resource URI or set default_resource_action to allow.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "New in v0.9.19 (#6819, BREAKING): resources/read is governed by policy and defaults to deny. The list methods are filtered by the same policy. No data member. Distinguishability: plugin.mcp_gateway.prompt_denied and tool_denied use the same code with their own messages. Body family: jsonrpc_error"
     },
     {
       "id": "frontend_parse.proxy_protocol_header_rejected",
@@ -34355,7 +34398,7 @@
       "refs": "v0.9.15 -> v0.9.20",
       "client_visible_effect": "WebSocket backend dial failures: connect/handshake timeout is 504 {\"error\":\"Backend timeout\"} instead of 502; every WS backend-failure answer (H1/H2/H3) now carries X-Gateway-Error (connection_failure or backend_error/backend_timeout).",
       "evidence": "src/proxy/mod.rs:16241; src/proxy/mod.rs:16214; src/http3/websocket.rs:433; src/proxy/mod.rs:50113 (#6777)",
-      "anvil_impact": "backend_connect_failed signal gains a token; new outcome protocol.ws.backend_connect_timeout. Anvil must not treat a WS 504 as a route/request timeout.",
+      "anvil_impact": "backend_connect_failed signal gains a token; new outcome upstream.connect.timeout (504). Anvil must not treat a WS 504 as a route/request timeout.",
       "outcome_ids": [
         "protocol.ws.backend_connect_failed",
         "upstream.connect.timeout"
@@ -36192,9 +36235,10 @@
       "refs": "v0.9.15 -> v0.9.20",
       "client_visible_effect": "mcp_gateway gates prompts/get and resources/read by policy (default deny); aggregate DELETE without a session is a 400; resource policy undecidable is -32006; client credentials and query no longer reach tool-selected upstreams unless forward_client_credentials.",
       "evidence": "src/plugins/mcp_gateway.rs:5671; src/plugins/mcp_gateway.rs:5921; src/plugins/mcp_gateway.rs:8058; src/plugins/mcp_gateway.rs:5909; src/plugins/mcp_gateway.rs:11144",
-      "anvil_impact": "New outcome plugin.mcp_gateway.prompt_resource_denied; session_or_version_rejected and catalog_unavailable notes. An upstream that relied on the client Authorization now answers its own 401/-32xxx.",
+      "anvil_impact": "New outcomes plugin.mcp_gateway.prompt_denied and plugin.mcp_gateway.resource_read_denied; session_or_version_rejected and catalog_unavailable notes. An upstream that relied on the client Authorization now answers its own 401/-32xxx.",
       "outcome_ids": [
-        "plugin.mcp_gateway.prompt_resource_denied",
+        "plugin.mcp_gateway.prompt_denied",
+        "plugin.mcp_gateway.resource_read_denied",
         "plugin.mcp_gateway.session_or_version_rejected",
         "plugin.mcp_gateway.catalog_unavailable"
       ]
@@ -36355,7 +36399,7 @@
     "state": "source_audited_candidate",
     "live_0_9_20_evidence": false,
     "baseline": "ferrum-edge-0.9.15",
-    "scope": "Carried observable inventory with the v0.9.15 -> v0.9.20 source delta (554 of the 556 v0.9.15 outcomes; protocol.grpc.request_body_read_failed and plugin.response_mock.status_101_non_websocket are removed), plus 61 outcomes for new client-visible refusals (one of them, plugin.oidc_relying_party.challenge_browser_state_cache_full, returns after its v0.9.15 removal); not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab qualification (manual workflow_dispatch, profile=all) is pending. Full evidence: docs/audit/gateway-0.9.20-delta.md."
+    "scope": "Carried observable inventory with the v0.9.15 -> v0.9.20 source delta (554 of the 556 v0.9.15 outcomes; protocol.grpc.request_body_read_failed and plugin.response_mock.status_101_non_websocket are removed), plus 62 outcomes for new client-visible refusals (one of them, plugin.oidc_relying_party.challenge_browser_state_cache_full, returns after its v0.9.15 removal); not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab qualification (manual workflow_dispatch, profile=all) is pending. Full evidence: docs/audit/gateway-0.9.20-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1906) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1669 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token. v0.9.17 (#6127) adds the loop_detected token and never retries a backend 508; v0.9.19 changes client-visible statuses for connection_timeout (504) and backend_connection_limit (503) without changing request_reached_wire. No ErrorClass variant was added or removed."
 }
