@@ -19937,16 +19937,17 @@
           "grpc-status": "8",
           "grpc-message": "Request inspection capacity exceeded | Response buffering capacity exceeded"
         },
-        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"} (request) or {\"error\":\"Response buffering capacity exceeded\"} (response); native gRPC clients see trailers-only",
+        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"} | {\"error\":\"Response buffering capacity exceeded\"}",
         "grpc_status": 8,
         "ws_close_code": null,
-        "transport": "native gRPC: HTTP 200 trailers-only grpc-status 8; otherwise complete HTTP 503"
+        "transport": "native gRPC: HTTP 200 trailers-only grpc-status 8; otherwise complete HTTP 503. The request-decode refusal carries the first body, the response-buffer refusal the second."
       },
       "evidence_visibility": "public_coarse",
       "shared_signal_with": [
         "gateway.capacity.request_decode",
         "gateway.capacity.response_buffer",
-        "plugin.compression.decode_capacity"
+        "plugin.compression.decode_capacity",
+        "plugin.openapi_validator.decode_capacity"
       ],
       "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, a gateway-wide inspection/buffering budget was exhausted while validating this gRPC message; the message itself was not judged invalid.",
       "must_not_claim": "That the message failed schema validation, that the backend is unavailable, or which plugin refused (the signal is byte-identical to the shared capacity refusals).",
@@ -20573,7 +20574,7 @@
           "content-type": "<error_response.content_type; default application/problem+json>",
           "Content-Type": "application/problem+json"
         },
-        "body_shape": "{\"type\":\"about:blank\",\"title\":\"Request parameter validation failed\",\"status\":{status},\"detail\":\"Required {location} parameter '{name}' is missing\" | \"{location} parameter '{name}' could not be converted: {error}\" | \"{location} parameter '{name}' does not satisfy its schema at {instance_location} (keyword '{keyword}')\" | fixed pair/item/percent-encoding details,\"operation\":\"{operation_label}\"}",
+        "body_shape": "{\"type\":\"about:blank\",\"title\":\"Request parameter validation failed\",\"status\":<status>,\"detail\":\"<detail>\",\"operation\":\"<operation_label>\"}",
         "grpc_status": null,
         "ws_close_code": null,
         "transport": "complete HTTP response"
@@ -20585,7 +20586,7 @@
       "remediation": "Caller: send the declared parameter in its default serialization with a schema-valid value. Operator: check the imported operation's parameters.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19). Runs in before_proxy before request transformers, reading header/cookie values from the pristine wire headers. Status is error_response.request_status_code (default 400, src/plugins/openapi_validator.rs:962). The title is the only field that distinguishes it from body violations. Values are never echoed; parameter names are operator-declared."
+      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19). Runs in before_proxy before request transformers, reading header/cookie values from the pristine wire headers. Status is error_response.request_status_code (default 400, src/plugins/openapi_validator.rs:962). The title is the only field that distinguishes it from body violations. Values are never echoed; parameter names are operator-declared. Body keys in that order (serde_json preserve_order); detail is one of \"Required <location> parameter '<name>' is missing\", \"<location> parameter '<name>' could not be converted: <error>\", \"<location> parameter '<name>' does not satisfy its schema at <instance_location> (keyword '<keyword>')\" (src/plugins/openapi_validator.rs:2534, :2541, :2549) or a fixed pair/item/percent-encoding detail; status is the configured request_error_status (default 400)."
     },
     {
       "id": "plugin.openapi_validator.decode_capacity",
@@ -20636,16 +20637,17 @@
           "content-type": "application/json",
           "Content-Type": "application/json"
         },
-        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"} (request) or {\"error\":\"Response buffering capacity exceeded\"} (response)",
+        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"} | {\"error\":\"Response buffering capacity exceeded\"}",
         "grpc_status": null,
         "ws_close_code": null,
-        "transport": "complete HTTP response"
+        "transport": "complete HTTP response. The request-decode refusal carries the first body, the response-buffer refusal the second."
       },
       "evidence_visibility": "public_coarse",
       "shared_signal_with": [
         "gateway.capacity.request_decode",
         "gateway.capacity.response_buffer",
-        "plugin.compression.decode_capacity"
+        "plugin.compression.decode_capacity",
+        "plugin.body_validator.decode_capacity"
       ],
       "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, a gateway-wide decode/buffer budget was exhausted while decompressing a body for OpenAPI validation; the body was not judged invalid.",
       "must_not_claim": "That the body violated the OpenAPI contract, or that the backend failed.",
@@ -28361,7 +28363,7 @@
       "condition": "model_limits is configured and an AI-candidate POST's model cannot be read before dispatch: 415 when the body is still content-coded, 400 when it does not parse.",
       "error_class": null,
       "public_signal": {
-        "http_status": 415,
+        "http_status": "400 | 415",
         "x_gateway_error": null,
         "other_headers": {
           "Content-Type": "application/json (proxy default)",
@@ -32169,16 +32171,15 @@
       "condition": "Mesh inbound HBONE byte-stream CONNECT that was admitted and routed, but the terminator's own dial to the destination workload fails before the tunnel is established: DNS failure (502 DNS body), TCP connect refused/reset/unreachable (502), or connect timeout, either the gateway's backend_connect_timeout_ms timer or (since v0.9.19, #6777) a kernel ETIMEDOUT (504).",
       "error_class": "connection_timeout",
       "public_signal": {
-        "http_status": null,
+        "http_status": "502 | 504",
         "x_gateway_error": null,
         "other_headers": {
           "content-type": "application/json"
         },
-        "body_shape": "502 {\"error\":\"Backend HBONE connection failed\"} | 504 {\"error\":\"Backend HBONE connection timed out\"} | 502 {\"error\":\"DNS resolution for backend failed\"}",
+        "body_shape": "{\"error\":\"Backend HBONE connection failed\"} | {\"error\":\"Backend HBONE connection timed out\"} | {\"error\":\"DNS resolution for backend failed\"}",
         "grpc_status": null,
         "ws_close_code": null,
-        "transport": "HTTP/2 CONNECT response (no tunnel established); no X-Gateway-Error on this reject path",
-        "http_status_note": "502 | 504"
+        "transport": "HTTP/2 CONNECT response (no tunnel established); no X-Gateway-Error on this reject path. 502 with the connection-failed or DNS body; 504 with the timed-out body."
       },
       "evidence_visibility": "public_coarse",
       "shared_signal_with": [],
@@ -33479,7 +33480,7 @@
         "other_headers": {
           "Content-Type": "application/json (proxy default)"
         },
-        "body_shape": "{\"error\":\"Request body could not be inspected\",\"message\":\"non_utf8_body|malformed_json|unsupported_charset\"}",
+        "body_shape": "{\"error\":\"Request body could not be inspected\",\"message\":\"non_utf8_body\"} | {\"error\":\"Request body could not be inspected\",\"message\":\"malformed_json\"} | {\"error\":\"Request body could not be inspected\",\"message\":\"unsupported_charset\"}",
         "grpc_status": null,
         "ws_close_code": null,
         "transport": "Pre-request (before_proxy or final-body hook)."

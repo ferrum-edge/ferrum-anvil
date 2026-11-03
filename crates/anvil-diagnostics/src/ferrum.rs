@@ -698,6 +698,58 @@ mod tests {
             assert_eq!(ids, ["protocol.ws.backend_connect_failed"], "{token}");
         }
 
+        // Every emitted status and body of outcomes with several variants
+        // matches: ai_rate_limiter's unreadable model (400 or 415),
+        // ai_prompt_shield's three reasons, the HBONE relay's dial failures and
+        // openapi_validator's parameter problem (#6847, #6838, #6777, #6837).
+        let model = r#"{"error":"AI request model unavailable","details":"model_limits requires an uncompressed, parseable request body so the requested model's token budget can be enforced"}"#;
+        let mut variants = vec![
+            (400, model.to_string(), "plugin.ai_rate_limiter.model_unattributable"),
+            (415, model.to_string(), "plugin.ai_rate_limiter.model_unattributable"),
+            (502, r#"{"error":"Backend HBONE connection failed"}"#.to_string(), "protocol.hbone.relay_backend_connect_failed"),
+            (504, r#"{"error":"Backend HBONE connection timed out"}"#.to_string(), "protocol.hbone.relay_backend_connect_failed"),
+            (502, r#"{"error":"DNS resolution for backend failed"}"#.to_string(), "protocol.hbone.relay_backend_connect_failed"),
+            (
+                400,
+                r#"{"type":"about:blank","title":"Request parameter validation failed","status":400,"detail":"Required query parameter 'limit' is missing","operation":"GET /items"}"#.to_string(),
+                "plugin.openapi_validator.request_parameter_violation",
+            ),
+        ];
+        for reason in ["non_utf8_body", "malformed_json", "unsupported_charset"] {
+            let text = format!(r#"{{"error":"Request body could not be inspected","message":"{reason}"}}"#);
+            variants.push((400, text, "plugin.ai_prompt_shield.body_uninspectable"));
+        }
+        for (status, text, expected) in &variants {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status: *status, token: None, body_text: text, body: &bf, grpc_status: None };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, [*expected], "{status} {text}");
+        }
+        // The validators' capacity refusals answer the shared capacity bodies,
+        // so they stay among that body's candidates.
+        for (text, expected) in [
+            (
+                r#"{"error":"Request inspection capacity exceeded"}"#,
+                &[
+                    "gateway.capacity.request_decode",
+                    "plugin.body_validator.decode_capacity",
+                    "plugin.openapi_validator.decode_capacity",
+                    "plugin.compression.decode_capacity",
+                ][..],
+            ),
+            (
+                r#"{"error":"Response buffering capacity exceeded"}"#,
+                &["plugin.body_validator.decode_capacity", "plugin.openapi_validator.decode_capacity"][..],
+            ),
+        ] {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, expected, "{text}");
+        }
+
         // mcp_gateway's default-deny of prompts and resources (#6819): each
         // message is its own exact outcome.
         let c = catalog_for("ferrum-edge-0.9.20").unwrap();

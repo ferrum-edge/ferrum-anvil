@@ -193,4 +193,13 @@ fn auth_017_oidc_challenge_among_others_is_not_a_login_step() {
         let d = run(&at, &r, body, true);
         assert!(codes(&d).contains(&CODE), "{only}: {:?}", codes(&d));
     }
+    // RFC 9110 §5.2: repeated field lines are one comma-joined value. One OIDC
+    // challenge split across lines still counts; separate challenges on
+    // separate lines are still a mixed list.
+    let split = [("www-authenticate", r#"Bearer realm="oidc""#), ("www-authenticate", r#"error="invalid_token""#)];
+    let d = run(&at, &response(401, &split, "application/json", body), body, true);
+    assert!(codes(&d).contains(&CODE), "{:?}", codes(&d));
+    let separate = [("www-authenticate", r#"ApiKey realm="ferrum-edge""#), ("www-authenticate", r#"Bearer realm="oidc""#)];
+    let d = run(&at, &response(401, &separate, "application/json", body), body, true);
+    assert!(!codes(&d).contains(&CODE), "{:?}", codes(&d));
 }

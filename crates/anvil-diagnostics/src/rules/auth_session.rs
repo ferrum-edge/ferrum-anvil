@@ -141,7 +141,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     // 0.9.19 a route that chains OIDC with another mechanism lists every
     // applicable challenge on each 401 (an API key or token the route
     // rejected included), which does not mean an interactive login is needed.
-    let offered: Vec<String> = r.header_values("www-authenticate").into_iter().flat_map(challenges).collect();
+    // Repeated field lines form one comma-joined value (RFC 9110 §5.2), so a
+    // challenge's parameters may continue on the next line.
+    let offered = challenges(&r.header_values("www-authenticate").join(", "));
     if !offered.iter().all(|c| oidc_realm(c)) {
         return;
     }
