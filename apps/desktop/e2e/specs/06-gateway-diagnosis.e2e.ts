@@ -4,8 +4,7 @@
 // to the gateway→backend leg at "likely" (markers are coarse and spoofable on
 // every audited release) and never claims TLS or DNS. Skipped without a lab
 // gateway. ANVIL_E2E_GATEWAY_COMPAT names the lab's release catalog (default:
-// the default pin, ferrum-edge-0.9.20; `anvil-lab --release v0.9.5 up
-// core` needs ferrum-edge-0.9.5).
+// the default pin, ferrum-edge-0.9.20, the only release the lab runs).
 import { $, $$, expect } from "@wdio/globals";
 import { invoke, newRequest, responseTab, screenshot, send, setUrl, waitForWorkbench } from "../helpers";
 

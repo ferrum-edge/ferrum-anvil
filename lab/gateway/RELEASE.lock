@@ -4,7 +4,7 @@
 # release, matching its .sha256 sidecars (verified 2026-11-03).
 # https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20
 # This release-specific copy and RELEASE.lock have identical pins.
-# Earlier supported releases retain their own locks under releases/.
+# It is the only supported release; v0.9.5 to v0.9.15 were retired.
 release v0.9.20
 source_sha e4a606a00352674daaef08636e3e359e6c48ba18
 ferrum-edge-macos-aarch64 c36b586507bd1ed072fbd9f3e2222ef07b2427f460a2ed923f21dbb973eb7061

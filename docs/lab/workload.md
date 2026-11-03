@@ -24,7 +24,6 @@ lifetime), and its warning `workload attestation failed` — and the lookalike f
 
 ```sh
 cargo run -p anvil-lab -- run workload --untrusted-pass
-cargo run -p anvil-lab -- --release v0.9.5 run workload --untrusted-pass
 cargo run -p anvil-lab -- up workload        # keep everything up; prints the socket and listeners
 anvil workload probe --endpoint unix://<socket dir>/mesh.sock --audience spiffe://anvil.lab/api/orders
 ```

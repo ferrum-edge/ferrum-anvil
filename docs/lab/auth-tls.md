@@ -36,7 +36,6 @@ cargo run -p anvil-lab -- list tls                    # scenario ids (skips incl
 cargo run -p anvil-lab -- run tls  --untrusted-pass
 cargo run -p anvil-lab -- run auth --untrusted-pass
 cargo run -p anvil-lab -- run auth --scenario AUTH-X04   # one scenario
-cargo run -p anvil-lab -- --release v0.9.5 run auth --untrusted-pass
 cargo run -p anvil-lab -- up tls                      # keep fixtures + gateways up for manual work
 ```
 

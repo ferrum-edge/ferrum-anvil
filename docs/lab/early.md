@@ -47,7 +47,6 @@ Gateway configuration:
 ```sh
 cargo run -p anvil-lab -- list early
 cargo run -p anvil-lab -- run early --untrusted-pass                     # ~3 s
-cargo run -p anvil-lab -- --release v0.9.5 run early --untrusted-pass
 cargo run -p anvil-lab -- up early                                       # manual/desktop use
 ```
 

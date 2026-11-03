@@ -27,7 +27,6 @@ the relayed byte counts).
 ```sh
 cargo run -p anvil-lab -- run mesh --untrusted-pass
 cargo run -p anvil-lab -- run mesh --scenario MESH-008     # one scenario
-cargo run -p anvil-lab -- --release v0.9.5 run mesh --untrusted-pass
 cargo run -p anvil-lab -- up mesh                          # keep everything up; prints listeners and client SVID paths
 ```
 
