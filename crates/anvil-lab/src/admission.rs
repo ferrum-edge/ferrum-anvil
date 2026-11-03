@@ -487,9 +487,11 @@ fn up018(env: &Env) -> Fut<'_> {
             format!("{:?}", codes(&look)),
         );
         // Lookalike B: the same status/body authored by the application.
-        // On direct H1 the gateway stamps backend_error, so it cannot match
-        // the pooled connection_failure family. On reqwest the full signal
-        // is identical, so attribution remains at most likely.
+        // On direct H1 through v0.9.15 the gateway stamps backend_error, so it
+        // cannot match the pooled connection_failure family. On reqwest, and
+        // from v0.9.19 (an application 503 with the limit body, stamped
+        // backend_error, is the reqwest lane's full signal), the signal is
+        // identical, so attribution remains at most likely.
         let same_path = format!("/status/{status}?body={}", enc(body));
         let before = log.count_requests();
         let same = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, &same_path)).await;
@@ -505,7 +507,7 @@ fn up018(env: &Env) -> Fut<'_> {
         c.token(&same, "ferrum.token.backend_error", env.trusted);
         c.max_confidence(&same, "ferrum.token.backend_error", Confidence::Likely);
         c.max_confidence(&same, "ferrum.outcome", Confidence::Likely);
-        if direct_h1 {
+        if direct_h1 && !own_503 {
             c.absent_prefix(&same, "ferrum.token.connection_failure");
             c.add(
                 CheckKind::Diagnosis,

@@ -770,7 +770,21 @@ fn auth026(env: &Env) -> Fut<'_> {
         );
         c.has(&o, "http.unauthorized");
         c.absent_prefix(&o, "client.tls.");
-        if env.trusted {
+        if env.trusted && gateway::release_at_least("v0.9.19") {
+            // oauth2_introspection's certificate binding (#6840) answers the
+            // same 401 body, so the catalog cannot tell the two plugins apart.
+            c.has(&o, "ferrum.outcome_ambiguous");
+            c.max_confidence(&o, "ferrum.outcome_ambiguous", Confidence::Unknown);
+            let ids = crate::fixtures_policy::catalog_ids(&o);
+            c.add(
+                CheckKind::Diagnosis,
+                "candidates are the jwks_auth and oauth2_introspection binding mismatches",
+                ["plugin.jwks_auth.mtls_binding_mismatch", "plugin.oauth2_introspection.mtls_binding_mismatch"]
+                    .iter()
+                    .all(|id| ids.iter().any(|i| i == id)),
+                format!("{ids:?}"),
+            );
+        } else if env.trusted {
             c.has(&o, "ferrum.outcome");
             c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
         }
