@@ -722,15 +722,13 @@ What it does **not** cover:
   ferrum-edge/ferrum-anvil#3.
 - **Packaged-app smoke tests:** install, launch, example import and a local
   call through the release CLI are automated for the published unsigned
-  packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.5`
-  (PR run 41275148483; the same result as the earlier runs 41273823587,
-  41270507104, 41255989645, 41254710916, 41189324002 and 41185287833), six of seven
-  targets pass. The AppImage fails at its first launch: its WebKit web
-  process aborts with `EGL_BAD_PARAMETER` (a package failure). The fix,
-  ferrum-edge/ferrum-anvil#463, is merged but not released. The owner's
-  disposition: the fixed AppImage ships in the 0.1.7 patch release (being
-  prepared, not yet published). `anvil-v0.1.5`'s assets and `latest.json`
-  are left unchanged, because 0.1.7 supersedes them. Not automated:
+  packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.7`
+  (run 41583409678, which publishing the release started), all seven targets
+  pass. On `anvil-v0.1.5` the AppImage failed at its first launch: its WebKit
+  web process aborted with `EGL_BAD_PARAMETER` (a package failure). Its fix,
+  ferrum-edge/ferrum-anvil#463, shipped in 0.1.7, and the 0.1.7 AppImage
+  passes the release smoke. `anvil-v0.1.5`'s assets and `latest.json` were
+  left unchanged, because 0.1.7 supersedes them. Not automated:
   - GUI-driven import and send;
   - first run through Gatekeeper/SmartScreen;
   - native dialogs, lock/unlock, uninstall.
