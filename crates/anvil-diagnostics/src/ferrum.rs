@@ -715,6 +715,37 @@ mod tests {
                 "plugin.openapi_validator.request_parameter_violation",
             ),
         ];
+        // ai_request_guard's generation controls and completion count, and
+        // ai_stream_router's untranslatable parameters (#6849, #6824), with
+        // substituted values.
+        for (text, expected) in [
+            (
+                r#"{"error":"Invalid max_tokens field","details":"'max_tokens' must be a non-negative integer"}"#,
+                "plugin.ai_request_guard.generation_control_invalid",
+            ),
+            (
+                r#"{"error":"Invalid completion count field","details":"'n' must be a non-negative integer"}"#,
+                "plugin.ai_request_guard.generation_control_invalid",
+            ),
+            (
+                r#"{"error":"Conflicting field spellings","details":"'generationConfig / generation_config' are both present; send a single spelling"}"#,
+                "plugin.ai_request_guard.generation_control_invalid",
+            ),
+            (
+                r#"{"error":"Too many completions requested","details":"Request asks for 2 completions, maximum allowed is 1"}"#,
+                "plugin.ai_request_guard.max_choices_exceeded",
+            ),
+            (
+                r#"{"error":{"message":"Invalid request for Anthropic translation: logit_bias is not supported","type":"invalid_request_error","param":"logit_bias","code":"unsupported_parameter"}}"#,
+                "plugin.ai_stream_router.parameter_unrepresentable",
+            ),
+            (
+                r#"{"error":{"message":"Invalid request for Gemini translation: n must be 1","type":"invalid_request_error","param":"n","code":"invalid_parameter"}}"#,
+                "plugin.ai_stream_router.parameter_unrepresentable",
+            ),
+        ] {
+            variants.push((400, text.to_string(), expected));
+        }
         for reason in ["non_utf8_body", "malformed_json", "unsupported_charset"] {
             let text = format!(r#"{{"error":"Request body could not be inspected","message":"{reason}"}}"#);
             variants.push((400, text, "plugin.ai_prompt_shield.body_uninspectable"));

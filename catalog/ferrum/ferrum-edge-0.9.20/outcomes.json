@@ -28047,7 +28047,7 @@
         "other_headers": {
           "Content-Type": "application/json"
         },
-        "body_shape": "{\"error\":{\"message\":\"Invalid request for {Anthropic|Gemini} translation: {detail}\",\"type\":\"invalid_request_error\",\"param\":\"{parameter}\",\"code\":\"unsupported_parameter|invalid_parameter\"}}",
+        "body_shape": "{\"error\":{\"message\":\"Invalid request for <provider> translation: <detail>\",\"type\":\"invalid_request_error\",\"param\":\"<parameter>\",\"code\":\"unsupported_parameter\"}} | {\"error\":{\"message\":\"Invalid request for <provider> translation: <detail>\",\"type\":\"invalid_request_error\",\"param\":\"<parameter>\",\"code\":\"invalid_parameter\"}}",
         "grpc_status": null,
         "ws_close_code": null,
         "transport": "Pre-stream JSON."
@@ -28777,7 +28777,7 @@
         "other_headers": {
           "Content-Type": "application/json (proxy default)"
         },
-        "body_shape": "{\"error\":\"Invalid max_tokens field\",\"details\":\"'{field}' must be a non-negative integer\"}",
+        "body_shape": "{\"error\":\"Invalid max_tokens field\",\"details\":\"'<field>' must be a non-negative integer\"} | {\"error\":\"Invalid completion count field\",\"details\":\"'<field>' must be a non-negative integer\"} | {\"error\":\"Conflicting field spellings\",\"details\":\"'<fields>' are both present; send a single spelling\"}",
         "grpc_status": null,
         "ws_close_code": null,
         "transport": "Pre-request."
@@ -28789,7 +28789,7 @@
       "remediation": "Caller: adjust the prompt/model/tool usage or token budget per the policy; operator can confirm the matched policy in gateway logs.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6849). Variants: {\"error\":\"Conflicting field spellings\",\"details\":\"'{a} / {b}' are both present; send a single spelling\"} and {\"error\":\"Invalid completion count field\",\"details\":\"'{field}' must be a non-negative integer\"}. Integral floats, exponents and quoted integers are accepted by value. Decision metadata ai_request_guard.reason: invalid_max_tokens | conflicting_fields | invalid_choice_count. Public reason detail: names the field. Body family: plain_error_json"
+      "notes": "New in v0.9.19 (#6849). The three bodies (src/plugins/ai_request_guard.rs:846, :911, :935) differ by title. Integral floats, exponents and quoted integers are accepted by value. Decision metadata ai_request_guard.reason: invalid_max_tokens | conflicting_fields | invalid_choice_count. Public reason detail: names the field. Body family: plain_error_json"
     },
     {
       "id": "plugin.ai_request_guard.max_choices_exceeded",
@@ -28815,7 +28815,7 @@
         "other_headers": {
           "Content-Type": "application/json (proxy default)"
         },
-        "body_shape": "{\"error\":\"Too many completions requested\",\"details\":\"Request asks for {requested} completions, maximum allowed is {max_choices}\"}",
+        "body_shape": "{\"error\":\"Too many completions requested\",\"details\":\"Request asks for <requested> completions, maximum allowed is <max_choices>\"}",
         "grpc_status": null,
         "ws_close_code": null,
         "transport": "Pre-request."
