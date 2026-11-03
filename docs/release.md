@@ -728,9 +728,9 @@ What it does **not** cover:
   targets pass. The AppImage fails at its first launch: its WebKit web
   process aborts with `EGL_BAD_PARAMETER` (a package failure). The fix,
   ferrum-edge/ferrum-anvil#463, is merged but not released. The owner's
-  disposition: the fixed AppImage ships in the 0.1.6 patch release (being
+  disposition: the fixed AppImage ships in the 0.1.7 patch release (being
   prepared, not yet published). `anvil-v0.1.5`'s assets and `latest.json`
-  are left unchanged, because 0.1.6 supersedes them. Not automated:
+  are left unchanged, because 0.1.7 supersedes them. Not automated:
   - GUI-driven import and send;
   - first run through Gatekeeper/SmartScreen;
   - native dialogs, lock/unlock, uninstall.
