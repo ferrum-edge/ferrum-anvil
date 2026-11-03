@@ -34,3 +34,10 @@ regexes = ['''0123456789abcdef0123456789abcdef''']
 [[allowlists]]
 description = "Throwaway RSA test keys (2048- and 1024-bit) made with OpenSSL, and one token signed offline with the 1024-bit key, for anvil-auth's RSA JWT tests, which pin AWS-LC's 2048-8192-bit key window; used nowhere else (provenance in crates/anvil-auth/tests/rsa_jwt.rs)"
 paths = ['''^crates/anvil-auth/tests/fixtures/rsa-test-[0-9]+\.(pkcs[18]\.pem|rs256\.jwt)$''']
+
+[[allowlists]]
+description = "Ferrum Edge catalog prose naming soap_ws_security's identity mechanisms (\"username_token, x509_signature\"): config value names, not a credential"
+condition = "AND"
+regexTarget = "line"
+paths =['''^catalog/ferrum/ferrum-edge-[0-9.]+/outcomes\.json$''']
+regexes = ['''username_token, x509_signature''']
