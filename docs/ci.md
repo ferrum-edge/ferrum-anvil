@@ -33,15 +33,16 @@ nightly lab run does not replace either.
 it runs on a PR, it must pass before merging. A pull request's Ubuntu lab job
 runs every profile against the default pin (about 11 to 12 minutes, inside the
 time the Rust jobs already take), and its macOS job runs the core profile. The
-nightly run adds every earlier supported release on both systems. Before this,
+nightly run repeats it on both systems (v0.9.20 is the only supported release). Before this,
 pull requests ran only the core profile, so a dependency bump that broke the
 `tls` profile's DTLS mTLS scenario (PROTO-022) merged green and failed every
 nightly job afterwards. A failing scenario is read from the job's uploaded
 `lab-results-*` artifact before anything is re-run; re-run a job only for a
 failure shown to be unrelated to the change, and open an issue for a scenario
-that fails that way more than once. The cross-version DTLS mTLS handshake
+that fails that way more than once. The DTLS 1.3 mutual-TLS handshake
 behind that failure is also a required Rust test
-(`crates/anvil-transport/tests/dtls_edge_interop.rs`).
+(`crates/anvil-transport/tests/dtls_edge_interop.rs`), against a listener that sends the
+CertificateRequest v0.9.20 sends.
 
 The existing macOS Rust job also compiles the standalone Swift branding helper
 with `swift build --package-path apps/desktop/scripts`. Its small SwiftPM
@@ -156,8 +157,8 @@ python3 -I scripts/matrix-coverage.py
 ruby lab/gateway/lint-profiles.rb
 lab/scripts/fetch-gateway.sh             # needs an authenticated `gh`; verifies RELEASE.lock
 ulimit -n 4096; cargo run -p anvil-lab -- run core --untrusted-pass
-lab/scripts/fetch-gateway.sh v0.9.5      # an earlier supported release (lab/gateway/releases/v0.9.5.lock)
-cargo run -p anvil-lab -- --release v0.9.5 run core --untrusted-pass
+lab/scripts/fetch-gateway.sh v0.9.20     # a release by tag (lab/gateway/releases/v0.9.20.lock)
+cargo run -p anvil-lab -- --release v0.9.20 run core --untrusted-pass
 
 # Native E2E
 (cd apps/desktop && npm run e2e:build && npm run e2e)
@@ -174,12 +175,12 @@ release asset for the runner's OS and architecture with `gh release download`
 It refuses to keep a binary whose SHA-256 differs from its lock:
 
 - `lab/gateway/RELEASE.lock`: the default pin (v0.9.20, hosted Anvil qualification pending);
-- `lab/gateway/releases/<release>.lock`: every supported release (v0.9.5,
-  v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14, v0.9.15 and v0.9.20).
+- `lab/gateway/releases/<release>.lock`: every supported release (v0.9.20;
+  v0.9.5 to v0.9.15 were retired, see [lab/README.md](lab/README.md)).
 
 Each lock pins macOS (arm64, x86_64), Linux (x86_64, arm64) and Windows
 (x86_64) assets. The workflow passes the release in `ANVIL_LAB_RELEASE`: pull
-requests use the default pin, the nightly run adds v0.9.15, v0.9.14, v0.9.11, v0.9.10, v0.9.9, v0.9.8, v0.9.7 and v0.9.5, and a manual run
+requests and the nightly run use the default pin, and a manual run
 takes a `release` input. `anvil-lab verify` prints the gateway's identity and
 `anvil-lab` re-verifies the checksum before every run. Results in
 `results/lab/**` (and the gateway logs under `lab/.run/`) are uploaded as one

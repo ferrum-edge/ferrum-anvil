@@ -15,8 +15,7 @@
 - Add the separately source-audited Edge v0.9.20 catalog and release-asset locks at
   `e4a606a00352674daaef08636e3e359e6c48ba18` (release 432463173), selected as the lab and
   new-profile default; hosted all-profile Lab qualification is pending. The audit also covers
-  v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18 were tagged but never published). v0.9.15 and the
-  earlier catalogs and locks stay supported, and the nightly lab now also runs v0.9.15. See
+  v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18 were tagged but never published). See
   `docs/audit/gateway-0.9.20-delta.md`.
 - Gateway catalog 0.9.20 has 616 outcomes: the 556 of 0.9.15, less two removed, plus 62 new,
   among them the proxy hop limit 508 `{"error":"Proxy hop limit exceeded"}` and the malformed
@@ -45,6 +44,22 @@
   with its own echo fixture, because v0.9.17 refuses a bare CONNECT to the HTTP port 17801. Each
   earlier release keeps its own expectations.
 - Diagnostics catalog version 2026.11.03-1.
+
+### Removed
+
+- Ferrum Edge v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14 and v0.9.15 are no
+  longer supported: v0.9.20 is the only supported release. Their lab locks
+  (`lab/gateway/releases/`) are removed, so `anvil-lab --release` refuses them, and the nightly
+  lab runs only the default pin. Their diagnostics catalogs stay embedded, so profiles and
+  imports that name them keep their diagnoses.
+- The vendored dimpl (`vendor/dimpl-0.8.0-empty-ca`): Anvil uses dimpl 0.8.0 from crates.io
+  again. That copy accepted the empty `certificate_authorities` list that Ferrum Edge DTLS 1.3
+  listeners requiring client certificates sent before v0.9.20 (ferrum-edge/ferrum-edge#7001).
+  Against those releases, DTLS 1.3 with a client certificate now times out again
+  (`client.dtls.handshake_timeout`) without presenting the identity; DTLS 1.2, and listeners
+  that do not request a certificate, are unaffected. `dtls_edge_interop.rs` now runs Anvil's
+  client against a DTLS 1.3 listener that omits the extension, as v0.9.20 does, and the
+  `dimpl-edge` (0.6.1) test dependency is gone.
 
 ## [0.1.7] - 2026-11-03
 

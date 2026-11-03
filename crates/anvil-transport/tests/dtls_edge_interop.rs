@@ -1,15 +1,17 @@
-//! Anvil's DTLS client against the DTLS stack every supported Ferrum Edge
-//! release serves: dimpl 0.6.1 (`dimpl-edge`), whose DTLS 1.3
-//! CertificateRequest carries an empty `certificate_authorities` extension
-//! when the listener requires client certificates (Edge v0.9.20 patches its
-//! copy to omit it, ferrum-edge/ferrum-edge#7001; v0.9.5 to v0.9.15 still
-//! send it). Unpatched dimpl 0.8.0
-//! drops that message without an alert, so the client never presents its
-//! identity and the handshake times out. That reached `main` once (the
-//! vendored dimpl in vendor/dimpl-0.8.0-empty-ca now accepts the list): Anvil's
-//! own fixtures run the same dimpl as the client and passed, and only the
-//! nightly lab's PROTO-022 against a real gateway failed. This test keeps the
-//! cross-version handshake in the required Rust lane.
+//! Anvil's DTLS client against a DTLS 1.3 listener that requires client
+//! certificates and sends the CertificateRequest the supported Ferrum Edge
+//! release (v0.9.20) sends: `signature_algorithms` only, with no
+//! `certificate_authorities` extension (ferrum-edge/ferrum-edge#7001
+//! backports dimpl #153 to Edge's dimpl 0.6.1). The server here is the
+//! workspace dimpl, which has omitted the extension since 0.7.0 (#153).
+//!
+//! Edge v0.9.5 to v0.9.19 send the extension with no names. dimpl 0.8 drops
+//! that CertificateRequest without an alert, so the client never presents
+//! its identity and the handshake times out; Anvil once carried a patched
+//! dimpl for it, and retired it with those releases. The regression reached
+//! `main` once because Anvil's own DTLS fixtures negotiate DTLS 1.2 and only
+//! the lab's PROTO-022 against a real gateway failed, so this test keeps the
+//! DTLS 1.3 mutual-TLS handshake in the required Rust lane.
 
 use anvil_domain::execution::*;
 use anvil_domain::outcome::ProtocolStatus;
@@ -42,21 +44,31 @@ impl ServerView {
     }
 }
 
-/// A one-peer DTLS echo server on Ferrum Edge's dimpl, configured as Edge's
-/// frontend DTLS listener is when a client CA is set
-/// (`require_client_certificate(true)`).
-async fn edge_dtls_echo(view: Arc<ServerView>) -> std::net::SocketAddr {
+/// A one-peer DTLS echo server configured as Ferrum Edge's frontend DTLS
+/// listener is when a client CA is set (`new_auto`,
+/// `require_client_certificate(true)`), with the lab server certificate
+/// (ECDSA, as dimpl needs).
+async fn edge_dtls_echo(pki: &LabPki, view: Arc<ServerView>) -> std::net::SocketAddr {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
+    let certificate = dimpl::DtlsCertificate {
+        certificate: anvil_fixtures::tlsserver::certs(&pki.server.cert)[0].as_ref().to_vec(),
+        private_key: anvil_fixtures::tlsserver::key(&pki.server.key).secret_der().to_vec(),
+    };
     tokio::spawn(async move {
-        let config = Arc::new(dimpl_edge::Config::builder().require_client_certificate(true).build().unwrap());
-        let cert = dimpl_edge::certificate::generate_self_signed_certificate().unwrap();
-        let mut server = dimpl_edge::Dtls::new_auto(config, cert, Instant::now());
+        let config = Arc::new(
+            dimpl::Config::builder()
+                .with_crypto_provider(dimpl::crypto::aws_lc_rs::default_provider())
+                .require_client_certificate(true)
+                .build()
+                .unwrap(),
+        );
+        let mut server = dimpl::Dtls::new_auto(config, certificate, Instant::now());
         let _ = server.handle_timeout(Instant::now());
         let mut peer = None;
         let mut next: Option<Instant> = None; // set by every drain (it ends at Timeout)
         let mut buf = vec![0u8; 65_535];
-        let mut out = vec![0u8; 4096];
+        let mut out = vec![0u8; 65_535];
         loop {
             let wait = next.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_millis(100));
             tokio::select! {
@@ -82,17 +94,18 @@ async fn edge_dtls_echo(view: Arc<ServerView>) -> std::net::SocketAddr {
                 let mut echo = None;
                 loop {
                     match server.poll_output(&mut out) {
-                        dimpl_edge::Output::Packet(p) => {
+                        dimpl::Output::Packet(p) => {
                             if let Some(to) = peer {
                                 let _ = sock.send_to(p, to).await;
                             }
                         }
-                        dimpl_edge::Output::Timeout(t) => {
+                        dimpl::Output::Timeout(t) => {
                             next = Some(t);
                             break;
                         }
-                        dimpl_edge::Output::PeerCert(_) => view.saw_client_cert.store(true, Ordering::SeqCst),
-                        dimpl_edge::Output::ApplicationData(d) => echo = Some(d.to_vec()),
+                        dimpl::Output::PeerCert(_) => view.saw_client_cert.store(true, Ordering::SeqCst),
+                        dimpl::Output::ApplicationData(d) => echo = Some(d.to_vec()),
+                        dimpl::Output::BufferTooSmall { needed } => return view.fail(format!("server output needs {needed} bytes")),
                         _ => {}
                     }
                 }
@@ -109,12 +122,12 @@ async fn edge_dtls_echo(view: Arc<ServerView>) -> std::net::SocketAddr {
 /// PROTO-022 without the gateway: a DTLS 1.3 listener that requires client
 /// certificates gets Anvil's client identity, and the datagram is echoed.
 #[tokio::test]
-async fn proto_022_dtls_mtls_handshake_with_ferrum_edge_dimpl_completes() {
+async fn proto_022_dtls_mtls_handshake_with_ferrum_edge_certificate_request_completes() {
     anvil_transport::init();
     anvil_fixtures::init();
     let pki = LabPki::generate();
     let view = Arc::new(ServerView::default());
-    let addr = edge_dtls_echo(view.clone()).await;
+    let addr = edge_dtls_echo(&pki, view.clone()).await;
     let prepared = Arc::new(tls::prepare(&TlsSettings { verify: false, ..Default::default() }).unwrap());
     let plan = dtls::DtlsPlan {
         host: "127.0.0.1".into(),

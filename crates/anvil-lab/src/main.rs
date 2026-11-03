@@ -5,7 +5,7 @@
 //! lab/scripts/fetch-gateway.sh            # download + verify the pinned binary
 //! cargo run -p anvil-lab -- run core      # start fixtures + gateway, run scenarios, stop
 //! cargo run -p anvil-lab -- run core --scenario UP-002
-//! cargo run -p anvil-lab -- --release v0.9.5 run all   # an earlier supported release
+//! cargo run -p anvil-lab -- --release v0.9.20 run all  # a release by tag
 //! ```
 //! The release defaults to `lab/gateway/RELEASE.lock`; `--release` (or
 //! `$ANVIL_LAB_RELEASE`) selects `lab/gateway/releases/<release>.lock`.
@@ -50,7 +50,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "anvil-lab", about = "Ferrum Anvil local failure laboratory")]
 struct Cli {
-    /// Gateway release to run against (e.g. `v0.9.5`): reads
+    /// Gateway release to run against (e.g. `v0.9.20`): reads
     /// `lab/gateway/releases/<release>.lock`. Default: `$ANVIL_LAB_RELEASE`,
     /// else `lab/gateway/RELEASE.lock`.
     #[arg(long, global = true)]

@@ -518,10 +518,13 @@ mod tests {
 
     /// Every supported release has a well-formed lock and an embedded
     /// diagnostics catalog, so the lab's trusted profile never falls back.
+    /// v0.9.5 to v0.9.15 were retired (their DTLS 1.3 listeners send the
+    /// empty `certificate_authorities` list Anvil's dimpl refuses); their
+    /// catalogs stay embedded, but the lab no longer runs them.
     #[test]
     fn every_supported_release_has_a_lock_and_a_catalog() {
         let releases = available_releases();
-        let expected = ["v0.9.5", "v0.9.7", "v0.9.8", "v0.9.9", "v0.9.10", "v0.9.11", "v0.9.14", "v0.9.15", "v0.9.20"];
+        let expected = ["v0.9.20"];
         assert_eq!(releases, expected);
         for r in releases {
             let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));

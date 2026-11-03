@@ -41,17 +41,18 @@ import { WorkloadIdentityFields } from "./WorkloadApi";
 const now = () => new Date().toISOString();
 
 /** Ferrum Edge releases with a source-audited catalog in anvil-diagnostics
- * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first. */
+ * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first.
+ * Only 0.9.20 is supported; the older catalogs stay for existing profiles. */
 export const FERRUM_COMPATIBILITY = [
   { id: "ferrum-edge-0.9.20", label: "Ferrum Edge 0.9.20" },
-  { id: "ferrum-edge-0.9.15", label: "Ferrum Edge 0.9.15" },
-  { id: "ferrum-edge-0.9.14", label: "Ferrum Edge 0.9.14" },
-  { id: "ferrum-edge-0.9.11", label: "Ferrum Edge 0.9.11" },
-  { id: "ferrum-edge-0.9.10", label: "Ferrum Edge 0.9.10" },
-  { id: "ferrum-edge-0.9.9", label: "Ferrum Edge 0.9.9" },
-  { id: "ferrum-edge-0.9.8", label: "Ferrum Edge 0.9.8" },
-  { id: "ferrum-edge-0.9.7", label: "Ferrum Edge 0.9.7" },
-  { id: "ferrum-edge-0.9.5", label: "Ferrum Edge 0.9.5" },
+  { id: "ferrum-edge-0.9.15", label: "Ferrum Edge 0.9.15 (no longer supported)" },
+  { id: "ferrum-edge-0.9.14", label: "Ferrum Edge 0.9.14 (no longer supported)" },
+  { id: "ferrum-edge-0.9.11", label: "Ferrum Edge 0.9.11 (no longer supported)" },
+  { id: "ferrum-edge-0.9.10", label: "Ferrum Edge 0.9.10 (no longer supported)" },
+  { id: "ferrum-edge-0.9.9", label: "Ferrum Edge 0.9.9 (no longer supported)" },
+  { id: "ferrum-edge-0.9.8", label: "Ferrum Edge 0.9.8 (no longer supported)" },
+  { id: "ferrum-edge-0.9.7", label: "Ferrum Edge 0.9.7 (no longer supported)" },
+  { id: "ferrum-edge-0.9.5", label: "Ferrum Edge 0.9.5 (no longer supported)" },
 ] as const;
 
 // ------------------------------------------------------------ environments

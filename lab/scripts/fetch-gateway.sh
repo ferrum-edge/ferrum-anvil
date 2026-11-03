@@ -3,8 +3,8 @@
 # it against its lock. Never keeps (or runs) an unverified binary.
 #
 #   lab/scripts/fetch-gateway.sh            # the default pin, lab/gateway/RELEASE.lock
-#   lab/scripts/fetch-gateway.sh v0.9.5     # lab/gateway/releases/v0.9.5.lock
-#   ANVIL_LAB_RELEASE=v0.9.5 lab/scripts/fetch-gateway.sh
+#   lab/scripts/fetch-gateway.sh v0.9.20    # lab/gateway/releases/v0.9.20.lock
+#   ANVIL_LAB_RELEASE=v0.9.20 lab/scripts/fetch-gateway.sh
 #
 # The binary lands in lab/bin/<release>/<asset>, where `anvil-lab --release
 # <release>` looks for it (after $ANVIL_LAB_FERRUM_BIN).

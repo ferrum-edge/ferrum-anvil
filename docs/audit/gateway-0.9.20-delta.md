@@ -6,7 +6,7 @@
 | Audited target | `v0.9.20`, `e4a606a00352674daaef08636e3e359e6c48ba18` (merge of Edge #7016), [release 432463173][release], published 2026-11-03T08:58:10Z |
 | Contracts | Published `contracts-edge-0.9.20`, `39da322083044c2e92617209e62983c92387f0ad` |
 | Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 616 outcome IDs: the 556 of 0.9.15 − 2 removed + 62 new |
-| Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.20.lock`; v0.9.15 is retained as an earlier supported release and joins the nightly matrix |
+| Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.20.lock`; the only supported release: v0.9.5 to v0.9.15 were retired with Anvil's vendored dimpl after adoption (see [#7001](#dtls-13-certificaterequest-omits-the-empty-certificate_authorities-list-7001)) |
 | Hosted qualification | Pending: the manual all-profile Lab run (`workflow_dispatch`, `profile=all`) on the PR head |
 | Audit date | 2026-11-03 |
 
@@ -110,9 +110,9 @@ expectations and one Anvil rule would have been wrong on v0.9.20:
    OIDC one (`crates/anvil-diagnostics/src/rules/auth_session.rs`).
 
 The new defaults `FERRUM_HTTP_CLIENT_WRITE_TIMEOUT_SECONDS=60` and `FERRUM_MAX_PROXY_HOPS=10` reach no
-lab scenario. Anvil's vendored dimpl (`vendor/dimpl-0.8.0-empty-ca`) stays: v0.9.20 omits the empty
-DTLS 1.3 `certificate_authorities` extension (#7001), but every earlier supported release still sends
-it.
+lab scenario. v0.9.20 omits the empty DTLS 1.3 `certificate_authorities` extension (#7001), which
+every earlier release sends. After this adoption Anvil retired v0.9.5 to v0.9.15 and its vendored
+dimpl (`vendor/dimpl-0.8.0-empty-ca`), which accepted the empty list.
 
 ## Gateway core, frontend and taxonomy
 
@@ -638,7 +638,7 @@ The refusal path in `src/dtls/mod.rs` is unchanged. The release adds only the #6
 - The condition names refused backend TLS material (#6119, v0.9.17).
 - A note records the change. On v0.9.15–v0.9.19, a strict client's DTLS 1.3 handshake timeout against a client-certificate listener is not evidence of a certificate refusal. On v0.9.20 that stall is gone.
 
-**Lab:** PROTO-022 and its `.nocert`, `.rogue` and `.root` variants, and PROTO-022-wrong-root, are unaffected. Anvil's patched dimpl 0.8.0 parses a request without the extension normally, and the refusals behave as before. The patch must stay while any pre-v0.9.20 release is supported. The `Cargo.toml` comment, the `vendor/README.md` retirement rule and `crates/anvil-transport/tests/dtls_edge_interop.rs` claim that every supported release sends the list empty; they need rewording.
+**Lab:** PROTO-022 and its `.nocert`, `.rogue` and `.root` variants, and PROTO-022-wrong-root, are unaffected. dimpl 0.8.0 parses a request without the extension normally, and the refusals behave as before. Unpatched, it drops the empty list every earlier release sends, so the vendored patch was retired together with v0.9.5 to v0.9.15. `crates/anvil-transport/tests/dtls_edge_interop.rs` now runs the handshake against a listener that omits the extension, as v0.9.20 does.
 
 ### UDP/DTLS sessions end when the datagram-hook policy changes (#6868)
 
