@@ -150,6 +150,10 @@ has the full list.
   AppImage uses the host's `libwayland-client`.
 - Windows 7 is no longer supported (Tauri 2.12 builds with `windows` 0.62 and
   `webview2-com` 0.39).
+- `anvil send --trust-ferrum HOST` trusts the host for that send only; add
+  `--save-trust` to save a Ferrum gateway profile. A profile an earlier build
+  saved this way is still trusted; list and remove it with `anvil gateway list`
+  and `anvil gateway remove`, or **Remove gateway** in the desktop app.
 - Rust code: `SecretResolver` methods no longer have default
   implementations, so a wrapping resolver must forward each one.
 
