@@ -1,5 +1,5 @@
 //! Public-signal contract tests for gateway-to-upstream setup outcomes that
-//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11, 0.9.14 or 0.9.15:
+//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11, 0.9.14, 0.9.15 or 0.9.20:
 //!
 //! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): neither release has a
 //!   dial-admission hook, and exhausting the lab host's real ephemeral ports
@@ -8,16 +8,19 @@
 //!   transports when an accepted trust publication withdraws an authority;
 //!   there is no mesh/HBONE lab;
 //! * UP-018 on the pooled lanes (direct H1 from 0.9.11 / H2 / gRPC / H3 / mesh pools), whose
-//!   public signal is the same coarse `connection_failure` family. The
+//!   public signal is the same coarse `connection_failure` family through
+//!   0.9.15; from 0.9.19 (#6777) the ceiling is its own 503 and a connect
+//!   timeout its own 504, both still `connection_failure`. The
 //!   HTTP/1.1 lane runs in `anvil-lab run admission`: reqwest on the historical
 //!   releases, direct H1 on 0.9.11 (hosted qualification recorded in
 //!   `docs/audit/gateway-0.9.11-delta.md`), 0.9.14 (hosted qualification
-//!   recorded in `docs/audit/gateway-0.9.14-delta.md`) and 0.9.15 (hosted
-//!   qualification recorded in `docs/audit/gateway-0.9.15-delta.md`).
+//!   recorded in `docs/audit/gateway-0.9.14-delta.md`), 0.9.15 (hosted
+//!   qualification recorded in `docs/audit/gateway-0.9.15-delta.md`) and
+//!   0.9.20 (recorded in `docs/audit/gateway-0.9.20-delta.md`).
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
 //! the exact public signal the source-audited catalogs record for each outcome
-//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8,0.9.9,0.9.10,0.9.11,0.9.14,0.9.15}/outcomes.json`;
+//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8,0.9.9,0.9.10,0.9.11,0.9.14,0.9.15,0.9.20}/outcomes.json`;
 //! every test runs against each embedded release's catalog) through the engine's
 //! diagnosis and assert what Anvil may and may not conclude from it. No
 //! private ground truth (operator `error_class`) is ever an input.
@@ -80,7 +83,7 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
 
 /// The strongest trust Anvil can have in an audited gateway release: a trusted
 /// profile over verified TLS. Markers stay spoofable on every audited release
-/// (0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11, 0.9.14 and 0.9.15), so attribution never exceeds `likely`.
+/// (0.9.5 through 0.9.20), so attribution never exceeds `likely`.
 fn trusted_verified(compat: &str) -> FerrumTrust {
     FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: true }
 }
@@ -88,6 +91,14 @@ fn trusted_verified(compat: &str) -> FerrumTrust {
 /// Every embedded release catalog.
 fn releases() -> Vec<&'static str> {
     anvil_diagnostics::ferrum::compatibility_ids().collect()
+}
+
+/// Whether the release answers a backend connect timeout (504) and a pooled
+/// connection ceiling (503) with their own signals instead of the shared
+/// setup-failure 502 (Ferrum Edge 0.9.19, #6777).
+fn own_setup_signals(compat: &str) -> bool {
+    let v: Vec<u64> = compat.trim_start_matches("ferrum-edge-").split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    v >= vec![0, 9, 19]
 }
 
 fn coarse_connection_failure(trust: FerrumTrust) -> Diagnosis {
@@ -157,7 +168,7 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 }
 
 /// UP-017 — public-signal contract test, NOT a live reproduction and NOT a
-/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 / 0.9.9 / 0.9.10 / 0.9.11 / 0.9.14 / 0.9.15 have no
+/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 / 0.9.9 / 0.9.10 / 0.9.11 / 0.9.14 / 0.9.15 / 0.9.20 have no
 /// lab dial-admission hook, and draining
 /// the host's ephemeral ports would be unsafe. The gateway answers port
 /// exhaustion with the same `502 connection_failure {"error":"Backend
@@ -166,10 +177,10 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 /// resources as the cause.
 #[test]
 fn up_017_port_exhaustion_signal_is_coarse_and_hook_free() {
-    for trust in releases().into_iter().flat_map(|compat| {
+    for (compat, trust) in releases().into_iter().flat_map(|compat| {
         [
-            trusted_verified(compat),
-            FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: false },
+            (compat, trusted_verified(compat)),
+            (compat, FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: false }),
         ]
     }) {
         let d = coarse_connection_failure(trust);
@@ -190,7 +201,9 @@ fn up_017_port_exhaustion_signal_is_coarse_and_hook_free() {
         assert_eq!(amb.confidence, Confidence::Unknown);
         assert!(ids.iter().any(|i| i == "upstream.port_exhaustion"), "{ids:?}");
         for sibling in ["upstream.connect.refused", "upstream.tls.handshake_failed_setup_phase", "upstream.connection_limit.pooled"] {
-            assert!(ids.iter().any(|i| i == sibling), "{sibling} missing from {ids:?}");
+            // From 0.9.19 the pooled ceiling has its own 503 and leaves the family.
+            let in_family = !(own_setup_signals(compat) && sibling == "upstream.connection_limit.pooled");
+            assert_eq!(ids.iter().any(|i| i == sibling), in_family, "{compat}: {sibling} in {ids:?}");
         }
         assert!(!codes(&d).contains(&"ferrum.outcome"), "no single-cause attribution: {:?}", codes(&d));
         // Nothing points at the caller's own leg or certificate.
@@ -237,14 +250,14 @@ fn up_019_trust_withdrawn_signal_makes_no_certificate_claim() {
     }
 }
 
-/// UP-018, pooled lanes (direct H2 / gRPC / H3 / mesh pools): the connection
-/// ceiling answers `502 connection_failure "Backend unavailable"`, the shared
-/// coarse signal. The honest result is the ambiguous family with the
-/// connection ceiling as one unknown-confidence candidate, never a
-/// backend-down or application claim.
+/// UP-018, pooled lanes (direct H2 / gRPC / H3 / mesh pools) through 0.9.15:
+/// the connection ceiling answers `502 connection_failure "Backend
+/// unavailable"`, the shared coarse signal. The honest result is the
+/// ambiguous family with the connection ceiling as one unknown-confidence
+/// candidate, never a backend-down or application claim.
 #[test]
 fn up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family() {
-    for compat in releases() {
+    for compat in releases().into_iter().filter(|c| !own_setup_signals(c)) {
         let d = coarse_connection_failure(trusted_verified(compat));
         let (amb, ids) = ambiguous_candidates(&d);
         assert_eq!(amb.confidence, Confidence::Unknown);
@@ -252,6 +265,36 @@ fn up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family() {
         assert_no_claim_at_likely(&d, &["connection limit", "connection ceiling", "maxconnections", "crash", "backend is down"]);
         assert!(!d.findings.iter().any(|f| f.scope == SourceScope::UpstreamApplication && f.confidence >= Confidence::Likely));
     }
+}
+
+/// UP-018 pooled lanes and UP-003/UP-007 from 0.9.19 (#6777): the ceiling
+/// answers `503 connection_failure {"error":"Backend connection limit
+/// exceeded"}` and a connect timeout `504 connection_failure {"error":"Backend
+/// timeout"}`. Each is one catalog outcome at most likely, never a backend or
+/// application failure; the reqwest lane's 503 differs only by its token.
+#[test]
+fn own_setup_signals_name_one_outcome_from_0_9_19() {
+    let cases: [(u16, &[u8], &str); 2] = [
+        (503, br#"{"error":"Backend connection limit exceeded"}"#, "upstream.connection_limit.pooled"),
+        (504, br#"{"error":"Backend timeout"}"#, "upstream.connect.timeout"),
+    ];
+    let mut checked = 0;
+    for compat in releases().into_iter().filter(|c| own_setup_signals(c)) {
+        for (status, body, want) in cases {
+            let mut r = response(status, &[("x-gateway-error", "connection_failure"), ("via", "1.1 ferrum-edge")], body);
+            r.body.content_type = None;
+            let d = diagnose_http(&r, body, trusted_verified(compat));
+            let o = d.findings.iter().find(|f| f.code == "ferrum.outcome").unwrap_or_else(|| panic!("{compat} {status}: {:?}", codes(&d)));
+            assert!(o.evidence.iter().any(|e| e.key == "catalog.outcome" && e.value == want), "{compat} {status}: {:?}", o.evidence);
+            assert!(o.confidence <= Confidence::Likely);
+            assert!(!codes(&d).contains(&"ferrum.outcome_ambiguous"), "{compat} {status}: {:?}", codes(&d));
+            assert!(!d.findings.iter().any(|f| f.scope == SourceScope::UpstreamApplication && f.confidence >= Confidence::Likely));
+            assert_no_claim_at_likely(&d, &["crash", "backend is down", "unhealthy"]);
+            assert_public_ferrum_confidence(&d);
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no embedded catalog from 0.9.19");
 }
 
 /// UP-018, retained reqwest lane — the same public signal the historical

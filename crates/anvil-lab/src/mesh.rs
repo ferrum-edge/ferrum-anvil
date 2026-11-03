@@ -78,6 +78,11 @@ pub const UDP_UNBOUND_PORT: u16 = 17805;
 /// a root the mesh does not trust (mesh_dtls.rs).
 pub const DTLS_ECHO_PORT: u16 = 17806;
 pub const DTLS_UNTRUSTED_PORT: u16 = 17807;
+/// A workload-only `tcp` port (mesh-sidecar.json; not a Service port) with its
+/// own echo fixture: MESH-008's bare CONNECT relays to it. From v0.9.17 (#6125)
+/// the sidecar refuses a byte-stream CONNECT to a port an HTTP route serves
+/// (17801), so the relay needs a declared non-HTTP port on every release.
+pub const RELAY_PORT: u16 = 17808;
 /// A port no workload declares (relay destination guard stimulus; unbound).
 const UNDECLARED_PORT: u16 = 17899;
 const SIDECAR_ADMIN: u16 = 17690;
@@ -97,6 +102,8 @@ pub struct Env {
     pub engine: Engine,
     pub pki: MeshPki,
     pub backend: fx::Fixture,
+    /// The workload's `tcp` application behind [`RELAY_PORT`] (MESH-008).
+    pub relay_backend: fx::Fixture,
     /// The workload's UDP applications (mesh_udp.rs): echo and silent.
     pub udp_echo: StreamFixture,
     pub udp_silent: StreamFixture,
@@ -398,7 +405,11 @@ fn backend_unchanged(c: &mut Checks, env: &Env, before: usize) {
 }
 
 fn backend_received(c: &mut Checks, env: &Env, before: usize, path: &str) {
-    let reqs = env.backend.log.requests();
+    fixture_received(c, &env.backend, before, path);
+}
+
+fn fixture_received(c: &mut Checks, fixture: &fx::Fixture, before: usize, path: &str) {
+    let reqs = fixture.log.requests();
     let got = reqs.len() == before + 1 && reqs.last().map(|(_, p)| p == path).unwrap_or(false);
     c.add(
         CheckKind::GroundTruth,
@@ -658,12 +669,13 @@ fn mesh007(env: &Env) -> Fut<'_> {
 }
 
 /// MESH-008: HBONE wire shape (bare HTTP/2 CONNECT over mTLS) on the sidecar
-/// inbound listener reaches the workload through the relay.
+/// inbound listener reaches the workload's declared `tcp` port through the
+/// relay.
 fn mesh008(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let (from, b0) = (env.sidecar.log_lines().len(), env.backend.log.count_requests());
-        let authority = format!("127.0.0.1:{BACKEND_PORT}");
+        let (from, b0) = (env.sidecar.log_lines().len(), env.relay_backend.log.count_requests());
+        let authority = format!("127.0.0.1:{RELAY_PORT}");
         let tls = env.tls("client SVID → svc", Svid::Client, ids::SVC_SPIFFE_ID, None);
         let o = send(&env.engine, &env.via_hbone(SIDECAR_PORT, &authority, "/echo", tls, HboneMarker::None)).await;
         c.success(CheckKind::Diagnosis, &o);
@@ -689,7 +701,7 @@ fn mesh008(env: &Env) -> Fut<'_> {
                 && attempt(&o).and_then(|a| a.phase(Phase::ProxyTunnel)).map(|p| p.status) == Some(PhaseStatus::Completed),
             "",
         );
-        backend_received(&mut c, env, b0, "/echo");
+        fixture_received(&mut c, &env.relay_backend, b0, "/echo");
         let log = wait_op_lines(&env.sidecar, from, &["__mesh-inbound-hbone-relay", "\"response_status_code\":200"]).await;
         c.add(CheckKind::GroundTruth, "operator log: inbound CONNECT relay transaction (200)", !log.is_empty(), "");
         outcome(o, c, log)
@@ -925,7 +937,7 @@ const SKIPPED: &[(&str, &str, &str)] = &[
 pub fn profile() -> Profile {
     Profile {
         name: "mesh",
-        about: "Mesh client: SPIFFE-verified sidecar mTLS 17606 (STRICT) / 17626 (PERMISSIVE), HBONE ambient 17618, workload 17801 (UDP 17802-17805, DTLS 17806-17807)",
+        about: "Mesh client: SPIFFE-verified sidecar mTLS 17606 (STRICT) / 17626 (PERMISSIVE), HBONE ambient 17618, workload 17801 (UDP 17802-17805, DTLS 17806-17807, TCP 17808)",
         scenarios: || {
             let mut v: Vec<(&'static str, &'static str)> = all().into_iter().map(|d| (d.id, d.title)).collect();
             v.extend(SKIPPED.iter().chain(crate::mesh_udp::SKIPPED).map(|(id, t, _)| (*id, *t)));
@@ -987,6 +999,7 @@ async fn start() -> anyhow::Result<Env> {
     pki.write_to(&pki_dir)?;
     let pki_dir = pki_dir.display().to_string();
     let backend = fx::serve(&format!("127.0.0.1:{BACKEND_PORT}"), None).await?;
+    let relay_backend = fx::serve(&format!("127.0.0.1:{RELAY_PORT}"), None).await?;
     let udp_echo = streams::udp(&format!("127.0.0.1:{UDP_ECHO_PORT}"), UdpMode::Echo).await?;
     let udp_silent = streams::udp(&format!("127.0.0.1:{UDP_SILENT_PORT}"), UdpMode::Silent).await?;
     // DTLS workloads (dimpl: ECDSA only, as the lab SVIDs are): the echo
@@ -1050,6 +1063,7 @@ async fn start() -> anyhow::Result<Env> {
         engine: Engine::new(),
         pki,
         backend,
+        relay_backend,
         udp_echo,
         udp_silent,
         dtls_echo,

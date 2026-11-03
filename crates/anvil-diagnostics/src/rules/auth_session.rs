@@ -14,7 +14,7 @@
 //! * an attempt that followed a redirect to a URL carrying the RFC 6749
 //!   §4.1.1 authorization-request parameters (`response_type` and
 //!   `client_id`), or a final 3xx whose `Location` carries them;
-//! * a 401 whose `WWW-Authenticate` challenge names the `oidc` realm.
+//! * a 401 whose `WWW-Authenticate` challenges all name the `oidc` realm.
 //!
 //! The observation is typed (URL parameters / challenge parameters); the
 //! interpretation that an interactive login is required stays `likely`.
@@ -42,6 +42,44 @@ fn authorization_request(url: &str) -> Option<(String, String)> {
 fn oidc_realm(challenge: &str) -> bool {
     let c = challenge.to_ascii_lowercase();
     c.contains("realm=\"oidc\"") || c.contains("realm=oidc")
+}
+
+/// The challenges of a `WWW-Authenticate` field value (RFC 9110 §11.6.1: a
+/// comma-separated list where auth-params also use commas). An element that
+/// starts with a scheme token followed by whitespace or the end of the
+/// element opens a new challenge; a `name=value` element continues the
+/// current one. Commas inside quoted strings are not separators.
+fn challenges(value: &str) -> Vec<String> {
+    let mut elements = Vec::new();
+    let (mut cur, mut quoted, mut escaped) = (String::new(), false, false);
+    for ch in value.chars() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                elements.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(ch);
+    }
+    elements.push(cur);
+    let tchar = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+    let mut out: Vec<String> = Vec::new();
+    for e in elements.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+        let head = e.find(|c: char| !tchar(c)).unwrap_or(e.len());
+        let opens = head > 0 && e[head..].chars().next().is_none_or(char::is_whitespace);
+        match out.last_mut() {
+            Some(last) if !opens => {
+                last.push_str(", ");
+                last.push_str(e);
+            }
+            _ => out.push(e.to_string()),
+        }
+    }
+    out
 }
 
 /// Whether the execution ended at an interactive login step rather than at
@@ -93,7 +131,15 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     if r.status != 401 {
         return;
     }
-    if let Some(ch) = r.header_values("www-authenticate").into_iter().find(|v| oidc_realm(v)) {
+    // Only when every challenge offered is the OIDC one: from Ferrum Edge
+    // 0.9.19 a route that chains OIDC with another mechanism lists every
+    // applicable challenge on each 401 (an API key or token the route
+    // rejected included), which does not mean an interactive login is needed.
+    let offered: Vec<String> = r.header_values("www-authenticate").into_iter().flat_map(challenges).collect();
+    if !offered.iter().all(|c| oidc_realm(c)) {
+        return;
+    }
+    if let Some(ch) = offered.first() {
         out.push(mk("answered 401 with an OIDC-realm bearer challenge instead of the API response").ev_at(
             E::HttpHeader,
             "header.www-authenticate",

@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.31-1",
+  "version": "2026.11.03-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1770,6 +1770,26 @@
         }
       ],
       "confirm_with": []
+    },
+    "ferrum.token.loop_detected": {
+      "title": "Gateway proxy hop limit reached",
+      "explanation": "Ferrum Edge refused this request ({token}, status {status}) before routing because its X-Ferrum-Hops count had already reached the gateway's proxy hop limit: it passed through that many Ferrum hops, which usually means a routing loop between gateways. {release_detail}",
+      "alternatives": [
+        "A long but intended chain of Ferrum gateways exceeds the configured limit."
+      ],
+      "does_not_prove": [
+        "That any backend was contacted.",
+        "Which gateway in the chain closed the loop."
+      ],
+      "remediation": [
+        {
+          "text": "Check the routes between Ferrum gateways for a loop, or raise FERRUM_MAX_PROXY_HOPS if the chain is intended.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "Gateway diagnostic reference for this request (rejection phase proxy_hop_limit)."
+      ]
     },
     "ferrum.marker.absent": {
       "title": "No gateway diagnostic marker on this error",

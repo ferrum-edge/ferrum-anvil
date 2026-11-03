@@ -8,13 +8,13 @@
     "version": 1,
     "status": "implemented",
     "owner": "ferrum-edge/ferrum-edge",
-    "edge_availability": "Released since Ferrum Edge v0.9.9; unchanged wire contract re-read at verified v0.9.12 source 0d917701b63ef38210c49df830f48cf0457cbc7d.",
+    "edge_availability": "Released since Ferrum Edge v0.9.9; v0.9.17 at 669c574c1d1e88e84dccb26a8159939e6694644d adds loop_detected to the mirrored closed Edge vocabulary under docs/versioning.md. Existing fields and reference/replica patterns are retained.",
     "wire_version": "ferrum.diagnostic_ref.v1",
     "provenance": [
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.12",
-        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "openapi.yaml",
         "symbols": [
           "components.schemas.DiagnosticRefLookup",
@@ -26,8 +26,8 @@
       },
       {
         "repo": "ferrum-edge/ferrum-edge",
-        "ref": "v0.9.12",
-        "commit": "0d917701b63ef38210c49df830f48cf0457cbc7d",
+        "ref": "v0.9.17",
+        "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
         "path": "src/diagnostic_ref.rs",
         "symbols": [
           "DIAGNOSTIC_REF_SCHEMA_VERSION",
@@ -119,6 +119,7 @@
         "config_stale",
         "concurrency_limit",
         "request_timeout",
+        "loop_detected",
         null
       ],
       "description": "The public X-Gateway-Error token of that response, or null for an all-mode reference on a gateway rejection that carries no token."
@@ -177,6 +178,7 @@
             "concurrency_limit",
             "overload",
             "config_stale",
+            "loop_detected",
             null
           ]
         },

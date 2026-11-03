@@ -51,8 +51,8 @@ const MAX_TEXT_LEN: usize = 300;
 pub const MAX_ATTEMPTS: usize = 8;
 /// `protocol`.
 pub const PROTOCOLS: [&str; 3] = ["http1", "http2", "http3"];
-/// `gateway_error` (besides `null`).
-pub const TOKENS: [&str; 8] = [
+/// `gateway_error` (besides `null`); `loop_detected` from Ferrum Edge v0.9.17.
+pub const TOKENS: [&str; 9] = [
     "connection_failure",
     "backend_timeout",
     "backend_error",
@@ -61,6 +61,7 @@ pub const TOKENS: [&str; 8] = [
     "config_stale",
     "concurrency_limit",
     "request_timeout",
+    "loop_detected",
 ];
 /// `detail.backend_dispatch`.
 pub const DISPATCH: [&str; 4] = ["not_dispatched", "pre_wire_failure", "ambiguous_failure", "backend_response"];
@@ -69,7 +70,7 @@ pub const ATTEMPT_DISPATCH: [&str; 3] = ["pre_wire_failure", "ambiguous_failure"
 /// `detail.duration_bucket`.
 pub const DURATION_BUCKETS: [&str; 6] = ["lt_10ms", "lt_100ms", "lt_1s", "lt_10s", "ge_10s", "unknown"];
 /// `detail.rejection_phase` (besides `null`).
-pub const REJECTION_PHASES: [&str; 4] = ["circuit_breaker_open", "concurrency_limit", "overload", "config_stale"];
+pub const REJECTION_PHASES: [&str; 5] = ["circuit_breaker_open", "concurrency_limit", "overload", "config_stale", "loop_detected"];
 /// `detail.route_timeout_phase` (besides `null`).
 pub const ROUTE_TIMEOUT_PHASES: [&str; 3] = ["before_dispatch", "dispatch", "retry_backoff"];
 /// `detail.rejection.source`.

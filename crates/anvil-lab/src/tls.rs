@@ -963,7 +963,11 @@ fn up_request(env: &Env, path: &str) -> ExecutionContext {
 
 /// Common assertions for a gateway-to-backend setup failure.
 fn upstream_setup_failure(c: &mut Checks, env: &Env, o: &ExecutionOutput, tokens: &[&str]) {
-    c.status_in(o, &[502]);
+    upstream_setup_failure_status(c, env, o, 502, tokens);
+}
+
+fn upstream_setup_failure_status(c: &mut Checks, env: &Env, o: &ExecutionOutput, status: u16, tokens: &[&str]) {
+    c.status_in(o, &[status]);
     c.token_any(o, tokens, env.trusted);
     for t in tokens {
         // `connection_failure` names the gateway-to-backend leg. 0.9.5 also
@@ -1100,8 +1104,25 @@ fn up007(env: &Env) -> Fut<'_> {
         let mut c = Checks::new();
         let (before, from) = (env.fx.stall.log.entries().len(), env.gw.log_lines().len());
         let o = go(env, &up_request(env, "/up/tls-stall/")).await;
-        upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure"]);
-        c.no_confirmed_claim(&o, "timeout");
+        // The stalled handshake runs under the backend connect budget. From
+        // v0.9.19 (#6777) a connect timeout answers 504 {"error":"Backend
+        // timeout"} with connection_failure instead of the shared 502; the
+        // confirmed 504 status finding is that fact, not a timeout claim.
+        if gateway::release_at_least("v0.9.19") {
+            upstream_setup_failure_status(&mut c, env, &o, 504, &["ferrum.token.connection_failure"]);
+            let bad: Vec<String> = o
+                .record
+                .findings
+                .iter()
+                .filter(|f| f.confidence == Confidence::Confirmed && f.code != "http.gateway_timeout")
+                .filter(|f| f.title.to_lowercase().contains("timeout") || f.code.contains("timeout"))
+                .map(|f| f.code.clone())
+                .collect();
+            c.add(CheckKind::Diagnosis, "no confirmed 'timeout' claim beyond the 504 status", bad.is_empty(), format!("{bad:?}"));
+        } else {
+            upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure"]);
+            c.no_confirmed_claim(&o, "timeout");
+        }
         let lines = crate::fixtures_policy::op_log_class(&env.gw, from, "up007-tls-stall", &["connection_timeout"]).await;
         c.operator_class(&lines, "up007-tls-stall", &["connection_timeout"]);
         c.add(CheckKind::GroundTruth, "the stalling backend accepted TCP", env.fx.stall.log.entries().len() > before, "");

@@ -54,7 +54,8 @@ fn token_scope(t: &str) -> SourceScope {
         // capacity or response-phase policy rejections (live: UP-015,
         // GW-020 content guard). The token alone does not identify the leg.
         "backend_error" => SourceScope::Unknown,
-        "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" => SourceScope::GatewayAdmission,
+        // From 0.9.17: the hop-limit 508, refused before routing.
+        "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" | "loop_detected" => SourceScope::GatewayAdmission,
         _ => SourceScope::Unknown,
     }
 }
@@ -70,6 +71,8 @@ fn token_owner(t: &str) -> Owner {
         "connection_failure" | "backend_timeout" | "circuit_breaker_open" | "overload" | "config_stale" | "concurrency_limit" => {
             Owner::GatewayOperator
         }
+        // A routing loop between gateways (the hop-limit 508, from 0.9.17).
+        "loop_detected" => Owner::GatewayOperator,
         _ => Owner::Unknown,
     }
 }
@@ -623,6 +626,7 @@ mod tests {
             "config_stale",
             "concurrency_limit",
             "request_timeout",
+            "loop_detected",
         ]
         .into_iter()
         .collect();
@@ -928,7 +932,8 @@ mod tests {
                 && !text.contains("0.9.10")
                 && !text.contains("0.9.11")
                 && !text.contains("0.9.14")
-                && !text.contains("0.9.15"),
+                && !text.contains("0.9.15")
+                && !text.contains("0.9.20"),
             "no release-specific claim for an unaudited release: {text}"
         );
         // A token outside the shared vocabulary stays unknown.
@@ -972,6 +977,7 @@ mod tests {
             ("ferrum-edge-0.9.11", "Ferrum Edge 0.9.11"),
             ("ferrum-edge-0.9.14", "Ferrum Edge 0.9.14"),
             ("ferrum-edge-0.9.15", "Ferrum Edge 0.9.15"),
+            ("ferrum-edge-0.9.20", "Ferrum Edge 0.9.20"),
         ] {
             let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
             let f = diagnose_as(Protocol::Http, &r, body, compat);
@@ -1066,7 +1072,19 @@ mod tests {
             "{}",
             t915.explanation
         );
-        for f in [t95, t97, t98, t99, t910, t911, t914, t915] {
+        let t920 = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.20");
+        let t920 = find(&t920, "ferrum.token.backend_timeout").unwrap();
+        // 0.9.20 (docs/error_classification.md): a route total that expires
+        // after dispatch began counts even during connection setup, so the
+        // value no longer says a backend held the request.
+        assert!(
+            t920.explanation.contains("Ferrum Edge 0.9.20")
+                && t920.explanation.contains("did not answer before its deadline")
+                && !t920.explanation.contains("a backend held the request"),
+            "{}",
+            t920.explanation
+        );
+        for f in [t95, t97, t98, t99, t910, t911, t914, t915, t920] {
             assert_eq!(f.confidence, Confidence::Likely);
             assert!(f.does_not_prove.iter().any(|d| d == "That the backend received the request."), "{:?}", f.does_not_prove);
         }
@@ -1085,6 +1103,7 @@ mod tests {
             "ferrum-edge-0.9.11",
             "ferrum-edge-0.9.14",
             "ferrum-edge-0.9.15",
+            "ferrum-edge-0.9.20",
         ];
         for id in supported {
             assert_eq!(crate::catalog_version_for(&t(id)), format!("findings:{v} ferrum:{id}"));

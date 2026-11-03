@@ -1,7 +1,9 @@
 //! Anvil's DTLS client against the DTLS stack every supported Ferrum Edge
 //! release serves: dimpl 0.6.1 (`dimpl-edge`), whose DTLS 1.3
 //! CertificateRequest carries an empty `certificate_authorities` extension
-//! when the listener requires client certificates. Unpatched dimpl 0.8.0
+//! when the listener requires client certificates (Edge v0.9.20 patches its
+//! copy to omit it, ferrum-edge/ferrum-edge#7001; v0.9.5 to v0.9.15 still
+//! send it). Unpatched dimpl 0.8.0
 //! drops that message without an alert, so the client never presents its
 //! identity and the handshake times out. That reached `main` once (the
 //! vendored dimpl in vendor/dimpl-0.8.0-empty-ca now accepts the list): Anvil's

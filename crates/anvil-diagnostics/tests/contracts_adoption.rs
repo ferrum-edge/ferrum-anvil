@@ -37,12 +37,12 @@ fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<S
     (missing, extra)
 }
 
-/// The published pin targets Edge v0.9.15. Its v1 vocabularies keep every
-/// token and class, so they also match the retained v0.9.9, v0.9.10, v0.9.11
-/// and v0.9.14 catalogs; their historical release-to-contract mappings remain
-/// contracts-edge-0.9.9(-r2), contracts-edge-0.9.11 and contracts-edge-0.9.14.
-const PINNED_RELEASES: [&str; 5] =
-    ["ferrum-edge-0.9.9", "ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15"];
+/// The published pin targets Edge v0.9.20. Its vocabulary adds the
+/// `loop_detected` token (Edge v0.9.17), which the retained v0.9.9 to v0.9.15
+/// catalogs do not have, so it covers the v0.9.20 catalog only; their
+/// historical release-to-contract mappings remain contracts-edge-0.9.9(-r2),
+/// contracts-edge-0.9.11, contracts-edge-0.9.14 and contracts-edge-0.9.15.
+const PINNED_RELEASES: [&str; 1] = ["ferrum-edge-0.9.20"];
 
 /// A catalog of a release the pin covers agrees with the pinned vocabularies:
 /// the same public tokens and error classes, each class with the contract's
@@ -125,8 +125,8 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
             _ => panic!("malformed PIN line: {line}"),
         }
     }
-    assert_eq!(tag, Some("contracts-edge-0.9.15"));
-    assert_eq!(commit, Some("6fb64c5dc2e014204c17609fc717d976f3b4589e"));
+    assert_eq!(tag, Some("contracts-edge-0.9.20"));
+    assert_eq!(commit, Some("39da322083044c2e92617209e62983c92387f0ad"));
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
         "vocabularies/gateway-headers.json",
@@ -137,15 +137,25 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         "fixtures/diagnostic-finding/invalid/missing-does-not-prove.json",
         "fixtures/diagnostic-finding/invalid/probability-confidence.json",
         "schemas/diagnostic-ref/v1.schema.json",
+        "fixtures/diagnostic-ref/valid/client-disconnect-upload.json",
         "fixtures/diagnostic-ref/valid/connection-failure.json",
+        "fixtures/diagnostic-ref/valid/gateway-closed-h3-upload.json",
         "fixtures/diagnostic-ref/valid/plugin-rejection.json",
+        "fixtures/diagnostic-ref/valid/proxy-hop-limit.json",
+        "fixtures/diagnostic-ref/valid/proxy-hops-invalid.json",
+        "fixtures/diagnostic-ref/valid/query-trigger-admission.json",
         "fixtures/diagnostic-ref/valid/replica-tagged-reference.json",
         "fixtures/diagnostic-ref/valid/route-protocol-admission.json",
         "fixtures/diagnostic-ref/valid/tls-retry.json",
+        "fixtures/diagnostic-ref/invalid/client-disconnect-upload-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/created-at-not-rfc3339.json",
         "fixtures/diagnostic-ref/invalid/detail-missing-backend-dispatch.json",
+        "fixtures/diagnostic-ref/invalid/gateway-closed-h3-upload-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/granular-class-as-token.json",
         "fixtures/diagnostic-ref/invalid/malformed-ref.json",
+        "fixtures/diagnostic-ref/invalid/proxy-hop-limit-as-detail-phase.json",
+        "fixtures/diagnostic-ref/invalid/proxy-hops-invalid-as-detail-phase.json",
+        "fixtures/diagnostic-ref/invalid/query-trigger-admission-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/route-protocol-admission-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/unknown-schema-version.json",
         "fixtures/diagnostic-ref/invalid/uppercase-replica-id.json",
@@ -184,12 +194,12 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
-    assert_eq!(errors["edge_release"], "v0.9.15");
-    assert_eq!(headers["edge_release"], "v0.9.15");
+    assert_eq!(errors["edge_release"], "v0.9.20");
+    assert_eq!(headers["edge_release"], "v0.9.20");
     for vocabulary in [&errors, &headers] {
         for source in vocabulary["provenance"].as_array().unwrap() {
-            assert_eq!(source["ref"], "v0.9.15");
-            assert_eq!(source["commit"], "25b37395ff61bfea0f3ffd189d9011c4984fa755");
+            assert_eq!(source["ref"], "v0.9.20");
+            assert_eq!(source["commit"], "e4a606a00352674daaef08636e3e359e6c48ba18");
         }
     }
     for compatibility_id in PINNED_RELEASES {
@@ -340,7 +350,7 @@ fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
     // `created_at` must be an RFC 3339 time: assert formats, as the contract's own checks do.
     let validator = jsonschema::options().should_validate_formats(true).build(&schema).expect("pinned diagnostic-ref schema compiles");
     let fixtures = files_under(&vendor.join("fixtures/diagnostic-ref"), &vendor);
-    assert_eq!(fixtures.len(), 12, "{fixtures:?}");
+    assert_eq!(fixtures.len(), 22, "{fixtures:?}");
     for fixture in fixtures {
         let bytes = std::fs::read(vendor.join(&fixture)).unwrap();
         let instance: Value = serde_json::from_slice(&bytes).unwrap();

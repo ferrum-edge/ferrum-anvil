@@ -1,0 +1,14 @@
+# Source-audited default for the Anvil failure lab; hosted Anvil gates pending.
+# Published Edge v0.9.20, release 432463173, immutable source below.
+# Asset names and SHA-256 are the GitHub API asset digests of the published
+# release, matching its .sha256 sidecars (verified 2026-11-03).
+# https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20
+# This release-specific copy and RELEASE.lock have identical pins.
+# Earlier supported releases retain their own locks under releases/.
+release v0.9.20
+source_sha e4a606a00352674daaef08636e3e359e6c48ba18
+ferrum-edge-macos-aarch64 c36b586507bd1ed072fbd9f3e2222ef07b2427f460a2ed923f21dbb973eb7061
+ferrum-edge-linux-aarch64 7cb5a849fabd6d02ea83af965ac9249de35cc718400625ae528a95c9276cee2f
+ferrum-edge-linux-x86_64 9d357a41ae61cf85d697f01c84beff15f2b8af8bcfd70dd1c50f32397fee66ac
+ferrum-edge-macos-x86_64 6e5950a31a54552389b25559024f5fa2fe3c4b4fb59803c4f3df3983bc087371
+ferrum-edge-windows-x86_64.exe 6cd00219e86b4f6429437c5d09513284b64532e1c660287044fc44e326a839f1
