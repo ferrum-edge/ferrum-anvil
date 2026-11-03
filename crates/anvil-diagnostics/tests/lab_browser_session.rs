@@ -160,3 +160,46 @@ fn auth_017_lookalikes_do_not_get_the_login_finding() {
     let d = run(&[attempt(0, AttemptReason::Initial, "http://127.0.0.1:18180/auth/open/status/401", 401)], &plain, body, true);
     assert!(!codes(&d).contains(&CODE), "{:?}", codes(&d));
 }
+
+/// From Ferrum Edge 0.9.19 a route that chains OIDC with another mechanism
+/// lists every applicable challenge in one `WWW-Authenticate` value, also on
+/// the 401 for a rejected API key: an OIDC challenge among others is not a
+/// login step. A list of OIDC challenges alone still is.
+#[test]
+fn auth_017_oidc_challenge_among_others_is_not_a_login_step() {
+    let body = br#"{"error":"Invalid API key"}"#;
+    let at = [attempt(0, AttemptReason::Initial, "http://127.0.0.1:18180/auth/multi/echo", 401)];
+    for value in [
+        r#"ApiKey realm="ferrum-edge", Bearer realm="oidc""#,
+        r#"ApiKey realm = "ferrum-edge", Bearer realm="oidc""#,
+        r#"Negotiate abc==, Bearer realm="oidc""#,
+        r#"Bearer realm="oidc", error="invalid_token", Basic realm="ferrum-edge", charset="UTF-8""#,
+        r#"Bearer realm="oidc2""#,
+    ] {
+        let r = response(401, &[("www-authenticate", value)], "application/json", body);
+        let d = run(&at, &r, body, true);
+        assert!(!codes(&d).contains(&CODE), "{value}: {:?}", codes(&d));
+    }
+    // RFC 9110 §11.2: whitespace around `=`, quoted commas and escapes stay
+    // inside one OIDC challenge.
+    for only in [
+        r#"Bearer realm="oidc", error="invalid_token", error_description="a, b""#,
+        r#"Bearer realm="oidc", error = "invalid_token""#,
+        r#"Bearer realm = "oidc""#,
+        r#"Bearer realm=oidc"#,
+        r#"Bearer realm="oidc", error_description="say \"hi\", ok""#,
+    ] {
+        let r = response(401, &[("www-authenticate", only)], "application/json", body);
+        let d = run(&at, &r, body, true);
+        assert!(codes(&d).contains(&CODE), "{only}: {:?}", codes(&d));
+    }
+    // RFC 9110 §5.2: repeated field lines are one comma-joined value. One OIDC
+    // challenge split across lines still counts; separate challenges on
+    // separate lines are still a mixed list.
+    let split = [("www-authenticate", r#"Bearer realm="oidc""#), ("www-authenticate", r#"error="invalid_token""#)];
+    let d = run(&at, &response(401, &split, "application/json", body), body, true);
+    assert!(codes(&d).contains(&CODE), "{:?}", codes(&d));
+    let separate = [("www-authenticate", r#"ApiKey realm="ferrum-edge""#), ("www-authenticate", r#"Bearer realm="oidc""#)];
+    let d = run(&at, &response(401, &separate, "application/json", body), body, true);
+    assert!(!codes(&d).contains(&CODE), "{:?}", codes(&d));
+}

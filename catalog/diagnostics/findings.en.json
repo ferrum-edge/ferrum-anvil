@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.31-1",
+  "version": "2026.11.03-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1770,6 +1770,33 @@
         }
       ],
       "confirm_with": []
+    },
+    "ferrum.token.loop_detected": {
+      "title": "Gateway proxy hop limit reached",
+      "explanation": "Ferrum Edge refused this request ({token}, status {status}) before routing because the X-Ferrum-Hops count it received had reached the gateway's proxy hop limit. Every Ferrum gateway increments that count when it forwards a request, so a routing loop between gateways is a common cause, but the count is a request header that a caller or an intermediary can also set. {release_detail}",
+      "alternatives": [
+        "A route whose upstream resolves back to a Ferrum gateway forms a loop.",
+        "A long but intended chain of Ferrum gateways exceeds the configured limit.",
+        "The caller, or a proxy in front of the gateway, sent or forwarded an X-Ferrum-Hops value at or above the limit."
+      ],
+      "does_not_prove": [
+        "How many gateways the request actually passed through.",
+        "That a routing loop exists.",
+        "Which gateway or route closes a loop, if there is one."
+      ],
+      "remediation": [
+        {
+          "text": "Check the routes between Ferrum gateways for one whose upstream resolves back to a gateway; raise FERRUM_MAX_PROXY_HOPS only for an intended long chain.",
+          "owner": "gateway_operator"
+        },
+        {
+          "text": "Do not send X-Ferrum-Hops yourself, and check that no proxy in front of the gateway adds or forwards it.",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": [
+        "Gateway diagnostic reference for this request (rejection phase proxy_hop_limit)."
+      ]
     },
     "ferrum.marker.absent": {
       "title": "No gateway diagnostic marker on this error",

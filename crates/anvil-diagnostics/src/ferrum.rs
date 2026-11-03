@@ -18,11 +18,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// The source-audited release new profiles default to. Hosted Anvil
-/// qualification is recorded in `docs/audit/gateway-0.9.15-delta.md`.
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.15";
+/// The source-audited release new profiles default to. The audit and its
+/// hosted Anvil qualification are recorded in `docs/audit/gateway-0.9.20-delta.md`.
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.20";
 
-const EDGE_0_9_15: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json");
+const EDGE_0_9_20: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json");
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
@@ -33,7 +33,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.10", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.10/outcomes.json")),
     ("ferrum-edge-0.9.11", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json")),
     ("ferrum-edge-0.9.14", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json")),
-    ("ferrum-edge-0.9.15", EDGE_0_9_15),
+    ("ferrum-edge-0.9.15", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json")),
+    ("ferrum-edge-0.9.20", EDGE_0_9_20),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -513,6 +514,7 @@ mod tests {
                 "ferrum-edge-0.9.11",
                 "ferrum-edge-0.9.14",
                 "ferrum-edge-0.9.15",
+                "ferrum-edge-0.9.20",
             ]
         );
         for id in ids {
@@ -531,11 +533,11 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.15");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.20");
     }
 
     /// `request_timeout` joined the closed vocabulary in 0.9.8 (0.9.9,
-    /// 0.9.10, 0.9.11, 0.9.14 and 0.9.15 keep it); the older catalogs do not
+    /// 0.9.10, 0.9.11, 0.9.14, 0.9.15 and 0.9.20 keep it); the older catalogs do not
     /// know it, so it is not part of the shared vocabulary.
     #[test]
     fn request_timeout_is_a_token_of_the_0_9_8_and_later_catalogs_only() {
@@ -567,9 +569,9 @@ mod tests {
 
     /// The `ai_prompt_shield` MCP refusals new in 0.9.10 (a non-UTF-8 request
     /// charset, an unparseable body that may carry a tool call) match from
-    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14 and
-    /// 0.9.15. The content-encoding message existed at 0.9.9 and matches all
-    /// five.
+    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14, 0.9.15
+    /// and 0.9.20. The content-encoding message existed at 0.9.9 and matches
+    /// all six.
     #[test]
     fn outcomes_new_in_0_9_10_match_only_their_own_catalog() {
         for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
@@ -577,7 +579,7 @@ mod tests {
             let bf = body_facts(Some("application/json"), text.as_bytes());
             let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None };
             let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15"] {
+            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
                 let catalog = catalog_for(id).unwrap();
                 let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
                 assert_eq!(ids(catalog), expected, "{id}: {reason}");
@@ -589,7 +591,7 @@ mod tests {
         let bf = body_facts(Some("application/json"), text.as_bytes());
         let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15"] {
+        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
             let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
             assert_eq!(ids(catalog_for(id).unwrap()), expected);
         }
@@ -599,7 +601,7 @@ mod tests {
 
     /// 0.9.14 answers a buffered-collector read error with the eager
     /// collector's body, so that body is ambiguous between the two collectors
-    /// from 0.9.14 (0.9.15 keeps it) and the old body matches only the earlier
+    /// from 0.9.14 (0.9.15 and 0.9.20 keep it) and the old body matches only the earlier
     /// catalogs.
     #[test]
     fn buffered_read_error_body_changed_in_0_9_14() {
@@ -613,7 +615,7 @@ mod tests {
         let current = r#"{"error":"Backend response body read failed"}"#;
         let old = r#"{"error":"Backend response read error"}"#;
         let both = ["upstream.body_read_failed.buffered_collector", "upstream.body_read_failed.eager_buffer"];
-        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15"] {
+        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
             assert_eq!(ids(id, current), both, "{id}");
             assert!(ids(id, old).is_empty(), "{id}");
         }
@@ -648,14 +650,147 @@ mod tests {
     /// v0.9.15 continues a browser login on the sealed pending-flow cookie when
     /// the instance-local pending-login cache is full, so the 503 that 0.9.14
     /// answered matches no 0.9.15 outcome (it is in `removed_outcomes`).
+    /// v0.9.19 (#6833) caps those cookie-only logins and answers the 503 again
+    /// once they run out, so 0.9.20 catalogues it as a new outcome.
     #[test]
-    fn oidc_state_cache_full_is_not_catalogued_from_0_9_15() {
+    fn oidc_state_cache_full_is_absent_from_0_9_15_only() {
         let text = r#"{"error":"OIDC state cache full"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
         let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
         let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids("ferrum-edge-0.9.14"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
         assert!(ids("ferrum-edge-0.9.15").is_empty());
+        assert_eq!(ids("ferrum-edge-0.9.20"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
+    }
+
+    /// Refusals new between 0.9.15 and 0.9.20 (the proxy hop limit and its
+    /// malformed header, key_auth's ambiguous key locations, the pooled
+    /// connection ceiling's own 503 and the connect timeout's own 504) match
+    /// from their public signal in the 0.9.20 catalog only.
+    #[test]
+    fn outcomes_new_in_0_9_20_match_only_their_own_catalog() {
+        let cases = [
+            (508, Some("loop_detected"), r#"{"error":"Proxy hop limit exceeded"}"#, "gateway.admission.proxy_hop_limit"),
+            (400, None, r#"{"error":"Invalid X-Ferrum-Hops header"}"#, "frontend_parse.proxy_hops_invalid"),
+            (401, None, r#"{"error":"Ambiguous API key locations"}"#, "plugin.key_auth.ambiguous_key_locations"),
+            (503, Some("connection_failure"), r#"{"error":"Backend connection limit exceeded"}"#, "upstream.connection_limit.pooled"),
+            (504, Some("connection_failure"), r#"{"error":"Backend timeout"}"#, "upstream.connect.timeout"),
+        ];
+        for (status, token, text, expected) in cases {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status, token, body_text: text, body: &bf, grpc_status: None };
+            let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
+            assert_eq!(ids("ferrum-edge-0.9.20"), [expected], "{text}");
+            assert!(ids("ferrum-edge-0.9.15").is_empty(), "{text}");
+        }
+        assert!(catalog_for("ferrum-edge-0.9.20").unwrap().is_known_token("loop_detected"));
+        assert!(!shared_tokens().iter().any(|t| t == "loop_detected"));
+
+        // A WebSocket upgrade the backend refused after the request went out
+        // carries backend_error, a pre-wire dial failure connection_failure;
+        // both match the one WebSocket outcome (#6777).
+        let text = r#"{"error":"Backend WebSocket connection failed"}"#;
+        let bf = body_facts(Some("application/json"), text.as_bytes());
+        for token in ["connection_failure", "backend_error"] {
+            let signal = Signal { status: 502, token: Some(token), body_text: text, body: &bf, grpc_status: None };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, ["protocol.ws.backend_connect_failed"], "{token}");
+        }
+
+        // Every emitted status and body of outcomes with several variants
+        // matches: ai_rate_limiter's unreadable model (400 or 415),
+        // ai_prompt_shield's three reasons, the HBONE relay's dial failures and
+        // openapi_validator's parameter problem (#6847, #6838, #6777, #6837).
+        let model = r#"{"error":"AI request model unavailable","details":"model_limits requires an uncompressed, parseable request body so the requested model's token budget can be enforced"}"#;
+        let mut variants = vec![
+            (400, model.to_string(), "plugin.ai_rate_limiter.model_unattributable"),
+            (415, model.to_string(), "plugin.ai_rate_limiter.model_unattributable"),
+            (502, r#"{"error":"Backend HBONE connection failed"}"#.to_string(), "protocol.hbone.relay_backend_connect_failed"),
+            (504, r#"{"error":"Backend HBONE connection timed out"}"#.to_string(), "protocol.hbone.relay_backend_connect_failed"),
+            (502, r#"{"error":"DNS resolution for backend failed"}"#.to_string(), "protocol.hbone.relay_backend_connect_failed"),
+            (
+                400,
+                r#"{"type":"about:blank","title":"Request parameter validation failed","status":400,"detail":"Required query parameter 'limit' is missing","operation":"GET /items"}"#.to_string(),
+                "plugin.openapi_validator.request_parameter_violation",
+            ),
+        ];
+        // ai_request_guard's generation controls and completion count, and
+        // ai_stream_router's untranslatable parameters (#6849, #6824), with
+        // substituted values.
+        for (text, expected) in [
+            (
+                r#"{"error":"Invalid max_tokens field","details":"'max_tokens' must be a non-negative integer"}"#,
+                "plugin.ai_request_guard.generation_control_invalid",
+            ),
+            (
+                r#"{"error":"Invalid completion count field","details":"'n' must be a non-negative integer"}"#,
+                "plugin.ai_request_guard.generation_control_invalid",
+            ),
+            (
+                r#"{"error":"Conflicting field spellings","details":"'generationConfig / generation_config' are both present; send a single spelling"}"#,
+                "plugin.ai_request_guard.generation_control_invalid",
+            ),
+            (
+                r#"{"error":"Too many completions requested","details":"Request asks for 2 completions, maximum allowed is 1"}"#,
+                "plugin.ai_request_guard.max_choices_exceeded",
+            ),
+            (
+                r#"{"error":{"message":"Invalid request for Anthropic translation: logit_bias is not supported","type":"invalid_request_error","param":"logit_bias","code":"unsupported_parameter"}}"#,
+                "plugin.ai_stream_router.parameter_unrepresentable",
+            ),
+            (
+                r#"{"error":{"message":"Invalid request for Gemini translation: n must be 1","type":"invalid_request_error","param":"n","code":"invalid_parameter"}}"#,
+                "plugin.ai_stream_router.parameter_unrepresentable",
+            ),
+        ] {
+            variants.push((400, text.to_string(), expected));
+        }
+        for reason in ["non_utf8_body", "malformed_json", "unsupported_charset"] {
+            let text = format!(r#"{{"error":"Request body could not be inspected","message":"{reason}"}}"#);
+            variants.push((400, text, "plugin.ai_prompt_shield.body_uninspectable"));
+        }
+        for (status, text, expected) in &variants {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status: *status, token: None, body_text: text, body: &bf, grpc_status: None };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, [*expected], "{status} {text}");
+        }
+        // The validators' capacity refusals answer the shared capacity bodies,
+        // so they stay among that body's candidates.
+        for (text, expected) in [
+            (
+                r#"{"error":"Request inspection capacity exceeded"}"#,
+                &[
+                    "gateway.capacity.request_decode",
+                    "plugin.body_validator.decode_capacity",
+                    "plugin.openapi_validator.decode_capacity",
+                    "plugin.compression.decode_capacity",
+                ][..],
+            ),
+            (
+                r#"{"error":"Response buffering capacity exceeded"}"#,
+                &["plugin.body_validator.decode_capacity", "plugin.openapi_validator.decode_capacity"][..],
+            ),
+        ] {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, expected, "{text}");
+        }
+
+        // mcp_gateway's default-deny of prompts and resources (#6819): each
+        // message is its own exact outcome.
+        let c = catalog_for("ferrum-edge-0.9.20").unwrap();
+        for (message, expected) in [
+            ("MCP prompt request denied by gateway policy", "plugin.mcp_gateway.prompt_denied"),
+            ("MCP resource read denied by gateway policy", "plugin.mcp_gateway.resource_read_denied"),
+        ] {
+            let m = c.match_jsonrpc_error(&JsonRpcSignal { status: 200, token: None, code: -32001, message, gateway: None });
+            assert_eq!(m.exact.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), [expected], "{message}");
+        }
     }
 
     #[test]
@@ -719,7 +854,16 @@ mod tests {
         let ids = |v: &[&Outcome]| v.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
         let m = c.match_jsonrpc_error(&sig(200, -32001, "MCP tool call denied by gateway policy", None));
         assert_eq!(ids(&m.exact), ["plugin.mcp_gateway.tool_denied"]);
-        assert_eq!(ids(&m.code_only), ["plugin.a2a_gateway.jsonrpc_method_denied"], "the same code with another message");
+        assert_eq!(
+            ids(&m.code_only),
+            [
+                "plugin.a2a_gateway.jsonrpc_method_denied",
+                "plugin.a2a_gateway.operation_class_changed",
+                "plugin.mcp_gateway.prompt_denied",
+                "plugin.mcp_gateway.resource_read_denied"
+            ],
+            "the same code with another message"
+        );
         // A2A's body carries its marker: without it, only the code matches.
         let m = c.match_jsonrpc_error(&sig(200, -32001, "A2A method denied by gateway policy", None));
         assert!(m.exact.is_empty(), "{:?}", ids(&m.exact));

@@ -45,6 +45,11 @@
             "port": 17807,
             "protocol": "udp",
             "name": "dtls-untrusted"
+          },
+          {
+            "port": 17808,
+            "protocol": "tcp",
+            "name": "tcp-echo"
           }
         ],
         "selector": {

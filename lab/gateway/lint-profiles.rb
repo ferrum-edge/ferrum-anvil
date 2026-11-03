@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 #
 # Structural lint for the Ferrum Anvil gateway lab profiles (every supported ferrum-edge release:
-# v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14 and v0.9.15).
+# v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14, v0.9.15 and v0.9.20).
 #
 # Why this exists: `ferrum-edge validate` rejects unknown keys on GatewayConfig, Proxy,
 # Consumer, PluginConfig and Upstream (serde deny_unknown_fields), and every plugin used here
@@ -10,7 +10,7 @@
 # and upstream targets are LENIENT: a misspelled key there is silently ignored and the lab
 # silently misconfigures. This script checks every key against field lists copied from the
 # v0.9.5 source (the field sets below are identical in v0.9.7 and v0.9.8 and still accepted at v0.9.9
-# and v0.9.10/v0.9.11/v0.9.14/v0.9.15; source re-checked when each was added),
+# and v0.9.10/v0.9.11/v0.9.14/v0.9.15/v0.9.20; source re-checked when each was added),
 # plus proxy/plugin association rules and resource_counts.
 #
 # Field lists: src/config/types.rs @ v0.9.5 (structs Proxy 2609, Consumer 3025,
@@ -34,6 +34,14 @@
 # sessions.max_sessions_per_principal (older releases reject both, so profiles must not use them), and
 # confines plugin environment references to FERRUM_PLUGIN_SECRET_<NAME>; see
 # docs/audit/gateway-0.9.15-delta.md.
+# v0.9.20 adds no operator field to these structs (src/config/types.rs gains serde(skip) runtime
+# fields only) and refuses none of the keys listed here. #6967 closes nested plugin objects; the
+# built-in plugins the lab uses were already closed. New keys (waf on_unlisted_content_type,
+# openapi_validator operations.parameters, rate_limiting max_state_entries, access_control external
+# identity lists, among others) are rejected by older releases, so profiles must not use them.
+# openapi_validator must be proxy-scoped (src/config/types.rs:6058, #6837), and a refused
+# stdout_logging config now fails startup (#6863); the lab's profiles satisfy both. See
+# docs/audit/gateway-0.9.20-delta.md.
 #
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
@@ -144,7 +152,7 @@ PLUGIN_KEYS = {
                     max_concurrent_requests cache_ttl_seconds max_cache_entries
                     hide_credentials allow_plaintext],                                # ldap_auth.rs:250-490 (keys read; consumer_mapping refused from v0.9.15)
   'mtls_auth' => %w[cert_field allowed_issuers allowed_ca_fingerprints_sha256],         # mtls_auth.rs:995-1045 (keys read)
-  'grpc_web' => %w[expose_headers],                                                     # grpc_web.rs:1218 parse_expose_headers (only key; v0.9.7 to v0.9.15)
+  'grpc_web' => %w[expose_headers],                                                     # grpc_web.rs:1218 parse_expose_headers (only key; v0.9.7 to v0.9.20)
   'oidc_relying_party' => %w[providers session behavior],                               # oidc_relying_party.rs:89 (CONFIG_FIELDS)
   'soap_ws_security' => %w[reject_missing_security_header content_type timestamp username_token
                            x509_signature saml nonce] + REDIS,                        # soap_ws_security.rs:648-664 (ROOT_CONFIG_KEYS)

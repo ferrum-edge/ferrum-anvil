@@ -21,14 +21,18 @@ verified by `lab/scripts/fetch-gateway.sh`. v0.9.11 was the default pin from 202
 separately audited in [`gateway-0.9.11-delta.md`](gateway-0.9.11-delta.md) with hosted Anvil
 qualification recorded. v0.9.14 was the default pin from 2026-10-08, audited in
 [`gateway-0.9.14-delta.md`](gateway-0.9.14-delta.md) with hosted Anvil qualification recorded;
-v0.9.12 to v0.9.14 change no config struct or plugin key. The current v0.9.15 default is
-audited in [`gateway-0.9.15-delta.md`](gateway-0.9.15-delta.md), with
+v0.9.12 to v0.9.14 change no config struct or plugin key. v0.9.15 was the default pin from
+2026-10-08, audited in [`gateway-0.9.15-delta.md`](gateway-0.9.15-delta.md), with
 [hosted Anvil qualification](gateway-0.9.15-delta.md#qualification-status) recorded;
 it adds no config struct field, removes the `ldap_auth` `consumer_mapping` key and adds plugin
 keys the lab does not use. Its Layer-4 authorization of mesh CONNECT relays made the sidecar
-MeshPolicy name its own denied identity (MESH-007). The historical observations and original
-profile assertions below remain unchanged. The lab runs as described in
-[`../lab/README.md`](../lab/README.md).
+MeshPolicy name its own denied identity (MESH-007). The current v0.9.20 default is audited in
+[`gateway-0.9.20-delta.md`](gateway-0.9.20-delta.md), hosted Anvil qualification pending; no lab
+profile key, value or `FERRUM_*` setting is refused, renamed or reinterpreted, and keys added
+after v0.9.15 stay out of the profiles while earlier releases run nightly. Its refusal of a bare
+CONNECT to a sidecar HTTP port (v0.9.17) made MESH-008 relay to a workload-only `tcp` port 17808.
+The historical observations and original profile assertions below remain unchanged. The lab
+runs as described in [`../lab/README.md`](../lab/README.md).
 
 ## 0. Provenance and citation convention
 

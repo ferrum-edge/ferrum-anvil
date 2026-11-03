@@ -1,0 +1,25 @@
+{
+  "schema_version": "ferrum.diagnostic_ref.v1",
+  "ref": "fd1_1a3c5e7f9b0d2f4a6c8e0b2d4f6a8c0e",
+  "namespace": "ferrum",
+  "created_at": "2026-09-27T10:17:11.020Z",
+  "expires_at": "2026-09-27T10:32:11.020Z",
+  "protocol": "http1",
+  "status": 400,
+  "gateway_error": null,
+  "detail_available": true,
+  "detail": {
+    "error_class": null,
+    "body_error_class": null,
+    "rejection_phase": "proxy_hops_invalid",
+    "route_timeout_phase": null,
+    "backend_dispatch": "not_dispatched",
+    "proxy_id": null,
+    "backend_target": null,
+    "duration_bucket": "lt_10ms",
+    "rejection": {
+      "source": "gateway",
+      "phase": "proxy_hops_invalid"
+    }
+  }
+}

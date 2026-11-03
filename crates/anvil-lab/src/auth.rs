@@ -330,10 +330,14 @@ fn auth001(env: &Env) -> Fut<'_> {
         let o = go(env, &ctx(env, "GET", "/auth/key/echo", api_key("X-API-Key", &key))).await;
         signal(&mut c, &o, 401, "Authentication required");
         let ch = raw_challenge("/auth/key/echo", &[("X-API-Key", key.clone())]).await;
+        // From v0.9.19 (#6779) every gateway 401 carries the challenge of each
+        // mechanism that governs the route: key_auth's here. Earlier releases
+        // send the bare fallback.
+        let want = if crate::gateway::release_at_least("v0.9.19") { r#"ApiKey realm="ferrum-edge""# } else { "ferrum-edge" };
         c.add(
             CheckKind::GroundTruth,
-            "fallback challenge WWW-Authenticate: ferrum-edge",
-            ch.as_deref() == Some("ferrum-edge"),
+            format!("missing-credential challenge WWW-Authenticate: {want}"),
+            ch.as_deref() == Some(want),
             format!("{ch:?}"),
         );
         c.has(&o, "http.unauthorized");

@@ -325,19 +325,33 @@ async fn hold_and_probe(
 /// HTTP/1.1 pool; earlier releases use reqwest.
 const DIRECT_H1_FIRST_RELEASE: &str = "v0.9.11";
 
+/// First published release whose pooled lanes answer a connection ceiling
+/// with its own 503 instead of the shared setup-failure 502 (#6777).
+const POOLED_LIMIT_503_FIRST_RELEASE: &str = "v0.9.19";
+
 /// UP-018 (HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
 /// mesh_external destination; the only connection is held by a slow
 /// request, so the next request needs a second socket and is refused.
 /// Releases from v0.9.11 through the pinned release use direct H1 for this
-/// bodyless GET (the v0.9.14 and v0.9.15 source audits found the lane
-/// unchanged); earlier releases use reqwest.
+/// bodyless GET (the v0.9.14, v0.9.15 and v0.9.20 source audits found the
+/// lane unchanged); earlier releases use reqwest. From v0.9.19 the direct-H1
+/// ceiling is its own 503 with connection_failure, one catalog outcome.
 fn up018(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let m = &env.mesh;
         let log = &m.backend.log;
         let direct_h1 = crate::gateway::release_from_through_pin(DIRECT_H1_FIRST_RELEASE);
-        let (status, marker, body, token, class) = if direct_h1 {
+        let own_503 = direct_h1 && crate::gateway::release_at_least(POOLED_LIMIT_503_FIRST_RELEASE);
+        let (status, marker, body, token, class) = if own_503 {
+            (
+                503,
+                "connection_failure",
+                r#"{"error":"Backend connection limit exceeded"}"#,
+                "ferrum.token.connection_failure",
+                "backend_connection_limit",
+            )
+        } else if direct_h1 {
             (502, "connection_failure", r#"{"error":"Backend unavailable"}"#, "ferrum.token.connection_failure", "backend_connection_limit")
         } else {
             (
@@ -397,7 +411,22 @@ fn up018(env: &Env) -> Fut<'_> {
             no_claim(&mut c, &o, term, Confidence::Unknown);
         }
         if env.trusted {
-            if direct_h1 {
+            if own_503 {
+                c.scope(&o, token, SourceScope::GatewayToUpstream);
+                c.absent_prefix(&o, "ferrum.token.backend_error");
+                c.absent_prefix(&o, "ferrum.outcome_ambiguous");
+                let got = catalog_outcome(&o);
+                c.add(
+                    CheckKind::Diagnosis,
+                    "catalog outcome upstream.connection_limit.pooled",
+                    got.as_deref() == Some("upstream.connection_limit.pooled"),
+                    format!("{got:?}; {:?}", codes(&o)),
+                );
+                c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
+                for term in ["dns", "tls", "refused"] {
+                    no_claim(&mut c, &o, term, Confidence::Likely);
+                }
+            } else if direct_h1 {
                 c.scope(&o, token, SourceScope::GatewayToUpstream);
                 c.absent_prefix(&o, "ferrum.token.backend_error");
                 c.has(&o, "ferrum.outcome_ambiguous");
@@ -458,9 +487,11 @@ fn up018(env: &Env) -> Fut<'_> {
             format!("{:?}", codes(&look)),
         );
         // Lookalike B: the same status/body authored by the application.
-        // On direct H1 the gateway stamps backend_error, so it cannot match
-        // the pooled connection_failure family. On reqwest the full signal
-        // is identical, so attribution remains at most likely.
+        // On direct H1 through v0.9.15 the gateway stamps backend_error, so it
+        // cannot match the pooled connection_failure family. On reqwest, and
+        // from v0.9.19 (an application 503 with the limit body, stamped
+        // backend_error, is the reqwest lane's full signal), the signal is
+        // identical, so attribution remains at most likely.
         let same_path = format!("/status/{status}?body={}", enc(body));
         let before = log.count_requests();
         let same = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, &same_path)).await;
@@ -476,7 +507,7 @@ fn up018(env: &Env) -> Fut<'_> {
         c.token(&same, "ferrum.token.backend_error", env.trusted);
         c.max_confidence(&same, "ferrum.token.backend_error", Confidence::Likely);
         c.max_confidence(&same, "ferrum.outcome", Confidence::Likely);
-        if direct_h1 {
+        if direct_h1 && !own_503 {
             c.absent_prefix(&same, "ferrum.token.connection_failure");
             c.add(
                 CheckKind::Diagnosis,

@@ -17,14 +17,20 @@ backend path parameters are involved.
 
 ## Contract and producer pins
 
-- **Contract.** `contracts-edge-0.9.15`, full commit
-  `6fb64c5dc2e014204c17609fc717d976f3b4589e`, vendored byte-exact and covered
+- **Contract.** `contracts-edge-0.9.20`, full commit
+  `39da322083044c2e92617209e62983c92387f0ad`, vendored byte-exact and covered
   by `contracts/ferrum-contracts/PIN` (see [ferrum-contracts.md](../ferrum-contracts.md)).
   The diagnostic-report schema and every earlier report, finding and reference
   fixture are byte-identical to `contracts-edge-0.9.11`, which first published
-  the shared v1 freeze. `contracts-edge-0.9.15` adds one valid and one invalid
+  the shared v1 freeze. `contracts-edge-0.9.15` added one valid and one invalid
   diagnostic-ref fixture for the `route_protocol_admission` label (accepted in
-  `rejection.phase`, refused in `detail.rejection_phase`). Owner descriptions
+  `rejection.phase`, refused in `detail.rejection_phase`). `contracts-edge-0.9.20`
+  adds `loop_detected` to the diagnostic-ref schema's `gateway_error` and
+  `detail.rejection_phase`, and five valid and five invalid diagnostic-ref
+  fixtures (`client-disconnect-upload`, `gateway-closed-h3-upload`,
+  `proxy-hop-limit`, `proxy-hops-invalid`, `query-trigger-admission`, each
+  invalid one carrying its label in `detail.rejection_phase`); the
+  diagnostic-ref fixtures are now 10 valid and 12 invalid. Owner descriptions
   keep historical PROPOSED wording; those paired bytes must remain exact after
   removing only `$id`/`x-contract`.
 - **Producer.** Alloy is unreleased (`publish = false`). Tests pin the exact CLI
@@ -130,7 +136,7 @@ stale replies, the real import-dialog entry point and zero mutation/lookup calls
 - The real hosted golden preserves all reported facts and both telemetry source
   families without granting trust.
 - The native E2E spec (`apps/desktop/e2e/specs/11-diagnostic-import.e2e.ts`,
-  fourteen cases) runs in the actual Tauri E2E app: all 29 shared fixtures, the
+  fourteen cases) runs in the actual Tauri E2E app: all 39 shared fixtures, the
   actual Alloy report and the source-derived CLI envelope cross native IPC, and
   the golden's timestamp lexemes are compared as strings through IPC and the
   real dialog. It also covers forged provenance/authentication, credential

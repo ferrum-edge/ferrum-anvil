@@ -1,15 +1,14 @@
-# Source-audited default for the Anvil failure lab; hosted Anvil qualification recorded
-# in docs/audit/gateway-0.9.15-delta.md.
-# Published Edge v0.9.15, release 407222520, immutable source below.
+# Source-audited default for the Anvil failure lab; hosted Anvil gates pending.
+# Published Edge v0.9.20, release 432463173, immutable source below.
 # Asset names and SHA-256 are the GitHub API asset digests of the published
-# release, matching its .sha256 sidecars, verified by root (2026-10-08).
-# https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.15
+# release, matching its .sha256 sidecars (verified 2026-11-03).
+# https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20
 # This release-specific copy and RELEASE.lock have identical pins.
 # Earlier supported releases retain their own locks under releases/.
-release v0.9.15
-source_sha 25b37395ff61bfea0f3ffd189d9011c4984fa755
-ferrum-edge-macos-aarch64 0cc4333b6e6944169549e12b8efd35c91c429cbfa410b6567b82b5996d881ab2
-ferrum-edge-linux-aarch64 0d287f938c19d0721d47586e9d5c18061ee9722fa371283b56128d6afad086bc
-ferrum-edge-linux-x86_64 69ae2402e1741d96b48ce0011d94088c9a4ec8240019e9dbb17d596cfa2082c5
-ferrum-edge-macos-x86_64 dbd4ad8434be1bb24e53e657c0ba8ec918fd9ec0c16b917570ed5a4dffc72b44
-ferrum-edge-windows-x86_64.exe 89817cb54ce2c99535a0c5eec5e4e222f712d57b9b219dbad6957a8c65d160cb
+release v0.9.20
+source_sha e4a606a00352674daaef08636e3e359e6c48ba18
+ferrum-edge-macos-aarch64 c36b586507bd1ed072fbd9f3e2222ef07b2427f460a2ed923f21dbb973eb7061
+ferrum-edge-linux-aarch64 7cb5a849fabd6d02ea83af965ac9249de35cc718400625ae528a95c9276cee2f
+ferrum-edge-linux-x86_64 9d357a41ae61cf85d697f01c84beff15f2b8af8bcfd70dd1c50f32397fee66ac
+ferrum-edge-macos-x86_64 6e5950a31a54552389b25559024f5fa2fe3c4b4fb59803c4f3df3983bc087371
+ferrum-edge-windows-x86_64.exe 6cd00219e86b4f6429437c5d09513284b64532e1c660287044fc44e326a839f1

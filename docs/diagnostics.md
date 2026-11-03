@@ -45,7 +45,7 @@ require a PROXY protocol header"; a 400, TLS alert or close right after
 Anvil sent one gains "the listener may not expect a PROXY protocol header"
 (see [protocols.md §3.10](protocols.md)).
 
-The catalog has 182 finding codes. The status bar shows the catalog version,
+The catalog has 183 finding codes. The status bar shows the catalog version,
 and every record names the findings catalog and Ferrum catalog it used.
 
 | Family | Codes | Examples |
@@ -59,7 +59,7 @@ and every record names the findings catalog and Ferrum catalog it used.
 | `request.*` | 5 | canceled; processing uncertain; an earlier attempt may have processed; `425 Too Early` with the retry outcome |
 | `early_data.*` | 4 | TLS 1.3 / QUIC 0-RTT: accepted (with the replay note), rejected and re-sent by the transport, no session ticket, tickets without early data |
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings), quoting an RFC 9457 problem report when the body is one |
-| `ferrum.*` | 30 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
+| `ferrum.*` | 31 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
 | `app.*`, `auth.*` | 13 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
 | `grpc.*`, `grpc_web.*` | 2 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
@@ -270,7 +270,8 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.15` (default; hosted qualification recorded) | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta; [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded) |
+| `ferrum-edge-0.9.20` (default; hosted qualification pending) | v0.9.20, `e4a606a` | **616** (556 − 2 removed + 62 new) | [audit/gateway-0.9.20-delta.md](audit/gateway-0.9.20-delta.md) (source delta covering v0.9.17–v0.9.20; [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) pending) |
+| `ferrum-edge-0.9.15` | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta; [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.14` | v0.9.14, `9bd4d5f` | **553 carried IDs** | [audit/gateway-0.9.14-delta.md](audit/gateway-0.9.14-delta.md) (source delta covering v0.9.12–v0.9.14; hosted qualification recorded) |
 | `ferrum-edge-0.9.11` | v0.9.11, `c764084` | **553 carried IDs** | [audit/gateway-0.9.11-delta.md](audit/gateway-0.9.11-delta.md) (source delta; hosted qualification recorded) |
 | `ferrum-edge-0.9.10` | v0.9.10, `ee040d5` | **553** | [audit/gateway-0.9.10-delta.md](audit/gateway-0.9.10-delta.md) (delta on top of the 0.9.9 audit) |
@@ -281,7 +282,8 @@ Anvil embeds one source-audited catalog per supported gateway release:
 
 Each catalog inventories the release's client-observable outcomes, the public
 `X-Gateway-Error` tokens (**7** in 0.9.5 and 0.9.7; 0.9.8 adds
-`request_timeout`, so **8**, unchanged in 0.9.9, 0.9.10, 0.9.11, 0.9.14 and 0.9.15), the **19**
+`request_timeout`, so **8**, unchanged in 0.9.9, 0.9.10, 0.9.11, 0.9.14 and 0.9.15; 0.9.20
+adds `loop_detected`, so **9**), the **19**
 internal error classes, the gateway-written headers, and each outcome's
 `shared_signal_with` siblings. Its `drift` section records the reconciliation
 with the previous release, and `marker_semantics` holds the release-specific
@@ -388,13 +390,14 @@ it. A "(gateway error: …)" class in the result text is content, not proof.
 | Token | What Anvil says | What Anvil never claims from the token alone |
 |---|---|---|
 | `connection_failure` | The gateway could not set up a connection to the configured backend (DNS, TCP, TLS, pool, …). | That TLS failed; that DNS failed; that your client certificate is wrong (the gateway uses its own identity). |
-| `backend_timeout` | The gateway's backend deadline elapsed (any 504 gets this token, except a 0.9.8 or later route timeout that no backend held). | That the backend received the request (on v0.9.5 a pooled-connection bug can strand it; on v0.9.7 a Gateway API route's request timeout can fire before dispatch); that the backend is slow rather than unreachable. |
+| `backend_timeout` | The gateway's backend deadline elapsed (any 504 gets this token, except a 0.9.8 or later route timeout that no backend held and, on 0.9.20, a backend connect timeout, which is `connection_failure`). | That the backend received the request (on v0.9.5 a pooled-connection bug can strand it; on v0.9.7 a Gateway API route's request timeout can fire before dispatch; on 0.9.20 a route total that expires after dispatch began counts even during connection setup); that the backend is slow rather than unreachable. |
 | `request_timeout` (0.9.8 and later) | The route's total request timeout expired before any backend held the attempt (upload, gateway processing or admission, retry backoff). | That the backend is slow; which phase used the time; that no earlier attempt reached a backend. |
 | `backend_error` | The backend path failed or the gateway refused locally (buffer capacity, in-flight limit, egress policy, …). | That the backend returned this error. |
 | `circuit_breaker_open` | The gateway's breaker for this backend is open. | That the backend is down right now. |
 | `overload` | The gateway shed load, was draining, or hit the response-transform ceiling (502). | CPU pressure. |
 | `config_stale` | The data plane's configuration fence is stale. | Which configuration change is missing. |
 | `concurrency_limit` | An adaptive or static concurrency limit rejected the request. | The limit value or the load cause. |
+| `loop_detected` (0.9.20) | The request reached the gateway's proxy hop limit (508 `{"error":"Proxy hop limit exceeded"}`, `FERRUM_MAX_PROXY_HOPS`, default 10) and was refused before routing: usually a routing loop between Ferrum gateways. | That any backend was contacted; which gateway in the chain closed the loop. |
 
 A missing marker does not prove the response came from the backend
 (`ferrum.marker.absent` explains this). A 403 alone never proves a WAF:
@@ -546,16 +549,20 @@ only presentation; every card shows its own confidence.
   catalogs, outcomes new in 0.9.9 (the `;` path-parameter refusal, MCP tool-call
   rate limits) do not match the 0.9.8 catalog, the `ai_prompt_shield` MCP
   refusals new in 0.9.10 (non-UTF-8 charset, unparseable body) match the
-  0.9.10, 0.9.11, 0.9.14 and 0.9.15 catalogs, the v0.9.9 content-encoding refusal matches
-  0.9.9, 0.9.10, 0.9.11, 0.9.14 and 0.9.15 but not 0.9.8, the buffered-collector read
-  error body that changed in 0.9.14 matches only the 0.9.14 and later catalogs, and the
-  refusals new in 0.9.15 (route protocol admission 403, HTTP/1.1 WebSocket non-GET 405,
-  request_deduplication Brotli 400/503) match only the 0.9.15 catalog.
+  0.9.10, 0.9.11, 0.9.14, 0.9.15 and 0.9.20 catalogs, the v0.9.9 content-encoding refusal
+  matches 0.9.9, 0.9.10, 0.9.11, 0.9.14, 0.9.15 and 0.9.20 but not 0.9.8, the
+  buffered-collector read error body that changed in 0.9.14 matches only the 0.9.14 and later
+  catalogs, the refusals new in 0.9.15 (route protocol admission 403, HTTP/1.1 WebSocket
+  non-GET 405, request_deduplication Brotli 400/503) match the 0.9.15 catalog but not 0.9.14,
+  the OIDC state-cache-full 503 matches 0.9.14 and 0.9.20 but not 0.9.15, and the refusals
+  new in 0.9.20 (proxy hop limit 508 and malformed `X-Ferrum-Hops` 400, key_auth's ambiguous
+  key locations 401, the pooled connection ceiling's 503 and the connect timeout's 504, both
+  `connection_failure`) match the 0.9.20 catalog but not 0.9.15.
   Release notes follow the profile's release, and an unknown release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release
   (`anvil-lab --release v0.9.5 …`; the default is the `RELEASE.lock` pin,
-  v0.9.15, with [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded). Every lab profile's trusted profile declares the running release's
+  v0.9.20, source-audited with [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) pending). Every lab profile's trusted profile declares the running release's
   compatibility id, and the lab refuses to run a release without its own
   catalog. Every scenario runs trusted and untrusted: no `ferrum.*`
   gateway attribution may appear when the destination is untrusted, and

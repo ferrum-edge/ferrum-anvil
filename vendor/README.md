@@ -213,7 +213,9 @@ transcript (dimpl #174), and its `CertificateRequest` parser rejects a
 for at least one, but every Ferrum Edge release Anvil supports serves DTLS
 with dimpl 0.6.1, whose DTLS 1.3 server always sends the extension empty
 when its listener requires client certificates (dimpl 0.7.0 stopped sending
-it, #153). The client drops the rejected message without an alert, so it
+it, #153). Edge v0.9.20 backports that fix to its vendored 0.6.1
+(ferrum-edge/ferrum-edge#7001) and omits the extension; v0.9.5 to v0.9.15
+still send it empty. The client drops the rejected message without an alert, so it
 never sends its certificate and the handshake times out: lab PROTO-022 in the
 `tls` profile failed on every supported release once 0.8.0 was taken. With
 the patch an empty list parses as naming no CA, as dimpl 0.7 parsed it;
@@ -233,7 +235,8 @@ The license is upstream's MIT OR Apache-2.0 (`dimpl-0.8.0-empty-ca/LICENSE-MIT.t
 `LICENSE-APACHE.txt`).
 
 **Retire it** when a dimpl release accepts an empty `certificate_authorities`
-list, or when no supported Ferrum Edge release sends one: bump `dimpl` in
+list, or when no supported Ferrum Edge release sends one (every supported
+release before v0.9.20 does): bump `dimpl` in
 `Cargo.toml`, delete the `[patch.crates-io]` entry, this directory and the
 patch, drop the `dimpl` Dependabot ignore, and regenerate
 `THIRD_PARTY_LICENSES.md`. Keep `dtls_edge_interop.rs` and `dimpl-edge` for as
