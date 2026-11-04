@@ -431,6 +431,10 @@ release page once.
   graph: `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 (nested WebdriverIO
   10.1.0, Mocha 12.0.3, `chokidar` 5.0.0) alongside the selected 9.32.0 runner
   packages and `@wdio/tauri-service` 1.5.1 with its nested WebdriverIO 9.31.9.
+  The runner packages (`webdriverio`, `@wdio/globals`, `@wdio/local-runner`)
+  stay on 9 because `@wdio/tauri-service` 1.x requires `webdriverio` ^9 and
+  fails its setup on 10 (webdriverio/desktop-mobile#297); Dependabot ignores
+  their 10.x majors, and they move by hand together with tauri-service 2.x.
   Both lines use `deepmerge-ts` 8.0.2. E2E tooling runs only on developer
   machines and CI against local fixtures and is never shipped. npm `overrides`
   pin `serialize-javascript` to 7.1.3 and move `@puppeteer/browsers` to 3.2.3,

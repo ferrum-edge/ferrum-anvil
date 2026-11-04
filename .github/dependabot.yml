@@ -69,6 +69,18 @@ updates:
         update-types:
           - version-update:semver-major
           - version-update:semver-minor
+      # The runner packages stay on WebdriverIO 9 until @wdio/tauri-service
+      # supports 10 (its 1.x peer is webdriverio ^9; webdriverio/desktop-mobile#297).
+      # Move them to 10 by hand together with tauri-service 2.x.
+      - dependency-name: webdriverio
+        update-types:
+          - version-update:semver-major
+      - dependency-name: '@wdio/globals'
+        update-types:
+          - version-update:semver-major
+      - dependency-name: '@wdio/local-runner'
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: deps
     labels:
