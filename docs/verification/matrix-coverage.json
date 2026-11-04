@@ -1,6 +1,6 @@
 {
  "source": "docs/handoff/FERRUM_ANVIL_FAILURE_MATRIX.json",
- "gateway_release": "v0.9.15",
+ "gateway_release": "v0.9.20",
  "total": 182,
  "totals": {
   "verified_test": 75,
@@ -249,7 +249,7 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1210,
+     "line": 1245,
      "kind": "lab"
     },
     {
@@ -260,7 +260,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-001": {
@@ -298,7 +298,7 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1211,
+     "line": 1246,
      "kind": "lab"
     },
     {
@@ -309,7 +309,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-002": {
@@ -347,7 +347,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-003": {
@@ -356,7 +356,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible on Ferrum Edge 0.9.15: the gateway refuses to start with an expired frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> has expired), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests."
+        "skip_reason": "infeasible on Ferrum Edge 0.9.20: the gateway refuses to start with an expired frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> has expired), so no client can observe one from it. Expired-certificate handling is exercised on the upstream leg by UP-004.expired and on the client leg by anvil-transport tests."
        }
       }
      }
@@ -381,7 +381,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-004": {
@@ -390,7 +390,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible on Ferrum Edge 0.9.15: the gateway refuses to start with a not-yet-valid frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> is not yet valid). Client-side not-yet-valid classification is covered by anvil-transport tests."
+        "skip_reason": "infeasible on Ferrum Edge 0.9.20: the gateway refuses to start with a not-yet-valid frontend certificate (the live `ferrum-edge validate` refused it: Validation error: Startup security validation failed: Invalid TLS configuration: `server TLS cert`: certificate record #1 in <redacted scalar> is not yet valid). Client-side not-yet-valid classification is covered by anvil-transport tests."
        }
       }
      }
@@ -430,22 +430,22 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 833,
+     "line": 847,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1212,
+     "line": 1247,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1213,
+     "line": 1248,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1226,
+     "line": 1261,
      "kind": "lab"
     },
     {
@@ -456,7 +456,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-005.tcp": {
@@ -542,17 +542,17 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1214,
+     "line": 1249,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1215,
+     "line": 1250,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1216,
+     "line": 1251,
      "kind": "lab"
     },
     {
@@ -563,7 +563,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-006.lookalike": {
@@ -629,7 +629,7 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1217,
+     "line": 1252,
      "kind": "lab"
     },
     {
@@ -640,7 +640,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-007": {
@@ -683,22 +683,22 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 814,
+     "line": 828,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1208,
+     "line": 1243,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1209,
+     "line": 1244,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1225,
+     "line": 1260,
      "kind": "lab"
     },
     {
@@ -709,7 +709,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-008.tcp": {
@@ -775,7 +775,7 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1218,
+     "line": 1253,
      "kind": "lab"
     },
     {
@@ -786,7 +786,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-009": {
@@ -824,7 +824,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-010": {
@@ -833,7 +833,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible against the real gateway: the Ferrum Edge 0.9.15 frontend always answers a ClientHello (its handshake timeout only closes clients that stall). A client-leg stall needs a non-gateway fault fixture; UP-007 covers the stall on the gateway-to-backend leg."
+        "skip_reason": "infeasible against the real gateway: the Ferrum Edge 0.9.20 frontend always answers a ClientHello (its handshake timeout only closes clients that stall). A client-leg stall needs a non-gateway fault fixture; UP-007 covers the stall on the gateway-to-backend leg."
        }
       }
      }
@@ -858,7 +858,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-011": {
@@ -867,7 +867,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible against the real gateway: Ferrum Edge 0.9.15 ends every frontend handshake refusal with a TLS alert; a bare reset needs a client-leg fault fixture that would not be the gateway."
+        "skip_reason": "infeasible against the real gateway: Ferrum Edge 0.9.20 ends every frontend handshake refusal with a TLS alert; a bare reset needs a client-leg fault fixture that would not be the gateway."
        }
       }
      }
@@ -892,7 +892,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-012": {
@@ -901,7 +901,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible against the real gateway: every Ferrum Edge 0.9.15 TLS listener (HTTPS and TCP+TLS share one rustls ServerConfig) offers h2, http/1.1 and acme-tls/1 (src/tls/mod.rs), and every Anvil HTTP-family policy offers h2 and/or http/1.1, so there is never an ALPN gap to observe."
+        "skip_reason": "infeasible against the real gateway: every Ferrum Edge 0.9.20 TLS listener (HTTPS and TCP+TLS share one rustls ServerConfig) offers h2, http/1.1 and acme-tls/1 (src/tls/mod.rs), and every Anvil HTTP-family policy offers h2 and/or http/1.1, so there is never an ALPN gap to observe."
        }
       }
      }
@@ -931,13 +931,13 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1220,
+     "line": 1255,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-013": {
@@ -980,7 +980,7 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1221,
+     "line": 1256,
      "kind": "lab"
     },
     {
@@ -991,7 +991,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-014": {
@@ -1029,7 +1029,7 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1222,
+     "line": 1257,
      "kind": "lab"
     },
     {
@@ -1040,7 +1040,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-015": {
@@ -1083,13 +1083,13 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1223,
+     "line": 1258,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-016": {
@@ -1127,7 +1127,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-017": {
@@ -1161,7 +1161,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:TLS-018": {
@@ -1200,7 +1200,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-001": {
@@ -1253,8 +1253,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core",
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100310Z-core",
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "core:UP-002": {
@@ -1295,9 +1295,15 @@
    "title": "Backend connect deadline",
    "status": "verified_live",
    "evidence_kinds": [
+    "integration_test",
     "lab"
    ],
    "references": [
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 270,
+     "kind": "integration_test"
+    },
     {
      "path": "crates/anvil-lab/src/core.rs",
      "line": 139,
@@ -1311,7 +1317,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-003": {
@@ -1353,29 +1359,29 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1046,
+     "line": 1064,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1050,
+     "line": 1068,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1232,
+     "line": 1267,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1233,
+     "line": 1268,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams",
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100546Z-streams",
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "streams:UP-004-tcps": {
@@ -1435,18 +1441,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1054,
+     "line": 1072,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1234,
+     "line": 1269,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:UP-005": {
@@ -1478,28 +1484,28 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1090,
+     "line": 1108,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1094,
+     "line": 1112,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1235,
+     "line": 1270,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1236,
+     "line": 1271,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:UP-006": {
@@ -1540,23 +1546,29 @@
    "title": "Backend TLS stall",
    "status": "verified_live",
    "evidence_kinds": [
+    "integration_test",
     "lab"
    ],
    "references": [
     {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 270,
+     "kind": "integration_test"
+    },
+    {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1098,
+     "line": 1116,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1237,
+     "line": 1272,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:UP-007": {
@@ -1588,28 +1600,28 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1113,
+     "line": 1148,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1140,
+     "line": 1175,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1238,
+     "line": 1273,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1239,
+     "line": 1274,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:UP-008.http-to-tls": {
@@ -1666,7 +1678,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-009": {
@@ -1719,8 +1731,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core",
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100310Z-core",
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "core:UP-010": {
@@ -1783,7 +1795,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-011": {
@@ -1832,7 +1844,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-012": {
@@ -1881,7 +1893,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-013": {
@@ -1924,7 +1936,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-014": {
@@ -1961,13 +1973,13 @@
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 528,
+     "line": 559,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103533Z-admission"
+     "results/lab/20261104T100423Z-admission"
     ],
     "variants": {
      "admission:UP-015": {
@@ -1999,18 +2011,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1160,
+     "line": 1195,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1240,
+     "line": 1275,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:UP-016": {
@@ -2047,22 +2059,22 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 159,
+     "line": 170,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 168,
+     "line": 179,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 202,
+     "line": 215,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 205,
+     "line": 218,
      "kind": "integration_test"
     }
    ],
@@ -2086,27 +2098,12 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 240,
+     "line": 253,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 246,
-     "kind": "integration_test"
-    },
-    {
-     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 257,
-     "kind": "integration_test"
-    },
-    {
-     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 264,
-     "kind": "integration_test"
-    },
-    {
-     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 266,
+     "line": 259,
      "kind": "integration_test"
     },
     {
@@ -2116,33 +2113,48 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 297,
+     "line": 300,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 299,
+     "line": 307,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 303,
+     "line": 309,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 313,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 340,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 342,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
+     "line": 346,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 334,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/admission.rs",
-     "line": 530,
+     "line": 339,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103533Z-admission"
+     "results/lab/20261104T100423Z-admission"
     ],
     "variants": {
      "admission:UP-018": {
@@ -2165,7 +2177,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "Not reachable with a single-destination lab on Ferrum Edge 0.9.15: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling is never re-dialled. Observed live on 0.9.5: with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool reuse the draining connection (502 connection_failure, operator error_class connection_pool_error = pool cancellation, not the ceiling). The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs)."
+        "skip_reason": "Not reachable with a single-destination lab on Ferrum Edge 0.9.20: the direct-H2 pool multiplexes, so a maxConnections=1 ceiling is never re-dialled. Observed live on 0.9.5: with SETTINGS_MAX_CONCURRENT_STREAMS=1 the second request queued ~2.5 s behind the first on the one connection (200, one backend connection), and a backend that GOAWAYs each connection made the pool reuse the draining connection (502 connection_failure, operator error_class connection_pool_error = pool cancellation, not the ceiling). The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs)."
        }
       }
      }
@@ -2189,12 +2201,12 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 212,
+     "line": 225,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 219,
+     "line": 232,
      "kind": "integration_test"
     }
    ],
@@ -2223,7 +2235,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:UP-020": {
@@ -2276,8 +2288,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core",
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100310Z-core",
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "core:GW-001": {
@@ -2328,13 +2340,13 @@
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 529,
+     "line": 560,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103533Z-admission"
+     "results/lab/20261104T100423Z-admission"
     ],
     "variants": {
      "admission:GW-002": {
@@ -2377,7 +2389,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103548Z-drain"
+     "results/lab/20261104T100439Z-drain"
     ],
     "variants": {
      "drain:GW-003": {
@@ -2420,7 +2432,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-004": {
@@ -2473,8 +2485,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103533Z-admission",
-     "results/lab/20261026T103734Z-cpdp"
+     "results/lab/20261104T100423Z-admission",
+     "results/lab/20261104T100624Z-cpdp"
     ],
     "variants": {
      "admission:GW-005": {
@@ -2569,7 +2581,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:GW-006": {
@@ -2612,7 +2624,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:GW-007": {
@@ -2655,7 +2667,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:GW-008": {
@@ -2698,7 +2710,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-009": {
@@ -2771,7 +2783,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-010": {
@@ -2845,18 +2857,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1186,
+     "line": 1190,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1774,
+     "line": 1778,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:GW-011": {
@@ -2899,7 +2911,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-012": {
@@ -2962,7 +2974,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-013-REFUSED": {
@@ -3033,7 +3045,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-014-GEO": {
@@ -3042,7 +3054,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "geo_restriction needs a readable MaxMind country .mmdb: `ferrum-edge validate` rejects a missing db_path ('not accessible before open'), no database is vendored in the repo and the lab may not download one, so neither the country-deny nor the database-unavailable path is reachable with Ferrum Edge 0.9.15 file mode here."
+        "skip_reason": "geo_restriction needs a readable MaxMind country .mmdb: `ferrum-edge validate` rejects a missing db_path ('not accessible before open'), no database is vendored in the repo and the lab may not download one, so neither the country-deny nor the database-unavailable path is reachable with Ferrum Edge 0.9.20 file mode here."
        }
       }
      },
@@ -3092,7 +3104,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-015": {
@@ -3141,7 +3153,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:GW-016": {
@@ -3184,7 +3196,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:GW-017": {
@@ -3233,7 +3245,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:GW-018": {
@@ -3316,7 +3328,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-019-REJECT-UNKNOWN": {
@@ -3445,7 +3457,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103453Z-policy"
+     "results/lab/20261104T100343Z-policy"
     ],
     "variants": {
      "policy:GW-020-GUARD": {
@@ -3530,13 +3542,13 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1745,
+     "line": 1749,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-001": {
@@ -3580,18 +3592,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 355,
+     "line": 359,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1746,
+     "line": 1750,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-002": {
@@ -3623,18 +3635,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 385,
+     "line": 389,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1747,
+     "line": 1751,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-003": {
@@ -3666,18 +3678,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 412,
+     "line": 416,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1748,
+     "line": 1752,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-004": {
@@ -3709,18 +3721,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 437,
+     "line": 441,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1749,
+     "line": 1753,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-005": {
@@ -3752,18 +3764,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 455,
+     "line": 459,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1750,
+     "line": 1754,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-006": {
@@ -3795,18 +3807,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 471,
+     "line": 475,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1751,
+     "line": 1755,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-007": {
@@ -3838,18 +3850,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 487,
+     "line": 491,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1752,
+     "line": 1756,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-008": {
@@ -3881,28 +3893,28 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 505,
+     "line": 509,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 544,
+     "line": 548,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1753,
+     "line": 1757,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1754,
+     "line": 1758,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-009.iss-array": {
@@ -3948,18 +3960,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 579,
+     "line": 583,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1755,
+     "line": 1759,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-010": {
@@ -3997,7 +4009,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-011": {
@@ -4042,7 +4054,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-012": {
@@ -4076,7 +4088,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-013": {
@@ -4116,7 +4128,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-014": {
@@ -4156,18 +4168,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 690,
+     "line": 694,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1757,
+     "line": 1761,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-015": {
@@ -4199,18 +4211,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 710,
+     "line": 714,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1758,
+     "line": 1762,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-016": {
@@ -4267,29 +4279,34 @@
      "kind": "integration_test"
     },
     {
+     "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
+     "line": 169,
+     "kind": "integration_test"
+    },
+    {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1655,
+     "line": 1659,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1724,
+     "line": 1728,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1782,
+     "line": 1786,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1784,
+     "line": 1788,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-017": {
@@ -4341,28 +4358,28 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 843,
+     "line": 847,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 861,
+     "line": 865,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1762,
+     "line": 1766,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1763,
+     "line": 1767,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-018": {
@@ -4414,18 +4431,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 875,
+     "line": 879,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1764,
+     "line": 1768,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-019": {
@@ -4463,18 +4480,18 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 893,
+     "line": 897,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1765,
+     "line": 1769,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-020": {
@@ -4506,23 +4523,23 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 929,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/auth.rs",
      "line": 933,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1766,
+     "line": 937,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/auth.rs",
+     "line": 1770,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-021": {
@@ -4554,18 +4571,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 958,
+     "line": 962,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1767,
+     "line": 1771,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-022": {
@@ -4597,18 +4614,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 989,
+     "line": 993,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1768,
+     "line": 1772,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-023": {
@@ -4640,18 +4657,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1019,
+     "line": 1023,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1769,
+     "line": 1773,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-024": {
@@ -4683,18 +4700,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1066,
+     "line": 1070,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1770,
+     "line": 1774,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-025.nonce": {
@@ -4703,7 +4720,7 @@
       "passes": {
        "trusted": {
         "status": "skipped",
-        "skip_reason": "infeasible on Ferrum Edge 0.9.15: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit \u00a75.4, re-checked in the 0.9.7 to 0.9.10 source); AUTH-025 covers the replay half live"
+        "skip_reason": "infeasible on Ferrum Edge 0.9.20: jwks_auth implements no DPoP-Nonce / use_dpop_nonce challenge (audit \u00a75.4, re-checked in the 0.9.7 to 0.9.10 source); AUTH-025 covers the replay half live"
        }
       }
      },
@@ -4741,13 +4758,13 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1224,
+     "line": 1259,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "tls:AUTH-026": {
@@ -4779,18 +4796,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1104,
+     "line": 1108,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1771,
+     "line": 1775,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-027": {
@@ -4822,18 +4839,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1127,
+     "line": 1131,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1772,
+     "line": 1776,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-028": {
@@ -4866,32 +4883,32 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1340,
+     "line": 1344,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1403,
+     "line": 1407,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1430,
+     "line": 1434,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1777,
+     "line": 1781,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1778,
+     "line": 1782,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1779,
+     "line": 1783,
      "kind": "lab"
     },
     {
@@ -4907,7 +4924,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-029.text": {
@@ -4967,18 +4984,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1459,
+     "line": 1463,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1780,
+     "line": 1784,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-030": {
@@ -5010,18 +5027,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1523,
+     "line": 1527,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1781,
+     "line": 1785,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-031": {
@@ -5053,18 +5070,18 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1149,
+     "line": 1153,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1773,
+     "line": 1777,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103633Z-auth"
+     "results/lab/20261104T100524Z-auth"
     ],
     "variants": {
      "auth:AUTH-032": {
@@ -5113,7 +5130,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-001": {
@@ -5162,7 +5179,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-002": {
@@ -5257,7 +5274,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-005": {
@@ -5311,7 +5328,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-006": {
@@ -5360,7 +5377,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-007": {
@@ -5409,7 +5426,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-008": {
@@ -5468,7 +5485,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-009-client-close": {
@@ -5531,7 +5548,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-010": {
@@ -5598,7 +5615,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-012": {
@@ -5657,7 +5674,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-013-blocked": {
@@ -5755,7 +5772,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-014": {
@@ -5851,7 +5868,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-015": {
@@ -5945,7 +5962,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-016-h3-fallback": {
@@ -6113,8 +6130,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103820Z-h3x",
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100712Z-h3x",
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "h3x:PROTO-018-h3-blocked": {
@@ -6267,7 +6284,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-019-tls": {
@@ -6349,7 +6366,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-020": {
@@ -6398,7 +6415,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:PROTO-021": {
@@ -6486,14 +6503,14 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 860,
+     "line": 874,
      "kind": "lab"
     }
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams",
-     "results/lab/20261026T103611Z-tls"
+     "results/lab/20261104T100546Z-streams",
+     "results/lab/20261104T100502Z-tls"
     ],
     "variants": {
      "streams:PROTO-022": {
@@ -6789,8 +6806,8 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103820Z-h3x",
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100712Z-h3x",
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "h3x:TRUST-007-sse-h3": {
@@ -6876,7 +6893,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:TRUST-009": {
@@ -6930,7 +6947,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:TRUST-010": {
@@ -6994,7 +7011,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103421Z-core"
+     "results/lab/20261104T100310Z-core"
     ],
     "variants": {
      "core:TRUST-011": {
@@ -7800,7 +7817,7 @@
    ],
    "lab": {
     "runs": [
-     "results/lab/20261026T103656Z-streams"
+     "results/lab/20261104T100546Z-streams"
     ],
     "variants": {
      "streams:LOAD-013-grpc": {

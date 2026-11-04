@@ -94,7 +94,7 @@ The full CI command list is in [docs/ci.md](docs/ci.md#reproducing-locally).
 
 The failure lab runs real, pinned Ferrum Edge releases on loopback
 (v0.9.20, the only supported release, source-audited with hosted Anvil qualification
-pending; see `lab/gateway/RELEASE.lock` and
+recorded; see `lab/gateway/RELEASE.lock` and
 [source audit](docs/audit/gateway-0.9.20-delta.md)):
 
 ```bash
