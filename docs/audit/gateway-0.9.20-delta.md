@@ -7,7 +7,7 @@
 | Contracts | Published `contracts-edge-0.9.20`, `39da322083044c2e92617209e62983c92387f0ad` |
 | Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 616 outcome IDs: the 556 of 0.9.15 − 2 removed + 62 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.20.lock`; the only supported release: v0.9.5 to v0.9.15 were retired with Anvil's vendored dimpl after adoption (see [#7001](#dtls-13-certificaterequest-omits-the-empty-certificate_authorities-list-7001)) |
-| Hosted qualification | Pending: the manual all-profile Lab run (`workflow_dispatch`, `profile=all`) on the PR head |
+| Hosted qualification | All-profile Lab run 41810892175 on `main` at `cfd4e196`; results are recorded below |
 | Audit date | 2026-11-03 |
 
 The [immutable comparison][compare] spans 456 commits and four tags: v0.9.16 and v0.9.18 were
@@ -2287,11 +2287,16 @@ unvendored.
 
 ## Qualification status
 
-The catalog is source-audited, not live-qualified. The hosted all-profile Lab run
-(`workflow_dispatch`, `profile=all`) on the PR head is pending; its results, including AUTH-001,
-UP-007, UP-018 and MESH-008 on v0.9.20 and the earlier releases, belong here. No physical-device
-native acceptance, platform signing, OAuth, provider-account or broader performance acceptance is
-claimed.
+The hosted all-profile Lab run
+[41810892175](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41810892175)
+(`workflow_dispatch`, `profile=all`, attempt 1) ran all 14 profiles against v0.9.20 on `main` at
+`cfd4e196`, after this adoption (#480) and the retirement of v0.9.5 to v0.9.15 (#481). macOS 15
+reported 558 passed / 0 failed / 19 skipped and Ubuntu 26.04 554 passed / 0 failed / 21 skipped;
+Ubuntu's two extra skips are AUTH-030 and AUTH-031, whose lab XML signer needs `xmllint`, which
+that runner lacks. AUTH-001, UP-007, UP-018 and MESH-008 passed, trusted and untrusted, on both
+operating systems; UP-018-H2 is skipped as unreachable in a single-destination lab. No earlier
+release ran: all were retired. No physical-device native acceptance, platform signing, OAuth,
+provider-account or broader performance acceptance is claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/25b37395ff61bfea0f3ffd189d9011c4984fa755...e4a606a00352674daaef08636e3e359e6c48ba18
 [changelog]: https://github.com/ferrum-edge/ferrum-edge/blob/e4a606a00352674daaef08636e3e359e6c48ba18/CHANGELOG.md

@@ -7,7 +7,7 @@ truth (fixture logs, the gateway's operator log, admin endpoints) that the engin
 
 The selected default is the source-audited **v0.9.20 release**
 (`lab/gateway/RELEASE.lock`, also `lab/gateway/releases/v0.9.20.lock`), with
-hosted Anvil qualification pending
+hosted Anvil qualification recorded
 ([source delta audit](../audit/gateway-0.9.20-delta.md#qualification-status), which also covers
 v0.9.17 and v0.9.19; v0.9.16 and v0.9.18 were never published).
 It is the only supported release. v0.9.5, v0.9.7, v0.9.8, v0.9.9, v0.9.10, v0.9.11, v0.9.14 and

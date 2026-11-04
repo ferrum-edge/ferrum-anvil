@@ -14,9 +14,11 @@
   the older catalogs keep their own contracts tags.
 - Add the separately source-audited Edge v0.9.20 catalog and release-asset locks at
   `e4a606a00352674daaef08636e3e359e6c48ba18` (release 432463173), selected as the lab and
-  new-profile default; hosted all-profile Lab qualification is pending. The audit also covers
-  v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18 were tagged but never published). See
-  `docs/audit/gateway-0.9.20-delta.md`.
+  new-profile default. Hosted all-profile Lab run 41810892175 (`workflow_dispatch`,
+  `profile=all`, `main` at `cfd4e196`) qualified it on all 14 profiles: macOS 558 passed /
+  0 failed / 19 skipped, Ubuntu 554 passed / 0 failed / 21 skipped; the failure-matrix coverage
+  now cites its macOS results. The audit also covers v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18
+  were tagged but never published). See `docs/audit/gateway-0.9.20-delta.md`.
 - Gateway catalog 0.9.20 has 616 outcomes: the 556 of 0.9.15, less two removed, plus 62 new,
   among them the proxy hop limit 508 `{"error":"Proxy hop limit exceeded"}` and the malformed
   `X-Ferrum-Hops` 400, the backend connect timeout's 504 and the pooled connection ceiling's 503
