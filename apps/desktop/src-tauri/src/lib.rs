@@ -60,7 +60,7 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread().thread_stack_size(WORKER_STACK).enable_all().build()
 }
 
-use state::DesktopState;
+use state::{DesktopState, LockReason};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
 
@@ -92,6 +92,10 @@ pub fn run() {
             }
             #[cfg(feature = "e2e")]
             e2e_unlock(&app.state::<DesktopState>());
+            let notify = app.handle().clone();
+            app.state::<DesktopState>().set_lock_notifier(Box::new(move |reason| {
+                let _ = notify.emit("locked", reason);
+            }));
             let handle = app.handle().clone();
             // Auto-lock: idle timeout and suspend detection (the monotonic clock
             // does not advance while the machine sleeps; the wall clock does).
@@ -112,7 +116,7 @@ pub fn run() {
                                 Ok(s) => (s.lock.idle_minutes, s.lock.lock_on_os_lock, Some(a)),
                                 Err(_) => {
                                     if st.lock_if_current(&a) {
-                                        let _ = handle.emit("locked", "profile integrity");
+                                        st.notify_locked(LockReason::Integrity);
                                     }
                                     continue;
                                 }
@@ -130,7 +134,7 @@ pub fn run() {
                     let Some(owner) = owner else { continue };
                     let idle_hit = st.idle_lock_due(idle_minutes);
                     if (idle_hit || (suspended && lock_on_sleep)) && st.lock_if_current(&owner) {
-                        let _ = handle.emit("locked", if idle_hit { "idle" } else { "suspend" });
+                        st.notify_locked(if idle_hit { LockReason::Idle } else { LockReason::Suspend });
                     }
                 }
             });

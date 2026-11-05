@@ -916,8 +916,13 @@ export function onUpdateProgress(cb: (p: { downloaded: number; total?: number | 
   return listen<{ downloaded: number; total?: number | null }>("update-progress", (ev) => cb(ev.payload));
 }
 
-export function onLocked(cb: (reason: string) => void): Promise<UnlistenFn> {
-  return listen<string | null>("locked", (ev) => cb(ev.payload ?? "manual"));
+/** Why the profile locked (`LockReason` in `src-tauri/src/state.rs`). */
+export type LockReason = "manual" | "idle" | "suspend" | "integrity";
+const LOCK_REASONS: readonly string[] = ["manual", "idle", "suspend", "integrity"] satisfies LockReason[];
+const isLockReason = (r: unknown): r is LockReason => typeof r === "string" && LOCK_REASONS.includes(r);
+
+export function onLocked(cb: (reason: LockReason) => void): Promise<UnlistenFn> {
+  return listen<unknown>("locked", (ev) => cb(isLockReason(ev.payload) ? ev.payload : "manual"));
 }
 
 export type { DiagnosticFinding as Finding };

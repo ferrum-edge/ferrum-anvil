@@ -56,6 +56,9 @@ const savedUrl = (t: OpenTab): string | undefined => {
 };
 /** What is still running for a tab in the backend, if anything. */
 const liveWork = (t: OpenTab): "session" | "request" | null => (t.session ? "session" : t.running ? "request" : null);
+/** Whether a send or a connect may start on the tab: nothing runs for it yet. The one
+ * guard for every way of starting one (the Send/Connect buttons and the shortcut alike). */
+const canStart = (t: OpenTab) => liveWork(t) === null;
 
 type View = "requests" | "runner" | "load" | "contract";
 type Layout = "stack" | "side";
@@ -465,7 +468,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   const send = async (sendAnyway = false, id: string | null = active) => {
     const t = tabsRef.current.find((x) => x.req.id === id);
-    if (!t || !ws || t.running) return;
+    if (!t || !ws || !canStart(t)) return;
     const execId = uid();
     const rid = t.req.id;
     updateTab(rid, { running: true, execId, progress: null });
@@ -491,7 +494,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   const connect = async () => {
     const t = tabsRef.current.find((x) => x.req.id === active);
-    if (!t || !ws || t.running || t.session) return;
+    if (!t || !ws || !canStart(t)) return;
     const execId = uid();
     const attemptId = uid();
     sessionAttempts.current.set(attemptId, execId);
