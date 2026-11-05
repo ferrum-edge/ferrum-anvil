@@ -1840,7 +1840,19 @@ mod tests {
         write_interrupted: CancellationToken,
         stats: Arc<crate::stats::ConnStats>,
     ) -> SessionOutput {
-        let events = EventCtx::none();
+        session_observed(io, plan, cancel, commands, write_interrupted, stats, EventCtx::none()).await
+    }
+
+    /// [`session_with`] whose live events go to `events`.
+    async fn session_observed(
+        io: DuplexStream,
+        plan: &WsPlan,
+        cancel: &CancellationToken,
+        commands: Option<CommandRx>,
+        write_interrupted: CancellationToken,
+        stats: Arc<crate::stats::ConnStats>,
+        events: EventCtx,
+    ) -> SessionOutput {
         let interactive = commands.is_some();
         let cx = SessionCtx {
             plan,
@@ -1996,16 +2008,29 @@ mod tests {
     /// Cancel or the total deadline during the close wait ends the wait:
     /// no second Close frame is attempted, nothing counts as an interrupted
     /// write, and the recorded close is the one that went on the wire.
+    /// Canceled as soon as the Close frame is recorded as sent, so the cancel
+    /// always lands in the close wait.
     #[tokio::test]
     async fn cancel_during_the_close_wait_keeps_the_close_that_was_sent() {
         let (io, peer) = tokio::io::duplex(1024);
         silent_reader(peer);
         let mut plan = plan(vec![], None);
-        plan.idle_close_ms = 3_000;
+        plan.idle_close_ms = 5_000;
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         tx.send(SessionCommand::Close { code: 4000, reason: "bye".into() }).await.unwrap();
         let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
-        let out = session_with(io, &plan, &cancel_after(300), Some(rx), interrupted.clone(), stats.clone()).await;
+        let cancel = CancellationToken::new();
+        let on_close = cancel.clone();
+        let sink: crate::recorder::EventFn = Arc::new(move |ev| {
+            if let ExecutionEvent::Message { message, .. } = ev
+                && message.kind == "close"
+                && message.direction == Direction::Sent
+            {
+                on_close.cancel();
+            }
+        });
+        let events = EventCtx { execution_id: anvil_domain::Id::nil(), sink: Some(sink) };
+        let out = session_observed(io, &plan, &cancel, Some(rx), interrupted.clone(), stats.clone(), events).await;
         assert_eq!(failure(&out), Some(FailureKind::Canceled));
         assert_eq!(closed(&out), (Some(4000), ClosedBy::Client), "the Close on the wire was 4000, not 1001");
         assert!(!interrupted.is_cancelled(), "no write was interrupted");
@@ -2017,7 +2042,8 @@ mod tests {
         drop(tx);
     }
 
-    #[tokio::test]
+    /// Paused time: the 300 ms deadline always passes before the 3 s close wait.
+    #[tokio::test(start_paused = true)]
     async fn the_total_deadline_during_the_close_wait_keeps_the_close_that_was_sent() {
         let (io, peer) = tokio::io::duplex(1024);
         silent_reader(peer);

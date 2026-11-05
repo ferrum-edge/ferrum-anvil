@@ -154,28 +154,40 @@ async fn sse_reconnects_only_when_enabled_with_last_event_id() {
 }
 
 /// A Close that arrives while an interactive stream waits to reconnect ends
-/// the session there: no further (signed) request is sent.
+/// the session there: no further (signed) request is sent. The Close is
+/// queued when the first attempt is recorded as failed, which happens just
+/// before the reconnection delay starts; with a retry delay of 0 ms the delay
+/// is over by the time the Close is read, and the Close still wins.
 #[tokio::test]
 async fn sse_close_during_the_reconnection_delay_sends_nothing_more() {
     init();
-    let (addr, seen) = flaky_sse_server_retrying_in(3_000).await;
-    let mut plan = sse_plan(addr, "/events");
-    plan.reconnect = true;
-    plan.max_reconnects = 5;
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    tokio::spawn(async move {
-        // The first stream ends after ~30 ms; the reconnection waits 3 s.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let _ = tx.send(anvil_domain::events::SessionCommand::Close { code: 1000, reason: String::new() }).await;
-        // Kept open: only the Close command ends the session.
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    });
-    let started = std::time::Instant::now();
-    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), Some(rx)).await;
-    assert!(started.elapsed() < std::time::Duration::from_secs(2), "the Close ended the delay: {:?}", started.elapsed());
-    assert_eq!(seen.lock().len(), 1, "no reconnection was sent after the Close");
-    assert_eq!(out.attempts.len(), 1);
-    assert!(matches!(out.status, ProtocolStatus::Sse { events: 2, closed_by: ClosedBy::Client, .. }), "{:?}", out.status);
+    for retry_ms in [0, 60_000] {
+        let (addr, seen) = flaky_sse_server_retrying_in(retry_ms).await;
+        let mut plan = sse_plan(addr, "/events");
+        plan.reconnect = true;
+        plan.max_reconnects = 5;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let sink: anvil_transport::recorder::EventFn = Arc::new(move |ev| {
+            if let anvil_domain::events::ExecutionEvent::AttemptFailed { attempt: 0, .. } = ev {
+                let _ = tx.try_send(anvil_domain::events::SessionCommand::Close { code: 1000, reason: String::new() });
+            }
+        });
+        let events = EventCtx { execution_id: Id::nil(), sink: Some(sink) };
+        // A generous hang guard only: with a 60 s delay, only the Close ends the wait.
+        let out = tokio::time::timeout(std::time::Duration::from_secs(20), sse::run(&plan, &events, &CancellationToken::new(), Some(rx)))
+            .await
+            .expect("the Close ended the reconnection delay");
+        assert_eq!(seen.lock().len(), 1, "retry {retry_ms} ms: no reconnection was sent after the Close");
+        assert_eq!(out.attempts.len(), 1);
+        assert_eq!(
+            out.attempts[0].observation.failure.as_ref().map(|f| f.kind),
+            Some(FailureKind::BodyIncomplete),
+            "the first stream broke"
+        );
+        let note = "not reconnected: the session was closed during the reconnection delay";
+        assert!(out.facts.notes.iter().any(|n| n == note), "the Close was read in the delay: {:?}", out.facts.notes);
+        assert!(matches!(out.status, ProtocolStatus::Sse { events: 2, closed_by: ClosedBy::Client, .. }), "{:?}", out.status);
+    }
 }
 
 /// A signer that signs the first `ok` sends (`x-send: <n>`) and refuses

@@ -63,6 +63,28 @@
   client against a DTLS 1.3 listener that omits the extension, as v0.9.20 does, and the
   `dimpl-edge` (0.6.1) test dependency is gone.
 
+### Fixed
+
+- The lock screen no longer gets stuck on "Set a new passphrase" when an idle or sleep lock lands
+  after a recovery-key unlock: any lock returns to the unlock form, and so does "Not now" when the
+  profile locked meanwhile. A new profile's one-time recovery key is shown even if the form was
+  switched while the profile was created, and after a lock the "continue" button leads to
+  unlocking the new profile. A lock after a failed integrity check is now announced at once and
+  shown as such ("a stored record failed its integrity check") instead of "manually" or
+  "inactivity".
+- Cmd/Ctrl+Enter no longer sends a request beside the tab's open WebSocket, SSE or gRPC session
+  (the Send button was already disabled).
+- A WebSocket canceled, or reaching its total deadline, while waiting for the peer's answer to its
+  Close frame no longer tries to write a second Close: the connection is not reset, the transcript
+  has no false "Close frame could not be written" note, and the recorded close code is the one sent
+  (not 1001).
+- An interactive SSE stream closed while it waited to reconnect sends no further request; a
+  cancel or deadline in that wait records who ended the stream.
+- A MASQUE CONNECT-UDP exchange canceled or timed out while the tunnel was not taking a datagram
+  records who closed the tunnel instead of "not closed".
+- Deleting a workspace while its stopped load run is still draining kills the worker at once, as
+  a delete does for a running load run.
+
 ## [0.1.7] - 2026-11-03
 
 Hardening release: the Linux AppImage no longer shows a blank window on hosts whose Mesa needs a

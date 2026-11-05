@@ -988,14 +988,18 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
         let sleep = tokio::time::sleep(delay);
         tokio::pin!(sleep);
         let waited = loop {
+            // Biased: cancel, the deadline and a queued Close (or a dropped
+            // handle) win over a delay that is over by the same poll, so no
+            // further request is made after any of them.
             tokio::select! {
-                _ = &mut sleep => break Backoff::Elapsed,
+                biased;
+                _ = cancel.cancelled() => break Backoff::Canceled,
+                _ = sleep_until_opt(total_deadline) => break Backoff::Deadline,
                 c = next_cmd(&mut commands), if interactive => match c {
                     Some(SessionCommand::Close { .. }) | None => break Backoff::Closed,
                     Some(_) => tr.note("unsupported_command", "an event stream is receive-only; only Close/cancel apply"),
                 },
-                _ = cancel.cancelled() => break Backoff::Canceled,
-                _ = sleep_until_opt(total_deadline) => break Backoff::Deadline,
+                _ = &mut sleep => break Backoff::Elapsed,
             }
         };
         match waited {

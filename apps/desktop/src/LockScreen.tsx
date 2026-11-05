@@ -13,13 +13,14 @@ export type Screen =
   | { kind: "form"; mode: FormMode }
   /** A single keychain profile opening by itself at launch. */
   | { kind: "autoOpening" }
-  /** A new profile's recovery key, shown once (the backend is unlocked). */
+  /** A new profile's recovery key, shown once (the backend opened the profile). */
   | { kind: "showRecovery"; key: string }
   /** After a recovery-key unlock (the backend is unlocked): offer a new passphrase. */
   | { kind: "resetPassphrase" }
-  /** A legacy profile that must enroll its policy before use. `afterReset`: entered from
+  /** A legacy profile that must enroll its policy before use. `mode`: the form Back returns
+   * to (`recovery`: the current credential is the recovery key). `afterReset`: entered from
    * `resetPassphrase` with the backend still unlocked, which enrollment locks first. */
-  | { kind: "enroll"; credential: "passphrase" | "recovery"; afterReset: boolean };
+  | { kind: "enroll"; mode: FormMode; afterReset: boolean };
 
 export interface LockState {
   screen: Screen;
@@ -33,9 +34,13 @@ export type LockAction =
   | { type: "autoOpenEnded" }
   | { type: "setMode"; mode: FormMode; clearError: boolean }
   | { type: "clearError" }
+  /** Already done in the backend: never dropped, whatever the form shows by now. */
   | { type: "recoveryUnlocked" }
+  /** Already done in the backend, with a key shown only once: never dropped. */
   | { type: "created"; recoveryKey: string }
   | { type: "recoveryStored" }
+  /** "Not now" on the new-passphrase step. */
+  | { type: "resetSkipped" }
   | { type: "passphraseChanged" }
   | { type: "enrolled" }
   | { type: "enrollBack" }
@@ -51,11 +56,11 @@ const UNLOCK: Screen = { kind: "form", mode: "unlock" };
 function enrollFrom(screen: Screen): Screen {
   switch (screen.kind) {
     case "form":
-      return { kind: "enroll", credential: screen.mode === "recovery" ? "recovery" : "passphrase", afterReset: false };
+      return { kind: "enroll", mode: screen.mode, afterReset: false };
     case "autoOpening":
-      return { kind: "enroll", credential: "passphrase", afterReset: false };
+      return { kind: "enroll", mode: "unlock", afterReset: false };
     case "resetPassphrase":
-      return { kind: "enroll", credential: "recovery", afterReset: true };
+      return { kind: "enroll", mode: "recovery", afterReset: true };
     case "showRecovery":
     case "enroll":
       return screen;
@@ -77,11 +82,16 @@ export function lockScreen(s: LockState, a: LockAction): LockState {
     case "clearError":
       return { ...s, error: null };
     case "recoveryUnlocked":
-      return screen.kind === "form" && screen.mode === "recovery" ? { screen: { kind: "resetPassphrase" }, error: null } : s;
+      // Whatever the form shows by now; only a recovery key on display stays.
+      return screen.kind === "showRecovery" ? s : { screen: { kind: "resetPassphrase" }, error: null };
     case "created":
-      return screen.kind === "form" && screen.mode === "create" ? { screen: { kind: "showRecovery", key: a.recoveryKey }, error: null } : s;
+      // The profile exists and its recovery key is returned only here.
+      return { screen: { kind: "showRecovery", key: a.recoveryKey }, error: null };
     case "recoveryStored":
       return screen.kind === "showRecovery" ? { screen: UNLOCK, error: null } : s;
+    case "resetSkipped":
+      // The app opens if the backend is still unlocked; if it locked meanwhile, this form shows.
+      return screen.kind === "resetPassphrase" ? { screen: UNLOCK, error: null } : s;
     case "passphraseChanged":
       // The rotation locks the profile; its `locked` event may come first.
       return screen.kind === "resetPassphrase" || screen.kind === "form"
@@ -92,11 +102,15 @@ export function lockScreen(s: LockState, a: LockAction): LockState {
     case "enrollBack":
       if (screen.kind !== "enroll") return s;
       return {
-        screen: screen.afterReset ? { kind: "resetPassphrase" } : { kind: "form", mode: screen.credential === "recovery" ? "recovery" : "unlock" },
+        screen: screen.afterReset ? { kind: "resetPassphrase" } : { kind: "form", mode: screen.mode },
         error: null,
       };
     case "failed":
       if (screen.kind !== a.on) return s;
+      // The new-passphrase step needs an unlocked backend: a lock ends it.
+      if (screen.kind === "resetPassphrase" && a.message === "LOCKED") {
+        return { screen: UNLOCK, error: "The profile locked before the new passphrase was saved. Unlock it to continue." };
+      }
       return { screen: a.message.includes(ENROLLMENT_REQUIRED) ? enrollFrom(screen) : screen, error: a.message };
     case "locked":
       switch (screen.kind) {
@@ -107,7 +121,8 @@ export function lockScreen(s: LockState, a: LockAction): LockState {
         // Enrollment works on a locked profile; nothing is left to lock first.
         case "enroll":
           return { ...s, screen: { ...screen, afterReset: false } };
-        // Kept: the key is shown once, and its button leads to the unlock form.
+        // Kept: the key is shown once, and its button leads to the unlock form
+        // with the new profile selected.
         case "showRecovery":
         case "form":
           return s;
@@ -142,6 +157,18 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
   const [enrollmentPass, setEnrollmentPass] = useState("");
   const [enrollmentRepeat, setEnrollmentRepeat] = useState("");
   const fail = (on: Screen["kind"], message: string) => dispatch({ type: "failed", on, message });
+  // The list a new profile is in, with it selected (the unlock form shows it if a lock
+  // lands before the app opens it).
+  const reloadProfiles = async (select: string) => {
+    try {
+      const p = await api.profiles();
+      setProfiles(p);
+      setSelected(p.some((x) => x.profile_id === select) ? select : (p[0]?.profile_id ?? ""));
+      dispatch({ type: "profilesLoaded", none: p.length === 0 });
+    } catch {
+      // Kept as it was: the list is read again when this screen next mounts.
+    }
+  };
 
   useEffect(() => {
     api.profiles().then(async (p) => {
@@ -215,6 +242,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
       setPass2("");
       if (r.recovery_key) dispatch({ type: "created", recoveryKey: r.recovery_key });
       else props.onUnlocked();
+      void reloadProfiles(r.profile_id);
     } catch (e) {
       const msg = String((e as Error).message);
       if (useKeychain && msg.includes("credential store is unavailable")) {
@@ -231,7 +259,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
   }
 
   if (screen.kind === "enroll") {
-    const byRecovery = screen.credential === "recovery";
+    const byRecovery = screen.mode === "recovery";
     return <div className="lock"><form className="lock-card" onSubmit={async (e) => {
       e.preventDefault();
       if (enrollmentPass.length < 8 || enrollmentPass !== enrollmentRepeat) return fail("enroll", `${ENROLLMENT_REQUIRED}: enter the same new passphrase twice (at least 8 characters).`);
@@ -294,7 +322,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
           <button className="btn primary" type="submit">
             Save passphrase
           </button>
-          <button type="button" className="btn ghost" onClick={() => props.onUnlocked()}>
+          <button type="button" className="btn ghost" onClick={() => { dispatch({ type: "resetSkipped" }); props.onUnlocked(); }}>
             Not now
           </button>
         </form>
@@ -361,7 +389,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
           <>
             <label className="lbl">
               Profile
-              <select className="field" value={selected} onChange={(e) => setSelected(e.target.value)}>
+              <select className="field" value={selected} disabled={busy} onChange={(e) => setSelected(e.target.value)}>
                 {profiles.map((p) => (
                   <option key={p.profile_id} value={p.profile_id}>
                     {p.display_name} — {p.protection === "os_keychain" ? "OS keychain" : "passphrase"}
@@ -384,14 +412,14 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
             </button>
             <div className="lock-links">
               {current?.protection !== "os_keychain" ? (
-                <button type="button" className="btn ghost small" onClick={() => { setMode(mode === "recovery" ? "unlock" : "recovery"); setSecret(""); }}>
+                <button type="button" className="btn ghost small" disabled={busy} onClick={() => { setMode(mode === "recovery" ? "unlock" : "recovery"); setSecret(""); }}>
                   <Icon name="key" size={13} />
                   {mode === "recovery" ? "Use passphrase" : "Use recovery key"}
                 </button>
               ) : (
                 <span />
               )}
-              <button type="button" className="btn ghost small" onClick={() => { setMode("create", true); setSecret(""); }}>
+              <button type="button" className="btn ghost small" disabled={busy} onClick={() => { setMode("create", true); setSecret(""); }}>
                 <Icon name="plus" size={13} />
                 New profile
               </button>
@@ -445,7 +473,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
               {busy ? "Creating…" : useKeychain ? "Start working" : "Create profile"}
             </button>
             {profiles && profiles.length > 0 && (
-              <button type="button" className="btn ghost" onClick={() => setMode("unlock")}>
+              <button type="button" className="btn ghost" disabled={busy} onClick={() => setMode("unlock")}>
                 <Icon name="chevronLeft" size={14} />
                 Back to unlock
               </button>

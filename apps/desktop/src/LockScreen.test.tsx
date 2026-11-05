@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { App } from "./App";
-import { LockScreen } from "./LockScreen";
+import { LockScreen, lockScreen } from "./LockScreen";
 
 type Profile = { profile_id: string; display_name: string; protection: "passphrase" | "os_keychain" };
 
@@ -180,5 +180,103 @@ describe("a lock while the lock screen shows", () => {
     // A lock with no reason (an older backend) reads as a manual one.
     await emitLocked(null);
     await screen.findByText(/Locked \(manually\)/);
+  });
+});
+
+// A backend reply the test completes by hand.
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+describe("results the backend already committed", () => {
+  const work: Profile = { profile_id: "p1", display_name: "Work", protection: "passphrase" };
+  const form = (mode: "unlock" | "create" | "recovery") => ({ screen: { kind: "form" as const, mode }, error: null });
+
+  it("are never dropped by the transition function, whatever form shows by then", () => {
+    for (const mode of ["unlock", "create", "recovery"] as const) {
+      expect(lockScreen(form(mode), { type: "created", recoveryKey: "RK" }).screen).toEqual({ kind: "showRecovery", key: "RK" });
+      expect(lockScreen(form(mode), { type: "recoveryUnlocked" }).screen).toEqual({ kind: "resetPassphrase" });
+    }
+  });
+
+  it("show a new profile's recovery key although Back was clicked while it was created", async () => {
+    const created = deferred<{ profile_id: string; recovery_key: string }>();
+    backend([work], { profile_create: () => created.promise });
+    render(<LockScreen onUnlocked={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "New profile" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Protect with a passphrase/ }));
+    fireEvent.change(screen.getByLabelText("Unlock passphrase"), { target: { value: "a long passphrase" } });
+    fireEvent.change(screen.getByLabelText("Repeat passphrase"), { target: { value: "a long passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("profile_create", expect.anything()));
+    fireEvent.click(screen.getByRole("button", { name: "Back to unlock" }));
+    await act(async () => created.resolve({ profile_id: "p2", recovery_key: "RK-ONCE" }));
+    await screen.findByRole("heading", { name: "Save your recovery key" });
+    expect(screen.getByLabelText("Recovery key").textContent).toBe("RK-ONCE");
+  });
+
+  it("offer the new passphrase after a recovery-key unlock although the form was switched meanwhile", async () => {
+    const unlocked = deferred<null>();
+    backend([work], { profile_unlock: () => unlocked.promise });
+    render(<LockScreen onUnlocked={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use recovery key" }));
+    fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: "RECOVERY-KEY" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("profile_unlock", expect.anything()));
+    fireEvent.click(screen.getByRole("button", { name: "Use passphrase" }));
+    await act(async () => unlocked.resolve(null));
+    await screen.findByRole("heading", { name: "Set a new passphrase" });
+  });
+});
+
+describe("every screen a lock leaves has a way forward", () => {
+  const work: Profile = { profile_id: "p1", display_name: "Work", protection: "passphrase" };
+
+  it("leads from a first-run recovery key shown across a lock to unlocking the new profile", async () => {
+    let profiles: Profile[] = [];
+    backend([], {
+      app_status: () => ({ state: "locked", profile: null }),
+      profiles_list: () => profiles,
+      profile_create: () => {
+        profiles = [work];
+        return { profile_id: "p1", recovery_key: "RK-FIRST" };
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("radio", { name: /Protect with a passphrase/ }));
+    fireEvent.change(screen.getByLabelText("Unlock passphrase"), { target: { value: "a long passphrase" } });
+    fireEvent.change(screen.getByLabelText("Repeat passphrase"), { target: { value: "a long passphrase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create profile" }));
+    await screen.findByRole("heading", { name: "Save your recovery key" });
+
+    // The backend locks while the key shows: the key stays until it is acknowledged.
+    await emitLocked("idle");
+    expect(screen.getByLabelText("Recovery key").textContent).toBe("RK-FIRST");
+    fireEvent.click(screen.getByRole("button", { name: /I stored it safely/ }));
+
+    // The backend stayed locked: the unlock form offers the new profile.
+    await screen.findByLabelText("Passphrase");
+    expect((screen.getByLabelText("Profile") as HTMLSelectElement).value).toBe("p1");
+    expect(screen.getByRole("button", { name: "Unlock" })).toBeTruthy();
+  });
+
+  it("leaves the new-passphrase step on Not now when the backend locked without an event", async () => {
+    backend([work], { app_status: () => ({ state: "locked", profile: null }) });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use recovery key" }));
+    fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: "RECOVERY-KEY" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    await screen.findByRole("heading", { name: "Set a new passphrase" });
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    await screen.findByLabelText("Passphrase");
+    expect(screen.queryByRole("heading", { name: "Set a new passphrase" })).toBeNull();
+  });
+
+  it("returns from an enrollment entered while creating to the create form", () => {
+    const enroll = lockScreen({ screen: { kind: "form", mode: "create" }, error: null }, { type: "failed", on: "form", message: "POLICY_ENROLLMENT_REQUIRED: x" });
+    expect(enroll.screen).toEqual({ kind: "enroll", mode: "create", afterReset: false });
+    expect(lockScreen(enroll, { type: "enrollBack" }).screen).toEqual({ kind: "form", mode: "create" });
   });
 });
