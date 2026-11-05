@@ -728,6 +728,16 @@ async fn open_h3(
     })
 }
 
+/// How the wait before a reconnection ended.
+enum Backoff {
+    /// The delay is over: reconnect.
+    Elapsed,
+    /// The user sent Close (or dropped the session handle).
+    Closed,
+    Canceled,
+    Deadline,
+}
+
 pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, mut commands: Option<CommandRx>) -> SessionOutput {
     let interactive = commands.is_some();
     let t0 = Instant::now();
@@ -975,10 +985,36 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
             delay.as_millis(),
             parser.last_event_id.as_deref().unwrap_or("(none)")
         ));
-        tokio::select! {
-            _ = tokio::time::sleep(delay) => {}
-            _ = cancel.cancelled() => break,
-            _ = sleep_until_opt(total_deadline) => break,
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        let waited = loop {
+            tokio::select! {
+                _ = &mut sleep => break Backoff::Elapsed,
+                c = next_cmd(&mut commands), if interactive => match c {
+                    Some(SessionCommand::Close { .. }) | None => break Backoff::Closed,
+                    Some(_) => tr.note("unsupported_command", "an event stream is receive-only; only Close/cancel apply"),
+                },
+                _ = cancel.cancelled() => break Backoff::Canceled,
+                _ = sleep_until_opt(total_deadline) => break Backoff::Deadline,
+            }
+        };
+        match waited {
+            Backoff::Elapsed => {}
+            Backoff::Closed => {
+                closed_by = ClosedBy::Client;
+                facts.notes.push("not reconnected: the session was closed during the reconnection delay".into());
+                break;
+            }
+            Backoff::Canceled => {
+                closed_by = ClosedBy::Client;
+                facts.notes.push("not reconnected: canceled during the reconnection delay".into());
+                break;
+            }
+            Backoff::Deadline => {
+                closed_by = ClosedBy::Timeout;
+                facts.notes.push("not reconnected: the total deadline elapsed during the reconnection delay".into());
+                break;
+            }
         }
         // Signed afresh (above) once the delay is over, so its time claims
         // are current; never sent with an earlier send's signature.

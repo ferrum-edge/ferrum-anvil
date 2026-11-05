@@ -1859,3 +1859,26 @@ describe("environments dialog", () => {
     expect((calls("workspace_save")[2].workspace as Workspace).variables).toEqual(vars("v2"));
   });
 });
+
+describe("the send shortcut", () => {
+  it("does not start a request beside the tab's open session", async () => {
+    backend();
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+
+    // Cmd/Ctrl+Enter is refused like the disabled Send button.
+    fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "Enter", metaKey: true });
+    await act(async () => {});
+    expect(calls("send_request")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Connected" })).toBeTruthy();
+
+    // Positive control: on a tab with nothing running the shortcut sends.
+    await openTab("Alpha");
+    fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+  });
+});

@@ -101,6 +101,24 @@ impl PayloadState for Arc<DesktopState> {
     }
 }
 
+/// Why the open profile locked: the payload of the `locked` event, which the
+/// lock screen shows (`LockReason` in `api.ts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockReason {
+    /// The user locked, or changed the profile's credentials.
+    Manual,
+    /// The idle timeout elapsed.
+    Idle,
+    /// The system was suspended.
+    Suspend,
+    /// A stored record failed its integrity check.
+    Integrity,
+}
+
+/// Tells the webview that the profile locked (set once the app runs).
+pub type LockNotifier = Box<dyn Fn(LockReason) + Send + Sync>;
+
 pub struct DesktopState {
     pub profiles: ProfileManager,
     pub app: RwLock<Option<Arc<App>>>,
@@ -153,6 +171,8 @@ pub struct DesktopState {
     pub presence: crate::presence::PresenceState,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
+    /// Every lock the webview must hear of goes through it (see [`DesktopState::notify_locked`]).
+    lock_notifier: std::sync::OnceLock<LockNotifier>,
 }
 
 pub(crate) struct KeyChange {
@@ -194,6 +214,19 @@ impl DesktopState {
             last_activity: Mutex::new(Instant::now()),
             presence: Default::default(),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
+            lock_notifier: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Set how the webview hears of a lock; only the first call takes effect.
+    pub fn set_lock_notifier(&self, notify: LockNotifier) {
+        let _ = self.lock_notifier.set(notify);
+    }
+
+    /// Tell the webview that the profile locked, and why.
+    pub fn notify_locked(&self, reason: LockReason) {
+        if let Some(notify) = self.lock_notifier.get() {
+            notify(reason);
         }
     }
 
@@ -432,12 +465,16 @@ impl DesktopState {
         self.lock_under_transition(after_fence);
     }
 
+    /// Lock after a failed integrity check, wherever it was detected, and
+    /// tell the webview so (it would otherwise learn only from a refused call).
     pub(crate) fn lock_integrity_if_current(&self, expected: &Arc<App>) {
-        let _transition = self.transition.lock();
+        let transition = self.transition.lock();
         if !expected.is_locked() || !self.is_current(expected) || !*self.payload_gate.read() {
             return;
         }
         self.lock_under_transition(|| {});
+        drop(transition);
+        self.notify_locked(LockReason::Integrity);
     }
 
     /// A failed background read must not lock a subsequently opened profile.
@@ -790,6 +827,32 @@ pub(crate) mod tests {
     fn reopen(dir: &std::path::Path) -> App {
         let (header, key) = ProfileManager::unlock(dir, anvil_app::profiles::Unlock::Passphrase(PASSPHRASE)).unwrap();
         App::open(dir.to_path_buf(), header, key).unwrap()
+    }
+
+    #[test]
+    fn an_integrity_lock_tells_the_webview_why() {
+        let root = TempRoot::new();
+        let st = DesktopState::new(root.0.clone());
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let h = heard.clone();
+        st.set_lock_notifier(Box::new(move |r| h.lock().push(r)));
+        let (a, _) = create(&st, "A");
+        st.set_app_since(a, st.epoch()).unwrap();
+        let app = st.app().unwrap();
+        // The store locks itself when a record fails its integrity check.
+        app.lock();
+        st.lock_integrity_if_current(&app);
+        assert!(!*st.payload_gate.read());
+        assert_eq!(*heard.lock(), vec![LockReason::Integrity]);
+        // Already locked: nothing more is said.
+        st.lock_integrity_if_current(&app);
+        assert_eq!(heard.lock().len(), 1);
+        // The webview's vocabulary (`LockReason` in api.ts).
+        let names: Vec<_> = [LockReason::Manual, LockReason::Idle, LockReason::Suspend, LockReason::Integrity]
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        assert_eq!(names, ["manual", "idle", "suspend", "integrity"]);
     }
 
     #[test]

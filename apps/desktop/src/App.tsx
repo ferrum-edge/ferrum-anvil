@@ -1,7 +1,7 @@
 // Top-level state machine: locked (LockScreen) ⇄ unlocked (Workbench). The
 // lock itself is enforced in Rust; this only mirrors it.
 import { useEffect, useState } from "react";
-import { api, onLocked, type Status } from "./api";
+import { api, onLocked, type LockReason, type Status } from "./api";
 import { LockScreen } from "./LockScreen";
 import { Workbench } from "./Workbench";
 import logo from "./assets/ferrum-anvil-logo.webp";
@@ -11,7 +11,10 @@ if (typeof Image !== "undefined") new Image().src = logo;
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [reason, setReason] = useState<string | null>(null);
+  const [reason, setReason] = useState<LockReason | null>(null);
+  // Counts the locks heard: a lock that lands while the lock screen shows
+  // (after a recovery-key unlock, say) has the same reason as the last one.
+  const [locks, setLocks] = useState(0);
   const [profileName, setProfileName] = useState("");
 
   const refresh = async () => {
@@ -24,10 +27,12 @@ export function App() {
     void refresh();
     const un = onLocked((r) => {
       setReason(r);
+      setLocks((n) => n + 1);
       void refresh();
     });
     const onLockedCall = () => {
       setReason((r) => r ?? "idle");
+      setLocks((n) => n + 1);
       void refresh();
     };
     window.addEventListener("anvil-locked", onLockedCall);
@@ -42,6 +47,7 @@ export function App() {
     return (
       <LockScreen
         reason={reason}
+        locks={locks}
         onUnlocked={() => {
           setReason(null);
           void refresh();

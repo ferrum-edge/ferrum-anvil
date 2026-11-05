@@ -125,36 +125,30 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
     let (profile_locked, deleted) = (run.locked().clone(), run.workspace_deleted().clone());
     let key = run_key.clone();
     tauri::async_runtime::spawn(async move {
-        let mut canceled = false;
+        let mut stop = Stop::Running;
         loop {
-            tokio::select! {
+            let cause = tokio::select! {
                 p = controller.next_progress() => match p {
                     // Only to the window of the profile the run started under.
                     Some(progress) if handle.state::<DesktopState>().is_current(&app) => {
                         let _ = handle.emit("load-progress", LoadProgressEvent { run_key: key.clone(), progress });
+                        continue;
                     }
-                    Some(_) => {}
+                    Some(_) => continue,
                     None => break,
                 },
-                _ = cancel.cancelled(), if !canceled => {
-                    canceled = true;
-                    controller.cancel().await;
-                }
-                _ = lock.cancelled(), if !canceled => {
-                    canceled = true;
-                    controller.cancel_for_lock().await;
-                }
-                _ = profile_locked.cancelled(), if !canceled => {
-                    canceled = true;
-                    controller.cancel_for_lock().await;
-                }
-                // The worker process, and with it every engine, pool and
-                // session it holds for the workspace, ends at once: nothing
-                // of its report is kept, so it has nothing to drain.
-                _ = deleted.cancelled(), if !canceled => {
-                    canceled = true;
-                    controller.kill();
-                }
+                _ = cancel.cancelled(), if stop.admits(StopCause::User) => StopCause::User,
+                _ = lock.cancelled(), if stop.admits(StopCause::Lock) => StopCause::Lock,
+                _ = profile_locked.cancelled(), if stop.admits(StopCause::Lock) => StopCause::Lock,
+                _ = deleted.cancelled(), if stop.admits(StopCause::WorkspaceDeleted) => StopCause::WorkspaceDeleted,
+            };
+            let (next, action) = stop.on(cause);
+            stop = next;
+            match action {
+                Some(StopAction::Cancel) => controller.cancel().await,
+                Some(StopAction::CancelForLock) => controller.cancel_for_lock().await,
+                Some(StopAction::Kill) => controller.kill(),
+                None => {}
             }
         }
         let result = controller.wait().await;
@@ -173,6 +167,59 @@ pub async fn load_run_start(st: State<'_, DesktopState>, handle: AppHandle, plan
         let _ = handle.emit("load-finished", for_window(ev, handle.state::<DesktopState>().is_current(&app)));
     });
     Ok(run_key)
+}
+
+/// Why the supervisor of a load run stops its worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopCause {
+    /// The user clicked Stop run.
+    User,
+    /// The app, or the run's profile, locked.
+    Lock,
+    /// The run's workspace was deleted.
+    WorkspaceDeleted,
+}
+
+/// How far the supervisor has stopped the worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    Running,
+    /// Asked to stop gracefully; the worker drains (bounded by its cancel
+    /// deadline) and reports.
+    Draining,
+    /// The worker process was killed: nothing is left to do.
+    Killed,
+}
+
+/// What the supervisor does to the worker on a transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopAction {
+    Cancel,
+    CancelForLock,
+    Kill,
+}
+
+impl Stop {
+    /// The one transition function. A graceful stop is sent once (the
+    /// worker keeps the first stop reason, and its stdin is gone after it).
+    /// A deleted workspace kills the worker, even while it drains: the
+    /// worker process, and with it every engine, pool and session it holds
+    /// for the workspace, ends at once, since nothing of its report is kept.
+    fn on(self, cause: StopCause) -> (Stop, Option<StopAction>) {
+        match (self, cause) {
+            (Stop::Killed, StopCause::User | StopCause::Lock | StopCause::WorkspaceDeleted) => (Stop::Killed, None),
+            (Stop::Running | Stop::Draining, StopCause::WorkspaceDeleted) => (Stop::Killed, Some(StopAction::Kill)),
+            (Stop::Running, StopCause::User) => (Stop::Draining, Some(StopAction::Cancel)),
+            (Stop::Running, StopCause::Lock) => (Stop::Draining, Some(StopAction::CancelForLock)),
+            (Stop::Draining, StopCause::User | StopCause::Lock) => (Stop::Draining, None),
+        }
+    }
+
+    /// Whether `cause` still does anything: a token already acted on is not
+    /// polled again.
+    fn admits(self, cause: StopCause) -> bool {
+        self.on(cause).1.is_some()
+    }
 }
 
 /// The event a run ends with when its workspace was deleted, which keeps no
@@ -323,6 +370,35 @@ pub async fn dataset_add(
 mod tests {
     use super::*;
     use crate::state::tests::{TempRoot, create};
+
+    /// Stop run, then a delete of the run's workspace while the worker
+    /// drains: the worker is still killed (it held the deleted workspace's
+    /// engines, pools and secrets for the whole drain window before).
+    #[test]
+    fn a_workspace_deleted_while_a_stopped_run_drains_still_kills_the_worker() {
+        let (stop, action) = Stop::Running.on(StopCause::User);
+        assert_eq!((stop, action), (Stop::Draining, Some(StopAction::Cancel)));
+        assert!(stop.admits(StopCause::WorkspaceDeleted), "the delete is still heard while the worker drains");
+        assert_eq!(stop.on(StopCause::WorkspaceDeleted), (Stop::Killed, Some(StopAction::Kill)));
+
+        // The same after a lock.
+        let (stop, action) = Stop::Running.on(StopCause::Lock);
+        assert_eq!(action, Some(StopAction::CancelForLock));
+        assert_eq!(stop.on(StopCause::WorkspaceDeleted), (Stop::Killed, Some(StopAction::Kill)));
+    }
+
+    #[test]
+    fn a_graceful_stop_is_sent_once_and_nothing_follows_a_kill() {
+        let draining = Stop::Draining;
+        assert_eq!(draining.on(StopCause::User), (Stop::Draining, None));
+        assert_eq!(draining.on(StopCause::Lock), (Stop::Draining, None), "the first stop reason stands");
+        assert!(!draining.admits(StopCause::User) && !draining.admits(StopCause::Lock));
+        assert_eq!(Stop::Running.on(StopCause::WorkspaceDeleted), (Stop::Killed, Some(StopAction::Kill)));
+        for cause in [StopCause::User, StopCause::Lock, StopCause::WorkspaceDeleted] {
+            assert_eq!(Stop::Killed.on(cause), (Stop::Killed, None));
+            assert!(!Stop::Killed.admits(cause));
+        }
+    }
 
     #[tokio::test]
     async fn a_run_of_a_deleted_workspace_keeps_no_report_and_only_its_profile_hears_why() {

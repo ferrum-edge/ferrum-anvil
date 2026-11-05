@@ -437,6 +437,33 @@ async fn connect_udp_silence_reset_and_proxy_close_are_told_apart() {
     assert!(out.attempts[0].observation.failure.is_none());
 }
 
+/// A cancel that interrupts a scripted send ends the tunnel as the client's
+/// close, as a cancel anywhere else in the exchange does.
+#[tokio::test]
+async fn connect_udp_cancel_during_a_send_records_the_client_close() {
+    init();
+    let proxy = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let silent = streams::udp("127.0.0.1:0", UdpMode::Silent).await.unwrap();
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    // Canceled as the session phase starts, right before the first scripted
+    // send: the send is interrupted (the guard sees the cancel first).
+    let sink: anvil_transport::recorder::EventFn = Arc::new(move |ev| {
+        if let anvil_domain::events::ExecutionEvent::Phase { phase: Phase::Session, status: PhaseStatus::Unknown, .. } = ev {
+            c2.cancel();
+        }
+    });
+    let events = EventCtx { execution_id: anvil_domain::Id::nil(), sink: Some(sink) };
+    let mut plan = masque_plan(proxy.addr, silent.addr, "", &["x"]);
+    plan.response_window_ms = 10_000;
+    let out = masque::run(&plan, &events, &cancel, None).await;
+    let f = out.attempts[0].observation.failure.as_ref().unwrap();
+    assert_eq!(f.kind, FailureKind::Canceled);
+    assert!(f.message.contains("not taking a datagram"), "the send was interrupted: {}", f.message);
+    let (sent, _, m) = udp_state(&out);
+    assert_eq!((sent, m.closed_by), (0, ClosedBy::Client));
+}
+
 #[tokio::test]
 async fn connect_udp_cancel_and_quic_blocked_path() {
     init();

@@ -1032,18 +1032,27 @@ async fn send_recorded(
     let outcome = match guarded(chan.send(payload), cancel, deadline).await {
         Ok(r) => r?,
         Err(i) => {
-            let f = match i {
-                Interrupted::Canceled => TransportFailure::new(
-                    Phase::Session,
-                    FailureKind::Canceled,
-                    "the CONNECT-UDP exchange was canceled while the tunnel was not taking a datagram",
+            // The exchange ends here, whichever send was interrupted: the
+            // record says who ended the tunnel, as the session loop does.
+            let (f, by) = match i {
+                Interrupted::Canceled => (
+                    TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::Canceled,
+                        "the CONNECT-UDP exchange was canceled while the tunnel was not taking a datagram",
+                    ),
+                    ClosedBy::Client,
                 ),
-                Interrupted::Deadline => TransportFailure::new(
-                    Phase::Session,
-                    FailureKind::TotalTimeout,
-                    "the total deadline elapsed while the tunnel was not taking a datagram",
+                Interrupted::Deadline => (
+                    TransportFailure::new(
+                        Phase::Session,
+                        FailureKind::TotalTimeout,
+                        "the total deadline elapsed while the tunnel was not taking a datagram",
+                    ),
+                    ClosedBy::Timeout,
                 ),
             };
+            chan.set_closed_by(by);
             return Err(f);
         }
     };

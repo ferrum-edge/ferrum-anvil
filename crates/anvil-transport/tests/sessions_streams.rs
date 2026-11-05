@@ -81,6 +81,11 @@ fn sse_plan(addr: SocketAddr, target: &str) -> sse::SsePlan {
 /// stream mid-body (no terminating chunk); later connections record the
 /// `Last-Event-ID` they carry and end cleanly after one more event.
 async fn flaky_sse_server() -> (SocketAddr, Arc<Mutex<Vec<Option<String>>>>) {
+    flaky_sse_server_retrying_in(50).await
+}
+
+/// [`flaky_sse_server`] whose first stream asks for `retry_ms` before a reconnection.
+async fn flaky_sse_server_retrying_in(retry_ms: u64) -> (SocketAddr, Arc<Mutex<Vec<Option<String>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![]));
@@ -103,7 +108,8 @@ async fn flaky_sse_server() -> (SocketAddr, Arc<Mutex<Vec<Option<String>>>>) {
             let chunk = |s: &str| format!("{:x}\r\n{s}\r\n", s.len());
             let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await;
             if n == 1 {
-                let _ = sock.write_all(chunk("retry: 50\nid: 1\ndata: one\n\nid: 2\ndata: two\n\ndata: partial-").as_bytes()).await;
+                let first = format!("retry: {retry_ms}\nid: 1\ndata: one\n\nid: 2\ndata: two\n\ndata: partial-");
+                let _ = sock.write_all(chunk(&first).as_bytes()).await;
                 let _ = sock.flush().await;
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 drop(sock); // abnormal end: no terminating chunk
@@ -145,6 +151,31 @@ async fn sse_reconnects_only_when_enabled_with_last_event_id() {
     assert_eq!(out.attempts.len(), 1);
     assert_eq!(seen.lock().len(), 1);
     assert!(matches!(out.status, ProtocolStatus::Sse { events: 2, closed_by: ClosedBy::Abnormal, .. }));
+}
+
+/// A Close that arrives while an interactive stream waits to reconnect ends
+/// the session there: no further (signed) request is sent.
+#[tokio::test]
+async fn sse_close_during_the_reconnection_delay_sends_nothing_more() {
+    init();
+    let (addr, seen) = flaky_sse_server_retrying_in(3_000).await;
+    let mut plan = sse_plan(addr, "/events");
+    plan.reconnect = true;
+    plan.max_reconnects = 5;
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        // The first stream ends after ~30 ms; the reconnection waits 3 s.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let _ = tx.send(anvil_domain::events::SessionCommand::Close { code: 1000, reason: String::new() }).await;
+        // Kept open: only the Close command ends the session.
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    });
+    let started = std::time::Instant::now();
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), Some(rx)).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "the Close ended the delay: {:?}", started.elapsed());
+    assert_eq!(seen.lock().len(), 1, "no reconnection was sent after the Close");
+    assert_eq!(out.attempts.len(), 1);
+    assert!(matches!(out.status, ProtocolStatus::Sse { events: 2, closed_by: ClosedBy::Client, .. }), "{:?}", out.status);
 }
 
 /// A signer that signs the first `ok` sends (`x-send: <n>`) and refuses

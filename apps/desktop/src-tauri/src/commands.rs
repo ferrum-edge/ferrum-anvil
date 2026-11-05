@@ -6,7 +6,7 @@
 //! uses the vault only where its saved request would (`crate::draft_authority`).
 
 use crate::presence::NativePresence;
-use crate::state::{DesktopState, ImportGate, PayloadFence, PayloadState, PendingEntry, cancel_pending};
+use crate::state::{DesktopState, ImportGate, LockReason, PayloadFence, PayloadState, PendingEntry, cancel_pending};
 use anvil_app::cleanup::{RemovedRevisions, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
 use anvil_app::exec::{SendOptions, refuse_linked_files};
 use anvil_app::file_grants::{FileGrants, FilePurpose};
@@ -281,10 +281,10 @@ pub async fn profile_enroll_unlinked(
 /// Rotate all active ciphertext and credentials after native intent and
 /// replacement-recovery acknowledgment. Success requires reopening a new App.
 #[tauri::command]
-pub async fn profile_change_passphrase(st: State<'_, DesktopState>, window: Window, handle: AppHandle, new_passphrase: String) -> R<()> {
+pub async fn profile_change_passphrase(st: State<'_, DesktopState>, window: Window, new_passphrase: String) -> R<()> {
     let out = crate::presence::change_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await;
     if st.app().is_err() {
-        let _ = handle.emit("locked", ());
+        st.notify_locked(LockReason::Manual);
     }
     out
 }
@@ -302,24 +302,19 @@ pub struct Converted {
 /// replacement recovery key is saved in the native dialog before commit.
 /// The desktop closes payload delivery before re-encryption and remains locked.
 #[tauri::command]
-pub async fn profile_convert_to_passphrase(
-    st: State<'_, DesktopState>,
-    window: Window,
-    handle: AppHandle,
-    new_passphrase: String,
-) -> R<Converted> {
+pub async fn profile_convert_to_passphrase(st: State<'_, DesktopState>, window: Window, new_passphrase: String) -> R<Converted> {
     let out = crate::presence::convert_to_passphrase(&st, &NativePresence(window), new_passphrase, KdfParams::interactive()).await;
     if st.app().is_err() {
-        let _ = handle.emit("locked", ());
+        st.notify_locked(LockReason::Manual);
     }
     let c = out?;
     Ok(Converted { keychain_entry_removed: c.keychain_entry_removed })
 }
 
 #[tauri::command]
-pub fn app_lock(st: State<'_, DesktopState>, app: AppHandle) {
+pub fn app_lock(st: State<'_, DesktopState>) {
     st.lock();
-    let _ = app.emit("locked", ());
+    st.notify_locked(LockReason::Manual);
 }
 
 /// The webview reports user activity. It postpones the idle lock only within

@@ -108,6 +108,80 @@ struct Close {
     closed_by: ClosedBy,
 }
 
+/// Where the closing handshake (RFC 6455 §7) stands. Only `Open` may send a
+/// Close frame or read session commands; every other state is waiting, until
+/// its deadline, for the connection to end.
+enum Handshake {
+    /// No Close frame either way yet.
+    Open,
+    /// The client's Close (`code`, `reason`) is on the wire; the peer's is awaited.
+    ClientClosing { code: u16, reason: String, deadline: Instant },
+    /// The peer's Close arrived first (tungstenite queued the reply).
+    PeerClosing { deadline: Instant },
+    /// The client's Close was answered by the peer's.
+    BothClosed { code: u16, reason: String, deadline: Instant },
+}
+
+/// What moves the closing handshake on.
+enum HandshakeEvent {
+    /// The client's Close frame was written.
+    ClientClose { code: u16, reason: String },
+    /// The peer's Close frame arrived.
+    PeerClose,
+}
+
+impl Handshake {
+    /// The one transition function. A Close the client writes after either
+    /// side's Close is not a transition: the callers never write one, since
+    /// tungstenite refuses it (`SendAfterClosing`).
+    fn on(self, ev: HandshakeEvent, close_wait: Duration) -> Handshake {
+        let deadline = Instant::now() + close_wait;
+        match (self, ev) {
+            (Handshake::Open, HandshakeEvent::ClientClose { code, reason }) => Handshake::ClientClosing { code, reason, deadline },
+            (Handshake::Open, HandshakeEvent::PeerClose) => Handshake::PeerClosing { deadline },
+            // The close wait the client's Close started keeps running.
+            (Handshake::ClientClosing { code, reason, deadline }, HandshakeEvent::PeerClose) => {
+                Handshake::BothClosed { code, reason, deadline }
+            }
+            (
+                state @ (Handshake::ClientClosing { .. } | Handshake::PeerClosing { .. } | Handshake::BothClosed { .. }),
+                HandshakeEvent::ClientClose { .. } | HandshakeEvent::PeerClose,
+            ) => state,
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        matches!(self, Handshake::Open)
+    }
+
+    fn peer_close_seen(&self) -> bool {
+        match self {
+            Handshake::PeerClosing { .. } | Handshake::BothClosed { .. } => true,
+            Handshake::Open | Handshake::ClientClosing { .. } => false,
+        }
+    }
+
+    /// When the close wait ends, once a Close frame went either way.
+    fn deadline(&self) -> Option<Instant> {
+        match self {
+            Handshake::Open => None,
+            Handshake::ClientClosing { deadline, .. } | Handshake::PeerClosing { deadline } | Handshake::BothClosed { deadline, .. } => {
+                Some(*deadline)
+            }
+        }
+    }
+
+    /// The Close frame the client put on the wire, if any.
+    fn client_close(&self) -> Option<Close> {
+        match self {
+            Handshake::ClientClosing { code, reason, .. } | Handshake::BothClosed { code, reason, .. } => {
+                Some(Close { code: Some(*code), reason: reason.clone(), closed_by: ClosedBy::Client })
+            }
+            Handshake::Open | Handshake::PeerClosing { .. } => None,
+        }
+    }
+}
+
 /// How long a Close frame the client sends on its way out (cancel, total
 /// deadline) may take to be written.
 const FINAL_CLOSE_WRITE: Duration = Duration::from_millis(250);
@@ -1163,11 +1237,9 @@ where
     }
     let mut violation: Option<WsCompressionViolation> = None;
     let mut close: Option<Close> = None;
-    let mut client_close_sent: Option<(u16, String)> = None;
-    let mut peer_close_seen = false;
+    let mut handshake = Handshake::Open;
     let mut failure: Option<TransportFailure> = None;
     let close_wait = Duration::from_millis(plan.idle_close_ms.clamp(250, 5_000));
-    let mut close_deadline: Option<Instant> = None;
 
     // Scripted messages (automation, and the opening of interactive sessions).
     // Every write below is raced against cancellation and the deadline that
@@ -1214,8 +1286,7 @@ where
             _ => tr.control(Direction::Sent, kind, &payload),
         }
         if is_close && let WsMessage::Close { code, reason } = m {
-            client_close_sent = Some((*code, reason.clone()));
-            close_deadline = Some(Instant::now() + close_wait);
+            handshake = handshake.on(HandshakeEvent::ClientClose { code: *code, reason: reason.clone() }, close_wait);
             break;
         }
     }
@@ -1270,16 +1341,16 @@ where
         if let Some(e) = pending_error.take() {
             let st =
                 ErrorState { close: &mut close, failure: &mut failure, violation: &mut violation, write_interrupted: &write_interrupted };
-            classify_ws_error(e, st, &mut ws, &mut tr, peer_close_seen, &stats).await;
+            classify_ws_error(e, st, &mut ws, &mut tr, handshake.peer_close_seen(), &stats).await;
             break;
         }
-        let idle_deadline = if !interactive && client_close_sent.is_none() && !peer_close_seen { Some(last_inbound + idle) } else { None };
-        let want_cmd = interactive && client_close_sent.is_none() && !peer_close_seen;
+        let idle_deadline = if !interactive && handshake.is_open() { Some(last_inbound + idle) } else { None };
+        let want_cmd = interactive && handshake.is_open();
         let ev = tokio::select! {
             m = ws.next() => Ev::Inbound(m),
             c = next_cmd(&mut commands), if want_cmd => Ev::Cmd(c),
             _ = sleep_until_opt(idle_deadline) => Ev::Idle,
-            _ = sleep_until_opt(close_deadline) => Ev::CloseWait,
+            _ = sleep_until_opt(handshake.deadline()) => Ev::CloseWait,
             _ = sleep_until_opt(total_deadline) => Ev::Deadline,
             _ = cancel.cancelled() => Ev::Canceled,
         };
@@ -1299,37 +1370,27 @@ where
                     }
                     Message::Pong(p) => tr.control(Direction::Received, "pong", &p),
                     Message::Close(frame) => {
-                        peer_close_seen = true;
                         let (code, reason) = match frame {
                             Some(f) => (Some(u16::from(f.code)), f.reason.to_string()),
                             None => (None, String::new()),
                         };
                         let shown = format!("{} {}", code.map(|c| c.to_string()).unwrap_or_else(|| "(no code)".into()), reason);
                         tr.control(Direction::Received, "close", shown.trim().as_bytes());
-                        match &client_close_sent {
-                            Some((c, r)) => {
-                                close.get_or_insert(Close { code: Some(*c), reason: r.clone(), closed_by: ClosedBy::Client });
+                        match handshake.client_close() {
+                            Some(sent) => {
+                                close.get_or_insert(sent);
                             }
-                            None => {
-                                close = Some(Close { code, reason, closed_by: ClosedBy::Peer });
-                                close_deadline = Some(Instant::now() + close_wait);
-                            }
+                            None => close = Some(Close { code, reason, closed_by: ClosedBy::Peer }),
                         }
+                        handshake = handshake.on(HandshakeEvent::PeerClose, close_wait);
                     }
                     Message::Frame(_) => {}
                 }
-                if write_stop.is_none()
-                    && !interactive
-                    && expect > 0
-                    && tr.received_count() >= expect
-                    && client_close_sent.is_none()
-                    && !peer_close_seen
-                {
+                if write_stop.is_none() && !interactive && expect > 0 && tr.received_count() >= expect && handshake.is_open() {
                     match send_close_guarded(&mut ws, 1000, "", cancel, total_deadline, close_wait).await {
                         Wrote::Done => {
                             tr.control(Direction::Sent, "close", b"1000");
-                            client_close_sent = Some((1000, String::new()));
-                            close_deadline = Some(Instant::now() + close_wait);
+                            handshake = handshake.on(HandshakeEvent::ClientClose { code: 1000, reason: String::new() }, close_wait);
                         }
                         Wrote::Failed(e) => pending_error = Some(e),
                         Wrote::Stopped(s) => write_stop = Some(s),
@@ -1385,8 +1446,7 @@ where
                         let w = send_close_guarded(&mut ws, code, &reason, cancel, total_deadline, close_wait).await;
                         if matches!(w, Wrote::Done) {
                             tr.control(Direction::Sent, "close", format!("{code} {reason}").trim().as_bytes());
-                            client_close_sent = Some((code, reason));
-                            close_deadline = Some(Instant::now() + close_wait);
+                            handshake = handshake.on(HandshakeEvent::ClientClose { code, reason }, close_wait);
                         }
                         w
                     }
@@ -1395,8 +1455,8 @@ where
                         let w = send_close_guarded(&mut ws, 1000, "session ended", cancel, total_deadline, close_wait).await;
                         if matches!(w, Wrote::Done) {
                             tr.control(Direction::Sent, "close", b"1000 session ended");
-                            client_close_sent = Some((1000, "session ended".into()));
-                            close_deadline = Some(Instant::now() + close_wait);
+                            handshake =
+                                handshake.on(HandshakeEvent::ClientClose { code: 1000, reason: "session ended".into() }, close_wait);
                         }
                         w
                     }
@@ -1410,18 +1470,15 @@ where
             Ev::Idle => match send_close_guarded(&mut ws, 1000, "", cancel, total_deadline, close_wait).await {
                 Wrote::Done => {
                     tr.control(Direction::Sent, "close", b"1000 (idle)");
-                    client_close_sent = Some((1000, String::new()));
-                    close_deadline = Some(Instant::now() + close_wait);
+                    handshake = handshake.on(HandshakeEvent::ClientClose { code: 1000, reason: String::new() }, close_wait);
                 }
                 Wrote::Failed(e) => pending_error = Some(e),
                 Wrote::Stopped(s) => write_stop = Some(s),
             },
             Ev::CloseWait => {
                 if close.is_none() {
-                    close = Some(match &client_close_sent {
-                        Some((code, reason)) => Close { code: Some(*code), reason: reason.clone(), closed_by: ClosedBy::Client },
-                        None => Close { code: None, reason: String::new(), closed_by: ClosedBy::Peer },
-                    });
+                    close =
+                        Some(handshake.client_close().unwrap_or(Close { code: None, reason: String::new(), closed_by: ClosedBy::Peer }));
                 }
                 tr.note(
                     "close_incomplete",
@@ -1430,14 +1487,26 @@ where
                 break;
             }
             Ev::Deadline => {
-                // Its own short bound: the deadline has passed already.
-                if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "deadline"))).await.is_ok_and(|r| r.is_ok()) {
-                    tr.control(Direction::Sent, "close", b"1001 deadline");
+                if handshake.is_open() {
+                    // Its own short bound: the deadline has passed already.
+                    if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "deadline"))).await.is_ok_and(|r| r.is_ok()) {
+                        tr.control(Direction::Sent, "close", b"1001 deadline");
+                    } else {
+                        write_interrupted.cancel();
+                        tr.note("close_incomplete", "the Close frame could not be written at the deadline; the connection was dropped");
+                    }
+                    close.get_or_insert(Close { code: Some(1001), reason: "deadline".into(), closed_by: ClosedBy::Timeout });
                 } else {
-                    write_interrupted.cancel();
-                    tr.note("close_incomplete", "the Close frame could not be written at the deadline; the connection was dropped");
+                    // A Close frame went already: no second one is written,
+                    // and the close recorded is the one on the wire.
+                    tr.note(
+                        "close_incomplete",
+                        "the total deadline elapsed before the closing handshake finished; the connection was dropped",
+                    );
+                    if let Some(sent) = handshake.client_close() {
+                        close.get_or_insert(sent);
+                    }
                 }
-                close.get_or_insert(Close { code: Some(1001), reason: "deadline".into(), closed_by: ClosedBy::Timeout });
                 failure = Some(
                     TransportFailure::new(
                         Phase::Session,
@@ -1449,13 +1518,22 @@ where
                 break;
             }
             Ev::Canceled => {
-                if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "canceled"))).await.is_ok_and(|r| r.is_ok()) {
-                    tr.control(Direction::Sent, "close", b"1001 canceled");
+                if handshake.is_open() {
+                    if tokio::time::timeout(FINAL_CLOSE_WRITE, ws.send(close_frame(1001, "canceled"))).await.is_ok_and(|r| r.is_ok()) {
+                        tr.control(Direction::Sent, "close", b"1001 canceled");
+                    } else {
+                        write_interrupted.cancel();
+                        tr.note("close_incomplete", "the Close frame could not be written on cancel; the connection was dropped");
+                    }
+                    close.get_or_insert(Close { code: Some(1001), reason: "canceled".into(), closed_by: ClosedBy::Client });
                 } else {
-                    write_interrupted.cancel();
-                    tr.note("close_incomplete", "the Close frame could not be written on cancel; the connection was dropped");
+                    // A Close frame went already: no second one is written,
+                    // and the close recorded is the one on the wire.
+                    tr.note("close_incomplete", "canceled before the closing handshake finished; the connection was dropped");
+                    if let Some(sent) = handshake.client_close() {
+                        close.get_or_insert(sent);
+                    }
                 }
-                close.get_or_insert(Close { code: Some(1001), reason: "canceled".into(), closed_by: ClosedBy::Client });
                 failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the WebSocket session was canceled"));
                 break;
             }
@@ -1467,10 +1545,8 @@ where
     if write_interrupted.is_cancelled() {
         stats.request_abortive_close();
     }
-    let close = close.unwrap_or(match &client_close_sent {
-        Some((c, r)) => Close { code: Some(*c), reason: r.clone(), closed_by: ClosedBy::Client },
-        None => Close { code: None, reason: String::new(), closed_by: ClosedBy::NotClosed },
-    });
+    let close =
+        close.or_else(|| handshake.client_close()).unwrap_or(Close { code: None, reason: String::new(), closed_by: ClosedBy::NotClosed });
     rec.finish(
         s_idx,
         match &failure {
@@ -1907,6 +1983,55 @@ mod tests {
         assert!(t.messages.iter().any(|m| m.kind == "ping" && m.direction == Direction::Received));
         assert!(!t.messages.iter().any(|m| m.kind == "pong"), "the stalled Pong is not recorded as sent");
         drop(peer);
+    }
+
+    /// A peer that reads everything but never answers a Close frame.
+    fn silent_reader(mut peer: DuplexStream) {
+        tokio::spawn(async move {
+            let mut sink = vec![0u8; 4096];
+            while matches!(peer.read(&mut sink).await, Ok(n) if n > 0) {}
+        });
+    }
+
+    /// Cancel or the total deadline during the close wait ends the wait:
+    /// no second Close frame is attempted, nothing counts as an interrupted
+    /// write, and the recorded close is the one that went on the wire.
+    #[tokio::test]
+    async fn cancel_during_the_close_wait_keeps_the_close_that_was_sent() {
+        let (io, peer) = tokio::io::duplex(1024);
+        silent_reader(peer);
+        let mut plan = plan(vec![], None);
+        plan.idle_close_ms = 3_000;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(SessionCommand::Close { code: 4000, reason: "bye".into() }).await.unwrap();
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &cancel_after(300), Some(rx), interrupted.clone(), stats.clone()).await;
+        assert_eq!(failure(&out), Some(FailureKind::Canceled));
+        assert_eq!(closed(&out), (Some(4000), ClosedBy::Client), "the Close on the wire was 4000, not 1001");
+        assert!(!interrupted.is_cancelled(), "no write was interrupted");
+        assert!(!stats.abortive_close_requested(), "the connection is not reset");
+        let t = out.transcript.unwrap();
+        let sent_closes = t.messages.iter().filter(|m| m.kind == "close" && m.direction == Direction::Sent).count();
+        assert_eq!(sent_closes, 1, "{:?}", t.messages);
+        assert!(!t.messages.iter().any(|m| m.preview.contains("could not be written")), "no false write-failure note: {:?}", t.messages);
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn the_total_deadline_during_the_close_wait_keeps_the_close_that_was_sent() {
+        let (io, peer) = tokio::io::duplex(1024);
+        silent_reader(peer);
+        let mut plan = plan(vec![WsMessage::Close { code: 1000, reason: String::new() }], Some(300));
+        plan.idle_close_ms = 3_000;
+        let (interrupted, stats) = (CancellationToken::new(), crate::stats::ConnStats::new());
+        let out = session_with(io, &plan, &CancellationToken::new(), None, interrupted.clone(), stats.clone()).await;
+        assert_eq!(failure(&out), Some(FailureKind::TotalTimeout));
+        assert_eq!(closed(&out), (Some(1000), ClosedBy::Client), "the Close on the wire was 1000, not 1001");
+        assert!(!interrupted.is_cancelled(), "no write was interrupted");
+        assert!(!stats.abortive_close_requested(), "the connection is not reset");
+        let t = out.transcript.unwrap();
+        let sent_closes = t.messages.iter().filter(|m| m.kind == "close" && m.direction == Direction::Sent).count();
+        assert_eq!(sent_closes, 1, "{:?}", t.messages);
     }
 
     /// An unmasked text frame from the server that is not valid UTF-8.
