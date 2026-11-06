@@ -4,13 +4,15 @@
 //! as `Store::list_history` does.
 
 use anvil_domain::Id;
-use anvil_domain::execution::ExecutionListing;
+use anvil_domain::execution::{ExecutionListing, ExecutionRecord};
 use anvil_storage::store::{DB_FILE, HistoryEntry};
 use anvil_storage::{Key, Store, StoreError};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
-/// A record shaped like an `ExecutionRecord`, with bulk the listing skips.
+/// The listed fields of an `ExecutionRecord` and some bulk the listing skips,
+/// without the record's other required fields: a full `ExecutionRecord` does
+/// not decode from it.
 fn record(id: Id, ws: Id, request: Id, status: Option<u16>) -> Value {
     let mut v = json!({
         "id": id,
@@ -28,8 +30,14 @@ fn record(id: Id, ws: Id, request: Id, status: Option<u16>) -> Value {
     v
 }
 
-/// `(id, started_at, size, workspace, request)` of each entry, in order.
-fn keys(entries: impl IntoIterator<Item = HistoryEntry>) -> Vec<(String, i64, i64, Option<String>, Option<String>)> {
+/// `(id, started_at, size, workspace, request)` of an entry.
+type EntryKey = (String, i64, i64, Option<String>, Option<String>);
+
+/// A row's `(workspace_id, request_id, body_blob)` columns.
+type Indexes = (Option<String>, Option<String>, Option<String>);
+
+/// The [`EntryKey`] of each entry, in order.
+fn keys(entries: impl IntoIterator<Item = HistoryEntry>) -> Vec<EntryKey> {
     entries.into_iter().map(|h| (h.id, h.started_at, h.size, h.workspace_id, h.request_id)).collect()
 }
 
@@ -111,7 +119,7 @@ fn a_record_that_fails_its_integrity_check_still_fails_the_listing() {
         ("UPDATE history SET body_blob=?1 WHERE id=?2", None),
     ];
     for (edit, value) in edits {
-        let before: (Option<String>, Option<String>, Option<String>) =
+        let before: Indexes =
             f.db.query_row("SELECT workspace_id, request_id, body_blob FROM history WHERE id=?1", params![target], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
@@ -143,6 +151,19 @@ fn an_authentic_record_that_does_not_decode_is_reported_with_its_entry() {
     assert_eq!(listed[0].0.id, odd.to_string());
     assert!(matches!(listed[0].1, Err(StoreError::Serde(_))));
     assert!(listed[1..].iter().all(|(_, rec)| rec.is_ok()));
+}
+
+#[test]
+fn a_record_the_full_record_type_rejects_is_listed_from_its_listed_fields() {
+    let f = fixture();
+    // The listing decodes only what it shows, so a record it can show is
+    // listed even when opening it as a full record fails.
+    let listed = f.store.list_history_with::<ExecutionListing>(Some(&f.ws), None, 10).unwrap();
+    assert_eq!(listed.len(), 3);
+    for (h, rec) in listed {
+        assert!(rec.is_ok(), "{}", h.id);
+        assert!(matches!(f.store.get_history::<ExecutionRecord>(&h.id), Err(StoreError::Serde(_))), "{}", h.id);
+    }
 }
 
 #[test]

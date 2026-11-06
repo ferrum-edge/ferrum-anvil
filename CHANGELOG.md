@@ -48,8 +48,10 @@
 - Diagnostics catalog version 2026.11.03-1.
 - The History panel and `anvil history` decrypt each listed record once and read only the fields
   they show, instead of decrypting it again with its stored response body. The listing still
-  fails on a record that does not authenticate, naming it; a stored body that no longer opens
-  shows only when that entry is opened. No storage format change.
+  fails on a record that does not authenticate, naming it. Two kinds of entry the History panel
+  used to leave out (and `anvil history` failed on) are now listed, and fail only when opened:
+  one whose stored response body no longer opens, and an authentic record whose listed fields
+  decode but whose other fields do not. No storage format change.
 
 ### Removed
 

@@ -1808,7 +1808,10 @@ impl Store {
     /// when the record is opened with [`Store::get_history`]. A record that
     /// fails its integrity or owner check fails the whole listing, naming its
     /// id, as in [`Store::list_history`]; one that authenticates but does not
-    /// decode as `S` comes with that error and the caller decides.
+    /// decode as `S` comes with that error and the caller decides. Only `S`
+    /// is decoded, so a record that decodes as `S` is listed even when it
+    /// would not decode as the full record type: that, too, shows only when
+    /// the record is opened.
     pub fn list_history_with<S: DeserializeOwned>(
         &self,
         workspace_id: Option<&Id>,

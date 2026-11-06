@@ -1068,7 +1068,8 @@ pub async fn history_list(handle: AppHandle, workspace_id: String, request_id: O
         };
         let mut out = Vec::with_capacity(rows.len());
         for (h, rec) in rows {
-            // Authentic but not a readable record: left out.
+            // Authentic, but without the listed fields: left out. Only those
+            // are decoded; a record that fails elsewhere fails in `history_get`.
             let Ok(rec) = rec else { continue };
             out.push(HistoryItem {
                 id: h.id,

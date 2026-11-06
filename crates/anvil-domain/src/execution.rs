@@ -986,6 +986,8 @@ pub struct ExecutionRecord {
 /// the stored record without building the rest of it: serde skips the fields
 /// this does not name (attempts, headers, stream transcript, findings, ...).
 /// Each field keeps the name and requiredness it has in [`ExecutionRecord`].
+/// Only these fields are checked: a stored record that has them decodes as
+/// this even when another of its fields would fail [`ExecutionRecord`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ExecutionListing {
     #[serde(default)]
