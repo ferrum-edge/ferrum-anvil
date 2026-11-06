@@ -90,10 +90,10 @@ is refused before the live database is touched.
 
 An execution record seals its workspace and request ID; a load report seals
 its plan's workspace. Every read path compares them with the row's plaintext
-columns and refuses a mismatch: `get_history`, `list_history` and
-`history_entries`, `get_load_report`, `list_load_reports` and
-`load_report_entries`. Owner maps used by import and restore conflict checks
-therefore come from the sealed owner too.
+columns and refuses a mismatch: `get_history`, `list_history`,
+`list_history_with` and `history_entries`, `get_load_report`,
+`list_load_reports` and `load_report_entries`. Owner maps used by import and
+restore conflict checks therefore come from the sealed owner too.
 
 A history record's response body is stored as a separate blob, and the row
 names it in a plaintext `body_blob` column. Schema 3 seals the record under

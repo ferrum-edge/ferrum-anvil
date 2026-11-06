@@ -981,3 +981,39 @@ pub struct ExecutionRecord {
     pub extracted: Vec<String>,
     pub findings: Vec<DiagnosticFinding>,
 }
+
+/// The fields of an [`ExecutionRecord`] a history listing shows, decoded from
+/// the stored record without building the rest of it: serde skips the fields
+/// this does not name (attempts, headers, stream transcript, findings, ...).
+/// Each field keeps the name and requiredness it has in [`ExecutionRecord`].
+/// Only these fields are checked: a stored record that has them decodes as
+/// this even when another of its fields would fail [`ExecutionRecord`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ExecutionListing {
+    #[serde(default)]
+    pub request_id: Option<Id>,
+    pub started_at: DateTime<Utc>,
+    pub prepared: ListedPrepared,
+    #[serde(default)]
+    pub response: Option<ListedResponse>,
+    pub outcome: ListedOutcome,
+}
+
+/// [`PreparedSummary::method`] and [`PreparedSummary::url`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ListedPrepared {
+    pub method: String,
+    pub url: String,
+}
+
+/// [`ResponseRecord::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ListedResponse {
+    pub status: u16,
+}
+
+/// [`ExecutionOutcome::summary`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ListedOutcome {
+    pub summary: String,
+}

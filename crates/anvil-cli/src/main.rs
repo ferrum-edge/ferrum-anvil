@@ -1380,10 +1380,10 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 Some(w) => Some(app.find_workspace(w)?.meta.id),
                 None => None,
             };
-            for h in app.store.list_history(ws.as_ref(), None, *limit)? {
-                if let Some((rec, _)) = app.store.get_history::<anvil_domain::execution::ExecutionRecord>(&h.id)? {
-                    println!("{}  {}  {}", rec.started_at.format("%Y-%m-%d %H:%M:%S"), rec.prepared.url, rec.outcome.summary);
-                }
+            // Each record is decrypted once, by the listing; response bodies are not read.
+            for (_, rec) in app.store.list_history_with::<anvil_domain::execution::ExecutionListing>(ws.as_ref(), None, *limit)? {
+                let rec = rec?;
+                println!("{}  {}  {}", rec.started_at.format("%Y-%m-%d %H:%M:%S"), rec.prepared.url, rec.outcome.summary);
             }
             Ok(0)
         }

@@ -1800,6 +1800,28 @@ impl Store {
         Records { key, conn: &conn, manifest: None }.list_history(workspace_id, request_id, Some(limit))
     }
 
+    /// As [`Store::list_history`], in the same single pass, with each entry's
+    /// record decoded as `S` from the decryption that authenticated it, so a
+    /// listing needs no [`Store::get_history`] per entry. `S` is meant to be a
+    /// narrow view of the record: serde skips the fields it does not name. The
+    /// response body is never read, so a body that no longer opens shows only
+    /// when the record is opened with [`Store::get_history`]. A record that
+    /// fails its integrity or owner check fails the whole listing, naming its
+    /// id, as in [`Store::list_history`]; one that authenticates but does not
+    /// decode as `S` comes with that error and the caller decides. Only `S`
+    /// is decoded, so a record that decodes as `S` is listed even when it
+    /// would not decode as the full record type: that, too, shows only when
+    /// the record is opened.
+    pub fn list_history_with<S: DeserializeOwned>(
+        &self,
+        workspace_id: Option<&Id>,
+        request_id: Option<&Id>,
+        limit: usize,
+    ) -> Result<Vec<(HistoryEntry, Result<S>)>> {
+        let (conn, key) = self.sealing()?;
+        Records { key, conn: &conn, manifest: None }.list_history_with(workspace_id, request_id, Some(limit))
+    }
+
     pub fn get_history<T: DeserializeOwned>(&self, id: &str) -> Result<Option<HistoryRecord<T>>> {
         let (conn, key) = self.sealing()?;
         Records { key, conn: &conn, manifest: None }.get_history(id)
@@ -2878,6 +2900,32 @@ impl Records<'_> {
     /// record under an owner it does not have. An entry that fails names its
     /// id.
     fn list_history(&self, workspace_id: Option<&Id>, request_id: Option<&Id>, limit: Option<usize>) -> Result<Vec<HistoryEntry>> {
+        self.scan_history(workspace_id, request_id, limit, |entry, _| entry)
+    }
+
+    /// As [`Records::list_history`], each entry with its record decoded as
+    /// `S` from the plaintext that authenticated it (see
+    /// [`Store::list_history_with`]).
+    fn list_history_with<S: DeserializeOwned>(
+        &self,
+        workspace_id: Option<&Id>,
+        request_id: Option<&Id>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(HistoryEntry, Result<S>)>> {
+        self.scan_history(workspace_id, request_id, limit, |entry, pt| (entry, serde_json::from_slice(pt).map_err(StoreError::from)))
+    }
+
+    /// The listing behind [`Records::list_history`]: each row is opened once
+    /// with [`Records::open_history`] and handed to `each` with its decrypted
+    /// record, which is zeroized when `each` returns. The response body is
+    /// never read.
+    fn scan_history<R>(
+        &self,
+        workspace_id: Option<&Id>,
+        request_id: Option<&Id>,
+        limit: Option<usize>,
+        mut each: impl FnMut(HistoryEntry, &[u8]) -> R,
+    ) -> Result<Vec<R>> {
         // SQLite treats a negative LIMIT as no limit.
         let limit = limit.map(|l| i64::try_from(l).unwrap_or(i64::MAX)).unwrap_or(-1);
         let filter = "(?1 IS NULL OR workspace_id=?1) AND (?2 IS NULL OR request_id=?2)";
@@ -2889,9 +2937,9 @@ impl Records<'_> {
         // One row in memory at a time.
         for row in rows {
             let row = row?;
-            self.open_history(&row).map_err(|e| row_integrity("history record", &row.id, e))?;
+            let pt = self.open_history(&row).map_err(|e| row_integrity("history record", &row.id, e))?;
             let HistoryRow { id, workspace_id, request_id, started_at, size, .. } = row;
-            out.push(HistoryEntry { id, workspace_id, request_id, started_at, size });
+            out.push(each(HistoryEntry { id, workspace_id, request_id, started_at, size }, pt.as_slice()));
         }
         Ok(out)
     }
