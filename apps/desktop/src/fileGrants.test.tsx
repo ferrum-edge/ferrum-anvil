@@ -16,6 +16,7 @@ import { AuthEditor, PemFromFile } from "./AuthEditor";
 
 const GRANT = { token: "fg-0123456789abcdef0123456789abcdef", file_name: "ca.pem" };
 const SECRET = { id: "secret-id", label: "key.pem" };
+const CHOOSER_SIGNATURE_ARGUMENT = /purpose|options|title|path/;
 const CERTIFICATE = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n";
 
 function tlsProfile(): TlsProfile {
@@ -219,7 +220,7 @@ describe("file grants in the renderer", () => {
     ]) {
       const command = dialogs.split(`pub async fn ${name}(`)[1].split("\n}")[0];
       const signature = command.split(") ->")[0];
-      expect(signature).not.toMatch(/purpose|options|title|path/);
+      expect(signature).not.toMatch(CHOOSER_SIGNATURE_ARGUMENT);
       expect(command).toContain(`FilePurpose::${purpose}`);
       expect(registration).toContain(`cmd_files::${name},`);
     }

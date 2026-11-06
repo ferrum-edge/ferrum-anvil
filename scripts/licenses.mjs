@@ -39,7 +39,6 @@ const SLASH = /\//g;
 const SPDX_TOKEN = /\(|\)|[^\s()]+/g;
 const NOTICE_FILE = /^NOTICE/i;
 const NODE_MODULES_PREFIX = /^.*node_modules\//;
-const PIPE = /\|/g;
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const jsonAt = args.indexOf("--json");
@@ -186,7 +185,7 @@ function render(rust, npm, pol) {
   const summary = new Map();
   for (const c of all) summary.set(c.license ?? "(none declared)", (summary.get(c.license ?? "(none declared)") ?? 0) + 1);
   const exceptionRows = rust.filter((c) => pol.exceptions.has(c.name));
-  const esc = (s) => String(s).replace(PIPE, "\\|");
+  const esc = (s) => String(s).replace(/\|/g, "\\|");
   const table = (rows) =>
     ["| Component | Version | License | Source |", "| --- | --- | --- | --- |", ...rows.map((c) => `| ${esc(c.name)} | ${esc(c.version)} | ${esc(c.license ?? "(none declared)")} | ${c.source} |`)].join("\n");
   const lines = [
