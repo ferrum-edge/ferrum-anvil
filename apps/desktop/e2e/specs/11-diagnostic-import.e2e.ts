@@ -21,10 +21,12 @@ const forged = readFileSync(
 const preview = (text: string) =>
   invoke<ImportedDiagnosticPreview>("diagnostic_import_preview", { input: { text } });
 
+const UNIX_NANO_TIMESTAMP = /"(?:start|end)_unix_nano"\s*:\s*(\d+)/g;
+
 // Compare numeric lexemes as strings, including every long timestamp in the
 // actual exporter capture. Neither this check nor the renderer parses them.
 function timestamps(text: string): string[] {
-  return Array.from(text.matchAll(/"(?:start|end)_unix_nano"\s*:\s*(\d+)/g), (m) => m[1]);
+  return Array.from(text.matchAll(UNIX_NANO_TIMESTAMP), (m) => m[1]);
 }
 
 // Hash the throw-away profile's persisted bytes, including encrypted vault,

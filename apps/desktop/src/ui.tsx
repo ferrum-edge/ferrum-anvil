@@ -32,8 +32,10 @@ export function fmtAgo(ms: number, now = Date.now()): string {
   return new Date(ms).toLocaleDateString();
 }
 
+const UNDERSCORES = /_/g;
+
 export function humanize(s: string): string {
-  return s.replace(/_/g, " ");
+  return s.replace(UNDERSCORES, " ");
 }
 
 /** The platform's shortcut modifier, as its keycap shows it. */

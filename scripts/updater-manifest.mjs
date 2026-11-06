@@ -33,10 +33,13 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // ------------------------------------------------------------ minisign
+const LINE_BREAK = /\r?\n/;
+const LEADING_V = /^v/;
+const ISO_MILLISECONDS = /\.\d{3}Z$/;
 const b64 = (s) => Buffer.from(s.trim(), "base64");
 const lines = (text) =>
   text
-    .split(/\r?\n/)
+    .split(LINE_BREAK)
     .map((l) => l.trim())
     .filter(Boolean);
 
@@ -83,19 +86,24 @@ export const signedVersion = (trusted) =>
     ?.slice("version:".length) ?? null;
 
 // ------------------------------------------------------------ discovery
+const DARWIN_TARGET = /apple-darwin/;
+const WINDOWS_TARGET = /windows/;
+const LINUX_TARGET = /linux/;
+// [payload file name, manifest os, installer key, also listed under the generic `<os>-<arch>` key]
+const UPDATER_RULES = [
+  [/\.app\.tar\.gz$/, "darwin", "app", true],
+  [/\.AppImage$/, "linux", "appimage", false],
+  [/-setup\.exe$/, "windows", "nsis", false],
+  [/\.msi$/, "windows", "msi", false],
+];
+
 /** Updater payloads in one target directory, with their manifest platform keys. */
 export function updaterArtifacts(dir, target) {
   const arch = target.split("-")[0];
-  const os = /apple-darwin/.test(target) ? "darwin" : /windows/.test(target) ? "windows" : /linux/.test(target) ? "linux" : null;
-  const rules = [
-    [/\.app\.tar\.gz$/, "darwin", "app", true],
-    [/\.AppImage$/, "linux", "appimage", false],
-    [/-setup\.exe$/, "windows", "nsis", false],
-    [/\.msi$/, "windows", "msi", false],
-  ];
+  const os = DARWIN_TARGET.test(target) ? "darwin" : WINDOWS_TARGET.test(target) ? "windows" : LINUX_TARGET.test(target) ? "linux" : null;
   const found = [];
   for (const name of readdirSync(dir).sort()) {
-    const rule = rules.find(([re, o]) => re.test(name) && o === os);
+    const rule = UPDATER_RULES.find(([re, o]) => re.test(name) && o === os);
     if (!rule || !existsSync(join(dir, `${name}.sig`))) continue;
     const [, , installer, generic] = rule;
     const keys = [`${os}-${arch}-${installer}`];
@@ -133,7 +141,7 @@ export function builtPubkey(targets) {
 export function checkSignedVersion(trusted, version) {
   const sv = signedVersion(trusted);
   if (sv === null) throw new Error("the signature records no version (the app requires a signed version)");
-  if (sv.replace(/^v/, "") !== version) throw new Error(`signed for version ${sv}, not ${version}`);
+  if (sv.replace(LEADING_V, "") !== version) throw new Error(`signed for version ${sv}, not ${version}`);
 }
 
 export function targetDirs(dist) {
@@ -206,7 +214,7 @@ function main() {
   const manifest = {
     version,
     notes: `Ferrum Anvil ${version}. Release notes: https://github.com/${repo}/releases/tag/${tag}`,
-    pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    pub_date: new Date().toISOString().replace(ISO_MILLISECONDS, "Z"),
     platforms: Object.fromEntries(Object.entries(platforms).sort(([a], [b]) => a.localeCompare(b))),
   };
   writeFileSync(out, JSON.stringify(manifest, null, 2) + "\n");

@@ -271,6 +271,8 @@ test("an incomplete check without errors is not reported as meeting the standard
     { unresolved_ref_count: 3, unresolved_refs: ["other.yaml#/Pet"] },
     { examples_not_checked: 2 },
   ];
+  const meetsEveryRule = /meets every rule in effect/;
+  const notKnownToMeet = /were not checked \(see below\), so it is not known to meet every rule/;
   for (const left of unchecked) {
     backend({
       standards_lint: () => ({ ...report(), counts: { error: 0, warn: 0, info: 0, hint: 0 }, findings: [], ...left }),
@@ -279,8 +281,8 @@ test("an incomplete check without errors is not reported as meeting the standard
     fireEvent.click(await screen.findByText("Orders"));
     expect(await screen.findByText("not completely checked")).toBeTruthy();
     expect(screen.queryByText("meets the standards")).toBeNull();
-    expect(screen.queryByText(/meets every rule in effect/)).toBeNull();
-    expect(screen.getByText(/were not checked \(see below\), so it is not known to meet every rule/)).toBeTruthy();
+    expect(screen.queryByText(meetsEveryRule)).toBeNull();
+    expect(screen.getByText(notKnownToMeet)).toBeTruthy();
     cleanup();
     invoke.mockReset();
   }
@@ -296,5 +298,5 @@ test("an incomplete check without errors is not reported as meeting the standard
   render(<ContractView workspaceId="A" notify={notify} />);
   fireEvent.click(await screen.findByText("Orders"));
   expect(await screen.findByText("meets the standards")).toBeTruthy();
-  expect(screen.getByText(/meets every rule in effect/)).toBeTruthy();
+  expect(screen.getByText(meetsEveryRule)).toBeTruthy();
 });

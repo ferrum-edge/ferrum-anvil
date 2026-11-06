@@ -401,12 +401,13 @@ describe("choosing a new location for a linked file", () => {
   const relocateButton = () => screen.queryByRole("button", { name: /Choose new location…/ });
 
   it("is offered for a file not chosen here, or missing or changed, where the saved request can be reloaded", async () => {
+    const relocateHint = /Choose new location… changes this request to name it/;
     for (const state of ["unbound", "invalid"] as const) {
       backend([{ path: PATH, state, problem: state === "invalid" ? "the file is no longer at this path" : undefined }]);
       render(<LinkedFileBinding referrer={REQUEST} path={PATH} onRelocated={() => {}} />);
       await screen.findByTestId("linked-file-state");
       expect(relocateButton()).toBeTruthy();
-      expect(screen.getByTestId("linked-file").textContent).toMatch(/Choose new location… changes this request to name it/);
+      expect(screen.getByTestId("linked-file").textContent).toMatch(relocateHint);
       cleanup();
       invoke.mockReset();
     }

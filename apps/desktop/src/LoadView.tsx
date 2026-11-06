@@ -1137,6 +1137,8 @@ function Timeline({ buckets }: { buckets: TimeBucket[] }) {
 
 // --------------------------------------------------------------- report
 
+const NON_FILE_NAME_CHARS = /[^\w.-]+/g;
+
 export function ReportView(props: { runId: string; reports: LoadReportSummary[]; notify: (m: string) => void; onDeleted: () => void }) {
   const [r, setR] = useState<LoadReport | null>(null);
   const [cmpWith, setCmpWith] = useState("");
@@ -1151,7 +1153,7 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
   const exportAs = async (format: "json" | "csv" | "timeline_csv" | "html") => {
     const ext = format === "html" ? "html" : format === "json" ? "json" : "csv";
     const file = await api.chooseFile("load_report_export", {
-      file_name: `anvil-load-${r.plan.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
+      file_name: `anvil-load-${r.plan.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
     });
     if (!file) return;
     const n = await api.exportLoadReport(r.run_id, format, file.token);

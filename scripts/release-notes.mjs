@@ -35,10 +35,23 @@ const DRAFT_MARKER = new RegExp(DRAFT_TEXT, "i");
 // The ### headings a version section may use: Keep a Changelog's and Breaking.
 // A heading is matched on its first word, so "Breaking changes" is Breaking.
 export const HEADINGS = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security", "Breaking"];
-const headingKind = (h) => HEADINGS.find((k) => new RegExp(`^${k}\\b`, "i").test(h));
+const HEADING_PATTERNS = HEADINGS.map((k) => [k, new RegExp(`^${k}\\b`, "i")]);
+const headingKind = (h) => HEADING_PATTERNS.find(([, re]) => re.test(h))?.[0];
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s/;
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const LINE_BREAK = /\r?\n/;
+const VERSION_HEADING_LINE = /^## /;
+const SUBHEADING_LINE = /^### /;
+// A relative Markdown link target (not a URL with a scheme, an anchor or an absolute path).
+const RELATIVE_LINK = /\]\((?![A-Za-z][A-Za-z0-9+.-]*:|[#/])(?:\.\/)?([^()\s]+)\)/g;
+const SUMMARY_LEAD = /^([A-Z][A-Za-z ,-]{0,80} release): ([\s\S]*)$/;
+const LEADING_LOWERCASE = /^[a-z]/;
+const UPDATER_KEY_ID = /^[0-9A-F]{16}$/;
+const REPOSITORY_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+const HTTPS_URL = /^https:\/\/[^\s()<>[\]]+$/;
+const REGEXP_SPECIAL = /[.*+?^${}()|[\]\\]/g;
+const escapeRegExp = (s) => s.replace(REGEXP_SPECIAL, "\\$&");
 
 // Blank-line separated Markdown blocks. GitHub keeps line breaks in a release
 // body, so hard-wrapped lines are joined; list items stay one per line (with
@@ -66,14 +79,14 @@ export function blocks(lines) {
 // Breaking section(s).
 export function changelogSection(text, version) {
   if (!VERSION.test(version)) throw new Error(`invalid version ${JSON.stringify(version)}`);
-  const lines = text.split(/\r?\n/);
+  const lines = text.split(LINE_BREAK);
   const heading = new RegExp(`^## \\[${escapeRegExp(version)}\\](?:\\s|$)`);
   const start = lines.findIndex((l) => heading.test(l));
   if (start < 0) throw new Error(`CHANGELOG.md has no "## [${version}]" section`);
-  let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
+  let end = lines.findIndex((l, i) => i > start && VERSION_HEADING_LINE.test(l));
   if (end < 0) end = lines.length;
   const body = lines.slice(start + 1, end);
-  const at = body.flatMap((l, i) => (/^### /.test(l) ? [i] : []));
+  const at = body.flatMap((l, i) => (SUBHEADING_LINE.test(l) ? [i] : []));
   const headings = at.map((i) => body[i].slice(4).trim());
   for (const h of headings) {
     if (!headingKind(h)) {
@@ -99,14 +112,14 @@ export function changelogSection(text, version) {
 // Relative Markdown links in CHANGELOG text resolve against `base` (the
 // repository at the tag); a release page would otherwise resolve them wrongly.
 export function absoluteLinks(text, base) {
-  return text.replace(/\]\((?![A-Za-z][A-Za-z0-9+.-]*:|[#/])(?:\.\/)?([^()\s]+)\)/g, (_, path) => `](${base}/${path})`);
+  return text.replace(RELATIVE_LINK, (_, path) => `](${base}/${path})`);
 }
 
 // "Compatibility release: Anvil adopts ..." -> "**Compatibility release.** Anvil adopts ..."
 export function summaryParagraph(paragraph) {
-  const m = /^([A-Z][A-Za-z ,-]{0,80} release): ([\s\S]*)$/.exec(paragraph);
+  const m = SUMMARY_LEAD.exec(paragraph);
   if (!m) return paragraph;
-  const rest = m[2].replace(/^[a-z]/, (c) => c.toUpperCase());
+  const rest = m[2].replace(LEADING_LOWERCASE, (c) => c.toUpperCase());
   return `**${m[1]}.** ${rest}`;
 }
 
@@ -134,17 +147,17 @@ export function checkEvidence(evidence, version) {
   }
   if (
     typeof updater.signed !== "boolean" ||
-    !(updater.key_id === null || (typeof updater.key_id === "string" && /^[0-9A-F]{16}$/.test(updater.key_id))) ||
+    !(updater.key_id === null || (typeof updater.key_id === "string" && UPDATER_KEY_ID.test(updater.key_id))) ||
     (updater.signed && updater.key_id === null)
   ) {
     throw new Error("release evidence updater has an invalid shape");
   }
   const repository = evidence.source?.repository;
-  if (typeof repository !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+  if (typeof repository !== "string" || !REPOSITORY_SLUG.test(repository)) {
     throw new Error("release evidence source.repository is missing or invalid");
   }
   const commit = evidence.source?.commit;
-  if (typeof commit !== "string" || !/^[0-9a-f]{40}$/.test(commit)) {
+  if (typeof commit !== "string" || !COMMIT_SHA.test(commit)) {
     throw new Error("release evidence source.commit is missing or invalid");
   }
   const runId = evidence.build?.run_id;
@@ -152,7 +165,7 @@ export function checkEvidence(evidence, version) {
     throw new Error("release evidence build.run_id is missing or invalid");
   }
   const runUrl = evidence.build?.run_url;
-  if (typeof runUrl !== "string" || !runUrl.endsWith(`/${repository}/actions/runs/${runId}`) || !/^https:\/\/[^\s()<>[\]]+$/.test(runUrl)) {
+  if (typeof runUrl !== "string" || !runUrl.endsWith(`/${repository}/actions/runs/${runId}`) || !HTTPS_URL.test(runUrl)) {
     throw new Error("release evidence build.run_url is missing or invalid");
   }
   return { repository, commit, runId, runUrl, server: runUrl.slice(0, -`/${repository}/actions/runs/${runId}`.length) };

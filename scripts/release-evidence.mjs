@@ -47,15 +47,24 @@ const META = new Set(["build-info.json"]);
 const sha256 = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
 
+const SBOM_FILE = /\.cdx\.json$/;
+const RELEASE_CHECK_FILE = /^release-check-.*\.json$/;
+const CLI_FILE = /^anvil-cli-/;
+const SIGNATURE_FILE = /\.sig$/;
+const UPDATER_BUNDLE_FILE = /\.app\.tar\.gz$/;
+const INSTALLER_FILE = /\.(dmg|msi|deb|rpm|AppImage)$/;
+const NSIS_INSTALLER_FILE = /-setup\.exe$/;
+const WHITESPACE = /\s+/;
+
 function kind(name) {
-  if (/\.cdx\.json$/.test(name)) return "sbom";
-  if (/^release-check-.*\.json$/.test(name)) return "release-check-report";
+  if (SBOM_FILE.test(name)) return "sbom";
+  if (RELEASE_CHECK_FILE.test(name)) return "release-check-report";
   if (name === "license-report.json") return "license-report";
-  if (/^anvil-cli-/.test(name)) return "cli";
+  if (CLI_FILE.test(name)) return "cli";
   if (name === "latest.json") return "updater-manifest";
-  if (/\.sig$/.test(name)) return "updater-signature";
-  if (/\.app\.tar\.gz$/.test(name)) return "updater-bundle";
-  if (/\.(dmg|msi|deb|rpm|AppImage)$/.test(name) || /-setup\.exe$/.test(name)) return "desktop-installer";
+  if (SIGNATURE_FILE.test(name)) return "updater-signature";
+  if (UPDATER_BUNDLE_FILE.test(name)) return "updater-bundle";
+  if (INSTALLER_FILE.test(name) || NSIS_INSTALLER_FILE.test(name)) return "desktop-installer";
   return "other";
 }
 
@@ -92,7 +101,7 @@ const readLock = (file) =>
     readFileSync(file, "utf8")
       .split("\n")
       .filter((l) => l.trim() && !l.startsWith("#"))
-      .map((l) => l.trim().split(/\s+/)),
+      .map((l) => l.trim().split(WHITESPACE)),
   );
 const lock = readLock(join(root, "lab/gateway/RELEASE.lock"));
 // Every release the lab can run (`anvil-lab --release <tag>`), default pin included.

@@ -5,6 +5,8 @@ import type { SessionCommand, StreamMessage } from "./api";
 import { Icon } from "./icons";
 import { fmtBytes, fmtUs } from "./ui";
 
+const WHITESPACE = /\s+/g;
+
 export function SessionConsole(props: {
   protocol: string;
   messages: StreamMessage[];
@@ -30,7 +32,7 @@ export function SessionConsole(props: {
   };
   const send = async () => {
     if (!text) return;
-    await run(hex ? { command: "send_binary_hex", hex: text.replace(/\s+/g, "") } : { command: "send_text", text });
+    await run(hex ? { command: "send_binary_hex", hex: text.replace(WHITESPACE, "") } : { command: "send_text", text });
     setText("");
   };
   return (

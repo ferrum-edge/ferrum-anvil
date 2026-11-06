@@ -4,9 +4,11 @@
 import { $, expect } from "@wdio/globals";
 import { dimension, type Fixture, newRequest, responseTab, screenshot, send, setUrl, startJsonFixture, waitForWorkbench } from "../helpers";
 
+const TRAILING_SLASHES = /\/+$/;
+
 describe("HTTP request — success", () => {
   let fixture: Fixture | null = null;
-  const gateway = process.env.ANVIL_E2E_GATEWAY?.replace(/\/+$/, "");
+  const gateway = process.env.ANVIL_E2E_GATEWAY?.replace(TRAILING_SLASHES, "");
 
   before(async () => {
     if (!gateway) fixture = await startJsonFixture();

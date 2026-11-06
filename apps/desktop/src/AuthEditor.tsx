@@ -547,6 +547,8 @@ export function PemFromFile(props: { label: string; workspaceId: string | null; 
   );
 }
 
+const UNDERSCORES = /_/g;
+
 function JwtInspectButton() {
   const [openDlg, setOpen] = useState(false);
   const [token, setToken] = useState("");
@@ -579,7 +581,7 @@ function JwtInspectButton() {
           {res && (
             <div className="col">
               <div className="row">
-                <span className={`badge ${res.time_status === "valid" || res.time_status === "no_expiry" ? "ok" : "bad"}`}>{res.time_status.replace(/_/g, " ")}</span>
+                <span className={`badge ${res.time_status === "valid" || res.time_status === "no_expiry" ? "ok" : "bad"}`}>{res.time_status.replace(UNDERSCORES, " ")}</span>
                 <span className="badge">signature not verified</span>
               </div>
               <pre className="code">{JSON.stringify(res.header, null, 2)}</pre>

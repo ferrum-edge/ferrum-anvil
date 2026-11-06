@@ -5,6 +5,8 @@ import {
   type ImportedDiagnosticPreview,
 } from "./diagnosticImportSource";
 
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/g;
+
 export function DiagnosticImport() {
   const [text, setText] = useState("");
   const [preview, setPreview] = useState<ImportedDiagnosticPreview | null>(null);
@@ -19,7 +21,7 @@ export function DiagnosticImport() {
   );
   const reported = preview?.reported_json ?? "";
   const displayLimit = 64 * 1024;
-  const escaped = reported.replace(/[\u202a-\u202e\u2066-\u2069]/g, (c) =>
+  const escaped = reported.replace(BIDI_CONTROLS, (c) =>
     `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
   const reportedBytes = new TextEncoder().encode(escaped);

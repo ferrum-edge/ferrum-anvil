@@ -42,6 +42,8 @@ function argKeys(): string[] {
   );
 }
 
+const DIALOG_PLUGIN_IMPORT = /import\s*\{([^}]*)\}\s*from\s*"@tauri-apps\/plugin-dialog"/g;
+
 describe("file grants in the renderer", () => {
   it("asks the backend for the dialog and returns its grant", async () => {
     invoke.mockResolvedValueOnce([GRANT]);
@@ -242,7 +244,7 @@ describe("file grants in the renderer", () => {
     const sources = import.meta.glob(["./*.tsx", "./*.ts", "!./*.test.tsx", "!./*.test.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
     const importers: Record<string, string[]> = {};
     for (const [file, text] of Object.entries(sources)) {
-      for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*"@tauri-apps\/plugin-dialog"/g)) {
+      for (const m of text.matchAll(DIALOG_PLUGIN_IMPORT)) {
         importers[file] = m[1].split(",").map((s) => s.trim()).filter(Boolean);
       }
     }

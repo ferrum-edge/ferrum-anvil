@@ -276,6 +276,8 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
   );
 }
 
+const FILE_EXTENSION = /\.[^.]+$/;
+
 function LintPage(props: { target: LintTarget; fileName: string; notify: (m: string) => void }) {
   const [report, setReport] = useState<LintReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -300,7 +302,7 @@ function LintPage(props: { target: LintTarget; fileName: string; notify: (m: str
   const findings = useMemo(() => (report ? report.findings.filter((f) => filter === "all" || f.severity === filter) : []), [report, filter]);
   const exportAs = async (format: "json" | "sarif") => {
     try {
-      const base = props.fileName.replace(/\.[^.]+$/, "") || "spec";
+      const base = props.fileName.replace(FILE_EXTENSION, "") || "spec";
       const file = await api.chooseFile("lint_report_export", { file_name: `${base}.standards.${format === "sarif" ? "sarif" : "json"}` });
       if (!file) return;
       await api.exportLintReport(props.target, format, props.fileName, file.token);
@@ -454,9 +456,11 @@ function LintFindingCard({ f }: { f: LintFinding }) {
   );
 }
 
+const CODE_SPAN = /(`[^`]+`)/;
+
 /** Ruleset text with `backticks` shown as code (the text itself stays inert). */
 function withCode(text: string) {
-  return text.split(/(`[^`]+`)/).map((part, i) => (part.length > 2 && part.startsWith("`") && part.endsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : part));
+  return text.split(CODE_SPAN).map((part, i) => (part.length > 2 && part.startsWith("`") && part.endsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : part));
 }
 
 function RulesPage(props: { view: StandardsView }) {

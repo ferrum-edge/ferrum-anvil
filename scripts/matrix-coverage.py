@@ -68,6 +68,10 @@ def id_patterns(case_id: str):
 # A line that defines a test: a Rust function, or a describe/it/test call
 # (comment lines never do).
 TEST_DEFINITION = re.compile(r"\bfn\s+\w+|\b(?:describe|it|test)(?:\.\w+)?\s*\(")
+# Lines that can carry evidence outside test files: a Rust function, and in the
+# lab also a scenario id or a skipped scenario.
+RUST_FN = re.compile(r"\bfn\s+\w+")
+LAB_DEFINITION = re.compile(r'id:\s*"|fn\s+\w+|skipped\(')
 
 
 def defined_kinds(refs):
@@ -93,9 +97,9 @@ def scan(cases):
         for i, line in enumerate(lines, 1):
             # Outside test files, only test function names and lab scenario
             # definitions count as evidence (not comments in product code).
-            if kind == "unit_test" and not re.search(r"\bfn\s+\w+", line):
+            if kind == "unit_test" and not RUST_FN.search(line):
                 continue
-            if kind == "lab" and not re.search(r'id:\s*"|fn\s+\w+|skipped\(', line):
+            if kind == "lab" and not LAB_DEFINITION.search(line):
                 continue
             for cid, ps in pats.items():
                 if any(p.search(line) for p in ps):
