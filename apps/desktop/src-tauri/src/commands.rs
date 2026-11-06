@@ -14,7 +14,7 @@ use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
-use anvil_domain::execution::ExecutionRecord;
+use anvil_domain::execution::{ExecutionListing, ExecutionRecord};
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SecretRef;
@@ -1049,29 +1049,34 @@ pub struct HistoryItem {
     pub request_id: Option<String>,
 }
 
-/// Decrypts up to 500 records, on a blocking thread (see [`blocking`]).
+/// Decrypts up to 500 records, each once, on a blocking thread (see
+/// [`blocking`]).
 #[tauri::command]
 pub async fn history_list(handle: AppHandle, workspace_id: String, request_id: Option<String>, limit: usize) -> R<Vec<HistoryItem>> {
     blocking(&handle, move |st| {
         let app = st.app()?;
         let ws = id(&workspace_id)?;
         let rid = request_id.as_deref().map(id).transpose()?;
-        let mut out = Vec::new();
-        for h in app.store.list_history(Some(&ws), rid.as_ref(), limit.min(500)).map_err(|x| x.to_string())? {
-            let rec = match app.store.get_history::<ExecutionRecord>(&h.id) {
-                Ok(Some((rec, _))) => rec,
-                // Locked midway: no partial list.
-                Err(StoreError::Locked) => return Err("LOCKED".into()),
-                // Removed meanwhile, or unreadable: left out.
-                Ok(None) | Err(_) => continue,
-            };
+        // The listing's own decryption yields the listed fields, so neither
+        // the full record nor its response body is read. One pass under one
+        // key: locked, there is no partial list; a record that fails its
+        // integrity check fails the listing, naming it.
+        let rows = match app.store.list_history_with::<ExecutionListing>(Some(&ws), rid.as_ref(), limit.min(500)) {
+            Ok(rows) => rows,
+            Err(StoreError::Locked) => return Err("LOCKED".into()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (h, rec) in rows {
+            // Authentic but not a readable record: left out.
+            let Ok(rec) = rec else { continue };
             out.push(HistoryItem {
                 id: h.id,
                 started_at: h.started_at,
-                method: rec.prepared.method.clone(),
-                url: rec.prepared.url.clone(),
-                summary: rec.outcome.summary.clone(),
-                status: rec.response.as_ref().map(|r| r.status),
+                method: rec.prepared.method,
+                url: rec.prepared.url,
+                summary: rec.outcome.summary,
+                status: rec.response.map(|r| r.status),
                 request_id: rec.request_id.map(|r| r.to_string()),
             });
         }

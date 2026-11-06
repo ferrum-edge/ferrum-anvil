@@ -46,6 +46,10 @@
   with its own echo fixture, because v0.9.17 refuses a bare CONNECT to the HTTP port 17801. Each
   earlier release keeps its own expectations.
 - Diagnostics catalog version 2026.11.03-1.
+- The History panel and `anvil history` decrypt each listed record once and read only the fields
+  they show, instead of decrypting it again with its stored response body. The listing still
+  fails on a record that does not authenticate, naming it; a stored body that no longer opens
+  shows only when that entry is opened. No storage format change.
 
 ### Removed
 
