@@ -17,15 +17,20 @@ interface Socket {
   remote: string | null;
 }
 
+const WHITESPACE = /\s+/;
+const LINE_BREAK = /\r?\n/;
+// The parenthesized state lsof appends to a socket name, e.g. " (LISTEN)".
+const LSOF_STATE_SUFFIX = /\s*\(.*\)$/;
+
 function appPid(): string {
   const port = process.env.ANVIL_E2E_WD_PORT ?? "";
   if (process.platform === "win32") {
     const out = execFileSync("powershell", ["-NoProfile", "-Command", `(Get-NetTCPConnection -LocalPort ${port} -State Listen).OwningProcess`], {
       encoding: "utf8",
     });
-    return out.trim().split(/\s+/)[0];
+    return out.trim().split(WHITESPACE)[0];
   }
-  return execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).trim().split(/\s+/)[0];
+  return execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).trim().split(WHITESPACE)[0];
 }
 
 function sockets(pid: string): Socket[] {
@@ -46,7 +51,7 @@ function sockets(pid: string): Socket[] {
     if (r.status !== 0) throw new Error(`socket query failed (${r.status}): ${r.stderr}`);
     return (
       r.stdout
-        .split(/\r?\n/)
+        .split(LINE_BREAK)
         .filter(Boolean)
         // "Bound" is Windows' listing of a socket that has a local port but no
         // connection yet (an outgoing connect shows up this way next to its
@@ -71,14 +76,15 @@ function sockets(pid: string): Socket[] {
     .slice(1)
     .filter(Boolean)
     .map((line) => {
-      const name = line.split(/\s+/).slice(8).join(" ").replace(/\s*\(.*\)$/, "");
+      const name = line.split(WHITESPACE).slice(8).join(" ").replace(LSOF_STATE_SUFFIX, "");
       const [local, remote] = name.split("->");
       return { line, local, remote: remote ?? null };
     });
 }
 
 const LOOPBACK = /^(127\.\d+\.\d+\.\d+|\[::1\]|::1|localhost)(:\d+)?$/;
-const hostPort = (s: string) => s.replace(/^\[?(.*?)\]?:(\d+|\*)$/, (_m, h: string, p: string) => `${h.includes(":") ? `[${h}]` : h}:${p}`);
+const HOST_PORT = /^\[?(.*?)\]?:(\d+|\*)$/;
+const hostPort = (s: string) => s.replace(HOST_PORT, (_m, h: string, p: string) => `${h.includes(":") ? `[${h}]` : h}:${p}`);
 
 // The embedded WebDriver server exists only in the test-only `e2e` build
 // (scripts/release-check.sh proves release builds lack it); it is not the
@@ -106,7 +112,7 @@ describe("Offline, no-account smoke (REL-005)", () => {
     let pids = [pid];
     if (process.platform !== "win32") {
       try {
-        pids = pids.concat(execFileSync("pgrep", ["-P", pid], { encoding: "utf8" }).split(/\s+/).filter(Boolean));
+        pids = pids.concat(execFileSync("pgrep", ["-P", pid], { encoding: "utf8" }).split(WHITESPACE).filter(Boolean));
       } catch {
         // pgrep exits 1 when there are no children.
       }

@@ -214,8 +214,10 @@ export function RequestEditor(props: {
   );
 }
 
+const URL_SCHEME = /^([a-z][a-z0-9+.-]*):\/\//i;
+
 function protocolForScheme(url: string): RequestSpec["protocol"] | null {
-  const m = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url.trim());
+  const m = URL_SCHEME.exec(url.trim());
   switch (m?.[1].toLowerCase()) {
     case "ws":
     case "wss":
@@ -605,6 +607,8 @@ function linkedSchemaFiles(schema: GrpcSpec["schema"]): string[] {
 /** Skipped tools and notes a discovery result lists before "and N more". */
 const MAX_LISTED = 5;
 
+const SIGNED_INT_PREFIX = /^-?\d*$/;
+
 /** An integer field that accepts a leading "-" (and an empty value) while typing. */
 function SignedIntField(props: { label: string; value: number; onChange: (n: number) => void }) {
   const [text, setText] = useState(String(props.value));
@@ -619,7 +623,7 @@ function SignedIntField(props: { label: string; value: number; onChange: (n: num
       value={text}
       onChange={(e) => {
         const t = e.target.value.trim();
-        if (!/^-?\d*$/.test(t)) return;
+        if (!SIGNED_INT_PREFIX.test(t)) return;
         setText(t);
         const n = Number(t);
         if (t !== "" && t !== "-" && Number.isSafeInteger(n)) props.onChange(n);
@@ -1287,6 +1291,8 @@ function TestsEditor({ spec, set }: { spec: RequestSpec; set: (p: Partial<Reques
   );
 }
 
+const LIST_SEPARATOR = /[,\s]+/;
+
 function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertion) => void }) {
   const cmp = (c: Comparison, cb: (c: Comparison) => void) => (
     <select className="field" value={c} onChange={(e) => cb(e.target.value as Comparison)}>
@@ -1307,7 +1313,7 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
         </>
       );
     case "status_in":
-      return <input className="field mono grow" value={a.values.join(", ")} onChange={(e) => onChange({ ...a, values: e.target.value.split(/[,\s]+/).filter(Boolean).map(Number).filter((n) => !Number.isNaN(n)) })} />;
+      return <input className="field mono grow" value={a.values.join(", ")} onChange={(e) => onChange({ ...a, values: e.target.value.split(LIST_SEPARATOR).filter(Boolean).map(Number).filter((n) => !Number.isNaN(n)) })} />;
     case "header":
     case "trailer":
       return (

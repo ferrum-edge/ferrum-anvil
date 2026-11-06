@@ -476,13 +476,16 @@ function ProfileList(props: {
 function hostsText(h: { host: string; port?: number | null }[] | undefined) {
   return (h ?? []).map((b) => b.host + (b.port ? `:${b.port}` : "")).join(", ");
 }
+
+const HOST_AND_PORT = /^(.*?)(?::(\d+))?$/;
+
 function parseHosts(s: string) {
   return s
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean)
     .map((x) => {
-      const m = /^(.*?)(?::(\d+))?$/.exec(x)!;
+      const m = HOST_AND_PORT.exec(x)!;
       return { host: m[1], port: m[2] ? Number(m[2]) : null };
     });
 }
@@ -903,14 +906,18 @@ const MODES = [
   { id: "full_backup", label: "Full backup", desc: "Everything including history and settings, encrypted. Restores into a clean install without this computer's keychain." },
 ];
 
+const VERBATIM_LINKED_FILE = /^(\w+ '.*': )(\\\\\?\\.*)$/s;
+
 /**
  * An export preview's linked file entry (`request 'Upload': /path/to/file`) as shown: its path
  * without the Windows `\\?\` verbatim prefix, as `displayPath` shows it.
  */
 export function displayLinkedFile(entry: string): string {
-  const m = /^(\w+ '.*': )(\\\\\?\\.*)$/s.exec(entry);
+  const m = VERBATIM_LINKED_FILE.exec(entry);
   return m ? m[1] + displayPath(m[2]) : entry;
 }
+
+const NON_FILE_NAME_CHARS = /[^\w.-]+/g;
 
 export function ExportDialog(props: { workspace: Workspace | null; onClose: () => void; notify: (m: string) => void }) {
   const [mode, setMode] = useState("share_safely");
@@ -938,7 +945,7 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
     setBusy(true);
     try {
       const file = await api.chooseFile("bundle_export", {
-        file_name: `${scope === "all" ? "anvil-backup" : props.workspace!.name.replace(/[^\w.-]+/g, "_")}-${stamp}.anvil`,
+        file_name: `${scope === "all" ? "anvil-backup" : props.workspace!.name.replace(NON_FILE_NAME_CHARS, "_")}-${stamp}.anvil`,
         filters: [{ name: "Anvil bundle", extensions: ["anvil"] }],
       });
       if (!file) return;

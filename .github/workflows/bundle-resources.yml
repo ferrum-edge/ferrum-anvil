@@ -209,11 +209,11 @@ jobs:
           root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "bundle-resource-results"
           linux = os.environ["RUNNER_OS"] == "Linux"
           metrics = {}
+          rss_pattern = re.compile(r"Maximum resident set size \(kbytes\):\s*(\d+)" if linux
+                                   else r"(\d+)\s+maximum resident set size")
           for path in sorted(root.glob("*.txt")):
               text = path.read_text()
-              pattern = (r"Maximum resident set size \(kbytes\):\s*(\d+)" if linux
-                         else r"(\d+)\s+maximum resident set size")
-              match = re.search(pattern, text)
+              match = rss_pattern.search(text)
               assert match, f"missing RSS metric: {path.name}"
               rss = int(match[1]) * (1024 if linux else 1)
               metrics[path.stem] = rss

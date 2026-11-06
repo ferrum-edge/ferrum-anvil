@@ -28,8 +28,17 @@ use anvil_domain::diagnostics::Owner;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 const CODE: &str = r#""([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)""#;
+
+static DRAFT_NEW: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"Draft::new\(\s*{CODE}")).unwrap());
+static CODE_CLOSURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"let\s+(\w+)\s*=\s*\|code:\s*&str").unwrap());
+static CODE_MATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"let\s+code\s*=\s*match\b").unwrap());
+static MATCH_ARM: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"=>\s*{CODE}")).unwrap());
+static IDENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9_]*$").unwrap());
+static COMPATIBILITY_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"id: "([^"]+)""#).unwrap());
+static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([^{}]*)\}").unwrap());
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -76,10 +85,6 @@ fn matching_brace(s: &str, open: usize) -> usize {
 }
 
 fn scan(files: &[PathBuf]) -> Emitted {
-    let draft_new = Regex::new(&format!(r"Draft::new\(\s*{CODE}")).unwrap();
-    let closure = Regex::new(r"let\s+(\w+)\s*=\s*\|code:\s*&str").unwrap();
-    let code_match = Regex::new(r"let\s+code\s*=\s*match\b").unwrap();
-    let arm = Regex::new(&format!(r"=>\s*{CODE}")).unwrap();
     let mut out = Emitted::default();
     let root = repo_root();
     for f in files {
@@ -89,22 +94,22 @@ fn scan(files: &[PathBuf]) -> Emitted {
             let map = if self_worded { &mut out.self_worded } else { &mut out.worded_by_catalog };
             map.entry(code.to_string()).or_default().insert(name.clone());
         };
-        for m in draft_new.captures_iter(&src) {
+        for m in DRAFT_NEW.captures_iter(&src) {
             let whole = m.get(0).unwrap();
             let next = src[whole.end()..].find("Draft::new(").map(|i| whole.end() + i).unwrap_or(src.len());
             let self_worded = src[whole.end()..next].contains("catalog_text = Some(");
             add(&m[1], self_worded);
         }
-        for c in closure.captures_iter(&src) {
+        for c in CODE_CLOSURE.captures_iter(&src) {
             let call = Regex::new(&format!(r"\b{}\(\s*{CODE}", regex::escape(&c[1]))).unwrap();
             for m in call.captures_iter(&src) {
                 add(&m[1], false);
             }
         }
-        for c in code_match.find_iter(&src) {
+        for c in CODE_MATCH.find_iter(&src) {
             let open = c.end() + src[c.end()..].find('{').expect("match body");
             let close = matching_brace(&src, open);
-            for m in arm.captures_iter(&src[open..close]) {
+            for m in MATCH_ARM.captures_iter(&src[open..close]) {
                 add(&m[1], false);
             }
         }
@@ -174,7 +179,6 @@ fn ferrum_catalogs_are_embedded_and_internally_consistent() {
     assert_eq!(on_disk, embedded, "every catalog/ferrum/<id>/outcomes.json must be embedded in anvil_diagnostics::ferrum");
     assert!(embedded.contains(ferrum::DEFAULT_COMPATIBILITY_ID));
 
-    let ident = Regex::new(r"^[a-z][a-z0-9_]*$").unwrap();
     let mut previous: Option<BTreeSet<String>> = None;
     for id in ferrum::compatibility_ids() {
         let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(id).join("outcomes.json")).unwrap()).unwrap();
@@ -210,7 +214,7 @@ fn ferrum_catalogs_are_embedded_and_internally_consistent() {
                 }
             }
             if let Some(t) = o["public_signal"]["x_gateway_error"].as_str() {
-                for part in t.split('|').map(str::trim).filter(|p| ident.is_match(p)) {
+                for part in t.split('|').map(str::trim).filter(|p| IDENT.is_match(p)) {
                     if !tokens.contains(part) {
                         problems.push(format!("{oid}: x_gateway_error {part:?} is not one of this release's public tokens"));
                     }
@@ -263,7 +267,7 @@ fn desktop_profile_dialog_offers_the_embedded_catalogs() {
     let src = std::fs::read_to_string(repo_root().join("apps/desktop/src/Dialogs.tsx")).unwrap();
     let start = src.find("export const FERRUM_COMPATIBILITY").expect("FERRUM_COMPATIBILITY list in Dialogs.tsx");
     let list = &src[start..start + src[start..].find("] as const").expect("end of list")];
-    let offered: Vec<String> = Regex::new(r#"id: "([^"]+)""#).unwrap().captures_iter(list).map(|c| c[1].to_string()).collect();
+    let offered: Vec<String> = COMPATIBILITY_ID.captures_iter(list).map(|c| c[1].to_string()).collect();
     let mut embedded: Vec<String> = ferrum::compatibility_ids().map(String::from).collect();
     embedded.reverse();
     assert_eq!(offered, embedded, "Dialogs.tsx FERRUM_COMPATIBILITY must list every embedded catalog, newest first");
@@ -294,8 +298,6 @@ fn catalog_entries_are_well_formed() {
     // those two fields empty here; everything else needs both.
     let emitted = scan(&sources());
     let worded_at_call_site = |code: &str| emitted.self_worded.contains_key(code) && !emitted.worded_by_catalog.contains_key(code);
-    let placeholder = Regex::new(r"\{([^{}]*)\}").unwrap();
-    let ident = Regex::new(r"^[a-z][a-z0-9_]*$").unwrap();
     let mut problems = Vec::new();
     for (code, t) in &catalog.findings {
         if t.title.trim().is_empty() || (t.explanation.trim().is_empty() && !worded_at_call_site(code)) {
@@ -308,8 +310,8 @@ fn catalog_entries_are_well_formed() {
             .chain(&t.confirm_with)
             .chain(t.remediation.iter().map(|r| &r.text));
         for text in texts {
-            for p in placeholder.captures_iter(text) {
-                if !ident.is_match(&p[1]) {
+            for p in PLACEHOLDER.captures_iter(text) {
+                if !IDENT.is_match(&p[1]) {
                     problems.push(format!("{code}: malformed placeholder {{{}}} in {text:?}", &p[1]));
                 }
             }

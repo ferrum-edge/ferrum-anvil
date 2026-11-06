@@ -14,9 +14,11 @@ const SEV_ICON: Record<LintSeverity, IconName> = { error: "alertCircle", warn: "
 
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${Math.round(ms)} ms`);
 
+const CODE_SPAN = /(`[^`]+`)/;
+
 /** Inline `code` in generated text (names from the description or the traffic), inert. */
 function withCode(text: string) {
-  return text.split(/(`[^`]+`)/).map((part, i) => (part.length > 2 && part.startsWith("`") && part.endsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : part));
+  return text.split(CODE_SPAN).map((part, i) => (part.length > 2 && part.startsWith("`") && part.endsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : part));
 }
 
 export function DriftFindingCard(props: { f: DriftFinding; suggestions: Suggestion[] }) {
@@ -77,6 +79,8 @@ function SuggestionRow(props: { s: Suggestion; checked: boolean; onToggle: (on: 
   );
 }
 
+const FILE_EXTENSION = /\.[^.]+$/;
+
 /** The import's collection history against its description. */
 export function DriftPage(props: { importId: string; fileName: string; notify: (m: string) => void; onReimported: () => void }) {
   const [report, setReport] = useState<DriftReport | null>(null);
@@ -103,8 +107,8 @@ export function DriftPage(props: { importId: string; fileName: string; notify: (
   const ids = useMemo(() => (report ? report.suggestions.filter((s) => chosen.has(s.id)).map((s) => s.id) : []), [report, chosen]);
   const save = async (format: "spec" | "patch") => {
     try {
-      const base = props.fileName.replace(/\.[^.]+$/, "") || "openapi";
-      const ext = format === "patch" ? "patch.json" : (props.fileName.match(/\.[^.]+$/)?.[0] ?? ".yaml").slice(1);
+      const base = props.fileName.replace(FILE_EXTENSION, "") || "openapi";
+      const ext = format === "patch" ? "patch.json" : (props.fileName.match(FILE_EXTENSION)?.[0] ?? ".yaml").slice(1);
       const file = await api.chooseFile("spec_revision_export", { file_name: `${base}.revised.${ext}` });
       if (!file) return;
       await api.driftExport(props.importId, ids, format, file.token);

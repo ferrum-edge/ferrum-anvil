@@ -16,6 +16,7 @@ import { AuthEditor, PemFromFile } from "./AuthEditor";
 
 const GRANT = { token: "fg-0123456789abcdef0123456789abcdef", file_name: "ca.pem" };
 const SECRET = { id: "secret-id", label: "key.pem" };
+const CHOOSER_SIGNATURE_ARGUMENT = /purpose|options|title|path/;
 const CERTIFICATE = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n";
 
 function tlsProfile(): TlsProfile {
@@ -41,6 +42,8 @@ function argKeys(): string[] {
     Object.entries((args ?? {}) as Record<string, unknown>).flatMap(([k, v]) => (v && typeof v === "object" && !Array.isArray(v) ? [k, ...Object.keys(v)] : [k])),
   );
 }
+
+const DIALOG_PLUGIN_IMPORT = /import\s*\{([^}]*)\}\s*from\s*"@tauri-apps\/plugin-dialog"/g;
 
 describe("file grants in the renderer", () => {
   it("asks the backend for the dialog and returns its grant", async () => {
@@ -217,7 +220,7 @@ describe("file grants in the renderer", () => {
     ]) {
       const command = dialogs.split(`pub async fn ${name}(`)[1].split("\n}")[0];
       const signature = command.split(") ->")[0];
-      expect(signature).not.toMatch(/purpose|options|title|path/);
+      expect(signature).not.toMatch(CHOOSER_SIGNATURE_ARGUMENT);
       expect(command).toContain(`FilePurpose::${purpose}`);
       expect(registration).toContain(`cmd_files::${name},`);
     }
@@ -242,7 +245,7 @@ describe("file grants in the renderer", () => {
     const sources = import.meta.glob(["./*.tsx", "./*.ts", "!./*.test.tsx", "!./*.test.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
     const importers: Record<string, string[]> = {};
     for (const [file, text] of Object.entries(sources)) {
-      for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*"@tauri-apps\/plugin-dialog"/g)) {
+      for (const m of text.matchAll(DIALOG_PLUGIN_IMPORT)) {
         importers[file] = m[1].split(",").map((s) => s.trim()).filter(Boolean);
       }
     }

@@ -557,6 +557,8 @@ function LiveRun(props: { live: Live; onCancel: () => void }) {
   );
 }
 
+const NON_FILE_NAME_CHARS = /[^\w.-]+/g;
+
 function ReportView(props: { runId: string; notify: (m: string) => void; onDeleted: () => void }) {
   const [r, setR] = useState<RunReport | null>(null);
   useEffect(() => {
@@ -566,7 +568,7 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
   const t = r.totals;
   const exportAs = async (format: "json" | "junit" | "html") => {
     const ext = format === "junit" ? "xml" : format;
-    const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(/[^\w.-]+/g, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
+    const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
     if (!file) return;
     await api.exportRunReport(r.run_id, format, file.token);
     props.notify(`Exported to ${file.file_name}`);

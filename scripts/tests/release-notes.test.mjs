@@ -235,17 +235,18 @@ test("refuses invalid evidence", () => {
 });
 
 test("draft-only text is refused", () => {
+  const refused = /draft-only text/;
   for (const text of [
     "Draft release of Ferrum Anvil 0.1.4 built from `x`.",
     "This draft is not published. Review the evidence (docs/release.md) before publishing.",
   ]) {
-    assert.throws(() => assertNoDraftText(`Summary.\n\n${text}\n`), /draft-only text/);
+    assert.throws(() => assertNoDraftText(`Summary.\n\n${text}\n`), refused);
   }
   // A summary that mentions a draft specification is still a release body.
   assert.doesNotThrow(() => assertNoDraftText("JSON Schema draft 2020-12 is read."));
-  assert.throws(() => assertNoDraftText("REVIEW THE EVIDENCE in docs/release.md BEFORE PUBLISHING"), /draft-only text/);
+  assert.throws(() => assertNoDraftText("REVIEW THE EVIDENCE in docs/release.md BEFORE PUBLISHING"), refused);
   const leaked = changelog.replace("Hardening release: requests are", "This draft is not published. Hardening release: requests are");
-  assert.throws(() => releaseNotes({ changelog: leaked, version: "1.2.0", evidence: evidence() }), /draft-only text/);
+  assert.throws(() => releaseNotes({ changelog: leaked, version: "1.2.0", evidence: evidence() }), refused);
 });
 
 test("the repository CHANGELOG has a usable section for the workspace version", () => {

@@ -78,6 +78,8 @@ function storedLayout(): Layout {
   }
 }
 
+const NOT_FOUND = /not.?found/i;
+
 export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [ws, setWs] = useState<Workspace | null>(null);
@@ -385,7 +387,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         } catch (e) {
           // A replaced bundle may no longer contain a request that had an open
           // tab. Keep the draft visible and mark it unsaved below.
-          if (!/not.?found/i.test(String((e as Error).message ?? e))) throw e;
+          if (!NOT_FOUND.test(String((e as Error).message ?? e))) throw e;
           return { id: t.req.id, req: null };
         }
       }),

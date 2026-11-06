@@ -22,6 +22,8 @@ export function notUsedText(r: EarlyDataNotUsed): string {
   return NOT_USED[r];
 }
 
+const UNDERSCORES = /_/g;
+
 /** One line for the attempts table. */
 export function earlyDataSummary(e: EarlyDataObservation): string {
   if (e.offered) {
@@ -29,7 +31,7 @@ export function earlyDataSummary(e: EarlyDataObservation): string {
     if (e.accepted === false) return e.resent_after_handshake ? "0-RTT rejected, re-sent after handshake" : "0-RTT rejected";
     return "0-RTT offered";
   }
-  return e.not_used ? `no 0-RTT (${e.not_used.replace(/_/g, " ")})` : "no 0-RTT";
+  return e.not_used ? `no 0-RTT (${e.not_used.replace(UNDERSCORES, " ")})` : "no 0-RTT";
 }
 
 /** Early-data policy for a settings layer: inherit, off, or on with extra methods. */

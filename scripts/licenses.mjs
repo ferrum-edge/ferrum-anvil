@@ -24,8 +24,21 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(root, "THIRD_PARTY_LICENSES.md");
 const SHIPPED = ["anvil-desktop", "anvil-cli"];
+const PATH_SEPARATOR = /[\\/]/;
 /** A third-party crate vendored under vendor/ (a path package that is not Anvil's). */
-const isVendored = (p) => !p.source && relative(join(root, "vendor"), p.manifest_path).split(/[\\/]/)[0] !== "..";
+const isVendored = (p) => !p.source && relative(join(root, "vendor"), p.manifest_path).split(PATH_SEPARATOR)[0] !== "..";
+// The `g` patterns below are used only with matchAll/match/replace, which reset or ignore lastIndex.
+const LICENSES_TABLE = /^\[licenses\]\s*$/m;
+const GRAPH_TABLE = /^\[graph\]\s*$/m;
+const NEXT_TABLE = /^\[(?!\[)[^\]]+\]\s*$/m;
+const ALLOW_LIST = /^allow\s*=\s*\[([\s\S]*?)\]/m;
+const TARGETS_LIST = /^targets\s*=\s*\[([\s\S]*?)\]/m;
+const QUOTED = /"([^"]+)"/g;
+const EXCEPTION = /\{\s*allow\s*=\s*\[([^\]]*)\]\s*,\s*crate\s*=\s*"([^"]+)"[^}]*\}/g;
+const SLASH = /\//g;
+const SPDX_TOKEN = /\(|\)|[^\s()]+/g;
+const NOTICE_FILE = /^NOTICE/i;
+const NODE_MODULES_PREFIX = /^.*node_modules\//;
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const jsonAt = args.indexOf("--json");
@@ -34,14 +47,14 @@ const jsonOut = jsonAt >= 0 ? args[jsonAt + 1] : null;
 // ---------------------------------------------------------------- policy
 function policy() {
   const toml = readFileSync(join(root, "deny.toml"), "utf8");
-  const section = toml.split(/^\[licenses\]\s*$/m)[1]?.split(/^\[(?!\[)[^\]]+\]\s*$/m)[0];
+  const section = toml.split(LICENSES_TABLE)[1]?.split(NEXT_TABLE)[0];
   if (!section) throw new Error("deny.toml has no [licenses] section");
-  const allowBlock = section.match(/^allow\s*=\s*\[([\s\S]*?)\]/m);
+  const allowBlock = section.match(ALLOW_LIST);
   if (!allowBlock) throw new Error("deny.toml [licenses] has no allow list");
-  const allow = new Set([...allowBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]));
+  const allow = new Set([...allowBlock[1].matchAll(QUOTED)].map((m) => m[1]));
   const exceptions = new Map();
-  for (const m of section.matchAll(/\{\s*allow\s*=\s*\[([^\]]*)\]\s*,\s*crate\s*=\s*"([^"]+)"[^}]*\}/g)) {
-    exceptions.set(m[2], new Set([...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1])));
+  for (const m of section.matchAll(EXCEPTION)) {
+    exceptions.set(m[2], new Set([...m[1].matchAll(QUOTED)].map((x) => x[1])));
   }
   return { allow, exceptions };
 }
@@ -52,7 +65,7 @@ function policy() {
 // silently accepted.
 function satisfied(expr, allowed) {
   if (!expr) return false;
-  const tokens = expr.replace(/\//g, " OR ").match(/\(|\)|[^\s()]+/g) ?? [];
+  const tokens = expr.replace(SLASH, " OR ").match(SPDX_TOKEN) ?? [];
   let i = 0;
   const peek = () => tokens[i];
   const factor = () => {
@@ -97,10 +110,10 @@ function satisfied(expr, allowed) {
 /** The shipped target triples: deny.toml `[graph] targets`. */
 function targets() {
   const toml = readFileSync(join(root, "deny.toml"), "utf8");
-  const section = toml.split(/^\[graph\]\s*$/m)[1]?.split(/^\[(?!\[)[^\]]+\]\s*$/m)[0];
-  const block = section?.match(/^targets\s*=\s*\[([\s\S]*?)\]/m);
+  const section = toml.split(GRAPH_TABLE)[1]?.split(NEXT_TABLE)[0];
+  const block = section?.match(TARGETS_LIST);
   if (!block) throw new Error("deny.toml [graph] has no targets list");
-  return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  return [...block[1].matchAll(QUOTED)].map((m) => m[1]);
 }
 
 // ---------------------------------------------------------------- cargo
@@ -136,7 +149,7 @@ function crates() {
       const dir = dirname(p.manifest_path);
       const notices = existsSync(dir)
         ? readdirSync(dir)
-            .filter((f) => /^NOTICE/i.test(f))
+            .filter((f) => NOTICE_FILE.test(f))
             .sort()
             .map((f) => ({ file: f, text: readFileSync(join(dir, f), "utf8").trim() }))
         : [];
@@ -160,7 +173,7 @@ function npmPackages() {
   return Object.entries(lock.packages)
     .filter(([path, p]) => path && !p.dev && !p.devOptional)
     .map(([path, p]) => {
-      const name = path.replace(/^.*node_modules\//, "");
+      const name = path.replace(NODE_MODULES_PREFIX, "");
       return { ecosystem: "npm", name, version: p.version, license: p.license ?? null, source: `https://www.npmjs.com/package/${name}/v/${p.version}`, notices: [] };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
