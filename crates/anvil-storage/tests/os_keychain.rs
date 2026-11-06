@@ -7,14 +7,31 @@
 //! permission prompt raised) by a plain `cargo test`. CI runs it on all three
 //! platforms with `cargo test -p anvil-storage --test os_keychain -- --ignored`;
 //! Linux CI provides a Secret Service with gnome-keyring in a D-Bus session.
+//!
+//! The tests take [`os_store`] so they run one at a time. The Windows
+//! Credential Manager does not reliably order operations issued from several
+//! threads at once (see the `windows-native-keyring-store` crate docs): with
+//! the other tests writing in parallel, reading an entry just written failed
+//! with "No matching credential found" on the Windows CI runner.
 #![cfg(feature = "os-keychain")]
+
+use std::sync::{Mutex, MutexGuard};
 
 use anvil_domain::workspace::ProtectionMode;
 use anvil_storage::vault::{self, VaultError};
 
+/// Held for the whole of each test, so only one touches the OS store at a time.
+fn os_store() -> MutexGuard<'static, ()> {
+    static OS_STORE: Mutex<()> = Mutex::new(());
+    // A test that panicked while holding it left the store as consistent as
+    // any failed test does; the next test still runs.
+    OS_STORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 #[ignore = "touches the real OS credential store; CI runs it with --ignored"]
 fn keychain_profile_round_trips_through_the_os_credential_store() {
+    let _store = os_store();
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_keychain_profile(dir.path(), "ci keychain").expect("the OS credential store accepted the data key");
     let h = vault::read_header(dir.path()).unwrap();
@@ -46,6 +63,8 @@ fn enrolled_keychain_profile_rotates_and_retires_its_real_os_entry() {
             let _ = vault::delete_keychain_entry(&self.0);
         }
     }
+    // Declared first so it is released last, after `Cleanup` removed the entry.
+    let _store = os_store();
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_enrolled_keychain_profile(dir.path(), "ci enrolled rotation").unwrap();
     let old = vault::read_header(dir.path()).unwrap();
@@ -86,6 +105,8 @@ fn enrolled_keychain_profile_rotates_into_a_new_real_os_entry() {
             }
         }
     }
+    // Declared first so it is released last, after `Cleanup` removed the entries.
+    let _store = os_store();
     let dir = tempfile::tempdir().unwrap();
     vault::create_enrolled_keychain_profile(dir.path(), "ci keychain rotation").unwrap();
     let old = vault::read_header(dir.path()).unwrap();
