@@ -357,6 +357,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_admin_channel_is_stricter_than_the_shared_literal_loopback_predicate() {
+        // OAuth token and sign-in endpoints accept IPv4-mapped loopback over plain HTTP
+        // (`anvil_transport::dns::is_literal_loopback`); the admin channel deliberately does not.
+        let mapped = "http://[::ffff:127.0.0.1]:9000";
+        assert!(anvil_transport::dns::is_literal_loopback(&url::Url::parse(mapped).unwrap()));
+        assert!(admin_channel_allowed(&target(mapped)).is_err());
+        // Where both accept: the canonical forms.
+        for both in ["http://127.0.0.1:18090", "http://[::1]:9000"] {
+            assert!(anvil_transport::dns::is_literal_loopback(&url::Url::parse(both).unwrap()), "{both}");
+            assert!(admin_channel_allowed(&target(both)).is_ok(), "{both}");
+        }
+    }
+
     /// A plain-HTTP lookup goes straight to loopback even when the request
     /// selects a forward proxy; only an https lookup, verified end to end,
     /// may cross it. Each lookup uses a fresh connection.

@@ -198,6 +198,20 @@ pub fn is_loopback(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether the URL's host is a canonical literal loopback address
+/// ([`is_loopback`]: `127.0.0.0/8`, `::1` or IPv4-mapped loopback). DNS names,
+/// `localhost` included, never qualify: whether they stay on this host
+/// depends on the resolver, not on the URL. The cleartext-to-loopback policy
+/// of OAuth token endpoints (`anvil-engine`) and interactive sign-in
+/// endpoints (`anvil-identity`); what else each requires stays with it.
+pub fn is_literal_loopback(u: &url::Url) -> bool {
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => is_loopback(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_loopback(IpAddr::V6(ip)),
+        Some(url::Host::Domain(_)) | None => false,
+    }
+}
+
 async fn resolve_custom(host: &str, port: u16, nameservers: &[String], timeout: Option<Duration>) -> Result<Resolution, TransportFailure> {
     use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
     use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -263,7 +277,7 @@ async fn resolve_custom(host: &str, port: u16, nameservers: &[String], timeout: 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_localhost_name, is_loopback, system_answer};
+    use super::{is_literal_loopback, is_localhost_name, is_loopback, system_answer};
     use std::net::{IpAddr, SocketAddr};
 
     #[test]
@@ -309,5 +323,27 @@ mod tests {
         assert!(is_loopback("::ffff:127.0.0.1".parse::<IpAddr>().unwrap()));
         assert!(!is_loopback("0.0.0.0".parse().unwrap()));
         assert!(!is_loopback("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn literal_loopback_urls_are_loopback_address_literals_only() {
+        let url = |raw: &str| url::Url::parse(raw).unwrap();
+        for raw in ["http://127.0.0.1/", "http://127.8.9.10:9/", "http://127.1/", "http://[::1]/", "http://[::ffff:127.0.0.1]:9/"] {
+            assert!(is_literal_loopback(&url(raw)), "{raw}");
+        }
+        for raw in [
+            "http://localhost/",
+            "http://LOCALHOST/",
+            "http://localhost./",
+            "http://api.localhost/",
+            "http://127.0.0.1.nip.io/",
+            "http://0.0.0.0/",
+            "http://[::]/",
+            "http://[::ffff:192.0.2.1]/",
+            "http://10.0.0.1/",
+            "file:///tmp/x",
+        ] {
+            assert!(!is_literal_loopback(&url(raw)), "{raw}");
+        }
     }
 }
