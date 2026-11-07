@@ -1148,7 +1148,7 @@ mod tests {
         let core = cat.outcome("gateway.capacity.synthetic_response_buffer").expect("core synthetic outcome");
         assert!(a.explanation.contains(&core.minimum_truthful_diagnosis), "{}", a.explanation);
         let lower = a.explanation.to_lowercase();
-        for claim in ["openapi", "decompress", "backend answered"] {
+        for claim in ["decompress", "openapi", "backend answered"] {
             assert!(!lower.contains(claim), "{claim:?} in {}", a.explanation);
         }
         let candidates: Vec<&str> = evidence(a, "catalog.candidates").expect("candidates").split(", ").collect();
