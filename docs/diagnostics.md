@@ -332,14 +332,18 @@ catalog whose id equals the profile's `compatibility_id`:
   record, Anvil says why.
 - `anvil gateway list WORKSPACE` lists a workspace's profiles (id, name,
   catalog, hosts, and whether trust needs verified TLS), and `anvil gateway
-  remove WORKSPACE PROFILE` (id, or a name no other profile has) removes
-  one; the desktop app's Connection profiles dialog has **Remove gateway**
-  on a saved profile (after an in-window prompt). Sends to its hosts are
-  then untrusted unless another profile matches them: trust and the G01
-  lookup follow the hosts of the profiles that remain. Settings that name
-  the profile (`integration_profile_id`, on the workspace, a folder or a
-  request) keep the id, which then matches no profile, and a vault secret
-  its lookup credential names is kept.
+  remove WORKSPACE PROFILE` (id, or a name no other profile of the workspace
+  has, case ignored by Unicode's lowercase rules as for workspaces) removes
+  one. An id wins: an argument that is one profile's id and another
+  profile's name removes the id's owner. A profile of another workspace is
+  never found. The desktop app's Connection profiles dialog has **Remove
+  gateway** on a saved profile (after an in-window prompt). Sends to its
+  hosts are then untrusted unless another profile matches them: trust and
+  the G01 lookup follow the hosts of the profiles that remain. Settings that
+  name the profile (`integration_profile_id`, on the workspace, a folder or a
+  request) keep the id, which then matches no profile; the desktop settings
+  show it as "removed profile", with **Clear** to inherit again. A vault
+  secret its lookup credential names is kept.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

@@ -1,6 +1,7 @@
 // Connection profiles dialog: a saved Ferrum gateway profile can be removed
 // through `integration_delete` once the in-window prompt is confirmed, and a
-// new one that was never saved offers no removal.
+// new one that was never saved offers no removal. After a save or removal the
+// dialog waits for the caller's refresh (`onChanged`) and reports its failure.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -38,6 +39,11 @@ function backend() {
       case "integration_delete":
         saved = saved.filter((p) => p.id !== args?.profileId);
         return null;
+      case "integration_save": {
+        const p = args?.profile as IntegrationProfile;
+        saved = [...saved.filter((x) => x.id !== p.id), p];
+        return p;
+      }
       default:
         throw new Error(`unexpected command ${cmd}`);
     }
@@ -46,8 +52,7 @@ function backend() {
 
 const calls = (cmd: string) => invoke.mock.calls.filter(([c]) => c === cmd).map(([, args]) => args as Args);
 
-async function openGateways() {
-  const onChanged = vi.fn();
+async function openGateways(onChanged: () => Promise<void> | void = vi.fn()) {
   render(<ProfilesDialog workspaceId="ws-1" onClose={vi.fn()} onChanged={onChanged} />);
   await waitFor(() => expect(calls("integrations_list")).toHaveLength(1));
   fireEvent.click(screen.getByRole("tab", { name: /Ferrum gateways/ }));
@@ -63,6 +68,13 @@ afterEach(() => {
   cleanup();
   invoke.mockReset();
 });
+
+async function removeGateway(name: string) {
+  fireEvent.click(await screen.findByText(name));
+  fireEvent.click(screen.getByRole("button", { name: "Remove gateway" }));
+  await screen.findByRole("dialog", { name: "Remove gateway" });
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+}
 
 describe("Ferrum gateway profiles", () => {
   it("removes a saved gateway profile once the prompt is confirmed", async () => {
@@ -247,5 +259,64 @@ describe("Ferrum gateway profiles", () => {
     fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
     expect(screen.queryByRole("button", { name: "Remove gateway" })).toBeNull();
     expect(calls("integration_delete")).toHaveLength(0);
+  });
+  it("waits for the caller's refresh after a removal and reports its failure", async () => {
+    let fail!: (e: Error) => void;
+    const onChanged = vi.fn(() => new Promise<void>((_resolve, reject) => (fail = reject)));
+    await openGateways(onChanged);
+    await removeGateway(gateway.name);
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("No gateways declared.")).toBeTruthy();
+    expect(screen.queryByText(/could not be refreshed/)).toBeNull();
+    await act(async () => fail(new Error("the store is busy")));
+    expect(await screen.findByText("Removed, but the request settings' profile list could not be refreshed: the store is busy")).toBeTruthy();
+    expect(calls("integration_delete")).toEqual([{ profileId: "gw-1" }]);
+    expect(screen.queryByText(gateway.name)).toBeNull();
+  });
+
+  it("reports both refreshes when neither can be read", async () => {
+    const answer = invoke.getMockImplementation()!;
+    await openGateways(() => Promise.reject(new Error("Workbench could not read")));
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integrations_list") throw "the store is busy";
+      return answer(cmd, args);
+    });
+    await removeGateway(gateway.name);
+    expect(
+      await screen.findByText(
+        "Removed, but the list could not be refreshed: the store is busy; the request settings' profile list could not be refreshed: Workbench could not read",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("reports a failed refresh of the caller after a save", async () => {
+    const onChanged = vi.fn(async () => {
+      throw new Error("the store is busy");
+    });
+    await openGateways(onChanged);
+    fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+    expect(await screen.findByText("Saved, but the request settings' profile list could not be refreshed: the store is busy")).toBeTruthy();
+    expect(calls("integration_save")).toHaveLength(1);
+    expect(screen.getByText("My gateway")).toBeTruthy();
+  });
+
+  it("lists a profile saved again under the id of one removed in this dialog", async () => {
+    // Every new draft gets the id of the profile about to be removed.
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue(gateway.id as ReturnType<typeof crypto.randomUUID>);
+    try {
+      await openGateways();
+      await removeGateway(gateway.name);
+      expect(await screen.findByText("No gateways declared.")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
+      const save = screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement;
+      await waitFor(() => expect(save.disabled).toBe(false));
+      fireEvent.click(save);
+      await waitFor(() => expect(calls("integration_save")).toHaveLength(1));
+      expect((calls("integration_save")[0].profile as IntegrationProfile).id).toBe(gateway.id);
+      expect(await screen.findByText("My gateway")).toBeTruthy();
+    } finally {
+      uuid.mockRestore();
+    }
   });
 });

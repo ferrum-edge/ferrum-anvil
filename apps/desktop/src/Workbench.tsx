@@ -15,7 +15,7 @@ import { RunnerView } from "./RunnerView";
 import { ContractView } from "./ContractView";
 import { UpdateDialog, UpdatePrompt, useLaunchUpdate } from "./Update";
 import { Icon } from "./icons";
-import { Keys, Modal, SidebarContext, SidebarResizer, Toast, drag, fmtAgo, shortcut, uid } from "./ui";
+import { Keys, Modal, SidebarContext, SidebarResizer, Toast, drag, fmtAgo, modalOpen, shortcut, uid } from "./ui";
 
 // Open tabs live for the whole unlocked session, across workspaces: switching
 // workspaces hides a workspace's tabs (with their drafts, in-flight sends and
@@ -664,8 +664,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         props.onLock();
         return;
       }
-      // A confirmation or a dialog is showing: its keys (Escape) are its own.
-      if (asking || dialog) return;
+      // A confirmation or a dialog is showing, Workbench's own or one a view
+      // opened (any Modal): its keys (Escape, ⌘/Ctrl+Enter) are its own.
+      if (asking || dialog || modalOpen(e)) return;
       if (mod && e.key === "Enter") {
         e.preventDefault();
         void send();

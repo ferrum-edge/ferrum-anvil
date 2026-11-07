@@ -90,6 +90,18 @@
   records who closed the tunnel instead of "not closed".
 - Deleting a workspace while its stopped load run is still draining kills the worker at once, as
   a delete does for a running load run.
+- Workspace, environment and `anvil gateway` profile names match with one case rule, Unicode
+  lowercase, so `Café` now names a workspace or environment called `CAFÉ` (workspaces and
+  environments used to ignore ASCII case only). `anvil env create` refuses a name that matches an
+  existing environment's by the same rule. An id still wins over another item's name (#471).
+- The desktop Connection profiles dialog waits for the request settings' copy of the profiles to
+  refresh after a save or a gateway removal, and reports it when that fails, instead of leaving the
+  removed gateway offered with an unhandled error. A profile saved again under an id removed in
+  the open dialog is listed again (#471).
+- A request, folder or workspace setting that names a removed Ferrum gateway profile shows it as
+  "removed profile" with **Clear**, instead of an empty select (#471).
+- Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
+  longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
 
 ## [0.1.7] - 2026-11-03
 

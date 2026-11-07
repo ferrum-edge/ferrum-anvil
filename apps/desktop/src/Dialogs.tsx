@@ -252,7 +252,11 @@ export function VariablesEditor(props: { vars: Variable[]; onChange: (v: Variabl
 
 type PTab = "tls" | "proxy" | "ferrum";
 
-export function ProfilesDialog(props: { workspaceId: string; onClose: () => void; onChanged: () => void }) {
+/**
+ * `onChanged` refreshes the caller's copy of the profiles (Workbench's
+ * request settings); the dialog waits for it and reports a failure.
+ */
+export function ProfilesDialog(props: { workspaceId: string; onClose: () => void; onChanged: () => Promise<void> | void }) {
   const [tab, setTab] = useState<PTab>("tls");
   const [tls, setTls] = useState<TlsProfile[]>([]);
   const [proxy, setProxy] = useState<ProxyProfile[]>([]);
@@ -264,9 +268,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   // The profiles whose removal is being written: none can be saved (which
   // would put it back) or removed again until its own removal settles.
   const [removing, setRemoving] = useState<ReadonlySet<string>>(new Set());
-  // The profiles removed in this dialog: a refresh that read the list before
-  // a removal was written, and answers after it, must not list them again
-  // (Save would then put a removed gateway back).
+  // The profiles removed in this dialog (and not saved again since): a
+  // refresh that read the list before a removal was written, and answers
+  // after it, must not list them again (Save would then put a removed
+  // gateway back).
   const removed = useRef(new Set<string>());
   // Focus goes back to Remove gateway after a cancelled prompt, once this
   // dialog is no longer inert (an inert element cannot take the focus).
@@ -287,6 +292,15 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
     void load();
   }, []);
   const base = { id: crypto.randomUUID(), workspace_id: props.workspaceId, created_at: now(), updated_at: now() };
+  // After a save or removal: this dialog's list and the caller's copy, both
+  // awaited. A failure of either is reported after what did happen (`done`).
+  const refresh = async (done: string) => {
+    const [list, caller] = await Promise.allSettled([load(), (async () => props.onChanged())()]);
+    const failed: string[] = [];
+    if (list.status === "rejected") failed.push(`the list could not be refreshed: ${String((list.reason as Error).message)}`);
+    if (caller.status === "rejected") failed.push(`the request settings' profile list could not be refreshed: ${String((caller.reason as Error).message)}`);
+    if (failed.length > 0) setErr(`${done}, but ${failed.join("; ")}`);
+  };
   const saveIt = async () => {
     if (!editing) return;
     setErr(null);
@@ -294,12 +308,14 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       if (editing.kind === "tls") await api.saveTlsProfile(editing.value as TlsProfile);
       if (editing.kind === "proxy") await api.saveProxyProfile(editing.value as ProxyProfile);
       if (editing.kind === "ferrum") await api.saveIntegration(editing.value as IntegrationProfile);
-      setEditing(null);
-      await load();
-      props.onChanged();
     } catch (e) {
       setErr(String((e as Error).message));
+      return;
     }
+    // Saved again: listed again, even under an id removed earlier.
+    if (editing.kind === "ferrum") removed.current.delete(editing.value.id);
+    setEditing(null);
+    await refresh("Saved");
   };
   // A saved gateway profile can be removed; a new one is only discarded.
   const removable = editing?.kind === "ferrum" && ints.some((p) => p.id === editing.value.id);
@@ -333,12 +349,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       removed.current.add(id);
       setInts((cur) => cur.filter((p) => p.id !== id));
       setEditing((cur) => (cur?.value.id === id ? null : cur));
-      props.onChanged();
-      try {
-        await load();
-      } catch (e) {
-        setErr(`Removed, but the list could not be refreshed: ${String((e as Error).message)}`);
-      }
+      await refresh("Removed");
     } finally {
       setRemoving((s) => {
         const left = new Set(s);

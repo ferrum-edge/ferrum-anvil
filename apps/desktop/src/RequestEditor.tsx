@@ -1443,6 +1443,8 @@ export function SettingsOverridesEditor({
   const selectedTls = profiles.tls.find((p) => p.id === s.tls_profile_id);
   const udp = protocol === "udp";
   const selectedProxy = s.proxy_profile_id?.kind === "profile" ? profiles.proxy.find((p) => p.id === (s.proxy_profile_id as { id: string }).id) : undefined;
+  // A gateway profile id that names no saved profile (one since removed).
+  const removedGateway = s.integration_profile_id && !profiles.integrations.some((p) => p.id === s.integration_profile_id) ? s.integration_profile_id : null;
   return (
     <div className="form wide">
       <p className="hint">Blank or “inherit” uses the folder, workspace or app default. The Effective request tab shows the resolved value and which layer it came from.</p>
@@ -1585,9 +1587,20 @@ export function SettingsOverridesEditor({
                   {p.name} ({p.compatibility_id})
                 </option>
               ))}
+              {removedGateway && <option value={removedGateway}>removed profile</option>}
             </select>
           </label>
         </div>
+        {removedGateway && (
+          <div className="warn-box row" role="note" aria-label="Removed gateway profile">
+            <span className="grow">
+              The Ferrum gateway profile this setting names was removed (id <code>{removedGateway}</code>), so it matches no profile. Clear it to inherit.
+            </span>
+            <button type="button" className="btn small" onClick={() => upd({ integration_profile_id: null })}>
+              Clear
+            </button>
+          </div>
+        )}
         {selectedTls?.verify === false && (
           <div className="warn-box">
             <b>Certificate verification is off for requests using “{selectedTls.name}”.</b> Traffic is still encrypted, but the server is not authenticated. This applies only to requests that select this profile.

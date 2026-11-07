@@ -8,7 +8,7 @@ use anvil_app::App;
 use anvil_contract::terminal_safe as t;
 use anvil_domain::Id;
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{Environment, Variable, Workspace};
+use anvil_domain::workspace::{Environment, Variable, Workspace, names_match};
 use anyhow::{Result, anyhow, bail};
 use clap::Subcommand;
 use std::io::Read;
@@ -107,13 +107,15 @@ fn quoted_names(envs: Vec<Environment>) -> String {
 }
 
 /// The environment of `ws` that `name` names: its id, or its name with case
-/// ignored when no other environment has it. A miss lists the names there are.
+/// ignored ([`names_match`]) when no other environment has it. An id wins: an
+/// argument that is one environment's id and another's name finds the id's
+/// owner. A miss lists the names there are.
 pub fn find_environment(app: &App, ws: &Workspace, name: &str) -> Result<Environment> {
     let mut all = app.environments(&ws.meta.id)?;
     if let Some(i) = all.iter().position(|e| e.meta.id.to_string() == name) {
         return Ok(all.swap_remove(i));
     }
-    let named: Vec<&Environment> = all.iter().filter(|e| e.name.eq_ignore_ascii_case(name)).collect();
+    let named: Vec<&Environment> = all.iter().filter(|e| names_match(&e.name, name)).collect();
     match named.len() {
         1 => Ok(named[0].clone()),
         0 if all.is_empty() => {
@@ -140,13 +142,14 @@ pub fn environment_id(app: &App, ws: &Workspace, name: Option<&str>) -> Result<O
 }
 
 /// The workspace `id_or_name` names: its id, or its name with case ignored
-/// when no other workspace has it. A secret is never written on a guess.
+/// ([`names_match`]) when no other workspace has it. An id wins, as for
+/// environments. A secret is never written on a guess.
 pub(crate) fn find_workspace(app: &App, id_or_name: &str) -> Result<Workspace> {
     let mut all = app.workspaces()?;
     if let Some(i) = all.iter().position(|w| w.meta.id.to_string() == id_or_name) {
         return Ok(all.swap_remove(i));
     }
-    let mut named: Vec<Workspace> = all.into_iter().filter(|w| w.name.eq_ignore_ascii_case(id_or_name)).collect();
+    let mut named: Vec<Workspace> = all.into_iter().filter(|w| names_match(&w.name, id_or_name)).collect();
     match named.len() {
         1 => Ok(named.remove(0)),
         0 => bail!("workspace '{}' not found (`anvil workspace list` shows them)", t(id_or_name)),

@@ -342,7 +342,10 @@ other workspace has. `--env` on `send`, `run`, `mcp-discover`, `env set` and
 `env unset`, and the environment argument of `env show` and `env use`, take an
 environment's id or its name, case ignored; a name two environments of the
 workspace share is refused with their ids, and a name that matches none lists
-the names there are.
+the names there are. Case is ignored by Unicode's lowercase rules, the same
+for workspaces, environments and `anvil gateway` profiles (`Café` names
+`CAFÉ`), and an id wins: an argument that is one environment's id and
+another's name names the id's owner.
 
 Under an import root, only the environments the import brought apply (see
 [The import root](#the-import-root)): a variable set in another environment
