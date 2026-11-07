@@ -206,12 +206,16 @@ async fn run_and_scenario_commands_end_to_end() {
 }
 
 /// A body a hostile server under test returns: once decoded, its `v` is a
-/// newline, a GitHub Actions workflow command and a terminal escape sequence.
-const HOSTILE_BODY: &str = r#"{"v":"x\n::error title=forged::y\u001b[2K"}"#;
+/// newline, a GitHub Actions workflow command, a terminal escape sequence and
+/// a legacy workflow command (which a runner reads anywhere in a line).
+const HOSTILE_BODY: &str = r#"{"v":"x\n::error title=forged::y\u001b[2K ##[error]legacy"}"#;
+/// The decoded `v` of [`HOSTILE_BODY`].
+const HOSTILE_VALUE: &str = "x\n::error title=forged::y\u{1b}[2K ##[error]legacy";
 
-/// A workspace whose "Hostile" folder holds one request (named with a
-/// workflow command of its own, as an imported collection could) that
-/// asserts `$.v == expected` against [`HOSTILE_BODY`]. Returns its id.
+/// A workspace with a folder and a scenario named with workflow commands (as
+/// an imported collection could name them), holding one request, itself
+/// named with workflow commands, that asserts `$.v == expected` against
+/// [`HOSTILE_BODY`]. Returns the request's id.
 fn setup_hostile(root: &Path, base: &str) -> String {
     let pm = ProfileManager::new(root);
     let (s, dek, _) = pm.create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
@@ -219,7 +223,7 @@ fn setup_hostile(root: &Path, base: &str) -> String {
     let app = App::open(s.dir, h, dek).unwrap();
     let ws = app.create_workspace("Shop").unwrap();
     app.create_environment(&ws.meta.id, "lab", vec![Variable::plain("base", base)]).unwrap();
-    let folder = app.create_folder(&ws.meta.id, None, "Hostile").unwrap();
+    let folder = app.create_folder(&ws.meta.id, None, "::error::folder").unwrap();
     let mut spec = RequestSpec::http("GET", "{{base}}/status/200");
     spec.params.push(KeyValue::new("body", HOSTILE_BODY));
     spec.assertions.push(Assertion {
@@ -227,16 +231,31 @@ fn setup_hostile(root: &Path, base: &str) -> String {
         label: String::new(),
         kind: AssertionKind::JsonPath { path: "$.v".into(), comparison: Comparison::Equals, value: "expected".into() },
     });
-    app.create_request(&ws.meta.id, Some(folder.meta.id), "Echo\n::notice::named", spec).unwrap().meta.id.to_string()
+    let r = app.create_request(&ws.meta.id, Some(folder.meta.id), "Echo\n::notice::named ##[notice]named", spec).unwrap();
+    app.save_scenario(Scenario {
+        meta: Meta::new(),
+        workspace_id: ws.meta.id,
+        name: "::warning::scenario".into(),
+        description: String::new(),
+        steps: vec![ScenarioStep { request_id: r.meta.id, enabled: true, delay_ms: 0 }],
+        dataset_id: None,
+        iterations: 1,
+        stop_on_failure: false,
+        trusted: true,
+    })
+    .unwrap();
+    r.meta.id.to_string()
 }
 
-/// No line of the output starts a CI workflow command, and no escape or
+/// No line of the output starts a CI workflow command (`::`, after leading
+/// whitespace), no line holds a legacy one (`##[`), and no escape or
 /// carriage-return byte reaches the terminal.
 fn assert_terminal_safe(what: &str, o: &Output) {
     for (stream, bytes) in [("stdout", &o.stdout), ("stderr", &o.stderr)] {
         assert!(!bytes.contains(&0x1b) && !bytes.contains(&b'\r'), "{what}: {stream} carries a raw control byte: {}", text(o));
         for line in String::from_utf8_lossy(bytes).lines() {
             assert!(!line.trim_start().starts_with("::"), "{what}: {stream} line {line:?} reads as a workflow command");
+            assert!(!line.contains("##["), "{what}: {stream} line {line:?} reads as a legacy workflow command");
         }
     }
 }
@@ -249,16 +268,42 @@ async fn response_text_in_the_human_readable_output_is_terminal_safe() {
     let data = dir.path().join("data");
     let id = setup_hostile(&data, &f.url(""));
     // The failed assertion quotes the decoded value, escaped.
-    let escaped = r"x\n::error title=forged::y\u{1b}[2K";
+    let escaped = r"x\n:\:error title=forged:\:y\u{1b}[2K #\#[error]legacy";
 
-    let o = anvil(&data, &["run", "Shop", "--folder", "Hostile", "--env", "lab"]).await;
+    let o = anvil(&data, &["run", "Shop", "--folder", "::error::folder", "--env", "lab"]).await;
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
-    assert_terminal_safe("anvil run", &o);
+    assert_terminal_safe("anvil run --folder", &o);
     let stdout = String::from_utf8_lossy(&o.stdout);
-    assert!(stdout.contains(escaped) && stdout.contains(r"Echo\n::notice::named"), "{stdout}");
+    assert!(stdout.contains(escaped) && stdout.contains(r"Echo\n:\:notice:\:named #\#[notice]named"), "{stdout}");
+    assert!(stdout.starts_with(r":\:error:\:folder"), "the folder name starts the report: {stdout}");
+
+    let o = anvil(&data, &["run", "Shop", "--scenario", "::warning::scenario", "--env", "lab"]).await;
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert_terminal_safe("anvil run --scenario", &o);
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(stdout.starts_with(r":\:warning:\:scenario"), "the scenario name starts the report: {stdout}");
+    assert!(stdout.contains(escaped), "{stdout}");
+
+    for args in [
+        vec!["scenario", "list", "Shop"],
+        vec!["scenario", "show", "Shop", "::warning::scenario"],
+        vec!["workspace", "tree", "Shop"],
+    ] {
+        let o = anvil(&data, &args).await;
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", text(&o));
+        assert_terminal_safe(&format!("anvil {}", args.join(" ")), &o);
+    }
 
     let o = anvil(&data, &["send", &id, "--workspace", "Shop", "--env", "lab"]).await;
     assert_eq!(o.status.code(), Some(2), "{}", text(&o));
     assert_terminal_safe("anvil send", &o);
     assert!(String::from_utf8_lossy(&o.stdout).contains(escaped), "{}", text(&o));
+
+    // JSON output keeps the value, with the legacy command's `[` escaped.
+    let o = anvil(&data, &["send", &id, "--workspace", "Shop", "--env", "lab", "--json"]).await;
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    let json = String::from_utf8(o.stdout.clone()).unwrap();
+    assert!(!json.contains("##["), "{json}");
+    let record: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(record["assertion_results"][0]["actual"], HOSTILE_VALUE, "{json}");
 }

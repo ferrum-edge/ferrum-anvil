@@ -355,10 +355,13 @@ local error (unreadable file, invalid spec or ruleset, or a description too
 large to lint completely, unless `--allow-incomplete`). With `--output`, the
 report goes to the file and a summary line to stderr. Text output escapes
 control characters and bidirectional overrides in everything that comes
-from the spec or a ruleset (errors included), so a message cannot inject a
-CI workflow command or a terminal escape sequence; JSON and SARIF output
-escape C1 controls, line separators and bidirectional overrides as
-`\uXXXX`. The CLI and desktop accept rulesets up to 1 MiB each; the desktop
+from the spec or a ruleset (errors included), and breaks the GitHub Actions
+workflow-command introducers with a visible backslash (`::` prints as
+`:\:`, `##[` as `#\#[`), so a message cannot inject a CI workflow command
+or a terminal escape sequence. Text without these prints unchanged. JSON
+and SARIF output escape C1 controls, line separators and bidirectional
+overrides as `\uXXXX`, and the `[` of `##[` as `\u005b` (a runner reads
+`##[command]` anywhere in a line); the parsed value is unchanged. The CLI and desktop accept rulesets up to 1 MiB each; the desktop
 also bounds the count and aggregate size of stored rulesets.
 
 SARIF 2.1.0 output names each rule (with its fix as help text and its
@@ -623,4 +626,5 @@ recommended suggestions or all of them (`--apply all`), and exits with `2`
 when a finding reaches `--fail-on` (default `error`), `3` on a local error.
 With `--har` it needs no profile; with `--import` it opens the profile and
 reads its history. Text output escapes control characters from the spec
-and the traffic.
+and the traffic and breaks workflow-command introducers (`::`, `##[`), as
+`lint-spec` does.

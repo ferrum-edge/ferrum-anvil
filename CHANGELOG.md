@@ -40,8 +40,18 @@
   `anvil spec-drift`, `anvil env` and `anvil gateway` already did. A server under test could
   answer with a newline and a GitHub Actions workflow command (`::error::`, `::add-mask::`,
   `::stop-commands::`) or a terminal escape sequence, and a failed JSONPath assertion printed the
-  value it read as it was, so the CI log ran the command or the terminal the sequence. JSON output
-  is unchanged.
+  value it read as it was, so the CI log ran the command or the terminal the sequence.
+- All of that text output, `lint-spec`, `spec-drift`, `env` and `gateway` included, now also
+  breaks the workflow-command introducers with a visible backslash: `::` prints as `:\:` and
+  `##[` as `#\#[`. Escaping control characters alone left a command that needs none: the legacy
+  `##[error]` syntax, which a runner reads anywhere in a line, and a folder or scenario named
+  `::error::…`, which starts the run report's first line. Text without these sequences prints
+  unchanged; an IPv6 address such as `[::1]` prints as `[:\:1]`.
+- JSON printed to stdout (`anvil send --json`, `workload probe --json`, `jwt`, `mcp-discover
+  --json`, `storage-cleanup --json`, `export --preview`, `import`, `import-spec --dry-run`,
+  `load check` and `load preflight`) escapes C1 controls, line separators,
+  bidirectional overrides and the `[` of `##[` as `\uXXXX`, as `lint-spec` and `spec-drift` JSON
+  do (which now escape `##[` too). The parsed JSON is unchanged.
 
 ### Changed
 

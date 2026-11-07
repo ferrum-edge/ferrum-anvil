@@ -2,7 +2,7 @@
 
 use anvil_app::App;
 use anvil_app::specs::SpecTarget;
-use anvil_contract::terminal_safe as t;
+use anvil_contract::{json_safe, terminal_safe as t};
 use anvil_domain::Id;
 use anvil_domain::load::{AbortRule, ConnectionMode, LoadPlan, RunCompletion, Stage, Workload};
 use anvil_import::{GroupBy, ImportOptions, SampleMode};
@@ -95,7 +95,7 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
     };
     if a.dry_run {
         let p = app.spec_preview(&bytes, &opts)?;
-        println!("{}", serde_json::to_string_pretty(&p)?);
+        println!("{}", json_safe(&serde_json::to_string_pretty(&p)?));
         return Ok(0);
     }
     let target = if a.new_workspace {
@@ -342,7 +342,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             let ws = app.find_workspace(workspace)?.meta.id;
             let p = find_plan(app, &ws, plan)?;
             let check = app.load_plan_check(&p)?;
-            println!("{}", serde_json::to_string_pretty(&check)?);
+            println!("{}", json_safe(&serde_json::to_string_pretty(&check)?));
             Ok(if check.refusal.is_some() { 3 } else { 0 })
         }
         LoadCmd::List { workspace } => {
@@ -355,7 +355,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
         LoadCmd::Preflight { workspace, plan } => {
             let ws = app.find_workspace(workspace)?.meta.id;
             let p = find_plan(app, &ws, plan)?;
-            println!("{}", serde_json::to_string_pretty(&app.load_preflight(&p)?)?);
+            println!("{}", json_safe(&serde_json::to_string_pretty(&app.load_preflight(&p)?)?));
             Ok(0)
         }
         LoadCmd::Run { workspace, plan, i_am_authorized, json, html, csv } => {

@@ -27,7 +27,7 @@ use anvil_app::port::ImportApproval;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::workspace::GatewaySave;
 use anvil_app::{App, AppError};
-use anvil_contract::terminal_safe;
+use anvil_contract::{json_safe, terminal_safe};
 use anvil_domain::diagnostics::{Confidence, Severity};
 use anvil_domain::execution::DispatchState;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
@@ -767,7 +767,7 @@ fn dispatched_to(record: &anvil_domain::execution::ExecutionRecord, host: &str) 
 fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     let r = &out.record;
     if json {
-        println!("{}", serde_json::to_string_pretty(r).unwrap_or_default());
+        println!("{}", json_safe(&serde_json::to_string_pretty(r).unwrap_or_default()));
         return;
     }
     println!("{} {}", terminal_safe(&r.prepared.method), terminal_safe(&r.prepared.url));
@@ -1034,7 +1034,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Cmd::Workload { cmd: WorkloadCmd::Probe { endpoint, audience, timeout_ms, json } } => {
             let p = anvil_engine::workload::probe(endpoint, audience.as_deref(), std::time::Duration::from_millis(*timeout_ms)).await;
             if *json {
-                println!("{}", serde_json::to_string_pretty(&p)?);
+                println!("{}", json_safe(&serde_json::to_string_pretty(&p)?));
             } else {
                 print_probe(&p);
             }
@@ -1047,7 +1047,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Cmd::SpecDrift(a) if !a.needs_profile() => drift::spec_drift_files(a),
         Cmd::Jwt { token } => {
             let i = anvil_auth::jwt::inspect(token, chrono::Utc::now(), 0).map_err(|e| anyhow!(e.to_string()))?;
-            println!("{}", serde_json::to_string_pretty(&i)?);
+            println!("{}", json_safe(&serde_json::to_string_pretty(&i)?));
             Ok(0)
         }
         Cmd::Doctor => {
@@ -1123,7 +1123,7 @@ async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
     let opts = SendOptions { environment: env, record_history: !a.no_history, ..Default::default() };
     let d = app.mcp_discover_tools(&ws.meta.id, &request.meta.id, opts, CancellationToken::new()).await.context("discover tools")?;
     if a.json {
-        println!("{}", serde_json::to_string_pretty(&d)?);
+        println!("{}", json_safe(&serde_json::to_string_pretty(&d)?));
         return Ok(0);
     }
     // Tool names, skip reasons and notes come from the MCP server.
@@ -1362,7 +1362,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             }
             let last = app.last_storage_cleanup()?;
             if *json {
-                println!("{}", serde_json::to_string_pretty(&last)?);
+                println!("{}", json_safe(&serde_json::to_string_pretty(&last)?));
                 return Ok(0);
             }
             let Some(last) = last else {
@@ -1413,7 +1413,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     bail!("a full backup covers every workspace; drop --workspace or choose another --mode");
                 }
                 if *preview {
-                    println!("{}", serde_json::to_string_pretty(&app.backup_preview()?)?);
+                    println!("{}", json_safe(&serde_json::to_string_pretty(&app.backup_preview()?)?));
                     return Ok(0);
                 }
                 let Some(pass) = export_passphrase().map(Zeroizing::new) else {
@@ -1433,7 +1433,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             }
             if *preview {
                 let p = app.export_preview_with_standards(ws.as_ref(), m, false, *include_standards)?;
-                println!("{}", serde_json::to_string_pretty(&p)?);
+                println!("{}", json_safe(&serde_json::to_string_pretty(&p)?));
                 return Ok(0);
             }
             let pass = if matches!(m, ExportMode::ShareSafely) { None } else { export_passphrase() };
@@ -1494,7 +1494,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 ),
                 e => e.into(),
             })?;
-            println!("{}", serde_json::to_string_pretty(&rep)?);
+            println!("{}", json_safe(&serde_json::to_string_pretty(&rep)?));
             Ok(0)
         }
         _ => unreachable!(),
