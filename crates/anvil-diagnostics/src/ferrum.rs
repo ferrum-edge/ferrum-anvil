@@ -786,7 +786,9 @@ mod tests {
                     "plugin.custom.undeclared_response_body_producer",
                 ][..],
             ),
-            (None, response, &[][..]),
+            // A governed synthetic (plugin short-circuit) response refused the
+            // same way is finalized on the reject path, which writes no token.
+            (None, response, &["plugin.openapi_validator.synthetic_response_decode_capacity"][..]),
             (Some("backend_error"), request, &[][..]),
         ] {
             let bf = body_facts(Some("application/json"), text.as_bytes());
@@ -795,6 +797,12 @@ mod tests {
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, expected, "{token:?} {text}");
         }
+        // The core retained-response refusal of a synthetic response sends the
+        // same token-less signal, so the two name each other.
+        let c = catalog_for("ferrum-edge-0.9.20").unwrap();
+        let synthetic = "plugin.openapi_validator.synthetic_response_decode_capacity";
+        assert!(c.outcome(synthetic).unwrap().shared_signal_with.iter().any(|s| s == "gateway.capacity.response_buffer"));
+        assert!(c.outcome("gateway.capacity.response_buffer").unwrap().shared_signal_with.iter().any(|s| s == synthetic));
 
         // The Agent Card rewrite refusal is a JSON 502 on the HTTP bindings
         // and, on the gRPC binding, HTTP 200 with grpc-status 13 set by the

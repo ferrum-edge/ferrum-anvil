@@ -3069,7 +3069,8 @@
       "shared_signal_with": [
         "plugin.custom.undeclared_response_body_producer",
         "plugin.body_validator.response_decode_capacity",
-        "plugin.openapi_validator.response_decode_capacity"
+        "plugin.openapi_validator.response_decode_capacity",
+        "plugin.openapi_validator.synthetic_response_decode_capacity"
       ],
       "minimum_truthful_diagnosis": "Ferrum Edge temporarily lacked gateway memory budget to buffer this response; the backend answered but its response was not delivered.",
       "must_not_claim": "That the backend is unhealthy or returned 503 (despite X-Gateway-Error: backend_error), or that retrying elsewhere helps immediately.",
@@ -3078,7 +3079,7 @@
       "fixture_ids": [
         "UP-015"
       ],
-      "notes": "Doc says 'Do not reuse backend_error for a response that never reached a backend' but this gateway-local refusal carries backend_error (status 503>=500, connection_error=false). Body is the only public discriminator. Not retried by the gateway. No Content-Type header on the HTTP/1.1 / HTTP/2 backend-response path: the gateway builds this body with an empty header map (lab-observed over HTTP/1.1 on 0.9.5 and 0.9.7: UP-015; the v0.9.5 audit had recorded application/json). The HTTP/3 writer was not lab-checked."
+      "notes": "Doc says 'Do not reuse backend_error for a response that never reached a backend' but this gateway-local refusal carries backend_error (status 503>=500, connection_error=false). Body is the only public discriminator. Not retried by the gateway. No Content-Type header on the HTTP/1.1 / HTTP/2 backend-response path: the gateway builds this body with an empty header map (lab-observed over HTTP/1.1 on 0.9.5 and 0.9.7: UP-015; the v0.9.5 audit had recorded application/json). The HTTP/3 writer was not lab-checked. On a governed synthetic response (plugin short-circuit) this refusal is finalized on the reject path and carries no X-Gateway-Error (src/proxy/mod.rs:27348); that form is linked through plugin.openapi_validator.synthetic_response_decode_capacity."
     },
     {
       "id": "gateway.capacity.request_buffer",
@@ -20007,7 +20008,7 @@
       "remediation": "Caller: retry later. Operator: check retained-response budget pressure (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES).",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6845; tagged v0.9.18, first published v0.9.19); the response side of plugin.body_validator.decode_capacity, catalogued separately because only this side carries a token. X-Gateway-Error: the refusal replaces a backend response, so the final builder derives the token from the final status (x_gateway_error_for_response, src/proxy/mod.rs:28709, at src/proxy/mod.rs:46459 on H1/H2; finalize_h3_response_gateway_headers, src/http3/server.rs:12549 on HTTP/3): a 503 without a connection error is backend_error (src/retry.rs:301), as for gateway.capacity.response_buffer. A response the gateway generated itself (a plugin short-circuit) was not traced. Native gRPC renders HTTP 200, which carries none. The plugin sets grpc-status/grpc-message headers itself (src/plugins/body_validator.rs:874-875) and marks gateway capacity provenance (:871). log_only records body_validator.response_outcome=uninspected and continues."
+      "notes": "New in v0.9.19 (#6845; tagged v0.9.18, first published v0.9.19); the response side of plugin.body_validator.decode_capacity, catalogued separately because only this side carries a token. X-Gateway-Error: the refusal replaces a backend response, so the final builder derives the token from the final status (x_gateway_error_for_response, src/proxy/mod.rs:28709, at src/proxy/mod.rs:46459 on H1/H2; finalize_h3_response_gateway_headers, src/http3/server.rs:12549 on HTTP/3): a 503 without a connection error is backend_error (src/retry.rs:301), as for gateway.capacity.response_buffer. No synthetic-response variant: gRPC-Web requests classify as ProxyProtocol::Grpc (src/proxy/mod.rs:36574), and synthetic gRPC bodies are governed only in the native-gRPC serverless terminate representation (src/proxy/mod.rs:26976), which renders as gRPC (HTTP 200, grpc-status 8), so this HTTP 503 cannot come from a plugin short-circuit. Native gRPC renders HTTP 200, which carries none. The plugin sets grpc-status/grpc-message headers itself (src/plugins/body_validator.rs:874-875) and marks gateway capacity provenance (:871). log_only records body_validator.response_outcome=uninspected and continues."
     },
     {
       "id": "plugin.body_validator.log_only_no_signal",
@@ -20761,7 +20762,78 @@
       "remediation": "Caller: retry later. Operator: check retained-response budget pressure (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES).",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19); the response side of plugin.openapi_validator.decode_capacity, catalogued separately because only this side carries a token. Not a problem+json body: the fixed shared capacity body with content-type application/json (src/plugins/openapi_validator.rs:1557-1560), unlike gateway.capacity.response_buffer (no Content-Type). Only content-coded bodies reach it. X-Gateway-Error: the refusal replaces a backend response, so the final builder derives the token from the final status (x_gateway_error_for_response, src/proxy/mod.rs:28709, at src/proxy/mod.rs:46459 on H1/H2; finalize_h3_response_gateway_headers, src/http3/server.rs:12549 on HTTP/3): a 503 without a connection error is backend_error (src/retry.rs:301), as for gateway.capacity.response_buffer. A response the gateway generated itself (a plugin short-circuit) was not traced. log_only records openapi_validator.response_error and continues."
+      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19); the response side of plugin.openapi_validator.decode_capacity, catalogued separately because only this side carries a token. Not a problem+json body: the fixed shared capacity body with content-type application/json (src/plugins/openapi_validator.rs:1557-1560), unlike gateway.capacity.response_buffer (no Content-Type). Only content-coded bodies reach it. X-Gateway-Error: the refusal replaces a backend response, so the final builder derives the token from the final status (x_gateway_error_for_response, src/proxy/mod.rs:28709, at src/proxy/mod.rs:46459 on H1/H2; finalize_h3_response_gateway_headers, src/http3/server.rs:12549 on HTTP/3): a 503 without a connection error is backend_error (src/retry.rs:301), as for gateway.capacity.response_buffer. A governed synthetic (plugin short-circuit) response refused the same way carries no token (plugin.openapi_validator.synthetic_response_decode_capacity). log_only records openapi_validator.response_error and continues."
+    },
+    {
+      "id": "plugin.openapi_validator.synthetic_response_decode_capacity",
+      "family": "capacity",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/plugins/openapi_validator.rs",
+          "line": 1533,
+          "symbol": "OpenapiValidator::decode_capacity_refusal",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/plugins/openapi_validator.rs",
+          "line": 1962,
+          "symbol": "on_final_response_body (MediaFailure::Capacity)",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 479,
+          "symbol": "RESPONSE_BUFFER_OVERLOAD_BODY",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26781,
+          "symbol": "should_apply_synthetic_response_body_hooks",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 27753,
+          "symbol": "synthetic short-circuit on_final_response_body loop",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 26698,
+          "symbol": "rebuild_plugin_rejection_response_headers",
+          "sha": "e4a606a"
+        }
+      ],
+      "condition": "A governed synthetic response (a plugin short-circuit with a 2xx, or a final serverless terminate response, that a response-body plugin buffers) carries a Content-Encoding that OpenAPI response validation must undo, and the decode cannot reserve its working set against the process-wide retained-response budget; enforcement_mode=block.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/json",
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Response buffering capacity exceeded\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response replacing the plugin-generated response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "gateway.capacity.response_buffer"
+      ],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the gateway-wide retained-response budget was exhausted while decompressing a gateway-generated (plugin short-circuit) response for OpenAPI validation; the body was not judged invalid and was not delivered. No backend need have been contacted.",
+      "must_not_claim": "That a backend answered or failed, that the body violated the OpenAPI contract, or which plugin generated the replaced response.",
+      "remediation": "Caller: retry later. Operator: check retained-response budget pressure (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES) and which plugin short-circuits this route with a content-coded body.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19); the synthetic-response form of plugin.openapi_validator.response_decode_capacity. openapi_validator validates governed synthetic responses (src/proxy/mod.rs:26781 admits 2xx plugin short-circuits and final serverless terminate responses that a response-body plugin buffers; the hooks run at src/proxy/mod.rs:27753), so a content-coded synthetic body whose decode the budget refuses becomes this 503. The rejection rebuilds the headers (src/proxy/mod.rs:26698, content-type application/json) and is finalized on the reject path (src/proxy/mod.rs:32441), which never reaches the backend-response builder that stamps backend_error (src/proxy/mod.rs:46459): no X-Gateway-Error. Linked with gateway.capacity.response_buffer because the core retained-response refusal of a synthetic response (FinalSyntheticBodyPolicyDecision::CapacityRefusal, src/proxy/mod.rs:27348) takes the same reject path and so also carries no token. The HTTP/3 synthetic path was not traced. log_only records openapi_validator.response_error and continues."
     },
     {
       "id": "plugin.graphql.uninspectable_transport",
@@ -35427,7 +35499,7 @@
       "refs": "v0.9.15 -> v0.9.20",
       "client_visible_effect": "New 415 'Unsupported request media type' (reject_unsupported_media_types) and new 503 / RESOURCE_EXHAUSTED decode-capacity refusal; new log_only mode suppresses every body_validator rejection.",
       "evidence": "src/plugins/body_validator.rs:733; src/plugins/body_validator.rs:815; src/plugins/body_validator.rs:835; src/plugins/body_validator.rs:808",
-      "anvil_impact": "Add three outcomes; 503 shares bytes with the gateway capacity refusals.",
+      "anvil_impact": "Add four outcomes (the decode-capacity 503 is split into request and response sides); 503 shares bytes with the gateway capacity refusals.",
       "outcome_ids": [
         "plugin.body_validator.unsupported_media_type",
         "plugin.body_validator.decode_capacity",
@@ -35452,10 +35524,11 @@
       "refs": "v0.9.15 -> v0.9.20",
       "client_visible_effect": "Content-Encoding is undone through the charged decoder; budget refusal is a 503 with the shared capacity body instead of a 400/502 decode failure; zstd now decodable.",
       "evidence": "src/plugins/openapi_validator.rs:1533; src/plugins/openapi_validator.rs:3568; src/plugins/openapi_validator.rs:3513",
-      "anvil_impact": "New outcome sharing bytes with gateway capacity refusals.",
+      "anvil_impact": "Three new outcomes (request side, response side, and the response side of a governed synthetic response) sharing bytes with gateway capacity refusals.",
       "outcome_ids": [
         "plugin.openapi_validator.decode_capacity",
         "plugin.openapi_validator.response_decode_capacity",
+        "plugin.openapi_validator.synthetic_response_decode_capacity",
         "plugin.openapi_validator.request_decode_or_conversion_failure",
         "plugin.openapi_validator.response_decode_failure"
       ]
@@ -36512,7 +36585,7 @@
     "state": "reviewed_candidate_qualified",
     "live_0_9_20_evidence": true,
     "baseline": "ferrum-edge-0.9.15",
-    "scope": "Carried observable inventory with the v0.9.15 -> v0.9.20 source delta (554 of the 556 v0.9.15 outcomes; protocol.grpc.request_body_read_failed and plugin.response_mock.status_101_non_websocket are removed), plus 64 outcomes for new client-visible refusals (one of them, plugin.oidc_relying_party.challenge_browser_state_cache_full, returns after its v0.9.15 removal); not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab run 41810892175 (workflow_dispatch, profile=all) on main cfd4e196, all 14 profiles on v0.9.20: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped. Ubuntu's two extra skips are AUTH-030 and AUTH-031, whose lab XML signer needs xmllint, which that runner lacks. AUTH-001, UP-007, UP-018 and MESH-008 passed on both OSes. Full evidence: docs/audit/gateway-0.9.20-delta.md."
+    "scope": "Carried observable inventory with the v0.9.15 -> v0.9.20 source delta (554 of the 556 v0.9.15 outcomes; protocol.grpc.request_body_read_failed and plugin.response_mock.status_101_non_websocket are removed), plus 65 outcomes for new client-visible refusals (one of them, plugin.oidc_relying_party.challenge_browser_state_cache_full, returns after its v0.9.15 removal); not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab run 41810892175 (workflow_dispatch, profile=all) on main cfd4e196, all 14 profiles on v0.9.20: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped. Ubuntu's two extra skips are AUTH-030 and AUTH-031, whose lab XML signer needs xmllint, which that runner lacks. AUTH-001, UP-007, UP-018 and MESH-008 passed on both OSes. Full evidence: docs/audit/gateway-0.9.20-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1906) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1669 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token. v0.9.17 (#6127) adds the loop_detected token and never retries a backend 508; v0.9.19 changes client-visible statuses for connection_timeout (504) and backend_connection_limit (503) without changing request_reached_wire. No ErrorClass variant was added or removed."
 }
