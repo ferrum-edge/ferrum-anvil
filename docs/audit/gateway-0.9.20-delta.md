@@ -5,7 +5,7 @@
 | Baseline | `v0.9.15`, `25b37395ff61bfea0f3ffd189d9011c4984fa755` (source-audited and hosted-qualified in [gateway-0.9.15-delta.md](gateway-0.9.15-delta.md)) |
 | Audited target | `v0.9.20`, `e4a606a00352674daaef08636e3e359e6c48ba18` (merge of Edge #7016), [release 432463173][release], published 2026-11-03T08:58:10Z |
 | Contracts | Published `contracts-edge-0.9.20`, `39da322083044c2e92617209e62983c92387f0ad` |
-| Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 619 outcome IDs: the 556 of 0.9.15 − 2 removed + 65 new |
+| Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 620 outcome IDs: the 556 of 0.9.15 − 2 removed + 66 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.20.lock`; the only supported release: v0.9.5 to v0.9.15 were retired with Anvil's vendored dimpl after adoption (see [#7001](#dtls-13-certificaterequest-omits-the-empty-certificate_authorities-list-7001)) |
 | Hosted qualification | All-profile Lab run 41810892175 on `main` at `cfd4e196`; results are recorded below |
 | Audit date | 2026-11-03 |
@@ -89,7 +89,7 @@ These change what Anvil matches, so they are the ones a diagnosis on 0.9.20 depe
   #6965); `GrpcProxyError::Internal` is INTERNAL (13); 499 maps to CANCELLED.
 - **Plugins**: the `request_size_limiting` 413 body is now the core 413 body; `rate_limiting` and
   `ai_rate_limiter` quota 429s carry `Retry-After`; `mcp_gateway` denies `prompts/get` and
-  `resources/read` by default; WAF, body and OpenAPI validation refuse more by default; 65 new
+  `resources/read` by default; WAF, body and OpenAPI validation refuse more by default; 66 new
   outcomes in all (listed in the catalog with `New in v0.9.NN` notes).
 - **Not matchable from the public signal alone**: four new outcomes have a concrete status but an
   empty body, so `match_signal` has no body pattern and never returns them (status alone would
@@ -1358,7 +1358,7 @@ v0.9.19 (#6837). Declared path, query, header and cookie parameters are validate
 
 v0.9.19 (#6837, #6848). Content-Encoding is now undone through the strict, budget-charged decoder (`src/plugins/openapi_validator.rs:3568`), and zstd is accepted. A budget refusal returns the shared `503` capacity body with `content-type: application/json` instead of a problem+json violation (`:1533`, `:1459`, `:1962`).
 
-**Catalog impact:** new outcomes `plugin.openapi_validator.decode_capacity` (request side, no token), `plugin.openapi_validator.response_decode_capacity` (response side, `backend_error` from the final builder as for `body_validator`; split in #483), and `plugin.openapi_validator.synthetic_response_decode_capacity`: openapi_validator also validates governed synthetic (plugin short-circuit) responses (`src/proxy/mod.rs:26781`, `:27753`), whose capacity refusal is finalized on the reject path (`:26698`, `:32441`) without `X-Gateway-Error`. It is linked with `gateway.capacity.response_buffer`, whose synthetic-response refusal (`:27348`) also carries no token. Notes are appended to `.request_decode_or_conversion_failure`, which is repointed to `CONTENT_ENCODING_DETAIL` `:3513`, and to `.response_decode_failure`.
+**Catalog impact:** new outcomes `plugin.openapi_validator.decode_capacity` (request side, no token), `plugin.openapi_validator.response_decode_capacity` (response side, `backend_error` from the final builder as for `body_validator`; split in #483), and `plugin.openapi_validator.synthetic_response_decode_capacity`: openapi_validator also validates governed synthetic (plugin short-circuit) responses (`src/proxy/mod.rs:26781`, `:27753`), whose capacity refusal is finalized on the reject path (`:26698`, `:32441`) without `X-Gateway-Error`. Core budget refusals of a synthetic response send the same token-less bytes with no OpenAPI involvement (for example `ai_response_guard` in redact mode whose scratch window cannot open, `src/plugins/ai_response_guard.rs:5136`, installed through `src/proxy/mod.rs:27493`, `:27348` and `:30024`), so the new core outcome `gateway.capacity.synthetic_response_buffer` is listed first and is the ambiguous finding's capacity-only common conclusion: it names no plugin, decompression or backend handoff. The two link each other; `gateway.capacity.response_buffer` covers only the backend-response form (`backend_error`). Notes are appended to `.request_decode_or_conversion_failure`, which is repointed to `CONTENT_ENCODING_DETAIL` `:3513`, and to `.response_decode_failure`.
 
 ### `openapi_validator` asserts `format` under every draft
 

@@ -19,7 +19,7 @@
   0 failed / 19 skipped, Ubuntu 554 passed / 0 failed / 21 skipped; the failure-matrix coverage
   now cites its macOS results. The audit also covers v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18
   were tagged but never published). See `docs/audit/gateway-0.9.20-delta.md`.
-- Gateway catalog 0.9.20 has 619 outcomes: the 556 of 0.9.15, less two removed, plus 65 new,
+- Gateway catalog 0.9.20 has 620 outcomes: the 556 of 0.9.15, less two removed, plus 66 new,
   among them the proxy hop limit 508 `{"error":"Proxy hop limit exceeded"}` and the malformed
   `X-Ferrum-Hops` 400, the backend connect timeout's 504 and the pooled connection ceiling's 503
   (both `connection_failure`), and the OIDC relying party's "state cache full" 503, which v0.9.19
@@ -52,9 +52,12 @@
   `plugin.body_validator.response_decode_capacity` and
   `plugin.openapi_validator.response_decode_capacity` carry the `backend_error` that the final
   response builder writes on their 503, so they match with `gateway.capacity.response_buffer`.
-  The new `plugin.openapi_validator.synthetic_response_decode_capacity` covers the same refusal of
-  a plugin short-circuit response, which the reject path finalizes without a token; body_validator
-  has no such form (synthetic gRPC and gRPC-Web bodies are not validated as HTTP responses).
+  The same refusal of a gateway-generated (plugin short-circuit) response is finalized on the
+  reject path without a token: the new `gateway.capacity.synthetic_response_buffer` is its
+  capacity-only diagnosis (no plugin, decompression or backend named), linked with the new
+  `plugin.openapi_validator.synthetic_response_decode_capacity`, and
+  `gateway.capacity.response_buffer` now covers only the backend-response form. body_validator has
+  no synthetic form (synthetic gRPC and gRPC-Web bodies are not validated as HTTP responses).
   `gateway.capacity.request_decode` and `plugin.compression.decode_capacity` list each other. The
   OpenAPI parameter violation's diagnosis names the default status configuration, and four
   outcomes with an empty body are marked as catalogued for completeness (not matchable from their

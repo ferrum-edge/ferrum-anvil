@@ -787,8 +787,13 @@ mod tests {
                 ][..],
             ),
             // A governed synthetic (plugin short-circuit) response refused the
-            // same way is finalized on the reject path, which writes no token.
-            (None, response, &["plugin.openapi_validator.synthetic_response_decode_capacity"][..]),
+            // same way is finalized on the reject path, which writes no token:
+            // the core capacity-only outcome comes first, then the OpenAPI form.
+            (
+                None,
+                response,
+                &["gateway.capacity.synthetic_response_buffer", "plugin.openapi_validator.synthetic_response_decode_capacity"][..],
+            ),
             (Some("backend_error"), request, &[][..]),
         ] {
             let bf = body_facts(Some("application/json"), text.as_bytes());
@@ -798,11 +803,14 @@ mod tests {
             assert_eq!(ids, expected, "{token:?} {text}");
         }
         // The core retained-response refusal of a synthetic response sends the
-        // same token-less signal, so the two name each other.
+        // same token-less signal, so the two name each other; the backend form
+        // (`backend_error`) is a different signal.
         let c = catalog_for("ferrum-edge-0.9.20").unwrap();
         let synthetic = "plugin.openapi_validator.synthetic_response_decode_capacity";
-        assert!(c.outcome(synthetic).unwrap().shared_signal_with.iter().any(|s| s == "gateway.capacity.response_buffer"));
-        assert!(c.outcome("gateway.capacity.response_buffer").unwrap().shared_signal_with.iter().any(|s| s == synthetic));
+        let core = "gateway.capacity.synthetic_response_buffer";
+        assert!(c.outcome(synthetic).unwrap().shared_signal_with.iter().any(|s| s == core));
+        assert!(c.outcome(core).unwrap().shared_signal_with.iter().any(|s| s == synthetic));
+        assert!(!c.outcome("gateway.capacity.response_buffer").unwrap().shared_signal_with.iter().any(|s| s == synthetic));
 
         // The Agent Card rewrite refusal is a JSON 502 on the HTTP bindings
         // and, on the gRPC binding, HTTP 200 with grpc-status 13 set by the

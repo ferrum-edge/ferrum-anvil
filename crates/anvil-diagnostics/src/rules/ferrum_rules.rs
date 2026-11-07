@@ -1131,4 +1131,32 @@ mod tests {
         assert!(a.alternatives.iter().any(|x| x.contains("backend returned a response with identical")), "{:?}", a.alternatives);
         assert!(!a.title.to_lowercase().contains("waf"));
     }
+
+    /// A token-less 503 `Response buffering capacity exceeded` is the reject-path
+    /// form of a gateway-generated (plugin short-circuit) response the
+    /// retained-response budget refused. Core budget refusals (for example
+    /// ai_response_guard's redact window) send it with no OpenAPI validation
+    /// involved, so the safe common conclusion is the capacity-only outcome: it
+    /// names no plugin, no decompression and no backend handoff.
+    #[test]
+    fn synthetic_capacity_refusal_renders_a_capacity_only_common_conclusion() {
+        let compat = "ferrum-edge-0.9.20";
+        let r = response(503, "application/json", &[]);
+        let f = diagnose_as(Protocol::Http, &r, br#"{"error":"Response buffering capacity exceeded"}"#, compat);
+        let a = find(&f, "ferrum.outcome_ambiguous").expect("ambiguous finding");
+        let cat = crate::ferrum::catalog_for(compat).expect("embedded catalog");
+        let core = cat.outcome("gateway.capacity.synthetic_response_buffer").expect("core synthetic outcome");
+        assert!(a.explanation.contains(&core.minimum_truthful_diagnosis), "{}", a.explanation);
+        let lower = a.explanation.to_lowercase();
+        for claim in ["openapi", "decompress", "backend answered"] {
+            assert!(!lower.contains(claim), "{claim:?} in {}", a.explanation);
+        }
+        let candidates: Vec<&str> = evidence(a, "catalog.candidates").expect("candidates").split(", ").collect();
+        assert_eq!(
+            candidates,
+            ["gateway.capacity.synthetic_response_buffer", "plugin.openapi_validator.synthetic_response_decode_capacity"],
+            "the backend form (backend_error) is not a candidate"
+        );
+        assert!(!codes(&f).contains(&"ferrum.outcome"), "{:?}", codes(&f));
+    }
 }
