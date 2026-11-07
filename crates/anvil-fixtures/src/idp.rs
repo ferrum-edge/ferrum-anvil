@@ -265,6 +265,8 @@ fn s256(verifier: &str) -> String {
 }
 
 /// RFC 8252 §7.3: loopback IP redirect, any port, http scheme.
+// Stricter than `anvil_transport::dns::is_literal_loopback` (no IPv4-mapped
+// loopback) on purpose, and fixtures do not depend on the transport.
 fn loopback_redirect(uri: &str) -> Option<url::Url> {
     let u = url::Url::parse(uri).ok()?;
     let host_ok = matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
@@ -545,4 +547,26 @@ async fn request(s: &mut Box<dyn Io>, target: &str, authority: &str) -> anyhow::
     let status: u16 = lines.next().and_then(|l| l.split_whitespace().nth(1)).and_then(|c| c.parse().ok()).unwrap_or(0);
     let headers = lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_string(), v.trim().to_string())).collect();
     Ok((status, headers, body.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_redirects_are_http_loopback_literals_with_a_port() {
+        for ok in ["http://127.0.0.1:9000/callback", "http://[::1]:9000/callback"] {
+            assert!(loopback_redirect(ok).is_some(), "{ok}");
+        }
+        for refused in [
+            // IPv4-mapped loopback, which `anvil_transport::dns::is_literal_loopback` accepts.
+            "http://[::ffff:127.0.0.1]:9000/callback",
+            "http://localhost:9000/callback",
+            "http://127.0.0.1/callback",
+            "http://127.0.0.1:9000/callback#frag",
+            "https://127.0.0.1:9000/callback",
+        ] {
+            assert!(loopback_redirect(refused).is_none(), "{refused}");
+        }
+    }
 }

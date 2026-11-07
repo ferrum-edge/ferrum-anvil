@@ -196,17 +196,12 @@ pub(crate) fn failed(observer: &dyn FlowObserver, e: FlowError) -> FlowError {
     e
 }
 
-/// Whether the URL names a canonical literal loopback address (`127.0.0.0/8`,
-/// `::1` or IPv4-mapped loopback). DNS names, `localhost` included, never
-/// qualify: whether they stay on this host depends on the resolver, not on
-/// the URL. This matches the engine's OAuth token-endpoint policy.
-pub(crate) fn is_literal_loopback(u: &url::Url) -> bool {
-    match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
-        Some(url::Host::Domain(_)) | None => false,
-    }
-}
+// Whether the URL names a canonical literal loopback address (`127.0.0.0/8`,
+// `::1` or IPv4-mapped loopback); DNS names, `localhost` included, never
+// qualify. The same predicate as the engine's OAuth token-endpoint policy;
+// what each requires beyond it (https or loopback here, loopback only for the
+// mock provider; a direct route there) stays with each.
+pub(crate) use anvil_transport::dns::is_literal_loopback;
 
 /// Interactive flows only talk to `https` issuers, except test issuers on a
 /// literal loopback address over `http`. Codes and verifiers never cross a
