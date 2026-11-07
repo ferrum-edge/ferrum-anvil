@@ -78,7 +78,7 @@ fn text_output_escapes_control_characters_from_the_spec() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.lines().all(|l| !l.starts_with("::")), "{text}");
     assert!(!text.contains('\u{1b}'), "{text}");
-    assert!(text.contains("\\n::stop-commands::x"), "{text}");
+    assert!(text.contains("\\n:\\:stop-commands:\\:x"), "{text}");
 }
 
 #[test]

@@ -347,6 +347,18 @@ anvil scenario trust <workspace> <scenario>
 
 Ctrl-C cancels and still writes the partial report files. Live progress goes
 to stderr (`-q` silences it); the summary and failing steps go to stdout.
+Both escape control characters and bidirectional overrides in everything
+that comes from the collection or the traffic (names, URLs, summaries,
+assertion and failure messages, findings, notes), as `anvil send` does, and
+break the GitHub Actions workflow-command introducers with a visible
+backslash: `::` prints as `:\:` and `##[` as `#\#[` (so an IPv6 URL such as
+`http://[::1]/` prints as `http://[:\:1]/`). A response, or a folder,
+scenario or request name, cannot start a CI workflow command (`::error::`),
+hold a legacy one (`##[error]`) or send the terminal an escape sequence.
+Text with none of these prints unchanged. JSON printed to stdout (`anvil
+send --json` and the other JSON views) escapes C1 controls, line separators,
+bidirectional overrides and the `[` of `##[` as `\uXXXX`, keeping the parsed
+value. The `--json`, `--junit` and `--html` files are unchanged.
 
 ## Tests
 
