@@ -29,6 +29,15 @@ impl Default for Meta {
     }
 }
 
+/// Whether `a` and `b` are the same name, case ignored: the one rule for
+/// finding a workspace, an environment or a Ferrum gateway profile by its
+/// name. Both are lowercased by Unicode's rules ([`str::to_lowercase`]), so
+/// `Café` names `CAFÉ`; there is no folding beyond lowercase (`ß` is not
+/// `SS`), and no trimming.
+pub fn names_match(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
+}
+
 /// Variable in a workspace base set, an environment, a folder or a request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Variable {

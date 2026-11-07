@@ -96,6 +96,29 @@ export function SidebarResizer() {
   );
 }
 
+// How many Modals are mounted, whichever component opened them: window-wide
+// shortcuts (Workbench's) leave a modal's keys to it. A key is the modal's if
+// one was open when it was pressed: the modal's own Escape handler may close
+// it, and React unmount it, before a later window listener sees the key, so
+// a capture listener (which runs before any other window keydown listener)
+// notes each key pressed while a modal is open.
+let openModals = 0;
+const modalKeys = new WeakSet<Event>();
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (openModals > 0) modalKeys.add(e);
+    },
+    { capture: true },
+  );
+}
+
+/** Whether a Modal is open, or was when the key `e` was pressed. */
+export function modalOpen(e?: Event): boolean {
+  return openModals > 0 || (e !== undefined && modalKeys.has(e));
+}
+
 export function Modal(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   // Escape calls the latest onClose, not the one from the first render.
@@ -103,6 +126,12 @@ export function Modal(props: { title: string; onClose: () => void; children: Rea
   useEffect(() => {
     onClose.current = props.onClose;
   });
+  useEffect(() => {
+    openModals++;
+    return () => {
+      openModals--;
+    };
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose.current();
     window.addEventListener("keydown", onKey);

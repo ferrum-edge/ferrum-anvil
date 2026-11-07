@@ -12,7 +12,15 @@ import { Modal, Tabs } from "./ui";
 type Target = { kind: "folder"; id: string } | { kind: "workspace"; workspace: Workspace };
 type Tab = "auth" | "variables" | "settings" | "scope" | "about";
 
-export function ScopeSettingsDialog(props: { target: Target; workspaceId: string; profiles: Profiles; onClose: () => void; onSaved: (w?: Workspace) => void }) {
+export function ScopeSettingsDialog(props: {
+  target: Target;
+  workspaceId: string;
+  profiles: Profiles;
+  /** `profiles` is the result of a read for this workspace (see SettingsOverridesEditor). */
+  profilesLoaded?: boolean;
+  onClose: () => void;
+  onSaved: (w?: Workspace) => void;
+}) {
   const [folder, setFolder] = useState<Folder | null>(null);
   const [ws, setWs] = useState<Workspace | null>(props.target.kind === "workspace" ? props.target.workspace : null);
   const [tab, setTab] = useState<Tab>("auth");
@@ -167,6 +175,7 @@ export function ScopeSettingsDialog(props: { target: Target; workspaceId: string
             value={settings}
             onChange={(s) => patch({ settings: s })}
             profiles={props.profiles}
+            profilesLoaded={props.profilesLoaded}
           />
         </>
       )}

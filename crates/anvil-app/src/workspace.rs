@@ -86,11 +86,15 @@ impl App {
         self.store.get(kind::WORKSPACE, id)?.ok_or_else(|| AppError::NotFound("workspace".into()))
     }
 
+    /// The workspace `id_or_name` names: its id, else the first (by name)
+    /// whose name matches, case ignored ([`names_match`]). An id wins over
+    /// another workspace's name.
     pub fn find_workspace(&self, id_or_name: &str) -> Result<Workspace> {
-        self.workspaces()?
-            .into_iter()
-            .find(|w| w.meta.id.to_string() == id_or_name || w.name.eq_ignore_ascii_case(id_or_name))
-            .ok_or_else(|| AppError::NotFound(format!("workspace '{id_or_name}'")))
+        let mut all = self.workspaces()?;
+        if let Some(i) = all.iter().position(|w| w.meta.id.to_string() == id_or_name) {
+            return Ok(all.swap_remove(i));
+        }
+        all.into_iter().find(|w| names_match(&w.name, id_or_name)).ok_or_else(|| AppError::NotFound(format!("workspace '{id_or_name}'")))
     }
 
     pub fn save_workspace(&self, mut w: Workspace) -> Result<Workspace> {
@@ -706,7 +710,7 @@ impl App {
             let Some(mut w) = s.get::<Workspace>(kind::WORKSPACE, ws)? else {
                 return Ok(Err(AppError::NotFound(format!("workspace '{ws}'"))));
             };
-            if s.list::<Environment>(kind::ENVIRONMENT, Some(ws))?.iter().any(|e| e.name.trim().eq_ignore_ascii_case(name)) {
+            if s.list::<Environment>(kind::ENVIRONMENT, Some(ws))?.iter().any(|e| names_match(e.name.trim(), name)) {
                 return Ok(Err(AppError::Invalid(format!("the workspace already has an environment named '{name}'"))));
             }
             let e = Environment { meta: Meta::new(), workspace_id: *ws, name: name.into(), variables: vec![] };
