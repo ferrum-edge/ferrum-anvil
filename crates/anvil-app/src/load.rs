@@ -683,7 +683,8 @@ fn prove_url(resolver: &Resolver, template: &str, field: &str) -> std::result::R
 /// The byte range of the port of `resolved` (a trimmed URL resolved with the
 /// per-run stand-ins) when a per-run value reaches it, or which part of its
 /// origin a per-run value reaches when that cannot be proven local. The URL
-/// is split as `parse_target` splits it: the scheme ends at the first `://`
+/// is split as `parse_target` splits it (`anvil_engine::prepare::split_origin`,
+/// shared with the OAuth worker endpoint check): the scheme ends at the first `://`
 /// (with none, a fixed one is inferred), the authority at the first `/`, `?`
 /// or `#`, and the host at the `:` before the port (after the `]` of an IPv6
 /// literal). A per-run port is accepted only after a fixed loopback host,
@@ -692,29 +693,25 @@ fn prove_url(resolver: &Resolver, template: &str, field: &str) -> std::result::R
 /// refuses an `@` in the authority and a port that is not 0-65535 in ASCII
 /// digits) but never the host.
 fn per_run_origin(resolved: &str) -> std::result::Result<Option<std::ops::Range<usize>>, PerRunOrigin> {
-    let (scheme, rest) = resolved.split_once("://").unwrap_or(("", resolved));
-    let sources = per_run_sources(scheme);
+    let origin = anvil_engine::prepare::split_origin(resolved);
+    let sources = per_run_sources(origin.scheme);
     if !sources.is_empty() {
         return Err(PerRunOrigin { part: "scheme", sources, rule: None });
     }
-    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-    let sources = per_run_sources(authority);
+    let sources = per_run_sources(origin.authority);
     if sources.is_empty() {
         return Ok(None);
     }
-    let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
-    let (host, port) = authority.split_at(host_end.unwrap_or(authority.len()));
-    let Some(port) = port.strip_prefix(':').filter(|_| per_run_sources(host).is_empty()) else {
+    let Some(port) = origin.port.filter(|_| per_run_sources(origin.host).is_empty()) else {
         return Err(PerRunOrigin { part: "host", sources, rule: None });
     };
-    if !host_is_loopback(host) {
+    if !host_is_loopback(origin.host) {
         return Err(PerRunOrigin { part: "port", sources, rule: Some("a per-iteration port is allowed only after a fixed loopback host") });
     }
-    if !replace_stand_ins(port, "").bytes().all(|b| b.is_ascii_digit()) {
+    if !replace_stand_ins(port.text, "").bytes().all(|b| b.is_ascii_digit()) {
         return Err(PerRunOrigin { part: "port", sources, rule: Some("only fixed digits may share the port with a per-iteration value") });
     }
-    let start = resolved.len() - rest.len() + host.len() + 1;
-    Ok(Some(start..resolved.len() - rest.len() + authority.len()))
+    Ok(Some(port.range))
 }
 
 /// The refusal of a load step whose `what` (its URL or MASQUE proxy URL) has

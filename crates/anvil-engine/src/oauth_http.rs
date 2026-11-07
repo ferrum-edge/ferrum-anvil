@@ -203,25 +203,10 @@ pub fn validate_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> Result<(
 /// proof while allowing per-run paths and literal-loopback ports.
 pub const OAUTH_PER_RUN_VALUE: &str = "anvil-oauth-per-run-value";
 
+/// `input` with each dynamic helper replaced by [`OAUTH_PER_RUN_VALUE`],
+/// tokenized as every resolution tokenizes (see [`crate::vars::mask_dynamic`]).
 pub fn mask_oauth_dynamic(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(open) = rest.find("{{") {
-        output.push_str(&rest[..open]);
-        let after = &rest[open + 2..];
-        let Some(close) = after.find("}}") else {
-            output.push_str(&rest[open..]);
-            return output;
-        };
-        if after[..close].trim().starts_with('$') {
-            output.push_str(OAUTH_PER_RUN_VALUE);
-        } else {
-            output.push_str(&rest[open..open + 2 + close + 2]);
-        }
-        rest = &after[close + 2..];
-    }
-    output.push_str(rest);
-    output
+    crate::vars::mask_dynamic(input, OAUTH_PER_RUN_VALUE)
 }
 
 /// Validate the expanded origin at the producer, before resolving or exporting
@@ -235,29 +220,24 @@ pub fn validate_worker_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> R
         .resolve(&mask_oauth_dynamic(&config.token_url), "auth.token_url")
         .map_err(|_| "could not resolve auth.token_url; check the vault and active variables".to_string())?;
     let varies = |value: &str| value.contains(OAUTH_PER_RUN_VALUE);
-    let (scheme, rest) = endpoint.split_once("://").unwrap_or(("", endpoint.as_str()));
-    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-    if varies(scheme) {
+    let origin = prepare::split_origin(&endpoint);
+    if varies(origin.scheme) {
         return Err("the OAuth token endpoint scheme depends on per-run values".into());
     }
-    let port_varies = varies(authority);
+    let port_varies = varies(origin.authority);
     if port_varies {
-        let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
-        let (host, port) = authority.split_at(host_end.unwrap_or(authority.len()));
-        let Some(port) = port.strip_prefix(':').filter(|_| !varies(host)) else {
+        let Some(port) = origin.port.filter(|_| !varies(origin.host)) else {
             return Err("the OAuth token endpoint host depends on per-run values".into());
         };
-        let loopback = url::Url::parse(&format!("http://{host}/")).ok().is_some_and(|url| match url.host() {
+        let loopback = url::Url::parse(&format!("http://{}/", origin.host)).ok().is_some_and(|url| match url.host() {
             Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
             Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()),
             _ => false,
         });
-        if !loopback || !port.replace(OAUTH_PER_RUN_VALUE, "").bytes().all(|byte| byte.is_ascii_digit()) {
+        if !loopback || !port.text.replace(OAUTH_PER_RUN_VALUE, "").bytes().all(|byte| byte.is_ascii_digit()) {
             return Err("a per-run OAuth token endpoint port requires a fixed literal-loopback host and digits".into());
         }
-        let start = endpoint.len() - rest.len() + host.len() + 1;
-        let end = endpoint.len() - rest.len() + authority.len();
-        endpoint.replace_range(start..end, "1");
+        endpoint.replace_range(port.range, "1");
     }
     let settings = crate::settings::resolve(&ctx.settings_layers);
     require_token_endpoint_route(&endpoint.replace(OAUTH_PER_RUN_VALUE, "1"), ctx, &settings, port_varies)
@@ -346,6 +326,95 @@ mod endpoint_tests {
         ] {
             assert!(require_secure_token_endpoint(url).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn the_oauth_masker_tokenizes_as_the_shared_masker() {
+        for input in [
+            "http://127.0.0.1:{{$randomInt}}/token",
+            "{{ $randomFrom a|b }}{{plain}}{{ also-plain }}",
+            "{{$a}}}}{{$b",
+            "{{{{$a}}}}",
+            "no references",
+            "{{unclosed",
+            "",
+        ] {
+            assert_eq!(mask_oauth_dynamic(input), crate::vars::mask_dynamic(input, OAUTH_PER_RUN_VALUE), "{input}");
+        }
+        assert_eq!(mask_oauth_dynamic("http://h/{{$uuid}}?{{v}}"), format!("http://h/{OAUTH_PER_RUN_VALUE}?{{{{v}}}}"));
+    }
+
+    /// Which part of a load worker's token URL a per-run value may reach:
+    /// only the path, query or fragment, or the port after a fixed literal
+    /// loopback host. Each refusal comes before any credential is resolved.
+    #[test]
+    fn a_worker_token_endpoint_varies_only_in_its_path_or_a_literal_loopback_port() {
+        let check = |token_url: &str| {
+            let mut spec = RequestSpec::http("GET", "https://api.example/");
+            spec.auth = anvil_domain::auth::AuthConfig::OAuth2 {
+                config: OAuth2Config {
+                    grant: OAuthGrant::ClientCredentials,
+                    token_url: token_url.into(),
+                    client_id: "client".into(),
+                    client_secret: SensitiveValue::template("{{credential}}"),
+                    authorization_url: String::new(),
+                    scope: String::new(),
+                    audience: String::new(),
+                    client_auth: OAuthClientAuth::RequestBody,
+                    token_cache_id: None,
+                    refresh_skew_secs: 30,
+                },
+            };
+            let ctx = ExecutionContext::standalone(spec);
+            let resolver = Resolver::new(
+                vec![VarLayer {
+                    label: "test".into(),
+                    vars: vec![VarEntry { name: "credential".into(), value: "unused-credential".into(), secret: true, literal: false }],
+                }],
+                None,
+            );
+            let result = validate_worker_oauth_endpoint(&ctx, &resolver);
+            assert!(resolver.used_secrets.lock().is_empty(), "{token_url}: no credential is resolved");
+            result
+        };
+        for ok in [
+            "https://issuer.example/token",
+            "https://issuer.example/{{$uuid}}?x={{$randomInt}}#{{$uuid}}",
+            "http://127.0.0.1/token/{{$uuid}}",
+            "http://127.0.0.1:{{$randomInt}}/token",
+            "http://127.0.0.1:80{{$randomInt}}/token",
+            "http://127.0.0.1:{{$randomInt}}",
+            "http://[::1]:{{$randomInt}}/token",
+            "http://[::ffff:127.0.0.1]:{{$randomInt}}/token",
+            "https://127.8.9.10:{{$randomInt}}/token",
+        ] {
+            assert_eq!(check(ok), Ok(()), "{ok}");
+        }
+        let scheme = "the OAuth token endpoint scheme depends on per-run values";
+        let host = "the OAuth token endpoint host depends on per-run values";
+        let port = "a per-run OAuth token endpoint port requires a fixed literal-loopback host and digits";
+        for (refused, why) in [
+            ("{{$randomFrom http|https}}://127.0.0.1/token", scheme),
+            ("http{{$uuid}}://127.0.0.1/token", scheme),
+            ("http://{{$randomFrom 127.0.0.1|issuer.example}}/token", host),
+            ("http://127.0.0.{{$randomInt}}/token", host),
+            ("http://127.0.0.1{{$uuid}}:80/token", host),
+            ("http://[::1]{{$uuid}}/token", host),
+            ("http://[::1{{$uuid}}]:80/token", host),
+            ("http://localhost:{{$randomInt}}/token", port),
+            ("https://issuer.example:{{$randomInt}}/token", port),
+            ("http://10.0.0.1:{{$randomInt}}/token", port),
+            ("http://127.0.0.1:{{$randomInt}}x/token", port),
+            ("http://127.0.0.1:{{$randomInt}}:1/token", port),
+        ] {
+            assert_eq!(check(refused), Err(why.to_string()), "{refused}");
+        }
+        // Past the per-run checks, the endpoint (its port spliced to one
+        // valid port) still goes through the route rules.
+        assert_eq!(
+            check("ftp://127.0.0.1:{{$randomInt}}/token"),
+            Err("the OAuth token endpoint requires HTTPS or literal-loopback HTTP".to_string())
+        );
     }
 
     #[test]
