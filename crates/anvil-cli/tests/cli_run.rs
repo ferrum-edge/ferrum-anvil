@@ -284,11 +284,9 @@ async fn response_text_in_the_human_readable_output_is_terminal_safe() {
     assert!(stdout.starts_with(r":\:warning:\:scenario"), "the scenario name starts the report: {stdout}");
     assert!(stdout.contains(escaped), "{stdout}");
 
-    for args in [
-        vec!["scenario", "list", "Shop"],
-        vec!["scenario", "show", "Shop", "::warning::scenario"],
-        vec!["workspace", "tree", "Shop"],
-    ] {
+    for args in
+        [vec!["scenario", "list", "Shop"], vec!["scenario", "show", "Shop", "::warning::scenario"], vec!["workspace", "tree", "Shop"]]
+    {
         let o = anvil(&data, &args).await;
         assert_eq!(o.status.code(), Some(0), "{args:?}: {}", text(&o));
         assert_terminal_safe(&format!("anvil {}", args.join(" ")), &o);

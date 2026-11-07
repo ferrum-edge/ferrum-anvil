@@ -46,7 +46,9 @@
   `##[` as `#\#[`. Escaping control characters alone left a command that needs none: the legacy
   `##[error]` syntax, which a runner reads anywhere in a line, and a folder or scenario named
   `::error::…`, which starts the run report's first line. Text without these sequences prints
-  unchanged; an IPv6 address such as `[::1]` prints as `[:\:1]`.
+  unchanged; an IPv6 address such as `[::1]` prints as `[:\:1]`. `anvil workload probe` quotes
+  the Workload API's status message and the JWT-SVID audiences (Rust Debug quoting, which escapes
+  control characters but not these sequences); they go through the same escaping now.
 - JSON printed to stdout (`anvil send --json`, `workload probe --json`, `jwt`, `mcp-discover
   --json`, `storage-cleanup --json`, `export --preview`, `import`, `import-spec --dry-run`,
   `load check` and `load preflight`) escapes C1 controls, line separators,

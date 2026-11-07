@@ -1066,22 +1066,41 @@ async fn run(cli: Cli) -> Result<i32> {
     }
 }
 
-fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
+/// One Workload API call's result for the terminal. The details and the
+/// status message come from the Workload API: the message keeps its quotes
+/// (Debug) and, like the rest, goes through `terminal_safe`, since Debug
+/// escapes control characters but not a workflow command (`::`, `##[`).
+fn workload_result_text(r: &anvil_domain::workload::WorkloadCallResult) -> String {
     use anvil_domain::workload::WorkloadCallResult as R;
+    match r {
+        R::Ok => "OK".to_string(),
+        R::Unavailable { detail, .. } => format!("unavailable: {}", terminal_safe(detail)),
+        R::Timeout { deadline_ms } => format!("no answer within {deadline_ms} ms"),
+        R::Status { code_name, message, .. } => format!("{} {}", terminal_safe(code_name), terminal_safe(&format!("{message:?}"))),
+        R::NoIdentity { detail } => format!("no identity: {}", terminal_safe(detail)),
+        R::Malformed { detail } => format!("malformed answer: {}", terminal_safe(detail)),
+    }
+}
+
+/// The JWT-SVID line of a probe. Its subject, audiences and algorithm come
+/// from the Workload API, so all three go through `terminal_safe`.
+fn jwt_svid_line(j: &anvil_domain::workload::JwtSvidSummary) -> String {
+    format!(
+        "  JWT-SVID    sub {} aud {} alg {} (token not shown)",
+        terminal_safe(j.subject.as_deref().unwrap_or("?")),
+        terminal_safe(&format!("{:?}", j.audiences)),
+        terminal_safe(j.algorithm.as_deref().unwrap_or("?"))
+    )
+}
+
+fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
     println!("endpoint: {}{}", terminal_safe(&p.endpoint), p.endpoint_source.map(|s| format!(" ({s:?})")).unwrap_or_default());
     if let Some(e) = &p.endpoint_error {
         println!("  not dialed: {}", terminal_safe(e));
         return;
     }
     for c in &p.calls {
-        let res = match &c.result {
-            R::Ok => "OK".to_string(),
-            R::Unavailable { detail, .. } => format!("unavailable: {}", terminal_safe(detail)),
-            R::Timeout { deadline_ms } => format!("no answer within {deadline_ms} ms"),
-            R::Status { code_name, message, .. } => format!("{} {message:?}", terminal_safe(code_name)),
-            R::NoIdentity { detail } => format!("no identity: {}", terminal_safe(detail)),
-            R::Malformed { detail } => format!("malformed answer: {}", terminal_safe(detail)),
-        };
+        let res = workload_result_text(&c.result);
         let uid = c.caller_uid.map(|u| format!(" (this process: uid {u})")).unwrap_or_default();
         println!("  {:<16} {res}{uid}", c.rpc.method());
     }
@@ -1101,12 +1120,7 @@ fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
         println!("  federated   {}", terminal_safe(&p.federated_trust_domains.join(", ")));
     }
     if let Some(j) = &p.jwt_svid {
-        println!(
-            "  JWT-SVID    sub {} aud {:?} alg {} (token not shown)",
-            terminal_safe(j.subject.as_deref().unwrap_or("?")),
-            j.audiences,
-            terminal_safe(j.algorithm.as_deref().unwrap_or("?"))
-        );
+        println!("{}", jwt_svid_line(j));
         for c in &j.checks {
             println!("    {:<10} {:?}: {}", format!("{:?}", c.check).to_lowercase(), c.result, terminal_safe(&c.detail));
         }
@@ -1512,4 +1526,50 @@ fn read_all_stdin() -> Result<String> {
     let mut s = String::new();
     std::io::stdin().read_to_string(&mut s)?;
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anvil_domain::workload::{JwtSvidSourceKind, JwtSvidSummary, WorkloadCallResult};
+
+    fn status(message: &str) -> WorkloadCallResult {
+        WorkloadCallResult::Status { code: 7, code_name: "PermissionDenied".into(), message: message.into() }
+    }
+
+    fn svid(audiences: &[&str]) -> JwtSvidSummary {
+        JwtSvidSummary {
+            source: JwtSvidSourceKind::WorkloadApi,
+            requested_audiences: vec![],
+            subject: Some("spiffe://t/w".into()),
+            audiences: audiences.iter().map(|a| a.to_string()).collect(),
+            algorithm: Some("ES256".into()),
+            key_id: None,
+            issued_at: None,
+            not_before: None,
+            expires_at: None,
+            has_issuer: false,
+            checks: vec![],
+            sent_despite_failed_checks: false,
+        }
+    }
+
+    #[test]
+    fn workload_probe_text_from_the_workload_api_is_terminal_safe() {
+        // Debug quoting escapes the newline but not the workflow commands.
+        assert_eq!(
+            workload_result_text(&status("no ##[error]forged\n::error::x")),
+            r#"PermissionDenied "no #\#[error]forged\n:\:error:\:x""#
+        );
+        assert_eq!(
+            jwt_svid_line(&svid(&["##[error]forged", "::warning::x"])),
+            r##"  JWT-SVID    sub spiffe://t/w aud ["#\#[error]forged", ":\:warning:\:x"] alg ES256 (token not shown)"##
+        );
+        // Ordinary values print as before.
+        assert_eq!(workload_result_text(&status("denied")), r#"PermissionDenied "denied""#);
+        assert_eq!(
+            jwt_svid_line(&svid(&["api", "spiffe://t/a"])),
+            r#"  JWT-SVID    sub spiffe://t/w aud ["api", "spiffe://t/a"] alg ES256 (token not shown)"#
+        );
+    }
 }

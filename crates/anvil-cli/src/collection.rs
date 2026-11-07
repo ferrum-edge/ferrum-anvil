@@ -287,12 +287,9 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
             );
             if let Some(d) = s.dataset_id {
                 match app.workspace_dataset(&s.workspace_id, &d) {
-                    Ok(d) => println!(
-                        "  dataset: {} ({:?}; sensitive columns: {})",
-                        t(&d.name),
-                        d.format,
-                        t(&d.sensitive_columns.join(", "))
-                    ),
+                    Ok(d) => {
+                        println!("  dataset: {} ({:?}; sensitive columns: {})", t(&d.name), d.format, t(&d.sensitive_columns.join(", ")))
+                    }
                     Err(_) => println!("  dataset: {d} (missing)"),
                 }
             }
