@@ -31,6 +31,16 @@
   names a routing loop, a long gateway chain and a caller-supplied count as possible causes, and
   does not claim how many gateways the request passed through.
 
+### Security
+
+- The auth label in an execution record (`prepared.auth_label`, which `anvil send --json` prints and
+  history keeps) and in the effective-request preview is redacted by secret value like the other
+  request fields. It names the resolved Basic, HMAC or WS-Security username or the API key name,
+  so a username or key name taken from a secret variable used to appear there in plain text. The
+  preview's notes, among them "the request would not be sent", which quotes the label, and its
+  lint warning are redacted as the stored record's are. A username that is not a secret is still
+  shown.
+
 ### Changed
 
 - New Ferrum gateway profiles and the lab default to Ferrum Edge v0.9.20

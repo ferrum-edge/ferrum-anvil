@@ -523,6 +523,122 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
 }
 
+/// Basic, API key, HMAC and WS-Security auth with the username (or key name)
+/// `user`, each with a password or key of its own.
+fn auths_for(user: &str) -> Vec<anvil_domain::auth::AuthConfig> {
+    use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, WsseConfig, WssePasswordType};
+    use anvil_domain::secret::SensitiveValue;
+    vec![
+        AuthConfig::Basic { username: user.into(), password: SensitiveValue::template("label-basic-password-3k9q") },
+        AuthConfig::ApiKey { name: user.into(), value: SensitiveValue::template("label-api-key-8m2v"), location: KeyLocation::Header },
+        AuthConfig::Hmac {
+            config: HmacConfig {
+                profile: Default::default(),
+                username: user.into(),
+                secret: SensitiveValue::template("label-hmac-secret-5t1x"),
+                algorithm: Default::default(),
+                digest_header: Default::default(),
+                namespace: String::new(),
+                allow_unsafe_legacy: false,
+            },
+        },
+        AuthConfig::Wsse {
+            config: WsseConfig {
+                username: user.into(),
+                password: SensitiveValue::template("label-wsse-password-6p4n"),
+                password_type: WssePasswordType::PasswordText,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        },
+    ]
+}
+
+/// The auth label names the resolved username or API key name, and a
+/// template can take either from a secret variable. The stored record (which
+/// `anvil send --json` prints and history keeps) and the effective-request
+/// preview redact it there, in any letter case; a plain username stays.
+#[tokio::test]
+async fn a_secret_username_or_key_name_is_redacted_from_the_auth_label() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "Label-Secret-User-7c2d";
+    let plain = "plain-label-user";
+    let leaks = |text: &str| text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
+    let engine = Engine::new();
+    let ctx_with = |auth: AuthConfig| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        // A SOAP envelope, for WS-Security to insert its header into.
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = auth;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    for auth in auths_for("{{api_user}}") {
+        let c = ctx_with(auth.clone());
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let label = &o.record.prepared.auth_label;
+        assert!(label.contains(REDACTED), "{auth:?}: the label is not the prepared one, or not redacted: {label}");
+        let record = serde_json::to_string(&o.record).unwrap();
+        assert!(!leaks(&record), "{auth:?}: the stored record holds the secret username: {record}");
+
+        let p = engine.preview(&c).expect("preview");
+        assert!(p.auth.contains(REDACTED), "{auth:?}: {}", p.auth);
+        let preview = serde_json::to_string(&p).unwrap();
+        assert!(!leaks(&preview), "{auth:?}: the preview holds the secret username: {preview}");
+    }
+
+    // The preview's "would not be sent" note quotes the label too: an API
+    // key value with a pasted line break is refused there.
+    let c = ctx_with(AuthConfig::ApiKey {
+        name: "{{api_user}}".into(),
+        value: SensitiveValue::template("label-api-key-8m2v\n"),
+        location: KeyLocation::Header,
+    });
+    let p = engine.preview(&c).expect("preview");
+    let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: ")).unwrap_or_else(|| panic!("{:?}", p.inferred));
+    assert!(note.contains(REDACTED), "the note does not quote the redacted label: {note}");
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!leaks(&preview), "the preview note holds the secret key name: {preview}");
+
+    // A username that is not a secret is kept, so the label stays useful.
+    for auth in auths_for(plain) {
+        let c = ctx_with(auth.clone());
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let label = &o.record.prepared.auth_label;
+        assert!(label.contains(plain) && !label.contains(REDACTED), "{auth:?}: {label}");
+        let p = engine.preview(&c).expect("preview");
+        assert!(p.auth.contains(plain) && !p.auth.contains(REDACTED), "{auth:?}: {}", p.auth);
+    }
+}
+
+/// An XML parser error quotes tag names from the body: the preview's lint
+/// warning is redacted as the stored record's warning is.
+#[tokio::test]
+async fn a_lint_warning_quoting_a_secret_is_redacted_in_the_preview() {
+    anvil_transport::init();
+    let secret = "LintSecretTag7q";
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/xml");
+    spec.body = anvil_domain::request::Body::Xml { text: "<{{tag}}></other>".into() };
+    spec.lint_policy = anvil_domain::request::LintSendPolicy::Warn;
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "tag".into(), value: secret.into(), secret: true, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    let p = Engine::new().preview(&c).expect("preview");
+    let warning = p.lint_warning.as_deref().expect("a lint warning");
+    assert!(warning.contains(REDACTED), "{warning}");
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!preview.contains(secret), "the preview holds the secret tag name: {preview}");
+}
+
 /// Constants are scrubbed too; operational consumers get a separate,
 /// nonpersisted copy of the original metadata.
 #[tokio::test]

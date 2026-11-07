@@ -194,7 +194,7 @@ impl Engine {
             body_bytes: body.len() as u64,
             body_preview,
             content_type: req.content_type.as_deref().map(|c| redactor.text_any_case(c)),
-            auth: prep.auth_label.clone(),
+            auth: redactor.metadata_text(&prep.auth_label),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),
             tls_verification: prep.tls.as_ref().map(|t| t.verify).unwrap_or(true),
@@ -205,8 +205,11 @@ impl Engine {
             },
             settings: prep.settings.clone(),
             variables_used: resolver.used.lock().clone(),
-            inferred,
-            lint_warning: prep.http.lint_bypassed.clone(),
+            // As the stored record's notes are: they can quote a templated
+            // host or the auth label (a resolved username or key name).
+            inferred: inferred.iter().map(|note| redactor.metadata_text(&redactor.inferred(note))).collect(),
+            // A parser error can quote the body (a tag or entity name).
+            lint_warning: prep.http.lint_bypassed.as_deref().map(|l| redactor.metadata_text(l)),
             omitted_secrets: omitted,
         })
     }

@@ -588,6 +588,9 @@ impl Redactor {
         }
         r.prepared.headers = self.headers(&r.prepared.headers);
         scrub(&mut r.prepared.content_type);
+        // The label names a resolved username or API key name, which a
+        // template can take from a secret.
+        r.prepared.auth_label = self.metadata_text(&r.prepared.auth_label);
         scrub(&mut r.prepared.proxy);
         crate::record::redact_attempts(&mut r.attempts, self);
         if let Some(resp) = &mut r.response {

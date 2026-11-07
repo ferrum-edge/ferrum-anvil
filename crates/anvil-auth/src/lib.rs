@@ -143,7 +143,10 @@ pub struct Applied {
     pub append_query: Vec<(String, String)>,
     /// Replacement body (WS-Security header insertion).
     pub body: Option<Vec<u8>>,
-    /// Human label for evidence (never contains secret material).
+    /// Human label for evidence ([`ResolvedAuth::label`]). It holds no
+    /// credential value, but it names the resolved username or API key name,
+    /// which a template can take from a secret: redact it before it is shown
+    /// or stored.
     pub label: String,
     /// Secret values used, for exact-value redaction of evidence and logs.
     pub secrets: Vec<String>,
@@ -152,6 +155,10 @@ pub struct Applied {
 }
 
 impl ResolvedAuth {
+    /// The auth type and its non-credential parameters, for evidence. It
+    /// names the resolved username or API key name, which can come from a
+    /// secret variable, so callers redact it by secret value before showing
+    /// or storing it.
     pub fn label(&self) -> String {
         match self {
             ResolvedAuth::None => "none".into(),
