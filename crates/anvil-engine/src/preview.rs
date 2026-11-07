@@ -228,27 +228,31 @@ const BODY_PREVIEW_BYTES: usize = 64 * 1024;
 /// the cut are redacted). A whole JSON body also gets field-name redaction; a
 /// cut one is no longer JSON and is scrubbed as text, as before. On every
 /// path a hidden auth parameter is first withheld where the generated
-/// WS-Security header writes it ([`Redactor::hide_written_parameters`]), on
-/// the body as written, before a secret replaced around it could hide it.
+/// WS-Security header writes it ([`Redactor::hide_written_parameters`]),
+/// before a secret replaced around it could hide it. Both run inside the
+/// redaction [`redact_then_cut`] applies to the window as captured, so the
+/// cut stays where it is in the body and a replacement crossing it, of
+/// either kind, is caught.
 fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String {
     let window = String::from_utf8_lossy(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
-    let window = redactor.hide_written_parameters(&window);
+    let redact = |s: &str| redactor.text(&redactor.hide_written_parameters(s));
     if body.len() <= BODY_PREVIEW_BYTES {
-        return if json { redactor.json_text(&window) } else { redactor.text(&window) };
+        return if json { redactor.json_text(&redactor.hide_written_parameters(&window)) } else { redact(&window) };
     }
     let mut cut = BODY_PREVIEW_BYTES.min(window.len());
     while !window.is_char_boundary(cut) {
         cut -= 1;
     }
-    redact_then_cut(&|s: &str| redactor.text(s), &window, cut)
+    redact_then_cut(&redact, &window, cut)
 }
 
 /// Whether a `Content-Type` names JSON by its media type essence
-/// (`type/subtype`): a `json` subtype or a `+json` suffix. Its parameters
-/// (a SOAP 1.2 `action="urn:json"`) do not count.
+/// (`type/subtype`): a `json` subtype, a `+json` suffix or a `-json` one
+/// (`application/x-json`). Its parameters (a SOAP 1.2 `action="urn:json"`)
+/// do not count.
 fn is_json_media_type(content_type: &str) -> bool {
     let essence = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
-    essence.split_once('/').is_some_and(|(_, subtype)| subtype == "json" || subtype.ends_with("+json"))
+    essence.split_once('/').is_some_and(|(_, subtype)| subtype == "json" || subtype.ends_with("+json") || subtype.ends_with("-json"))
 }
 
 #[cfg(test)]
@@ -258,7 +262,7 @@ mod tests {
 
     #[test]
     fn json_is_told_by_the_media_type_essence() {
-        for json in ["application/json", "Application/JSON; charset=utf-8", "application/problem+json", "text/json"] {
+        for json in ["application/json", "Application/JSON; charset=utf-8", "application/problem+json", "text/json", "application/x-json"] {
             assert!(is_json_media_type(json), "{json}");
         }
         for other in ["application/soap+xml; charset=utf-8; action=\"urn:json\"", "text/xml; json=1", "application/jsonl", "json"] {

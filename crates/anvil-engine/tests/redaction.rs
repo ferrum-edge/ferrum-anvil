@@ -960,6 +960,64 @@ async fn a_short_secret_ws_security_username_is_withheld_from_every_body_preview
     }
 }
 
+/// A SOAP 1.1 envelope with a `pad`-byte comment before its Body.
+fn padded_envelope(pad: usize) -> String {
+    let comment = "p".repeat(pad);
+    format!(r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><!--{comment}--><soap:Body/></soap:Envelope>"#)
+}
+
+/// A WS-Security username hidden by where it came from (a short secret plus
+/// literal padding), long enough that the preview's cut falls inside it,
+/// with the password starting 72 bytes before the end of the captured
+/// window, so the window holds only its first bytes and cannot recognise
+/// it. The cut stays where it is in the body: the preview ends with the
+/// marker where the username starts and shows no prefix of the password. A
+/// plain username is shown up to the cut.
+#[tokio::test]
+async fn a_hidden_username_crossing_the_body_preview_cut_shows_no_password_prefix() {
+    use anvil_auth::wsse::insert_security;
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::{SensitiveValue, floor_char_boundary};
+    anvil_transport::init();
+    let padding = "u".repeat(65_498);
+    let password = format!("tok-SENSITIVE-straddle-{}", "w".repeat(200));
+    let (username, text, now) = (format!("Qb{padding}"), WssePasswordType::PasswordText, chrono::Utc::now());
+    // Where the password starts in the body sent, with a comment of `pad` bytes.
+    let password_at = |pad: usize| {
+        let sent = insert_security(padded_envelope(pad).as_bytes(), &username, &password, text, None, None, now).unwrap();
+        String::from_utf8(sent).unwrap().find(password.as_str()).unwrap()
+    };
+    let pad = 131_000 - password_at(0);
+    assert_eq!(password_at(pad), 131_000);
+    let engine = Engine::new();
+    for secret in [true, false] {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: padded_envelope(pad), action: None };
+        spec.auth = AuthConfig::Wsse {
+            config: WsseConfig {
+                username: format!("{{{{short}}}}{padding}"),
+                password: SensitiveValue::template(password.clone()),
+                password_type: text,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: "Qb".into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        let p = engine.preview(&c).expect("preview");
+        let tail = &p.body_preview[floor_char_boundary(&p.body_preview, p.body_preview.len().saturating_sub(200))..];
+        assert!(!p.body_preview.contains("tok-SENSITIVE-straddle"), "secret={secret}: a password prefix is shown: {tail}");
+        if secret {
+            assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "the preview does not end at the username: {tail}");
+            assert!(!p.body_preview.contains("Qbuu"), "the hidden username is shown: {tail}");
+        } else {
+            assert!(p.body_preview.contains("<wsse:Username>Qbuu"), "the plain username is not shown: {tail}");
+        }
+    }
+}
+
 /// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
 /// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
 /// redacted too, from the stored record (which `anvil send` prints, as JSON
