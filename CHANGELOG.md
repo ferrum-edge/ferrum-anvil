@@ -43,10 +43,16 @@
 - A username or API key name that took a secret variable is hidden in the auth label and in auth
   refusals (multi-auth conflicts, invalid header or cookie values) by where it came from, so a
   secret shorter than 4 characters, which exact-value redaction ignores, is not shown there
-  either. The same goes for the header, query or cookie name an API key is sent under (in the
-  record and the preview) and the WS-Security username in the preview's body. The whole parameter
-  is hidden when its template adds literal text. The same value from a plain variable is still
-  shown, and the request sent is unchanged.
+  either. The same goes for every structured place it can come back: a header name or value, a
+  `Cookie` or `Set-Cookie` name, a URL path segment or query or fragment part (as written or
+  percent-decoded, in any letter case), in the record and the preview, and the WS-Security
+  username in the preview's body, which is hidden before anything else in the body is replaced.
+  A response cookie named by it is not kept in the cookie jar, so a later request does not send
+  it. The whole parameter is hidden when its template adds literal text. The same value from a
+  plain variable is still shown, and the request sent is unchanged.
+- The effective-request preview tells a JSON body by the `Content-Type` media type
+  (`application/json`, `+json`), not by "json" anywhere in the header: a SOAP 1.2 `action`
+  naming JSON no longer makes a SOAP body previewed as JSON.
 - When the effective-request preview cannot be prepared, its error is redacted like the stored
   record's copy of it, ignoring letter case. Under the default lint policy, an XML body refused by
   the linter used to return the parser's message, which quotes tag names, with a secret value

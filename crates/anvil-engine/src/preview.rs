@@ -186,7 +186,7 @@ impl Engine {
             // schema comes from server reflection).
             redactor.json_text(m)
         } else {
-            redacted_body_preview(&redactor, &body, req.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false))
+            redacted_body_preview(&redactor, &body, req.content_type.as_deref().is_some_and(is_json_media_type))
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
@@ -226,25 +226,45 @@ const BODY_PREVIEW_BYTES: usize = 64 * 1024;
 /// redacted before they are cut, so a secret that crosses the cut is replaced
 /// whole instead of leaving its prefix (only [`REDACT_LOOKAHEAD_BYTES`] past
 /// the cut are redacted). A whole JSON body also gets field-name redaction; a
-/// cut one is no longer JSON and is scrubbed as text, as before. Text also
-/// withholds a hidden auth parameter where the generated WS-Security header
-/// names it ([`Redactor::body_text`]).
+/// cut one is no longer JSON and is scrubbed as text, as before. On every
+/// path a hidden auth parameter is first withheld where the generated
+/// WS-Security header writes it ([`Redactor::hide_written_parameters`]), on
+/// the body as written, before a secret replaced around it could hide it.
 fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String {
     let window = String::from_utf8_lossy(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
+    let window = redactor.hide_written_parameters(&window);
     if body.len() <= BODY_PREVIEW_BYTES {
-        return if json { redactor.json_text(&window) } else { redactor.body_text(&window) };
+        return if json { redactor.json_text(&window) } else { redactor.text(&window) };
     }
     let mut cut = BODY_PREVIEW_BYTES.min(window.len());
     while !window.is_char_boundary(cut) {
         cut -= 1;
     }
-    redact_then_cut(&|s: &str| redactor.body_text(s), &window, cut)
+    redact_then_cut(&|s: &str| redactor.text(s), &window, cut)
+}
+
+/// Whether a `Content-Type` names JSON by its media type essence
+/// (`type/subtype`): a `json` subtype or a `+json` suffix. Its parameters
+/// (a SOAP 1.2 `action="urn:json"`) do not count.
+fn is_json_media_type(content_type: &str) -> bool {
+    let essence = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    essence.split_once('/').is_some_and(|(_, subtype)| subtype == "json" || subtype.ends_with("+json"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anvil_domain::secret::REDACTED;
+
+    #[test]
+    fn json_is_told_by_the_media_type_essence() {
+        for json in ["application/json", "Application/JSON; charset=utf-8", "application/problem+json", "text/json"] {
+            assert!(is_json_media_type(json), "{json}");
+        }
+        for other in ["application/soap+xml; charset=utf-8; action=\"urn:json\"", "text/xml; json=1", "application/jsonl", "json"] {
+            assert!(!is_json_media_type(other), "{other}");
+        }
+    }
 
     #[test]
     fn a_secret_crossing_the_body_preview_cut_leaves_no_prefix() {

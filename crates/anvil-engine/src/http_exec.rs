@@ -15,6 +15,7 @@ use anvil_diagnostics::FerrumTrust;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::*;
 use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
+use anvil_domain::secret::REDACTED;
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
 use anvil_transport::connector::ProxyPlan;
 use anvil_transport::dns::DnsConfig;
@@ -1152,7 +1153,9 @@ pub(crate) async fn execute_viewing(
                             headers.retain(|(n, v)| {
                                 let credential = carries_credential(n, v, marked, names, &secrets);
                                 if credential && !withheld.iter().any(|w| w.eq_ignore_ascii_case(n)) {
-                                    withheld.push(redactor.text(n));
+                                    // A hidden auth parameter (an API key header) whatever its length.
+                                    let shown = if redactor.hides_parameter(n) { REDACTED.to_string() } else { redactor.text(n) };
+                                    withheld.push(shown);
                                 }
                                 !credential
                             });

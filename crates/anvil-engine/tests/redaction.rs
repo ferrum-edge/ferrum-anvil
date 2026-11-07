@@ -778,6 +778,130 @@ async fn a_short_secret_key_name_or_username_is_hidden_where_it_is_written() {
     }
 }
 
+/// A cookie API key named by a short secret, which the server sets again
+/// (`Set-Cookie` with the same name): the stored response shows the name
+/// redacted, the jar does not keep the cookie, and a later request without
+/// that auth does not send it. A plain name is shown, kept and sent.
+#[tokio::test]
+async fn a_short_secret_cookie_key_name_set_again_is_not_shown_or_kept() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::secret::SensitiveValue;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    for secret in [true, false] {
+        let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+        let engine = Engine::new();
+        let mut spec = RequestSpec::http("GET", &f.url("/set-cookie?name={{short}}&value=refreshed-value"));
+        let value = SensitiveValue::template("tok-SENSITIVE-jar-key-6t2b");
+        spec.auth = AuthConfig::ApiKey { name: "{{short}}".into(), value, location: KeyLocation::Cookie };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: "Jc".into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let r = o.record.response.as_ref().unwrap_or_else(|| panic!("secret={secret}: no response: {:?}", o.record.attempts));
+        let set_cookie: Vec<&str> =
+            r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("set-cookie")).map(|h| h.value.as_str()).collect();
+        let note = "a response cookie was not stored because its name contains a request secret";
+        let noted = o.record.prepared.inferred.iter().any(|n| n == note);
+        if secret {
+            assert_eq!(set_cookie, vec![format!("{REDACTED}={REDACTED}; Path=/; HttpOnly")]);
+            assert!(noted, "{:?}", o.record.prepared.inferred);
+            assert!(!o.record.prepared.url.contains("=Jc") && !o.record.attempts.iter().any(|a| a.url.contains("=Jc")));
+        } else {
+            assert_eq!(set_cookie, vec![format!("Jc={REDACTED}; Path=/; HttpOnly")]);
+            assert!(!noted, "{:?}", o.record.prepared.inferred);
+        }
+
+        // A later request without that auth: the jar sends the cookie only
+        // when its name was not a secret.
+        let later = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo")));
+        let o = engine.execute(&later, EventCtx::none(), CancellationToken::new()).await;
+        assert!(o.record.response.is_some(), "secret={secret}: {:?}", o.record.attempts);
+        let sent = f.log.last_request_headers().unwrap();
+        let cookies: Vec<&str> = sent.iter().filter(|(n, _)| n.eq_ignore_ascii_case("cookie")).map(|(_, v)| v.as_str()).collect();
+        let sent_jc = cookies.iter().any(|v| v.split(';').any(|c| c.trim() == "Jc=refreshed-value"));
+        assert_eq!(sent_jc, !secret, "secret={secret}: {cookies:?}");
+    }
+}
+
+/// Each structured component Anvil writes or reads back is hidden when it
+/// is a hidden auth parameter, however short, as written or percent-decoded
+/// and in any letter case: a URL path segment, query name, value and bare
+/// part, a fragment part, a header name and value, and a `Cookie` and
+/// `Set-Cookie` name. Other components are kept.
+#[test]
+fn a_hidden_auth_parameter_is_hidden_in_every_structured_component() {
+    use anvil_domain::execution::HeaderEntry;
+    let resolver = Resolver::new(vec![], None);
+    resolver.hidden_parameters.lock().push("Qb".into());
+    let r = Redactor::for_execution(&resolver, &[]);
+    assert_eq!(
+        r.url("https://h/p/Qb?x=1&Qb&y=qb&%51b=2&k=Qbc#Qb"),
+        format!("https://h/p/{REDACTED}?x=1&{REDACTED}&y={REDACTED}&{REDACTED}={REDACTED}&k=Qbc#{REDACTED}")
+    );
+    let header = |name: &str, value: &str| HeaderEntry { name: name.into(), value: value.into() };
+    let shown = r.headers(&[
+        header("qb", "v"),
+        header("X-User", "QB"),
+        header("X-Other", "kept"),
+        header("Cookie", "Qb=1; other=2"),
+        header("Set-Cookie", "Qb=v; Path=/"),
+    ]);
+    assert_eq!(shown[0], header(REDACTED, REDACTED));
+    assert_eq!(shown[1], header("X-User", REDACTED));
+    assert_eq!(shown[2], header("X-Other", "kept"));
+    assert_eq!(shown[3], header("Cookie", &format!("{REDACTED}={REDACTED}; other={REDACTED}")));
+    assert_eq!(shown[4], header("Set-Cookie", &format!("{REDACTED}={REDACTED}; Path=/")));
+}
+
+/// The preview withholds a short secret WS-Security username in the body
+/// before anything else is replaced, so neither a password that is literally
+/// a word of the markup (`wsse`, `Username`), nor a body previewed as JSON
+/// (an explicit `Content-Type: application/json`), lets it through; a SOAP
+/// 1.2 action naming JSON does not make the body JSON. A plain username is
+/// shown in each case.
+#[tokio::test]
+async fn a_short_secret_ws_security_username_is_withheld_from_every_body_preview() {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, KeyValue, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE_11: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    const ENVELOPE_12: &str = r#"<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    let engine = Engine::new();
+    let cases: [(&str, &str, SoapVersion, Option<&str>, bool); 4] = [
+        ("password wsse", "wsse", SoapVersion::Soap11, None, false),
+        ("password Username", "Username", SoapVersion::Soap11, None, false),
+        ("SOAP 1.2 action urn:json", "tok-SENSITIVE-wsse-pw-2c9d", SoapVersion::Soap12, Some("urn:json"), false),
+        ("Content-Type application/json", "tok-SENSITIVE-wsse-pw-2c9d", SoapVersion::Soap11, None, true),
+    ];
+    for (case, password, version, action, json) in cases {
+        for secret in [true, false] {
+            let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+            let envelope = if version == SoapVersion::Soap12 { ENVELOPE_12 } else { ENVELOPE_11 };
+            spec.body = Body::Soap { version, envelope: envelope.into(), action: action.map(Into::into) };
+            if json {
+                spec.headers.push(KeyValue::new("Content-Type", "application/json"));
+            }
+            spec.auth = AuthConfig::Wsse {
+                config: WsseConfig {
+                    username: "{{short}}".into(),
+                    password: SensitiveValue::template(password),
+                    password_type: WssePasswordType::PasswordText,
+                    timestamp_ttl_secs: None,
+                    saml_assertion: None,
+                },
+            };
+            let mut c = ExecutionContext::standalone(spec);
+            let vars = vec![VarEntry { name: "short".into(), value: "Wu".into(), secret, literal: false }];
+            c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+            let p = engine.preview(&c).expect("preview");
+            assert!(p.body_preview.contains("Security"), "{case}: no Security header: {}", p.body_preview);
+            assert_eq!(p.body_preview.contains(">Wu<"), !secret, "{case} secret={secret}: {}", p.body_preview);
+        }
+    }
+}
+
 /// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
 /// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
 /// redacted too, from the stored record (which `anvil send` prints, as JSON

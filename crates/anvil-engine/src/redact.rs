@@ -174,10 +174,41 @@ impl Redactor {
         }
     }
 
-    /// Whether `name` (a header, query or cookie name) is a hidden auth
-    /// parameter, ignoring ASCII case (HTTP/2 and HTTP/3 lowercase names).
-    fn hides_parameter(&self, name: &str) -> bool {
-        self.hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
+    /// Whether a structured component Anvil writes or reads back (a header,
+    /// query or cookie name or value, a URL path segment or bare query part)
+    /// is a hidden auth parameter: equal to one, whatever its length, as
+    /// written or once percent-decoded, ignoring ASCII case (HTTP/2 and
+    /// HTTP/3 lowercase names) and surrounding whitespace.
+    pub(crate) fn hides_parameter(&self, component: &str) -> bool {
+        if self.hidden.is_empty() {
+            return false;
+        }
+        let raw = component.trim();
+        let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
+        self.hidden.iter().any(|h| h.eq_ignore_ascii_case(raw) || h.eq_ignore_ascii_case(decoded.trim()))
+    }
+
+    /// The one test for a structured component: it hides a secret
+    /// ([`Redactor::hides_secret`]) or is a hidden auth parameter
+    /// ([`Redactor::hides_parameter`]).
+    pub(crate) fn hides_component(&self, component: &str) -> bool {
+        self.hides_secret(component) || self.hides_parameter(component)
+    }
+
+    /// A request body as previewed, before any secret value is replaced: a
+    /// hidden auth parameter is withheld where the generated WS-Security
+    /// header writes it (`wsse:Username`, XML-escaped), whatever its length.
+    /// It runs first, so a secret replaced in the surrounding markup (a
+    /// password that is literally `wsse`) cannot hide the element from it.
+    pub(crate) fn hide_written_parameters(&self, body: &str) -> String {
+        let mut out = body.to_string();
+        for h in &self.hidden {
+            let written = format!("<wsse:Username>{}</wsse:Username>", anvil_auth::wsse::xml_escape(h));
+            if out.contains(&written) {
+                out = out.replace(&written, &format!("<wsse:Username>{REDACTED}</wsse:Username>"));
+            }
+        }
+        out
     }
 
     /// Take in what the resolver has seen since this redactor was built:
@@ -291,20 +322,6 @@ impl Redactor {
         replace_matches(matcher, s)
     }
 
-    /// [`Redactor::text`] for a request body Anvil may have rewritten: a
-    /// hidden auth parameter is also withheld where the generated
-    /// WS-Security header names it (`wsse:Username`), whatever its length.
-    pub(crate) fn body_text(&self, s: &str) -> String {
-        let mut out = self.text(s);
-        for h in &self.hidden {
-            let written = format!("<wsse:Username>{}</wsse:Username>", anvil_auth::wsse::xml_escape(h));
-            if out.contains(&written) {
-                out = out.replace(&written, &format!("<wsse:Username>{REDACTED}</wsse:Username>"));
-            }
-        }
-        out
-    }
-
     /// [`Redactor::text`] ignoring ASCII case, for text a protocol may have
     /// case-folded after the secret was sent: header names, content codings,
     /// and messages that quote them.
@@ -409,7 +426,7 @@ impl Redactor {
         // and a crossing raw match interact, withhold the whole value.
         let prepared = if sensitive && name.eq_ignore_ascii_case("set-cookie") {
             value.split_once('=').map(|(key, rest)| {
-                let key = if self.hides_secret(key.trim()) { REDACTED } else { key };
+                let key = if self.hides_component(key.trim()) { REDACTED } else { key };
                 match rest.split_once(';') {
                     Some((credential, attrs)) => format!("{key}={credential};{}", self.set_cookie_attrs(attrs)),
                     None => format!("{key}={rest}"),
@@ -420,7 +437,7 @@ impl Redactor {
                 value
                     .split(';')
                     .map(|part| match part.split_once('=') {
-                        Some((key, rest)) if self.hides_secret(key.trim()) => format!("{REDACTED}={rest}"),
+                        Some((key, rest)) if self.hides_component(key.trim()) => format!("{REDACTED}={rest}"),
                         _ => part.to_string(),
                     })
                     .collect::<Vec<_>>()
@@ -451,7 +468,7 @@ impl Redactor {
                     .map(|c| match c.split_once('=') {
                         Some((k, _)) => {
                             let name = k.trim();
-                            if self.hides_secret(name) || self.hides_parameter(name) {
+                            if self.hides_component(name) {
                                 format!("{REDACTED}={REDACTED}")
                             } else {
                                 format!("{name}={REDACTED}")
@@ -466,7 +483,7 @@ impl Redactor {
                 return match value.split_once('=') {
                     Some((k, rest)) => {
                         let name = k.trim();
-                        let name = if self.hides_secret(name) { REDACTED } else { name };
+                        let name = if self.hides_component(name) { REDACTED } else { name };
                         let attrs = rest.split_once(';').map(|(_, a)| format!(";{}", self.set_cookie_attrs(a))).unwrap_or_default();
                         format!("{name}={REDACTED}{attrs}")
                     }
@@ -483,7 +500,7 @@ impl Redactor {
             .split(';')
             .map(|attr| match attr.split_once('=') {
                 Some((name, value))
-                    if matches!(name.trim().to_ascii_lowercase().as_str(), "path" | "domain") && self.hides_secret(value.trim()) =>
+                    if matches!(name.trim().to_ascii_lowercase().as_str(), "path" | "domain") && self.hides_component(value.trim()) =>
                 {
                     format!("{name}={REDACTED}")
                 }
@@ -603,12 +620,13 @@ impl Redactor {
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
         h.iter()
             .map(|e| {
-                // An API key header named by a hidden auth parameter is
-                // withheld whatever the name's length.
+                // A header named by a hidden auth parameter (an API key
+                // header) is withheld whatever the name's length, and so is a
+                // value that is one.
                 let name = if self.hides_parameter(&e.name) { REDACTED.to_string() } else { self.text_any_case(&e.name) };
                 // A later runner pass cannot infer a URL/cookie role from a
                 // masked name, so no value survives losing its identifying name.
-                let value = if name != e.name || name.contains(REDACTED) {
+                let value = if name != e.name || name.contains(REDACTED) || self.hides_parameter(&e.value) {
                     REDACTED.to_string()
                 } else {
                     self.metadata_text(&self.header(&e.name, &e.value))
@@ -743,15 +761,15 @@ impl Redactor {
                     let dk = percent_encoding::percent_decode_str(k).decode_utf8_lossy();
                     // A query API key named by a hidden auth parameter: the
                     // name and its value are withheld.
-                    let hidden = self.hides_parameter(&dk);
+                    let hidden = self.hides_parameter(k);
                     let k = if hidden || self.hides_secret(k) { REDACTED } else { k };
-                    if hidden || is_sensitive_name(&dk, &self.extra_names) || self.hides_secret(v) {
+                    if hidden || is_sensitive_name(&dk, &self.extra_names) || self.hides_component(v) {
                         format!("{k}={REDACTED}")
                     } else {
                         format!("{k}={v}")
                     }
                 }
-                None if self.hides_secret(kv) => REDACTED.to_string(),
+                None if self.hides_component(kv) => REDACTED.to_string(),
                 None => kv.to_string(),
             })
             .collect::<Vec<_>>()
@@ -786,7 +804,7 @@ impl Redactor {
             }
             None => (String::new(), s),
         };
-        let path: Vec<&str> = path.split('/').map(|seg| if self.hides_secret(seg) { REDACTED } else { seg }).collect();
+        let path: Vec<&str> = path.split('/').map(|seg| if self.hides_component(seg) { REDACTED } else { seg }).collect();
         format!("{prefix}{}", path.join("/"))
     }
 
