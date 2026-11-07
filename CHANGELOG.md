@@ -31,6 +31,31 @@
   names a routing loop, a long gateway chain and a caller-supplied count as possible causes, and
   does not claim how many gateways the request passed through.
 
+### Security
+
+- The auth label in an execution record (`prepared.auth_label`, which `anvil send --json` prints and
+  history keeps) and in the effective-request preview is redacted by secret value like the other
+  request fields. It names the resolved Basic, HMAC or WS-Security username or the API key name,
+  so a username or key name taken from a secret variable used to appear there in plain text. The
+  preview's notes, among them "the request would not be sent", which quotes the label, and its
+  lint warning are redacted as the stored record's are. A username that is not a secret is still
+  shown.
+- A username or API key name that took a secret variable is hidden in the auth label and in auth
+  refusals (multi-auth conflicts, invalid header or cookie values) by where it came from, so a
+  secret shorter than 4 characters, which exact-value redaction ignores, is not shown there
+  either. The whole parameter is hidden when its template adds literal text. The same value from
+  a plain variable is still shown.
+- When the effective-request preview cannot be prepared, its error is redacted like the stored
+  record's copy of it, ignoring letter case. Under the default lint policy, an XML body refused by
+  the linter used to return the parser's message, which quotes tag names, with a secret value
+  still in it; a session request's refusal (a gRPC metadata key, quoted lowercased) was redacted
+  only in the secret's own letter case.
+- Secret values are also redacted in the other forms Anvil writes them in: Rust's string escaping,
+  as a refusal quotes a header, cookie or API key name (a NUL as `\0`); XML escaping, as the
+  WS-Security header writes a username (a secret username with `&` or `<` was shown in the
+  preview's body); and a multipart part name, whose `"` is written as `%22`. They were already
+  redacted raw, percent-encoded, as hex and JSON-escaped.
+
 ### Changed
 
 - New Ferrum gateway profiles and the lab default to Ferrum Edge v0.9.20

@@ -34,3 +34,10 @@ d64da595172a550838586dfbb1c291ccaaa88879:crates/anvil-engine/tests/mcp.rs:generi
 # to the allowlisted tok-SENSITIVE- canary prefix. CI scans full history, hence this
 # single fingerprint.
 1e7d5153af10c28f38ea2b271a58294044185da6:crates/anvil-engine/tests/engine_scenarios.rs:generic-api-key:772
+
+# Exact-fingerprint ignore for a planted redaction canary (a fake XML tag name used
+# as a secret variable) in crates/anvil-engine/tests/redaction.rs, first pushed in
+# commit 0f4dd500 on branch security/redact-prepared-auth-label. The value is fake;
+# the next commit switches it to the allowlisted tok-SENSITIVE- canary prefix. CI
+# scans full history, hence this single fingerprint.
+0f4dd500f97c728029c0e50e387055efd03de352:crates/anvil-engine/tests/redaction.rs:generic-api-key:628

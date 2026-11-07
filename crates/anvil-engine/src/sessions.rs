@@ -299,10 +299,12 @@ struct Authorized {
 
 /// Per-send auth for `req`, refused before anything is sent when a header
 /// it produced is not valid on the wire or the session cannot carry it.
-fn sign_request(auth: &ResolvedAuth, req: &SessionRequest) -> Result<anvil_auth::Applied, TransportFailure> {
+/// `hidden`: the auth's displayed parameters that came from a secret
+/// ([`Prepared::auth_hidden`]), hidden in the refusals.
+fn sign_request(auth: &ResolvedAuth, hidden: &[String], req: &SessionRequest) -> Result<anvil_auth::Applied, TransportFailure> {
     let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
-    let applied =
-        anvil_auth::apply(auth, &signable, Utc::now()).map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
+    let applied = anvil_auth::apply_hiding(auth, &signable, Utc::now(), hidden)
+        .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
     http_exec::check_auth_headers(&applied)?;
     if let Some(why) = auth_refusal(&applied, req.path_only) {
         return Err(unsupported(why, "auth"));
@@ -344,7 +346,7 @@ async fn apply_auth(
             appended: vec![],
         });
     }
-    let applied = sign_request(&prep.auth, req)?;
+    let applied = sign_request(&prep.auth, &prep.auth_hidden, req)?;
     for s in &applied.secrets {
         redactor.add_secret(s);
     }
@@ -378,6 +380,7 @@ async fn apply_auth(
 #[allow(clippy::too_many_arguments)]
 fn sign_in_transport(
     auth: ResolvedAuth,
+    hidden: Vec<String>,
     request: &SessionRequest,
     first: &[(String, String)],
     appended: &[(String, String)],
@@ -389,7 +392,7 @@ fn sign_in_transport(
     let (request, first, appended, sent) = (request.clone(), first.to_vec(), appended.to_vec(), sent.to_vec());
     Arc::new(move |path: &str, body: &Bytes| -> Result<Vec<(HeaderName, HeaderValue)>, TransportFailure> {
         let target = Target { path: path.to_string(), ..request.target.clone() };
-        let applied = sign_request(&auth, &SessionRequest { target, body: body.clone(), ..request.clone() })?;
+        let applied = sign_request(&auth, &hidden, &SessionRequest { target, body: body.clone(), ..request.clone() })?;
         if applied.append_query != appended {
             return Err(unsupported(
                 format!(
@@ -842,7 +845,17 @@ async fn prepare_sse(
     let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
     let signed = SignedSecrets::default();
     let sign = resigned.clone().map(|slot| -> sse::SignFn {
-        let sign = sign_in_transport(b.prep.auth.clone(), &request, &set, &appended, &headers, Some(slot), live.clone(), signed.clone());
+        let sign = sign_in_transport(
+            b.prep.auth.clone(),
+            b.prep.auth_hidden.clone(),
+            &request,
+            &set,
+            &appended,
+            &headers,
+            Some(slot),
+            live.clone(),
+            signed.clone(),
+        );
         let (path, body) = (request.target.path.clone(), request.body.clone());
         Arc::new(move || sign(&path, &body))
     });
@@ -1135,7 +1148,19 @@ async fn prepare_grpc(
     let resigned: Option<ResignedSlot> = reflected.then(Default::default);
     let live: SharedRedactor = Arc::new(parking_lot::RwLock::new(b.redactor.clone()));
     let signed = SignedSecrets::default();
-    let signer = |slot| sign_in_transport(b.prep.auth.clone(), &request, &set, &appended, &headers, slot, live.clone(), signed.clone());
+    let signer = |slot| {
+        sign_in_transport(
+            b.prep.auth.clone(),
+            b.prep.auth_hidden.clone(),
+            &request,
+            &set,
+            &appended,
+            &headers,
+            slot,
+            live.clone(),
+            signed.clone(),
+        )
+    };
     let sign = resigned.clone().map(|slot| signer(Some(slot)));
     // Each reflection request is signed for its own path and body.
     let sign_reflection = reflection.then(|| signer(None));
@@ -2232,7 +2257,8 @@ mod tests {
         let auth = ResolvedAuth::ApiKey { name: "key".into(), value: zeroize::Zeroizing::new("k2".into()), location: KeyLocation::Query };
         let prepared = [("key".to_string(), "k1".to_string())];
         let (slot, signed) = (ResignedSlot::default(), SignedSecrets::default());
-        let sign = sign_in_transport(auth.clone(), &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed.clone());
+        let sign =
+            sign_in_transport(auth.clone(), vec![], &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed.clone());
         let e = sign("/events", &Bytes::new()).unwrap_err();
         assert_eq!(e.kind, FailureKind::UnsupportedCombination);
         assert!(e.message.contains("other query parameters"), "{}", e.message);
@@ -2242,7 +2268,7 @@ mod tests {
 
         // The query it was prepared with is signed again as before.
         let prepared = [("key".to_string(), "k2".to_string())];
-        let sign = sign_in_transport(auth, &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed);
+        let sign = sign_in_transport(auth, vec![], &request, &[], &prepared, &[], Some(slot.clone()), Default::default(), signed);
         assert!(sign("/events", &Bytes::new()).is_ok());
         assert!(slot.lock().is_some());
     }

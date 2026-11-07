@@ -110,16 +110,20 @@ impl Engine {
         }
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
-        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;
+        // A failure can quote a resolved value (a lint error quotes the body,
+        // a refused gRPC metadata key is quoted lowercased): redacted as the
+        // send path's stored failure is, with the secrets resolved before it.
+        let redacted = |mut f: TransportFailure| {
+            Redactor::for_execution(&resolver, &ctx.redaction_names).failure(&mut f);
+            f
+        };
+        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes).map_err(redacted)?;
         let mut inferred = prep.inferred.clone();
         let shape = match ctx.spec.protocol {
             Protocol::Http => Shape::http(&prep),
             // A message that does not fit the schema is refused with an error
             // that may quote it: redacted as the session's failure is.
-            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(|mut f| {
-                f.message = Redactor::for_execution(&resolver, &ctx.redaction_names).text(&f.message);
-                f
-            })?,
+            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(redacted)?,
         };
         // After the session's messages and metadata are resolved, so the
         // secrets they use are known.
@@ -143,7 +147,7 @@ impl Engine {
         } else {
             prep.auth.clone()
         };
-        match anvil_auth::apply(&auth, &signable, chrono::Utc::now()) {
+        match anvil_auth::apply_hiding(&auth, &signable, chrono::Utc::now(), &prep.auth_hidden) {
             Ok(applied) => {
                 for s in applied.secrets.iter().filter(|s| s.as_str() != UNFETCHED_JWT_SVID) {
                     redactor.add_secret(s);
@@ -194,7 +198,7 @@ impl Engine {
             body_bytes: body.len() as u64,
             body_preview,
             content_type: req.content_type.as_deref().map(|c| redactor.text_any_case(c)),
-            auth: prep.auth_label.clone(),
+            auth: redactor.metadata_text(&prep.auth_label),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),
             tls_verification: prep.tls.as_ref().map(|t| t.verify).unwrap_or(true),
@@ -205,8 +209,11 @@ impl Engine {
             },
             settings: prep.settings.clone(),
             variables_used: resolver.used.lock().clone(),
-            inferred,
-            lint_warning: prep.http.lint_bypassed.clone(),
+            // As the stored record's notes are: they can quote a templated
+            // host or the auth label (a resolved username or key name).
+            inferred: inferred.iter().map(|note| redactor.metadata_text(&redactor.inferred(note))).collect(),
+            // A parser error can quote the body (a tag or entity name).
+            lint_warning: prep.http.lint_bypassed.as_deref().map(|l| redactor.metadata_text(l)),
             omitted_secrets: omitted,
         })
     }
