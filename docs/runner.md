@@ -381,11 +381,13 @@ Real fixture sockets and the real engine throughout:
 * Exact-value redaction ignores values shorter than 4 characters (the
   engine's rule, to avoid shredding ordinary text); name-based redaction
   still applies. Like every detector, it cannot recognize secrets that were
-  never marked as secret. The auth label (`prepared.auth_label`, the
-  preview's `auth`) and auth refusals hide a username or API key name that
-  took a secret variable by where it came from, whatever its length: the
-  whole parameter, even when its template adds literal text (`svc-{{user}}`).
-  Elsewhere (a header named after a short secret API key name, a short
-  secret WS-Security username in the body) the 4-character rule applies.
+  never marked as secret. A username or API key name that took a secret
+  variable is hidden by where it came from, whatever its length, wherever
+  Anvil writes it: the auth label (`prepared.auth_label`, the preview's
+  `auth`), auth refusals, the header, query or cookie name an API key is
+  sent under (in the record and the preview), and the WS-Security
+  `wsse:Username` in the preview's body. The whole parameter is hidden, even
+  when its template adds literal text (`svc-{{user}}`). The request sent is
+  unchanged.
 * Response bodies are not part of any report; they live only in history,
   subject to the history policy.

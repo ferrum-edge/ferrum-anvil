@@ -696,6 +696,88 @@ async fn a_short_secret_username_or_key_name_is_hidden_in_the_auth_label() {
     }
 }
 
+/// A short secret (under 4 characters, which exact-value redaction of text
+/// ignores) used as an API key name or a WS-Security username is hidden
+/// where Anvil writes it: a header, query or cookie name in the record and
+/// the preview, and the `wsse:Username` in the preview's body. The same value
+/// from a plain variable is shown, and the request sent is the same.
+#[tokio::test]
+async fn a_short_secret_key_name_or_username_is_hidden_where_it_is_written() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation, WsseConfig, WssePasswordType};
+    use anvil_domain::execution::HeaderEntry;
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let engine = Engine::new();
+    let ctx_with = |auth: AuthConfig, value: &str, secret: bool| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = auth;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: value.into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    for value in ["Q", "Qz", "Qz7"] {
+        for secret in [false, true] {
+            let case = format!("{value:?} secret={secret}");
+            for location in [KeyLocation::Header, KeyLocation::Query, KeyLocation::Cookie] {
+                let value_template = SensitiveValue::template("tok-SENSITIVE-short-name-4n8v");
+                let auth = AuthConfig::ApiKey { name: "{{short}}".into(), value: value_template, location };
+                let c = ctx_with(auth, value, secret);
+                let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+                assert!(o.record.response.is_some(), "{case} {location:?}: not sent: {:?}", o.record.attempts);
+                let p = engine.preview(&c).expect("preview");
+                let named = |n: &str| n.trim().eq_ignore_ascii_case(value);
+                let in_query = |url: &str| url.contains(&format!("?{value}=")) || url.contains(&format!("&{value}="));
+                let in_cookie = |h: &[HeaderEntry]| -> bool {
+                    let cookies = h.iter().filter(|h| h.name.eq_ignore_ascii_case("cookie"));
+                    cookies.flat_map(|h| h.value.split(';')).any(|c| named(c.split('=').next().unwrap_or_default()))
+                };
+                let mut record_urls = vec![o.record.prepared.url.as_str()];
+                record_urls.extend(o.record.attempts.iter().map(|a| a.url.as_str()));
+                let (record_shows, preview_shows) = match location {
+                    KeyLocation::Header => {
+                        (o.record.prepared.headers.iter().any(|h| named(&h.name)), p.headers.iter().any(|h| named(&h.name)))
+                    }
+                    KeyLocation::Query => (record_urls.iter().any(|u| in_query(u)), in_query(&p.url)),
+                    KeyLocation::Cookie => (in_cookie(&o.record.prepared.headers), in_cookie(&p.headers)),
+                };
+                // The plain name is shown where Anvil writes it; a secret one nowhere.
+                assert_eq!(preview_shows, !secret, "{case} {location:?}: preview {p:?}");
+                if secret {
+                    assert!(!record_shows, "{case} {location:?}: record {:?}", o.record.prepared);
+                }
+                if secret && value.len() == 3 {
+                    let record = serde_json::to_string(&o.record).unwrap().to_ascii_lowercase();
+                    assert!(!record.contains("qz7"), "{case} {location:?}: {record}");
+                    let preview = serde_json::to_string(&p).unwrap().to_ascii_lowercase();
+                    assert!(!preview.contains("qz7"), "{case} {location:?}: {preview}");
+                }
+            }
+
+            let auth = AuthConfig::Wsse {
+                config: WsseConfig {
+                    username: "{{short}}".into(),
+                    password: SensitiveValue::template("tok-SENSITIVE-short-wsse-pw"),
+                    password_type: WssePasswordType::PasswordText,
+                    timestamp_ttl_secs: None,
+                    saml_assertion: None,
+                },
+            };
+            let p = engine.preview(&ctx_with(auth, value, secret)).expect("preview");
+            let plain = format!("<wsse:Username>{value}</wsse:Username>");
+            let hidden = format!("<wsse:Username>{REDACTED}</wsse:Username>");
+            assert_eq!(p.body_preview.contains(&plain), !secret, "{case}: {}", p.body_preview);
+            assert_eq!(p.body_preview.contains(&hidden), secret, "{case}: {}", p.body_preview);
+        }
+    }
+}
+
 /// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
 /// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
 /// redacted too, from the stored record (which `anvil send` prints, as JSON

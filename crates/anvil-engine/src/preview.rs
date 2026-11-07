@@ -226,17 +226,19 @@ const BODY_PREVIEW_BYTES: usize = 64 * 1024;
 /// redacted before they are cut, so a secret that crosses the cut is replaced
 /// whole instead of leaving its prefix (only [`REDACT_LOOKAHEAD_BYTES`] past
 /// the cut are redacted). A whole JSON body also gets field-name redaction; a
-/// cut one is no longer JSON and is scrubbed as text, as before.
+/// cut one is no longer JSON and is scrubbed as text, as before. Text also
+/// withholds a hidden auth parameter where the generated WS-Security header
+/// names it ([`Redactor::body_text`]).
 fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String {
     let window = String::from_utf8_lossy(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
     if body.len() <= BODY_PREVIEW_BYTES {
-        return if json { redactor.json_text(&window) } else { redactor.text(&window) };
+        return if json { redactor.json_text(&window) } else { redactor.body_text(&window) };
     }
     let mut cut = BODY_PREVIEW_BYTES.min(window.len());
     while !window.is_char_boundary(cut) {
         cut -= 1;
     }
-    redact_then_cut(&|s: &str| redactor.text(s), &window, cut)
+    redact_then_cut(&|s: &str| redactor.body_text(s), &window, cut)
 }
 
 #[cfg(test)]

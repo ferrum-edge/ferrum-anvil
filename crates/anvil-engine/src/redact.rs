@@ -123,11 +123,25 @@ pub struct Redactor {
     /// degrades to a slower replacement pass instead of silently failing.
     fallback_patterns: Vec<String>,
     extra_names: Vec<String>,
+    /// Auth parameters (a username or API key name) that took a secret
+    /// variable (`Resolver::hidden_parameters`). Where Anvil writes them in a
+    /// known place (a header, query or cookie name, the WS-Security
+    /// username) they are hidden whatever their length; other text keeps the
+    /// `MIN_SECRET_LEN` rule.
+    hidden: Vec<String>,
 }
 
 impl Redactor {
     pub fn new(secrets: Vec<String>, extra_names: Vec<String>) -> Self {
-        let mut r = Redactor { secrets, matcher: None, any_case: None, any_case_fallback: vec![], fallback_patterns: vec![], extra_names };
+        let mut r = Redactor {
+            secrets,
+            matcher: None,
+            any_case: None,
+            any_case_fallback: vec![],
+            fallback_patterns: vec![],
+            extra_names,
+            hidden: vec![],
+        };
         r.secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         r.reindex();
         r
@@ -145,7 +159,25 @@ impl Redactor {
         }
         let mut secrets = r.used_secrets.lock().clone();
         secrets.extend(r.decoded_secrets.lock().iter().cloned());
-        Redactor::new(secrets, all)
+        let mut redactor = Redactor::new(secrets, all);
+        redactor.hide_parameters(&r.hidden_parameters.lock());
+        redactor
+    }
+
+    /// Take in auth parameters to hide where Anvil writes them (the
+    /// `hidden` field).
+    fn hide_parameters(&mut self, values: &[String]) {
+        for v in values {
+            if !v.is_empty() && !self.hidden.contains(v) {
+                self.hidden.push(v.clone());
+            }
+        }
+    }
+
+    /// Whether `name` (a header, query or cookie name) is a hidden auth
+    /// parameter, ignoring ASCII case (HTTP/2 and HTTP/3 lowercase names).
+    fn hides_parameter(&self, name: &str) -> bool {
+        self.hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
 
     /// Take in what the resolver has seen since this redactor was built:
@@ -168,6 +200,7 @@ impl Redactor {
                 self.extra_names.push(n.clone());
             }
         }
+        self.hide_parameters(&r.hidden_parameters.lock());
     }
 
     /// The patterns [`Redactor::reindex`] builds its matchers from.
@@ -228,6 +261,7 @@ impl Redactor {
                 self.extra_names.push(n.clone());
             }
         }
+        self.hide_parameters(&other.hidden);
     }
 
     pub fn add_secret(&mut self, s: &str) {
@@ -255,6 +289,20 @@ impl Redactor {
             return if self.fallback_patterns.is_empty() { s.to_string() } else { fallback_redact(s, &self.fallback_patterns) };
         };
         replace_matches(matcher, s)
+    }
+
+    /// [`Redactor::text`] for a request body Anvil may have rewritten: a
+    /// hidden auth parameter is also withheld where the generated
+    /// WS-Security header names it (`wsse:Username`), whatever its length.
+    pub(crate) fn body_text(&self, s: &str) -> String {
+        let mut out = self.text(s);
+        for h in &self.hidden {
+            let written = format!("<wsse:Username>{}</wsse:Username>", anvil_auth::wsse::xml_escape(h));
+            if out.contains(&written) {
+                out = out.replace(&written, &format!("<wsse:Username>{REDACTED}</wsse:Username>"));
+            }
+        }
+        out
     }
 
     /// [`Redactor::text`] ignoring ASCII case, for text a protocol may have
@@ -403,7 +451,11 @@ impl Redactor {
                     .map(|c| match c.split_once('=') {
                         Some((k, _)) => {
                             let name = k.trim();
-                            if self.hides_secret(name) { format!("{REDACTED}={REDACTED}") } else { format!("{name}={REDACTED}") }
+                            if self.hides_secret(name) || self.hides_parameter(name) {
+                                format!("{REDACTED}={REDACTED}")
+                            } else {
+                                format!("{name}={REDACTED}")
+                            }
                         }
                         None => REDACTED.to_string(),
                     })
@@ -551,7 +603,9 @@ impl Redactor {
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
         h.iter()
             .map(|e| {
-                let name = self.text_any_case(&e.name);
+                // An API key header named by a hidden auth parameter is
+                // withheld whatever the name's length.
+                let name = if self.hides_parameter(&e.name) { REDACTED.to_string() } else { self.text_any_case(&e.name) };
                 // A later runner pass cannot infer a URL/cookie role from a
                 // masked name, so no value survives losing its identifying name.
                 let value = if name != e.name || name.contains(REDACTED) {
@@ -687,8 +741,11 @@ impl Redactor {
             .map(|kv| match kv.split_once('=') {
                 Some((k, v)) => {
                     let dk = percent_encoding::percent_decode_str(k).decode_utf8_lossy();
-                    let k = if self.hides_secret(k) { REDACTED } else { k };
-                    if is_sensitive_name(&dk, &self.extra_names) || self.hides_secret(v) {
+                    // A query API key named by a hidden auth parameter: the
+                    // name and its value are withheld.
+                    let hidden = self.hides_parameter(&dk);
+                    let k = if hidden || self.hides_secret(k) { REDACTED } else { k };
+                    if hidden || is_sensitive_name(&dk, &self.extra_names) || self.hides_secret(v) {
                         format!("{k}={REDACTED}")
                     } else {
                         format!("{k}={v}")
@@ -1217,6 +1274,37 @@ mod tests {
         r.any_case = None;
         assert_eq!(r.text(&text), REDACTED);
         assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), REDACTED);
+    }
+
+    /// A message quotes a name with `{:?}`, where a NUL is `\0` (JSON writes
+    /// `\u0000`) and, through `str::escape_debug`, a `'` is `\'`: those forms
+    /// of a secret are replaced whole, with and without the matchers, and an
+    /// unregistered value is kept.
+    #[test]
+    fn rust_escaped_secrets_are_redacted_even_without_matchers() {
+        use super::*;
+        let secrets = ["tok-SENSITIVE-nul\0unit", "tok-SENSITIVE-it's\0unit"];
+        let mut text = String::from("start");
+        let mut expected = String::from("start");
+        for secret in secrets {
+            let quoted = format!("{secret:?}");
+            let debug = &quoted[1..quoted.len() - 1];
+            let escaped = secret.escape_debug().to_string();
+            assert!(debug != secret && escaped != secret);
+            text.push_str(&format!(" {debug} | {escaped}"));
+            expected.push_str(&format!(" {REDACTED} | {REDACTED}"));
+        }
+        text.push_str(" keep-me-9q");
+        expected.push_str(" keep-me-9q");
+        let mut r = Redactor::new(secrets.iter().map(|s| s.to_string()).collect(), vec![]);
+        assert_eq!(r.text(&text), expected);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), expected.to_ascii_uppercase().replace("‹REDACTED›", REDACTED));
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.matcher = None;
+        r.any_case = None;
+        assert_eq!(r.text(&text), expected);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), expected.to_ascii_uppercase().replace("‹REDACTED›", REDACTED));
     }
 
     #[test]

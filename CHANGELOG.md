@@ -43,8 +43,10 @@
 - A username or API key name that took a secret variable is hidden in the auth label and in auth
   refusals (multi-auth conflicts, invalid header or cookie values) by where it came from, so a
   secret shorter than 4 characters, which exact-value redaction ignores, is not shown there
-  either. The whole parameter is hidden when its template adds literal text. The same value from
-  a plain variable is still shown.
+  either. The same goes for the header, query or cookie name an API key is sent under (in the
+  record and the preview) and the WS-Security username in the preview's body. The whole parameter
+  is hidden when its template adds literal text. The same value from a plain variable is still
+  shown, and the request sent is unchanged.
 - When the effective-request preview cannot be prepared, its error is redacted like the stored
   record's copy of it, ignoring letter case. Under the default lint policy, an XML body refused by
   the linter used to return the parser's message, which quotes tag names, with a secret value

@@ -197,7 +197,7 @@ impl ResolvedAuth {
             ResolvedAuth::Hmac(p) => format!("hmac({:?}, user {})", p.profile, show(&p.username)),
             ResolvedAuth::Dpop { .. } => "dpop(bound access token)".into(),
             ResolvedAuth::Wsse { username, password_type, .. } => format!("ws-security({password_type:?}, user {})", show(username)),
-            ResolvedAuth::JwtSvid { header_name, .. } => format!("jwt_svid({header_name})"),
+            ResolvedAuth::JwtSvid { header_name, .. } => format!("jwt_svid({})", show(header_name)),
             ResolvedAuth::Multi(v) => format!("multi[{}]", v.iter().map(|a| a.label_hiding(hidden)).collect::<Vec<_>>().join(", ")),
         }
     }

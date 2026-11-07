@@ -102,15 +102,12 @@ fn resolve_auth(
     };
     Ok(match auth {
         AuthConfig::Inherit | AuthConfig::None => ResolvedAuth::None,
-        AuthConfig::ApiKey { name, value, location } => ResolvedAuth::ApiKey {
-            name: displayed(name, "auth.name", hidden)?,
-            value: sens(value, "auth.value")?,
-            location: *location,
-        },
-        AuthConfig::Basic { username, password } => ResolvedAuth::Basic {
-            username: displayed(username, "auth.username", hidden)?,
-            password: sens(password, "auth.password")?,
-        },
+        AuthConfig::ApiKey { name, value, location } => {
+            ResolvedAuth::ApiKey { name: displayed(name, "auth.name", hidden)?, value: sens(value, "auth.value")?, location: *location }
+        }
+        AuthConfig::Basic { username, password } => {
+            ResolvedAuth::Basic { username: displayed(username, "auth.username", hidden)?, password: sens(password, "auth.password")? }
+        }
         AuthConfig::Bearer { token, prefix } => ResolvedAuth::Bearer { token: sens(token, "auth.token")?, prefix: prefix.clone() },
         AuthConfig::Jwt { algorithm, signing_key, claims, kid, header_name, prefix } => {
             let extra = if claims.extra_json.trim().is_empty() {
@@ -508,6 +505,15 @@ pub(crate) fn prepare_all_at(
     let mut oauth_key = None;
     let mut auth_hidden = Vec::new();
     let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key, &mut auth_hidden)?;
+    // Every redactor built from the resolver hides them where Anvil writes them.
+    {
+        let mut hidden = r.hidden_parameters.lock();
+        for v in &auth_hidden {
+            if !hidden.contains(v) {
+                hidden.push(v.clone());
+            }
+        }
+    }
     let shown = auth.label_hiding(&auth_hidden);
     let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{shown} (from {auth_scope})") };
     let tls_scheme = matches!(http.target.scheme.as_str(), "https" | "wss" | "grpcs");
