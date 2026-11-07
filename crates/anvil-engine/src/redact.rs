@@ -166,26 +166,32 @@ impl Redactor {
 
     /// Take in auth parameters to hide where Anvil writes them (the
     /// `hidden` field).
+    /// A value is kept as resolved and, when that differs, trimmed.
     fn hide_parameters(&mut self, values: &[String]) {
         for v in values {
-            if !v.is_empty() && !self.hidden.contains(v) {
-                self.hidden.push(v.clone());
+            for form in [v.as_str(), v.trim()] {
+                if !form.is_empty() && !self.hidden.iter().any(|h| h == form) {
+                    self.hidden.push(form.to_string());
+                }
             }
         }
     }
 
     /// Whether a structured component Anvil writes or reads back (a header,
     /// query or cookie name or value, a URL path segment or bare query part)
-    /// is a hidden auth parameter: equal to one, whatever its length, as
-    /// written or once percent-decoded, ignoring ASCII case (HTTP/2 and
-    /// HTTP/3 lowercase names) and surrounding whitespace.
+    /// is a hidden auth parameter, whatever its length: equal to one as
+    /// written or in any of its decodings ([`decoded_forms`]), ignoring ASCII
+    /// case (HTTP/2 and HTTP/3 lowercase names), compared both exactly and
+    /// with surrounding whitespace trimmed from both sides.
     pub(crate) fn hides_parameter(&self, component: &str) -> bool {
         if self.hidden.is_empty() {
             return false;
         }
-        let raw = component.trim();
-        let decoded = percent_encoding::percent_decode_str(raw).decode_utf8_lossy();
-        self.hidden.iter().any(|h| h.eq_ignore_ascii_case(raw) || h.eq_ignore_ascii_case(decoded.trim()))
+        let forms = decoded_forms(component);
+        self.hidden.iter().any(|h| {
+            let trimmed = h.trim();
+            forms.iter().any(|f| f.eq_ignore_ascii_case(h) || (!trimmed.is_empty() && f.trim().eq_ignore_ascii_case(trimmed)))
+        })
     }
 
     /// The one test for a structured component: it hides a secret
@@ -468,11 +474,7 @@ impl Redactor {
                     .map(|c| match c.split_once('=') {
                         Some((k, _)) => {
                             let name = k.trim();
-                            if self.hides_component(name) {
-                                format!("{REDACTED}={REDACTED}")
-                            } else {
-                                format!("{name}={REDACTED}")
-                            }
+                            if self.hides_component(name) { format!("{REDACTED}={REDACTED}") } else { format!("{name}={REDACTED}") }
                         }
                         None => REDACTED.to_string(),
                     })
@@ -953,6 +955,34 @@ fn encoded_forms(s: &str) -> Vec<String> {
     let lower = lower_hex(&upper);
     let form: String = url::form_urlencoded::byte_serialize(s.as_bytes()).collect();
     [upper, lower, form].into_iter().filter(|f| f != s).collect()
+}
+
+/// A component as written and as every decoding a URL or form writer could
+/// have applied makes it: percent-decoding, and form decoding (`+` read as a
+/// space), each repeated up to [`MAX_DECODE_ROUNDS`] times (a doubly encoded
+/// component). Anvil writes an auth query name percent-encoded
+/// (`prepare::encode_component`, a space as `%20`).
+fn decoded_forms(component: &str) -> Vec<String> {
+    let mut forms = vec![component.to_string()];
+    let mut layer = forms.clone();
+    for _ in 0..MAX_DECODE_ROUNDS {
+        let mut next = Vec::new();
+        for f in &layer {
+            let percent = percent_encoding::percent_decode_str(f).decode_utf8_lossy().into_owned();
+            let form = percent_encoding::percent_decode_str(&f.replace('+', " ")).decode_utf8_lossy().into_owned();
+            for decoded in [percent, form] {
+                if !forms.contains(&decoded) {
+                    forms.push(decoded.clone());
+                    next.push(decoded);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        layer = next;
+    }
+    forms
 }
 
 /// The value as it appears inside a serialized JSON string, when escaping

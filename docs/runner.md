@@ -387,7 +387,8 @@ Real fixture sockets and the real engine throughout:
   (`prepared.auth_label`, the preview's `auth`) and auth refusals; a header
   name or value, a `Cookie` or `Set-Cookie` cookie name, and a URL path
   segment or query or fragment name, value or bare part equal to it (as
-  written or percent-decoded, in any letter case), in the record and the
+  written, percent-decoded, form-decoded or doubly encoded, in any letter
+  case, with or without surrounding whitespace), in the record and the
   preview; and the WS-Security `wsse:Username` in the preview's body. A
   response cookie named by it is not kept in the cookie jar. The whole
   parameter is hidden, even when its template adds literal text

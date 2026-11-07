@@ -852,6 +852,64 @@ fn a_hidden_auth_parameter_is_hidden_in_every_structured_component() {
     assert_eq!(shown[2], header("X-Other", "kept"));
     assert_eq!(shown[3], header("Cookie", &format!("{REDACTED}={REDACTED}; other={REDACTED}")));
     assert_eq!(shown[4], header("Set-Cookie", &format!("{REDACTED}={REDACTED}; Path=/")));
+
+    // A parameter with whitespace around it: compared as resolved and
+    // trimmed, against each decoding of a component: percent (as Anvil
+    // writes an auth query name, `%20`), form (`+`), doubly encoded, and
+    // trimmed.
+    let resolver = Resolver::new(vec![], None);
+    resolver.hidden_parameters.lock().push(" Wz".into());
+    let r = Redactor::for_execution(&resolver, &[]);
+    let pair = format!("{REDACTED}={REDACTED}");
+    assert_eq!(
+        r.url("https://h/q?%20Wz=1&+Wz=2&%2520Wz=3&Wz=4&%20wz%20=5&x=Wzz"),
+        format!("https://h/q?{pair}&{pair}&{pair}&{pair}&{pair}&x=Wzz")
+    );
+    assert_eq!(r.headers(&[header(" Wz", "v")])[0], header(REDACTED, REDACTED));
+}
+
+/// A short secret API key name with whitespace around it: Anvil sends a
+/// query name percent-encoded (`%20Qb`) and refuses a header or cookie name
+/// with a space, quoting it. Neither the encoded nor the decoded name stays
+/// in the preview's URL or notes, nor in the stored attempt URL or failure;
+/// a plain name is shown.
+#[tokio::test]
+async fn a_short_secret_key_name_with_whitespace_is_hidden_in_every_form() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::secret::SensitiveValue;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let engine = Engine::new();
+    for name in [" Qb", "Qb ", " Qb "] {
+        for secret in [true, false] {
+            for location in [KeyLocation::Query, KeyLocation::Header, KeyLocation::Cookie] {
+                let case = format!("{name:?} secret={secret} {location:?}");
+                let mut spec = RequestSpec::http("GET", &f.url("/status/200"));
+                let value = SensitiveValue::template("tok-SENSITIVE-spaced-key-3w8r");
+                spec.auth = AuthConfig::ApiKey { name: "{{short}}".into(), value, location };
+                let mut c = ExecutionContext::standalone(spec);
+                let vars = vec![VarEntry { name: "short".into(), value: name.into(), secret, literal: false }];
+                c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+                let shows = |texts: &[String]| texts.iter().any(|t| t.contains("Qb"));
+
+                let p = engine.preview(&c).expect("preview");
+                let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+                let mut stored: Vec<String> = o.record.attempts.iter().map(|a| a.url.clone()).collect();
+                stored.extend(o.record.attempts.iter().filter_map(|a| a.failure.as_ref()).map(|fail| fail.message.clone()));
+                let mut previewed = vec![p.url.clone()];
+                previewed.extend(p.inferred.iter().cloned());
+                previewed.extend(p.headers.iter().map(|h| format!("{}: {}", h.name, h.value)));
+                if secret {
+                    assert!(!shows(&stored), "{case}: stored {stored:?}");
+                    assert!(!shows(&previewed), "{case}: previewed {previewed:?}");
+                } else {
+                    // Sent in the query; refused, and named, as a header or cookie.
+                    assert!(shows(&previewed), "{case}: previewed {previewed:?}");
+                }
+            }
+        }
+    }
 }
 
 /// The preview withholds a short secret WS-Security username in the body

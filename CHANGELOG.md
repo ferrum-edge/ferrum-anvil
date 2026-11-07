@@ -44,8 +44,9 @@
   refusals (multi-auth conflicts, invalid header or cookie values) by where it came from, so a
   secret shorter than 4 characters, which exact-value redaction ignores, is not shown there
   either. The same goes for every structured place it can come back: a header name or value, a
-  `Cookie` or `Set-Cookie` name, a URL path segment or query or fragment part (as written or
-  percent-decoded, in any letter case), in the record and the preview, and the WS-Security
+  `Cookie` or `Set-Cookie` name, a URL path segment or query or fragment part (as written,
+  percent-decoded, form-decoded or doubly encoded, in any letter case, with or without the
+  whitespace around it), in the record and the preview, and the WS-Security
   username in the preview's body, which is hidden before anything else in the body is replaced.
   A response cookie named by it is not kept in the cookie jar, so a later request does not send
   it. The whole parameter is hidden when its template adds literal text. The same value from a
