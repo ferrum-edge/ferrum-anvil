@@ -33,8 +33,9 @@ pub type Redact<'a> = Option<&'a dyn Fn(&str) -> String>;
 
 /// How far past an excerpt's cut the redactor looks: a secret (in any form
 /// the redactor knows) that starts before the cut and is at most this long
-/// is recognized whole before the excerpt is cut.
-pub const EXCERPT_LOOKAHEAD_BYTES: usize = 64 * 1024;
+/// is recognized whole before the excerpt is cut. The transport's session
+/// previews use the same bound ([`anvil_domain::secret::REDACT_LOOKAHEAD_BYTES`]).
+pub const EXCERPT_LOOKAHEAD_BYTES: usize = anvil_domain::secret::REDACT_LOOKAHEAD_BYTES;
 
 /// Inputs for one diagnosis. The engine assembles this from the shared
 /// native execution; the UI/CLI never feed it anything else.
@@ -181,14 +182,6 @@ const SOAP_FAULT_XML_LIMITS: XmlLimits = XmlLimits {
     namespace_scope_work: 1 << 22,
 };
 
-fn floor_char_boundary(s: &str, i: usize) -> usize {
-    let mut end = i.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
-}
-
 /// At most `max_chars` characters of `s`, redacted before the cut.
 ///
 /// `s` is redacted up to [`EXCERPT_LOOKAHEAD_BYTES`] past the cut, then cut:
@@ -196,34 +189,9 @@ fn floor_char_boundary(s: &str, i: usize) -> usize {
 /// with the redaction marker where that secret starts. Nothing from past
 /// the cut is shown. Without a redactor, `s` is only cut.
 pub fn excerpt(redact: Redact<'_>, s: &str, max_chars: usize) -> String {
-    let cut = s.char_indices().nth(max_chars).map_or(s.len(), |(i, _)| i);
-    match redact {
-        Some(r) => redact_then_cut(r, &s[..floor_char_boundary(s, cut.saturating_add(EXCERPT_LOOKAHEAD_BYTES))], cut),
-        None => s[..cut].to_string(),
-    }
-}
-
-/// `window` redacted, then cut at byte `cut` (a char boundary of `window`),
-/// as the transport's session previews are: redacting either side of the
-/// cut alone finds the same secrets as redacting the whole window unless a
-/// secret crosses the cut, and then the part before it is kept.
-fn redact_then_cut(redact: &dyn Fn(&str) -> String, window: &str, cut: usize) -> String {
-    if cut >= window.len() {
-        return redact(window);
-    }
-    let whole = redact(window);
-    if whole == window {
-        return window[..cut].to_string();
-    }
-    let head = redact(&window[..cut]);
-    let tail = redact(&window[cut..]);
-    if whole.len() == head.len() + tail.len() && whole.starts_with(&head) && whole.ends_with(&tail) {
-        return head;
-    }
-    let same = whole.bytes().zip(head.bytes()).take_while(|(a, b)| a == b).count();
-    let mut out = head[..floor_char_boundary(&head, same)].to_string();
-    out.push_str(anvil_domain::secret::REDACTED);
-    out
+    // The transport's session previews follow the same redact-before-cut
+    // policy, shared through `anvil_domain::secret`.
+    anvil_domain::secret::redacted_excerpt(redact, s, max_chars)
 }
 
 pub fn body_facts(content_type: Option<&str>, body: &[u8]) -> BodyFacts {
