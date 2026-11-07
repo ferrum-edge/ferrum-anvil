@@ -30,13 +30,41 @@ fn bind_udp_future(bind: &str) -> UdpBindFuture<UdpSocket> {
     Box::pin(async move { UdpSocket::bind(bind).await })
 }
 
+/// A failed step of the DNS pair bind. Binding (UDP, or TCP to the UDP
+/// port) is retried on another port when [`retryable_bind_error`]; reading
+/// the bound UDP socket's address never is: its error is returned as it is.
+enum PairStepError {
+    Bind(io::Error),
+    LocalAddr(io::Error),
+}
+
+impl From<io::Error> for PairStepError {
+    /// A TCP bind error.
+    fn from(error: io::Error) -> Self {
+        PairStepError::Bind(error)
+    }
+}
+
+impl PairStepError {
+    fn retryable(&self) -> bool {
+        matches!(self, PairStepError::Bind(error) if retryable_bind_error(error))
+    }
+
+    fn into_io(self) -> io::Error {
+        match self {
+            PairStepError::Bind(error) | PairStepError::LocalAddr(error) => error,
+        }
+    }
+}
+
 /// Binds a TCP listener and a UDP socket to the same ephemeral port of
 /// `bind`'s host ([`crate::ports`]: UDP first, a TCP refusal retried on
 /// another port). Only for a port-0 `bind`: [`serve`] binds an explicitly
 /// requested port once and reports any failure as-is.
 ///
 /// A UDP bind is retried only when [`retryable_bind_error`]; any other UDP
-/// error is returned at once.
+/// bind error, and any failure to read the bound socket's address, is
+/// returned at once.
 async fn bind_ephemeral_pair_with<Tcp, Udp, T, U>(bind: &str, bind_udp: U, bind_tcp: T) -> io::Result<(Udp, Tcp)>
 where
     Udp: BoundUdpSocket + Send + 'static,
@@ -57,19 +85,19 @@ where
     T: FnMut(SocketAddr) -> TcpBindFuture<Tcp>,
     U: FnMut(&str) -> UdpBindFuture<Udp>,
 {
-    let bind_udp = |port: Option<u16>| -> ports::UdpBindFuture<Udp, io::Error> {
+    let bind_udp = |port: Option<u16>| -> ports::UdpBindFuture<Udp, PairStepError> {
         let bound = bind_udp(&port.map_or_else(|| bind.to_owned(), |port| bind_with_port(bind, port)));
         Box::pin(async move {
-            let udp = bound.await?;
-            let addr = udp.local_addr()?;
+            let udp = bound.await.map_err(PairStepError::Bind)?;
+            let addr = udp.local_addr().map_err(PairStepError::LocalAddr)?;
             Ok((udp, addr))
         })
     };
-    match ports::bind_udp_tcp_pair(random_start, retryable_bind_error, bind_udp, bind_tcp).await {
+    match ports::bind_udp_tcp_pair(random_start, PairStepError::retryable, bind_udp, bind_tcp).await {
         Ok(pair) => Ok(pair),
-        Err(PairBindError::Fatal(error)) => Err(error),
+        Err(PairBindError::Fatal(error)) => Err(error.into_io()),
         Err(PairBindError::Exhausted { tried_ports, last_error }) => {
-            let error = last_error.unwrap_or_else(|| io::Error::other("the DNS fixture pair bind made no attempts"));
+            let error = last_error.map_or_else(|| io::Error::other("the DNS fixture pair bind made no attempts"), PairStepError::into_io);
             Err(io::Error::new(
                 error.kind(),
                 format!(
@@ -282,6 +310,73 @@ mod tests {
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AddrNotAvailable);
         assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    /// A bound UDP socket whose address cannot be read (e.g. a security
+    /// policy that permits `bind` but denies `getsockname`).
+    struct AddresslessUdpSocket;
+
+    impl BoundUdpSocket for AddresslessUdpSocket {
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            // The code `retryable_bind_error` matches on every OS: retrying it would change the outcome.
+            Err(io::Error::from_raw_os_error(WINDOWS_WSAEACCES))
+        }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_pair_returns_a_local_addr_failure_at_once() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let bind_calls = calls.clone();
+        let tcp_calls = Arc::new(Mutex::new(0usize));
+        let tcp_seen = tcp_calls.clone();
+        let result = bind_ephemeral_pair_with(
+            "127.0.0.1:0",
+            move |_| {
+                *bind_calls.lock().unwrap() += 1;
+                Box::pin(async move { Ok(AddresslessUdpSocket) }) as UdpBindFuture<AddresslessUdpSocket>
+            },
+            move |addr| {
+                *tcp_seen.lock().unwrap() += 1;
+                Box::pin(async move { Ok(MockTcpListener(addr)) }) as TcpBindFuture<MockTcpListener>
+            },
+        )
+        .await;
+
+        let error = result.err().expect("the address failure is returned");
+        let original = io::Error::from_raw_os_error(WINDOWS_WSAEACCES);
+        assert_eq!(error.raw_os_error(), Some(WINDOWS_WSAEACCES));
+        assert_eq!(error.to_string(), original.to_string(), "returned as it is, not wrapped");
+        assert_eq!(*calls.lock().unwrap(), 1, "the UDP bind was retried");
+        assert_eq!(*tcp_calls.lock().unwrap(), 0, "TCP was bound without a UDP address");
+    }
+
+    #[tokio::test]
+    async fn serve_binds_an_explicit_port_once_and_reports_its_error_as_is() {
+        // TCP holds the requested port, so the fixed-port bind must fail with the bind's own error
+        // instead of falling back to another port.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let requested = held.local_addr().unwrap();
+        let error = match serve(&requested.to_string(), DnsMode::NxDomain).await {
+            Ok(fixture) => panic!("served on {} although TCP {requested} is held", fixture.addr),
+            Err(error) => error,
+        };
+        let io = error.downcast_ref::<io::Error>().expect("the bind's io::Error");
+        assert!(matches!(io.kind(), io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied), "{io:?}");
+        assert!(!error.to_string().contains("could not bind a DNS UDP/TCP pair"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn serve_keeps_an_explicit_port() {
+        // A port free over UDP may still be taken over TCP (or excluded on Windows): try a few.
+        for _ in 0..16 {
+            let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let requested = SocketAddr::from(([127, 0, 0, 1], port));
+            if let Ok(fixture) = serve(&requested.to_string(), DnsMode::NxDomain).await {
+                assert_eq!(fixture.addr, requested);
+                return;
+            }
+        }
+        panic!("no free port over both UDP and TCP in 16 tries");
     }
 
     #[tokio::test]
