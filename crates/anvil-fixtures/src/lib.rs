@@ -27,6 +27,7 @@ pub mod mcp;
 pub mod mesh_pki;
 pub mod pki;
 pub mod policy;
+mod ports;
 pub mod proxy_protocol;
 pub mod raw;
 pub mod replay_guard;

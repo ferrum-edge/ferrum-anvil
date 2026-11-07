@@ -23,6 +23,7 @@
 
 use crate::facts::{EXCERPT_LOOKAHEAD_BYTES, Redact, excerpt};
 use anvil_domain::execution::{ConnectionObservation, ResponseRecord};
+use anvil_domain::secret::floor_char_boundary;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
@@ -169,11 +170,7 @@ pub const MAX_QUOTE_CHARS: usize = 80;
 /// redacted.
 fn unquoted(s: &str) -> String {
     let cut = s.char_indices().nth(MAX_QUOTE_CHARS).map_or(s.len(), |(i, _)| i);
-    let mut end = cut.saturating_add(EXCERPT_LOOKAHEAD_BYTES).min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
+    s[..floor_char_boundary(s, cut.saturating_add(EXCERPT_LOOKAHEAD_BYTES))].to_string()
 }
 
 /// A text a response or a record supplied, as a finding may quote it: at
@@ -585,6 +582,8 @@ pub enum GatewayDetail {
 
 /// Whether a connection went straight to a loopback address, through no
 /// proxy and no tunnel: nothing outside this computer could answer on it.
+// Stricter than `anvil_transport::dns::is_loopback` on purpose: an IPv4-mapped
+// loopback address (`[::ffff:127.0.0.1]`) does not count.
 pub fn direct_loopback(c: &ConnectionObservation) -> bool {
     c.via_proxy.is_none()
         && c.tunnel.is_none()
@@ -631,6 +630,17 @@ mod tests {
     fn binding(r: &ResponseRecord, namespace: Option<&str>) -> Binding {
         let now = Utc::now();
         Binding::new(r, parse_ref(REF).unwrap(), namespace, now - chrono::Duration::seconds(1), now)
+    }
+
+    #[test]
+    fn unquoted_texts_keep_exactly_what_quoting_redacts() {
+        // `MAX_QUOTE_CHARS` characters plus the lookahead bytes, cut on a char boundary.
+        let s = format!("{}{}", "é".repeat(MAX_QUOTE_CHARS), "€".repeat(EXCERPT_LOOKAHEAD_BYTES));
+        let kept = unquoted(&s);
+        // `é` is 2 bytes and `€` 3: the window ends inside a `€`, so it is cut back to the one before.
+        assert_eq!(kept.len(), 2 * MAX_QUOTE_CHARS + EXCERPT_LOOKAHEAD_BYTES / 3 * 3);
+        assert!(s.starts_with(&kept) && s.len() > kept.len());
+        assert_eq!(unquoted("short"), "short");
     }
 
     #[test]
@@ -785,6 +795,7 @@ mod tests {
         };
         assert!(direct_loopback(&conn("127.0.0.1:18090", None)));
         assert!(direct_loopback(&conn("[::1]:18090", None)));
+        assert!(!direct_loopback(&conn("[::ffff:127.0.0.1]:18090", None)), "IPv4-mapped loopback does not count");
         assert!(!direct_loopback(&conn("192.0.2.10:18090", None)));
         assert!(!direct_loopback(&conn("127.0.0.1:3128", Some("lab proxy"))));
     }

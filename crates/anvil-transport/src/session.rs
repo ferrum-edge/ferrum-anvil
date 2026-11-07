@@ -64,61 +64,20 @@ impl Default for TranscriptLimits {
 /// redaction). A longer value is cut and ends with `…`.
 pub const METADATA_PREVIEW_BYTES: usize = 256;
 
-/// How far past a preview cut the redactor looks: a secret (in any form the
-/// redactor knows) that starts before the cut and is at most this long is
-/// recognized whole before the preview is cut. Only this much of a payload
-/// is redacted per entry, whatever its size.
-pub const REDACT_LOOKAHEAD_BYTES: usize = 64 * 1024;
+// The redact-before-cut policy of previews: redact over up to
+// `REDACT_LOOKAHEAD_BYTES` past the cut, then cut, so a secret that crosses
+// the cut is replaced whole. Shared with the findings' excerpts
+// (`anvil_diagnostics::facts::excerpt`) through `anvil_domain::secret`.
+pub use anvil_domain::secret::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 
-fn floor_char_boundary(s: &str, i: usize) -> usize {
-    let mut end = i.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
-}
-
-/// `window` redacted, then cut at `cut` bytes (a char boundary of `window`).
-///
-/// Redaction runs before the cut, so a secret that crosses the cut is
-/// replaced whole instead of leaving its prefix in the preview. `window`
-/// must hold the text past the cut that the redactor needs to see (up to
-/// [`REDACT_LOOKAHEAD_BYTES`]). The result shows nothing from past the cut:
-/// when a secret crosses it, the preview ends with the redaction marker
-/// where that secret starts.
-pub fn redact_then_cut<F: Fn(&str) -> String + ?Sized>(redact: &F, window: &str, cut: usize) -> String {
-    if cut >= window.len() {
-        return redact(window);
-    }
-    let whole = redact(window);
-    if whole == window {
-        // Nothing in the window is secret, so nothing before the cut is.
-        return window[..cut].to_string();
-    }
-    let head = redact(&window[..cut]);
-    let tail = redact(&window[cut..]);
-    if whole.len() == head.len() + tail.len() && whole.starts_with(&head) && whole.ends_with(&tail) {
-        // Redacting either side alone finds the same secrets: none crosses the cut.
-        return head;
-    }
-    // A secret crosses the cut. What precedes it is the same in both forms;
-    // from where they differ on, the head holds that secret's prefix.
-    let same = whole.bytes().zip(head.bytes()).take_while(|(a, b)| a == b).count();
-    let mut out = head[..floor_char_boundary(&head, same)].to_string();
-    out.push_str(anvil_domain::secret::REDACTED);
-    out
-}
+use anvil_domain::secret::floor_char_boundary;
 
 /// At most `max_chars` characters of `s`, redacted before the cut when a
 /// redactor is given ([`redact_then_cut`], over up to
 /// [`REDACT_LOOKAHEAD_BYTES`] past the cut): a secret that crosses the cut
 /// is replaced whole instead of leaving its prefix.
 pub fn redacted_excerpt(redact: Option<&(dyn Fn(&str) -> String + Send + Sync)>, s: &str, max_chars: usize) -> String {
-    let cut = s.char_indices().nth(max_chars).map_or(s.len(), |(i, _)| i);
-    match redact {
-        Some(r) => redact_then_cut(r, &s[..floor_char_boundary(s, cut.saturating_add(REDACT_LOOKAHEAD_BYTES))], cut),
-        None => s[..cut].to_string(),
-    }
+    anvil_domain::secret::redacted_excerpt(redact, s, max_chars)
 }
 
 /// Why a [`guarded`] operation did not complete.
@@ -889,19 +848,6 @@ mod tests {
         let mut t = Transcript::new(Instant::now(), limits, EventCtx::none(), None);
         t.data(Direction::Sent, "text", plain.as_bytes());
         assert_eq!(t.finish().messages[0].preview, &plain[..64]);
-    }
-
-    #[test]
-    fn redact_then_cut_never_shows_what_is_past_the_cut() {
-        let r = |s: &str| s.replace("abcdef", "#");
-        // The secret crosses the cut: the preview stops where it starts.
-        assert_eq!(redact_then_cut(&r, "xxabcdefyy", 4), format!("xx{REDACTED}"));
-        // Wholly before the cut; wholly after it; none.
-        assert_eq!(redact_then_cut(&r, "abcdefxxyy", 8), "#xx");
-        assert_eq!(redact_then_cut(&r, "xxyyabcdef", 4), "xxyy");
-        assert_eq!(redact_then_cut(&r, "xxyyzz", 3), "xxy");
-        // A cut at or past the end redacts the whole text.
-        assert_eq!(redact_then_cut(&r, "xxabcdef", 8), "xx#");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use anvil_auth::oauth::{BoxFut, CachedToken, Generation, OAuthResolved, TokenHtt
 use anvil_domain::auth::{OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::{AttemptReason, FailureKind, Phase, TransportFailure};
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
-use anvil_transport::dns::DnsConfig;
+use anvil_transport::dns::{DnsConfig, is_literal_loopback};
 use anvil_transport::http::HttpPlan;
 use anvil_transport::recorder::EventCtx;
 use base64::Engine as _;
@@ -247,11 +247,7 @@ pub fn validate_worker_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> R
         let Some(port) = port.strip_prefix(':').filter(|_| !varies(host)) else {
             return Err("the OAuth token endpoint host depends on per-run values".into());
         };
-        let loopback = url::Url::parse(&format!("http://{host}/")).ok().is_some_and(|url| match url.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()),
-            _ => false,
-        });
+        let loopback = url::Url::parse(&format!("http://{host}/")).ok().is_some_and(|url| is_literal_loopback(&url));
         if !loopback || !port.replace(OAUTH_PER_RUN_VALUE, "").bytes().all(|byte| byte.is_ascii_digit()) {
             return Err("a per-run OAuth token endpoint port requires a fixed literal-loopback host and digits".into());
         }
@@ -268,12 +264,7 @@ pub fn validate_worker_oauth_endpoint(ctx: &ExecutionContext, r: &Resolver) -> R
 /// localhost) cannot opt into cleartext; only a canonical literal loopback can.
 pub fn require_secure_token_endpoint(raw: &str) -> Result<(), String> {
     let u = url::Url::parse(raw).map_err(|_| "the OAuth token endpoint is not a valid URL".to_string())?;
-    let loopback = match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
-        _ => false,
-    };
-    if u.scheme() == "https" || (u.scheme() == "http" && loopback) {
+    if u.scheme() == "https" || (u.scheme() == "http" && is_literal_loopback(&u)) {
         Ok(())
     } else {
         Err("the OAuth token endpoint requires HTTPS or literal-loopback HTTP".into())
