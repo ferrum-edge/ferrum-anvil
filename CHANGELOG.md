@@ -48,13 +48,14 @@
   percent-decoded, form-decoded or doubly encoded, in any letter case, with or without the
   whitespace around it), in the record and the preview, and the WS-Security
   username in the preview's body, which is hidden before anything else in the body is replaced,
-  also when the preview's window ends inside it.
+  also when the preview's window ends inside it (its content is then withheld whole).
   A response cookie named by it is not kept in the cookie jar, so a later request does not send
   it. The whole parameter is hidden when its template adds literal text. The same value from a
   plain variable is still shown, and the request sent is unchanged.
 - The effective-request preview tells a JSON body by the `Content-Type` media type
-  (`application/json`, `+json`, `-json`), not by "json" anywhere in the header: a SOAP 1.2
-  `action` naming JSON no longer makes a SOAP body previewed as JSON.
+  (`application/json`, `+json`, `-json`, JSON Lines and NDJSON), not by "json" anywhere in the
+  header: a SOAP 1.2 `action` naming JSON no longer makes a SOAP body previewed as JSON. A
+  preview no longer shows a code point split by the end of the captured body as U+FFFD.
 - When the effective-request preview cannot be prepared, its error is redacted like the stored
   record's copy of it, ignoring letter case. Under the default lint policy, an XML body refused by
   the linter used to return the parser's message, which quotes tag names, with a secret value

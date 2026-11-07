@@ -234,7 +234,8 @@ const BODY_PREVIEW_BYTES: usize = 64 * 1024;
 /// cut stays where it is in the body and a replacement crossing it, of
 /// either kind, is caught.
 fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String {
-    let window = String::from_utf8_lossy(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
+    let captured = without_split_code_point(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
+    let window = String::from_utf8_lossy(captured);
     let redact = |s: &str| redactor.text(&redactor.hide_written_parameters(s));
     if body.len() <= BODY_PREVIEW_BYTES {
         return if json { redactor.json_text(&redactor.hide_written_parameters(&window)) } else { redact(&window) };
@@ -246,13 +247,36 @@ fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String
     redact_then_cut(&redact, &window, cut)
 }
 
+/// `bytes` without a last UTF-8 code point their end cuts short, so lossy
+/// decoding does not turn its first bytes into U+FFFD. Every other byte
+/// keeps its offset.
+fn without_split_code_point(bytes: &[u8]) -> &[u8] {
+    for (back, &b) in bytes.iter().rev().take(4).enumerate() {
+        if b & 0xC0 == 0x80 {
+            continue;
+        }
+        // A lead byte (or ASCII): how many bytes its code point takes.
+        let width = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        return if back + 1 < width { &bytes[..bytes.len() - back - 1] } else { bytes };
+    }
+    bytes
+}
+
 /// Whether a `Content-Type` names JSON by its media type essence
-/// (`type/subtype`): a `json` subtype, a `+json` suffix or a `-json` one
-/// (`application/x-json`). Its parameters (a SOAP 1.2 `action="urn:json"`)
-/// do not count.
+/// (`type/subtype`): a `json`, `jsonl`, `ndjson` or `x-ndjson` subtype, a
+/// `+json` suffix or a `-json` one (`application/x-json`). Its parameters
+/// (a SOAP 1.2 `action="urn:json"`) do not count. A body that does not
+/// parse as one JSON document is still redacted as text.
 fn is_json_media_type(content_type: &str) -> bool {
     let essence = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
-    essence.split_once('/').is_some_and(|(_, subtype)| subtype == "json" || subtype.ends_with("+json") || subtype.ends_with("-json"))
+    essence.split_once('/').is_some_and(|(_, subtype)| {
+        matches!(subtype, "json" | "jsonl" | "ndjson" | "x-ndjson") || subtype.ends_with("+json") || subtype.ends_with("-json")
+    })
 }
 
 #[cfg(test)]
@@ -262,11 +286,30 @@ mod tests {
 
     #[test]
     fn json_is_told_by_the_media_type_essence() {
-        for json in ["application/json", "Application/JSON; charset=utf-8", "application/problem+json", "text/json", "application/x-json"] {
+        for json in [
+            "application/json",
+            "Application/JSON; charset=utf-8",
+            "application/problem+json",
+            "text/json",
+            "application/x-json",
+            "application/jsonl",
+            "application/x-ndjson",
+            "application/ndjson",
+        ] {
             assert!(is_json_media_type(json), "{json}");
         }
-        for other in ["application/soap+xml; charset=utf-8; action=\"urn:json\"", "text/xml; json=1", "application/jsonl", "json"] {
+        for other in ["application/soap+xml; charset=utf-8; action=\"urn:json\"", "text/xml; json=1", "application/jsonx", "json"] {
             assert!(!is_json_media_type(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_code_point_split_by_the_capture_is_left_out() {
+        let text = "aé€😀";
+        for end in 0..=text.len() {
+            let kept = without_split_code_point(&text.as_bytes()[..end]);
+            let boundary = (0..=end).rev().find(|&i| text.is_char_boundary(i)).unwrap();
+            assert_eq!(kept, &text.as_bytes()[..boundary], "{end}");
         }
     }
 

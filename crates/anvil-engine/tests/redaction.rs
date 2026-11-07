@@ -1059,6 +1059,79 @@ async fn a_hidden_username_running_past_the_captured_body_is_withheld() {
     }
 }
 
+/// The preview of a WS-Security request whose username is `{{short}}`
+/// followed by `suffix`, in a [`padded_envelope`] of `pad` bytes, with
+/// `short` a secret or a plain variable.
+async fn long_username_preview(engine: &Engine, suffix: &str, pad: usize, secret: bool) -> anvil_engine::preview::EffectiveRequest {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+    spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: padded_envelope(pad), action: None };
+    spec.auth = AuthConfig::Wsse {
+        config: WsseConfig {
+            username: format!("{{{{short}}}}{suffix}"),
+            password: SensitiveValue::template("tok-SENSITIVE-long-user-pw"),
+            password_type: WssePasswordType::PasswordText,
+            timestamp_ttl_secs: None,
+            saml_assertion: None,
+        },
+    };
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "short".into(), value: "Qb".into(), secret, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    engine.preview(&c).expect("preview")
+}
+
+/// A hidden username whose closing tag straddles the end of the captured
+/// window (the window holds the value and part of `</wsse:Username>`): the
+/// element is withheld all the same. A plain username is shown up to the cut.
+#[tokio::test]
+async fn a_hidden_username_whose_closing_tag_straddles_the_capture_is_withheld() {
+    use anvil_auth::wsse::insert_security;
+    use anvil_domain::auth::WssePasswordType;
+    anvil_transport::init();
+    let suffix = "u".repeat(65_600);
+    let username = format!("Qb{suffix}");
+    let (password, text, now) = ("tok-SENSITIVE-long-user-pw", WssePasswordType::PasswordText, chrono::Utc::now());
+    // Where `</wsse:Username>` starts in the body sent, with a comment of `pad` bytes.
+    let close_at = |pad: usize| {
+        let sent = insert_security(padded_envelope(pad).as_bytes(), &username, password, text, None, None, now).unwrap();
+        String::from_utf8(sent).unwrap().find(&format!("{username}</wsse:Username>")).unwrap() + username.len()
+    };
+    // The window (128 KiB) ends 5 bytes into the closing tag.
+    let pad = 131_067 - close_at(0);
+    assert_eq!(close_at(pad), 131_067);
+    let engine = Engine::new();
+    let p = long_username_preview(&engine, &suffix, pad, true).await;
+    assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "the preview does not end at the username");
+    assert!(!serde_json::to_string(&p).unwrap().contains("Qb"), "the hidden username is shown");
+    let p = long_username_preview(&engine, &suffix, pad, false).await;
+    assert!(p.body_preview.contains("<wsse:Username>Qbuu"), "the plain username is not shown");
+}
+
+/// A hidden username of multibyte characters running past the captured
+/// window, which ends at each byte of a 2- and a 3-byte code point in turn:
+/// the element is withheld whatever the window's last bytes are. A plain
+/// username is shown up to the cut.
+#[tokio::test]
+async fn a_hidden_multibyte_username_split_by_the_capture_is_withheld() {
+    anvil_transport::init();
+    let engine = Engine::new();
+    for ch in ["é", "€"] {
+        let suffix = ch.repeat(140_000 / ch.len());
+        for pad in 0..ch.len() {
+            let p = long_username_preview(&engine, &suffix, pad, true).await;
+            let case = format!("{ch} pad={pad}");
+            assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "{case}: the preview does not end at the username");
+            assert!(!serde_json::to_string(&p).unwrap().contains("Qb"), "{case}: the hidden username is shown");
+            assert!(!p.body_preview.contains('\u{FFFD}'), "{case}");
+        }
+        let p = long_username_preview(&engine, &suffix, 0, false).await;
+        assert!(p.body_preview.contains(&format!("<wsse:Username>Qb{ch}{ch}")), "{ch}: the plain username is not shown");
+    }
+}
+
 /// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
 /// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
 /// redacted too, from the stored record (which `anvil send` prints, as JSON
