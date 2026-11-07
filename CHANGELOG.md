@@ -96,10 +96,11 @@
   existing environment's by the same rule. An id still wins over another item's name (#471).
 - The desktop Connection profiles dialog waits for the request settings' copy of the profiles to
   refresh after a save or a gateway removal, and reports it when that fails, instead of leaving the
-  removed gateway offered with an unhandled error. A profile saved again under an id removed in
-  the open dialog is listed again (#471).
+  removed gateway offered with an unhandled error. A profile re-created under the id of one removed
+  in the open dialog, there or elsewhere, is listed by the next read of the list (#471).
 - A request, folder or workspace setting that names a removed Ferrum gateway profile shows it as
-  "removed profile" with **Clear**, instead of an empty select (#471).
+  "removed profile" with **Clear**, instead of an empty select. Until the workspace's profiles
+  have been read, the id is shown as it is (#471).
 - Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
   longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
 

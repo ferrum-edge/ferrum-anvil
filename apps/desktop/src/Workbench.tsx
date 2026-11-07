@@ -87,6 +87,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const [tree, setTree] = useState<TreeNode[]>([]);
   // The workspace whose tree is shown: until the selected one's arrives, it is loading.
   const [treeWs, setTreeWs] = useState<string | null>(null);
+  // The workspace whose profiles `profiles` holds, once a read of them
+  // succeeded: until then a setting's profile id is not shown as removed.
+  const [profilesWs, setProfilesWs] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -193,7 +196,10 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       const [tls, proxy, integrations] = await Promise.all([api.tlsProfiles(ws.id), api.proxyProfiles(ws.id), api.integrations(ws.id)]);
       return { tls, proxy, integrations };
     };
-    await readLatest("profiles", ws.id, read, setProfiles);
+    await readLatest("profiles", ws.id, read, (p) => {
+      setProfiles(p);
+      setProfilesWs(ws.id);
+    });
   }, [ws]);
   const loadEnvs = useCallback(async () => {
     if (ws) await readLatest("envs", ws.id, () => api.environments(ws.id), setEnvs);
@@ -214,6 +220,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     setTree([]);
     setHistory([]);
     setProfiles({ tls: [], proxy: [], integrations: [] });
+    setProfilesWs(null);
     setEnvs([]);
     void Promise.all([loadTree(), loadHistory(), loadProfiles(), loadEnvs()]).catch(fail);
   }, [ws?.id]);
@@ -707,6 +714,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   const filtered = useMemo(() => filterTree(tree, filter.trim().toLowerCase()), [tree, filter]);
   const activeEnv = envs.find((e) => e.id === ws?.active_environment_id) ?? null;
+  const profilesLoaded = profilesWs !== null && profilesWs === ws?.id;
   const sidebar = useMemo(() => ({ resize: (d: number) => setSideW((w) => clamp(200, 520, w + d)) }), []);
 
   // ------------------------------------------------------------------ render
@@ -1015,6 +1023,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     workspaceId={ws.id}
                     environmentId={ws.active_environment_id ?? null}
                     profiles={profiles}
+                    profilesLoaded={profilesLoaded}
                     onReload={() => reloadSaved(tab.req.id)}
                     confirmReload={() => confirmReload(tab.req.id)}
                     savedUrl={savedUrl(tab)}
@@ -1124,6 +1133,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             target={{ kind: "workspace", workspace: ws }}
             workspaceId={ws.id}
             profiles={profiles}
+            profilesLoaded={profilesLoaded}
             onClose={() => setDialog(null)}
             onSaved={(w) => {
               if (w) {
@@ -1134,7 +1144,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           />
         )}
         {typeof dialog === "object" && dialog?.kind === "folder" && ws && (
-          <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} onClose={() => setDialog(null)} onSaved={() => void loadTree()} />
+          <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} profilesLoaded={profilesLoaded} onClose={() => setDialog(null)} onSaved={() => void loadTree()} />
         )}
         {dialog === "profiles" && ws && <ProfilesDialog workspaceId={ws.id} onClose={() => setDialog(null)} onChanged={loadProfiles} />}
         {dialog === "export" && <ExportDialog workspace={ws} onClose={() => setDialog(null)} notify={notify} />}

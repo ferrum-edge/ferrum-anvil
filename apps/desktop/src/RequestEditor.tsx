@@ -67,6 +67,8 @@ export function RequestEditor(props: {
   workspaceId: string;
   environmentId: string | null;
   profiles: Profiles;
+  /** `profiles` is the result of a read for this workspace, not the empty lists shown while it loads. */
+  profilesLoaded?: boolean;
   /** Replace the draft with the saved request, which the backend changed (a linked file was relocated). */
   onReload?: () => Promise<void>;
   /** Asked before a linked file is relocated, as that replaces the draft; false relocates nothing. */
@@ -207,7 +209,7 @@ export function RequestEditor(props: {
           />
         )}
         {activeSub === "tests" && <TestsEditor spec={spec} set={set} />}
-        {activeSub === "settings" && <SettingsEditor spec={spec} set={set} profiles={props.profiles} />}
+        {activeSub === "settings" && <SettingsEditor spec={spec} set={set} profiles={props.profiles} profilesLoaded={props.profilesLoaded} />}
         {activeSub === "effective" && <EffectivePanel req={req} workspaceId={props.workspaceId} environmentId={props.environmentId} />}
       </div>
     </>
@@ -1408,11 +1410,21 @@ function fromTri(s: string): boolean | null {
 
 /** Request-level settings: the layered overrides, plus the PROXY header of
  * an HTTP-family request (raw TCP and UDP configure theirs in the protocol tab). */
-export function SettingsEditor({ spec, set, profiles }: { spec: RequestSpec; set: (p: Partial<RequestSpec>) => void; profiles: Profiles }) {
+export function SettingsEditor({
+  spec,
+  set,
+  profiles,
+  profilesLoaded,
+}: {
+  spec: RequestSpec;
+  set: (p: Partial<RequestSpec>) => void;
+  profiles: Profiles;
+  profilesLoaded?: boolean;
+}) {
   const httpFamily = ["http", "web_socket", "grpc", "sse", "mcp"].includes(spec.protocol ?? "http");
   return (
     <div className="form wide">
-      <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} protocol={spec.protocol} />
+      <SettingsOverridesEditor value={spec.settings ?? {}} onChange={(settings) => set({ settings })} profiles={profiles} profilesLoaded={profilesLoaded} protocol={spec.protocol} />
       {httpFamily && <ProxyHeaderEditor value={spec.proxy_protocol} onChange={(proxy_protocol) => set({ proxy_protocol })} http />}
     </div>
   );
@@ -1430,11 +1442,17 @@ export function SettingsOverridesEditor({
   value,
   onChange,
   profiles,
+  profilesLoaded = false,
   protocol,
 }: {
   value: SettingsOverrides;
   onChange: (s: SettingsOverrides) => void;
   profiles: Profiles;
+  /**
+   * `profiles` is the result of a read for this workspace. Until it is, an
+   * id that matches no listed profile is shown as it is, not as removed.
+   */
+  profilesLoaded?: boolean;
   protocol?: RequestSpec["protocol"];
 }) {
   const s: SettingsOverrides = value;
@@ -1443,8 +1461,10 @@ export function SettingsOverridesEditor({
   const selectedTls = profiles.tls.find((p) => p.id === s.tls_profile_id);
   const udp = protocol === "udp";
   const selectedProxy = s.proxy_profile_id?.kind === "profile" ? profiles.proxy.find((p) => p.id === (s.proxy_profile_id as { id: string }).id) : undefined;
-  // A gateway profile id that names no saved profile (one since removed).
-  const removedGateway = s.integration_profile_id && !profiles.integrations.some((p) => p.id === s.integration_profile_id) ? s.integration_profile_id : null;
+  // A gateway profile id that names no listed profile: one since removed
+  // once the profiles are read, else one not read yet.
+  const unlistedGateway = s.integration_profile_id && !profiles.integrations.some((p) => p.id === s.integration_profile_id) ? s.integration_profile_id : null;
+  const removedGateway = profilesLoaded ? unlistedGateway : null;
   return (
     <div className="form wide">
       <p className="hint">Blank or “inherit” uses the folder, workspace or app default. The Effective request tab shows the resolved value and which layer it came from.</p>
@@ -1587,7 +1607,7 @@ export function SettingsOverridesEditor({
                   {p.name} ({p.compatibility_id})
                 </option>
               ))}
-              {removedGateway && <option value={removedGateway}>removed profile</option>}
+              {unlistedGateway && <option value={unlistedGateway}>{removedGateway ? "removed profile" : unlistedGateway}</option>}
             </select>
           </label>
         </div>

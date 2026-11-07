@@ -301,6 +301,24 @@ describe("Ferrum gateway profiles", () => {
     expect(screen.getByText("My gateway")).toBeTruthy();
   });
 
+  it("lists a profile re-created elsewhere under a removed id once a later read finds it", async () => {
+    await openGateways();
+    await removeGateway(gateway.name);
+    expect(await screen.findByText("No gateways declared.")).toBeTruthy();
+    await waitFor(() => expect(calls("integrations_list")).toHaveLength(2));
+    // Restored outside this dialog (an import that keeps incoming ids, say).
+    saved = [...saved, gateway];
+    // Saving another profile refreshes the list: that read started after the removal.
+    fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
+    const save = screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(calls("integration_save")).toHaveLength(1));
+    expect(await screen.findByText("My gateway")).toBeTruthy();
+    expect(screen.getByText(gateway.name)).toBeTruthy();
+    expect(calls("integration_save").map((a) => (a.profile as IntegrationProfile).id)).not.toContain(gateway.id);
+  });
+
   it("lists a profile saved again under the id of one removed in this dialog", async () => {
     // Every new draft gets the id of the profile about to be removed.
     const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue(gateway.id as ReturnType<typeof crypto.randomUUID>);

@@ -268,11 +268,15 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   // The profiles whose removal is being written: none can be saved (which
   // would put it back) or removed again until its own removal settles.
   const [removing, setRemoving] = useState<ReadonlySet<string>>(new Set());
-  // The profiles removed in this dialog (and not saved again since): a
-  // refresh that read the list before a removal was written, and answers
-  // after it, must not list them again (Save would then put a removed
-  // gateway back).
-  const removed = useRef(new Set<string>());
+  // Each list read is numbered when it starts. A profile removed in this
+  // dialog maps to the number of the last read started before its removal
+  // was written: such a read may still list it, and answer after the
+  // removal, so it is filtered out of that read (Save would otherwise put a
+  // removed gateway back). A read started after the removal is the store's
+  // own answer and lists whatever exists, a profile re-created under that id
+  // included, by this dialog or elsewhere.
+  const reads = useRef(0);
+  const removedBefore = useRef(new Map<string, number>());
   // Focus goes back to Remove gateway after a cancelled prompt, once this
   // dialog is no longer inert (an inert element cannot take the focus).
   const [cancelled, setCancelled] = useState(0);
@@ -283,10 +287,11 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
     }
   }, [cancelled, asking]);
   const load = async () => {
+    const n = ++reads.current;
     const [a, b, c] = await Promise.all([api.tlsProfiles(props.workspaceId), api.proxyProfiles(props.workspaceId), api.integrations(props.workspaceId)]);
     setTls(a);
     setProxy(b);
-    setInts(c.filter((p) => !removed.current.has(p.id)));
+    setInts(c.filter((p) => n > (removedBefore.current.get(p.id) ?? 0)));
   };
   useEffect(() => {
     void load();
@@ -296,9 +301,10 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   // awaited. A failure of either is reported after what did happen (`done`).
   const refresh = async (done: string) => {
     const [list, caller] = await Promise.allSettled([load(), (async () => props.onChanged())()]);
+    const reason = (e: unknown) => String((e as Error)?.message ?? e);
     const failed: string[] = [];
-    if (list.status === "rejected") failed.push(`the list could not be refreshed: ${String((list.reason as Error).message)}`);
-    if (caller.status === "rejected") failed.push(`the request settings' profile list could not be refreshed: ${String((caller.reason as Error).message)}`);
+    if (list.status === "rejected") failed.push(`the list could not be refreshed: ${reason(list.reason)}`);
+    if (caller.status === "rejected") failed.push(`the request settings' profile list could not be refreshed: ${reason(caller.reason)}`);
     if (failed.length > 0) setErr(`${done}, but ${failed.join("; ")}`);
   };
   const saveIt = async () => {
@@ -312,8 +318,6 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
       setErr(String((e as Error).message));
       return;
     }
-    // Saved again: listed again, even under an id removed earlier.
-    if (editing.kind === "ferrum") removed.current.delete(editing.value.id);
     setEditing(null);
     await refresh("Saved");
   };
@@ -342,11 +346,11 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
         setErr(String((e as Error).message));
         return;
       }
-      // Removed: drop it here at once, and from every later refresh, so a
-      // failed or late refresh cannot leave it listed (and savable back).
-      // Close the editor only if it still shows it: a slow delete must not
-      // close another draft opened meanwhile.
-      removed.current.add(id);
+      // Removed: drop it here at once, and from every read started before
+      // now, so a failed or late refresh cannot leave it listed (and savable
+      // back). Close the editor only if it still shows it: a slow delete
+      // must not close another draft opened meanwhile.
+      removedBefore.current.set(id, reads.current);
       setInts((cur) => cur.filter((p) => p.id !== id));
       setEditing((cur) => (cur?.value.id === id ? null : cur));
       await refresh("Removed");

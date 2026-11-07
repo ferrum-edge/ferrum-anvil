@@ -1,6 +1,7 @@
 // Renderer tests for the Ferrum gateway profile setting (jsdom; no engine): a
 // request, folder or workspace setting that names a removed profile shows it
 // as "removed profile", not an empty select, and can be cleared to inherit.
+// Until the workspace's profiles are read, an unlisted id is shown as it is.
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { IntegrationProfile, SettingsOverrides } from "./generated/contracts";
@@ -24,7 +25,7 @@ const profiles: Profiles = { tls: [], proxy: [], integrations: [gateway] };
 
 let latest: SettingsOverrides = {};
 
-function Harness(props: { initial: SettingsOverrides }) {
+function Harness(props: { initial: SettingsOverrides; loaded?: boolean }) {
   const [s, setS] = useState<SettingsOverrides>(props.initial);
   latest = s;
   return (
@@ -35,6 +36,7 @@ function Harness(props: { initial: SettingsOverrides }) {
         setS(v);
       }}
       profiles={profiles}
+      profilesLoaded={props.loaded ?? true}
     />
   );
 }
@@ -77,5 +79,22 @@ describe("the Ferrum gateway profile setting", () => {
     render(<Harness initial={{}} />);
     expect(selectedLabel()).toBe("inherit");
     expect(screen.queryByRole("note", { name: "Removed gateway profile" })).toBeNull();
+  });
+
+  it("shows an unlisted id as it is, with nothing to clear, until the profiles are read", () => {
+    const empty: Profiles = { tls: [], proxy: [], integrations: [] };
+    const { rerender } = render(<SettingsOverridesEditor value={{ integration_profile_id: "gw-1" }} onChange={() => {}} profiles={empty} profilesLoaded={false} />);
+    expect(gatewaySelect().value).toBe("gw-1");
+    expect(selectedLabel()).toBe("gw-1");
+    expect(Array.from(gatewaySelect().options).map((o) => o.textContent)).not.toContain("removed profile");
+    expect(screen.queryByRole("note", { name: "Removed gateway profile" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
+    // Without the signal the editor assumes the profiles are not read.
+    rerender(<SettingsOverridesEditor value={{ integration_profile_id: "gw-1" }} onChange={() => {}} profiles={empty} />);
+    expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
+    // Read: the saved profile is listed by name.
+    rerender(<SettingsOverridesEditor value={{ integration_profile_id: "gw-1" }} onChange={() => {}} profiles={profiles} profilesLoaded />);
+    expect(selectedLabel()).toBe("Edge (ferrum-edge-0.9.20)");
+    expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
   });
 });
