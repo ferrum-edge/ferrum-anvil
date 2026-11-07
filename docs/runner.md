@@ -347,6 +347,12 @@ anvil scenario trust <workspace> <scenario>
 
 Ctrl-C cancels and still writes the partial report files. Live progress goes
 to stderr (`-q` silences it); the summary and failing steps go to stdout.
+Both escape control characters and bidirectional overrides in everything
+that comes from the collection or the traffic (names, URLs, summaries,
+assertion and failure messages, findings, notes), as `anvil send` does, so a
+response cannot start a CI workflow command (`::error::`) or send the
+terminal an escape sequence. The `--json`, `--junit` and `--html` files are
+unchanged.
 
 ## Tests
 

@@ -3,6 +3,7 @@
 use super::{Dimension, DsFormat, RunArgs, ScenarioCmd};
 use anvil_app::App;
 use anvil_app::runner::RunSettings;
+use anvil_contract::terminal_safe as t;
 use anvil_domain::runner::{FailOn, RunEvent, RunReport, RunStepStatus, RunnerCompletion};
 use anvil_domain::workspace::{DatasetFormat, ScenarioStep};
 use anvil_runner::RunDataset;
@@ -68,37 +69,41 @@ fn status_word(s: RunStepStatus) -> &'static str {
     }
 }
 
+/// Everything from the collection or the traffic (names, URLs, summaries,
+/// assertion and failure messages, findings, notes) goes through
+/// `terminal_safe`: a server's response must not start a line a CI runner
+/// reads as a workflow command, or reach the terminal as an escape sequence.
 fn print_report(r: &RunReport) {
-    let t = &r.totals;
+    let k = &r.totals;
     println!(
         "{} — {} in {} ms{}",
-        r.name,
+        t(&r.name),
         match r.completion {
             RunnerCompletion::Completed => "completed",
             RunnerCompletion::Canceled => "CANCELED (partial report)",
             RunnerCompletion::Aborted => "ABORTED (partial report)",
         },
         r.duration_ms,
-        r.environment_name.as_deref().map(|e| format!(" · environment {e}")).unwrap_or_default()
+        r.environment_name.as_deref().map(|e| format!(" · environment {}", t(e))).unwrap_or_default()
     );
     if let Some(a) = &r.abort_reason {
-        println!("  aborted: {a}");
+        println!("  aborted: {}", t(a));
     }
     println!(
         "  iterations: {} passed, {} failed, {} incomplete of {} planned",
-        t.iterations_passed, t.iterations_failed, t.iterations_incomplete, t.iterations_planned
+        k.iterations_passed, k.iterations_failed, k.iterations_incomplete, k.iterations_planned
     );
     println!(
         "  steps: {} passed, {} failed, {} not sent, {} skipped, {} canceled",
-        t.steps_passed,
-        t.steps_failed,
-        t.steps_errored,
-        t.steps_skipped,
-        t.steps_canceled + t.steps_canceled_in_flight
+        k.steps_passed,
+        k.steps_failed,
+        k.steps_errored,
+        k.steps_skipped,
+        k.steps_canceled + k.steps_canceled_in_flight
     );
     println!(
         "  failed dimensions: transport {} · application {} · assertions {} (assertion results: {} passed, {} failed)",
-        t.transport_failures, t.application_failures, t.assertion_failures, t.assertions_passed, t.assertions_failed
+        k.transport_failures, k.application_failures, k.assertion_failures, k.assertions_passed, k.assertions_failed
     );
     let mut shown = 0;
     for it in &r.iterations {
@@ -109,26 +114,26 @@ fn print_report(r: &RunReport) {
             }
             shown += 1;
             let row = it.dataset_row.map(|x| format!(" (row {x})")).unwrap_or_default();
-            println!("\n  ✗ iteration {}{row} · step {} {} — {}", it.index + 1, s.index + 1, s.name, status_word(s.status));
+            println!("\n  ✗ iteration {}{row} · step {} {} — {}", it.index + 1, s.index + 1, t(&s.name), status_word(s.status));
             if !s.url.is_empty() {
-                println!("    {} {}", s.method, s.url);
+                println!("    {} {}", t(&s.method), t(&s.url));
             }
             if !s.summary.is_empty() {
-                println!("    {}", s.summary);
+                println!("    {}", t(&s.summary));
             }
             if let Some(m) = &s.message {
-                println!("    {m}");
+                println!("    {}", t(m));
             }
             for a in s.assertion_results.iter().filter(|a| !a.passed) {
-                println!("    ✗ {} — {}", a.label, a.message);
+                println!("    ✗ {} — {}", t(&a.label), t(&a.message));
             }
             for f in s.findings.iter().take(2) {
-                println!("    {} [{:?}]", f.title, f.confidence);
+                println!("    {} [{:?}]", t(&f.title), f.confidence);
             }
         }
     }
     for n in &r.notes {
-        println!("  ! {n}");
+        println!("  ! {}", t(n));
     }
     println!("  run id: {}", r.run_id);
 }
@@ -167,9 +172,9 @@ pub async fn run_collection(app: &App, a: &RunArgs) -> Result<i32> {
     } else {
         Some(Arc::new(|e: RunEvent| match e {
             RunEvent::RunStarted { name, iterations, steps, .. } => {
-                eprintln!("running {name}: {iterations} iteration(s) × {steps} step(s)")
+                eprintln!("running {}: {iterations} iteration(s) × {steps} step(s)", t(&name))
             }
-            RunEvent::StepStarted { iteration, step, name, .. } => eprintln!("  [{}] {} {name} …", iteration + 1, step + 1),
+            RunEvent::StepStarted { iteration, step, name, .. } => eprintln!("  [{}] {} {} …", iteration + 1, step + 1, t(&name)),
             RunEvent::StepFinished { iteration, step, status, http_status, duration_ms, .. } => eprintln!(
                 "  [{}] {} {}{}{}",
                 iteration + 1,
@@ -264,14 +269,14 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
         ScenarioCmd::List { workspace } => {
             let ws = app.find_workspace(workspace)?;
             for s in app.scenarios(&ws.meta.id)? {
-                println!("{}  {}  {} step(s)  {}", s.meta.id, if s.trusted { "trusted  " } else { "UNTRUSTED" }, s.steps.len(), s.name);
+                println!("{}  {}  {} step(s)  {}", s.meta.id, if s.trusted { "trusted  " } else { "UNTRUSTED" }, s.steps.len(), t(&s.name));
             }
             Ok(0)
         }
         ScenarioCmd::Show { workspace, scenario } => {
             let ws = app.find_workspace(workspace)?;
             let s = app.find_scenario(&ws.meta.id, scenario)?;
-            println!("{}  ({})", s.name, s.meta.id);
+            println!("{}  ({})", t(&s.name), s.meta.id);
             if !s.trusted {
                 println!("  UNTRUSTED: imported or not yet reviewed. Review the steps, then `anvil scenario trust`.");
             }
@@ -282,13 +287,18 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
             );
             if let Some(d) = s.dataset_id {
                 match app.workspace_dataset(&s.workspace_id, &d) {
-                    Ok(d) => println!("  dataset: {} ({:?}; sensitive columns: {})", d.name, d.format, d.sensitive_columns.join(", ")),
+                    Ok(d) => println!(
+                        "  dataset: {} ({:?}; sensitive columns: {})",
+                        t(&d.name),
+                        d.format,
+                        t(&d.sensitive_columns.join(", "))
+                    ),
                     Err(_) => println!("  dataset: {d} (missing)"),
                 }
             }
             for (i, st) in s.steps.iter().enumerate() {
                 let desc = match app.request(&st.request_id) {
-                    Ok(r) if r.workspace_id == s.workspace_id => format!("{} {} {}", r.name, r.spec.method, r.spec.url),
+                    Ok(r) if r.workspace_id == s.workspace_id => format!("{} {} {}", t(&r.name), t(&r.spec.method), t(&r.spec.url)),
                     _ => format!("missing request {}", st.request_id),
                 };
                 println!(
@@ -320,7 +330,7 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
             let ws = app.find_workspace(workspace)?;
             let s = app.find_scenario(&ws.meta.id, scenario)?;
             app.trust_scenario(&s.meta.id)?;
-            println!("scenario '{}' is now trusted", s.name);
+            println!("scenario '{}' is now trusted", t(&s.name));
             Ok(0)
         }
     }

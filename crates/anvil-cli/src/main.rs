@@ -760,14 +760,18 @@ fn dispatched_to(record: &anvil_domain::execution::ExecutionRecord, host: &str) 
     (sent_to_host, redacted)
 }
 
+/// The human-readable lines print everything from the request or the traffic
+/// (URL, summary, notes, warnings, findings, assertion messages) through
+/// `terminal_safe`: a server's response must not start a line a CI runner
+/// reads as a workflow command, or reach the terminal as an escape sequence.
 fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     let r = &out.record;
     if json {
         println!("{}", serde_json::to_string_pretty(r).unwrap_or_default());
         return;
     }
-    println!("{} {}", r.prepared.method, r.prepared.url);
-    println!("  {}", r.outcome.summary);
+    println!("{} {}", terminal_safe(&r.prepared.method), terminal_safe(&r.prepared.url));
+    println!("  {}", terminal_safe(&r.outcome.summary));
     println!(
         "  transport={:?} application={:?} assertions={:?} dispatch={:?}",
         r.outcome.transport, r.outcome.application, r.outcome.assertions, r.outcome.dispatch
@@ -786,12 +790,12 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
     if r.prepared.protocol == anvil_domain::request::Protocol::Mcp {
         // How the MCP session went (the session id is never in them).
         for n in r.prepared.inferred.iter().filter(|n| n.starts_with("MCP") || n.starts_with("the ")) {
-            println!("  {n}");
+            println!("  {}", terminal_safe(n));
         }
     }
     if let ProtocolStatus::WebSocket { extensions: Some(e), .. } = &r.outcome.protocol_status {
         for line in ws_extension_lines(e) {
-            println!("  {line}");
+            println!("  {}", terminal_safe(&line));
         }
     }
     for a in &r.attempts {
@@ -800,7 +804,7 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
         }
     }
     for w in &r.outcome.warnings {
-        println!("  ! {}", w.message);
+        println!("  ! {}", terminal_safe(&w.message));
     }
     for f in &r.findings {
         let conf = match f.confidence {
@@ -814,17 +818,17 @@ fn print_outcome(out: &anvil_engine::ExecutionOutput, json: bool) {
             Severity::Warning => "!",
             Severity::Info => "i",
         };
-        println!("\n  {mark} {} [{conf}; {:?}]", f.title, f.scope);
-        println!("    {}", f.explanation);
+        println!("\n  {mark} {} [{conf}; {:?}]", terminal_safe(&f.title), f.scope);
+        println!("    {}", terminal_safe(&f.explanation));
         for d in f.does_not_prove.iter().take(3) {
-            println!("    does not prove: {d}");
+            println!("    does not prove: {}", terminal_safe(d));
         }
         for rem in f.remediation.iter().take(3) {
-            println!("    next ({:?}): {}", rem.owner, rem.text);
+            println!("    next ({:?}): {}", rem.owner, terminal_safe(&rem.text));
         }
     }
     for a in &r.assertion_results {
-        println!("  {} {} — {}", if a.passed { "✓" } else { "✗" }, a.label, a.message);
+        println!("  {} {} — {}", if a.passed { "✓" } else { "✗" }, terminal_safe(&a.label), terminal_safe(&a.message));
     }
 }
 
@@ -879,7 +883,8 @@ async fn cli_main() -> i32 {
     match run(cli).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            // An error can quote a spec, a bundle or a server's answer.
+            eprintln!("error: {}", terminal_safe(&format!("{e:#}")));
             3
         }
     }
@@ -1063,19 +1068,19 @@ async fn run(cli: Cli) -> Result<i32> {
 
 fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
     use anvil_domain::workload::WorkloadCallResult as R;
-    println!("endpoint: {}{}", p.endpoint, p.endpoint_source.map(|s| format!(" ({s:?})")).unwrap_or_default());
+    println!("endpoint: {}{}", terminal_safe(&p.endpoint), p.endpoint_source.map(|s| format!(" ({s:?})")).unwrap_or_default());
     if let Some(e) = &p.endpoint_error {
-        println!("  not dialed: {e}");
+        println!("  not dialed: {}", terminal_safe(e));
         return;
     }
     for c in &p.calls {
         let res = match &c.result {
             R::Ok => "OK".to_string(),
-            R::Unavailable { detail, .. } => format!("unavailable: {detail}"),
+            R::Unavailable { detail, .. } => format!("unavailable: {}", terminal_safe(detail)),
             R::Timeout { deadline_ms } => format!("no answer within {deadline_ms} ms"),
-            R::Status { code_name, message, .. } => format!("{code_name} {message:?}"),
-            R::NoIdentity { detail } => format!("no identity: {detail}"),
-            R::Malformed { detail } => format!("malformed answer: {detail}"),
+            R::Status { code_name, message, .. } => format!("{} {message:?}", terminal_safe(code_name)),
+            R::NoIdentity { detail } => format!("no identity: {}", terminal_safe(detail)),
+            R::Malformed { detail } => format!("malformed answer: {}", terminal_safe(detail)),
         };
         let uid = c.caller_uid.map(|u| format!(" (this process: uid {u})")).unwrap_or_default();
         println!("  {:<16} {res}{uid}", c.rpc.method());
@@ -1083,27 +1088,27 @@ fn print_probe(p: &anvil_engine::workload::WorkloadProbe) {
     for s in &p.x509_svids {
         println!(
             "  X.509-SVID  {}  expires {}  chain {}  bundle {} CA",
-            s.spiffe_id,
+            terminal_safe(&s.spiffe_id),
             s.not_after.to_rfc3339(),
             s.chain_length,
             s.bundle_certificates
         );
     }
     for b in &p.jwt_bundles {
-        println!("  JWT bundle  {}  keys {}", b.trust_domain, b.key_ids.join(", "));
+        println!("  JWT bundle  {}  keys {}", terminal_safe(&b.trust_domain), terminal_safe(&b.key_ids.join(", ")));
     }
     if !p.federated_trust_domains.is_empty() {
-        println!("  federated   {}", p.federated_trust_domains.join(", "));
+        println!("  federated   {}", terminal_safe(&p.federated_trust_domains.join(", ")));
     }
     if let Some(j) = &p.jwt_svid {
         println!(
             "  JWT-SVID    sub {} aud {:?} alg {} (token not shown)",
-            j.subject.as_deref().unwrap_or("?"),
+            terminal_safe(j.subject.as_deref().unwrap_or("?")),
             j.audiences,
-            j.algorithm.as_deref().unwrap_or("?")
+            terminal_safe(j.algorithm.as_deref().unwrap_or("?"))
         );
         for c in &j.checks {
-            println!("    {:<10} {:?}: {}", format!("{:?}", c.check).to_lowercase(), c.result, c.detail);
+            println!("    {:<10} {:?}: {}", format!("{:?}", c.check).to_lowercase(), c.result, terminal_safe(&c.detail));
         }
     }
 }
@@ -1121,17 +1126,18 @@ async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&d)?);
         return Ok(0);
     }
+    // Tool names, skip reasons and notes come from the MCP server.
     for r in &d.created {
-        println!("{}  {}", r.meta.id, r.name);
+        println!("{}  {}", r.meta.id, terminal_safe(&r.name));
     }
     for why in &d.skipped {
-        println!("skipped: {why}");
+        println!("skipped: {}", terminal_safe(why));
     }
     if d.skipped_total > d.skipped.len() {
         println!("skipped: {} more tool(s)", d.skipped_total - d.skipped.len());
     }
     for n in &d.notes {
-        println!("note: {n}");
+        println!("note: {}", terminal_safe(n));
     }
     if d.notes_total > d.notes.len() {
         println!("note: {} more", d.notes_total - d.notes.len());
@@ -1152,7 +1158,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
         Cmd::Workspace { cmd } => match cmd {
             WorkspaceCmd::List => {
                 for w in app.workspaces()? {
-                    println!("{}  {}", w.meta.id, w.name);
+                    println!("{}  {}", w.meta.id, terminal_safe(&w.name));
                 }
                 Ok(0)
             }
@@ -1166,13 +1172,13 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 fn print(nodes: &[anvil_app::workspace::TreeNode], depth: usize) {
                     for n in nodes {
                         match n.kind {
-                            "folder" => println!("{}▸ {}", "  ".repeat(depth), n.name),
+                            "folder" => println!("{}▸ {}", "  ".repeat(depth), terminal_safe(&n.name)),
                             _ => println!(
                                 "{}{} {}  {}",
                                 "  ".repeat(depth),
-                                n.method.clone().unwrap_or_default(),
-                                n.name,
-                                n.url.clone().unwrap_or_default()
+                                terminal_safe(n.method.as_deref().unwrap_or_default()),
+                                terminal_safe(&n.name),
+                                terminal_safe(n.url.as_deref().unwrap_or_default())
                             ),
                         }
                         print(&n.children, depth + 1);
@@ -1184,9 +1190,9 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             WorkspaceCmd::AllowDeviceIdentity { workspace } => {
                 let w = exact_workspace(&app, workspace)?;
                 if app.allow_device_identity(&w.meta.id)? {
-                    println!("requests in '{}' may now use this device's workload identity", w.name);
+                    println!("requests in '{}' may now use this device's workload identity", terminal_safe(&w.name));
                 } else {
-                    println!("'{}' was not sealed from this device's workload identity", w.name);
+                    println!("'{}' was not sealed from this device's workload identity", terminal_safe(&w.name));
                 }
                 Ok(0)
             }
@@ -1383,7 +1389,12 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
             // Each record is decrypted once, by the listing; response bodies are not read.
             for (_, rec) in app.store.list_history_with::<anvil_domain::execution::ExecutionListing>(ws.as_ref(), None, *limit)? {
                 let rec = rec?;
-                println!("{}  {}  {}", rec.started_at.format("%Y-%m-%d %H:%M:%S"), rec.prepared.url, rec.outcome.summary);
+                println!(
+                    "{}  {}  {}",
+                    rec.started_at.format("%Y-%m-%d %H:%M:%S"),
+                    terminal_safe(&rec.prepared.url),
+                    terminal_safe(&rec.outcome.summary)
+                );
             }
             Ok(0)
         }
@@ -1440,7 +1451,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 p.manifest.excluded.len()
             );
             for w in &p.manifest.content_warnings {
-                println!("  ! {} {}", w.pointer, w.reason);
+                println!("  ! {} {}", terminal_safe(&w.pointer), terminal_safe(&w.reason));
             }
             Ok(0)
         }

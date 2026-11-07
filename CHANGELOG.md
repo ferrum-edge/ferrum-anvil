@@ -31,6 +31,18 @@
   names a routing loop, a long gateway chain and a caller-supplied count as possible causes, and
   does not claim how many gateways the request passed through.
 
+### Security
+
+- The human-readable output of `anvil run` and `anvil send` (and of `anvil scenario`, `anvil
+  workspace list` and `tree`, `anvil history`, `anvil mcp-discover`, `anvil workload probe`,
+  `anvil load`, the import and export notes, and command errors) escapes control characters and
+  bidirectional overrides in text from the collection, a spec or the traffic, as `anvil lint-spec`,
+  `anvil spec-drift`, `anvil env` and `anvil gateway` already did. A server under test could
+  answer with a newline and a GitHub Actions workflow command (`::error::`, `::add-mask::`,
+  `::stop-commands::`) or a terminal escape sequence, and a failed JSONPath assertion printed the
+  value it read as it was, so the CI log ran the command or the terminal the sequence. JSON output
+  is unchanged.
+
 ### Changed
 
 - New Ferrum gateway profiles and the lab default to Ferrum Edge v0.9.20

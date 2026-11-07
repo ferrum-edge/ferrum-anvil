@@ -146,7 +146,7 @@ fn print_rules(rules: &RuleSet) {
         println!("{:<5}  {:<34} {:<16} {}{formats}", r.severity.label(), r.id, t(&r.given), t(&r.description.unwrap_or_default()));
     }
     for d in &rules.disabled {
-        println!("off    {d}");
+        println!("off    {}", t(d));
     }
 }
 

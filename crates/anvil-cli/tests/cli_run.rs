@@ -204,3 +204,61 @@ async fn run_and_scenario_commands_end_to_end() {
     let o = anvil(&data, &["run", "--help"]).await;
     assert_eq!(o.status.code(), Some(0));
 }
+
+/// A body a hostile server under test returns: once decoded, its `v` is a
+/// newline, a GitHub Actions workflow command and a terminal escape sequence.
+const HOSTILE_BODY: &str = r#"{"v":"x\n::error title=forged::y\u001b[2K"}"#;
+
+/// A workspace whose "Hostile" folder holds one request (named with a
+/// workflow command of its own, as an imported collection could) that
+/// asserts `$.v == expected` against [`HOSTILE_BODY`]. Returns its id.
+fn setup_hostile(root: &Path, base: &str) -> String {
+    let pm = ProfileManager::new(root);
+    let (s, dek, _) = pm.create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+    let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+    let app = App::open(s.dir, h, dek).unwrap();
+    let ws = app.create_workspace("Shop").unwrap();
+    app.create_environment(&ws.meta.id, "lab", vec![Variable::plain("base", base)]).unwrap();
+    let folder = app.create_folder(&ws.meta.id, None, "Hostile").unwrap();
+    let mut spec = RequestSpec::http("GET", "{{base}}/status/200");
+    spec.params.push(KeyValue::new("body", HOSTILE_BODY));
+    spec.assertions.push(Assertion {
+        enabled: true,
+        label: String::new(),
+        kind: AssertionKind::JsonPath { path: "$.v".into(), comparison: Comparison::Equals, value: "expected".into() },
+    });
+    app.create_request(&ws.meta.id, Some(folder.meta.id), "Echo\n::notice::named", spec).unwrap().meta.id.to_string()
+}
+
+/// No line of the output starts a CI workflow command, and no escape or
+/// carriage-return byte reaches the terminal.
+fn assert_terminal_safe(what: &str, o: &Output) {
+    for (stream, bytes) in [("stdout", &o.stdout), ("stderr", &o.stderr)] {
+        assert!(!bytes.contains(&0x1b) && !bytes.contains(&b'\r'), "{what}: {stream} carries a raw control byte: {}", text(o));
+        for line in String::from_utf8_lossy(bytes).lines() {
+            assert!(!line.trim_start().starts_with("::"), "{what}: {stream} line {line:?} reads as a workflow command");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_text_in_the_human_readable_output_is_terminal_safe() {
+    anvil_fixtures::init();
+    let f = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let id = setup_hostile(&data, &f.url(""));
+    // The failed assertion quotes the decoded value, escaped.
+    let escaped = r"x\n::error title=forged::y\u{1b}[2K";
+
+    let o = anvil(&data, &["run", "Shop", "--folder", "Hostile", "--env", "lab"]).await;
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert_terminal_safe("anvil run", &o);
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(stdout.contains(escaped) && stdout.contains(r"Echo\n::notice::named"), "{stdout}");
+
+    let o = anvil(&data, &["send", &id, "--workspace", "Shop", "--env", "lab"]).await;
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert_terminal_safe("anvil send", &o);
+    assert!(String::from_utf8_lossy(&o.stdout).contains(escaped), "{}", text(&o));
+}

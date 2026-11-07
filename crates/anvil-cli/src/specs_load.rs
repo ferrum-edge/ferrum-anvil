@@ -112,7 +112,7 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
     let lines = match hints {
         Ok(lines) => lines,
         Err(e) => {
-            eprintln!("note: the import's environments could not be listed ({e:#}); `anvil env list` shows them");
+            eprintln!("note: the import's environments could not be listed ({}); `anvil env list` shows them", t(&format!("{e:#}")));
             r.report.required_variables.iter().map(fill_in_line).collect()
         }
     };
@@ -120,7 +120,7 @@ pub fn import_spec(app: &App, a: &ImportSpecArgs) -> Result<i32> {
         println!("{l}");
     }
     for w in r.report.unsupported.iter().take(20) {
-        println!("  not imported: {} ({})", w.message, w.pointer);
+        println!("  not imported: {} ({})", t(&w.message), t(&w.pointer));
     }
     Ok(0)
 }
@@ -332,7 +332,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             println!("created load plan {} ({})", p.name, p.id);
             let check = app.load_plan_check(&p)?;
             match (&check.unit_label, &check.refusal) {
-                (_, Some(r)) => println!("  refused for load: {r}"),
+                (_, Some(r)) => println!("  refused for load: {}", t(&r.to_string())),
                 (Some(label), None) => println!("  load unit: {label}"),
                 _ => {}
             }
@@ -348,7 +348,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
         LoadCmd::List { workspace } => {
             let ws = app.find_workspace(workspace)?.meta.id;
             for p in app.load_plans(&ws)? {
-                println!("{}  {}{}", p.id, p.name, if p.trusted { "" } else { "  (imported — review before running)" });
+                println!("{}  {}{}", p.id, t(&p.name), if p.trusted { "" } else { "  (imported — review before running)" });
             }
             Ok(0)
         }
@@ -368,11 +368,11 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 bail!("the load plan belongs to another workspace");
             }
             let pre = app.load_preflight(&p)?;
-            eprintln!("destinations: {}", pre.destinations.join(", "));
-            eprintln!("workload: {}", pre.workload);
+            eprintln!("destinations: {}", t(&pre.destinations.join(", ")));
+            eprintln!("workload: {}", t(&pre.workload));
             eprintln!("load unit: {} — {}", pre.unit_label, pre.semantics.completed_means);
             for w in &pre.warnings {
-                eprintln!("warning: {w}");
+                eprintln!("warning: {}", t(w));
             }
             if !i_am_authorized {
                 eprintln!(
@@ -453,7 +453,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 }
             }
             for n in &report.notes {
-                println!("  note: {n}");
+                println!("  note: {}", t(n));
             }
             let failed = k.transport_failures + k.timeouts + k.application_failures > 0;
             Ok(if report.completion != RunCompletion::Completed || report.partial || failed {
@@ -471,7 +471,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                     "{}  {}  {}  {}  {:?}{}  {:.1}/s  p95 {}  {} failed",
                     r.run_id,
                     r.started_at.format("%Y-%m-%d %H:%M:%S"),
-                    r.plan_name,
+                    t(&r.plan_name),
                     anvil_load::protocol::label(r.unit),
                     r.completion,
                     if r.partial { " (partial)" } else { "" },
