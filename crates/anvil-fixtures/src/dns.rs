@@ -2,6 +2,7 @@
 //! (default NXDOMAIN), or never answers (`Silent`) to produce resolver timeouts.
 
 use crate::log::{GroundTruth, GroundTruthLog};
+use crate::ports::{self, PORT_ZERO_BIND_ATTEMPTS, PairBindError, TcpBindFuture, retryable_bind_error};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -10,19 +11,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
 
-const PORT_ZERO_BIND_ATTEMPTS: usize = 64;
-const SEQUENTIAL_BIND_ATTEMPTS: usize = 4;
-const DYNAMIC_PORT_START: u16 = 49_152;
-const DYNAMIC_PORT_COUNT: u16 = u16::MAX - DYNAMIC_PORT_START + 1;
-const DYNAMIC_PORT_STRIDE: u16 = 9_973;
-
-/// `WSAEACCES`: Windows refuses a bind that lands inside a reserved/excluded
-/// port range (Hyper-V, WinNAT, WSL). Rust maps it to `PermissionDenied` on
-/// Windows, but the raw code is matched too, so the retry can be exercised on
-/// any platform.
-const WINDOWS_WSAEACCES: i32 = 10013;
-
-type TcpBindFuture<Tcp> = Pin<Box<dyn Future<Output = io::Result<Tcp>> + Send>>;
 type UdpBindFuture<Udp> = Pin<Box<dyn Future<Output = io::Result<Udp>> + Send>>;
 
 trait BoundUdpSocket {
@@ -42,91 +30,54 @@ fn bind_udp_future(bind: &str) -> UdpBindFuture<UdpSocket> {
     Box::pin(async move { UdpSocket::bind(bind).await })
 }
 
-fn retryable_bind_error(error: &io::Error) -> bool {
-    if error.raw_os_error() == Some(WINDOWS_WSAEACCES) {
-        return true;
-    }
-    matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse)
-}
-
-/// Binds a TCP listener and a UDP socket to the same ephemeral port.
+/// Binds a TCP listener and a UDP socket to the same ephemeral port of
+/// `bind`'s host ([`crate::ports`]: UDP first, a TCP refusal retried on
+/// another port). Only for a port-0 `bind`: [`serve`] binds an explicitly
+/// requested port once and reports any failure as-is.
 ///
-/// Windows reserves blocks of TCP ports (Hyper-V/WinNAT excluded ranges), and
-/// an explicit TCP bind to one fails with WSAEACCES (10013). The UDP port is
-/// assigned first, then TCP is bound to that port. If TCP refuses it, the UDP
-/// socket is kept until the function returns so another attempt cannot
-/// receive the same port. Port 0 binds take this path; an explicitly
-/// requested port is bound once and reported as-is.
+/// A UDP bind is retried only when [`retryable_bind_error`]; any other UDP
+/// error is returned at once.
 async fn bind_ephemeral_pair_with<Tcp, Udp, T, U>(bind: &str, bind_udp: U, bind_tcp: T) -> io::Result<(Udp, Tcp)>
 where
-    Udp: BoundUdpSocket,
+    Udp: BoundUdpSocket + Send + 'static,
     T: FnMut(SocketAddr) -> TcpBindFuture<Tcp>,
     U: FnMut(&str) -> UdpBindFuture<Udp>,
 {
-    bind_ephemeral_pair_with_start(bind, rand::random_range(0..DYNAMIC_PORT_COUNT), bind_udp, bind_tcp).await
+    bind_ephemeral_pair_with_start(bind, ports::random_start(), bind_udp, bind_tcp).await
 }
 
 async fn bind_ephemeral_pair_with_start<Tcp, Udp, T, U>(
     bind: &str,
     random_start: u16,
     mut bind_udp: U,
-    mut bind_tcp: T,
+    bind_tcp: T,
 ) -> io::Result<(Udp, Tcp)>
 where
-    Udp: BoundUdpSocket,
+    Udp: BoundUdpSocket + Send + 'static,
     T: FnMut(SocketAddr) -> TcpBindFuture<Tcp>,
     U: FnMut(&str) -> UdpBindFuture<Udp>,
 {
-    let mut rejected = Vec::new();
-    let mut tried_ports = Vec::new();
-    let mut last_error = None;
-    for attempt in 0..PORT_ZERO_BIND_ATTEMPTS {
-        let candidate_bind = if requests_ephemeral_port(bind) && attempt >= SEQUENTIAL_BIND_ATTEMPTS {
-            let mut offset = attempt - SEQUENTIAL_BIND_ATTEMPTS;
-            let port = loop {
-                let port = dynamic_port_candidate(random_start, offset);
-                if !tried_ports.contains(&port) {
-                    break port;
-                }
-                offset += 1;
-            };
-            tried_ports.push(port);
-            bind_with_port(bind, port)
-        } else {
-            bind.to_owned()
-        };
-        let udp = match bind_udp(&candidate_bind).await {
-            Ok(udp) => udp,
-            Err(error) if retryable_bind_error(&error) => {
-                last_error = Some(error);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let addr = udp.local_addr()?;
-        if !tried_ports.contains(&addr.port()) {
-            tried_ports.push(addr.port());
-        }
-        match bind_tcp(addr).await {
-            Ok(tcp) => return Ok((udp, tcp)),
-            Err(error) if retryable_bind_error(&error) => {
-                last_error = Some(error);
-                rejected.push(udp);
-            }
-            Err(error) => return Err(error),
+    let bind_udp = |port: Option<u16>| -> ports::UdpBindFuture<Udp, io::Error> {
+        let bound = bind_udp(&port.map_or_else(|| bind.to_owned(), |port| bind_with_port(bind, port)));
+        Box::pin(async move {
+            let udp = bound.await?;
+            let addr = udp.local_addr()?;
+            Ok((udp, addr))
+        })
+    };
+    match ports::bind_udp_tcp_pair(random_start, retryable_bind_error, bind_udp, bind_tcp).await {
+        Ok(pair) => Ok(pair),
+        Err(PairBindError::Fatal(error)) => Err(error),
+        Err(PairBindError::Exhausted { tried_ports, last_error }) => {
+            let error = last_error.unwrap_or_else(|| io::Error::other("the DNS fixture pair bind made no attempts"));
+            Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "could not bind a DNS UDP/TCP pair after {PORT_ZERO_BIND_ATTEMPTS} attempts; tried UDP ports {tried_ports:?}: {error}"
+                ),
+            ))
         }
     }
-
-    let error = last_error.unwrap_or_else(|| io::Error::other("the DNS fixture pair bind made no attempts"));
-    Err(io::Error::new(
-        error.kind(),
-        format!("could not bind a DNS UDP/TCP pair after {PORT_ZERO_BIND_ATTEMPTS} attempts; tried UDP ports {tried_ports:?}: {error}"),
-    ))
-}
-
-fn dynamic_port_candidate(random_start: u16, offset: usize) -> u16 {
-    let position = (u32::from(random_start) + (offset as u32 * u32::from(DYNAMIC_PORT_STRIDE))) % u32::from(DYNAMIC_PORT_COUNT);
-    DYNAMIC_PORT_START + position as u16
 }
 
 fn bind_with_port(bind: &str, port: u16) -> String {
@@ -267,6 +218,7 @@ pub fn stalled_listener(bind: &str) -> anyhow::Result<StalledListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::{DYNAMIC_PORT_START, SEQUENTIAL_BIND_ATTEMPTS, WINDOWS_WSAEACCES};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Copy, Debug)]
@@ -310,6 +262,50 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), 2);
         assert_eq!(udp.local_addr().unwrap().port(), 54_321);
         assert_eq!(udp.local_addr().unwrap().port(), tcp.0.port());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_pair_returns_a_non_retryable_udp_error_at_once() {
+        // Unlike the HTTP/3 replay fixture, which retries every failed QUIC endpoint creation.
+        let calls = Arc::new(Mutex::new(0usize));
+        let bind_calls = calls.clone();
+        let result = bind_ephemeral_pair_with(
+            "127.0.0.1:0",
+            move |_| {
+                *bind_calls.lock().unwrap() += 1;
+                let error = io::Error::from(io::ErrorKind::AddrNotAvailable);
+                Box::pin(async move { Err(error) }) as UdpBindFuture<MockUdpSocket>
+            },
+            |addr| Box::pin(async move { Ok(MockTcpListener(addr)) }) as TcpBindFuture<MockTcpListener>,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AddrNotAvailable);
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_pair_walks_ports_of_the_requested_host() {
+        let binds = Arc::new(Mutex::new(Vec::new()));
+        let seen = binds.clone();
+        let result = bind_ephemeral_pair_with_start(
+            "[::1]:0",
+            0,
+            move |bind: &str| {
+                seen.lock().unwrap().push(bind.to_owned());
+                let error = io::Error::from(io::ErrorKind::AddrInUse);
+                Box::pin(async move { Err(error) }) as UdpBindFuture<MockUdpSocket>
+            },
+            |addr| Box::pin(async move { Ok(MockTcpListener(addr)) }) as TcpBindFuture<MockTcpListener>,
+        )
+        .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert!(error.to_string().starts_with("could not bind a DNS UDP/TCP pair after 64 attempts"), "{error}");
+        let binds = binds.lock().unwrap();
+        assert!(binds[..SEQUENTIAL_BIND_ATTEMPTS].iter().all(|b| b == "[::1]:0"), "{binds:?}");
+        assert_eq!(binds[SEQUENTIAL_BIND_ATTEMPTS], format!("[::1]:{DYNAMIC_PORT_START}"));
     }
 
     #[tokio::test]
@@ -441,13 +437,5 @@ mod tests {
         for port in tried.iter() {
             assert!(error.contains(&port.to_string()), "error omitted tried port {port}: {error}");
         }
-    }
-
-    #[test]
-    fn windows_excluded_port_and_addr_in_use_are_retryable() {
-        assert!(retryable_bind_error(&io::Error::from_raw_os_error(WINDOWS_WSAEACCES)));
-        assert!(retryable_bind_error(&io::Error::from(io::ErrorKind::PermissionDenied)));
-        assert!(retryable_bind_error(&io::Error::from(io::ErrorKind::AddrInUse)));
-        assert!(!retryable_bind_error(&io::Error::from(io::ErrorKind::ConnectionRefused)));
     }
 }
