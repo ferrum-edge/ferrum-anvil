@@ -171,13 +171,7 @@ impl Redactor {
     /// The patterns [`Redactor::reindex`] builds its matchers from.
     #[cfg(test)]
     fn fallback_patterns_for_test(&self) -> Vec<String> {
-        let mut patterns = Vec::new();
-        for s in &self.secrets {
-            patterns.push(s.clone());
-            patterns.push(hex::encode(s));
-            patterns.extend(encoded_forms(s));
-            patterns.extend(json_escaped(s));
-        }
+        let mut patterns: Vec<String> = self.secrets.iter().map(String::as_str).flat_map(secret_forms).collect();
         sort_longest_first(&mut patterns);
         patterns
     }
@@ -185,14 +179,7 @@ impl Redactor {
     /// Longest first so overlapping values are fully covered.
     fn reindex(&mut self) {
         sort_longest_first(&mut self.secrets);
-        let mut patterns = Vec::with_capacity(self.secrets.len() * 5);
-        for s in &self.secrets {
-            patterns.push(s.clone());
-            // A session transcript shows bytes that are not printable text as hex.
-            patterns.push(hex::encode(s));
-            patterns.extend(encoded_forms(s));
-            patterns.extend(json_escaped(s));
-        }
+        let mut patterns: Vec<String> = self.secrets.iter().map(String::as_str).flat_map(secret_forms).collect();
         sort_longest_first(&mut patterns);
         self.any_case = if patterns.is_empty() {
             None
@@ -249,11 +236,12 @@ impl Redactor {
     }
 
     /// Scrub raw secret values, their canonical percent encodings and JSON
-    /// string escapes from arbitrary text.
+    /// and Rust string escapes from arbitrary text.
     ///
     /// Limits: only the raw value, the encodings in [`encoded_forms`], its
-    /// lowercase hex and the value's JSON string escaping (as rendered in
-    /// JSON diagnostics) are recognized. A secret encoded any other way
+    /// lowercase hex, the value's JSON string escaping (as rendered in JSON
+    /// diagnostics) and its Rust escaping (as a `{:?}`-formatted message
+    /// quotes it) are recognized. A secret encoded any other way
     /// (partly or doubly percent-encoded, base64, HTML-escaped), split by other
     /// content, or shorter than 4 characters passes through, and names are
     /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
@@ -886,6 +874,30 @@ fn json_escaped(s: &str) -> Option<String> {
     let quoted = serde_json::to_string(s).ok()?;
     let inner = &quoted[1..quoted.len() - 1];
     (inner != s).then(|| inner.to_string())
+}
+
+/// The value as Rust's escaping shows it, when that changes it (control
+/// characters, quotes, backslashes, non-printable code points): inside a
+/// `{:?}`-formatted string, as messages quote a name, and as
+/// [`str::escape_debug`] writes it. A NUL is `\0` there, not JSON's `\u0000`.
+fn debug_escaped(s: &str) -> Vec<String> {
+    let quoted = format!("{s:?}");
+    let inner = quoted[1..quoted.len() - 1].to_string();
+    let mut forms = vec![inner, s.escape_debug().to_string()];
+    forms.dedup();
+    forms.retain(|f| f != s);
+    forms
+}
+
+/// Every form of a secret value the matchers look for: the value itself, its
+/// lowercase hex (a session transcript shows bytes that are not printable
+/// text as hex), its URL encodings, and its JSON and Rust string escapes.
+fn secret_forms(s: &str) -> Vec<String> {
+    let mut forms = vec![s.to_string(), hex::encode(s)];
+    forms.extend(encoded_forms(s));
+    forms.extend(json_escaped(s));
+    forms.extend(debug_escaped(s));
+    forms
 }
 
 fn lower_hex(encoded: &str) -> String {

@@ -40,6 +40,12 @@
   preview's notes, among them "the request would not be sent", which quotes the label, and its
   lint warning are redacted as the stored record's are. A username that is not a secret is still
   shown.
+- When the effective-request preview cannot be prepared, its error is redacted like the stored
+  record's copy of it. Under the default lint policy, an XML body refused by the linter used to
+  return the parser's message, which quotes tag names, with a secret value still in it.
+- Secret values are also redacted in the form Rust's string escaping writes them, as a refusal
+  quotes a header, cookie or API key name (a NUL as `\0`). They were already redacted raw,
+  percent-encoded, as hex and JSON-escaped.
 
 ### Changed
 

@@ -110,7 +110,15 @@ impl Engine {
         }
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
-        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;
+        // A preparation failure can quote a resolved value (a lint error
+        // quotes the body): redacted as the send path's stored failure is,
+        // with the secrets resolved before it.
+        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes).map_err(|mut f| {
+            let redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
+            f.message = redactor.text_any_case(&f.message);
+            f.field = f.field.as_deref().map(|s| redactor.text_any_case(s));
+            f
+        })?;
         let mut inferred = prep.inferred.clone();
         let shape = match ctx.spec.protocol {
             Protocol::Http => Shape::http(&prep),

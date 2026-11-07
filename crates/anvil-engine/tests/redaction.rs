@@ -523,19 +523,24 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
 }
 
-/// Basic, API key, HMAC and WS-Security auth with the username (or key name)
-/// `user`, each with a password or key of its own.
+/// Basic, API key, HMAC, WS-Security and multi-auth (an API key and Basic)
+/// with the username (or key name) `user`, each with a password or key of
+/// its own.
 fn auths_for(user: &str) -> Vec<anvil_domain::auth::AuthConfig> {
     use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, WsseConfig, WssePasswordType};
     use anvil_domain::secret::SensitiveValue;
     vec![
-        AuthConfig::Basic { username: user.into(), password: SensitiveValue::template("label-basic-password-3k9q") },
-        AuthConfig::ApiKey { name: user.into(), value: SensitiveValue::template("label-api-key-8m2v"), location: KeyLocation::Header },
+        AuthConfig::Basic { username: user.into(), password: SensitiveValue::template("tok-SENSITIVE-basic-pw-3k9q") },
+        AuthConfig::ApiKey {
+            name: user.into(),
+            value: SensitiveValue::template("tok-SENSITIVE-api-key-8m2v"),
+            location: KeyLocation::Header,
+        },
         AuthConfig::Hmac {
             config: HmacConfig {
                 profile: Default::default(),
                 username: user.into(),
-                secret: SensitiveValue::template("label-hmac-secret-5t1x"),
+                secret: SensitiveValue::template("tok-SENSITIVE-hmac-5t1x"),
                 algorithm: Default::default(),
                 digest_header: Default::default(),
                 namespace: String::new(),
@@ -545,11 +550,21 @@ fn auths_for(user: &str) -> Vec<anvil_domain::auth::AuthConfig> {
         AuthConfig::Wsse {
             config: WsseConfig {
                 username: user.into(),
-                password: SensitiveValue::template("label-wsse-password-6p4n"),
+                password: SensitiveValue::template("tok-SENSITIVE-wsse-pw-6p4n"),
                 password_type: WssePasswordType::PasswordText,
                 timestamp_ttl_secs: None,
                 saml_assertion: None,
             },
+        },
+        AuthConfig::Multi {
+            profiles: vec![
+                AuthConfig::ApiKey {
+                    name: "X-Label-Key".into(),
+                    value: SensitiveValue::template("tok-SENSITIVE-multi-key-2r8w"),
+                    location: KeyLocation::Header,
+                },
+                AuthConfig::Basic { username: user.into(), password: SensitiveValue::template("tok-SENSITIVE-multi-pw-4h6j") },
+            ],
         },
     ]
 }
@@ -567,7 +582,7 @@ async fn a_secret_username_or_key_name_is_redacted_from_the_auth_label() {
     anvil_transport::init();
     anvil_fixtures::init();
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
-    let secret = "Label-Secret-User-7c2d";
+    let secret = "tok-SENSITIVE-label-user-7c2d";
     let plain = "plain-label-user";
     let leaks = |text: &str| text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
     let engine = Engine::new();
@@ -600,7 +615,7 @@ async fn a_secret_username_or_key_name_is_redacted_from_the_auth_label() {
     // key value with a pasted line break is refused there.
     let c = ctx_with(AuthConfig::ApiKey {
         name: "{{api_user}}".into(),
-        value: SensitiveValue::template("label-api-key-8m2v\n"),
+        value: SensitiveValue::template("tok-SENSITIVE-api-key-8m2v\n"),
         location: KeyLocation::Header,
     });
     let p = engine.preview(&c).expect("preview");
@@ -620,23 +635,82 @@ async fn a_secret_username_or_key_name_is_redacted_from_the_auth_label() {
     }
 }
 
-/// An XML parser error quotes tag names from the body: the preview's lint
-/// warning is redacted as the stored record's warning is.
+/// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
+/// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
+/// redacted too, from the stored record (which `anvil send` prints, as JSON
+/// or as text) and from the preview.
 #[tokio::test]
-async fn a_lint_warning_quoting_a_secret_is_redacted_in_the_preview() {
+async fn an_escaped_secret_key_name_in_a_refusal_is_redacted() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::secret::SensitiveValue;
     anvil_transport::init();
-    let secret = "LintSecretTag7q";
-    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/xml");
-    spec.body = anvil_domain::request::Body::Xml { text: "<{{tag}}></other>".into() };
-    spec.lint_policy = anvil_domain::request::LintSendPolicy::Warn;
-    let mut c = ExecutionContext::standalone(spec);
-    let vars = vec![VarEntry { name: "tag".into(), value: secret.into(), secret: true, literal: false }];
-    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
-    let p = Engine::new().preview(&c).expect("preview");
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "tok-SENSITIVE-nul\0name-4b";
+    // The raw value, its JSON escape and its Rust escape all hold this.
+    let leaks = |text: &str| text.to_ascii_lowercase().contains("sensitive-nul");
+    let engine = Engine::new();
+    for location in [KeyLocation::Header, KeyLocation::Cookie] {
+        let mut spec = RequestSpec::http("GET", &f.url("/status/200"));
+        let value = SensitiveValue::template("tok-SENSITIVE-api-value-9d3f");
+        spec.auth = AuthConfig::ApiKey { name: "{{api_user}}".into(), value, location };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let failure = o.record.attempts.iter().find_map(|a| a.failure.as_ref());
+        let failure = failure.unwrap_or_else(|| panic!("{location:?}: the request was not refused"));
+        assert!(failure.message.contains(REDACTED), "{location:?}: {}", failure.message);
+        let record = serde_json::to_string(&o.record).unwrap();
+        assert!(!leaks(&record), "{location:?}: the stored record holds the key name: {record}");
+
+        let p = engine.preview(&c).expect("preview");
+        let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: "));
+        let note = note.unwrap_or_else(|| panic!("{location:?}: {:?}", p.inferred));
+        assert!(note.contains(REDACTED), "{location:?}: {note}");
+        let preview = serde_json::to_string(&p).unwrap();
+        assert!(!leaks(&preview), "{location:?}: the preview holds the key name: {preview}");
+    }
+}
+
+/// An XML parser error quotes tag names from the body. Under the default
+/// lint policy (block) the preview fails with it, under `warn` it shows it
+/// as a warning: either way a secret tag name is redacted, as the stored
+/// record's copy is, and a plain one is kept.
+#[tokio::test]
+async fn a_lint_error_quoting_a_secret_is_redacted_in_the_preview() {
+    use anvil_domain::execution::FailureKind;
+    use anvil_domain::request::{Body, LintSendPolicy};
+    anvil_transport::init();
+    let secret = "tok-SENSITIVE-tag-7q";
+    let engine = Engine::new();
+    let ctx_with = |xml: &str, policy: LintSendPolicy| {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/xml");
+        spec.body = Body::Xml { text: xml.into() };
+        spec.lint_policy = policy;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "tag".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    assert_eq!(LintSendPolicy::default(), LintSendPolicy::Block);
+    let f = engine.preview(&ctx_with("<{{tag}}></other>", LintSendPolicy::default())).expect_err("a lint refusal");
+    assert_eq!(f.kind, FailureKind::LintBlocked, "{f:?}");
+    assert!(f.message.contains(REDACTED), "{}", f.message);
+    let failure = serde_json::to_string(&f).unwrap();
+    assert!(!failure.contains(secret), "the preview failure holds the secret tag name: {failure}");
+
+    let p = engine.preview(&ctx_with("<{{tag}}></other>", LintSendPolicy::Warn)).expect("preview");
     let warning = p.lint_warning.as_deref().expect("a lint warning");
     assert!(warning.contains(REDACTED), "{warning}");
     let preview = serde_json::to_string(&p).unwrap();
     assert!(!preview.contains(secret), "the preview holds the secret tag name: {preview}");
+
+    // A tag name that is not a secret is quoted as it is.
+    let f = engine.preview(&ctx_with("<plaintag></other>", LintSendPolicy::default())).expect_err("a lint refusal");
+    assert!(f.message.contains("plaintag") && !f.message.contains(REDACTED), "{}", f.message);
 }
 
 /// Constants are scrubbed too; operational consumers get a separate,
