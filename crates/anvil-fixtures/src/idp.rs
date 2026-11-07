@@ -265,6 +265,8 @@ fn s256(verifier: &str) -> String {
 }
 
 /// RFC 8252 §7.3: loopback IP redirect, any port, http scheme.
+// Stricter than `anvil_transport::dns::is_literal_loopback` (no IPv4-mapped
+// loopback) on purpose, and fixtures do not depend on the transport.
 fn loopback_redirect(uri: &str) -> Option<url::Url> {
     let u = url::Url::parse(uri).ok()?;
     let host_ok = matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
