@@ -30,7 +30,12 @@ use zeroize::Zeroizing;
 pub struct Prepared {
     pub http: PreparedHttp,
     pub auth: ResolvedAuth,
+    /// [`ResolvedAuth::label_hiding`] with `auth_hidden`, and the scope the
+    /// auth came from.
     pub auth_label: String,
+    /// The auth's displayed parameters (a username or API key name) that
+    /// took a secret variable: labels and messages hide them.
+    pub auth_hidden: Vec<String>,
     pub auth_secrets: Vec<String>,
     pub settings: EffectiveSettings,
     pub tls: Option<Arc<PreparedTls>>,
@@ -64,15 +69,28 @@ pub(crate) fn binding_matches(b: &[anvil_domain::tls::HostBinding], t: &Target) 
     b.is_empty() || b.iter().any(|x| host_matches(&x.host, &t.host) && x.port.map(|p| p == t.port).unwrap_or(true))
 }
 
-/// Resolve auth configuration secrets into a [`ResolvedAuth`].
+/// Resolve auth configuration secrets into a [`ResolvedAuth`]. Each
+/// displayed parameter (a username or API key name) that took a secret
+/// variable joins `hidden`, whole: labels and messages hide it whatever its
+/// length, though exact-value redaction ignores a secret shorter than 4
+/// characters.
 fn resolve_auth(
     engine: &Engine,
     auth: &AuthConfig,
     ctx: &ExecutionContext,
     r: &Resolver,
     oauth_key: &mut Option<(anvil_auth::oauth::TokenKey, anvil_auth::oauth::OAuthResolved)>,
+    hidden: &mut Vec<String>,
 ) -> Result<ResolvedAuth, TransportFailure> {
     let fail = |m: String| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, m).with_field("auth");
+    let displayed = |template: &str, field: &str, hidden: &mut Vec<String>| -> Result<String, TransportFailure> {
+        let before = r.secret_substitutions();
+        let value = r.resolve(template, field)?;
+        if r.secret_substitutions() > before && !value.is_empty() && !hidden.contains(&value) {
+            hidden.push(value.clone());
+        }
+        Ok(value)
+    };
     let sens = |v: &anvil_domain::secret::SensitiveValue, field: &str| -> Result<Zeroizing<String>, TransportFailure> {
         let (raw, _) = resolve_sensitive(v, ctx.secrets.as_ref())
             .map_err(|_| fail(format!("could not resolve {field}; check the vault and active variables")))?;
@@ -84,12 +102,15 @@ fn resolve_auth(
     };
     Ok(match auth {
         AuthConfig::Inherit | AuthConfig::None => ResolvedAuth::None,
-        AuthConfig::ApiKey { name, value, location } => {
-            ResolvedAuth::ApiKey { name: r.resolve(name, "auth.name")?, value: sens(value, "auth.value")?, location: *location }
-        }
-        AuthConfig::Basic { username, password } => {
-            ResolvedAuth::Basic { username: r.resolve(username, "auth.username")?, password: sens(password, "auth.password")? }
-        }
+        AuthConfig::ApiKey { name, value, location } => ResolvedAuth::ApiKey {
+            name: displayed(name, "auth.name", hidden)?,
+            value: sens(value, "auth.value")?,
+            location: *location,
+        },
+        AuthConfig::Basic { username, password } => ResolvedAuth::Basic {
+            username: displayed(username, "auth.username", hidden)?,
+            password: sens(password, "auth.password")?,
+        },
         AuthConfig::Bearer { token, prefix } => ResolvedAuth::Bearer { token: sens(token, "auth.token")?, prefix: prefix.clone() },
         AuthConfig::Jwt { algorithm, signing_key, claims, kid, header_name, prefix } => {
             let extra = if claims.extra_json.trim().is_empty() {
@@ -124,7 +145,7 @@ fn resolve_auth(
         }
         AuthConfig::Hmac { config } => ResolvedAuth::Hmac(anvil_auth::HmacParams {
             profile: config.profile,
-            username: r.resolve(&config.username, "auth.username")?,
+            username: displayed(&config.username, "auth.username", hidden)?,
             secret: sens(&config.secret, "auth.secret")?,
             algorithm: config.algorithm,
             digest_header: config.digest_header,
@@ -138,7 +159,7 @@ fn resolve_auth(
             nonce: None,
         },
         AuthConfig::Wsse { config } => ResolvedAuth::Wsse {
-            username: r.resolve(&config.username, "auth.username")?,
+            username: displayed(&config.username, "auth.username", hidden)?,
             password: sens(&config.password, "auth.password")?,
             password_type: config.password_type,
             timestamp_ttl_secs: config.timestamp_ttl_secs,
@@ -157,7 +178,7 @@ fn resolve_auth(
         AuthConfig::Multi { profiles } => {
             let mut v = Vec::new();
             for p in profiles {
-                v.push(resolve_auth(engine, p, ctx, r, oauth_key)?);
+                v.push(resolve_auth(engine, p, ctx, r, oauth_key, hidden)?);
             }
             ResolvedAuth::Multi(v)
         }
@@ -485,8 +506,10 @@ pub(crate) fn prepare_all_at(
         .oauth_profile()
         .map_err(|message| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, message).with_field("auth"))?;
     let mut oauth_key = None;
-    let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key)?;
-    let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{} (from {auth_scope})", auth.label()) };
+    let mut auth_hidden = Vec::new();
+    let auth = resolve_auth(engine, &auth_cfg, ctx, r, &mut oauth_key, &mut auth_hidden)?;
+    let shown = auth.label_hiding(&auth_hidden);
+    let auth_label = if matches!(auth, ResolvedAuth::None) { "none".into() } else { format!("{shown} (from {auth_scope})") };
     let tls_scheme = matches!(http.target.scheme.as_str(), "https" | "wss" | "grpcs");
     let (tls, tls_name, bindings) = if tls_scheme {
         tls_for(engine, epoch, ctx, &settings, &http.target, &mut inferred).map(|(a, b, c)| (Some(a), b, c))?
@@ -503,6 +526,7 @@ pub(crate) fn prepare_all_at(
         http,
         auth,
         auth_label,
+        auth_hidden,
         auth_secrets: vec![],
         settings,
         tls,
@@ -551,12 +575,14 @@ fn invalid_header(msg: String, field: &str) -> TransportFailure {
 pub(crate) fn auth_header_problem(applied: &anvil_auth::Applied) -> Option<String> {
     let label = &applied.label;
     for (n, v) in &applied.set_headers {
+        // A header name can be an API key name that came from a secret.
+        let shown = applied.shown(n);
         if http::HeaderName::from_bytes(n.as_bytes()).is_err() {
-            return Some(format!("the auth profile {label} would send a header named {n:?}, which is not a valid header name"));
+            return Some(format!("the auth profile {label} would send a header named {shown:?}, which is not a valid header name"));
         }
         if http::HeaderValue::from_str(v).is_err() {
             return Some(format!(
-                "the auth profile {label} produced a value for the {n} header that is not a valid header value (it holds a line break or control character, for example pasted with the credential)"
+                "the auth profile {label} produced a value for the {shown} header that is not a valid header value (it holds a line break or control character, for example pasted with the credential)"
             ));
         }
         if n.eq_ignore_ascii_case("host")
@@ -899,7 +925,7 @@ pub(crate) async fn execute_viewing(
         let mut query = current.target.query.clone();
         let mut body = current.body.clone();
         if current.with_credentials {
-            let applied = anvil_auth::apply(&prep.auth, &signable, Utc::now())
+            let applied = anvil_auth::apply_hiding(&prep.auth, &signable, Utc::now(), &prep.auth_hidden)
                 .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth"))
                 .and_then(|a| check_auth_headers(&a).map(|()| a));
             match applied {

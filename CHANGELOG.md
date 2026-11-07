@@ -40,6 +40,11 @@
   preview's notes, among them "the request would not be sent", which quotes the label, and its
   lint warning are redacted as the stored record's are. A username that is not a secret is still
   shown.
+- A username or API key name that took a secret variable is hidden in the auth label and in auth
+  refusals (multi-auth conflicts, invalid header or cookie values) by where it came from, so a
+  secret shorter than 4 characters, which exact-value redaction ignores, is not shown there
+  either. The whole parameter is hidden when its template adds literal text. The same value from
+  a plain variable is still shown.
 - When the effective-request preview cannot be prepared, its error is redacted like the stored
   record's copy of it, ignoring letter case. Under the default lint policy, an XML body refused by
   the linter used to return the parser's message, which quotes tag names, with a secret value

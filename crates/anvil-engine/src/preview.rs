@@ -147,7 +147,7 @@ impl Engine {
         } else {
             prep.auth.clone()
         };
-        match anvil_auth::apply(&auth, &signable, chrono::Utc::now()) {
+        match anvil_auth::apply_hiding(&auth, &signable, chrono::Utc::now(), &prep.auth_hidden) {
             Ok(applied) => {
                 for s in applied.secrets.iter().filter(|s| s.as_str() != UNFETCHED_JWT_SVID) {
                     redactor.add_secret(s);

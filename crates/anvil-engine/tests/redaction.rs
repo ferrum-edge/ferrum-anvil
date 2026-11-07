@@ -635,6 +635,67 @@ async fn a_secret_username_or_key_name_is_redacted_from_the_auth_label() {
     }
 }
 
+/// Exact-value redaction ignores a secret shorter than 4 characters, so a
+/// username or API key name that took a secret variable is hidden in the
+/// auth label by where it came from, whatever its length: whole when its
+/// template mixes the secret with literal text. The same value from a plain
+/// variable is shown, and refusals that quote the label or the key name
+/// hide it too.
+#[tokio::test]
+async fn a_short_secret_username_or_key_name_is_hidden_in_the_auth_label() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let engine = Engine::new();
+    let ctx_with = |auth: AuthConfig, value: &str, secret: bool| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = auth;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: value.into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    for (template, value) in [("{{short}}", "b"), ("{{short}}", "bo"), ("{{short}}", "bob"), ("svc-{{short}}", "bo")] {
+        let shown = format!(" {})", template.replace("{{short}}", value));
+        for auth in auths_for(template) {
+            // A plain variable: the label names the value.
+            let c = ctx_with(auth.clone(), value, false);
+            let plain = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await.record.prepared.auth_label;
+            assert!(plain.contains(&shown) && !plain.contains(REDACTED), "{auth:?} {value:?}: {plain}");
+            assert_eq!(engine.preview(&c).expect("preview").auth, plain, "{auth:?} {value:?}");
+
+            // A secret variable: the label hides the whole parameter.
+            let hidden = plain.replace(&shown, &format!(" {REDACTED})"));
+            let c = ctx_with(auth.clone(), value, true);
+            let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+            assert_eq!(o.record.prepared.auth_label, hidden, "{auth:?} {value:?}");
+            assert_eq!(engine.preview(&c).expect("preview").auth, hidden, "{auth:?} {value:?}");
+        }
+    }
+
+    // Refusals quote the label and the key name: a header API key value with
+    // a pasted line break, and a cookie API key value with a space.
+    for (location, quoted) in [(KeyLocation::Header, format!("the {REDACTED} header")), (KeyLocation::Cookie, format!("'{REDACTED}'"))] {
+        let value = SensitiveValue::template("tok-SENSITIVE-short-key\n has space");
+        let c = ctx_with(AuthConfig::ApiKey { name: "{{short}}".into(), value, location }, "bo", true);
+        let p = engine.preview(&c).expect("preview");
+        let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: "));
+        let note = note.unwrap_or_else(|| panic!("{location:?}: {:?}", p.inferred));
+        assert!(note.contains(&quoted), "{location:?}: {note}");
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let failure = o.record.attempts.iter().find_map(|a| a.failure.as_ref());
+        let failure = failure.unwrap_or_else(|| panic!("{location:?}: the request was not refused"));
+        assert!(failure.message.contains(&quoted), "{location:?}: {}", failure.message);
+        assert!(!failure.message.contains("'bo'") && !failure.message.contains(" bo "), "{location:?}: {}", failure.message);
+    }
+}
+
 /// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
 /// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
 /// redacted too, from the stored record (which `anvil send` prints, as JSON

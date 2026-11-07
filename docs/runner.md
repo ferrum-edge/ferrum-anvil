@@ -381,6 +381,11 @@ Real fixture sockets and the real engine throughout:
 * Exact-value redaction ignores values shorter than 4 characters (the
   engine's rule, to avoid shredding ordinary text); name-based redaction
   still applies. Like every detector, it cannot recognize secrets that were
-  never marked as secret.
+  never marked as secret. The auth label (`prepared.auth_label`, the
+  preview's `auth`) and auth refusals hide a username or API key name that
+  took a secret variable by where it came from, whatever its length: the
+  whole parameter, even when its template adds literal text (`svc-{{user}}`).
+  Elsewhere (a header named after a short secret API key name, a short
+  secret WS-Security username in the body) the 4-character rule applies.
 * Response bodies are not part of any report; they live only in history,
   subject to the history policy.
