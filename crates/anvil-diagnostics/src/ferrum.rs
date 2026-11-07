@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// The source-audited release new profiles default to. The audit and its
-/// hosted Anvil qualification are recorded in `docs/audit/gateway-0.9.20-delta.md`.
+/// qualification status (the hosted all-profile Lab run, also recorded in the
+/// catalog's `qualification`) are in `docs/audit/gateway-0.9.20-delta.md`.
 pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.20";
 
 const EDGE_0_9_20: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json");
@@ -758,10 +759,16 @@ mod tests {
             assert_eq!(ids, [*expected], "{status} {text}");
         }
         // The validators' capacity refusals answer the shared capacity bodies,
-        // so they stay among that body's candidates.
-        for (text, expected) in [
+        // so they stay among that body's candidates. The request side is a
+        // plugin reject with no token; the response side replaces a backend
+        // response, so the final builder stamps `backend_error` on its 503,
+        // as on the core retained-response refusal.
+        let request = r#"{"error":"Request inspection capacity exceeded"}"#;
+        let response = r#"{"error":"Response buffering capacity exceeded"}"#;
+        for (token, text, expected) in [
             (
-                r#"{"error":"Request inspection capacity exceeded"}"#,
+                None,
+                request,
                 &[
                     "gateway.capacity.request_decode",
                     "plugin.body_validator.decode_capacity",
@@ -770,16 +777,30 @@ mod tests {
                 ][..],
             ),
             (
-                r#"{"error":"Response buffering capacity exceeded"}"#,
-                &["plugin.body_validator.decode_capacity", "plugin.openapi_validator.decode_capacity"][..],
+                Some("backend_error"),
+                response,
+                &[
+                    "gateway.capacity.response_buffer",
+                    "plugin.body_validator.response_decode_capacity",
+                    "plugin.openapi_validator.response_decode_capacity",
+                    "plugin.custom.undeclared_response_body_producer",
+                ][..],
             ),
+            (None, response, &[][..]),
+            (Some("backend_error"), request, &[][..]),
         ] {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
+            let signal = Signal { status: 503, token, body_text: text, body: &bf, grpc_status: None };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
-            assert_eq!(ids, expected, "{text}");
+            assert_eq!(ids, expected, "{token:?} {text}");
         }
+
+        // The Agent Card rewrite refusal is a JSON 502 on the HTTP bindings
+        // and, on the gRPC binding, HTTP 200 with grpc-status 13 set by the
+        // plugin itself (not the 502's mapped 14).
+        let card = catalog_for("ferrum-edge-0.9.20").unwrap().outcome("plugin.a2a_gateway.agent_card_rewrite_failed").unwrap();
+        assert_eq!((card.statuses.as_slice(), card.grpc_status), (&[502][..], Some(13)));
 
         // mcp_gateway's default-deny of prompts and resources (#6819): each
         // message is its own exact outcome.

@@ -5,7 +5,7 @@
 | Baseline | `v0.9.15`, `25b37395ff61bfea0f3ffd189d9011c4984fa755` (source-audited and hosted-qualified in [gateway-0.9.15-delta.md](gateway-0.9.15-delta.md)) |
 | Audited target | `v0.9.20`, `e4a606a00352674daaef08636e3e359e6c48ba18` (merge of Edge #7016), [release 432463173][release], published 2026-11-03T08:58:10Z |
 | Contracts | Published `contracts-edge-0.9.20`, `39da322083044c2e92617209e62983c92387f0ad` |
-| Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 616 outcome IDs: the 556 of 0.9.15 − 2 removed + 62 new |
+| Catalog | [`ferrum-edge-0.9.20/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json), 618 outcome IDs: the 556 of 0.9.15 − 2 removed + 64 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.20.lock`; the only supported release: v0.9.5 to v0.9.15 were retired with Anvil's vendored dimpl after adoption (see [#7001](#dtls-13-certificaterequest-omits-the-empty-certificate_authorities-list-7001)) |
 | Hosted qualification | All-profile Lab run 41810892175 on `main` at `cfd4e196`; results are recorded below |
 | Audit date | 2026-11-03 |
@@ -47,9 +47,18 @@ emitter was read at v0.9.20 for its status, body, `X-Gateway-Error`, headers, gR
 WebSocket close code and transport shape, and for callers that now swallow or rewrite it, against the
 [0.9.20 changelog][changelog] (sections 0.9.16 to 0.9.20) and the [upgrade guide][upgrade]. A global
 comparison of every catalog public signal (status, token, body pattern, gRPC status) within the new
-catalog checked `shared_signal_with`: every pair of outcomes whose signals are identical lists the
-other, as in 0.9.15. A catalog-to-catalog comparison cannot detect an emitter that stopped firing;
-the two removals below were found by reading the call sites.
+catalog checked `shared_signal_with`, but the links are not a complete closure over that comparison.
+`shared_signal_with` links outcomes whose full public signal, headers included, the audit found
+identical. Some pairs that agree on status, token, body and gRPC status are not linked because a
+header separates them, for example `plugin.cors.actual_origin_not_allowed` and
+`plugin.cors.preflight_origin_not_allowed` (`Vary`) or `plugin.rate_limiting.exceeded` and
+`plugin.rate_limiting.local_state_capacity` (`Retry-After`). `match_signal` does not compare those
+headers, so it still returns such a pair together and the diagnosis stays ambiguous (the safe
+direction). Outcomes with no client-visible signal, such as `plugin.body_validator.log_only_no_signal`
+and `plugin.openapi_validator.log_only_no_signal`, have nothing to share and list no sibling. The
+byte-identical `gateway.capacity.request_decode` and `plugin.compression.decode_capacity` now list
+each other (#483). A catalog-to-catalog comparison cannot detect an emitter that stopped firing; the
+two removals below were found by reading the call sites.
 
 Local validation is static inspection, `git diff --check`, `rustfmt --check` on the changed Rust
 files, the lab profile lint and read-only consistency checks of the new JSON (the invariants of
@@ -78,8 +87,13 @@ These change what Anvil matches, so they are the ones a diagnosis on 0.9.20 depe
   #6965); `GrpcProxyError::Internal` is INTERNAL (13); 499 maps to CANCELLED.
 - **Plugins**: the `request_size_limiting` 413 body is now the core 413 body; `rate_limiting` and
   `ai_rate_limiter` quota 429s carry `Retry-After`; `mcp_gateway` denies `prompts/get` and
-  `resources/read` by default; WAF, body and OpenAPI validation refuse more by default; 62 new
+  `resources/read` by default; WAF, body and OpenAPI validation refuse more by default; 64 new
   outcomes in all (listed in the catalog with `New in v0.9.NN` notes).
+- **Not matchable from the public signal alone**: four new outcomes have a concrete status but an
+  empty body, so `match_signal` has no body pattern and never returns them (status alone would
+  over-match): `protocol.grpc.dispatch_internal_error`, `plugin.load_testing.fanout_auth_refused`,
+  `plugin.load_testing.fanout_resource_refused` and `plugin.response_mock.delay_client_gone`. They
+  are catalogued for completeness, and each one's notes say so.
 - **Removed**: `protocol.grpc.request_body_read_failed` (its INTERNAL emitter is gone since v0.9.17,
   #6150) and `plugin.response_mock.status_101_non_websocket` (a 101 mock is refused at load since
   v0.9.19, #6869). `plugin.oidc_relying_party.challenge_browser_state_cache_full`, removed in 0.9.15,
@@ -1324,7 +1338,7 @@ v0.9.19 (#6845). With `reject_unsupported_media_types: true` (default false), a 
 
 v0.9.19 (#6845). The protobuf decompression and reflected decode are charged against the aggregate budgets: request-decode on the request side, retained-response on the response side. A refused reservation returns the shared capacity terminal with `grpc-status: 8` (`src/plugins/body_validator.rs:835`, `:654`, `:4978`, headers `:874`-`:875`). The bodies are `src/proxy/response_buffer_budget.rs:382` and `:479`. In v0.9.15 the decode was uncharged.
 
-**Catalog impact:** new outcome `plugin.body_validator.decode_capacity`. Its signal is shared with `gateway.capacity.request_decode`, `gateway.capacity.response_buffer` and `plugin.compression.decode_capacity`.
+**Catalog impact:** new outcomes `plugin.body_validator.decode_capacity` (request side) and `plugin.body_validator.response_decode_capacity` (response side). The request-side refusal is a plugin reject before dispatch and carries no `X-Gateway-Error`; its signal is shared with `gateway.capacity.request_decode` and `plugin.compression.decode_capacity`. The response-side 503 replaces a backend response, so the final builder derives `backend_error` from its status (`x_gateway_error_for_response`, `src/proxy/mod.rs:46459`; `src/http3/server.rs:12549`; `src/retry.rs:301`), and its signal is shared with `gateway.capacity.response_buffer` and `plugin.custom.undeclared_response_body_producer`. The two sides were one outcome recording no token until #483 split them.
 
 ### New: `body_validator` `enforcement_mode: log_only`
 
@@ -1336,13 +1350,13 @@ v0.9.19 (#6845). In `log_only` mode every violation and capacity refusal is reco
 
 v0.9.19 (#6837). Declared path, query, header and cookie parameters are validated in `before_proxy`, before any request transformer. Header and cookie values are read from the pristine wire headers. A missing required parameter, a repeated scalar, an unconvertible value, a schema failure, malformed cookie percent-encoding, or more than 1024 pairs gets the configured request status (default 400, `src/plugins/openapi_validator.rs:962`). The response is problem+json titled `Request parameter validation failed` (`:193`, `:1649`, `:2392`, `:2534`).
 
-**Catalog impact:** new outcome `plugin.openapi_validator.request_parameter_violation`. The title is its only discriminator from body violations.
+**Catalog impact:** new outcome `plugin.openapi_validator.request_parameter_violation`. The title is its only discriminator from body violations. The catalog records the default 400, so its diagnosis says "default configuration" and `match_signal` misses a non-default `request_status_code`.
 
 ### New: `openapi_validator` Content-Encoding decode capacity (503)
 
 v0.9.19 (#6837, #6848). Content-Encoding is now undone through the strict, budget-charged decoder (`src/plugins/openapi_validator.rs:3568`), and zstd is accepted. A budget refusal returns the shared `503` capacity body with `content-type: application/json` instead of a problem+json violation (`:1533`, `:1459`, `:1962`).
 
-**Catalog impact:** new outcome `plugin.openapi_validator.decode_capacity`. Notes are appended to `.request_decode_or_conversion_failure`, which is repointed to `CONTENT_ENCODING_DETAIL` `:3513`, and to `.response_decode_failure`.
+**Catalog impact:** new outcomes `plugin.openapi_validator.decode_capacity` (request side, no token) and `plugin.openapi_validator.response_decode_capacity` (response side, `backend_error` from the final builder as for `body_validator`; split in #483). Notes are appended to `.request_decode_or_conversion_failure`, which is repointed to `CONTENT_ENCODING_DETAIL` `:3513`, and to `.response_decode_failure`.
 
 ### `openapi_validator` asserts `format` under every draft
 
@@ -1998,7 +2012,7 @@ Catalog: notes on `listener_errors` and `openapi_bridge_error_result`.
 
 `policy.methods.*` allow entries accept `allowed_groups` / `denied_groups`, checked by `A2aMethodGrant::admits` (`src/plugins/a2a_gateway.rs:316`). An ungranted method gets the existing deny on all three bindings. A final body that changed operation class or can no longer be classified gets HTTP 200 `-32001` `A2A operation changed after gateway admission` with `data.gateway` set (`:3032`, `:2220`, `:2187`). A final body over the detection limit gets the existing 413 (`:2185`). Encoded HTTP Agent Cards are decoded and rewritten. Partial (206/226, including multipart) and undecodable cards are refused by `gateway.response.representation_uninspectable` (502). A card still encoded after the gate records `agent_card_representation_uninspectable` (`:1392`). GRPC and HTTP+JSON interface URLs are now rewritten.
 
-Catalog: new outcome `plugin.a2a_gateway.operation_class_changed`. Notes on the three denial outcomes, `request_too_large` and `agent_card_rewrite_failed`.
+Catalog: new outcome `plugin.a2a_gateway.operation_class_changed`. Notes on the three denial outcomes, `request_too_large` and `agent_card_rewrite_failed`. `agent_card_rewrite_failed` has two wire forms: a JSON 502 on the HTTP bindings (`src/plugins/a2a_gateway.rs:3554`-`:3561`) and, on the gRPC binding, HTTP 200 with an empty body, `content-type: application/grpc` and `grpc-status: 13` set by the plugin (`:3757`-`:3764`). Its `grpc_status` was corrected from 14 (the mapped value of a 502) to 13 (#483).
 
 ### ai_token_metrics and ai_transcript_audit: no client-visible change (#6857, #6815)
 

@@ -3068,8 +3068,8 @@
       "evidence_visibility": "public",
       "shared_signal_with": [
         "plugin.custom.undeclared_response_body_producer",
-        "plugin.body_validator.decode_capacity",
-        "plugin.openapi_validator.decode_capacity"
+        "plugin.body_validator.response_decode_capacity",
+        "plugin.openapi_validator.response_decode_capacity"
       ],
       "minimum_truthful_diagnosis": "Ferrum Edge temporarily lacked gateway memory budget to buffer this response; the backend answered but its response was not delivered.",
       "must_not_claim": "That the backend is unhealthy or returned 503 (despite X-Gateway-Error: backend_error), or that retrying elsewhere helps immediately.",
@@ -3192,6 +3192,7 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [
+        "plugin.compression.decode_capacity",
         "plugin.body_validator.decode_capacity",
         "plugin.openapi_validator.decode_capacity"
       ],
@@ -7478,7 +7479,7 @@
       "remediation": "Gateway operator: check the gateway log for the backend TLS material or backend URL error on this route. Do not retry as a transient outage.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6777, issue #6773; commit tagged v0.9.18, unpublished): before, H1/H2 answered 14 'Backend unavailable' (protocol.grpc.backend_unavailable) and native HTTP/3 backends 14 'Service unavailable'. Health-neutral. Same text as protocol.grpc.response_build_failed, which uses 14."
+      "notes": "New in v0.9.19 (#6777, issue #6773; commit tagged v0.9.18, unpublished): before, H1/H2 answered 14 'Backend unavailable' (protocol.grpc.backend_unavailable) and native HTTP/3 backends 14 'Service unavailable'. Health-neutral. Same text as protocol.grpc.response_build_failed, which uses 14. Catalogued for completeness: the body is empty, so match_signal has no body pattern and never returns this outcome from its public signal alone (the status by itself would over-match)."
     },
     {
       "id": "protocol.grpc_web.error_shape",
@@ -19910,6 +19911,53 @@
           "sha": "e4a606a"
         },
         {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 382,
+          "symbol": "REQUEST_DECODE_OVERLOAD_BODY",
+          "sha": "e4a606a"
+        }
+      ],
+      "condition": "Protobuf validation of a gRPC / gRPC-Web request body cannot reserve its decompression or reflected-decode working set against the process-wide request-decode budget; enforcement_mode=block. The response-side refusal is plugin.body_validator.response_decode_capacity.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": null,
+        "other_headers": {
+          "grpc-status": "8",
+          "grpc-message": "Request inspection capacity exceeded"
+        },
+        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"}",
+        "grpc_status": 8,
+        "ws_close_code": null,
+        "transport": "native gRPC: HTTP 200 trailers-only grpc-status 8; otherwise complete HTTP 503."
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "gateway.capacity.request_decode",
+        "plugin.compression.decode_capacity",
+        "plugin.openapi_validator.decode_capacity"
+      ],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the gateway-wide request-decode budget was exhausted while validating this gRPC request; the message itself was not judged invalid.",
+      "must_not_claim": "That the message failed schema validation, that the backend is unavailable, or which plugin refused (the signal is byte-identical to the shared capacity refusals).",
+      "remediation": "Caller: retry later. Operator: check gateway request-decode budget pressure.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "New in v0.9.19 (#6845; tagged v0.9.18, first published v0.9.19). Previously a decode had no aggregate charge. The plugin sets grpc-status/grpc-message headers itself (src/plugins/body_validator.rs:874-875) and marks gateway capacity provenance (:871). log_only records body_validator.*_outcome=uninspected and continues. No X-Gateway-Error: this is a plugin reject before dispatch, and token_for_rejection_phase gives a token only to the circuit-breaker, adaptive_concurrency, overload, config_stale and hop-limit phases (src/retry.rs:340). The response-side refusal, which carries backend_error, is plugin.body_validator.response_decode_capacity."
+    },
+    {
+      "id": "plugin.body_validator.response_decode_capacity",
+      "family": "capacity",
+      "protocols": [
+        "grpc"
+      ],
+      "source": [
+        {
+          "path": "src/plugins/body_validator.rs",
+          "line": 835,
+          "symbol": "BodyValidator::capacity_refusal",
+          "sha": "e4a606a"
+        },
+        {
           "path": "src/plugins/body_validator.rs",
           "line": 4978,
           "symbol": "finalize_client_visible_response_body (ProtobufFailure::Capacity)",
@@ -19917,44 +19965,49 @@
         },
         {
           "path": "src/proxy/response_buffer_budget.rs",
-          "line": 382,
-          "symbol": "REQUEST_DECODE_OVERLOAD_BODY",
-          "sha": "e4a606a"
-        },
-        {
-          "path": "src/proxy/response_buffer_budget.rs",
           "line": 479,
           "symbol": "RESPONSE_BUFFER_OVERLOAD_BODY",
           "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 46459,
+          "symbol": "x_gateway_error_for_response (final H1/H2 builder)",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 301,
+          "symbol": "http_observability_error_class",
+          "sha": "e4a606a"
         }
       ],
-      "condition": "Protobuf validation of a gRPC / gRPC-Web body (request or response) cannot reserve its decompression or reflected-decode working set against the process-wide request-decode (request) or retained-response (response) budget; enforcement_mode=block.",
+      "condition": "Protobuf validation of a gRPC / gRPC-Web response body cannot reserve its decompression or reflected-decode working set against the process-wide retained-response budget; enforcement_mode=block.",
       "error_class": null,
       "public_signal": {
         "http_status": 503,
-        "x_gateway_error": null,
+        "x_gateway_error": "backend_error",
         "other_headers": {
           "grpc-status": "8",
-          "grpc-message": "Request inspection capacity exceeded | Response buffering capacity exceeded"
+          "grpc-message": "Response buffering capacity exceeded"
         },
-        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"} | {\"error\":\"Response buffering capacity exceeded\"}",
+        "body_shape": "{\"error\":\"Response buffering capacity exceeded\"}",
         "grpc_status": 8,
         "ws_close_code": null,
-        "transport": "native gRPC: HTTP 200 trailers-only grpc-status 8; otherwise complete HTTP 503. The request-decode refusal carries the first body, the response-buffer refusal the second."
+        "transport": "native gRPC: HTTP 200 trailers-only grpc-status 8, no X-Gateway-Error; otherwise complete HTTP 503 replacing the backend response."
       },
       "evidence_visibility": "public_coarse",
       "shared_signal_with": [
-        "gateway.capacity.request_decode",
         "gateway.capacity.response_buffer",
-        "plugin.compression.decode_capacity",
-        "plugin.openapi_validator.decode_capacity"
+        "plugin.custom.undeclared_response_body_producer",
+        "plugin.openapi_validator.response_decode_capacity"
       ],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, a gateway-wide inspection/buffering budget was exhausted while validating this gRPC message; the message itself was not judged invalid.",
-      "must_not_claim": "That the message failed schema validation, that the backend is unavailable, or which plugin refused (the signal is byte-identical to the shared capacity refusals).",
-      "remediation": "Caller: retry later. Operator: check gateway decode/buffer budget pressure (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES and the request-decode budget).",
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the gateway-wide retained-response budget was exhausted while validating this gRPC response; the backend answered, its message was not judged invalid, and it was not delivered.",
+      "must_not_claim": "That the message failed schema validation, that the backend failed or returned 503 (despite X-Gateway-Error: backend_error), or which plugin refused (the signal is byte-identical to the shared capacity refusals).",
+      "remediation": "Caller: retry later. Operator: check retained-response budget pressure (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES).",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6845; tagged v0.9.18, first published v0.9.19). Previously a decode had no aggregate charge. The plugin sets grpc-status/grpc-message headers itself (src/plugins/body_validator.rs:874-875) and marks gateway capacity provenance (:871). log_only records body_validator.*_outcome=uninspected and continues. X-Gateway-Error not confirmed per path (response-side 503 likely backend_error, as for other response-phase >=500 rejects)."
+      "notes": "New in v0.9.19 (#6845; tagged v0.9.18, first published v0.9.19); the response side of plugin.body_validator.decode_capacity, catalogued separately because only this side carries a token. X-Gateway-Error: the refusal replaces a backend response, so the final builder derives the token from the final status (x_gateway_error_for_response, src/proxy/mod.rs:28709, at src/proxy/mod.rs:46459 on H1/H2; finalize_h3_response_gateway_headers, src/http3/server.rs:12549 on HTTP/3): a 503 without a connection error is backend_error (src/retry.rs:301), as for gateway.capacity.response_buffer. A response the gateway generated itself (a plugin short-circuit) was not traced. Native gRPC renders HTTP 200, which carries none. The plugin sets grpc-status/grpc-message headers itself (src/plugins/body_validator.rs:874-875) and marks gateway capacity provenance (:871). log_only records body_validator.response_outcome=uninspected and continues."
     },
     {
       "id": "plugin.body_validator.log_only_no_signal",
@@ -20581,12 +20634,12 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its openapi_validator plugin refused the request because a declared path, query, header or cookie parameter did not meet the operation contract.",
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway in its default configuration (error_response.request_status_code 400), its openapi_validator plugin refused the request because a declared path, query, header or cookie parameter did not meet the operation contract.",
       "must_not_claim": "That the request body was invalid, or that the backend validated the request.",
       "remediation": "Caller: send the declared parameter in its default serialization with a schema-valid value. Operator: check the imported operation's parameters.",
       "owner": "caller",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19). Runs in before_proxy before request transformers, reading header/cookie values from the pristine wire headers. Status is error_response.request_status_code (default 400, src/plugins/openapi_validator.rs:962). The title is the only field that distinguishes it from body violations. Values are never echoed; parameter names are operator-declared. Body keys in that order (serde_json preserve_order); detail is one of \"Required <location> parameter '<name>' is missing\", \"<location> parameter '<name>' could not be converted: <error>\", \"<location> parameter '<name>' does not satisfy its schema at <instance_location> (keyword '<keyword>')\" (src/plugins/openapi_validator.rs:2534, :2541, :2549) or a fixed pair/item/percent-encoding detail; status is the configured request_error_status (default 400)."
+      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19). Runs in before_proxy before request transformers, reading header/cookie values from the pristine wire headers. Status is error_response.request_status_code (default 400, src/plugins/openapi_validator.rs:962). The title is the only field that distinguishes it from body violations. Values are never echoed; parameter names are operator-declared. Body keys in that order (serde_json preserve_order); detail is one of \"Required <location> parameter '<name>' is missing\", \"<location> parameter '<name>' could not be converted: <error>\", \"<location> parameter '<name>' does not satisfy its schema at <instance_location> (keyword '<keyword>')\" (src/plugins/openapi_validator.rs:2534, :2541, :2549) or a fixed pair/item/percent-encoding detail; status is the configured request_error_status (default 400). The catalog pins the default 400, so match_signal misses a non-default request_status_code."
     },
     {
       "id": "plugin.openapi_validator.decode_capacity",
@@ -20610,25 +20663,13 @@
           "sha": "e4a606a"
         },
         {
-          "path": "src/plugins/openapi_validator.rs",
-          "line": 1962,
-          "symbol": "on_final_response_body (MediaFailure::Capacity)",
-          "sha": "e4a606a"
-        },
-        {
           "path": "src/proxy/response_buffer_budget.rs",
           "line": 382,
           "symbol": "REQUEST_DECODE_OVERLOAD_BODY",
           "sha": "e4a606a"
-        },
-        {
-          "path": "src/proxy/response_buffer_budget.rs",
-          "line": 479,
-          "symbol": "RESPONSE_BUFFER_OVERLOAD_BODY",
-          "sha": "e4a606a"
         }
       ],
-      "condition": "Undoing a request or response Content-Encoding for schema validation cannot reserve its working set against the process-wide request-decode (request) or retained-response (response) budget; enforcement_mode=block.",
+      "condition": "Undoing a request Content-Encoding for schema validation cannot reserve its working set against the process-wide request-decode budget; enforcement_mode=block. The response-side refusal is plugin.openapi_validator.response_decode_capacity.",
       "error_class": null,
       "public_signal": {
         "http_status": 503,
@@ -20637,24 +20678,90 @@
           "content-type": "application/json",
           "Content-Type": "application/json"
         },
-        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"} | {\"error\":\"Response buffering capacity exceeded\"}",
+        "body_shape": "{\"error\":\"Request inspection capacity exceeded\"}",
         "grpc_status": null,
         "ws_close_code": null,
-        "transport": "complete HTTP response. The request-decode refusal carries the first body, the response-buffer refusal the second."
+        "transport": "complete HTTP response"
       },
       "evidence_visibility": "public_coarse",
       "shared_signal_with": [
         "gateway.capacity.request_decode",
-        "gateway.capacity.response_buffer",
         "plugin.compression.decode_capacity",
         "plugin.body_validator.decode_capacity"
       ],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, a gateway-wide decode/buffer budget was exhausted while decompressing a body for OpenAPI validation; the body was not judged invalid.",
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the gateway-wide request-decode budget was exhausted while decompressing the request body for OpenAPI validation; the body was not judged invalid.",
       "must_not_claim": "That the body violated the OpenAPI contract, or that the backend failed.",
-      "remediation": "Caller: retry later. Operator: check gateway decode/buffer budget pressure.",
+      "remediation": "Caller: retry later. Operator: check gateway request-decode budget pressure.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19). Not a problem+json body: the fixed shared capacity body with content-type application/json (src/plugins/openapi_validator.rs:1557-1560). Only content-coded bodies reach it. Unlike gateway.capacity.response_buffer (no Content-Type), the response-side variant carries Content-Type application/json. X-Gateway-Error on the response-side 503 is likely backend_error (final status >= 500 rule) but not confirmed. log_only records openapi_validator.*_error and continues."
+      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19). Not a problem+json body: the fixed shared capacity body with content-type application/json (src/plugins/openapi_validator.rs:1557-1560). Only content-coded bodies reach it. No X-Gateway-Error: this is a plugin reject before dispatch, and token_for_rejection_phase gives a token only to the circuit-breaker, adaptive_concurrency, overload, config_stale and hop-limit phases (src/retry.rs:340). The response-side refusal, which carries backend_error, is plugin.openapi_validator.response_decode_capacity. log_only records openapi_validator.*_error and continues."
+    },
+    {
+      "id": "plugin.openapi_validator.response_decode_capacity",
+      "family": "capacity",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/plugins/openapi_validator.rs",
+          "line": 1533,
+          "symbol": "OpenapiValidator::decode_capacity_refusal",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/plugins/openapi_validator.rs",
+          "line": 1962,
+          "symbol": "on_final_response_body (MediaFailure::Capacity)",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/response_buffer_budget.rs",
+          "line": 479,
+          "symbol": "RESPONSE_BUFFER_OVERLOAD_BODY",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 46459,
+          "symbol": "x_gateway_error_for_response (final H1/H2 builder)",
+          "sha": "e4a606a"
+        },
+        {
+          "path": "src/retry.rs",
+          "line": 301,
+          "symbol": "http_observability_error_class",
+          "sha": "e4a606a"
+        }
+      ],
+      "condition": "Undoing a response Content-Encoding for schema validation cannot reserve its working set against the process-wide retained-response budget; enforcement_mode=block.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 503,
+        "x_gateway_error": "backend_error",
+        "other_headers": {
+          "content-type": "application/json",
+          "Content-Type": "application/json"
+        },
+        "body_shape": "{\"error\":\"Response buffering capacity exceeded\"}",
+        "grpc_status": null,
+        "ws_close_code": null,
+        "transport": "complete HTTP response replacing the backend response"
+      },
+      "evidence_visibility": "public_coarse",
+      "shared_signal_with": [
+        "gateway.capacity.response_buffer",
+        "plugin.custom.undeclared_response_body_producer",
+        "plugin.body_validator.response_decode_capacity"
+      ],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the gateway-wide retained-response budget was exhausted while decompressing the response body for OpenAPI validation; the backend answered, its body was not judged invalid, and it was not delivered.",
+      "must_not_claim": "That the body violated the OpenAPI contract, or that the backend failed or returned 503 (despite X-Gateway-Error: backend_error).",
+      "remediation": "Caller: retry later. Operator: check retained-response budget pressure (FERRUM_RESPONSE_BUFFER_MAX_TOTAL_BYTES).",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "New in v0.9.19 (#6837; tagged v0.9.18, first published v0.9.19); the response side of plugin.openapi_validator.decode_capacity, catalogued separately because only this side carries a token. Not a problem+json body: the fixed shared capacity body with content-type application/json (src/plugins/openapi_validator.rs:1557-1560), unlike gateway.capacity.response_buffer (no Content-Type). Only content-coded bodies reach it. X-Gateway-Error: the refusal replaces a backend response, so the final builder derives the token from the final status (x_gateway_error_for_response, src/proxy/mod.rs:28709, at src/proxy/mod.rs:46459 on H1/H2; finalize_h3_response_gateway_headers, src/http3/server.rs:12549 on HTTP/3): a 503 without a connection error is backend_error (src/retry.rs:301), as for gateway.capacity.response_buffer. A response the gateway generated itself (a plugin short-circuit) was not traced. log_only records openapi_validator.response_error and continues."
     },
     {
       "id": "plugin.graphql.uninspectable_transport",
@@ -21897,7 +22004,7 @@
       "remediation": "None for the caller; the client had already gone.",
       "owner": "unknown",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6869; tagged v0.9.18, unpublished). delay_ms now runs under the shared fault-delay bounds (FERRUM_MAX_CONCURRENT_FAULT_DELAYS budget shared with fault_injection, shutdown cancellation, HTTP/3 peer-gone cancellation); an exhausted budget or shutdown serves the mock at once. Metadata fault_delay_outcome records the non-completing outcome. Distinguishability: not realistically observable (client is gone); recorded mainly in logs."
+      "notes": "New in v0.9.19 (#6869; tagged v0.9.18, unpublished). delay_ms now runs under the shared fault-delay bounds (FERRUM_MAX_CONCURRENT_FAULT_DELAYS budget shared with fault_injection, shutdown cancellation, HTTP/3 peer-gone cancellation); an exhausted budget or shutdown serves the mock at once. Metadata fault_delay_outcome records the non-completing outcome. Distinguishability: not realistically observable (client is gone); recorded mainly in logs. Catalogued for completeness: the body is empty, so match_signal has no body pattern and never returns this outcome from its public signal alone (the status by itself would over-match)."
     },
     {
       "id": "plugin.response_caching.hit",
@@ -25311,6 +25418,7 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [
+        "gateway.capacity.request_decode",
         "plugin.body_validator.decode_capacity",
         "plugin.openapi_validator.decode_capacity"
       ],
@@ -25645,7 +25753,7 @@
       "remediation": "Gateway operator: make every node's load_testing key match the controller's; remove X-Loadtesting-Fanout from ordinary traffic.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6856; tagged v0.9.18, unpublished). Before, such a request was forwarded as an application request. Empty body, no content-type from the plugin. Control headers (including underscore spellings) are stripped on every path."
+      "notes": "New in v0.9.19 (#6856; tagged v0.9.18, unpublished). Before, such a request was forwarded as an application request. Empty body, no content-type from the plugin. Control headers (including underscore spellings) are stripped on every path. Catalogued for completeness: the body is empty, so match_signal has no body pattern and never returns this outcome from its public signal alone (the status by itself would over-match)."
     },
     {
       "id": "plugin.load_testing.fanout_resource_refused",
@@ -25693,7 +25801,7 @@
       "remediation": "Wait for running load tests to finish or reduce concurrent runs/body sizes on that node.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.19 (#6384; tagged v0.9.18, unpublished). A non-fan-out trigger refused by the same budget keeps flowing to the backend (Continue). Empty body; distinguishable from gateway overload 503s by the missing X-Gateway-Error and JSON body."
+      "notes": "New in v0.9.19 (#6384; tagged v0.9.18, unpublished). A non-fan-out trigger refused by the same budget keeps flowing to the backend (Continue). Empty body; distinguishable from gateway overload 503s by the missing X-Gateway-Error and JSON body. Catalogued for completeness: the body is empty, so match_signal has no body pattern and never returns this outcome from its public signal alone (the status by itself would over-match)."
     },
     {
       "id": "plugin.request_mirror.no_client_signal",
@@ -26488,7 +26596,9 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [
-        "gateway.capacity.response_buffer"
+        "gateway.capacity.response_buffer",
+        "plugin.body_validator.response_decode_capacity",
+        "plugin.openapi_validator.response_decode_capacity"
       ],
       "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its (custom plugin) plugin produced this outcome; the condition is: A custom plugin in the buffered response transform/normalize stage does not override response_body_production() (defaults to Undeclared), or the retained-response budget cannot cover a producer.",
       "must_not_claim": "That the backend application produced this response (unless the destination is not a trusted Ferrum endpoint, in which case the body alone proves nothing); which exact rule/policy matched unless the body says so; that credentials are invalid.",
@@ -31273,9 +31383,9 @@
           "Content-Type": "application/json"
         },
         "body_shape": "{\"error\":\"{diagnostic}\"}",
-        "grpc_status": 14,
+        "grpc_status": 13,
         "ws_close_code": null,
-        "transport": "complete HTTP response"
+        "transport": "HTTP bindings: complete HTTP 502 response with the JSON body; gRPC binding: HTTP 200 trailers-only, content-type application/grpc, grpc-status 13 [grpc-message: the diagnostic], empty body"
       },
       "evidence_visibility": "public",
       "shared_signal_with": [],
@@ -31286,7 +31396,7 @@
       "fixture_ids": [
         "GW-020"
       ],
-      "notes": "agent_card_public_origin_unavailable can fire before dispatch, in before_proxy. Public reason detail: Diagnostics: agent_card_public_origin_unavailable, agent_card_grpc_rewrite_not_applied, agent_card_grpc_schema_unsupported, the agent_card_protobuf_* family, agent_card_grpc_frame_too_large, agent_card_grpc_encoding_unsupported, agent_card_grpc_frame_malformed. Distinguishability: gRPC binding: HTTP 200, content-type application/grpc, grpc-status 13, grpc-message = the diagnostic, empty body. Body family: plain_error_json gRPC status derived from src/proxy/grpc_proxy.rs:3132 mapping. v0.9.19 (#6841, #6919): with rewriting on, a gzip/br HTTP card is decoded and rewritten, and an undecodable or partial (206/226, any media type including multipart/byteranges) card is refused by the shared response representation gate (gateway.response.representation_uninspectable, 502), not by this outcome; a card left encoded after the gate records agent_card_representation_uninspectable (src/plugins/a2a_gateway.rs:1392). GRPC and HTTP+JSON interface URLs are now rewritten to the gateway too."
+      "notes": "agent_card_public_origin_unavailable can fire before dispatch, in before_proxy. Public reason detail: Diagnostics: agent_card_public_origin_unavailable, agent_card_grpc_rewrite_not_applied, agent_card_grpc_schema_unsupported, the agent_card_protobuf_* family, agent_card_grpc_frame_too_large, agent_card_grpc_encoding_unsupported, agent_card_grpc_frame_malformed. Distinguishability: gRPC binding: HTTP 200, content-type application/grpc, grpc-status 13, grpc-message = the diagnostic, empty body. Body family: plain_error_json on the HTTP bindings. The gRPC binding's status 13 is set by grpc_agent_card_rewrite_failure itself (src/plugins/a2a_gateway.rs:3757-3764), not derived from the HTTP 502 (the src/proxy/grpc_proxy.rs:3132 mapping would give 14); grpc_status corrected from 14 to 13. v0.9.19 (#6841, #6919): with rewriting on, a gzip/br HTTP card is decoded and rewritten, and an undecodable or partial (206/226, any media type including multipart/byteranges) card is refused by the shared response representation gate (gateway.response.representation_uninspectable, 502), not by this outcome; a card left encoded after the gate records agent_card_representation_uninspectable (src/plugins/a2a_gateway.rs:1392). GRPC and HTTP+JSON interface URLs are now rewritten to the gateway too."
     },
     {
       "id": "plugin.a2a_gateway.operation_class_changed",
@@ -35321,6 +35431,7 @@
       "outcome_ids": [
         "plugin.body_validator.unsupported_media_type",
         "plugin.body_validator.decode_capacity",
+        "plugin.body_validator.response_decode_capacity",
         "plugin.body_validator.log_only_no_signal"
       ]
     },
@@ -35344,6 +35455,7 @@
       "anvil_impact": "New outcome sharing bytes with gateway capacity refusals.",
       "outcome_ids": [
         "plugin.openapi_validator.decode_capacity",
+        "plugin.openapi_validator.response_decode_capacity",
         "plugin.openapi_validator.request_decode_or_conversion_failure",
         "plugin.openapi_validator.response_decode_failure"
       ]
@@ -36400,7 +36512,7 @@
     "state": "reviewed_candidate_qualified",
     "live_0_9_20_evidence": true,
     "baseline": "ferrum-edge-0.9.15",
-    "scope": "Carried observable inventory with the v0.9.15 -> v0.9.20 source delta (554 of the 556 v0.9.15 outcomes; protocol.grpc.request_body_read_failed and plugin.response_mock.status_101_non_websocket are removed), plus 62 outcomes for new client-visible refusals (one of them, plugin.oidc_relying_party.challenge_browser_state_cache_full, returns after its v0.9.15 removal); not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab run 41810892175 (workflow_dispatch, profile=all) on main cfd4e196, all 14 profiles on v0.9.20: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped. Ubuntu's two extra skips are AUTH-030 and AUTH-031, whose lab XML signer needs xmllint, which that runner lacks. AUTH-001, UP-007, UP-018 and MESH-008 passed on both OSes. Full evidence: docs/audit/gateway-0.9.20-delta.md."
+    "scope": "Carried observable inventory with the v0.9.15 -> v0.9.20 source delta (554 of the 556 v0.9.15 outcomes; protocol.grpc.request_body_read_failed and plugin.response_mock.status_101_non_websocket are removed), plus 64 outcomes for new client-visible refusals (one of them, plugin.oidc_relying_party.challenge_browser_state_cache_full, returns after its v0.9.15 removal); not a comprehensive inventory of new admin, Kubernetes translation or control-plane behaviour. Hosted all-profile Lab run 41810892175 (workflow_dispatch, profile=all) on main cfd4e196, all 14 profiles on v0.9.20: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped. Ubuntu's two extra skips are AUTH-030 and AUTH-031, whose lab XML signer needs xmllint, which that runner lacks. AUTH-001, UP-007, UP-018 and MESH-008 passed on both OSes. Full evidence: docs/audit/gateway-0.9.20-delta.md."
   },
   "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1906) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1669 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token. v0.9.17 (#6127) adds the loop_detected token and never retries a backend 508; v0.9.19 changes client-visible statuses for connection_timeout (504) and backend_connection_limit (503) without changing request_reached_wire. No ErrorClass variant was added or removed."
 }

@@ -19,7 +19,7 @@
   0 failed / 19 skipped, Ubuntu 554 passed / 0 failed / 21 skipped; the failure-matrix coverage
   now cites its macOS results. The audit also covers v0.9.17 and v0.9.19 (v0.9.16 and v0.9.18
   were tagged but never published). See `docs/audit/gateway-0.9.20-delta.md`.
-- Gateway catalog 0.9.20 has 616 outcomes: the 556 of 0.9.15, less two removed, plus 62 new,
+- Gateway catalog 0.9.20 has 618 outcomes: the 556 of 0.9.15, less two removed, plus 64 new,
   among them the proxy hop limit 508 `{"error":"Proxy hop limit exceeded"}` and the malformed
   `X-Ferrum-Hops` 400, the backend connect timeout's 504 and the pooled connection ceiling's 503
   (both `connection_failure`), and the OIDC relying party's "state cache full" 503, which v0.9.19
@@ -45,6 +45,25 @@
   `upstream.connection_limit.pooled`. MESH-008 relays to a new workload-only `tcp` port 17808
   with its own echo fixture, because v0.9.17 refuses a bare CONNECT to the HTTP port 17801. Each
   earlier release keeps its own expectations.
+- Gateway catalog 0.9.20 corrections (#483): `plugin.a2a_gateway.agent_card_rewrite_failed`
+  records grpc-status 13, which its gRPC binding sets itself (HTTP 200, empty body), beside the
+  HTTP bindings' JSON 502. The `body_validator` and `openapi_validator` capacity refusals are split
+  by side: the request side carries no `X-Gateway-Error`, and the new
+  `plugin.body_validator.response_decode_capacity` and
+  `plugin.openapi_validator.response_decode_capacity` carry the `backend_error` that the final
+  response builder writes on their 503, so they match with `gateway.capacity.response_buffer`.
+  `gateway.capacity.request_decode` and `plugin.compression.decode_capacity` list each other. The
+  OpenAPI parameter violation's diagnosis names the default status configuration, and four
+  outcomes with an empty body are marked as catalogued for completeness (not matchable from their
+  public signal). The audit no longer claims that `shared_signal_with` links every pair with the
+  same status, token, body and gRPC status.
+- Docs: the `loop_detected` token row says only that the received hop count reached the limit;
+  the mesh lab notes say the nightly runs only the v0.9.20 pin, so the pre-0.9.8 branch of
+  `mesh::synthesis_refusal` is retained but unrun and v0.9.8 itself never ran (#484). The UP-018-H2
+  skip text names the 0.9.19+ 503 contract test, and the failure-matrix coverage header names the
+  release its recorded results ran on.
+- The gitleaks allowlist for the soap_ws_security mechanism names covers only the 0.9.20 catalog
+  and the `generic-api-key` rule.
 - Diagnostics catalog version 2026.11.03-1.
 - The History panel and `anvil history` decrypt each listed record once and read only the fields
   they show, instead of decrypting it again with its stored response body. The listing still

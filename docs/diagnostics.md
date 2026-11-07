@@ -273,7 +273,7 @@ cannot complete mutual TLS with them ([protocols.md §3.6](protocols.md#36-dtls)
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.20` (default; hosted qualification recorded) | v0.9.20, `e4a606a` | **616** (556 − 2 removed + 62 new) | [audit/gateway-0.9.20-delta.md](audit/gateway-0.9.20-delta.md) (source delta covering v0.9.17–v0.9.20; [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) recorded) |
+| `ferrum-edge-0.9.20` (default; hosted qualification recorded) | v0.9.20, `e4a606a` | **618** (556 − 2 removed + 64 new) | [audit/gateway-0.9.20-delta.md](audit/gateway-0.9.20-delta.md) (source delta covering v0.9.17–v0.9.20; [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.15` | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta; [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.14` | v0.9.14, `9bd4d5f` | **553 carried IDs** | [audit/gateway-0.9.14-delta.md](audit/gateway-0.9.14-delta.md) (source delta covering v0.9.12–v0.9.14; hosted qualification recorded) |
 | `ferrum-edge-0.9.11` | v0.9.11, `c764084` | **553 carried IDs** | [audit/gateway-0.9.11-delta.md](audit/gateway-0.9.11-delta.md) (source delta; hosted qualification recorded) |
@@ -400,7 +400,7 @@ it. A "(gateway error: …)" class in the result text is content, not proof.
 | `overload` | The gateway shed load, was draining, or hit the response-transform ceiling (502). | CPU pressure. |
 | `config_stale` | The data plane's configuration fence is stale. | Which configuration change is missing. |
 | `concurrency_limit` | An adaptive or static concurrency limit rejected the request. | The limit value or the load cause. |
-| `loop_detected` (0.9.20) | The request reached the gateway's proxy hop limit (508 `{"error":"Proxy hop limit exceeded"}`, `FERRUM_MAX_PROXY_HOPS`, default 10) and was refused before routing: usually a routing loop between Ferrum gateways. | That any backend was contacted; which gateway in the chain closed the loop. |
+| `loop_detected` (0.9.20) | The request reached the gateway's proxy hop limit (508 `{"error":"Proxy hop limit exceeded"}`, `FERRUM_MAX_PROXY_HOPS`, default 10) and was refused before routing: the `X-Ferrum-Hops` count it received had reached the limit. A routing loop between Ferrum gateways, a long but intended chain, or a count the caller or an intermediary supplied all produce this. | That any backend was contacted; how many gateways the request passed through; that a routing loop exists, or which gateway or route closes one. |
 
 A missing marker does not prove the response came from the backend
 (`ferrum.marker.absent` explains this). A 403 alone never proves a WAF:
