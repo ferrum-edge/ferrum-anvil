@@ -674,6 +674,124 @@ async fn an_escaped_secret_key_name_in_a_refusal_is_redacted() {
     }
 }
 
+/// The WS-Security header Anvil generates writes the username XML-escaped:
+/// that form of a secret username is redacted from the preview's body (the
+/// stored record keeps only the body's size and digest) and from the label,
+/// and a plain username is shown.
+#[tokio::test]
+async fn an_xml_escaped_secret_ws_security_username_is_redacted() {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "tok-SENSITIVE-xml&user<7c2d";
+    // The raw value and its XML, JSON and Rust escapes all hold this.
+    let leaks = |text: &str| text.to_ascii_lowercase().contains("sensitive-xml");
+    let engine = Engine::new();
+    let ctx_with = |user: &str| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = AuthConfig::Wsse {
+            config: WsseConfig {
+                username: user.into(),
+                password: SensitiveValue::template("tok-SENSITIVE-wsse-pw-6p4n"),
+                password_type: WssePasswordType::PasswordText,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    let c = ctx_with("{{api_user}}");
+    let p = engine.preview(&c).expect("preview");
+    assert!(p.body_preview.contains(&format!("<wsse:Username>{REDACTED}</wsse:Username>")), "{}", p.body_preview);
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret username: {preview}");
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    assert!(o.record.prepared.auth_label.contains(REDACTED), "{}", o.record.prepared.auth_label);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!leaks(&record), "the stored record holds the secret username: {record}");
+
+    // A username that is not a secret is shown, escaped as it is sent.
+    let p = engine.preview(&ctx_with("plain&user")).expect("preview");
+    assert!(p.body_preview.contains("<wsse:Username>plain&amp;user</wsse:Username>"), "{}", p.body_preview);
+}
+
+/// A multipart part name is written with a `"` as `%22` and nothing else
+/// encoded: that form of a secret name is redacted from the preview's body.
+#[tokio::test]
+async fn a_quoted_secret_multipart_part_name_is_redacted() {
+    use anvil_domain::request::{Body, MultipartContent, MultipartPart};
+    anvil_transport::init();
+    let secret = "tok-SENSITIVE-part\"name 3m1q";
+    let leaks = |text: &str| text.to_ascii_lowercase().contains("sensitive-part");
+    let ctx_with = |name: &str| {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/upload");
+        let content = MultipartContent::Text { value: "ordinary".into() };
+        spec.body = Body::Multipart { parts: vec![MultipartPart { name: name.into(), enabled: true, content, content_type: None }] };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "part".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+    let engine = Engine::new();
+    let p = engine.preview(&ctx_with("{{part}}")).expect("preview");
+    assert!(p.body_preview.contains(&format!("name=\"{REDACTED}\"")), "{}", p.body_preview);
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret part name: {preview}");
+
+    let p = engine.preview(&ctx_with("plain\"part")).expect("preview");
+    assert!(p.body_preview.contains("name=\"plain%22part\""), "{}", p.body_preview);
+}
+
+/// A gRPC metadata key is lowercased before it is checked, and the refusal
+/// quotes it: a key built from a mixed-case secret is redacted from the
+/// preview's failure ignoring ASCII case, which keeps its kind, and a plain
+/// key is quoted as it is.
+#[tokio::test]
+async fn a_lowercased_secret_in_a_session_preview_failure_is_redacted() {
+    use anvil_domain::execution::FailureKind;
+    use anvil_domain::request::{GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, KeyValue, Protocol};
+    anvil_transport::init();
+    let secret = "tok-SENSITIVE-Mixed-Meta-5w2e";
+    let ctx_with = |key: &str| {
+        let mut spec = RequestSpec::http("POST", "grpc://127.0.0.1:9");
+        spec.protocol = Protocol::Grpc;
+        spec.grpc = Some(GrpcSpec {
+            service: "anvil.lab.v1.Echo".into(),
+            method: "Unary".into(),
+            mode: GrpcMode::Unary,
+            schema: GrpcSchemaSource::Reflection,
+            messages: vec![r#"{"message":"hi"}"#.into()],
+            metadata: vec![KeyValue::new(key, "v")],
+            deadline_ms: None,
+            plaintext: false,
+            wire: GrpcWire::Grpc,
+        });
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+    let engine = Engine::new();
+    let f = engine.preview(&ctx_with("grpc-{{api_user}}")).expect_err("a refused metadata key");
+    assert_eq!(f.kind, FailureKind::InvalidHeader, "{f:?}");
+    assert!(f.message.contains(REDACTED), "{}", f.message);
+    let failure = serde_json::to_string(&f).unwrap().to_ascii_lowercase();
+    assert!(!failure.contains(&secret.to_ascii_lowercase()), "the preview failure holds the secret: {failure}");
+
+    let f = engine.preview(&ctx_with("grpc-plain-meta")).expect_err("a refused metadata key");
+    assert_eq!(f.kind, FailureKind::InvalidHeader, "{f:?}");
+    assert!(f.message.contains("grpc-plain-meta") && !f.message.contains(REDACTED), "{}", f.message);
+}
+
 /// An XML parser error quotes tag names from the body. Under the default
 /// lint policy (block) the preview fails with it, under `warn` it shows it
 /// as a warning: either way a secret tag name is redacted, as the stored

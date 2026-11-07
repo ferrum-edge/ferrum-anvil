@@ -41,11 +41,15 @@
   lint warning are redacted as the stored record's are. A username that is not a secret is still
   shown.
 - When the effective-request preview cannot be prepared, its error is redacted like the stored
-  record's copy of it. Under the default lint policy, an XML body refused by the linter used to
-  return the parser's message, which quotes tag names, with a secret value still in it.
-- Secret values are also redacted in the form Rust's string escaping writes them, as a refusal
-  quotes a header, cookie or API key name (a NUL as `\0`). They were already redacted raw,
-  percent-encoded, as hex and JSON-escaped.
+  record's copy of it, ignoring letter case. Under the default lint policy, an XML body refused by
+  the linter used to return the parser's message, which quotes tag names, with a secret value
+  still in it; a session request's refusal (a gRPC metadata key, quoted lowercased) was redacted
+  only in the secret's own letter case.
+- Secret values are also redacted in the other forms Anvil writes them in: Rust's string escaping,
+  as a refusal quotes a header, cookie or API key name (a NUL as `\0`); XML escaping, as the
+  WS-Security header writes a username (a secret username with `&` or `<` was shown in the
+  preview's body); and a multipart part name, whose `"` is written as `%22`. They were already
+  redacted raw, percent-encoded, as hex and JSON-escaped.
 
 ### Changed
 

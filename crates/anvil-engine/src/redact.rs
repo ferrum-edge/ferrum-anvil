@@ -16,7 +16,7 @@
 use crate::vars::Resolver;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use anvil_domain::diagnostics::DiagnosticFinding;
-use anvil_domain::execution::{ExecutionRecord, HeaderEntry};
+use anvil_domain::execution::{ExecutionRecord, HeaderEntry, TransportFailure};
 use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::request::PayloadEncoding;
 use anvil_domain::secret::REDACTED;
@@ -107,8 +107,10 @@ pub fn is_credential_name(name: &str, extra: &[String]) -> bool {
 pub struct Redactor {
     /// Secret values, longest first (compared against decoded URL components).
     secrets: Vec<String>,
-    /// Secret values, their canonical percent-encoded forms and their JSON
-    /// string escaping, longest first (scrubbed from arbitrary text).
+    /// Every form of each secret value in [`secret_forms`] (the value, its
+    /// lowercase hex, its canonical percent encodings, its JSON, Rust and XML
+    /// escaping, and its multipart part-name quoting), longest first
+    /// (scrubbed from arbitrary text).
     matcher: Option<AhoCorasick>,
     /// The same patterns compared ignoring ASCII case, for fields a protocol
     /// normalizes (header names, content codings are lowercased).
@@ -235,15 +237,17 @@ impl Redactor {
         }
     }
 
-    /// Scrub raw secret values, their canonical percent encodings and JSON
-    /// and Rust string escapes from arbitrary text.
+    /// Scrub raw secret values, their canonical percent encodings and JSON,
+    /// Rust and XML string escapes from arbitrary text.
     ///
     /// Limits: only the raw value, the encodings in [`encoded_forms`], its
     /// lowercase hex, the value's JSON string escaping (as rendered in JSON
-    /// diagnostics) and its Rust escaping (as a `{:?}`-formatted message
-    /// quotes it) are recognized. A secret encoded any other way
-    /// (partly or doubly percent-encoded, base64, HTML-escaped), split by other
-    /// content, or shorter than 4 characters passes through, and names are
+    /// diagnostics), its Rust escaping (as a `{:?}`-formatted message quotes
+    /// it), its XML escaping (as a generated WS-Security header writes it)
+    /// and its multipart part-name quoting are recognized. A secret encoded
+    /// any other way (partly or doubly percent-encoded, base64, numeric
+    /// character references), split by other content, or shorter than 4
+    /// characters passes through, and names are
     /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
     /// [`Redactor::json_text`] where the structure is known.
     pub fn text(&self, s: &str) -> String {
@@ -558,6 +562,14 @@ impl Redactor {
                 HeaderEntry { name, value }
             })
             .collect()
+    }
+
+    /// A failure's message and field, ignoring ASCII case (a message can
+    /// quote a header or metadata name a protocol lowercased). Its phase,
+    /// kind and typed fields are kept.
+    pub(crate) fn failure(&self, f: &mut TransportFailure) {
+        f.message = self.text_any_case(&f.message);
+        f.field = f.field.as_deref().map(|s| self.text_any_case(s));
     }
 
     /// Scrub metadata and every persisted copy of it. Engine assembly calls
@@ -889,14 +901,30 @@ fn debug_escaped(s: &str) -> Vec<String> {
     forms
 }
 
+/// The value as Anvil writes it into XML it generates (a WS-Security
+/// username or password), when escaping changes it (`&`, `<`, `>`, `"`, `'`).
+fn xml_escaped(s: &str) -> Option<String> {
+    let escaped = anvil_auth::wsse::xml_escape(s);
+    (escaped != s).then_some(escaped)
+}
+
+/// The value as a multipart part name is written: a `"` as `%22`, nothing
+/// else (see `prepare`'s multipart body).
+fn quote_escaped(s: &str) -> Option<String> {
+    s.contains('"').then(|| s.replace('"', "%22"))
+}
+
 /// Every form of a secret value the matchers look for: the value itself, its
 /// lowercase hex (a session transcript shows bytes that are not printable
-/// text as hex), its URL encodings, and its JSON and Rust string escapes.
+/// text as hex), its URL encodings, its JSON, Rust and XML escapes, and its
+/// multipart part-name quoting.
 fn secret_forms(s: &str) -> Vec<String> {
     let mut forms = vec![s.to_string(), hex::encode(s)];
     forms.extend(encoded_forms(s));
     forms.extend(json_escaped(s));
     forms.extend(debug_escaped(s));
+    forms.extend(xml_escaped(s));
+    forms.extend(quote_escaped(s));
     forms
 }
 

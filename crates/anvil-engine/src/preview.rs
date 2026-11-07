@@ -110,24 +110,20 @@ impl Engine {
         }
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
-        // A preparation failure can quote a resolved value (a lint error
-        // quotes the body): redacted as the send path's stored failure is,
-        // with the secrets resolved before it.
-        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes).map_err(|mut f| {
-            let redactor = Redactor::for_execution(&resolver, &ctx.redaction_names);
-            f.message = redactor.text_any_case(&f.message);
-            f.field = f.field.as_deref().map(|s| redactor.text_any_case(s));
+        // A failure can quote a resolved value (a lint error quotes the body,
+        // a refused gRPC metadata key is quoted lowercased): redacted as the
+        // send path's stored failure is, with the secrets resolved before it.
+        let redacted = |mut f: TransportFailure| {
+            Redactor::for_execution(&resolver, &ctx.redaction_names).failure(&mut f);
             f
-        })?;
+        };
+        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes).map_err(redacted)?;
         let mut inferred = prep.inferred.clone();
         let shape = match ctx.spec.protocol {
             Protocol::Http => Shape::http(&prep),
             // A message that does not fit the schema is refused with an error
             // that may quote it: redacted as the session's failure is.
-            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(|mut f| {
-                f.message = Redactor::for_execution(&resolver, &ctx.redaction_names).text(&f.message);
-                f
-            })?,
+            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(redacted)?,
         };
         // After the session's messages and metadata are resolved, so the
         // secrets they use are known.
