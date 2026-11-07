@@ -206,12 +206,33 @@ impl Redactor {
     /// header writes it (`wsse:Username`, XML-escaped), whatever its length.
     /// It runs first, so a secret replaced in the surrounding markup (a
     /// password that is literally `wsse`) cannot hide the element from it.
+    ///
+    /// `body` can be a window that ends inside the element (a long username
+    /// past the captured bytes or the preview's cut): a last `wsse:Username`
+    /// left open whose content so far begins a hidden value loses that
+    /// content, to the end. The preview cuts inside it, so `redact_then_cut`
+    /// sees the change cross its cut and ends the preview with the marker
+    /// where the content starts. An element that closes is withheld only
+    /// when its whole content is a hidden value.
     pub(crate) fn hide_written_parameters(&self, body: &str) -> String {
+        const OPEN: &str = "<wsse:Username>";
+        const CLOSE: &str = "</wsse:Username>";
         let mut out = body.to_string();
-        for h in &self.hidden {
-            let written = format!("<wsse:Username>{}</wsse:Username>", anvil_auth::wsse::xml_escape(h));
+        if self.hidden.is_empty() {
+            return out;
+        }
+        let escaped: Vec<String> = self.hidden.iter().map(|h| anvil_auth::wsse::xml_escape(h.as_str())).collect();
+        for h in &escaped {
+            let written = format!("{OPEN}{h}{CLOSE}");
             if out.contains(&written) {
-                out = out.replace(&written, &format!("<wsse:Username>{REDACTED}</wsse:Username>"));
+                out = out.replace(&written, &format!("{OPEN}{REDACTED}{CLOSE}"));
+            }
+        }
+        if let Some(open) = out.rfind(OPEN) {
+            let start = open + OPEN.len();
+            let content = &out[start..];
+            if !content.contains(CLOSE) && escaped.iter().any(|h| h.starts_with(content)) {
+                out.truncate(start);
             }
         }
         out

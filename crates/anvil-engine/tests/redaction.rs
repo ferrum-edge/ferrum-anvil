@@ -1018,6 +1018,47 @@ async fn a_hidden_username_crossing_the_body_preview_cut_shows_no_password_prefi
     }
 }
 
+/// A WS-Security username hidden by where it came from (a short secret plus
+/// 131,072 bytes of literal text) whose closing tag lies past the captured
+/// window: the element is withheld from where its content starts, so the
+/// secret is not shown anywhere in the preview. A plain username is shown up
+/// to the cut.
+#[tokio::test]
+async fn a_hidden_username_running_past_the_captured_body_is_withheld() {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::{SensitiveValue, floor_char_boundary};
+    anvil_transport::init();
+    let padding = "u".repeat(131_072);
+    let engine = Engine::new();
+    for secret in [true, false] {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: padded_envelope(0), action: None };
+        spec.auth = AuthConfig::Wsse {
+            config: WsseConfig {
+                username: format!("{{{{short}}}}{padding}"),
+                password: SensitiveValue::template("tok-SENSITIVE-long-user-pw"),
+                password_type: WssePasswordType::PasswordText,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: "Qb".into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        let p = engine.preview(&c).expect("preview");
+        let tail = &p.body_preview[floor_char_boundary(&p.body_preview, p.body_preview.len().saturating_sub(200))..];
+        if secret {
+            assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "the preview does not end at the username: {tail}");
+            let preview = serde_json::to_string(&p).unwrap();
+            assert!(!preview.contains("Qb"), "the hidden username is shown: {tail}");
+        } else {
+            assert!(p.body_preview.contains("<wsse:Username>Qbuu"), "the plain username is not shown: {tail}");
+            assert!(!p.body_preview.contains(REDACTED), "{tail}");
+        }
+    }
+}
+
 /// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
 /// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
 /// redacted too, from the stored record (which `anvil send` prints, as JSON

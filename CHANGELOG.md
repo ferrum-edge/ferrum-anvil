@@ -47,7 +47,8 @@
   `Cookie` or `Set-Cookie` name, a URL path segment or query or fragment part (as written,
   percent-decoded, form-decoded or doubly encoded, in any letter case, with or without the
   whitespace around it), in the record and the preview, and the WS-Security
-  username in the preview's body, which is hidden before anything else in the body is replaced.
+  username in the preview's body, which is hidden before anything else in the body is replaced,
+  also when the preview's window ends inside it.
   A response cookie named by it is not kept in the cookie jar, so a later request does not send
   it. The whole parameter is hidden when its template adds literal text. The same value from a
   plain variable is still shown, and the request sent is unchanged.
