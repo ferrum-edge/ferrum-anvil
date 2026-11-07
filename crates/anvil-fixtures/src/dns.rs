@@ -85,6 +85,7 @@ where
     T: FnMut(SocketAddr) -> TcpBindFuture<Tcp>,
     U: FnMut(&str) -> UdpBindFuture<Udp>,
 {
+    debug_assert!(requests_ephemeral_port(bind), "the pair bind is only for port 0; serve binds an explicit port once");
     let bind_udp = |port: Option<u16>| -> ports::UdpBindFuture<Udp, PairStepError> {
         let bound = bind_udp(&port.map_or_else(|| bind.to_owned(), |port| bind_with_port(bind, port)));
         Box::pin(async move {
