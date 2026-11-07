@@ -582,6 +582,8 @@ pub enum GatewayDetail {
 
 /// Whether a connection went straight to a loopback address, through no
 /// proxy and no tunnel: nothing outside this computer could answer on it.
+// Stricter than `anvil_transport::dns::is_loopback` on purpose: an IPv4-mapped
+// loopback address (`[::ffff:127.0.0.1]`) does not count.
 pub fn direct_loopback(c: &ConnectionObservation) -> bool {
     c.via_proxy.is_none()
         && c.tunnel.is_none()
@@ -793,6 +795,7 @@ mod tests {
         };
         assert!(direct_loopback(&conn("127.0.0.1:18090", None)));
         assert!(direct_loopback(&conn("[::1]:18090", None)));
+        assert!(!direct_loopback(&conn("[::ffff:127.0.0.1]:18090", None)), "IPv4-mapped loopback does not count");
         assert!(!direct_loopback(&conn("192.0.2.10:18090", None)));
         assert!(!direct_loopback(&conn("127.0.0.1:3128", Some("lab proxy"))));
     }

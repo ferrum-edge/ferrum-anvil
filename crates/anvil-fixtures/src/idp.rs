@@ -548,3 +548,25 @@ async fn request(s: &mut Box<dyn Io>, target: &str, authority: &str) -> anyhow::
     let headers = lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_string(), v.trim().to_string())).collect();
     Ok((status, headers, body.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_redirects_are_http_loopback_literals_with_a_port() {
+        for ok in ["http://127.0.0.1:9000/callback", "http://[::1]:9000/callback"] {
+            assert!(loopback_redirect(ok).is_some(), "{ok}");
+        }
+        for refused in [
+            // IPv4-mapped loopback, which `anvil_transport::dns::is_literal_loopback` accepts.
+            "http://[::ffff:127.0.0.1]:9000/callback",
+            "http://localhost:9000/callback",
+            "http://127.0.0.1/callback",
+            "http://127.0.0.1:9000/callback#frag",
+            "https://127.0.0.1:9000/callback",
+        ] {
+            assert!(loopback_redirect(refused).is_none(), "{refused}");
+        }
+    }
+}
