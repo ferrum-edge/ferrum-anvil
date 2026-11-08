@@ -271,7 +271,9 @@ never appear in them, but a credential typed into a body or URL is exported
 as written, with a warning in the preview.
 
 A literal secret is a value that is not exactly one `{{variable}}` reference
-(or an argument-free helper such as `{{$guid}}`) spanning the whole value, of
+(or an argument-free helper such as `{{$guid}}`) spanning the whole value (in
+a field used as written, an HBONE proxy profile's extra headers or a header or
+trailer assertion, reference-shaped text is the literal itself), of
 an auth field (a password, token or key), of a secret variable, or of a
 header, query parameter, form field or gRPC metadata entry that is marked
 sensitive, whose name is itself a template (it may resolve to a credential
