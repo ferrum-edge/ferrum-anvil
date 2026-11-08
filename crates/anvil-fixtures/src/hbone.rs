@@ -11,6 +11,9 @@
 //! * a `CONNECT` whose authority is not in `allowed` is refused `403`
 //!   `{"error":"HBONE relay destination not allowed"}`;
 //! * an authority in `unavailable` answers `503`; a dial failure `502`;
+//! * an authority in `stalled_refusals` is refused `403` with headers and a
+//!   first body chunk ([`STALLED_REFUSAL_HEAD`]), and the body is then held
+//!   open until the client gives up (any marker);
 //! * otherwise `200` and the stream is spliced to a TCP connection.
 //!
 //! A `CONNECT` carrying the `udp` protocol marker (`x-ferrum-mesh-protocol`,
@@ -54,6 +57,8 @@ pub const DESTINATION_DENIED_BODY: &str = r#"{"error":"HBONE relay destination n
 pub const UDP_UNAUTHENTICATED_BODY: &str = r#"{"error":"HBONE UDP tunnel requires an authenticated mesh peer"}"#;
 pub const UDP_DESTINATION_DENIED_BODY: &str = r#"{"error":"HBONE UDP relay destination not allowed"}"#;
 pub const UDP_CAPACITY_BODY: &str = r#"{"error":"UDP egress relay session capacity exhausted"}"#;
+/// The first (and only) chunk of a stalled refusal body.
+pub const STALLED_REFUSAL_HEAD: &str = r#"{"error":"HBONE relay destination not allowed","detail":""#;
 
 /// How the fixture ends an admitted datagram tunnel (per authority).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +95,10 @@ pub struct HboneOptions {
     pub unavailable: Vec<String>,
     /// Datagram-tunnel faults by authority (`host:port`).
     pub udp_faults: Vec<(String, UdpTunnelFault)>,
+    /// Authorities refused `403` with a body that sends
+    /// [`STALLED_REFUSAL_HEAD`] and then never ends (byte-stream and
+    /// datagram tunnels alike).
+    pub stalled_refusals: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +152,33 @@ fn text(status: u16, body: &'static str) -> Response<Body> {
         .status(status)
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from_static(body.as_bytes())).boxed())
+        .expect("response")
+}
+
+/// A body that sends one chunk and then stays open: it never ends, so the
+/// client must give up on it (its deadline or a cancel resets the stream).
+struct Stalled(Option<Bytes>);
+
+impl hyper::body::Body for Stalled {
+    type Data = Bytes;
+    type Error = Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Infallible>>> {
+        match self.0.take() {
+            Some(b) => std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(b)))),
+            None => std::task::Poll::Pending,
+        }
+    }
+}
+
+fn stalled_refusal() -> Response<Body> {
+    Response::builder()
+        .status(403)
+        .header("content-type", "application/json")
+        .header("x-refusal", "stalled")
+        .body(Stalled(Some(Bytes::from_static(STALLED_REFUSAL_HEAD.as_bytes()))).boxed())
         .expect("response")
 }
 
@@ -237,6 +273,10 @@ async fn handle(
             status,
         });
     };
+    if opts.stalled_refusals.contains(&authority) {
+        record(403);
+        return stalled_refusal();
+    }
     // Ferrum's precedence: the first marker present decides (x-ferrum-mesh-protocol wins).
     let marker = req.headers().get("x-ferrum-mesh-protocol").or_else(|| req.headers().get("x-istio-protocol"));
     if marker.and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("udp")) {

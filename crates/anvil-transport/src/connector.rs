@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
@@ -120,10 +121,15 @@ pub async fn establish(
     timeouts: &Timeouts,
     proxy: Option<&ProxyPlan>,
 ) -> Result<Established, (TransportFailure, ConnectionObservation)> {
-    establish_with(rec, target, dns_cfg, timeouts, proxy, None).await
+    establish_with(rec, target, dns_cfg, timeouts, proxy, None, &CancellationToken::new(), None).await
 }
 
 /// [`establish`] with an optional PROXY protocol header written before TLS.
+/// `cancel` and `total_deadline` bound the read of an HBONE endpoint's
+/// refusal body ([`crate::hbone::open`]); the caller races the rest of the
+/// setup against them and must poll this future first, so that a refusal
+/// already received is kept.
+#[allow(clippy::too_many_arguments)]
 pub async fn establish_with(
     rec: &mut Recorder,
     target: &Target<'_>,
@@ -131,6 +137,8 @@ pub async fn establish_with(
     timeouts: &Timeouts,
     proxy: Option<&ProxyPlan>,
     header: Option<PreTlsHeader<'_>>,
+    cancel: &CancellationToken,
+    total_deadline: Option<std::time::Instant>,
 ) -> Result<Established, (TransportFailure, ConnectionObservation)> {
     let mut obs = blank_observation(next_connection_id());
     let stats = ConnStats::new();
@@ -161,7 +169,7 @@ pub async fn establish_with(
             Some("the HBONE endpoint connects to the destination (outer TCP: tunnel evidence)"),
         );
         let idx = rec.start(Phase::ProxyTunnel);
-        let io = match crate::hbone::open(rec, p, target.host, target.port, dns_cfg, timeouts).await {
+        let io = match crate::hbone::open(rec, p, target.host, target.port, dns_cfg, timeouts, cancel, total_deadline).await {
             Ok((io, t)) => {
                 rec.finish_with(
                     idx,
@@ -172,8 +180,7 @@ pub async fn establish_with(
                 io
             }
             Err((f, t)) => {
-                let st = t.failure.as_ref().map(|i| i.deadline_ms.is_some()).unwrap_or(false);
-                rec.finish_with(idx, if st { PhaseStatus::TimedOut } else { PhaseStatus::Failed }, format!("HBONE tunnel via {}", p.label));
+                rec.finish_with(idx, crate::hbone::tunnel_phase_status(&t), format!("HBONE tunnel via {}", p.label));
                 obs.tunnel = Some(t);
                 return Err((f, obs));
             }
