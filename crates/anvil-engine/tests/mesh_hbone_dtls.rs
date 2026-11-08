@@ -123,6 +123,7 @@ fn endpoint_options(allowed: Vec<String>, faults: Vec<(String, UdpTunnelFault)>)
         allowed,
         unavailable: vec![],
         udp_faults: faults,
+        stalled_refusals: vec![],
     }
 }
 

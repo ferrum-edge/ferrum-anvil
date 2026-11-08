@@ -300,6 +300,7 @@ async fn hbone_endpoint(client_auth: ClientAuth, alpn: &[&str], extra_allowed: &
             allowed,
             unavailable: vec!["127.0.0.1:9".into()],
             udp_faults: vec![],
+            stalled_refusals: vec![],
         },
     )
     .await
@@ -376,6 +377,7 @@ async fn hbone_tunnel_carries_inner_tls_and_http2_to_the_destination() {
             allowed: vec![format!("localhost:{}", echo.addr.port())],
             unavailable: vec![],
             udp_faults: vec![],
+            stalled_refusals: vec![],
         },
     )
     .await
@@ -525,4 +527,82 @@ async fn hbone_endpoint_problems_before_connect_are_tunnel_leg_failures() {
     assert_eq!(failure(&o).kind, FailureKind::HboneProtocolError);
     assert_eq!(tunnel(&o).failure.as_ref().unwrap().kind, FailureKind::TlsAlpnMismatch);
     assert!(h.endpoint.connects().is_empty());
+}
+
+/// An endpoint that refuses `stalled` with `403`, headers and a first body
+/// chunk, then holds the refusal body open (#500).
+async fn stalling_endpoint(stalled: &str) -> hbone::HboneFixture {
+    hbone::serve(
+        "127.0.0.1:0",
+        HboneOptions {
+            server_cert_chain_pem: mesh().ztunnel.chain_with(&mesh().ca),
+            server_key_pem: mesh().ztunnel.key.clone(),
+            client_auth: required(),
+            alpn: vec!["h2".into()],
+            allowed: vec![],
+            unavailable: vec![],
+            udp_faults: vec![],
+            stalled_refusals: vec![stalled.into()],
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// The refusal evidence a cut-short refusal body keeps: the endpoint's
+/// status and headers, and the body received before the cut.
+fn assert_refusal_kept(o: &AttemptOutput) {
+    let f = failure(o);
+    assert_eq!(f.status, Some(403), "{f:?}");
+    assert_eq!(f.phase, Phase::ProxyTunnel);
+    assert_eq!(o.observation.dispatch, DispatchState::NotDispatched);
+    assert!(o.response.is_none(), "a CONNECT refusal is not a destination response");
+    let t = tunnel(o);
+    assert_eq!(t.connect_status, Some(403));
+    assert!(t.response_headers.iter().any(|h| h.name == "x-refusal" && h.value == "stalled"), "{:?}", t.response_headers);
+    assert_eq!(t.refusal_body.as_deref(), Some(hbone::STALLED_REFUSAL_HEAD));
+    assert!(t.refusal_body_truncated, "the body never ended");
+    assert_eq!(t.failure.as_ref().map(|i| i.kind), Some(f.kind));
+}
+
+#[tokio::test]
+async fn a_refusal_body_held_open_past_the_total_deadline_keeps_the_refusal() {
+    init();
+    let target = "127.0.0.1:1";
+    let endpoint = stalling_endpoint(target).await;
+    let mut p = plan(&format!("http://{target}/x"), None, Some(hbone_proxy(&endpoint.address(), client_svid_tls(), &[])));
+    // The idle wait per chunk (at most 5 s) outlasts the total deadline.
+    p.timeouts.body_idle_ms = Some(5_000);
+    p.timeouts.total_ms = Some(1_500);
+    let started = std::time::Instant::now();
+    let o = run(&HttpTransport::new(), &p).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(4_500), "the read stopped at the deadline: {:?}", started.elapsed());
+    let f = failure(&o);
+    assert_eq!(f.kind, FailureKind::TotalTimeout, "{f:?}");
+    assert_eq!(f.deadline_ms, Some(1_500));
+    assert_refusal_kept(&o);
+    assert_eq!(o.observation.phase(Phase::ProxyTunnel).unwrap().status, PhaseStatus::TimedOut);
+    assert_eq!(endpoint.connects().len(), 1);
+    assert_eq!(endpoint.connects()[0].status, 403);
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_refusal_body_is_read_keeps_the_refusal() {
+    init();
+    let target = "127.0.0.1:1";
+    let endpoint = stalling_endpoint(target).await;
+    let mut p = plan(&format!("http://{target}/x"), None, Some(hbone_proxy(&endpoint.address(), client_svid_tls(), &[])));
+    p.timeouts.body_idle_ms = Some(5_000);
+    let cancel = CancellationToken::new();
+    let c = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+        c.cancel();
+    });
+    let mut outs = HttpTransport::new().execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &cancel).await;
+    let o = outs.pop().unwrap();
+    let f = failure(&o);
+    assert_eq!(f.kind, FailureKind::Canceled, "{f:?}");
+    assert_refusal_kept(&o);
+    assert_eq!(o.observation.phase(Phase::ProxyTunnel).unwrap().status, PhaseStatus::Canceled);
 }

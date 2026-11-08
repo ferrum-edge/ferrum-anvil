@@ -530,8 +530,11 @@ pub async fn establish_guarded_with(
         Deadline,
     }
     let ev = {
-        let fut = connector::establish_with(rec, target, dns, timeouts, proxy, header);
+        // Polled first: an HBONE endpoint's refusal already received ends at
+        // the deadline or a cancel inside it, with its evidence kept.
+        let fut = connector::establish_with(rec, target, dns, timeouts, proxy, header, cancel, total_deadline);
         tokio::select! {
+            biased;
             r = fut => Ev::Done(r),
             _ = cancel.cancelled() => Ev::Canceled,
             _ = sleep_until_opt(total_deadline) => Ev::Deadline,

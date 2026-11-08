@@ -39,8 +39,9 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_util::sync::CancellationToken;
 
 /// Refusal bodies are evidence, bounded: a record keeps at most this much.
 pub const MAX_REFUSAL_BODY: usize = 8 * 1024;
@@ -298,8 +299,59 @@ pub(crate) async fn endpoint_leg(
     Ok(Leg { sub, t, stream, stats: outer_stats, authority })
 }
 
+/// How a refused `CONNECT` ends: as the refusal, or cut short while its
+/// body was read by the attempt's total deadline or a cancel. The status,
+/// response headers and the body captured so far are kept either way.
+pub(crate) fn refusal_failure(
+    cut: Option<FailureKind>,
+    status: u16,
+    refused: &str,
+    consequence: &str,
+    timeouts: &Timeouts,
+) -> (TransportFailure, PhaseStatus) {
+    let (mut f, st) = match cut {
+        Some(FailureKind::TotalTimeout) => (
+            TransportFailure::new(
+                Phase::ProxyTunnel,
+                FailureKind::TotalTimeout,
+                format!("{refused}, and the total deadline elapsed while its refusal body was still being read; {consequence}"),
+            )
+            .with_deadline(timeouts.total_ms),
+            PhaseStatus::TimedOut,
+        ),
+        Some(_) => (
+            TransportFailure::new(
+                Phase::ProxyTunnel,
+                FailureKind::Canceled,
+                format!("{refused}, and the attempt was canceled while its refusal body was being read; {consequence}"),
+            ),
+            PhaseStatus::Canceled,
+        ),
+        None => (
+            TransportFailure::new(Phase::ProxyTunnel, FailureKind::HboneConnectRefused, format!("{refused}; {consequence}")),
+            PhaseStatus::Failed,
+        ),
+    };
+    f.status = Some(status);
+    (f, st)
+}
+
+/// The status of the attempt's `proxy_tunnel` phase for a failed tunnel
+/// (`t.failure`, the tunnel's own failure).
+pub(crate) fn tunnel_phase_status(t: &TunnelObservation) -> PhaseStatus {
+    match t.failure.as_ref() {
+        Some(f) if f.kind == FailureKind::Canceled => PhaseStatus::Canceled,
+        Some(f) if f.deadline_ms.is_some() => PhaseStatus::TimedOut,
+        _ => PhaseStatus::Failed,
+    }
+}
+
 /// Open an HBONE tunnel to `target_host:target_port` through `p`. Records the
-/// outer phases in the tunnel observation (same clock as `rec`).
+/// outer phases in the tunnel observation (same clock as `rec`). A refusal
+/// body is read within `total_deadline` and stops at `cancel`, so the
+/// caller's own race against them (which drops this future and its
+/// evidence) must poll this future first.
+#[allow(clippy::too_many_arguments)]
 pub async fn open(
     rec: &Recorder,
     p: &ProxyPlan,
@@ -307,6 +359,8 @@ pub async fn open(
     target_port: u16,
     dns_cfg: &DnsConfig,
     timeouts: &Timeouts,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
 ) -> Result<(BoxIo, TunnelObservation), (TransportFailure, TunnelObservation)> {
     let Leg { mut sub, mut t, stream: tls_stream, stats: outer_stats, authority } =
         endpoint_leg(rec, p, target_host, target_port, dns_cfg, timeouts).await?;
@@ -412,12 +466,22 @@ pub async fn open(
         .collect();
 
     if !(200..300).contains(&status) {
-        // Keep the refusal (status + bounded body) as evidence.
+        // Keep the refusal (status + bounded body) as evidence. The body is
+        // read within the attempt's total deadline and stops at a cancel: a
+        // body held open or trickled past either ends there, with what was
+        // captured kept.
         let mut body = resp.into_body();
         let mut captured = BytesMut::new();
         let mut truncated = false;
+        let idle = Duration::from_millis(timeouts.body_idle_ms.unwrap_or(5_000).min(5_000));
+        let mut cut = None;
         loop {
-            let frame = tokio::time::timeout(Duration::from_millis(timeouts.body_idle_ms.unwrap_or(5_000).min(5_000)), body.frame()).await;
+            let frame = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => { cut = Some(FailureKind::Canceled); break; }
+                _ = crate::http::sleep_until_opt(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
+                f = tokio::time::timeout(idle, body.frame()) => f,
+            };
             match frame {
                 Ok(Some(Ok(fr))) => {
                     if let Ok(d) = fr.into_data() {
@@ -441,16 +505,15 @@ pub async fn open(
         if !captured.is_empty() {
             t.refusal_body = Some(String::from_utf8_lossy(&captured).into_owned());
         }
-        t.refusal_body_truncated = truncated;
-        let mut f = TransportFailure::new(
-            Phase::ProxyTunnel,
-            FailureKind::HboneConnectRefused,
-            format!(
-                "the HBONE endpoint {endpoint} refused the CONNECT to {authority} with HTTP {status}; the destination was not contacted"
-            ),
+        t.refusal_body_truncated = truncated || cut.is_some();
+        let (f, st) = refusal_failure(
+            cut,
+            status,
+            &format!("the HBONE endpoint {endpoint} refused the CONNECT to {authority} with HTTP {status}"),
+            "the destination was not contacted",
+            timeouts,
         );
-        f.status = Some(status);
-        sub.finish_with(c_idx, PhaseStatus::Failed, format!("CONNECT {authority} → {status}"));
+        sub.finish_with(c_idx, st, format!("CONNECT {authority} → {status}"));
         t.phases = std::mem::take(&mut sub.phases);
         t.failure = Some(f.clone());
         return Err((f, t));

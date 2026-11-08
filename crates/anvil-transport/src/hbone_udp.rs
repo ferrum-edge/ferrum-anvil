@@ -157,7 +157,10 @@ fn datagram_leg_failure(mut t: TunnelObservation, f: TransportFailure) -> (Trans
 
 /// Open the datagram tunnel to `host:port` through the HBONE endpoint `p`
 /// (whose `connect_headers` carry the `udp` marker). The outer phases go to
-/// the tunnel observation, on the clock of `rec`.
+/// the tunnel observation, on the clock of `rec`. A refusal body is read
+/// within `total_deadline` and stops at `cancel`, as for the byte-stream
+/// tunnel ([`hbone::open`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn open(
     rec: &Recorder,
     p: &ProxyPlan,
@@ -165,6 +168,8 @@ pub async fn open(
     port: u16,
     dns_cfg: &DnsConfig,
     timeouts: &Timeouts,
+    cancel: &CancellationToken,
+    total_deadline: Option<Instant>,
 ) -> Result<(DatagramTunnel, TunnelObservation), (TransportFailure, TunnelObservation)> {
     let Leg { mut sub, mut t, stream, stats, authority } = match hbone::endpoint_leg(rec, p, host, port, dns_cfg, timeouts).await {
         Ok(l) => l,
@@ -280,12 +285,21 @@ pub async fn open(
     let mut rx = resp.into_body();
 
     if !(200..300).contains(&status) {
-        // Keep the refusal (status + bounded body) as evidence; no record was sent.
+        // Keep the refusal (status + bounded body) as evidence; no record was
+        // sent. The body is read within the attempt's total deadline and
+        // stops at a cancel, with what was captured kept.
         let idle = Duration::from_millis(timeouts.body_idle_ms.unwrap_or(5_000).min(5_000));
         let mut captured = BytesMut::new();
         let mut truncated = false;
+        let mut cut = None;
         loop {
-            match tokio::time::timeout(idle, rx.data()).await {
+            let chunk = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => { cut = Some(FailureKind::Canceled); break; }
+                _ = sleep_until_opt(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
+                c = tokio::time::timeout(idle, rx.data()) => c,
+            };
+            match chunk {
                 Ok(Some(Ok(d))) => {
                     let _ = rx.flow_control().release_capacity(d.len());
                     let room = hbone::REFUSAL_CAPTURE.saturating_sub(captured.len());
@@ -309,16 +323,15 @@ pub async fn open(
         if !captured.is_empty() {
             t.refusal_body = Some(String::from_utf8_lossy(&captured).into_owned());
         }
-        t.refusal_body_truncated = truncated;
-        let mut f = TransportFailure::new(
-            Phase::ProxyTunnel,
-            FailureKind::HboneConnectRefused,
-            format!(
-                "the HBONE endpoint {endpoint} refused the datagram CONNECT to {authority} with HTTP {status}; no tunnel was opened and no datagram was sent"
-            ),
+        t.refusal_body_truncated = truncated || cut.is_some();
+        let (f, st) = hbone::refusal_failure(
+            cut,
+            status,
+            &format!("the HBONE endpoint {endpoint} refused the datagram CONNECT to {authority} with HTTP {status}"),
+            "no tunnel was opened and no datagram was sent",
+            timeouts,
         );
-        f.status = Some(status);
-        sub.finish_with(c_idx, PhaseStatus::Failed, format!("CONNECT {authority} → {status}"));
+        sub.finish_with(c_idx, st, format!("CONNECT {authority} → {status}"));
         t.phases = std::mem::take(&mut sub.phases);
         t.failure = Some(f.clone());
         return Err((f, t));
@@ -599,22 +612,20 @@ pub(crate) async fn open_channel(
         Some("UDP is connectionless; the HBONE endpoint opens the UDP socket toward the destination (outer TCP: tunnel evidence)"),
     );
     let idx = rec.start(Phase::ProxyTunnel);
+    // `open` is polled first: once it has the endpoint's refusal it ends at
+    // the deadline or a cancel itself, keeping that evidence.
     let opened = tokio::select! {
-        r = open(rec, p, host, port, dns, timeouts) => Ok(r),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::TotalTimeout,
-            "the total deadline elapsed while opening the HBONE datagram tunnel").with_deadline(timeouts.total_ms)),
+        biased;
+        r = open(rec, p, host, port, dns, timeouts, cancel, total_deadline) => Ok(r),
         _ = cancel.cancelled() => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::Canceled,
             "canceled while opening the HBONE datagram tunnel")),
+        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::TotalTimeout,
+            "the total deadline elapsed while opening the HBONE datagram tunnel").with_deadline(timeouts.total_ms)),
     };
     let (tunnel, t) = match opened {
         Ok(Ok(x)) => x,
         Ok(Err((f, t))) => {
-            let timed_out = t.failure.as_ref().is_some_and(|i| i.deadline_ms.is_some());
-            rec.finish_with(
-                idx,
-                if timed_out { PhaseStatus::TimedOut } else { PhaseStatus::Failed },
-                format!("HBONE datagram tunnel via {}", p.label),
-            );
+            rec.finish_with(idx, hbone::tunnel_phase_status(&t), format!("HBONE datagram tunnel via {}", p.label));
             cobs.tunnel = Some(t);
             obs.connection = Some(cobs);
             return Err(f);

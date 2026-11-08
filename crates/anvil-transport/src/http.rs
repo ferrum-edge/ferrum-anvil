@@ -996,12 +996,25 @@ impl HttpTransport {
                     match resumption {
                         Some(r) => connector::establish_resumable(&mut rec, &target, &plan.dns, &plan.timeouts, r, header).await,
                         None => (
-                            connector::establish_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), header).await,
+                            connector::establish_with(
+                                &mut rec,
+                                &target,
+                                &plan.dns,
+                                &plan.timeouts,
+                                plan.proxy.as_ref(),
+                                header,
+                                cancel,
+                                total_deadline,
+                            )
+                            .await,
                             None,
                         ),
                     }
                 };
+                // Polled first: an HBONE endpoint's refusal already received
+                // ends at the deadline or a cancel inside it, with its evidence.
                 let est = tokio::select! {
+                    biased;
                     (r, info) = connecting => {
                         if let (Some(e), Some(i)) = (early.as_mut(), info) {
                             e.info = Some(i);
