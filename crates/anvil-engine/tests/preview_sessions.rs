@@ -411,6 +411,8 @@ async fn the_negotiated_version_note_names_auth_fields_and_not_transport_replace
     sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
     sse.headers.push(KeyValue::new("Connection", "authorization, accept, cache-control, content-length"));
     sse.headers.push(KeyValue::new("Content-Length", "0"));
+    sse.headers.push(KeyValue::new("TE", "trailers"));
+    sse.headers.push(KeyValue::new("TE", "gzip"));
     sse.headers.push(KeyValue::new("Accept", "application/json"));
     sse.headers.push(KeyValue::new("Cache-Control", "no-cache"));
     let p = e.preview(&with_auth(sse, Some(HttpVersionPolicy::Auto), hmac())).unwrap();
@@ -422,6 +424,7 @@ async fn the_negotiated_version_note_names_auth_fields_and_not_transport_replace
     assert!(!named.iter().any(|n| n == "accept"), "the event stream's Accept is sent on every version: {note}");
     assert!(!named.iter().any(|n| n == "cache-control"), "the transport's Cache-Control default is sent on every version: {note}");
     assert!(!named.iter().any(|n| n == "content-length"), "hyper sets Content-Length from the body on HTTP/2: {note}");
+    assert!(!named.iter().any(|n| n == "te"), "TE: trailers is still sent over HTTP/2 and HTTP/3: {note}");
 }
 
 #[tokio::test]

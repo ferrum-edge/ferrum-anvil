@@ -114,9 +114,13 @@ impl Shape {
         // HTTP/2), as the preview's body size shows: it is never named.
         let replaced =
             |n: &str| n.eq_ignore_ascii_case("content-length") || self.req.transport.iter().any(|(t, _, _)| t.eq_ignore_ascii_case(n));
+        // A field some value of which is still sent (`TE: trailers` beside
+        // `TE: gzip`) is not wholly left out, so it is not named.
+        let survives = |n: &str| headers.iter().any(|(m, w)| m.eq_ignore_ascii_case(n) && !rule.drops(m, w));
         let mut names: Vec<&str> = Vec::new();
         for (n, v) in headers {
             if rule.drops(n, v)
+                && !survives(n)
                 && !self.req.not_sent.contains(&n.to_ascii_lowercase().as_str())
                 && !replaced(n)
                 && !names.iter().any(|m| m.eq_ignore_ascii_case(n))
