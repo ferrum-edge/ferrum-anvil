@@ -480,8 +480,9 @@ pub async fn open(
                 biased;
                 _ = cancel.cancelled() => { cut = Some(FailureKind::Canceled); break; }
                 // The clock, not only the timer: a caller whose own deadline
-                // timer fired polls this once more before dropping it.
-                _ = std::future::ready(()), if total_deadline.is_some_and(|d| Instant::now() >= d) => { cut = Some(FailureKind::TotalTimeout); break; }
+                // timer fired polls this once more before dropping it, and
+                // this one's timer may not have fired yet.
+                _ = crate::http::past(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
                 _ = crate::http::sleep_until_opt(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
                 f = tokio::time::timeout(idle, body.frame()) => f,
             };

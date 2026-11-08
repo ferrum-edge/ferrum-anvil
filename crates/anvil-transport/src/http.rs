@@ -1730,6 +1730,15 @@ pub(crate) async fn settle_once<F: std::future::Future>(mut fut: Pin<&mut F>) ->
     .await
 }
 
+/// Ready once the clock has reached `at`, read on every poll (no timer, so
+/// it registers no wake-up of its own): a `select!` polled again, after a
+/// caller's timer for the same instant fired but before this task's own did,
+/// still sees the deadline. A `select!` precondition would not: it is read
+/// once, when the `select!` starts.
+pub(crate) fn past(at: Option<Instant>) -> impl std::future::Future<Output = ()> {
+    std::future::poll_fn(move |_| if at.is_some_and(|d| Instant::now() >= d) { Poll::Ready(()) } else { Poll::Pending })
+}
+
 pub async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
@@ -1761,16 +1770,21 @@ mod tests {
         cancel.cancel();
         assert_eq!(settle_once(settles.as_mut()).await, Some("kept the evidence"));
 
-        let deadline = Instant::now();
+        // The deadline passes between two polls of one `select!`, with no
+        // timer to wake it: `past` reads the clock on the second poll.
+        let deadline = Instant::now() + Duration::from_millis(50);
         let by_clock = async {
             tokio::select! {
                 biased;
-                _ = std::future::ready(()), if Instant::now() >= deadline => "deadline seen on the clock",
+                _ = past(Some(deadline)) => "deadline seen on the clock",
                 _ = std::future::pending::<()>() => unreachable!(),
             }
         };
         tokio::pin!(by_clock);
+        assert_eq!(settle_once(by_clock.as_mut()).await, None, "not yet");
+        std::thread::sleep(Duration::from_millis(60));
         assert_eq!(settle_once(by_clock.as_mut()).await, Some("deadline seen on the clock"));
+        assert_eq!(settle_once(std::pin::pin!(past(None))).await, None, "no deadline");
 
         let never = std::future::pending::<()>();
         tokio::pin!(never);

@@ -297,7 +297,7 @@ pub async fn open(
                 biased;
                 _ = cancel.cancelled() => { cut = Some(FailureKind::Canceled); break; }
                 // The clock, not only the timer (see `hbone::open`).
-                _ = std::future::ready(()), if total_deadline.is_some_and(|d| Instant::now() >= d) => { cut = Some(FailureKind::TotalTimeout); break; }
+                _ = crate::http::past(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
                 _ = sleep_until_opt(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
                 c = tokio::time::timeout(idle, rx.data()) => c,
             };
