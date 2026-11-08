@@ -153,6 +153,14 @@
 
 ### Fixed
 
+- HTTP/3 requests, WebSocket over HTTP/3, SSE over HTTP/3, gRPC over HTTP/3 and MASQUE CONNECT-UDP
+  no longer send `Proxy-Connection`, a `TE` other than `trailers`, or a field a `Connection` value
+  names. RFC 9114 makes such a request malformed, so the server reset the stream where the same
+  request over HTTP/2 succeeded. Every HTTP/2 and HTTP/3 builder now applies one rule, the one
+  hyper applies on HTTP/2, and the effective-request preview of WebSocket, SSE and gRPC sessions
+  over HTTP/2 or HTTP/3 no longer lists those fields. Where ALPN or an HTTP/3 fallback picks the
+  version when the request is sent, the preview keeps showing them and a note names the ones HTTP/2
+  and HTTP/3 leave out (#499).
 - An HBONE `CONNECT` refusal whose body the endpoint held open or trickled past the total deadline,
   or that was canceled while the body was read, keeps its evidence: the endpoint's status, response
   headers and the body captured so far stay in the tunnel record, and `hbone.tunnel_refused` (or

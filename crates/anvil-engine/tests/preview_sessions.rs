@@ -329,6 +329,104 @@ async fn sse_preview_is_the_request_sent_over_http1_and_http2() {
     }
 }
 
+/// `s` with fields an HTTP/2 or HTTP/3 request must not carry (RFC 9113
+/// §8.2.2, RFC 9114 §4.2), and one that it may.
+fn with_connection_specific_fields(mut s: RequestSpec) -> RequestSpec {
+    for (n, v) in [("Proxy-Connection", "keep-alive"), ("TE", "gzip"), ("Connection", "X-Hop"), ("X-Hop", "1"), ("X-Kept", "1")] {
+        s.headers.push(KeyValue::new(n, v));
+    }
+    s
+}
+
+#[tokio::test]
+async fn the_preview_over_http2_leaves_out_the_connection_specific_fields_the_transport_leaves_out() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let ws = with_connection_specific_fields(ws_spec(&format!("ws://{}/ws?close_after=1", f.addr), WsBootstrap::Http2ExtendedConnect));
+    let mut sse = with_connection_specific_fields(RequestSpec::http("GET", &f.url("/sse?count=1&interval=1")));
+    sse.protocol = Protocol::Sse;
+    sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
+    let cases = [
+        ("ws over HTTP/2", with_auth(ws, None, hmac()), "/ws"),
+        ("sse over HTTP/2", with_auth(sse, Some(HttpVersionPolicy::H2c), hmac()), "/sse"),
+    ];
+    for (label, c, path) in cases {
+        let (p, r) = preview_and_send(label, &e, &c, &f.log, path).await;
+        for name in ["proxy-connection", "te", "connection", "x-hop"] {
+            assert!(!p.headers.iter().any(|h| h.name.eq_ignore_ascii_case(name)), "{label}: the preview shows {name}: {:?}", p.headers);
+            assert!(header(&r.headers, name).is_none(), "{label}: {name} was sent: {:?}", r.headers);
+        }
+        assert!(p.headers.iter().any(|h| h.name.eq_ignore_ascii_case("x-kept") && h.value == "1"), "{label}: {:?}", p.headers);
+        assert_preview_sent(label, &p, &r);
+    }
+}
+
+/// Where ALPN or an HTTP/3 fallback picks the version when the request is
+/// sent, HTTP/1.1 sends the fields HTTP/2 and HTTP/3 leave out: the preview
+/// shows them and names them in a note.
+#[tokio::test]
+async fn a_negotiated_version_shows_the_connection_specific_fields_and_says_where_they_are_left_out() {
+    init();
+    let e = Engine::new();
+    let mut sse = with_connection_specific_fields(RequestSpec::http("GET", "https://api.example.test/events"));
+    sse.protocol = Protocol::Sse;
+    sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
+    let mut web = grpc("https://api.example.test/", GrpcWire::GrpcWeb, HttpVersionPolicy::Auto, hmac());
+    web.spec = with_connection_specific_fields(web.spec);
+    let cases = [
+        ("sse, automatic HTTP/3", with_auth(sse.clone(), Some(HttpVersionPolicy::Http3WithFallback), hmac())),
+        ("sse over TLS, ALPN", with_auth(sse, Some(HttpVersionPolicy::Auto), hmac())),
+        ("gRPC-Web over TLS, ALPN", web),
+    ];
+    for (label, c) in cases {
+        let p = e.preview(&c).unwrap_or_else(|f| panic!("{label}: {f:?}"));
+        for name in ["proxy-connection", "x-hop", "x-kept"] {
+            assert!(p.headers.iter().any(|h| h.name.eq_ignore_ascii_case(name)), "{label}: {name} is sent over HTTP/1.1: {:?}", p.headers);
+        }
+        let note = p
+            .inferred
+            .iter()
+            .find(|i| i.contains("left out over HTTP/2 and HTTP/3"))
+            .unwrap_or_else(|| panic!("{label}: no note: {:?}", p.inferred));
+        let named: Vec<String> =
+            note.split(" are sent over").next().unwrap_or_default().split(", ").map(|n| n.to_ascii_lowercase()).collect();
+        for name in ["proxy-connection", "te", "x-hop"] {
+            assert!(named.iter().any(|n| n == name), "{label}: {name} not named: {note}");
+        }
+        assert!(!named.iter().any(|n| n == "x-kept"), "{label}: {note}");
+    }
+}
+
+/// The note is computed from the headers as sent, after auth: a credential
+/// auth adds and a `Connection` value names is named, and a field the
+/// transport replaces or defaults on every version (an event stream's
+/// `Accept` and `Cache-Control`) is not.
+#[tokio::test]
+async fn the_negotiated_version_note_names_auth_fields_and_not_transport_replaced_ones() {
+    init();
+    let e = Engine::new();
+    let mut sse = RequestSpec::http("GET", "https://api.example.test/events");
+    sse.protocol = Protocol::Sse;
+    sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
+    sse.headers.push(KeyValue::new("Connection", "authorization, accept, cache-control, content-length"));
+    sse.headers.push(KeyValue::new("Content-Length", "0"));
+    sse.headers.push(KeyValue::new("TE", "trailers"));
+    sse.headers.push(KeyValue::new("TE", "gzip"));
+    sse.headers.push(KeyValue::new("Accept", "application/json"));
+    sse.headers.push(KeyValue::new("Cache-Control", "no-cache"));
+    let p = e.preview(&with_auth(sse, Some(HttpVersionPolicy::Auto), hmac())).unwrap();
+    let note =
+        p.inferred.iter().find(|i| i.contains("left out over HTTP/2 and HTTP/3")).unwrap_or_else(|| panic!("no note: {:?}", p.inferred));
+    let named: Vec<String> = note.split(" are sent over").next().unwrap_or_default().split(", ").map(|n| n.to_ascii_lowercase()).collect();
+    assert!(named.iter().any(|n| n == "authorization"), "{note}");
+    assert!(named.iter().any(|n| n == "connection"), "{note}");
+    assert!(!named.iter().any(|n| n == "accept"), "the event stream's Accept is sent on every version: {note}");
+    assert!(!named.iter().any(|n| n == "cache-control"), "the transport's Cache-Control default is sent on every version: {note}");
+    assert!(!named.iter().any(|n| n == "content-length"), "hyper sets Content-Length from the body on HTTP/2: {note}");
+    assert!(!named.iter().any(|n| n == "te"), "TE: trailers is still sent over HTTP/2 and HTTP/3: {note}");
+}
+
 #[tokio::test]
 async fn grpc_preview_is_the_call_sent_over_h2c_and_grpc_web_over_http1() {
     init();

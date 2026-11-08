@@ -18,6 +18,7 @@
 //! [`H3Transport::execute_attempt`]): by this transport when none of it
 //! left, else by the engine, which signs it again.
 
+use crate::connection_fields::ConnectionSpecific;
 use crate::dns;
 use crate::errors::display_chain;
 use crate::fence::Generations;
@@ -804,13 +805,11 @@ fn build_request(plan: &HttpPlan) -> Result<(http::Request<()>, String), Transpo
     let explicit_host = plan.headers.iter().find(|(n, _)| n == http::header::HOST).map(|(_, v)| v.to_str().unwrap_or("").to_string());
     let uri = format!("https://{}{}", explicit_host.unwrap_or_else(|| plan.authority.clone()), plan.request_target);
     let mut req = http::Request::builder().method(plan.method.clone()).uri(uri.clone());
+    let specific = ConnectionSpecific::of_fields(plan.headers.iter().map(|(n, v)| (n, v)));
     for (n, v) in &plan.headers {
-        if n == http::header::HOST
-            || n == http::header::CONNECTION
-            || n == http::header::TRANSFER_ENCODING
-            || n == http::header::UPGRADE
-            || n.as_str() == "keep-alive"
-        {
+        // The Host travels as :authority; connection-specific fields make an
+        // HTTP/3 message malformed (RFC 9114 §4.2).
+        if n == http::header::HOST || specific.drops_field(n, v) {
             continue;
         }
         req = req.header(n, v);
@@ -2119,6 +2118,50 @@ impl H3Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_leaves_out_connection_specific_fields() {
+        let fields = [
+            ("host", "example.test"),
+            ("proxy-connection", "keep-alive"),
+            ("te", "gzip"),
+            ("connection", "x-hop"),
+            ("x-hop", "1"),
+            ("keep-alive", "timeout=5"),
+            ("transfer-encoding", "chunked"),
+            ("upgrade", "h2c"),
+            ("x-kept", "1"),
+        ];
+        let mut plan = HttpPlan {
+            proxy_header: None,
+            proxy_header_withheld: None,
+            method: http::Method::GET,
+            https: true,
+            authority: "example.test".into(),
+            host: "example.test".into(),
+            port: 443,
+            request_target: "/".into(),
+            headers: fields.iter().map(|&(n, v)| (http::HeaderName::from_static(n), http::HeaderValue::from_static(v))).collect(),
+            body: Bytes::new(),
+            version: anvil_domain::settings::HttpVersionPolicy::Http3Only,
+            timeouts: anvil_domain::settings::Timeouts::default(),
+            limits: Limits::default(),
+            keepalive: true,
+            dns: crate::dns::DnsConfig::default(),
+            proxy: None,
+            tls: None,
+            isolation: "test".into(),
+            display_url: "https://example.test/".into(),
+            early_data: EarlyDataIntent::Off,
+            fence: None,
+        };
+        let (req, uri) = build_request(&plan).unwrap();
+        assert_eq!(uri, "https://example.test/", "the Host is the :authority");
+        let names: Vec<&str> = req.headers().keys().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["x-kept"]);
+        plan.headers = vec![(http::header::TE, http::HeaderValue::from_static("trailers"))];
+        assert_eq!(build_request(&plan).unwrap().0.headers().get("te").unwrap(), "trailers", "the one TE value HTTP/3 allows");
+    }
 
     #[test]
     fn the_field_section_limit_is_clamped_to_what_settings_can_carry() {

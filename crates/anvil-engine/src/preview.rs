@@ -179,6 +179,9 @@ impl Engine {
             Err(e) => inferred.push(format!("the request would not be sent: {}", redactor.text(&e.to_string()))),
         }
         let authority = http_exec::request_authority(&headers, &target);
+        if let Some(note) = shape.negotiated_fields_note(&headers) {
+            inferred.push(note);
+        }
         shape.transport_headers(&mut headers, &authority);
         let body_preview = if let Some(m) = &shape.message {
             // A gRPC call's message as the JSON it is encoded from; its body
