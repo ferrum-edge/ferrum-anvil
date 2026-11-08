@@ -7,7 +7,12 @@
 //! - `Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding` and
 //!   `Upgrade` are left out;
 //! - so is every field a `Connection` value nominates;
-//! - and `TE`, unless its value is `trailers`.
+//! - and `TE`, unless its value is exactly `trailers` (hyper's HTTP/2
+//!   client compares the bytes, so `Trailers` is left out too).
+//!
+//! Values are compared as UTF-8 text, so the preview (which holds the
+//! request's fields as strings) and the transport (which holds them as
+//! header values) decide alike.
 
 use http::{HeaderName, HeaderValue};
 
@@ -35,10 +40,10 @@ impl ConnectionSpecific {
         ConnectionSpecific { nominated }
     }
 
-    /// [`Self::of`] for typed fields. A value that is not text nominates
-    /// nothing.
+    /// [`Self::of`] for typed fields. A value that is not UTF-8 nominates
+    /// nothing (one built from a string always is).
     pub fn of_fields<'a>(fields: impl IntoIterator<Item = (&'a HeaderName, &'a HeaderValue)>) -> Self {
-        Self::of(fields.into_iter().filter_map(|(n, v)| v.to_str().ok().map(|v| (n.as_str(), v))))
+        Self::of(fields.into_iter().filter_map(|(n, v)| std::str::from_utf8(v.as_bytes()).ok().map(|v| (n.as_str(), v))))
     }
 
     /// Whether `name: value` is left out of an HTTP/2 or HTTP/3 request.
@@ -47,16 +52,16 @@ impl ConnectionSpecific {
         if CONNECTION_SPECIFIC.iter().any(|c| name.eq_ignore_ascii_case(c)) {
             return true;
         }
-        if name.eq_ignore_ascii_case("te") && !value.trim().eq_ignore_ascii_case("trailers") {
+        if name.eq_ignore_ascii_case("te") && value != "trailers" {
             return true;
         }
         self.nominated.iter().any(|n| name.eq_ignore_ascii_case(n))
     }
 
-    /// [`Self::drops`] for a typed field. A `TE` value that is not text is
+    /// [`Self::drops`] for a typed field. A `TE` value that is not UTF-8 is
     /// not `trailers`.
     pub fn drops_field(&self, name: &HeaderName, value: &HeaderValue) -> bool {
-        self.drops(name.as_str(), value.to_str().unwrap_or(""))
+        self.drops(name.as_str(), std::str::from_utf8(value.as_bytes()).unwrap_or(""))
     }
 }
 
@@ -86,11 +91,30 @@ mod tests {
     }
 
     #[test]
-    fn te_trailers_is_kept() {
+    fn only_te_trailers_is_kept() {
         assert_eq!(kept(&[("TE", "trailers")]), ["TE: trailers"]);
-        assert_eq!(kept(&[("te", " Trailers ")]), ["te:  Trailers "]);
+        // hyper's HTTP/2 client keeps only these exact bytes.
+        assert!(kept(&[("te", "Trailers")]).is_empty());
+        assert!(kept(&[("te", " trailers")]).is_empty());
         assert!(kept(&[("te", "trailers, gzip")]).is_empty());
         assert!(kept(&[("te", "")]).is_empty());
+    }
+
+    #[test]
+    fn strings_and_typed_values_decide_alike() {
+        // A UTF-8 value `HeaderValue::from_str` accepts but `to_str` refuses.
+        let fields = [("connection", "x-hop, café"), ("x-hop", "1"), ("x-kept", "é")];
+        let by_text = kept(&fields);
+        let typed: Vec<(HeaderName, HeaderValue)> =
+            fields.iter().map(|&(n, v)| (HeaderName::from_static(n), HeaderValue::from_str(v).unwrap())).collect();
+        let rule = ConnectionSpecific::of_fields(typed.iter().map(|(n, v)| (n, v)));
+        let by_value: Vec<String> = typed
+            .iter()
+            .filter(|(n, v)| !rule.drops_field(n, v))
+            .map(|(n, v)| format!("{n}: {}", std::str::from_utf8(v.as_bytes()).unwrap()))
+            .collect();
+        assert_eq!(by_text, ["x-kept: é"]);
+        assert_eq!(by_value, by_text);
     }
 
     #[test]

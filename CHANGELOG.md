@@ -158,7 +158,9 @@
   names. RFC 9114 makes such a request malformed, so the server reset the stream where the same
   request over HTTP/2 succeeded. Every HTTP/2 and HTTP/3 builder now applies one rule, the one
   hyper applies on HTTP/2, and the effective-request preview of WebSocket, SSE and gRPC sessions
-  over HTTP/2 or HTTP/3 no longer lists those fields (#499).
+  over HTTP/2 or HTTP/3 no longer lists those fields. Where ALPN or an HTTP/3 fallback picks the
+  version when the request is sent, the preview keeps showing them and a note names the ones HTTP/2
+  and HTTP/3 leave out (#499).
 - The lock screen no longer gets stuck on "Set a new passphrase" when an idle or sleep lock lands
   after a recovery-key unlock: any lock returns to the unlock form, and so does "Not now" when the
   profile locked meanwhile. A new profile's one-time recovery key is shown even if the form was

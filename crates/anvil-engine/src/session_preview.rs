@@ -8,7 +8,7 @@
 use crate::context::ExecutionContext;
 use crate::http_exec::Prepared;
 use crate::prepare::Target;
-use crate::sessions::{self, SessionRequest};
+use crate::sessions::{self, ConnectionFields, SessionRequest};
 use crate::vars::Resolver;
 use anvil_auth::ResolvedAuth;
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
@@ -64,7 +64,7 @@ impl Shape {
             content_type: prep.http.content_type.clone(),
             transport: vec![],
             not_sent: &[],
-            connection_specific: false,
+            connection_fields: ConnectionFields::Sent,
             host_from_authority: false,
             path_only: false,
         };
@@ -88,6 +88,9 @@ impl Shape {
             Protocol::Grpc => grpc_call(ctx, r, prep, inferred)?,
             p => return Err(schemes(p).err().unwrap_or_else(|| unsupported("HTTP is not a session protocol", "protocol"))),
         };
+        if let Some(note) = negotiated_fields_note(&req) {
+            inferred.push(note);
+        }
         Ok(Shape { req, session: true, message })
     }
 
@@ -102,7 +105,7 @@ impl Shape {
     /// the request is sent with (and signed for).
     pub(crate) fn transport_headers(&self, headers: &mut Vec<(String, String)>, authority: &str) {
         headers.retain(|(n, _)| !self.req.not_sent.contains(&n.to_ascii_lowercase().as_str()));
-        if self.req.connection_specific {
+        if self.req.connection_fields == ConnectionFields::LeftOut {
             let rule = ConnectionSpecific::of(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
             headers.retain(|(n, v)| !rule.drops(n, v));
         }
@@ -125,6 +128,29 @@ impl Shape {
     pub(crate) fn url(&self, target: &Target) -> String {
         if self.req.path_only { format!("{}://{}{}", target.scheme, target.authority, target.path) } else { target.url() }
     }
+}
+
+/// For a request whose HTTP version is negotiated when it is sent: the
+/// fields shown that HTTP/2 and HTTP/3 leave out and HTTP/1.1 sends.
+fn negotiated_fields_note(req: &SessionRequest) -> Option<String> {
+    if req.connection_fields != ConnectionFields::Negotiated {
+        return None;
+    }
+    let rule = ConnectionSpecific::of(req.headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+    let names: Vec<&str> = req
+        .headers
+        .iter()
+        .filter(|(n, v)| rule.drops(n, v) && !req.not_sent.contains(&n.to_ascii_lowercase().as_str()))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {} sent over HTTP/1.1 but left out over HTTP/2 and HTTP/3, which do not carry connection-specific fields (RFC 9113 §8.2.2, RFC 9114 §4.2)",
+        names.join(", "),
+        if names.len() == 1 { "is" } else { "are" }
+    ))
 }
 
 fn websocket(

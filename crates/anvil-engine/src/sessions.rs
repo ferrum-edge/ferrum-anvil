@@ -272,15 +272,28 @@ pub(crate) struct SessionRequest {
     /// Lowercase names of the headers the transport leaves out.
     pub(crate) not_sent: &'static [&'static str],
     /// Whether the transport also leaves out the connection-specific fields
-    /// (HTTP/2, HTTP/3): the rule of
-    /// [`anvil_transport::connection_fields::ConnectionSpecific`].
-    pub(crate) connection_specific: bool,
+    /// (the rule of [`anvil_transport::connection_fields::ConnectionSpecific`]).
+    pub(crate) connection_fields: ConnectionFields,
     /// Whether the transport sends the authority as `Host` (gRPC-Web over
     /// HTTP/1.1).
     pub(crate) host_from_authority: bool,
     /// Whether the request-target is the path alone (a gRPC call's method
     /// path): no query is sent and an auth profile may add none.
     pub(crate) path_only: bool,
+}
+
+/// Whether a session request leaves out the connection-specific fields
+/// (RFC 9113 §8.2.2, RFC 9114 §4.2) beyond its `not_sent` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionFields {
+    /// Sent as given (HTTP/1.1).
+    Sent,
+    /// Left out: the request goes over HTTP/2 or HTTP/3.
+    LeftOut,
+    /// Left out over HTTP/2 and HTTP/3 and sent over HTTP/1.1, which ALPN or
+    /// an HTTP/3 fallback decides when the request is sent: the preview
+    /// shows them and says so.
+    Negotiated,
 }
 
 /// Why a session refuses what an auth profile applied, before anything is
@@ -695,7 +708,8 @@ impl WsOffer {
                 ("CONNECT", WS_NOT_ON_EXTENDED_CONNECT)
             }
         };
-        let connection_specific = !matches!(spec.bootstrap, WsBootstrap::Http1Upgrade);
+        let connection_fields =
+            if matches!(spec.bootstrap, WsBootstrap::Http1Upgrade) { ConnectionFields::Sent } else { ConnectionFields::LeftOut };
         let request = SessionRequest {
             method: method.into(),
             target: prep.http.target.clone(),
@@ -704,7 +718,7 @@ impl WsOffer {
             content_type: None,
             transport,
             not_sent,
-            connection_specific,
+            connection_fields,
             host_from_authority: false,
             path_only: false,
         };
@@ -818,6 +832,16 @@ pub(crate) fn sse_request(
     // Where the version policy leaves no choice of HTTP/2 or HTTP/3.
     let h2_or_h3 =
         matches!(prep.settings.http_version, HttpVersionPolicy::H2c | HttpVersionPolicy::Http2Only | HttpVersionPolicy::Http3Only);
+    // Over TLS, automatic HTTP/3 or ALPN decides when the stream is opened.
+    let negotiated = prep.http.target.scheme == "https"
+        && matches!(prep.settings.http_version, HttpVersionPolicy::Auto | HttpVersionPolicy::Http3WithFallback);
+    let connection_fields = if h2_or_h3 {
+        ConnectionFields::LeftOut
+    } else if negotiated {
+        ConnectionFields::Negotiated
+    } else {
+        ConnectionFields::Sent
+    };
     let request = SessionRequest {
         method: prep.http.method.clone(),
         target: prep.http.target.clone(),
@@ -826,7 +850,7 @@ pub(crate) fn sse_request(
         content_type: prep.http.content_type.clone(),
         transport,
         not_sent: if h2_or_h3 { SSE_NOT_SENT_OVER_H2_H3 } else { &[] },
-        connection_specific: h2_or_h3,
+        connection_fields,
         host_from_authority: false,
         path_only: false,
     };
@@ -1119,6 +1143,10 @@ pub(crate) fn grpc_call(
     if let Some(ms) = spec.deadline_ms {
         transport.push(("grpc-timeout".into(), grpc::grpc_timeout(ms), true));
     }
+    // Native gRPC is always HTTP/2 or HTTP/3; gRPC-Web is only when the
+    // policy rules out HTTP/1.1 (an HTTP/3 fallback or ALPN may choose it).
+    let left_out =
+        !spec.wire.is_web() || matches!(version, HttpVersionPolicy::Http2Only | HttpVersionPolicy::H2c | HttpVersionPolicy::Http3Only);
     let prefix = target.path.trim_end_matches('/').to_string();
     let request = SessionRequest {
         method: "POST".into(),
@@ -1127,8 +1155,14 @@ pub(crate) fn grpc_call(
         body: unary_body,
         content_type: Some(content_type.into()),
         transport,
-        not_sent: if http1 { GRPC_NOT_SENT_OVER_H1 } else { GRPC_NOT_SENT },
-        connection_specific: !http1,
+        not_sent: if left_out { GRPC_NOT_SENT } else { GRPC_NOT_SENT_OVER_H1 },
+        connection_fields: if left_out {
+            ConnectionFields::LeftOut
+        } else if http1 {
+            ConnectionFields::Sent
+        } else {
+            ConnectionFields::Negotiated
+        },
         host_from_authority: http1,
         path_only: true,
     };
@@ -1660,7 +1694,7 @@ async fn prepare_masque(
         content_type: None,
         transport: vec![],
         not_sent: &[],
-        connection_specific: false,
+        connection_fields: ConnectionFields::Sent,
         host_from_authority: false,
         path_only: false,
     };
@@ -2266,7 +2300,7 @@ mod tests {
             content_type: None,
             transport: vec![],
             not_sent: &[],
-            connection_specific: false,
+            connection_fields: ConnectionFields::Sent,
             host_from_authority: false,
             path_only: false,
         };

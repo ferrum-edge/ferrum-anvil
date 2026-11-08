@@ -362,6 +362,42 @@ async fn the_preview_over_http2_leaves_out_the_connection_specific_fields_the_tr
     }
 }
 
+/// Where ALPN or an HTTP/3 fallback picks the version when the request is
+/// sent, HTTP/1.1 sends the fields HTTP/2 and HTTP/3 leave out: the preview
+/// shows them and names them in a note.
+#[tokio::test]
+async fn a_negotiated_version_shows_the_connection_specific_fields_and_says_where_they_are_left_out() {
+    init();
+    let e = Engine::new();
+    let mut sse = with_connection_specific_fields(RequestSpec::http("GET", "https://api.example.test/events"));
+    sse.protocol = Protocol::Sse;
+    sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
+    let mut web = grpc("https://api.example.test/", GrpcWire::GrpcWeb, HttpVersionPolicy::Auto, hmac());
+    web.spec = with_connection_specific_fields(web.spec);
+    let cases = [
+        ("sse, automatic HTTP/3", with_auth(sse.clone(), Some(HttpVersionPolicy::Http3WithFallback), hmac())),
+        ("sse over TLS, ALPN", with_auth(sse, Some(HttpVersionPolicy::Auto), hmac())),
+        ("gRPC-Web over TLS, ALPN", web),
+    ];
+    for (label, c) in cases {
+        let p = e.preview(&c).unwrap_or_else(|f| panic!("{label}: {f:?}"));
+        for name in ["proxy-connection", "x-hop", "x-kept"] {
+            assert!(p.headers.iter().any(|h| h.name.eq_ignore_ascii_case(name)), "{label}: {name} is sent over HTTP/1.1: {:?}", p.headers);
+        }
+        let note = p
+            .inferred
+            .iter()
+            .find(|i| i.contains("left out over HTTP/2 and HTTP/3"))
+            .unwrap_or_else(|| panic!("{label}: no note: {:?}", p.inferred));
+        let named: Vec<String> =
+            note.split(" are sent over").next().unwrap_or_default().split(", ").map(|n| n.to_ascii_lowercase()).collect();
+        for name in ["proxy-connection", "te", "x-hop"] {
+            assert!(named.iter().any(|n| n == name), "{label}: {name} not named: {note}");
+        }
+        assert!(!named.iter().any(|n| n == "x-kept"), "{label}: {note}");
+    }
+}
+
 #[tokio::test]
 async fn grpc_preview_is_the_call_sent_over_h2c_and_grpc_web_over_http1() {
     init();
