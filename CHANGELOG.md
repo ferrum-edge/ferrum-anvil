@@ -33,6 +33,27 @@
 
 ### Security
 
+- The human-readable output of `anvil run` and `anvil send` (and of `anvil scenario`, `anvil
+  workspace list` and `tree`, `anvil history`, `anvil mcp-discover`, `anvil workload probe`,
+  `anvil load`, the import and export notes, and command errors) escapes control characters and
+  bidirectional overrides in text from the collection, a spec or the traffic, as `anvil lint-spec`,
+  `anvil spec-drift`, `anvil env` and `anvil gateway` already did. A server under test could
+  answer with a newline and a GitHub Actions workflow command (`::error::`, `::add-mask::`,
+  `::stop-commands::`) or a terminal escape sequence, and a failed JSONPath assertion printed the
+  value it read as it was, so the CI log ran the command or the terminal the sequence.
+- All of that text output, `lint-spec`, `spec-drift`, `env` and `gateway` included, now also
+  breaks the workflow-command introducers with a visible backslash: `::` prints as `:\:` and
+  `##[` as `#\#[`. Escaping control characters alone left a command that needs none: the legacy
+  `##[error]` syntax, which a runner reads anywhere in a line, and a folder or scenario named
+  `::error::…`, which starts the run report's first line. Text without these sequences prints
+  unchanged; an IPv6 address such as `[::1]` prints as `[:\:1]`. `anvil workload probe` quotes
+  the Workload API's status message and the JWT-SVID audiences (Rust Debug quoting, which escapes
+  control characters but not these sequences); they go through the same escaping now.
+- JSON printed to stdout (`anvil send --json`, `workload probe --json`, `jwt`, `mcp-discover
+  --json`, `storage-cleanup --json`, `export --preview`, `import`, `import-spec --dry-run`,
+  `load check` and `load preflight`) escapes C1 controls, line separators,
+  bidirectional overrides and the `[` of `##[` as `\uXXXX`, as `lint-spec` and `spec-drift` JSON
+  do (which now escape `##[` too). The parsed JSON is unchanged.
 - The auth label in an execution record (`prepared.auth_label`, which `anvil send --json` prints and
   history keeps) and in the effective-request preview is redacted by secret value like the other
   request fields. It names the resolved Basic, HMAC or WS-Security username or the API key name,

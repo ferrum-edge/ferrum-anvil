@@ -360,7 +360,8 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   read; specs are parsed under the import bounds plus a member-name budget,
   `$ref` resolution is internal and depth-capped, and every walk is linear
   ([contract.md](contract.md#guarantees)). Text output escapes control
-  characters, so a spec cannot inject CI workflow commands or terminal
+  characters and breaks workflow-command introducers (`::` as `:\:`, `##[`
+  as `#\#[`), so a spec cannot inject CI workflow commands or terminal
   escape sequences.
   Custom JSON Schema functions share the reference, size and scan limits
   used for OpenAPI example and drift checks. Non-structural applicators in a
