@@ -90,13 +90,36 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
 pub struct Sanitized {
     pub extracted: Vec<Extracted>,
     pub warnings: Vec<ContentWarning>,
+    /// The value each placeholder name stands for so far.
+    placeholders: std::collections::HashMap<String, String>,
+}
+
+impl Sanitized {
+    /// A placeholder name for `value` under `hint`: the same name for the
+    /// same value (one variable fills them all), another (`_2`, `_3`, ...)
+    /// for a different value, so a share-safely recipient can supply each.
+    fn placeholder_for(&mut self, hint: &str, value: &str) -> String {
+        let base = placeholder_name(hint);
+        let mut n = 1usize;
+        loop {
+            let name = if n == 1 { base.clone() } else { format!("{base}_{n}") };
+            match self.placeholders.get(&name) {
+                Some(v) if v != value => n += 1,
+                Some(_) => return name,
+                None => {
+                    self.placeholders.insert(name.clone(), value.to_string());
+                    return name;
+                }
+            }
+        }
+    }
 }
 
 /// Walk `objects.json` and replace sensitive literals in place. `extra` is
 /// the user's extra redaction names (`AppSettings::redaction_names`), always
 /// treated as credential names.
 pub fn sanitize(v: &mut serde_json::Value, extra: &[String]) -> Sanitized {
-    let mut s = Sanitized { extracted: vec![], warnings: vec![] };
+    let mut s = Sanitized { extracted: vec![], warnings: vec![], placeholders: Default::default() };
     walk(v, String::new(), "", extra, &mut s);
     s
 }
@@ -111,7 +134,7 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
             if is_template {
                 let val = map["value"].as_str().unwrap_or("").to_string();
                 if !is_pure_reference(&val) {
-                    let ph = placeholder_name(key);
+                    let ph = s.placeholder_for(key, &val);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
                 }
@@ -153,7 +176,7 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                 // scope: its literal value is extracted too.
                 let templated = name.contains("{{");
                 if (flagged || templated || sensitive_name(&name, extra)) && !is_pure_reference(&val) {
-                    let ph = placeholder_name(&name);
+                    let ph = s.placeholder_for(&name, &val);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
                 } else if let Some(why) = looks_like_credential(&val) {
@@ -314,6 +337,7 @@ mod tests {
             cn::IMPORT_CREDENTIAL_HEADERS,
             cn::IMPORT_CREDENTIAL_PARTS,
             cn::IMPORT_CREDENTIAL_EXACT,
+            cn::OAUTH_SECRET_FORM_FIELDS,
         ]
         .concat()
         .iter()
@@ -405,6 +429,21 @@ mod tests {
         }
         assert!(text.contains("{{header_value}}") && text.contains("{{function_key}}"), "whole references stay: {text}");
         assert_eq!(s.extracted.len(), 3);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn different_values_under_one_name_get_their_own_placeholders() {
+        let kv = |n: &str, v: &str| serde_json::json!({"name": n, "value": v, "enabled": true});
+        let mut v = serde_json::json!({"requests": [
+            {"headers": [kv("X-Master-Key", "tenant-a"), kv("x_master_key", "tenant-b")]},
+            {"headers": [kv("X-Master-Key", "tenant-a")], "params": [kv("sig", "s1"), kv("sig", "s2")]}
+        ]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let names: Vec<&str> = s.extracted.iter().map(|e| e.placeholder.as_str()).collect();
+        assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_2", "secret_x_master_key", "secret_sig", "secret_sig_2"]);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
     }

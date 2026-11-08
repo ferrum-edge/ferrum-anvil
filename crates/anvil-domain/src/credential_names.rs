@@ -1,7 +1,7 @@
 //! Field names Anvil treats as credentials: one source for the engine's
 //! redactor and redirect rule (`anvil_engine::redact`), the importer
-//! (`anvil_import::util`) and the bundle export sanitizer
-//! (`anvil_portability::sanitize`).
+//! (`anvil_import::util`), the OAuth token request (`anvil_auth::oauth`) and
+//! the bundle export sanitizer (`anvil_portability::sanitize`).
 //!
 //! Each consumer keeps its own rule over these lists (the redactor caps
 //! substring matches by length, the importer leaves pagination tokens out),
@@ -94,6 +94,11 @@ pub const IMPORT_CREDENTIAL_PARTS: &[&str] = &[
 /// OAuth values).
 pub const IMPORT_CREDENTIAL_EXACT: &[&str] = &["sig", "key", "pwd", "pass", "auth", "otp", "pin", "jwt", "sid", "code_verifier"];
 
+/// Token-request form fields whose values are credentials an issuer could
+/// echo back (`anvil_auth::oauth`).
+pub const OAUTH_SECRET_FORM_FIELDS: &[&str] =
+    &["client_secret", "refresh_token", "code", "code_verifier", "password", "assertion", "client_assertion"];
+
 /// Name fragments only the export sanitizer had: they stay in its rule.
 const EXPORT_NAME_PARTS: &[&str] = &["cookie", "private", "x-api-key"];
 
@@ -118,7 +123,11 @@ pub fn is_export_secret_name(name: &str, extra: &[String]) -> bool {
         return true;
     }
     let listed = |list: &[&str]| list.contains(&n.as_str());
-    if listed(ENGINE_SENSITIVE_HEADERS) || listed(IMPORT_CREDENTIAL_HEADERS) || listed(IMPORT_CREDENTIAL_EXACT) {
+    if listed(ENGINE_SENSITIVE_HEADERS)
+        || listed(IMPORT_CREDENTIAL_HEADERS)
+        || listed(IMPORT_CREDENTIAL_EXACT)
+        || listed(OAUTH_SECRET_FORM_FIELDS)
+    {
         return true;
     }
     let part = |list: &[&str]| list.iter().any(|p| n.contains(p));
@@ -141,6 +150,7 @@ mod tests {
             IMPORT_CREDENTIAL_HEADERS,
             IMPORT_CREDENTIAL_PARTS,
             IMPORT_CREDENTIAL_EXACT,
+            OAUTH_SECRET_FORM_FIELDS,
             EXPORT_NAME_PARTS,
         ] {
             for n in list {
@@ -170,6 +180,9 @@ mod tests {
             "otp",
             "pin",
             " Key ",
+            "code",
+            "assertion",
+            "client_assertion",
         ] {
             assert!(is_export_secret_name(n, &[]), "{n}");
         }

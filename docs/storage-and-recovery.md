@@ -285,12 +285,21 @@ name), or whose name Anvil treats as a credential anywhere
   `DD-Application-Key`, `tenant_key`);
 - the names the importer marks sensitive, among them the short names
   `key`, `sig`, `pwd`, `pass`, `auth`, `otp`, `pin`, `jwt` and `sid`;
+- the OAuth token-request fields Anvil keeps out of issuer error text
+  (`code`, `assertion`, `client_assertion` among them);
 - the extra redaction names in Settings.
 
 The rule errs towards extraction: a value under a name matched by mistake
 only becomes a placeholder (share safely) or travels in the vault
 (encrypted transfer), so pagination tokens such as `page_token` are
 extracted too.
+
+Each different value gets its own placeholder: two `X-Master-Key` literals
+that differ become `{{secret_x_master_key}}` and `{{secret_x_master_key_2}}`,
+while the same value everywhere stays one placeholder. A header or trailer
+assertion's expected value under such a name is extracted too; assertion
+values are compared as written, so a share-safely recipient types the
+expected value back into the assertion rather than defining a variable.
 
 ### Encrypted bundles are tamper-evident
 

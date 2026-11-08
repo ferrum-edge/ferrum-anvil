@@ -592,9 +592,10 @@ const DESCRIPTION_CHARS: usize = 200;
 /// Characters of it scanned for the request's secrets before the cut.
 const DESCRIPTION_SCAN_CHARS: usize = 64 * 1024;
 
-/// Form fields whose values are credentials an issuer could echo back.
-const SECRET_FORM_FIELDS: &[&str] =
-    &["client_secret", "refresh_token", "code", "code_verifier", "password", "assertion", "client_assertion"];
+// Form fields whose values are credentials an issuer could echo back (in
+// `anvil_domain::credential_names`, which the bundle export sanitizer reads
+// too).
+use anvil_domain::credential_names::OAUTH_SECRET_FORM_FIELDS as SECRET_FORM_FIELDS;
 
 /// The credentials a token request carries (form fields and the Basic
 /// client secret) in every form an issuer may echo them in ([`echo_forms`]),
