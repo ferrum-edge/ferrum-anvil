@@ -88,9 +88,6 @@ impl Shape {
             Protocol::Grpc => grpc_call(ctx, r, prep, inferred)?,
             p => return Err(schemes(p).err().unwrap_or_else(|| unsupported("HTTP is not a session protocol", "protocol"))),
         };
-        if let Some(note) = negotiated_fields_note(&req) {
-            inferred.push(note);
-        }
         Ok(Shape { req, session: true, message })
     }
 
@@ -98,6 +95,37 @@ impl Shape {
     /// before sending anything.
     pub(crate) fn auth_refusal(&self, applied: &anvil_auth::Applied) -> Option<String> {
         if self.session { sessions::auth_refusal(applied, self.req.path_only) } else { None }
+    }
+
+    /// For a session whose HTTP version is negotiated when it is sent: a note
+    /// naming the fields of `headers` (after auth, before
+    /// [`Self::transport_headers`]) that HTTP/1.1 sends and HTTP/2 and
+    /// HTTP/3 leave out. Fields the transport leaves out or replaces on every
+    /// version are not named.
+    pub(crate) fn negotiated_fields_note(&self, headers: &[(String, String)]) -> Option<String> {
+        if self.req.connection_fields != ConnectionFields::Negotiated {
+            return None;
+        }
+        let rule = ConnectionSpecific::of(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+        let replaced = |n: &str| self.req.transport.iter().any(|(t, _, replace)| *replace && t.eq_ignore_ascii_case(n));
+        let mut names: Vec<&str> = Vec::new();
+        for (n, v) in headers {
+            if rule.drops(n, v)
+                && !self.req.not_sent.contains(&n.to_ascii_lowercase().as_str())
+                && !replaced(n)
+                && !names.iter().any(|m| m.eq_ignore_ascii_case(n))
+            {
+                names.push(n);
+            }
+        }
+        if names.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{} {} sent over HTTP/1.1 but left out over HTTP/2 and HTTP/3, which do not carry connection-specific fields (RFC 9113 §8.2.2, RFC 9114 §4.2)",
+            names.join(", "),
+            if names.len() == 1 { "is" } else { "are" }
+        ))
     }
 
     /// Apply what the transport does to the headers after auth: the fields
@@ -128,29 +156,6 @@ impl Shape {
     pub(crate) fn url(&self, target: &Target) -> String {
         if self.req.path_only { format!("{}://{}{}", target.scheme, target.authority, target.path) } else { target.url() }
     }
-}
-
-/// For a request whose HTTP version is negotiated when it is sent: the
-/// fields shown that HTTP/2 and HTTP/3 leave out and HTTP/1.1 sends.
-fn negotiated_fields_note(req: &SessionRequest) -> Option<String> {
-    if req.connection_fields != ConnectionFields::Negotiated {
-        return None;
-    }
-    let rule = ConnectionSpecific::of(req.headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
-    let names: Vec<&str> = req
-        .headers
-        .iter()
-        .filter(|(n, v)| rule.drops(n, v) && !req.not_sent.contains(&n.to_ascii_lowercase().as_str()))
-        .map(|(n, _)| n.as_str())
-        .collect();
-    if names.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "{} {} sent over HTTP/1.1 but left out over HTTP/2 and HTTP/3, which do not carry connection-specific fields (RFC 9113 §8.2.2, RFC 9114 §4.2)",
-        names.join(", "),
-        if names.len() == 1 { "is" } else { "are" }
-    ))
 }
 
 fn websocket(
