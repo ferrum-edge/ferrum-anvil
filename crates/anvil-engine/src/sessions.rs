@@ -232,18 +232,24 @@ pub(crate) const EARLY_DATA_NOTE: &str =
 /// Stands in for the `Sec-WebSocket-Key` generated for each handshake.
 const WS_KEY_PER_HANDSHAKE: &str = "<generated per handshake>";
 
-/// Connection-specific fields an HTTP/2 or HTTP/3 request does not carry
-/// (the `Host` is sent as `:authority`), and the WebSocket key, which only
-/// the HTTP/1.1 upgrade has (RFC 8441 §4).
-const WS_NOT_ON_EXTENDED_CONNECT: &[&str] = &["host", "connection", "upgrade", "transfer-encoding", "keep-alive", "sec-websocket-key"];
+/// What an extended CONNECT (HTTP/2 or HTTP/3) leaves out besides the
+/// connection-specific fields: the `Host` (sent as `:authority`) and the
+/// WebSocket key, which only the HTTP/1.1 upgrade has (RFC 8441 §4).
+const WS_NOT_ON_EXTENDED_CONNECT: &[&str] = &["host", "sec-websocket-key"];
 
-/// The fields a gRPC call does not take from the request's headers (the
-/// transport frames the body and sets the authority itself).
-const GRPC_NOT_SENT: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "content-length", "keep-alive"];
+/// The fields a gRPC call over HTTP/2 or HTTP/3 does not take from the
+/// request's headers besides the connection-specific ones (the transport
+/// frames the body and sets the authority itself).
+const GRPC_NOT_SENT: &[&str] = &["host", "content-length"];
 
-/// The connection-specific fields an event stream over HTTP/2 or HTTP/3
-/// does not send (the `Host` is sent as `:authority`).
-const SSE_NOT_SENT_OVER_H2_H3: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "keep-alive"];
+/// The fields a gRPC-Web call over HTTP/1.1 does not take from the request's
+/// headers (the transport frames the body, sets the `Host` and owns the
+/// connection's own fields).
+const GRPC_NOT_SENT_OVER_H1: &[&str] = &["host", "connection", "transfer-encoding", "upgrade", "content-length", "keep-alive"];
+
+/// What an event stream over HTTP/2 or HTTP/3 leaves out besides the
+/// connection-specific fields: the `Host` (sent as `:authority`).
+const SSE_NOT_SENT_OVER_H2_H3: &[&str] = &["host"];
 
 /// The HTTP request a session opens with (a WebSocket or SSE handshake, a
 /// gRPC call, a MASQUE `CONNECT`), before auth and cookies. The session and
@@ -265,6 +271,10 @@ pub(crate) struct SessionRequest {
     pub(crate) transport: Vec<(String, String, bool)>,
     /// Lowercase names of the headers the transport leaves out.
     pub(crate) not_sent: &'static [&'static str],
+    /// Whether the transport also leaves out the connection-specific fields
+    /// (HTTP/2, HTTP/3): the rule of
+    /// [`anvil_transport::connection_fields::ConnectionSpecific`].
+    pub(crate) connection_specific: bool,
     /// Whether the transport sends the authority as `Host` (gRPC-Web over
     /// HTTP/1.1).
     pub(crate) host_from_authority: bool,
@@ -685,6 +695,7 @@ impl WsOffer {
                 ("CONNECT", WS_NOT_ON_EXTENDED_CONNECT)
             }
         };
+        let connection_specific = !matches!(spec.bootstrap, WsBootstrap::Http1Upgrade);
         let request = SessionRequest {
             method: method.into(),
             target: prep.http.target.clone(),
@@ -693,6 +704,7 @@ impl WsOffer {
             content_type: None,
             transport,
             not_sent,
+            connection_specific,
             host_from_authority: false,
             path_only: false,
         };
@@ -814,6 +826,7 @@ pub(crate) fn sse_request(
         content_type: prep.http.content_type.clone(),
         transport,
         not_sent: if h2_or_h3 { SSE_NOT_SENT_OVER_H2_H3 } else { &[] },
+        connection_specific: h2_or_h3,
         host_from_authority: false,
         path_only: false,
     };
@@ -1114,7 +1127,8 @@ pub(crate) fn grpc_call(
         body: unary_body,
         content_type: Some(content_type.into()),
         transport,
-        not_sent: GRPC_NOT_SENT,
+        not_sent: if http1 { GRPC_NOT_SENT_OVER_H1 } else { GRPC_NOT_SENT },
+        connection_specific: !http1,
         host_from_authority: http1,
         path_only: true,
     };
@@ -1646,6 +1660,7 @@ async fn prepare_masque(
         content_type: None,
         transport: vec![],
         not_sent: &[],
+        connection_specific: false,
         host_from_authority: false,
         path_only: false,
     };
@@ -2251,6 +2266,7 @@ mod tests {
             content_type: None,
             transport: vec![],
             not_sent: &[],
+            connection_specific: false,
             host_from_authority: false,
             path_only: false,
         };

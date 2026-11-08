@@ -987,6 +987,31 @@ async fn grpc_h3_adapter_uses_quic_and_reads_status_from_h3_trailers() {
 }
 
 #[tokio::test]
+async fn grpc_over_h3_leaves_out_connection_specific_metadata_and_sends_te_trailers() {
+    init();
+    let f =
+        anvil_fixtures::h3server::serve("127.0.0.1:0", TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone()))
+            .await
+            .unwrap();
+    let mut plan =
+        echo_plan(f.addr.port(), true, "Unary", GrpcMode::Unary, r#"{"message":"h"}"#, GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
+    plan.headers = [("proxy-connection", "keep-alive"), ("te", "gzip"), ("connection", "x-hop"), ("x-hop", "1"), ("x-kept", "1")]
+        .into_iter()
+        .map(|(n, v)| (http::HeaderName::from_static(n), http::HeaderValue::from_static(v)))
+        .collect();
+    let out = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(status_of(&out), (Some(0), GrpcStatusSource::Trailers), "{:?}", failure_of(&out));
+    let hdrs = f.log.last_request_headers().unwrap();
+    let mut sent: Vec<String> = hdrs
+        .iter()
+        .filter(|(n, _)| ["proxy-connection", "te", "connection", "x-hop", "x-kept"].contains(&n.as_str()))
+        .map(|(n, v)| format!("{n}: {v}"))
+        .collect();
+    sent.sort();
+    assert_eq!(sent, ["te: trailers", "x-kept: 1"], "the one TE HTTP/3 allows is the transport's own: {hdrs:?}");
+}
+
+#[tokio::test]
 async fn a_reflection_request_auth_cannot_sign_is_not_sent_and_is_reported_as_an_auth_failure() {
     init();
     let f = fxhttp::serve("127.0.0.1:0", None).await.unwrap();

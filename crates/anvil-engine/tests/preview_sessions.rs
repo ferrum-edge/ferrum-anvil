@@ -329,6 +329,39 @@ async fn sse_preview_is_the_request_sent_over_http1_and_http2() {
     }
 }
 
+/// `s` with fields an HTTP/2 or HTTP/3 request must not carry (RFC 9113
+/// §8.2.2, RFC 9114 §4.2), and one that it may.
+fn with_connection_specific_fields(mut s: RequestSpec) -> RequestSpec {
+    for (n, v) in [("Proxy-Connection", "keep-alive"), ("TE", "gzip"), ("Connection", "X-Hop"), ("X-Hop", "1"), ("X-Kept", "1")] {
+        s.headers.push(KeyValue::new(n, v));
+    }
+    s
+}
+
+#[tokio::test]
+async fn the_preview_over_http2_leaves_out_the_connection_specific_fields_the_transport_leaves_out() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let ws = with_connection_specific_fields(ws_spec(&format!("ws://{}/ws?close_after=1", f.addr), WsBootstrap::Http2ExtendedConnect));
+    let mut sse = with_connection_specific_fields(RequestSpec::http("GET", &f.url("/sse?count=1&interval=1")));
+    sse.protocol = Protocol::Sse;
+    sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
+    let cases = [
+        ("ws over HTTP/2", with_auth(ws, None, hmac()), "/ws"),
+        ("sse over HTTP/2", with_auth(sse, Some(HttpVersionPolicy::H2c), hmac()), "/sse"),
+    ];
+    for (label, c, path) in cases {
+        let (p, r) = preview_and_send(label, &e, &c, &f.log, path).await;
+        for name in ["proxy-connection", "te", "connection", "x-hop"] {
+            assert!(!p.headers.iter().any(|h| h.name.eq_ignore_ascii_case(name)), "{label}: the preview shows {name}: {:?}", p.headers);
+            assert!(header(&r.headers, name).is_none(), "{label}: {name} was sent: {:?}", r.headers);
+        }
+        assert!(p.headers.iter().any(|h| h.name.eq_ignore_ascii_case("x-kept") && h.value == "1"), "{label}: {:?}", p.headers);
+        assert_preview_sent(label, &p, &r);
+    }
+}
+
 #[tokio::test]
 async fn grpc_preview_is_the_call_sent_over_h2c_and_grpc_web_over_http1() {
     init();

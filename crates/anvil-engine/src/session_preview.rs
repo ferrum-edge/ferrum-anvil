@@ -14,6 +14,7 @@ use anvil_auth::ResolvedAuth;
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
 use anvil_domain::request::*;
 use anvil_domain::settings::HttpVersionPolicy;
+use anvil_transport::connection_fields::ConnectionSpecific;
 use anvil_transport::grpc;
 
 /// A request as it is sent, before auth is applied.
@@ -63,6 +64,7 @@ impl Shape {
             content_type: prep.http.content_type.clone(),
             transport: vec![],
             not_sent: &[],
+            connection_specific: false,
             host_from_authority: false,
             path_only: false,
         };
@@ -100,6 +102,10 @@ impl Shape {
     /// the request is sent with (and signed for).
     pub(crate) fn transport_headers(&self, headers: &mut Vec<(String, String)>, authority: &str) {
         headers.retain(|(n, _)| !self.req.not_sent.contains(&n.to_ascii_lowercase().as_str()));
+        if self.req.connection_specific {
+            let rule = ConnectionSpecific::of(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+            headers.retain(|(n, v)| !rule.drops(n, v));
+        }
         if self.req.host_from_authority {
             headers.push(("Host".into(), authority.to_string()));
         }

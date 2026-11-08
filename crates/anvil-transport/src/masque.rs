@@ -33,6 +33,7 @@
 //!   [`MasqueChannel`], so DTLS records travel as HTTP Datagrams exactly like
 //!   UDP payloads.
 
+use crate::connection_fields::ConnectionSpecific;
 use crate::datagram::{DatagramChannel, Inbound, Sent};
 use crate::dns::DnsConfig;
 use crate::h3::{H3_NO_ERROR, H3ClientOptions, QuicConnected};
@@ -827,14 +828,9 @@ pub(crate) async fn open(
             return Err(not_opened(f, Some(tunnel)));
         }
     };
+    let specific = ConnectionSpecific::of_fields(plan.headers.iter().map(|(n, v)| (n, v)));
     for (n, v) in &plan.headers {
-        if n == http::header::HOST
-            || n == http::header::CONNECTION
-            || n == http::header::UPGRADE
-            || n == http::header::TRANSFER_ENCODING
-            || n.as_str() == "keep-alive"
-            || n.as_str() == "capsule-protocol"
-        {
+        if n == http::header::HOST || n.as_str() == "capsule-protocol" || specific.drops_field(n, v) {
             continue;
         }
         req.headers_mut().append(n.clone(), v.clone());

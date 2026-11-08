@@ -7,6 +7,7 @@
 //! have been written (an idempotent one, or one the peer refused unprocessed)
 //! belong to the engine.
 
+use crate::connection_fields::ConnectionSpecific;
 use crate::connector::{self, BoxIo, Established, ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
@@ -1076,15 +1077,10 @@ impl HttpTransport {
             req = req.header(http::header::HOST, plan.authority.as_str());
             header_bytes += 6 + plan.authority.len() as u64 + 2;
         }
+        let specific = ConnectionSpecific::of_fields(plan.headers.iter().map(|(n, v)| (n, v)));
         for (n, v) in &plan.headers {
-            if is_h2
-                && (n == http::header::HOST
-                    || n == http::header::CONNECTION
-                    || n == http::header::TRANSFER_ENCODING
-                    || n.as_str() == "keep-alive"
-                    || n == http::header::UPGRADE)
-            {
-                continue; // connection-specific fields are illegal in HTTP/2
+            if is_h2 && (n == http::header::HOST || specific.drops_field(n, v)) {
+                continue; // connection-specific fields are illegal in HTTP/2 (hyper would strip them too)
             }
             header_bytes += n.as_str().len() as u64 + 2 + v.len() as u64 + 2;
             req = req.header(n, v);
