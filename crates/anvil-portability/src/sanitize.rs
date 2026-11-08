@@ -225,7 +225,13 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                 // A templated name may resolve to a credential name in some
                 // scope: its literal value is extracted too.
                 let templated = name.contains("{{");
-                if (flagged || templated || sensitive_name(&name, extra)) && !is_pure_reference(&val) {
+                // Fields used as written, never resolved: an HBONE proxy
+                // profile's extra headers and a header or trailer
+                // assertion's expected value. Text shaped like a reference
+                // there is the literal itself.
+                let verbatim = key == "extra_headers" || map.contains_key("comparison");
+                let literal = if verbatim { !val.trim().is_empty() } else { !is_pure_reference(&val) };
+                if (flagged || templated || sensitive_name(&name, extra)) && literal {
                     let ph = s.placeholder_for(&name, &val);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
@@ -528,6 +534,27 @@ mod tests {
         let s = sanitize(&mut v, &[]);
         assert_eq!(s.extracted.len(), 20_000);
         assert_eq!(s.extracted.last().unwrap().placeholder, "secret_x_master_key_20000");
+    }
+
+    #[test]
+    fn values_used_as_written_are_extracted_even_when_shaped_like_a_reference() {
+        let mut v = serde_json::json!({
+            "proxy_profiles": [{"hbone": {"extra_headers": [
+                {"name": "X-Master-Key", "value": "{{hb-live-5724}}", "enabled": true, "sensitive": true}
+            ]}}],
+            "requests": [{"spec": {
+                "headers": [{"name": "X-Master-Key", "value": "{{master_key}}", "enabled": true}],
+                "assertions": [{"type": "header", "name": "X-Master-Key", "comparison": "equals", "value": "{{hb-live-5724}}", "enabled": true}]
+            }}]
+        });
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        assert!(!text.contains("hb-live-5724"), "{text}");
+        assert!(text.contains("{{master_key}}"), "a reference in a resolved field stays: {text}");
+        assert_eq!(s.extracted.len(), 2);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
     }
 
     #[test]
