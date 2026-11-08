@@ -126,8 +126,11 @@ impl Sanitized {
     }
 }
 
-/// The names `v` already uses: every variable's name and every `{{name}}`
-/// reference (as the resolver reads it: the first `}}` closes it).
+/// The names `v` already uses: every variable's name, every response
+/// extraction's variable, every sensitive dataset column, and every
+/// `{{name}}` reference (as the resolver reads it: the first `}}` closes
+/// it). A dataset's other columns live only in its attachment and are not
+/// seen here.
 fn used_names(v: &serde_json::Value, out: &mut HashSet<String>) {
     match v {
         serde_json::Value::Object(map) => {
@@ -135,6 +138,12 @@ fn used_names(v: &serde_json::Value, out: &mut HashSet<String>) {
                 && let Some(n) = map.get("name").and_then(|n| n.as_str())
             {
                 out.insert(n.trim().to_string());
+            }
+            if let Some(n) = map.get("variable").and_then(|n| n.as_str()) {
+                out.insert(n.trim().to_string());
+            }
+            if let Some(columns) = map.get("sensitive_columns").and_then(|c| c.as_array()) {
+                out.extend(columns.iter().filter_map(|c| c.as_str()).map(|c| c.trim().to_string()));
             }
             for child in map.values() {
                 used_names(child, out);
@@ -496,6 +505,8 @@ mod tests {
             "environments": [{"variables": [
                 {"name": "secret_x_master_key_2", "value": {"kind": "template", "value": "catalog-filter"}, "secret": false, "enabled": true}
             ]}],
+            "datasets": [{"sensitive_columns": ["secret_x_master_key_5"]}],
+            "extractions": [{"variable": "secret_x_master_key_4", "from": {"kind": "status"}}],
             "requests": [
                 {"headers": [kv("X-Label", "{{secret_x_master_key_2}}"), kv("X-Other", "{{ secret_x_master_key_3 }}")]},
                 {"headers": [kv("X-Master-Key", "tenant-a"), kv("X-Master-Key", "tenant-b"), kv("X-Master-Key", "tenant-c")]}
@@ -504,7 +515,7 @@ mod tests {
         let original = v.clone();
         let s = sanitize(&mut v, &[]);
         let names: Vec<&str> = s.extracted.iter().map(|e| e.placeholder.as_str()).collect();
-        assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_4", "secret_x_master_key_5"]);
+        assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_6", "secret_x_master_key_7"]);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
     }

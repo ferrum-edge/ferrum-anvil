@@ -296,11 +296,14 @@ extracted too.
 
 Each different value gets its own placeholder: two `X-Master-Key` literals
 that differ become `{{secret_x_master_key}}` and `{{secret_x_master_key_2}}`,
-while the same value everywhere stays one placeholder; a placeholder never
-takes a name the workspace already uses for a variable or a `{{reference}}`. A header or trailer
-assertion's expected value under such a name is extracted too; assertion
-values are compared as written, so a share-safely recipient types the
-expected value back into the assertion rather than defining a variable.
+while the same value everywhere stays one placeholder. A placeholder never
+takes a name the workspace already uses for a variable, a `{{reference}}`, a
+response extraction or a sensitive dataset column (a dataset's other column
+names are only in its file and are not checked). A header or trailer
+assertion's expected value under such a name is extracted too, and so is an
+HBONE proxy profile's extra header. Both are used as written, without
+variables, so a share-safely recipient types the value back into the
+assertion or the profile rather than defining a variable.
 
 ### Encrypted bundles are tamper-evident
 
