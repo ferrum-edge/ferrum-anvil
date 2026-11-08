@@ -110,7 +110,10 @@ impl Shape {
         // The transport sets these itself after leaving fields out (a
         // replacement, or a default for one now absent), so they are sent on
         // every version.
-        let replaced = |n: &str| self.req.transport.iter().any(|(t, _, _)| t.eq_ignore_ascii_case(n));
+        // HTTP libraries set `Content-Length` from the body itself (hyper on
+        // HTTP/2), as the preview's body size shows: it is never named.
+        let replaced =
+            |n: &str| n.eq_ignore_ascii_case("content-length") || self.req.transport.iter().any(|(t, _, _)| t.eq_ignore_ascii_case(n));
         let mut names: Vec<&str> = Vec::new();
         for (n, v) in headers {
             if rule.drops(n, v)
