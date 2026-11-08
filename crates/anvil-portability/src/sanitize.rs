@@ -183,7 +183,12 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                 && map.get("value").map(|x| x.is_string()).unwrap_or(false);
             if is_template {
                 let val = map["value"].as_str().unwrap_or("").to_string();
-                if !is_pure_reference(&val) {
+                // TLS and proxy profile secrets (a proxy password, a PKCS#12
+                // password, a key or bundle) are used as written, never
+                // resolved: reference-shaped text there is the literal.
+                let verbatim = ptr.starts_with("/proxy_profiles/") || ptr.starts_with("/tls_profiles/");
+                let literal = if verbatim { !val.is_empty() } else { !is_pure_reference(&val) };
+                if literal {
                     let ph = s.placeholder_for(key, &val);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
@@ -553,6 +558,26 @@ mod tests {
         assert!(!text.contains("hb-live-5724"), "{text}");
         assert!(text.contains("{{master_key}}"), "a reference in a resolved field stays: {text}");
         assert_eq!(s.extracted.len(), 2);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn profile_secrets_are_extracted_even_when_shaped_like_a_reference() {
+        let tpl = |v: &str| serde_json::json!({"kind": "template", "value": v});
+        let mut v = serde_json::json!({
+            "proxy_profiles": [{"username": "svc", "password": tpl("{{proxy-live-5724}}")}],
+            "tls_profiles": [{"client_identity": {"format": "pkcs12", "bundle_b64": tpl("{{$guid}}"), "password": tpl("{{p12-live-5724}}")}}],
+            "requests": [{"spec": {"auth": {"type": "basic", "username": "bob", "password": tpl("{{basic_password}}")}}}]
+        });
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        for leaked in ["proxy-live-5724", "p12-live-5724", "$guid"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert!(text.contains("{{basic_password}}"), "a reference in a resolved field stays: {text}");
+        assert_eq!(s.extracted.len(), 3);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
     }
