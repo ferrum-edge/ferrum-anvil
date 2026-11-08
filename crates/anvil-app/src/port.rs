@@ -208,9 +208,8 @@ impl App {
             // Preview counts production metadata without deriving a key.
             kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
-            redaction_names: &settings.redaction_names,
         };
-        Ok(bundle::preview(&g, &opts)?)
+        Ok(bundle::preview_redacting(&g, &opts, &settings.redaction_names)?)
     }
 
     /// Write a bundle of one workspace, or of every workspace when `ws` is
@@ -246,9 +245,8 @@ impl App {
             include_history,
             kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
-            redaction_names: &settings.redaction_names,
         };
-        Ok(bundle::write(&g, &opts)?)
+        Ok(bundle::write_redacting(&g, &opts, &settings.redaction_names)?)
     }
 
     /// Dry run: validate and plan without mutating anything. Bundles that

@@ -132,7 +132,6 @@ fn opts(mode: ExportMode, pass: Option<&str>) -> ExportOptions<'_> {
         include_history: false,
         kdf: KdfParams::testing(),
         app_version: "test",
-        redaction_names: &[],
     }
 }
 
@@ -253,8 +252,7 @@ fn credential_named_literals_never_reach_the_readable_objects() {
             .collect::<Vec<_>>()
     };
 
-    let share = ExportOptions { redaction_names: &extra, ..opts(ExportMode::ShareSafely, None) };
-    let (bytes, preview) = bundle::write(&g, &share).unwrap();
+    let (bytes, preview) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &extra).unwrap();
     assert!(leaked(&text_of(&bytes)).is_empty(), "share safely: {:?}", leaked(&text_of(&bytes)));
     for (n, _) in literals {
         let placeholder = format!("{{{{secret_{}}}}}", n.to_ascii_lowercase().replace('-', "_"));
@@ -266,8 +264,7 @@ fn credential_named_literals_never_reach_the_readable_objects() {
     assert!(create.spec.params.iter().any(|q| q.name == "page" && q.value == "2"), "an ordinary parameter stays");
 
     let pass = "correct horse battery";
-    let transfer = ExportOptions { redaction_names: &extra, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
-    let (bytes, _) = bundle::write(&g, &transfer).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some(pass)), &extra).unwrap();
     assert!(leaked(&objects_of(&bytes)).is_empty(), "encrypted transfer: {:?}", leaked(&objects_of(&bytes)));
     let opened = bundle::open(&bytes, Some(pass)).unwrap();
     let mut expected = g.clone();
@@ -1371,7 +1368,7 @@ fn with_format_1_vault(bytes: &[u8], g: &PortableGraph, pass: &str) -> Vec<u8> {
     let salt = base64::engine::general_purpose::STANDARD.decode(manifest["vault"]["salt_b64"].as_str().unwrap()).unwrap();
     let key = anvil_storage::crypto::derive(pass.as_bytes(), &salt, &kdf).unwrap();
     let mut objects = serde_json::to_value(g).unwrap();
-    let literals = anvil_portability::sanitize::sanitize(&mut objects).extracted;
+    let literals = anvil_portability::sanitize::sanitize(&mut objects, &[]).extracted;
     let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals }).unwrap();
     let vault = anvil_storage::crypto::seal(&key, b"anvil-portable-vault-v1", &payload);
     repack(bytes, |n, b| match n {
