@@ -257,6 +257,43 @@ fn a_5xx_on_connect_makes_no_leg_claim() {
     no_destination_blame(&d);
 }
 
+/// A refusal whose body the total deadline or a cancel cut short ends the
+/// attempt as `total_timeout` or `canceled` (#500), but the endpoint's answer
+/// is still its refusal: the finding says so, with the status kept.
+#[test]
+fn a_refusal_cut_short_by_the_deadline_or_a_cancel_is_still_the_endpoints_refusal() {
+    for (kind, status, code) in [
+        (FailureKind::TotalTimeout, 403, "hbone.tunnel_refused"),
+        (FailureKind::Canceled, 403, "hbone.tunnel_refused"),
+        (FailureKind::TotalTimeout, 503, "hbone.tunnel_unavailable"),
+    ] {
+        let d = run(&Shape {
+            kind,
+            inner: inner(Phase::ProxyTunnel, kind, None),
+            tls: Some(outer_tls(TlsVerification::Verified, true)),
+            status: Some(status),
+            body: Some(r#"{"error":"HBONE relay destination not allowed","detail":""#),
+        });
+        let f = find(&d, code);
+        assert!(f.explanation.contains(&format!("HTTP {status}")), "{kind:?}: {}", f.explanation);
+        assert!(f.evidence.iter().any(|e| e.key == "tunnel.connect_status" && e.value == status.to_string()), "{kind:?}");
+        assert!(f.evidence.iter().any(|e| e.key == "failure.kind" && e.value == format!("{kind:?}")), "{kind:?}");
+    }
+    // A deadline before any CONNECT answer is no refusal.
+    let d = run(&Shape {
+        kind: FailureKind::TotalTimeout,
+        inner: inner(Phase::ProxyTunnel, FailureKind::TotalTimeout, None),
+        tls: Some(outer_tls(TlsVerification::Verified, true)),
+        status: None,
+        body: None,
+    });
+    assert!(
+        !d.findings.iter().any(|f| f.code.starts_with("hbone.tunnel_")),
+        "{:?}",
+        d.findings.iter().map(|f| &f.code).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn mtls_failures_are_split_by_who_decided() {
     // Anvil rejected the endpoint (local verification decision).

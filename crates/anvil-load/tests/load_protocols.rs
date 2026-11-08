@@ -631,6 +631,7 @@ async fn hbone_endpoint(allowed: Vec<String>) -> HboneFixture {
             allowed,
             unavailable: vec![],
             udp_faults: vec![],
+            stalled_refusals: vec![],
         },
     )
     .await

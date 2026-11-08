@@ -180,6 +180,7 @@ async fn endpoint(auth: ClientAuth, allowed: Vec<String>, unavailable: Vec<Strin
             allowed,
             unavailable,
             udp_faults: faults,
+            stalled_refusals: vec![],
         },
     )
     .await
@@ -390,6 +391,7 @@ async fn a_reset_tunnel_is_an_abnormal_end_with_its_code() {
         allowed: vec![],
         unavailable: vec![],
         udp_faults: vec![],
+        stalled_refusals: vec![],
     };
     let ep = hbone::serve_resetting("127.0.0.1:0", opts, 1).await.unwrap();
     let o = run(&via_hbone(&echo, udp_spec(&["one"], 2_000), &ep, Some(client_svid()), HboneMarker::None)).await;

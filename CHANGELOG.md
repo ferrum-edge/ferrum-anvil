@@ -161,6 +161,13 @@
   over HTTP/2 or HTTP/3 no longer lists those fields. Where ALPN or an HTTP/3 fallback picks the
   version when the request is sent, the preview keeps showing them and a note names the ones HTTP/2
   and HTTP/3 leave out (#499).
+- An HBONE `CONNECT` refusal whose body the endpoint held open or trickled past the total deadline,
+  or that was canceled while the body was read, keeps its evidence: the endpoint's status, response
+  headers and the body captured so far stay in the tunnel record, and `hbone.tunnel_refused` (or
+  `hbone.tunnel_unavailable`) still reports the refusal. The attempt ends as `total_timeout` in
+  `proxy_tunnel` (`deadline_ms` = `total_ms`) or as `canceled`, as MASQUE and WebSocket refusals do.
+  The refusal used to be lost: the attempt reported a generic connection-setup timeout. This
+  covers the byte-stream tunnel and the UDP datagram tunnel (#500).
 - The lock screen no longer gets stuck on "Set a new passphrase" when an idle or sleep lock lands
   after a recovery-key unlock: any lock returns to the unlock form, and so does "Not now" when the
   profile locked meanwhile. A new profile's one-time recovery key is shown even if the form was

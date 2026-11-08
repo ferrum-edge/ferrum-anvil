@@ -993,29 +993,71 @@ impl HttpTransport {
                     }
                     _ => None,
                 };
-                let connecting = async {
-                    match resumption {
-                        Some(r) => connector::establish_resumable(&mut rec, &target, &plan.dns, &plan.timeouts, r, header).await,
-                        None => (
-                            connector::establish_with(&mut rec, &target, &plan.dns, &plan.timeouts, plan.proxy.as_ref(), header).await,
-                            None,
-                        ),
+                // An interruption that wins the race still gives the setup one
+                // more poll ([`settle_once`]): an HBONE endpoint's refusal
+                // already received ends there with its evidence.
+                enum Setup<T> {
+                    Done(T),
+                    Canceled,
+                    Deadline,
+                }
+                let setup = {
+                    let connecting = async {
+                        match resumption {
+                            Some(r) => connector::establish_resumable(&mut rec, &target, &plan.dns, &plan.timeouts, r, header).await,
+                            None => (
+                                connector::establish_with(
+                                    &mut rec,
+                                    &target,
+                                    &plan.dns,
+                                    &plan.timeouts,
+                                    plan.proxy.as_ref(),
+                                    header,
+                                    cancel,
+                                    total_deadline,
+                                )
+                                .await,
+                                None,
+                            ),
+                        }
+                    };
+                    tokio::pin!(connecting);
+                    let raced = tokio::select! {
+                        biased;
+                        out = &mut connecting => Setup::Done(out),
+                        _ = cancel.cancelled() => Setup::Canceled,
+                        _ = sleep_until_opt(total_deadline) => Setup::Deadline,
+                    };
+                    match raced {
+                        Setup::Done(out) => Setup::Done(out),
+                        interrupted => match settle_once(connecting.as_mut()).await {
+                            Some(out @ (Err(_), _)) => Setup::Done(out),
+                            _ => interrupted,
+                        },
                     }
                 };
-                let est = tokio::select! {
-                    (r, info) = connecting => {
+                let est = match setup {
+                    Setup::Done((r, info)) => {
                         if let (Some(e), Some(i)) = (early.as_mut(), info) {
                             e.info = Some(i);
                         }
                         r
                     }
-                    _ = cancel.cancelled() => {
-                        let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::Canceled, "canceled during connection setup");
+                    Setup::Canceled => {
+                        let f = TransportFailure::new(
+                            rec.open_phase().unwrap_or(Phase::Connect),
+                            FailureKind::Canceled,
+                            "canceled during connection setup",
+                        );
                         return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
-                    _ = sleep_until_opt(total_deadline) => {
-                        let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::TotalTimeout, "total deadline elapsed during connection setup")
-                            .with_deadline(plan.timeouts.total_ms);
+                    Setup::Deadline => {
+                        let f = TransportFailure::new(
+                            rec.open_phase().unwrap_or(Phase::Connect),
+                            FailureKind::TotalTimeout,
+                            "total deadline elapsed during connection setup",
+                        )
+                        .with_deadline(plan.timeouts.total_ms);
                         return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
                 };
@@ -1669,6 +1711,35 @@ fn finalize_fail(mut out: AttemptOutput, stats: &ConnStats, written_before: u64,
     out
 }
 
+/// One more poll of `fut` after the caller's race against cancel and the
+/// total deadline chose an interruption, before `fut` is dropped. A future
+/// that settles the interruption itself (an HBONE refusal whose body is being
+/// read keeps the endpoint's answer) is ready on this poll, since the cancel
+/// and the deadline are now observable to it; any other is still pending.
+///
+/// The poll runs outside Tokio's cooperative budget: with the budget spent
+/// (the caller's own timer may have used its last unit), a `select!` returns
+/// `Pending` before polling any branch, and the interruption would go unseen.
+/// It is a single poll, so it cannot starve the scheduler.
+pub(crate) async fn settle_once<F: std::future::Future>(mut fut: Pin<&mut F>) -> Option<F::Output> {
+    tokio::task::coop::unconstrained(std::future::poll_fn(|cx| {
+        Poll::Ready(match std::future::Future::poll(fut.as_mut(), cx) {
+            Poll::Ready(out) => Some(out),
+            Poll::Pending => None,
+        })
+    }))
+    .await
+}
+
+/// Ready once the clock has reached `at`, read on every poll (no timer, so
+/// it registers no wake-up of its own): a `select!` polled again, after a
+/// caller's timer for the same instant fired but before this task's own did,
+/// still sees the deadline. A `select!` precondition would not: it is read
+/// once, when the `select!` starts.
+pub(crate) fn past(at: Option<Instant>) -> impl std::future::Future<Output = ()> {
+    std::future::poll_fn(move |_| if at.is_some_and(|d| Instant::now() >= d) { Poll::Ready(()) } else { Poll::Pending })
+}
+
 pub async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
@@ -1679,6 +1750,75 @@ pub async fn sleep_until_opt(at: Option<Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The race in a caller against cancel and the deadline can pick the
+    /// interruption after the setup future last returned `Pending` (another
+    /// thread cancels in between). The extra poll lets a future that settles
+    /// the interruption itself return its result instead of being dropped;
+    /// one that does not is still pending.
+    #[tokio::test]
+    async fn settle_once_hands_back_a_result_the_interruption_made_ready() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let settles = async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => "kept the evidence",
+                _ = std::future::pending::<()>() => unreachable!(),
+            }
+        };
+        tokio::pin!(settles);
+        assert_eq!(settle_once(settles.as_mut()).await, None, "nothing to settle yet");
+        cancel.cancel();
+        assert_eq!(settle_once(settles.as_mut()).await, Some("kept the evidence"));
+
+        // The deadline passes between two polls of one `select!`, with no
+        // timer to wake it: `past` reads the clock on the second poll.
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let by_clock = async {
+            tokio::select! {
+                biased;
+                _ = past(Some(deadline)) => "deadline seen on the clock",
+                _ = std::future::pending::<()>() => unreachable!(),
+            }
+        };
+        tokio::pin!(by_clock);
+        assert_eq!(settle_once(by_clock.as_mut()).await, None, "not yet");
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(settle_once(by_clock.as_mut()).await, Some("deadline seen on the clock"));
+        assert_eq!(settle_once(std::pin::pin!(past(None))).await, None, "no deadline");
+
+        // With the task's cooperative budget spent, a `select!` returns
+        // `Pending` before polling any branch; the settling poll is outside
+        // the budget, so it still sees the cancel.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let settles = async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => "kept the evidence",
+                _ = std::future::pending::<()>() => unreachable!(),
+            }
+        };
+        tokio::pin!(settles);
+        cancel.cancel();
+        // Spend the budget: `consume_budget` is pending once none is left.
+        let mut spent = 0;
+        loop {
+            let mut unit = std::pin::pin!(tokio::task::coop::consume_budget());
+            let ready = std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(unit.as_mut(), cx).is_ready())).await;
+            if !ready {
+                break;
+            }
+            spent += 1;
+            assert!(spent < 10_000, "the budget never ran out");
+        }
+        let blocked = std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(settles.as_mut(), cx).is_pending())).await;
+        assert!(blocked, "a select! with no budget left polls no branch");
+        assert_eq!(settle_once(settles.as_mut()).await, Some("kept the evidence"));
+
+        let never = std::future::pending::<()>();
+        tokio::pin!(never);
+        assert_eq!(settle_once(never.as_mut()).await, None);
+    }
 
     fn start_sweeper(t: &HttpTransport) {
         let mut state = t.pool.shared.state.lock();

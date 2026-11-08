@@ -101,6 +101,7 @@ async fn endpoint(alpn: &[&str], allowed: Vec<String>) -> hbone::HboneFixture {
             allowed,
             unavailable: vec![],
             udp_faults: vec![],
+            stalled_refusals: vec![],
         },
     )
     .await
@@ -208,4 +209,80 @@ async fn cancellation_at_session_start_sends_no_record() {
         assert_eq!(tunnel(&o).datagrams.as_ref().unwrap().records_sent, 0);
     }
     assert!(!echo.log.entries().iter().any(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })), "no datagram reached the target");
+}
+
+/// An endpoint that refuses the datagram CONNECT to `stalled` with `403`,
+/// headers and a first body chunk, then holds the body open (#500).
+async fn stalling_endpoint(stalled: &str) -> hbone::HboneFixture {
+    hbone::serve(
+        "127.0.0.1:0",
+        HboneOptions {
+            server_cert_chain_pem: mesh().ztunnel.chain_with(&mesh().ca),
+            server_key_pem: mesh().ztunnel.key.clone(),
+            client_auth: ClientAuth::Required { ca_pem: mesh().ca.cert.clone() },
+            alpn: vec!["h2".into()],
+            allowed: vec![],
+            unavailable: vec![],
+            udp_faults: vec![],
+            stalled_refusals: vec![stalled.into()],
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// The refusal evidence a cut-short refusal body keeps.
+fn assert_refusal_kept(o: &SessionOutput, kind: FailureKind) {
+    let a = attempt(o);
+    let f = a.failure.as_ref().unwrap();
+    assert_eq!((f.kind, f.phase, f.status), (kind, Phase::ProxyTunnel, Some(403)), "{f:?}");
+    assert_eq!(a.dispatch, DispatchState::NotDispatched);
+    let t = tunnel(o);
+    assert_eq!(t.connect_status, Some(403));
+    assert!(t.response_headers.iter().any(|h| h.name == "x-refusal" && h.value == "stalled"), "{:?}", t.response_headers);
+    assert_eq!(t.refusal_body.as_deref(), Some(hbone::STALLED_REFUSAL_HEAD));
+    assert!(t.refusal_body_truncated);
+    assert_eq!(t.failure.as_ref().map(|i| i.kind), Some(kind));
+    assert!(t.datagrams.is_some(), "the datagram channel is recorded");
+    assert!(matches!(o.status, ProtocolStatus::Udp { datagrams_sent: 0, .. }), "{:?}", o.status);
+}
+
+#[tokio::test]
+async fn a_datagram_refusal_body_held_open_past_the_total_deadline_keeps_the_refusal() {
+    init();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let ep = stalling_endpoint(&echo.addr.to_string()).await;
+    let mut p = plan(echo.addr, proxy(&ep.address()), &[b"x"]);
+    p.timeouts.body_idle_ms = Some(5_000);
+    p.timeouts.total_ms = Some(3_000);
+    let started = std::time::Instant::now();
+    let o = run(&p).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(4_900), "the read stopped at the deadline: {:?}", started.elapsed());
+    assert_refusal_kept(&o, FailureKind::TotalTimeout);
+    assert_eq!(attempt(&o).failure.as_ref().unwrap().deadline_ms, Some(3_000));
+    assert_eq!(attempt(&o).phase(Phase::ProxyTunnel).unwrap().status, PhaseStatus::TimedOut);
+    assert!(echo.log.entries().is_empty(), "nothing reached the destination");
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_datagram_refusal_body_is_read_keeps_the_refusal() {
+    init();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let ep = stalling_endpoint(&echo.addr.to_string()).await;
+    let mut p = plan(echo.addr, proxy(&ep.address()), &[b"x"]);
+    p.timeouts.body_idle_ms = Some(5_000);
+    // Cancel once the endpoint has answered (its log records the refusal
+    // before the answer goes out) and the head has had time to arrive.
+    let cancel = CancellationToken::new();
+    let (c, log) = (cancel.clone(), ep.log.clone());
+    tokio::spawn(async move {
+        while log.connects.lock().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        c.cancel();
+    });
+    let o = hbone_udp::run(&p, &EventCtx::none(), &cancel, None).await;
+    assert_refusal_kept(&o, FailureKind::Canceled);
+    assert_eq!(attempt(&o).phase(Phase::ProxyTunnel).unwrap().status, PhaseStatus::Canceled);
 }

@@ -1309,6 +1309,7 @@ async fn hbone_receives_unpinned_target_and_oauth_names_despite_client_overrides
             allowed: vec![],
             unavailable: vec![],
             udp_faults: vec![],
+            stalled_refusals: vec![],
         },
     )
     .await
