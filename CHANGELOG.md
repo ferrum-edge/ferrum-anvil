@@ -39,7 +39,9 @@
   did not: `Ocp-Apim-Subscription-Key`, `X-Functions-Key`, `DPoP`, names ending in `-key` or `_key`
   (`X-Master-Key`, `DD-Application-Key`, `tenant_key`), names containing `auth` or `access_key`,
   the short names `key`, `sig`, `pwd`, `pass`, `otp` and `pin`, and the user's extra redaction
-  names. The engine, the importer and the export sanitizer now read one set of lists
+  names; and a value with literal text after a reference (`{{tenant}}-key…`), a helper argument
+  (`{{$randomFrom a|b}}`) or a templated field name. The engine, the importer and the export
+  sanitizer now read one set of lists
   (`anvil_domain::credential_names`), and export extracts a literal under any of them. Such a value
   now becomes a `{{placeholder}}` the recipient fills in (share safely), or travels in the
   encrypted vault and is restored on import (encrypted transfer). Treat a credential of this kind in
