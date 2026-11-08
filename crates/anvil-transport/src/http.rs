@@ -1720,13 +1720,18 @@ fn finalize_fail(mut out: AttemptOutput, stats: &ConnStats, written_before: u64,
 /// that settles the interruption itself (an HBONE refusal whose body is being
 /// read keeps the endpoint's answer) is ready on this poll, since the cancel
 /// and the deadline are now observable to it; any other is still pending.
+///
+/// The poll runs outside Tokio's cooperative budget: with the budget spent
+/// (the caller's own timer may have used its last unit), a `select!` returns
+/// `Pending` before polling any branch, and the interruption would go unseen.
+/// It is a single poll, so it cannot starve the scheduler.
 pub(crate) async fn settle_once<F: std::future::Future>(mut fut: Pin<&mut F>) -> Option<F::Output> {
-    std::future::poll_fn(|cx| {
+    tokio::task::coop::unconstrained(std::future::poll_fn(|cx| {
         Poll::Ready(match std::future::Future::poll(fut.as_mut(), cx) {
             Poll::Ready(out) => Some(out),
             Poll::Pending => None,
         })
-    })
+    }))
     .await
 }
 
@@ -1785,6 +1790,34 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(settle_once(by_clock.as_mut()).await, Some("deadline seen on the clock"));
         assert_eq!(settle_once(std::pin::pin!(past(None))).await, None, "no deadline");
+
+        // With the task's cooperative budget spent, a `select!` returns
+        // `Pending` before polling any branch; the settling poll is outside
+        // the budget, so it still sees the cancel.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let settles = async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => "kept the evidence",
+                _ = std::future::pending::<()>() => unreachable!(),
+            }
+        };
+        tokio::pin!(settles);
+        cancel.cancel();
+        // Spend the budget: `consume_budget` is pending once none is left.
+        let mut spent = 0;
+        loop {
+            let mut unit = std::pin::pin!(tokio::task::coop::consume_budget());
+            let ready = std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(unit.as_mut(), cx).is_ready())).await;
+            if !ready {
+                break;
+            }
+            spent += 1;
+            assert!(spent < 10_000, "the budget never ran out");
+        }
+        let blocked = std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(settles.as_mut(), cx).is_pending())).await;
+        assert!(blocked, "a select! with no budget left polls no branch");
+        assert_eq!(settle_once(settles.as_mut()).await, Some("kept the evidence"));
 
         let never = std::future::pending::<()>();
         tokio::pin!(never);
