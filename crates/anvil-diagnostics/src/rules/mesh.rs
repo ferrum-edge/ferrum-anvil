@@ -179,7 +179,12 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                 d.ev_at(E::NativeTransport, "tunnel.tls.alert", alert.clone(), a.index).var("alert", alert)
             })
         }
-        K::HboneConnectRefused => {
+        // The refusal, or a refusal whose body the total deadline or a cancel
+        // cut short (the attempt then ends as `total_timeout` or `canceled`,
+        // with the endpoint's status, headers and partial body kept).
+        K::HboneConnectRefused | K::TotalTimeout | K::Canceled
+            if f.kind == K::HboneConnectRefused || t.connect_status.is_some_and(|s| !(200..300).contains(&s)) =>
+        {
             let status = f.status.or(t.connect_status).unwrap_or(0);
             // The CONNECT answer came over the endpoint's own HTTP/2
             // connection; its origin is certain only when that connection's
