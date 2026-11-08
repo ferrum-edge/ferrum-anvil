@@ -254,12 +254,12 @@ async fn a_datagram_refusal_body_held_open_past_the_total_deadline_keeps_the_ref
     let ep = stalling_endpoint(&echo.addr.to_string()).await;
     let mut p = plan(echo.addr, proxy(&ep.address()), &[b"x"]);
     p.timeouts.body_idle_ms = Some(5_000);
-    p.timeouts.total_ms = Some(1_500);
+    p.timeouts.total_ms = Some(3_000);
     let started = std::time::Instant::now();
     let o = run(&p).await;
-    assert!(started.elapsed() < std::time::Duration::from_millis(4_500), "the read stopped at the deadline: {:?}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_millis(4_900), "the read stopped at the deadline: {:?}", started.elapsed());
     assert_refusal_kept(&o, FailureKind::TotalTimeout);
-    assert_eq!(attempt(&o).failure.as_ref().unwrap().deadline_ms, Some(1_500));
+    assert_eq!(attempt(&o).failure.as_ref().unwrap().deadline_ms, Some(3_000));
     assert_eq!(attempt(&o).phase(Phase::ProxyTunnel).unwrap().status, PhaseStatus::TimedOut);
     assert!(echo.log.entries().is_empty(), "nothing reached the destination");
 }
@@ -271,10 +271,15 @@ async fn a_cancel_while_the_datagram_refusal_body_is_read_keeps_the_refusal() {
     let ep = stalling_endpoint(&echo.addr.to_string()).await;
     let mut p = plan(echo.addr, proxy(&ep.address()), &[b"x"]);
     p.timeouts.body_idle_ms = Some(5_000);
+    // Cancel once the endpoint has answered (its log records the refusal
+    // before the answer goes out) and the head has had time to arrive.
     let cancel = CancellationToken::new();
-    let c = cancel.clone();
+    let (c, log) = (cancel.clone(), ep.log.clone());
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+        while log.connects.lock().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         c.cancel();
     });
     let o = hbone_udp::run(&p, &EventCtx::none(), &cancel, None).await;

@@ -573,13 +573,13 @@ async fn a_refusal_body_held_open_past_the_total_deadline_keeps_the_refusal() {
     let mut p = plan(&format!("http://{target}/x"), None, Some(hbone_proxy(&endpoint.address(), client_svid_tls(), &[])));
     // The idle wait per chunk (at most 5 s) outlasts the total deadline.
     p.timeouts.body_idle_ms = Some(5_000);
-    p.timeouts.total_ms = Some(1_500);
+    p.timeouts.total_ms = Some(3_000);
     let started = std::time::Instant::now();
     let o = run(&HttpTransport::new(), &p).await;
-    assert!(started.elapsed() < std::time::Duration::from_millis(4_500), "the read stopped at the deadline: {:?}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_millis(4_900), "the read stopped at the deadline: {:?}", started.elapsed());
     let f = failure(&o);
     assert_eq!(f.kind, FailureKind::TotalTimeout, "{f:?}");
-    assert_eq!(f.deadline_ms, Some(1_500));
+    assert_eq!(f.deadline_ms, Some(3_000));
     assert_refusal_kept(&o);
     assert_eq!(o.observation.phase(Phase::ProxyTunnel).unwrap().status, PhaseStatus::TimedOut);
     assert_eq!(endpoint.connects().len(), 1);
@@ -593,10 +593,15 @@ async fn a_cancel_while_the_refusal_body_is_read_keeps_the_refusal() {
     let endpoint = stalling_endpoint(target).await;
     let mut p = plan(&format!("http://{target}/x"), None, Some(hbone_proxy(&endpoint.address(), client_svid_tls(), &[])));
     p.timeouts.body_idle_ms = Some(5_000);
+    // Cancel once the endpoint has answered (its log records the refusal
+    // before the answer goes out) and the head has had time to arrive.
     let cancel = CancellationToken::new();
-    let c = cancel.clone();
+    let (c, log) = (cancel.clone(), endpoint.log.clone());
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+        while log.connects.lock().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         c.cancel();
     });
     let mut outs = HttpTransport::new().execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &cancel).await;
