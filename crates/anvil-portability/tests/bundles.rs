@@ -132,6 +132,7 @@ fn opts(mode: ExportMode, pass: Option<&str>) -> ExportOptions<'_> {
         include_history: false,
         kdf: KdfParams::testing(),
         app_version: "test",
+        redaction_names: &[],
     }
 }
 
@@ -212,6 +213,66 @@ fn data_003_encrypted_transfer_restores_exact_values() {
     assert_eq!(opened.graph.requests, expected.requests, "requests restored byte-for-byte");
     assert_eq!(opened.graph.environments, expected.environments);
     assert_eq!(opened.graph.secrets, g.secrets);
+}
+
+/// The readable `workspace/objects.json` of a bundle.
+fn objects_of(bytes: &[u8]) -> String {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut objects = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("workspace/objects.json").unwrap(), &mut objects).unwrap();
+    objects
+}
+
+/// GHSA-8fmc-h49v-mh7f: literals under header and parameter names the engine
+/// or the importer treats as credentials, and under the user's extra
+/// redaction names, never reach the readable objects in either bundle mode,
+/// and encrypted transfer restores them.
+#[test]
+fn credential_named_literals_never_reach_the_readable_objects() {
+    let mut g = sample();
+    let literals = [
+        ("Ocp-Apim-Subscription-Key", "apim-literal-0001"),
+        ("X-Master-Key", "master-literal-0002"),
+        ("DD-Application-Key", "dd-literal-0003"),
+        ("X-Customer-Ssn", "extra-literal-0004"),
+    ];
+    let spec = &mut g.requests[0].spec;
+    for (n, v) in literals {
+        spec.headers.push(KeyValue::new(n, v));
+    }
+    spec.params.push(KeyValue::new("key", "query-key-literal-0005"));
+    spec.params.push(KeyValue::new("sig", "query-sig-literal-0006"));
+    spec.params.push(KeyValue::new("page", "2"));
+    let extra = vec!["x-customer-ssn".to_string()];
+    let leaked = |objects: &str| {
+        literals
+            .iter()
+            .map(|(_, v)| *v)
+            .chain(["query-key-literal-0005", "query-sig-literal-0006"])
+            .filter(|v| objects.contains(v))
+            .collect::<Vec<_>>()
+    };
+
+    let share = ExportOptions { redaction_names: &extra, ..opts(ExportMode::ShareSafely, None) };
+    let (bytes, preview) = bundle::write(&g, &share).unwrap();
+    assert!(leaked(&text_of(&bytes)).is_empty(), "share safely: {:?}", leaked(&text_of(&bytes)));
+    for (n, _) in literals {
+        let placeholder = format!("{{{{secret_{}}}}}", n.to_ascii_lowercase().replace('-', "_"));
+        assert!(objects_of(&bytes).contains(&placeholder), "{n}: no {placeholder}");
+    }
+    assert!(preview.manifest.excluded.iter().any(|e| e.contains("secret_ocp_apim_subscription_key")), "{:?}", preview.manifest.excluded);
+    let opened = bundle::open(&bytes, None).unwrap();
+    let create = opened.graph.requests.iter().find(|r| r.name == "Create order").unwrap();
+    assert!(create.spec.params.iter().any(|q| q.name == "page" && q.value == "2"), "an ordinary parameter stays");
+
+    let pass = "correct horse battery";
+    let transfer = ExportOptions { redaction_names: &extra, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
+    let (bytes, _) = bundle::write(&g, &transfer).unwrap();
+    assert!(leaked(&objects_of(&bytes)).is_empty(), "encrypted transfer: {:?}", leaked(&objects_of(&bytes)));
+    let opened = bundle::open(&bytes, Some(pass)).unwrap();
+    let mut expected = g.clone();
+    let _ = validate::validate_and_normalize(&mut expected).unwrap();
+    assert_eq!(opened.graph.requests, expected.requests, "encrypted transfer restores every literal");
 }
 
 #[test]

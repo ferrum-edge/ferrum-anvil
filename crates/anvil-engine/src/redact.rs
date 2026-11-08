@@ -48,39 +48,9 @@ const URL_HEADERS: &[&str] = &["location", "content-location", "referer"];
 /// references (a server can put a trace URL with a token in `instance`).
 const URL_EVIDENCE: &[&str] = &["redirect.authorization_endpoint", "body.problem.type", "body.problem.instance"];
 
-const SENSITIVE_HEADERS: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-api-key",
-    "api-key",
-    "apikey",
-    "x-auth-token",
-    "x-access-token",
-    "x-amz-security-token",
-    "x-csrf-token",
-    "dpop",
-    "x-functions-key",
-    "ocp-apim-subscription-key",
-];
-
-const SENSITIVE_NAME_PARTS: &[&str] = &[
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "access_key",
-    "private_key",
-    "signature",
-    "sig",
-    "session",
-    "credential",
-    "auth",
-];
+// The engine's credential names live in `anvil_domain::credential_names`,
+// which the bundle export sanitizer reads too.
+use anvil_domain::credential_names::{ENGINE_SENSITIVE_HEADERS as SENSITIVE_HEADERS, ENGINE_SENSITIVE_NAME_PARTS as SENSITIVE_NAME_PARTS};
 
 pub fn is_sensitive_name(name: &str, extra: &[String]) -> bool {
     let n = name.to_ascii_lowercase();

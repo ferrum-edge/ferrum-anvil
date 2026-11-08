@@ -270,6 +270,26 @@ entries that anyone holding the file can read. Secrets and literal secrets
 never appear in them, but a credential typed into a body or URL is exported
 as written, with a warning in the preview.
 
+A literal secret is a literal value (not a single `{{variable}}` reference)
+of an auth field (a password, token or key), of a secret variable, or of a
+header, query parameter, form field or gRPC metadata entry that is marked
+sensitive or whose name Anvil treats as a credential anywhere
+(`anvil_domain::credential_names`):
+
+- the names the engine redacts and keeps off a cross-origin redirect,
+  among them `Ocp-Apim-Subscription-Key`, `X-Functions-Key`, `DPoP` and any
+  name containing `token`, `secret`, `auth`, `sig`, `session` or
+  `access_key`, or ending in `-key` or `_key` (`X-Master-Key`,
+  `DD-Application-Key`, `tenant_key`);
+- the names the importer marks sensitive, among them the short names
+  `key`, `sig`, `pwd`, `pass`, `auth`, `otp`, `pin`, `jwt` and `sid`;
+- the extra redaction names in Settings.
+
+The rule errs towards extraction: a value under a name matched by mistake
+only becomes a placeholder (share safely) or travels in the vault
+(encrypted transfer), so pagination tokens such as `page_token` are
+extracted too.
+
 ### Encrypted bundles are tamper-evident
 
 An encrypted-transfer bundle (format 2) seals its vault with the SHA-256 of

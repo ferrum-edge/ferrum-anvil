@@ -150,6 +150,7 @@ fn encrypted(g: &PortableGraph) -> Vec<u8> {
         include_history: false,
         kdf: KdfParams::testing(),
         app_version: "test",
+        redaction_names: &[],
     };
     bundle::write(g, &opts).unwrap().0
 }
@@ -900,6 +901,7 @@ async fn an_imported_history_record_is_never_dated_after_its_import() {
         include_history: true,
         kdf: KdfParams::testing(),
         app_version: "test",
+        redaction_names: &[],
     };
     let (bytes, _) = bundle::write(&g, &opts).unwrap();
 

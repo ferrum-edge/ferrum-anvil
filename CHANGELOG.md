@@ -33,6 +33,17 @@
 
 ### Security
 
+- Share-safely and encrypted-transfer exports no longer keep a literal credential in the readable
+  `workspace/objects.json` when it sits under a header, query parameter or form field name that
+  the engine or the importer treats as a credential but the export sanitizer's own, narrower list
+  did not: `Ocp-Apim-Subscription-Key`, `X-Functions-Key`, `DPoP`, names ending in `-key` or `_key`
+  (`X-Master-Key`, `DD-Application-Key`, `tenant_key`), names containing `auth` or `access_key`,
+  the short names `key`, `sig`, `pwd`, `pass`, `otp` and `pin`, and the user's extra redaction
+  names. The engine, the importer and the export sanitizer now read one set of lists
+  (`anvil_domain::credential_names`), and export extracts a literal under any of them. Such a value
+  now becomes a `{{placeholder}}` the recipient fills in (share safely), or travels in the
+  encrypted vault and is restored on import (encrypted transfer). Treat a credential of this kind in
+  a bundle an earlier build exported as disclosed, and rotate it (GHSA-8fmc-h49v-mh7f).
 - The human-readable output of `anvil run` and `anvil send` (and of `anvil scenario`, `anvil
   workspace list` and `tree`, `anvil history`, `anvil mcp-discover`, `anvil workload probe`,
   `anvil load`, the import and export notes, and command errors) escapes control characters and

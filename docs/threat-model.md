@@ -514,7 +514,11 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   (names, URLs, header and body text), attachments and history are ordinary
   zip entries that anyone holding the file can read, in either mode. Secrets
   and sensitive literals never appear in them, but credentials typed into
-  free text (a body or URL) are only warned about on export. Full backups are
+  free text (a body or URL) are only warned about on export. A sensitive
+  literal is a field marked sensitive or one under any name the engine, the
+  importer or the user's extra redaction names treat as a credential
+  (`anvil_domain::credential_names::is_export_secret_name`; see
+  storage-and-recovery.md). Full backups are
   encrypted as a whole.
 - **Bundle key-derivation costs:** the Argon2id costs in a bundle manifest or
   backup header are read before anything authenticates, so costs outside the

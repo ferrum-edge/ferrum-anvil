@@ -199,6 +199,7 @@ impl App {
         if !include_standards {
             g.rulesets.clear();
         }
+        let settings = self.settings()?;
         let opts = ExportOptions {
             kind: BundleKind::Workspace,
             mode,
@@ -207,6 +208,7 @@ impl App {
             // Preview counts production metadata without deriving a key.
             kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
+            redaction_names: &settings.redaction_names,
         };
         Ok(bundle::preview(&g, &opts)?)
     }
@@ -236,6 +238,7 @@ impl App {
         if !include_standards {
             g.rulesets.clear();
         }
+        let settings = self.settings()?;
         let opts = ExportOptions {
             kind: BundleKind::Workspace,
             mode,
@@ -243,6 +246,7 @@ impl App {
             include_history,
             kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
+            redaction_names: &settings.redaction_names,
         };
         Ok(bundle::write(&g, &opts)?)
     }

@@ -165,6 +165,10 @@ pub struct ExportOptions<'a> {
     pub include_history: bool,
     pub kdf: KdfParams,
     pub app_version: &'a str,
+    /// The user's extra redaction names (`AppSettings::redaction_names`):
+    /// a literal header, query or form value under one of them is moved out
+    /// of `objects.json` like any other credential-named field.
+    pub redaction_names: &'a [String],
 }
 
 /// Summary shown before writing (and returned after).
@@ -240,7 +244,7 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
         charge_entry_bytes(&name, data.len() as u64, &mut remaining, READ_LIMITS)?;
     }
     let mut objects = serde_json::to_value(graph)?;
-    let san = sanitize::sanitize(&mut objects);
+    let san = sanitize::sanitize(&mut objects, opts.redaction_names);
     let mut excluded = graph.omitted.clone();
     // Stored files whose content could not be read here travel without it.
     for u in crate::validate::uncarried_attachments(graph)? {
@@ -1187,6 +1191,7 @@ mod read_tests {
             include_history: false,
             kdf: KdfParams::testing(),
             app_version: "test",
+            redaction_names: &[],
         };
         let (bytes, _) = write(&graph, &options).unwrap();
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
@@ -1628,6 +1633,7 @@ mod read_tests {
                 include_history: true,
                 kdf: KdfParams::testing(),
                 app_version: "test",
+                redaction_names: &[],
             };
             let (bytes, preview) = write(&graph, &opts).unwrap();
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
@@ -1668,6 +1674,7 @@ mod read_tests {
             include_history: false,
             kdf: KdfParams::testing(),
             app_version: "test",
+            redaction_names: &[],
         };
         preview(&graph, &opts).unwrap();
         let (bytes, _) = write(&graph, &opts).unwrap();
@@ -1688,6 +1695,7 @@ mod read_tests {
                 include_history: true,
                 kdf: KdfParams::interactive(),
                 app_version: "test",
+                redaction_names: &[],
             };
             let mut prepared = prepare(&graph, &opts).unwrap();
             // Exercise the production paths with one stable timestamp, not a
@@ -1797,6 +1805,7 @@ mod read_tests {
                 include_history: true,
                 kdf: KdfParams::testing(),
                 app_version: &app_version,
+                redaction_names: &[],
             };
             let (manifest, mut objects, vault) = prepare(&graph, &opts).unwrap();
             if name == "workspace/objects.json" {
@@ -1825,6 +1834,7 @@ mod read_tests {
             include_history: false,
             kdf: KdfParams::testing(),
             app_version: "test",
+            redaction_names: &[],
         };
         assert!(matches!(preview(&too_many, &opts), Err(BundleError::Limits(_))));
         assert!(matches!(write(&too_many, &opts), Err(BundleError::Limits(_))));
@@ -1945,6 +1955,7 @@ mod read_tests {
             include_history: false,
             kdf: KdfParams::testing(),
             app_version: "test",
+            redaction_names: &[],
         };
         // Without ZIP64 sentinels the nested record is harmless and round-trips.
         let mut graph = PortableGraph::default();

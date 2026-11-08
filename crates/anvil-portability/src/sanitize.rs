@@ -1,8 +1,9 @@
 //! Moves sensitive literals out of the object graph before export.
 //!
 //! Every `SensitiveValue::Template` literal (auth passwords, tokens, private
-//! keys…), every *secret* variable value, and every sensitive-named header,
-//! query or form field with a literal value is replaced by a `{{placeholder}}`
+//! keys…), every *secret* variable value, and every header, query or form
+//! field with a literal value that is flagged `sensitive` or whose name is a
+//! credential name ([`sensitive_name`]) is replaced by a `{{placeholder}}`
 //! reference. The originals are returned so encrypted bundles can carry them
 //! in the authenticated vault and restore them on import. `objects.json`
 //! therefore never contains secret material, in any export mode.
@@ -24,26 +25,12 @@ pub struct ContentWarning {
     pub reason: String,
 }
 
-const SENSITIVE_PARTS: &[&str] = &[
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "authorization",
-    "cookie",
-    "session",
-    "private",
-    "credential",
-    "signature",
-    "x-api-key",
-];
-
-pub fn sensitive_name(n: &str) -> bool {
-    let l = n.to_ascii_lowercase();
-    SENSITIVE_PARTS.iter().any(|p| l.contains(p))
+/// Whether a field or variable named `name` holds a secret for export:
+/// any name the engine, the importer or the user's extra redaction names
+/// (`extra`) treat as a credential
+/// ([`anvil_domain::credential_names::is_export_secret_name`]).
+pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
+    anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
 fn is_pure_reference(s: &str) -> bool {
@@ -88,14 +75,16 @@ pub struct Sanitized {
     pub warnings: Vec<ContentWarning>,
 }
 
-/// Walk `objects.json` and replace sensitive literals in place.
-pub fn sanitize(v: &mut serde_json::Value) -> Sanitized {
+/// Walk `objects.json` and replace sensitive literals in place. `extra` is
+/// the user's extra redaction names (`AppSettings::redaction_names`), always
+/// treated as credential names.
+pub fn sanitize(v: &mut serde_json::Value, extra: &[String]) -> Sanitized {
     let mut s = Sanitized { extracted: vec![], warnings: vec![] };
-    walk(v, String::new(), "", &mut s);
+    walk(v, String::new(), "", extra, &mut s);
     s
 }
 
-fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
+fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: &mut Sanitized) {
     match v {
         serde_json::Value::Object(map) => {
             // SensitiveValue::Template  => {"kind":"template","value": "..."}
@@ -125,7 +114,7 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                         val["value"] = serde_json::Value::String(String::new());
                     } else if !secret
                         && is_tpl
-                        && (sensitive_name(&name) || looks_like_credential(&text).is_some())
+                        && (sensitive_name(&name, extra) || looks_like_credential(&text).is_some())
                         && !text.is_empty()
                         && !is_pure_reference(&text)
                     {
@@ -143,7 +132,7 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                 let name = map.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let flagged = map.get("sensitive").and_then(|b| b.as_bool()).unwrap_or(false);
                 let val = map["value"].as_str().unwrap_or("").to_string();
-                if (flagged || sensitive_name(&name)) && !is_pure_reference(&val) {
+                if (flagged || sensitive_name(&name, extra)) && !is_pure_reference(&val) {
                     let ph = placeholder_name(&name);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
@@ -166,13 +155,13 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                     continue;
                 }
                 if let Some(child) = map.get_mut(&k) {
-                    walk(child, child_ptr, &k, s);
+                    walk(child, child_ptr, &k, extra, s);
                 }
             }
         }
         serde_json::Value::Array(a) => {
             for (i, x) in a.iter_mut().enumerate() {
-                walk(x, format!("{ptr}/{i}"), key, s);
+                walk(x, format!("{ptr}/{i}"), key, extra, s);
             }
         }
         _ => {}
@@ -235,7 +224,7 @@ mod tests {
             ]}]
         });
         let original = v.clone();
-        let s = sanitize(&mut v);
+        let s = sanitize(&mut v, &[]);
         let text = v.to_string();
         for leaked in ["hunter2", "k-123", "s3cr3t"] {
             assert!(!text.contains(leaked), "{leaked} leaked");
@@ -260,7 +249,7 @@ mod tests {
                 {"name": "db_pw", "value": {"kind": "template", "value": "s3cr3t"}, "secret": true, "enabled": true}
             ]}]
         });
-        let s = sanitize(&mut v);
+        let s = sanitize(&mut v, &[]);
         assert_eq!(s.extracted.len(), 2);
         let sanitized = v.clone();
         let pw = s.extracted.iter().position(|e| e.placeholder == "secret_password").unwrap();
@@ -292,10 +281,82 @@ mod tests {
         assert!(v.to_string().contains("hunter2") && v.to_string().contains("s3cr3t"));
     }
 
+    /// GHSA-8fmc-h49v-mh7f: every name the engine or the importer treats as
+    /// a credential, and the user's extra redaction names, is extracted from
+    /// headers, query parameters and form fields; ordinary names are not.
+    #[test]
+    fn every_credential_name_anvil_knows_is_extracted() {
+        use anvil_domain::credential_names as cn;
+        let extra = vec!["X-Customer-Ssn".to_string()];
+        let mut names: Vec<String> = [
+            cn::ENGINE_SENSITIVE_HEADERS,
+            cn::ENGINE_SENSITIVE_NAME_PARTS,
+            cn::IMPORT_CREDENTIAL_HEADERS,
+            cn::IMPORT_CREDENTIAL_PARTS,
+            cn::IMPORT_CREDENTIAL_EXACT,
+        ]
+        .concat()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+        names.extend(
+            [
+                "Ocp-Apim-Subscription-Key",
+                "X-Functions-Key",
+                "DPoP",
+                "X-Master-Key",
+                "Subscription-Key",
+                "X-Auth-Key",
+                "DD-Application-Key",
+            ]
+            .map(String::from),
+        );
+        names.extend(
+            ["tenant_key", "aws_access_key_id", "X-Auth-User", "key", "sig", "pwd", "pass", "otp", "pin", "x-customer-ssn"]
+                .map(String::from),
+        );
+        let kv = |n: &str, i: usize, place: &str| serde_json::json!({"name": n, "value": format!("lit-{place}-{i}-zq"), "enabled": true});
+        let fields = |place: &str| names.iter().enumerate().map(|(i, n)| kv(n, i, place)).collect::<Vec<_>>();
+        let ordinary = ["Accept", "Content-Type", "X-Request-Id", "page", "limit"];
+        let kept = |place: &str| {
+            ordinary
+                .iter()
+                .map(|n| serde_json::json!({"name": n, "value": format!("plain-{place}-{n}"), "enabled": true}))
+                .collect::<Vec<_>>()
+        };
+        let mut headers = fields("h");
+        headers.extend(kept("h"));
+        let mut query = fields("q");
+        query.extend(kept("q"));
+        let mut form = fields("f");
+        form.extend(kept("f"));
+        let mut v = serde_json::json!({"requests": [{"spec": {
+            "headers": headers,
+            "query": query,
+            "body": {"type": "form", "fields": form}
+        }}]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &extra);
+        let text = v.to_string();
+        assert!(!text.contains("lit-"), "a credential-named literal stayed: {text}");
+        assert_eq!(s.extracted.len(), names.len() * 3);
+        for place in ["h", "q", "f"] {
+            for n in ordinary {
+                assert!(text.contains(&format!("plain-{place}-{n}")), "{n} was extracted");
+            }
+        }
+        // Without the extra name, its literal stays (it is no built-in name).
+        let mut without = original.clone();
+        let s_without = sanitize(&mut without, &[]);
+        assert_eq!(s_without.extracted.len(), (names.len() - 1) * 3, "x-customer-ssn is only an extra name");
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
     #[test]
     fn free_text_credentials_are_warned_not_modified() {
         let mut v = serde_json::json!({"requests": [{"spec": {"body": {"type": "json", "text": "{\"password\":\"abc123\"}"}}}]});
-        let s = sanitize(&mut v);
+        let s = sanitize(&mut v, &[]);
         assert_eq!(s.warnings.len(), 1);
         assert!(!s.warnings[0].reason.contains("use encrypted transfer"), "{}", s.warnings[0].reason);
         assert!(s.warnings[0].reason.contains("encrypted-transfer"), "{}", s.warnings[0].reason);

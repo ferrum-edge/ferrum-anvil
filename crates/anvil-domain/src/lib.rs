@@ -17,6 +17,7 @@
 
 pub mod assertions;
 pub mod auth;
+pub mod credential_names;
 pub mod diagnostic_import;
 pub mod diagnostics;
 pub mod events;
