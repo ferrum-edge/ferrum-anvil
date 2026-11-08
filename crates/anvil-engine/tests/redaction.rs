@@ -523,6 +523,811 @@ async fn a_secret_reflected_into_response_metadata_is_not_kept() {
     assert!(!leaks(&record), "the stored record holds the reflected secret: {record}");
 }
 
+/// Basic, API key, HMAC, WS-Security and multi-auth (an API key and Basic)
+/// with the username (or key name) `user`, each with a password or key of
+/// its own.
+fn auths_for(user: &str) -> Vec<anvil_domain::auth::AuthConfig> {
+    use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, WsseConfig, WssePasswordType};
+    use anvil_domain::secret::SensitiveValue;
+    vec![
+        AuthConfig::Basic { username: user.into(), password: SensitiveValue::template("tok-SENSITIVE-basic-pw-3k9q") },
+        AuthConfig::ApiKey {
+            name: user.into(),
+            value: SensitiveValue::template("tok-SENSITIVE-api-key-8m2v"),
+            location: KeyLocation::Header,
+        },
+        AuthConfig::Hmac {
+            config: HmacConfig {
+                profile: Default::default(),
+                username: user.into(),
+                secret: SensitiveValue::template("tok-SENSITIVE-hmac-5t1x"),
+                algorithm: Default::default(),
+                digest_header: Default::default(),
+                namespace: String::new(),
+                allow_unsafe_legacy: false,
+            },
+        },
+        AuthConfig::Wsse {
+            config: WsseConfig {
+                username: user.into(),
+                password: SensitiveValue::template("tok-SENSITIVE-wsse-pw-6p4n"),
+                password_type: WssePasswordType::PasswordText,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        },
+        AuthConfig::Multi {
+            profiles: vec![
+                AuthConfig::ApiKey {
+                    name: "X-Label-Key".into(),
+                    value: SensitiveValue::template("tok-SENSITIVE-multi-key-2r8w"),
+                    location: KeyLocation::Header,
+                },
+                AuthConfig::Basic { username: user.into(), password: SensitiveValue::template("tok-SENSITIVE-multi-pw-4h6j") },
+            ],
+        },
+    ]
+}
+
+/// The auth label names the resolved username or API key name, and a
+/// template can take either from a secret variable. The stored record (which
+/// `anvil send --json` prints and history keeps) and the effective-request
+/// preview redact it there, in any letter case; a plain username stays.
+#[tokio::test]
+async fn a_secret_username_or_key_name_is_redacted_from_the_auth_label() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "tok-SENSITIVE-label-user-7c2d";
+    let plain = "plain-label-user";
+    let leaks = |text: &str| text.to_ascii_lowercase().contains(&secret.to_ascii_lowercase());
+    let engine = Engine::new();
+    let ctx_with = |auth: AuthConfig| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        // A SOAP envelope, for WS-Security to insert its header into.
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = auth;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    for auth in auths_for("{{api_user}}") {
+        let c = ctx_with(auth.clone());
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let label = &o.record.prepared.auth_label;
+        assert!(label.contains(REDACTED), "{auth:?}: the label is not the prepared one, or not redacted: {label}");
+        let record = serde_json::to_string(&o.record).unwrap();
+        assert!(!leaks(&record), "{auth:?}: the stored record holds the secret username: {record}");
+
+        let p = engine.preview(&c).expect("preview");
+        assert!(p.auth.contains(REDACTED), "{auth:?}: {}", p.auth);
+        let preview = serde_json::to_string(&p).unwrap();
+        assert!(!leaks(&preview), "{auth:?}: the preview holds the secret username: {preview}");
+    }
+
+    // The preview's "would not be sent" note quotes the label too: an API
+    // key value with a pasted line break is refused there.
+    let c = ctx_with(AuthConfig::ApiKey {
+        name: "{{api_user}}".into(),
+        value: SensitiveValue::template("tok-SENSITIVE-api-key-8m2v\n"),
+        location: KeyLocation::Header,
+    });
+    let p = engine.preview(&c).expect("preview");
+    let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: ")).unwrap_or_else(|| panic!("{:?}", p.inferred));
+    assert!(note.contains(REDACTED), "the note does not quote the redacted label: {note}");
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!leaks(&preview), "the preview note holds the secret key name: {preview}");
+
+    // A username that is not a secret is kept, so the label stays useful.
+    for auth in auths_for(plain) {
+        let c = ctx_with(auth.clone());
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let label = &o.record.prepared.auth_label;
+        assert!(label.contains(plain) && !label.contains(REDACTED), "{auth:?}: {label}");
+        let p = engine.preview(&c).expect("preview");
+        assert!(p.auth.contains(plain) && !p.auth.contains(REDACTED), "{auth:?}: {}", p.auth);
+    }
+}
+
+/// Exact-value redaction ignores a secret shorter than 4 characters, so a
+/// username or API key name that took a secret variable is hidden in the
+/// auth label by where it came from, whatever its length: whole when its
+/// template mixes the secret with literal text. The same value from a plain
+/// variable is shown, and refusals that quote the label or the key name
+/// hide it too.
+#[tokio::test]
+async fn a_short_secret_username_or_key_name_is_hidden_in_the_auth_label() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let engine = Engine::new();
+    let ctx_with = |auth: AuthConfig, value: &str, secret: bool| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = auth;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: value.into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    for (template, value) in [("{{short}}", "b"), ("{{short}}", "bo"), ("{{short}}", "bob"), ("svc-{{short}}", "bo")] {
+        let shown = format!(" {})", template.replace("{{short}}", value));
+        for auth in auths_for(template) {
+            // A plain variable: the label names the value.
+            let c = ctx_with(auth.clone(), value, false);
+            let plain = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await.record.prepared.auth_label;
+            assert!(plain.contains(&shown) && !plain.contains(REDACTED), "{auth:?} {value:?}: {plain}");
+            assert_eq!(engine.preview(&c).expect("preview").auth, plain, "{auth:?} {value:?}");
+
+            // A secret variable: the label hides the whole parameter.
+            let hidden = plain.replace(&shown, &format!(" {REDACTED})"));
+            let c = ctx_with(auth.clone(), value, true);
+            let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+            assert_eq!(o.record.prepared.auth_label, hidden, "{auth:?} {value:?}");
+            assert_eq!(engine.preview(&c).expect("preview").auth, hidden, "{auth:?} {value:?}");
+        }
+    }
+
+    // Refusals quote the label and the key name: a header API key value with
+    // a pasted line break, and a cookie API key value with a space.
+    for (location, quoted) in [(KeyLocation::Header, format!("the {REDACTED} header")), (KeyLocation::Cookie, format!("'{REDACTED}'"))] {
+        let value = SensitiveValue::template("tok-SENSITIVE-short-key\n has space");
+        let c = ctx_with(AuthConfig::ApiKey { name: "{{short}}".into(), value, location }, "bo", true);
+        let p = engine.preview(&c).expect("preview");
+        let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: "));
+        let note = note.unwrap_or_else(|| panic!("{location:?}: {:?}", p.inferred));
+        assert!(note.contains(&quoted), "{location:?}: {note}");
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let failure = o.record.attempts.iter().find_map(|a| a.failure.as_ref());
+        let failure = failure.unwrap_or_else(|| panic!("{location:?}: the request was not refused"));
+        assert!(failure.message.contains(&quoted), "{location:?}: {}", failure.message);
+        assert!(!failure.message.contains("'bo'") && !failure.message.contains(" bo "), "{location:?}: {}", failure.message);
+    }
+}
+
+/// A short secret (under 4 characters, which exact-value redaction of text
+/// ignores) used as an API key name or a WS-Security username is hidden
+/// where Anvil writes it: a header, query or cookie name in the record and
+/// the preview, and the `wsse:Username` in the preview's body. The same value
+/// from a plain variable is shown, and the request sent is the same.
+#[tokio::test]
+async fn a_short_secret_key_name_or_username_is_hidden_where_it_is_written() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation, WsseConfig, WssePasswordType};
+    use anvil_domain::execution::HeaderEntry;
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let engine = Engine::new();
+    let ctx_with = |auth: AuthConfig, value: &str, secret: bool| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = auth;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: value.into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    for value in ["Q", "Qz", "Qz7"] {
+        for secret in [false, true] {
+            let case = format!("{value:?} secret={secret}");
+            for location in [KeyLocation::Header, KeyLocation::Query, KeyLocation::Cookie] {
+                let value_template = SensitiveValue::template("tok-SENSITIVE-short-name-4n8v");
+                let auth = AuthConfig::ApiKey { name: "{{short}}".into(), value: value_template, location };
+                let c = ctx_with(auth, value, secret);
+                let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+                assert!(o.record.response.is_some(), "{case} {location:?}: not sent: {:?}", o.record.attempts);
+                let p = engine.preview(&c).expect("preview");
+                let named = |n: &str| n.trim().eq_ignore_ascii_case(value);
+                let in_query = |url: &str| url.contains(&format!("?{value}=")) || url.contains(&format!("&{value}="));
+                let in_cookie = |h: &[HeaderEntry]| -> bool {
+                    let cookies = h.iter().filter(|h| h.name.eq_ignore_ascii_case("cookie"));
+                    cookies.flat_map(|h| h.value.split(';')).any(|c| named(c.split('=').next().unwrap_or_default()))
+                };
+                let mut record_urls = vec![o.record.prepared.url.as_str()];
+                record_urls.extend(o.record.attempts.iter().map(|a| a.url.as_str()));
+                let (record_shows, preview_shows) = match location {
+                    KeyLocation::Header => {
+                        (o.record.prepared.headers.iter().any(|h| named(&h.name)), p.headers.iter().any(|h| named(&h.name)))
+                    }
+                    KeyLocation::Query => (record_urls.iter().any(|u| in_query(u)), in_query(&p.url)),
+                    KeyLocation::Cookie => (in_cookie(&o.record.prepared.headers), in_cookie(&p.headers)),
+                };
+                // The plain name is shown where Anvil writes it; a secret one nowhere.
+                assert_eq!(preview_shows, !secret, "{case} {location:?}: preview {p:?}");
+                if secret {
+                    assert!(!record_shows, "{case} {location:?}: record {:?}", o.record.prepared);
+                }
+                if secret && value.len() == 3 {
+                    let record = serde_json::to_string(&o.record).unwrap().to_ascii_lowercase();
+                    assert!(!record.contains("qz7"), "{case} {location:?}: {record}");
+                    let preview = serde_json::to_string(&p).unwrap().to_ascii_lowercase();
+                    assert!(!preview.contains("qz7"), "{case} {location:?}: {preview}");
+                }
+            }
+
+            let auth = AuthConfig::Wsse {
+                config: WsseConfig {
+                    username: "{{short}}".into(),
+                    password: SensitiveValue::template("tok-SENSITIVE-short-wsse-pw"),
+                    password_type: WssePasswordType::PasswordText,
+                    timestamp_ttl_secs: None,
+                    saml_assertion: None,
+                },
+            };
+            let p = engine.preview(&ctx_with(auth, value, secret)).expect("preview");
+            let plain = format!("<wsse:Username>{value}</wsse:Username>");
+            let hidden = format!("<wsse:Username>{REDACTED}</wsse:Username>");
+            assert_eq!(p.body_preview.contains(&plain), !secret, "{case}: {}", p.body_preview);
+            assert_eq!(p.body_preview.contains(&hidden), secret, "{case}: {}", p.body_preview);
+        }
+    }
+}
+
+/// A cookie API key named by a short secret, which the server sets again
+/// (`Set-Cookie` with the same name): the stored response shows the name
+/// redacted, the jar does not keep the cookie, and a later request without
+/// that auth does not send it. A plain name is shown, kept and sent.
+#[tokio::test]
+async fn a_short_secret_cookie_key_name_set_again_is_not_shown_or_kept() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::secret::SensitiveValue;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    for secret in [true, false] {
+        let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+        let engine = Engine::new();
+        let mut spec = RequestSpec::http("GET", &f.url("/set-cookie?name={{short}}&value=refreshed-value"));
+        let value = SensitiveValue::template("tok-SENSITIVE-jar-key-6t2b");
+        spec.auth = AuthConfig::ApiKey { name: "{{short}}".into(), value, location: KeyLocation::Cookie };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: "Jc".into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let r = o.record.response.as_ref().unwrap_or_else(|| panic!("secret={secret}: no response: {:?}", o.record.attempts));
+        let set_cookie: Vec<&str> =
+            r.headers.iter().filter(|h| h.name.eq_ignore_ascii_case("set-cookie")).map(|h| h.value.as_str()).collect();
+        let note = "a response cookie was not stored because its name contains a request secret";
+        let noted = o.record.prepared.inferred.iter().any(|n| n == note);
+        if secret {
+            assert_eq!(set_cookie, vec![format!("{REDACTED}={REDACTED}; Path=/; HttpOnly")]);
+            assert!(noted, "{:?}", o.record.prepared.inferred);
+            assert!(!o.record.prepared.url.contains("=Jc") && !o.record.attempts.iter().any(|a| a.url.contains("=Jc")));
+        } else {
+            assert_eq!(set_cookie, vec![format!("Jc={REDACTED}; Path=/; HttpOnly")]);
+            assert!(!noted, "{:?}", o.record.prepared.inferred);
+        }
+
+        // A later request without that auth: the jar sends the cookie only
+        // when its name was not a secret.
+        let later = ExecutionContext::standalone(RequestSpec::http("GET", &f.url("/echo")));
+        let o = engine.execute(&later, EventCtx::none(), CancellationToken::new()).await;
+        assert!(o.record.response.is_some(), "secret={secret}: {:?}", o.record.attempts);
+        let sent = f.log.last_request_headers().unwrap();
+        let cookies: Vec<&str> = sent.iter().filter(|(n, _)| n.eq_ignore_ascii_case("cookie")).map(|(_, v)| v.as_str()).collect();
+        let sent_jc = cookies.iter().any(|v| v.split(';').any(|c| c.trim() == "Jc=refreshed-value"));
+        assert_eq!(sent_jc, !secret, "secret={secret}: {cookies:?}");
+    }
+}
+
+/// Each structured component Anvil writes or reads back is hidden when it
+/// is a hidden auth parameter, however short, as written or percent-decoded
+/// and in any letter case: a URL path segment, query name, value and bare
+/// part, a fragment part, a header name and value, and a `Cookie` and
+/// `Set-Cookie` name. Other components are kept.
+#[test]
+fn a_hidden_auth_parameter_is_hidden_in_every_structured_component() {
+    use anvil_domain::execution::HeaderEntry;
+    let resolver = Resolver::new(vec![], None);
+    resolver.hidden_parameters.lock().push("Qb".into());
+    let r = Redactor::for_execution(&resolver, &[]);
+    assert_eq!(
+        r.url("https://h/p/Qb?x=1&Qb&y=qb&%51b=2&k=Qbc#Qb"),
+        format!("https://h/p/{REDACTED}?x=1&{REDACTED}&y={REDACTED}&{REDACTED}={REDACTED}&k=Qbc#{REDACTED}")
+    );
+    let header = |name: &str, value: &str| HeaderEntry { name: name.into(), value: value.into() };
+    let shown = r.headers(&[
+        header("qb", "v"),
+        header("X-User", "QB"),
+        header("X-Other", "kept"),
+        header("Cookie", "Qb=1; other=2"),
+        header("Set-Cookie", "Qb=v; Path=/"),
+    ]);
+    assert_eq!(shown[0], header(REDACTED, REDACTED));
+    assert_eq!(shown[1], header("X-User", REDACTED));
+    assert_eq!(shown[2], header("X-Other", "kept"));
+    assert_eq!(shown[3], header("Cookie", &format!("{REDACTED}={REDACTED}; other={REDACTED}")));
+    assert_eq!(shown[4], header("Set-Cookie", &format!("{REDACTED}={REDACTED}; Path=/")));
+
+    // A parameter with whitespace around it: compared as resolved and
+    // trimmed, against each decoding of a component: percent (as Anvil
+    // writes an auth query name, `%20`), form (`+`), doubly encoded, and
+    // trimmed.
+    let resolver = Resolver::new(vec![], None);
+    resolver.hidden_parameters.lock().push(" Wz".into());
+    let r = Redactor::for_execution(&resolver, &[]);
+    let pair = format!("{REDACTED}={REDACTED}");
+    assert_eq!(
+        r.url("https://h/q?%20Wz=1&+Wz=2&%2520Wz=3&Wz=4&%20wz%20=5&x=Wzz"),
+        format!("https://h/q?{pair}&{pair}&{pair}&{pair}&{pair}&x=Wzz")
+    );
+    assert_eq!(r.headers(&[header(" Wz", "v")])[0], header(REDACTED, REDACTED));
+}
+
+/// A short secret API key name with whitespace around it: Anvil sends a
+/// query name percent-encoded (`%20Qb`) and refuses a header or cookie name
+/// with a space, quoting it. Neither the encoded nor the decoded name stays
+/// in the preview's URL or notes, nor in the stored attempt URL or failure;
+/// a plain name is shown.
+#[tokio::test]
+async fn a_short_secret_key_name_with_whitespace_is_hidden_in_every_form() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::secret::SensitiveValue;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let engine = Engine::new();
+    for name in [" Qb", "Qb ", " Qb "] {
+        for secret in [true, false] {
+            for location in [KeyLocation::Query, KeyLocation::Header, KeyLocation::Cookie] {
+                let case = format!("{name:?} secret={secret} {location:?}");
+                let mut spec = RequestSpec::http("GET", &f.url("/status/200"));
+                let value = SensitiveValue::template("tok-SENSITIVE-spaced-key-3w8r");
+                spec.auth = AuthConfig::ApiKey { name: "{{short}}".into(), value, location };
+                let mut c = ExecutionContext::standalone(spec);
+                let vars = vec![VarEntry { name: "short".into(), value: name.into(), secret, literal: false }];
+                c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+                let shows = |texts: &[String]| texts.iter().any(|t| t.contains("Qb"));
+
+                let p = engine.preview(&c).expect("preview");
+                let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+                let mut stored: Vec<String> = o.record.attempts.iter().map(|a| a.url.clone()).collect();
+                stored.extend(o.record.attempts.iter().filter_map(|a| a.failure.as_ref()).map(|fail| fail.message.clone()));
+                let mut previewed = vec![p.url.clone()];
+                previewed.extend(p.inferred.iter().cloned());
+                previewed.extend(p.headers.iter().map(|h| format!("{}: {}", h.name, h.value)));
+                if secret {
+                    assert!(!shows(&stored), "{case}: stored {stored:?}");
+                    assert!(!shows(&previewed), "{case}: previewed {previewed:?}");
+                } else {
+                    // Sent in the query; refused, and named, as a header or cookie.
+                    assert!(shows(&previewed), "{case}: previewed {previewed:?}");
+                }
+            }
+        }
+    }
+}
+
+/// The preview withholds a short secret WS-Security username in the body
+/// before anything else is replaced, so neither a password that is literally
+/// a word of the markup (`wsse`, `Username`), nor a body previewed as JSON
+/// (an explicit `Content-Type: application/json`), lets it through; a SOAP
+/// 1.2 action naming JSON does not make the body JSON. A plain username is
+/// shown in each case.
+#[tokio::test]
+async fn a_short_secret_ws_security_username_is_withheld_from_every_body_preview() {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, KeyValue, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE_11: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    const ENVELOPE_12: &str = r#"<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    let engine = Engine::new();
+    let cases: [(&str, &str, SoapVersion, Option<&str>, bool); 4] = [
+        ("password wsse", "wsse", SoapVersion::Soap11, None, false),
+        ("password Username", "Username", SoapVersion::Soap11, None, false),
+        ("SOAP 1.2 action urn:json", "tok-SENSITIVE-wsse-pw-2c9d", SoapVersion::Soap12, Some("urn:json"), false),
+        ("Content-Type application/json", "tok-SENSITIVE-wsse-pw-2c9d", SoapVersion::Soap11, None, true),
+    ];
+    for (case, password, version, action, json) in cases {
+        for secret in [true, false] {
+            let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+            let envelope = if version == SoapVersion::Soap12 { ENVELOPE_12 } else { ENVELOPE_11 };
+            spec.body = Body::Soap { version, envelope: envelope.into(), action: action.map(Into::into) };
+            if json {
+                spec.headers.push(KeyValue::new("Content-Type", "application/json"));
+            }
+            spec.auth = AuthConfig::Wsse {
+                config: WsseConfig {
+                    username: "{{short}}".into(),
+                    password: SensitiveValue::template(password),
+                    password_type: WssePasswordType::PasswordText,
+                    timestamp_ttl_secs: None,
+                    saml_assertion: None,
+                },
+            };
+            let mut c = ExecutionContext::standalone(spec);
+            let vars = vec![VarEntry { name: "short".into(), value: "Wu".into(), secret, literal: false }];
+            c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+            let p = engine.preview(&c).expect("preview");
+            assert!(p.body_preview.contains("Security"), "{case}: no Security header: {}", p.body_preview);
+            assert_eq!(p.body_preview.contains(">Wu<"), !secret, "{case} secret={secret}: {}", p.body_preview);
+        }
+    }
+}
+
+/// A SOAP 1.1 envelope with a `pad`-byte comment before its Body.
+fn padded_envelope(pad: usize) -> String {
+    let comment = "p".repeat(pad);
+    format!(r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><!--{comment}--><soap:Body/></soap:Envelope>"#)
+}
+
+/// A WS-Security username hidden by where it came from (a short secret plus
+/// literal padding), long enough that the preview's cut falls inside it,
+/// with the password starting 72 bytes before the end of the captured
+/// window, so the window holds only its first bytes and cannot recognise
+/// it. The cut stays where it is in the body: the preview ends with the
+/// marker where the username starts and shows no prefix of the password. A
+/// plain username is shown up to the cut.
+#[tokio::test]
+async fn a_hidden_username_crossing_the_body_preview_cut_shows_no_password_prefix() {
+    use anvil_auth::wsse::insert_security;
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::{SensitiveValue, floor_char_boundary};
+    anvil_transport::init();
+    let padding = "u".repeat(65_498);
+    let password = format!("tok-SENSITIVE-straddle-{}", "w".repeat(200));
+    let (username, text, now) = (format!("Qb{padding}"), WssePasswordType::PasswordText, chrono::Utc::now());
+    // Where the password starts in the body sent, with a comment of `pad` bytes.
+    let password_at = |pad: usize| {
+        let sent = insert_security(padded_envelope(pad).as_bytes(), &username, &password, text, None, None, now).unwrap();
+        String::from_utf8(sent).unwrap().find(password.as_str()).unwrap()
+    };
+    let pad = 131_000 - password_at(0);
+    assert_eq!(password_at(pad), 131_000);
+    let engine = Engine::new();
+    for secret in [true, false] {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: padded_envelope(pad), action: None };
+        spec.auth = AuthConfig::Wsse {
+            config: WsseConfig {
+                username: format!("{{{{short}}}}{padding}"),
+                password: SensitiveValue::template(password.clone()),
+                password_type: text,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: "Qb".into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        let p = engine.preview(&c).expect("preview");
+        let tail = &p.body_preview[floor_char_boundary(&p.body_preview, p.body_preview.len().saturating_sub(200))..];
+        assert!(!p.body_preview.contains("tok-SENSITIVE-straddle"), "secret={secret}: a password prefix is shown: {tail}");
+        if secret {
+            assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "the preview does not end at the username: {tail}");
+            assert!(!p.body_preview.contains("Qbuu"), "the hidden username is shown: {tail}");
+        } else {
+            assert!(p.body_preview.contains("<wsse:Username>Qbuu"), "the plain username is not shown: {tail}");
+        }
+    }
+}
+
+/// A WS-Security username hidden by where it came from (a short secret plus
+/// 131,072 bytes of literal text) whose closing tag lies past the captured
+/// window: the element is withheld from where its content starts, so the
+/// secret is not shown anywhere in the preview. A plain username is shown up
+/// to the cut.
+#[tokio::test]
+async fn a_hidden_username_running_past_the_captured_body_is_withheld() {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::{SensitiveValue, floor_char_boundary};
+    anvil_transport::init();
+    let padding = "u".repeat(131_072);
+    let engine = Engine::new();
+    for secret in [true, false] {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: padded_envelope(0), action: None };
+        spec.auth = AuthConfig::Wsse {
+            config: WsseConfig {
+                username: format!("{{{{short}}}}{padding}"),
+                password: SensitiveValue::template("tok-SENSITIVE-long-user-pw"),
+                password_type: WssePasswordType::PasswordText,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "short".into(), value: "Qb".into(), secret, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        let p = engine.preview(&c).expect("preview");
+        let tail = &p.body_preview[floor_char_boundary(&p.body_preview, p.body_preview.len().saturating_sub(200))..];
+        if secret {
+            assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "the preview does not end at the username: {tail}");
+            let preview = serde_json::to_string(&p).unwrap();
+            assert!(!preview.contains("Qb"), "the hidden username is shown: {tail}");
+        } else {
+            assert!(p.body_preview.contains("<wsse:Username>Qbuu"), "the plain username is not shown: {tail}");
+            assert!(!p.body_preview.contains(REDACTED), "{tail}");
+        }
+    }
+}
+
+/// The preview of a WS-Security request whose username is `{{short}}`
+/// followed by `suffix`, in a [`padded_envelope`] of `pad` bytes, with
+/// `short` a secret or a plain variable.
+async fn long_username_preview(engine: &Engine, suffix: &str, pad: usize, secret: bool) -> anvil_engine::preview::EffectiveRequest {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/soap");
+    spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: padded_envelope(pad), action: None };
+    spec.auth = AuthConfig::Wsse {
+        config: WsseConfig {
+            username: format!("{{{{short}}}}{suffix}"),
+            password: SensitiveValue::template("tok-SENSITIVE-long-user-pw"),
+            password_type: WssePasswordType::PasswordText,
+            timestamp_ttl_secs: None,
+            saml_assertion: None,
+        },
+    };
+    let mut c = ExecutionContext::standalone(spec);
+    let vars = vec![VarEntry { name: "short".into(), value: "Qb".into(), secret, literal: false }];
+    c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+    engine.preview(&c).expect("preview")
+}
+
+/// A hidden username whose closing tag straddles the end of the captured
+/// window (the window holds the value and part of `</wsse:Username>`): the
+/// element is withheld all the same. A plain username is shown up to the cut.
+#[tokio::test]
+async fn a_hidden_username_whose_closing_tag_straddles_the_capture_is_withheld() {
+    use anvil_auth::wsse::insert_security;
+    use anvil_domain::auth::WssePasswordType;
+    anvil_transport::init();
+    let suffix = "u".repeat(65_600);
+    let username = format!("Qb{suffix}");
+    let (password, text, now) = ("tok-SENSITIVE-long-user-pw", WssePasswordType::PasswordText, chrono::Utc::now());
+    // Where `</wsse:Username>` starts in the body sent, with a comment of `pad` bytes.
+    let close_at = |pad: usize| {
+        let sent = insert_security(padded_envelope(pad).as_bytes(), &username, password, text, None, None, now).unwrap();
+        String::from_utf8(sent).unwrap().find(&format!("{username}</wsse:Username>")).unwrap() + username.len()
+    };
+    // The window (128 KiB) ends 5 bytes into the closing tag.
+    let pad = 131_067 - close_at(0);
+    assert_eq!(close_at(pad), 131_067);
+    let engine = Engine::new();
+    let p = long_username_preview(&engine, &suffix, pad, true).await;
+    assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "the preview does not end at the username");
+    assert!(!serde_json::to_string(&p).unwrap().contains("Qb"), "the hidden username is shown");
+    let p = long_username_preview(&engine, &suffix, pad, false).await;
+    assert!(p.body_preview.contains("<wsse:Username>Qbuu"), "the plain username is not shown");
+}
+
+/// A hidden username of multibyte characters running past the captured
+/// window, which ends at each byte of a 2- and a 3-byte code point in turn:
+/// the element is withheld whatever the window's last bytes are. A plain
+/// username is shown up to the cut.
+#[tokio::test]
+async fn a_hidden_multibyte_username_split_by_the_capture_is_withheld() {
+    anvil_transport::init();
+    let engine = Engine::new();
+    for ch in ["é", "€"] {
+        let suffix = ch.repeat(140_000 / ch.len());
+        for pad in 0..ch.len() {
+            let p = long_username_preview(&engine, &suffix, pad, true).await;
+            let case = format!("{ch} pad={pad}");
+            assert!(p.body_preview.ends_with(&format!("<wsse:Username>{REDACTED}")), "{case}: the preview does not end at the username");
+            assert!(!serde_json::to_string(&p).unwrap().contains("Qb"), "{case}: the hidden username is shown");
+            assert!(!p.body_preview.contains('\u{FFFD}'), "{case}");
+        }
+        let p = long_username_preview(&engine, &suffix, 0, false).await;
+        assert!(p.body_preview.contains(&format!("<wsse:Username>Qb{ch}{ch}")), "{ch}: the plain username is not shown");
+    }
+}
+
+/// A refusal quotes an API key name with Rust's string escaping (`{:?}`),
+/// where a NUL is `\0` (JSON writes `\u0000`): that form of a secret is
+/// redacted too, from the stored record (which `anvil send` prints, as JSON
+/// or as text) and from the preview.
+#[tokio::test]
+async fn an_escaped_secret_key_name_in_a_refusal_is_redacted() {
+    use anvil_domain::auth::{AuthConfig, KeyLocation};
+    use anvil_domain::secret::SensitiveValue;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "tok-SENSITIVE-nul\0name-4b";
+    // The raw value, its JSON escape and its Rust escape all hold this.
+    let leaks = |text: &str| text.to_ascii_lowercase().contains("sensitive-nul");
+    let engine = Engine::new();
+    for location in [KeyLocation::Header, KeyLocation::Cookie] {
+        let mut spec = RequestSpec::http("GET", &f.url("/status/200"));
+        let value = SensitiveValue::template("tok-SENSITIVE-api-value-9d3f");
+        spec.auth = AuthConfig::ApiKey { name: "{{api_user}}".into(), value, location };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+
+        let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+        let failure = o.record.attempts.iter().find_map(|a| a.failure.as_ref());
+        let failure = failure.unwrap_or_else(|| panic!("{location:?}: the request was not refused"));
+        assert!(failure.message.contains(REDACTED), "{location:?}: {}", failure.message);
+        let record = serde_json::to_string(&o.record).unwrap();
+        assert!(!leaks(&record), "{location:?}: the stored record holds the key name: {record}");
+
+        let p = engine.preview(&c).expect("preview");
+        let note = p.inferred.iter().find(|i| i.starts_with("the request would not be sent: "));
+        let note = note.unwrap_or_else(|| panic!("{location:?}: {:?}", p.inferred));
+        assert!(note.contains(REDACTED), "{location:?}: {note}");
+        let preview = serde_json::to_string(&p).unwrap();
+        assert!(!leaks(&preview), "{location:?}: the preview holds the key name: {preview}");
+    }
+}
+
+/// The WS-Security header Anvil generates writes the username XML-escaped:
+/// that form of a secret username is redacted from the preview's body (the
+/// stored record keeps only the body's size and digest) and from the label,
+/// and a plain username is shown.
+#[tokio::test]
+async fn an_xml_escaped_secret_ws_security_username_is_redacted() {
+    use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
+    use anvil_domain::request::{Body, SoapVersion};
+    use anvil_domain::secret::SensitiveValue;
+    const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let secret = "tok-SENSITIVE-xml&user<7c2d";
+    // The raw value and its XML, JSON and Rust escapes all hold this.
+    let leaks = |text: &str| text.to_ascii_lowercase().contains("sensitive-xml");
+    let engine = Engine::new();
+    let ctx_with = |user: &str| {
+        let mut spec = RequestSpec::http("POST", &f.url("/status/200"));
+        spec.body = Body::Soap { version: SoapVersion::Soap11, envelope: ENVELOPE.into(), action: None };
+        spec.auth = AuthConfig::Wsse {
+            config: WsseConfig {
+                username: user.into(),
+                password: SensitiveValue::template("tok-SENSITIVE-wsse-pw-6p4n"),
+                password_type: WssePasswordType::PasswordText,
+                timestamp_ttl_secs: None,
+                saml_assertion: None,
+            },
+        };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    let c = ctx_with("{{api_user}}");
+    let p = engine.preview(&c).expect("preview");
+    assert!(p.body_preview.contains(&format!("<wsse:Username>{REDACTED}</wsse:Username>")), "{}", p.body_preview);
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret username: {preview}");
+    let o = engine.execute(&c, EventCtx::none(), CancellationToken::new()).await;
+    assert!(o.record.prepared.auth_label.contains(REDACTED), "{}", o.record.prepared.auth_label);
+    let record = serde_json::to_string(&o.record).unwrap();
+    assert!(!leaks(&record), "the stored record holds the secret username: {record}");
+
+    // A username that is not a secret is shown, escaped as it is sent.
+    let p = engine.preview(&ctx_with("plain&user")).expect("preview");
+    assert!(p.body_preview.contains("<wsse:Username>plain&amp;user</wsse:Username>"), "{}", p.body_preview);
+}
+
+/// A multipart part name is written with a `"` as `%22` and nothing else
+/// encoded: that form of a secret name is redacted from the preview's body.
+#[tokio::test]
+async fn a_quoted_secret_multipart_part_name_is_redacted() {
+    use anvil_domain::request::{Body, MultipartContent, MultipartPart};
+    anvil_transport::init();
+    let secret = "tok-SENSITIVE-part\"name 3m1q";
+    let leaks = |text: &str| text.to_ascii_lowercase().contains("sensitive-part");
+    let ctx_with = |name: &str| {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/upload");
+        let content = MultipartContent::Text { value: "ordinary".into() };
+        spec.body = Body::Multipart { parts: vec![MultipartPart { name: name.into(), enabled: true, content, content_type: None }] };
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "part".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+    let engine = Engine::new();
+    let p = engine.preview(&ctx_with("{{part}}")).expect("preview");
+    assert!(p.body_preview.contains(&format!("name=\"{REDACTED}\"")), "{}", p.body_preview);
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!leaks(&preview), "the preview holds the secret part name: {preview}");
+
+    let p = engine.preview(&ctx_with("plain\"part")).expect("preview");
+    assert!(p.body_preview.contains("name=\"plain%22part\""), "{}", p.body_preview);
+}
+
+/// A gRPC metadata key is lowercased before it is checked, and the refusal
+/// quotes it: a key built from a mixed-case secret is redacted from the
+/// preview's failure ignoring ASCII case, which keeps its kind, and a plain
+/// key is quoted as it is.
+#[tokio::test]
+async fn a_lowercased_secret_in_a_session_preview_failure_is_redacted() {
+    use anvil_domain::execution::FailureKind;
+    use anvil_domain::request::{GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, KeyValue, Protocol};
+    anvil_transport::init();
+    let secret = "tok-SENSITIVE-Mixed-Meta-5w2e";
+    let ctx_with = |key: &str| {
+        let mut spec = RequestSpec::http("POST", "grpc://127.0.0.1:9");
+        spec.protocol = Protocol::Grpc;
+        spec.grpc = Some(GrpcSpec {
+            service: "anvil.lab.v1.Echo".into(),
+            method: "Unary".into(),
+            mode: GrpcMode::Unary,
+            schema: GrpcSchemaSource::Reflection,
+            messages: vec![r#"{"message":"hi"}"#.into()],
+            metadata: vec![KeyValue::new(key, "v")],
+            deadline_ms: None,
+            plaintext: false,
+            wire: GrpcWire::Grpc,
+        });
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "api_user".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+    let engine = Engine::new();
+    let f = engine.preview(&ctx_with("grpc-{{api_user}}")).expect_err("a refused metadata key");
+    assert_eq!(f.kind, FailureKind::InvalidHeader, "{f:?}");
+    assert!(f.message.contains(REDACTED), "{}", f.message);
+    let failure = serde_json::to_string(&f).unwrap().to_ascii_lowercase();
+    assert!(!failure.contains(&secret.to_ascii_lowercase()), "the preview failure holds the secret: {failure}");
+
+    let f = engine.preview(&ctx_with("grpc-plain-meta")).expect_err("a refused metadata key");
+    assert_eq!(f.kind, FailureKind::InvalidHeader, "{f:?}");
+    assert!(f.message.contains("grpc-plain-meta") && !f.message.contains(REDACTED), "{}", f.message);
+}
+
+/// An XML parser error quotes tag names from the body. Under the default
+/// lint policy (block) the preview fails with it, under `warn` it shows it
+/// as a warning: either way a secret tag name is redacted, as the stored
+/// record's copy is, and a plain one is kept.
+#[tokio::test]
+async fn a_lint_error_quoting_a_secret_is_redacted_in_the_preview() {
+    use anvil_domain::execution::FailureKind;
+    use anvil_domain::request::{Body, LintSendPolicy};
+    anvil_transport::init();
+    let secret = "tok-SENSITIVE-tag-7q";
+    let engine = Engine::new();
+    let ctx_with = |xml: &str, policy: LintSendPolicy| {
+        let mut spec = RequestSpec::http("POST", "http://127.0.0.1:9/xml");
+        spec.body = Body::Xml { text: xml.into() };
+        spec.lint_policy = policy;
+        let mut c = ExecutionContext::standalone(spec);
+        let vars = vec![VarEntry { name: "tag".into(), value: secret.into(), secret: true, literal: false }];
+        c.var_layers = vec![VarLayer { label: "environment:test".into(), vars }];
+        c
+    };
+
+    assert_eq!(LintSendPolicy::default(), LintSendPolicy::Block);
+    let f = engine.preview(&ctx_with("<{{tag}}></other>", LintSendPolicy::default())).expect_err("a lint refusal");
+    assert_eq!(f.kind, FailureKind::LintBlocked, "{f:?}");
+    assert!(f.message.contains(REDACTED), "{}", f.message);
+    let failure = serde_json::to_string(&f).unwrap();
+    assert!(!failure.contains(secret), "the preview failure holds the secret tag name: {failure}");
+
+    let p = engine.preview(&ctx_with("<{{tag}}></other>", LintSendPolicy::Warn)).expect("preview");
+    let warning = p.lint_warning.as_deref().expect("a lint warning");
+    assert!(warning.contains(REDACTED), "{warning}");
+    let preview = serde_json::to_string(&p).unwrap();
+    assert!(!preview.contains(secret), "the preview holds the secret tag name: {preview}");
+
+    // A tag name that is not a secret is quoted as it is.
+    let f = engine.preview(&ctx_with("<plaintag></other>", LintSendPolicy::default())).expect_err("a lint refusal");
+    assert!(f.message.contains("plaintag") && !f.message.contains(REDACTED), "{}", f.message);
+}
+
 /// Constants are scrubbed too; operational consumers get a separate,
 /// nonpersisted copy of the original metadata.
 #[tokio::test]

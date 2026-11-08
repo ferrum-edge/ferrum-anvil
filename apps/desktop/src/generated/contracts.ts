@@ -2393,7 +2393,8 @@ export interface PreparedSummary {
   body_sha256?: string | null;
   content_type?: string | null;
   /**
-   * `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
+   * `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never a credential value; a
+   * username or key name taken from a secret is redacted.
    */
   auth_label: string;
   /**

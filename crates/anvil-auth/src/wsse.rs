@@ -51,7 +51,10 @@ pub fn password_digest(nonce: &[u8], created: &str, password: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(h.finalize())
 }
 
-pub(crate) fn xml_escape(s: &str) -> String {
+/// The text as the generated Security header writes it: the five XML
+/// predefined entities, nothing else. The engine's redactor registers this
+/// form of every secret, so a value written here is recognised.
+pub fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 

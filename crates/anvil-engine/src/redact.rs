@@ -16,7 +16,7 @@
 use crate::vars::Resolver;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use anvil_domain::diagnostics::DiagnosticFinding;
-use anvil_domain::execution::{ExecutionRecord, HeaderEntry};
+use anvil_domain::execution::{ExecutionRecord, HeaderEntry, TransportFailure};
 use anvil_domain::outcome::ProtocolStatus;
 use anvil_domain::request::PayloadEncoding;
 use anvil_domain::secret::REDACTED;
@@ -107,8 +107,10 @@ pub fn is_credential_name(name: &str, extra: &[String]) -> bool {
 pub struct Redactor {
     /// Secret values, longest first (compared against decoded URL components).
     secrets: Vec<String>,
-    /// Secret values, their canonical percent-encoded forms and their JSON
-    /// string escaping, longest first (scrubbed from arbitrary text).
+    /// Every form of each secret value in [`secret_forms`] (the value, its
+    /// lowercase hex, its canonical percent encodings, its JSON, Rust and XML
+    /// escaping, and its multipart part-name quoting), longest first
+    /// (scrubbed from arbitrary text).
     matcher: Option<AhoCorasick>,
     /// The same patterns compared ignoring ASCII case, for fields a protocol
     /// normalizes (header names, content codings are lowercased).
@@ -121,11 +123,25 @@ pub struct Redactor {
     /// degrades to a slower replacement pass instead of silently failing.
     fallback_patterns: Vec<String>,
     extra_names: Vec<String>,
+    /// Auth parameters (a username or API key name) that took a secret
+    /// variable (`Resolver::hidden_parameters`). Where Anvil writes them in a
+    /// known place (a header, query or cookie name, the WS-Security
+    /// username) they are hidden whatever their length; other text keeps the
+    /// `MIN_SECRET_LEN` rule.
+    hidden: Vec<String>,
 }
 
 impl Redactor {
     pub fn new(secrets: Vec<String>, extra_names: Vec<String>) -> Self {
-        let mut r = Redactor { secrets, matcher: None, any_case: None, any_case_fallback: vec![], fallback_patterns: vec![], extra_names };
+        let mut r = Redactor {
+            secrets,
+            matcher: None,
+            any_case: None,
+            any_case_fallback: vec![],
+            fallback_patterns: vec![],
+            extra_names,
+            hidden: vec![],
+        };
         r.secrets.retain(|s| s.len() >= MIN_SECRET_LEN);
         r.reindex();
         r
@@ -143,7 +159,85 @@ impl Redactor {
         }
         let mut secrets = r.used_secrets.lock().clone();
         secrets.extend(r.decoded_secrets.lock().iter().cloned());
-        Redactor::new(secrets, all)
+        let mut redactor = Redactor::new(secrets, all);
+        redactor.hide_parameters(&r.hidden_parameters.lock());
+        redactor
+    }
+
+    /// Take in auth parameters to hide where Anvil writes them (the
+    /// `hidden` field).
+    /// A value is kept as resolved and, when that differs, trimmed.
+    fn hide_parameters(&mut self, values: &[String]) {
+        for v in values {
+            for form in [v.as_str(), v.trim()] {
+                if !form.is_empty() && !self.hidden.iter().any(|h| h == form) {
+                    self.hidden.push(form.to_string());
+                }
+            }
+        }
+    }
+
+    /// Whether a structured component Anvil writes or reads back (a header,
+    /// query or cookie name or value, a URL path segment or bare query part)
+    /// is a hidden auth parameter, whatever its length: equal to one as
+    /// written or in any of its decodings ([`decoded_forms`]), ignoring ASCII
+    /// case (HTTP/2 and HTTP/3 lowercase names), compared both exactly and
+    /// with surrounding whitespace trimmed from both sides.
+    pub(crate) fn hides_parameter(&self, component: &str) -> bool {
+        if self.hidden.is_empty() {
+            return false;
+        }
+        let forms = decoded_forms(component);
+        self.hidden.iter().any(|h| {
+            let trimmed = h.trim();
+            forms.iter().any(|f| f.eq_ignore_ascii_case(h) || (!trimmed.is_empty() && f.trim().eq_ignore_ascii_case(trimmed)))
+        })
+    }
+
+    /// The one test for a structured component: it hides a secret
+    /// ([`Redactor::hides_secret`]) or is a hidden auth parameter
+    /// ([`Redactor::hides_parameter`]).
+    pub(crate) fn hides_component(&self, component: &str) -> bool {
+        self.hides_secret(component) || self.hides_parameter(component)
+    }
+
+    /// A request body as previewed, before any secret value is replaced: a
+    /// hidden auth parameter is withheld where the generated WS-Security
+    /// header writes it (`wsse:Username`, XML-escaped), whatever its length.
+    /// It runs first, so a secret replaced in the surrounding markup (a
+    /// password that is literally `wsse`) cannot hide the element from it.
+    ///
+    /// `body` can be a window that ends inside the element (a long username
+    /// past the captured bytes, or the preview's cut): while any parameter is
+    /// hidden, a last `wsse:Username` without a complete closing tag loses
+    /// all its content, to the end, whatever that content is (it can end in
+    /// part of the closing tag or a code point the window split). The
+    /// preview cuts inside it, so `redact_then_cut` sees the change cross
+    /// its cut and ends the preview with the marker where the content
+    /// starts. An element that closes is withheld only when its whole
+    /// content is a hidden value.
+    pub(crate) fn hide_written_parameters(&self, body: &str) -> String {
+        const OPEN: &str = "<wsse:Username>";
+        const CLOSE: &str = "</wsse:Username>";
+        let mut out = body.to_string();
+        if self.hidden.is_empty() {
+            return out;
+        }
+        let escaped: Vec<String> = self.hidden.iter().map(|h| anvil_auth::wsse::xml_escape(h.as_str())).collect();
+        for h in &escaped {
+            let written = format!("{OPEN}{h}{CLOSE}");
+            if out.contains(&written) {
+                out = out.replace(&written, &format!("{OPEN}{REDACTED}{CLOSE}"));
+            }
+        }
+        if let Some(open) = out.rfind(OPEN) {
+            let start = open + OPEN.len();
+            let content = &out[start..];
+            if !content.contains(CLOSE) {
+                out.truncate(start);
+            }
+        }
+        out
     }
 
     /// Take in what the resolver has seen since this redactor was built:
@@ -166,18 +260,13 @@ impl Redactor {
                 self.extra_names.push(n.clone());
             }
         }
+        self.hide_parameters(&r.hidden_parameters.lock());
     }
 
     /// The patterns [`Redactor::reindex`] builds its matchers from.
     #[cfg(test)]
     fn fallback_patterns_for_test(&self) -> Vec<String> {
-        let mut patterns = Vec::new();
-        for s in &self.secrets {
-            patterns.push(s.clone());
-            patterns.push(hex::encode(s));
-            patterns.extend(encoded_forms(s));
-            patterns.extend(json_escaped(s));
-        }
+        let mut patterns: Vec<String> = self.secrets.iter().map(String::as_str).flat_map(secret_forms).collect();
         sort_longest_first(&mut patterns);
         patterns
     }
@@ -185,14 +274,7 @@ impl Redactor {
     /// Longest first so overlapping values are fully covered.
     fn reindex(&mut self) {
         sort_longest_first(&mut self.secrets);
-        let mut patterns = Vec::with_capacity(self.secrets.len() * 5);
-        for s in &self.secrets {
-            patterns.push(s.clone());
-            // A session transcript shows bytes that are not printable text as hex.
-            patterns.push(hex::encode(s));
-            patterns.extend(encoded_forms(s));
-            patterns.extend(json_escaped(s));
-        }
+        let mut patterns: Vec<String> = self.secrets.iter().map(String::as_str).flat_map(secret_forms).collect();
         sort_longest_first(&mut patterns);
         self.any_case = if patterns.is_empty() {
             None
@@ -239,6 +321,7 @@ impl Redactor {
                 self.extra_names.push(n.clone());
             }
         }
+        self.hide_parameters(&other.hidden);
     }
 
     pub fn add_secret(&mut self, s: &str) {
@@ -248,14 +331,17 @@ impl Redactor {
         }
     }
 
-    /// Scrub raw secret values, their canonical percent encodings and JSON
-    /// string escapes from arbitrary text.
+    /// Scrub raw secret values, their canonical percent encodings and JSON,
+    /// Rust and XML string escapes from arbitrary text.
     ///
     /// Limits: only the raw value, the encodings in [`encoded_forms`], its
-    /// lowercase hex and the value's JSON string escaping (as rendered in
-    /// JSON diagnostics) are recognized. A secret encoded any other way
-    /// (partly or doubly percent-encoded, base64, HTML-escaped), split by other
-    /// content, or shorter than 4 characters passes through, and names are
+    /// lowercase hex, the value's JSON string escaping (as rendered in JSON
+    /// diagnostics), its Rust escaping (as a `{:?}`-formatted message quotes
+    /// it), its XML escaping (as a generated WS-Security header writes it)
+    /// and its multipart part-name quoting are recognized. A secret encoded
+    /// any other way (partly or doubly percent-encoded, base64, numeric
+    /// character references), split by other content, or shorter than 4
+    /// characters passes through, and names are
     /// not consulted. Use [`Redactor::url`], [`Redactor::header`] or
     /// [`Redactor::json_text`] where the structure is known.
     pub fn text(&self, s: &str) -> String {
@@ -369,7 +455,7 @@ impl Redactor {
         // and a crossing raw match interact, withhold the whole value.
         let prepared = if sensitive && name.eq_ignore_ascii_case("set-cookie") {
             value.split_once('=').map(|(key, rest)| {
-                let key = if self.hides_secret(key.trim()) { REDACTED } else { key };
+                let key = if self.hides_component(key.trim()) { REDACTED } else { key };
                 match rest.split_once(';') {
                     Some((credential, attrs)) => format!("{key}={credential};{}", self.set_cookie_attrs(attrs)),
                     None => format!("{key}={rest}"),
@@ -380,7 +466,7 @@ impl Redactor {
                 value
                     .split(';')
                     .map(|part| match part.split_once('=') {
-                        Some((key, rest)) if self.hides_secret(key.trim()) => format!("{REDACTED}={rest}"),
+                        Some((key, rest)) if self.hides_component(key.trim()) => format!("{REDACTED}={rest}"),
                         _ => part.to_string(),
                     })
                     .collect::<Vec<_>>()
@@ -411,7 +497,7 @@ impl Redactor {
                     .map(|c| match c.split_once('=') {
                         Some((k, _)) => {
                             let name = k.trim();
-                            if self.hides_secret(name) { format!("{REDACTED}={REDACTED}") } else { format!("{name}={REDACTED}") }
+                            if self.hides_component(name) { format!("{REDACTED}={REDACTED}") } else { format!("{name}={REDACTED}") }
                         }
                         None => REDACTED.to_string(),
                     })
@@ -422,7 +508,7 @@ impl Redactor {
                 return match value.split_once('=') {
                     Some((k, rest)) => {
                         let name = k.trim();
-                        let name = if self.hides_secret(name) { REDACTED } else { name };
+                        let name = if self.hides_component(name) { REDACTED } else { name };
                         let attrs = rest.split_once(';').map(|(_, a)| format!(";{}", self.set_cookie_attrs(a))).unwrap_or_default();
                         format!("{name}={REDACTED}{attrs}")
                     }
@@ -439,7 +525,7 @@ impl Redactor {
             .split(';')
             .map(|attr| match attr.split_once('=') {
                 Some((name, value))
-                    if matches!(name.trim().to_ascii_lowercase().as_str(), "path" | "domain") && self.hides_secret(value.trim()) =>
+                    if matches!(name.trim().to_ascii_lowercase().as_str(), "path" | "domain") && self.hides_component(value.trim()) =>
                 {
                     format!("{name}={REDACTED}")
                 }
@@ -559,10 +645,13 @@ impl Redactor {
     pub fn headers(&self, h: &[HeaderEntry]) -> Vec<HeaderEntry> {
         h.iter()
             .map(|e| {
-                let name = self.text_any_case(&e.name);
+                // A header named by a hidden auth parameter (an API key
+                // header) is withheld whatever the name's length, and so is a
+                // value that is one.
+                let name = if self.hides_parameter(&e.name) { REDACTED.to_string() } else { self.text_any_case(&e.name) };
                 // A later runner pass cannot infer a URL/cookie role from a
                 // masked name, so no value survives losing its identifying name.
-                let value = if name != e.name || name.contains(REDACTED) {
+                let value = if name != e.name || name.contains(REDACTED) || self.hides_parameter(&e.value) {
                     REDACTED.to_string()
                 } else {
                     self.metadata_text(&self.header(&e.name, &e.value))
@@ -570,6 +659,14 @@ impl Redactor {
                 HeaderEntry { name, value }
             })
             .collect()
+    }
+
+    /// A failure's message and field, ignoring ASCII case (a message can
+    /// quote a header or metadata name a protocol lowercased). Its phase,
+    /// kind and typed fields are kept.
+    pub(crate) fn failure(&self, f: &mut TransportFailure) {
+        f.message = self.text_any_case(&f.message);
+        f.field = f.field.as_deref().map(|s| self.text_any_case(s));
     }
 
     /// Scrub metadata and every persisted copy of it. Engine assembly calls
@@ -588,6 +685,9 @@ impl Redactor {
         }
         r.prepared.headers = self.headers(&r.prepared.headers);
         scrub(&mut r.prepared.content_type);
+        // The label names a resolved username or API key name, which a
+        // template can take from a secret.
+        r.prepared.auth_label = self.metadata_text(&r.prepared.auth_label);
         scrub(&mut r.prepared.proxy);
         crate::record::redact_attempts(&mut r.attempts, self);
         if let Some(resp) = &mut r.response {
@@ -684,14 +784,17 @@ impl Redactor {
             .map(|kv| match kv.split_once('=') {
                 Some((k, v)) => {
                     let dk = percent_encoding::percent_decode_str(k).decode_utf8_lossy();
-                    let k = if self.hides_secret(k) { REDACTED } else { k };
-                    if is_sensitive_name(&dk, &self.extra_names) || self.hides_secret(v) {
+                    // A query API key named by a hidden auth parameter: the
+                    // name and its value are withheld.
+                    let hidden = self.hides_parameter(k);
+                    let k = if hidden || self.hides_secret(k) { REDACTED } else { k };
+                    if hidden || is_sensitive_name(&dk, &self.extra_names) || self.hides_component(v) {
                         format!("{k}={REDACTED}")
                     } else {
                         format!("{k}={v}")
                     }
                 }
-                None if self.hides_secret(kv) => REDACTED.to_string(),
+                None if self.hides_component(kv) => REDACTED.to_string(),
                 None => kv.to_string(),
             })
             .collect::<Vec<_>>()
@@ -726,7 +829,7 @@ impl Redactor {
             }
             None => (String::new(), s),
         };
-        let path: Vec<&str> = path.split('/').map(|seg| if self.hides_secret(seg) { REDACTED } else { seg }).collect();
+        let path: Vec<&str> = path.split('/').map(|seg| if self.hides_component(seg) { REDACTED } else { seg }).collect();
         format!("{prefix}{}", path.join("/"))
     }
 
@@ -877,12 +980,80 @@ fn encoded_forms(s: &str) -> Vec<String> {
     [upper, lower, form].into_iter().filter(|f| f != s).collect()
 }
 
+/// A component as written and as every decoding a URL or form writer could
+/// have applied makes it: percent-decoding, and form decoding (`+` read as a
+/// space), each repeated up to [`MAX_DECODE_ROUNDS`] times (a doubly encoded
+/// component). Anvil writes an auth query name percent-encoded
+/// (`prepare::encode_component`, a space as `%20`).
+fn decoded_forms(component: &str) -> Vec<String> {
+    let mut forms = vec![component.to_string()];
+    let mut layer = forms.clone();
+    for _ in 0..MAX_DECODE_ROUNDS {
+        let mut next = Vec::new();
+        for f in &layer {
+            let percent = percent_encoding::percent_decode_str(f).decode_utf8_lossy().into_owned();
+            let form = percent_encoding::percent_decode_str(&f.replace('+', " ")).decode_utf8_lossy().into_owned();
+            for decoded in [percent, form] {
+                if !forms.contains(&decoded) {
+                    forms.push(decoded.clone());
+                    next.push(decoded);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        layer = next;
+    }
+    forms
+}
+
 /// The value as it appears inside a serialized JSON string, when escaping
 /// changes it (quotes, backslashes, control characters).
 fn json_escaped(s: &str) -> Option<String> {
     let quoted = serde_json::to_string(s).ok()?;
     let inner = &quoted[1..quoted.len() - 1];
     (inner != s).then(|| inner.to_string())
+}
+
+/// The value as Rust's escaping shows it, when that changes it (control
+/// characters, quotes, backslashes, non-printable code points): inside a
+/// `{:?}`-formatted string, as messages quote a name, and as
+/// [`str::escape_debug`] writes it. A NUL is `\0` there, not JSON's `\u0000`.
+fn debug_escaped(s: &str) -> Vec<String> {
+    let quoted = format!("{s:?}");
+    let inner = quoted[1..quoted.len() - 1].to_string();
+    let mut forms = vec![inner, s.escape_debug().to_string()];
+    forms.dedup();
+    forms.retain(|f| f != s);
+    forms
+}
+
+/// The value as Anvil writes it into XML it generates (a WS-Security
+/// username or password), when escaping changes it (`&`, `<`, `>`, `"`, `'`).
+fn xml_escaped(s: &str) -> Option<String> {
+    let escaped = anvil_auth::wsse::xml_escape(s);
+    (escaped != s).then_some(escaped)
+}
+
+/// The value as a multipart part name is written: a `"` as `%22`, nothing
+/// else (see `prepare`'s multipart body).
+fn quote_escaped(s: &str) -> Option<String> {
+    s.contains('"').then(|| s.replace('"', "%22"))
+}
+
+/// Every form of a secret value the matchers look for: the value itself, its
+/// lowercase hex (a session transcript shows bytes that are not printable
+/// text as hex), its URL encodings, its JSON, Rust and XML escapes, and its
+/// multipart part-name quoting.
+fn secret_forms(s: &str) -> Vec<String> {
+    let mut forms = vec![s.to_string(), hex::encode(s)];
+    forms.extend(encoded_forms(s));
+    forms.extend(json_escaped(s));
+    forms.extend(debug_escaped(s));
+    forms.extend(xml_escaped(s));
+    forms.extend(quote_escaped(s));
+    forms
 }
 
 fn lower_hex(encoded: &str) -> String {
@@ -1174,6 +1345,37 @@ mod tests {
         r.any_case = None;
         assert_eq!(r.text(&text), REDACTED);
         assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), REDACTED);
+    }
+
+    /// A message quotes a name with `{:?}`, where a NUL is `\0` (JSON writes
+    /// `\u0000`) and, through `str::escape_debug`, a `'` is `\'`: those forms
+    /// of a secret are replaced whole, with and without the matchers, and an
+    /// unregistered value is kept.
+    #[test]
+    fn rust_escaped_secrets_are_redacted_even_without_matchers() {
+        use super::*;
+        let secrets = ["tok-SENSITIVE-nul\0unit", "tok-SENSITIVE-it's\0unit"];
+        let mut text = String::from("start");
+        let mut expected = String::from("start");
+        for secret in secrets {
+            let quoted = format!("{secret:?}");
+            let debug = &quoted[1..quoted.len() - 1];
+            let escaped = secret.escape_debug().to_string();
+            assert!(debug != secret && escaped != secret);
+            text.push_str(&format!(" {debug} | {escaped}"));
+            expected.push_str(&format!(" {REDACTED} | {REDACTED}"));
+        }
+        text.push_str(" keep-me-9q");
+        expected.push_str(" keep-me-9q");
+        let mut r = Redactor::new(secrets.iter().map(|s| s.to_string()).collect(), vec![]);
+        assert_eq!(r.text(&text), expected);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), expected.to_ascii_uppercase().replace("‹REDACTED›", REDACTED));
+        r.fallback_patterns = r.fallback_patterns_for_test();
+        r.any_case_fallback = r.fallback_patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+        r.matcher = None;
+        r.any_case = None;
+        assert_eq!(r.text(&text), expected);
+        assert_eq!(r.text_any_case(&text.to_ascii_uppercase()), expected.to_ascii_uppercase().replace("‹REDACTED›", REDACTED));
     }
 
     #[test]

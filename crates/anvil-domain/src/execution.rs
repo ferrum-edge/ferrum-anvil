@@ -925,7 +925,8 @@ pub struct PreparedSummary {
     pub body_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
-    /// `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.
+    /// `api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never a credential value; a
+    /// username or key name taken from a secret is redacted.
     pub auth_label: String,
     /// TLS profile of the connection that produced the final response (the last redirect
     /// hop when redirects were followed).

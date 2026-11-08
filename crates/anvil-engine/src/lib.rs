@@ -198,7 +198,9 @@ impl CookieJars {
             }
             let secret_name = v.split(';').next().and_then(|pair| pair.split_once('=')).is_some_and(|(name, _)| {
                 let name = name.trim();
-                redactor.text(name) != name || redactor.hides_secret(name)
+                // A hidden auth parameter (a cookie API key's name) too,
+                // whatever its length: a later request must not send it.
+                redactor.text(name) != name || redactor.hides_component(name)
             });
             if secret_name {
                 skipped_secret_name = true;
