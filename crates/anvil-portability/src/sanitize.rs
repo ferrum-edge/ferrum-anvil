@@ -33,9 +33,26 @@ pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
     anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
+/// Whether `s` carries no literal text: empty, or exactly one `{{name}}`
+/// reference spanning the whole (trimmed) value, as the resolver reads it
+/// (the first `}}` closes it). A dynamic helper counts only without
+/// arguments (`{{$guid}}`): an argument such as `{{$randomFrom a|b}}` is
+/// literal text that is sent.
 fn is_pure_reference(s: &str) -> bool {
     let t = s.trim();
-    t.is_empty() || (t.starts_with("{{") && t.ends_with("}}") && t.matches("{{").count() == 1)
+    if t.is_empty() {
+        return true;
+    }
+    let Some(inner) = t.strip_prefix("{{") else { return false };
+    let Some(close) = inner.find("}}") else { return false };
+    if close + 2 != inner.len() {
+        return false;
+    }
+    let expr = inner[..close].trim();
+    match expr.strip_prefix('$') {
+        Some(helper) => !helper.is_empty() && !helper.contains(char::is_whitespace),
+        None => !expr.is_empty(),
+    }
 }
 
 fn escape_ptr(s: &str) -> String {
@@ -132,7 +149,10 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                 let name = map.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let flagged = map.get("sensitive").and_then(|b| b.as_bool()).unwrap_or(false);
                 let val = map["value"].as_str().unwrap_or("").to_string();
-                if (flagged || sensitive_name(&name, extra)) && !is_pure_reference(&val) {
+                // A templated name may resolve to a credential name in some
+                // scope: its literal value is extracted too.
+                let templated = name.contains("{{");
+                if (flagged || templated || sensitive_name(&name, extra)) && !is_pure_reference(&val) {
                     let ph = placeholder_name(&name);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
@@ -349,6 +369,42 @@ mod tests {
         let mut without = original.clone();
         let s_without = sanitize(&mut without, &[]);
         assert_eq!(s_without.extracted.len(), (names.len() - 1) * 3, "x-customer-ssn is only an extra name");
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn only_a_whole_value_reference_is_left_in_place() {
+        for pure in ["", "  ", "{{token}}", " {{ token }} ", "{{$guid}}", "{{api key}}"] {
+            assert!(is_pure_reference(pure), "{pure:?}");
+        }
+        for literal in [
+            "{{tenant}}-live-key-123456}}",
+            "{{tenant}}-live-key",
+            "live-{{tenant}}",
+            "{{a}}{{b}}",
+            "{{$randomFrom live-key-a|live-key-b}}",
+            "{{}}",
+            "{{$}}",
+            "{{unterminated",
+        ] {
+            assert!(!is_pure_reference(literal), "{literal:?}");
+        }
+        let mut v = serde_json::json!({"headers": [
+            {"name": "X-Functions-Key", "value": "{{tenant}}-live-key-123456}}", "enabled": true},
+            {"name": "X-Functions-Key", "value": "{{$randomFrom live-key-a|live-key-b}}", "enabled": true},
+            {"name": "{{header_name}}", "value": "templated-name-literal", "enabled": true},
+            {"name": "{{header_name}}", "value": "{{header_value}}", "enabled": true},
+            {"name": "X-Functions-Key", "value": "{{function_key}}", "enabled": true}
+        ]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        for leaked in ["live-key", "templated-name-literal"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert!(text.contains("{{header_value}}") && text.contains("{{function_key}}"), "whole references stay: {text}");
+        assert_eq!(s.extracted.len(), 3);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
     }

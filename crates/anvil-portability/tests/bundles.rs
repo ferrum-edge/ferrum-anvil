@@ -242,12 +242,16 @@ fn credential_named_literals_never_reach_the_readable_objects() {
     spec.params.push(KeyValue::new("key", "query-key-literal-0005"));
     spec.params.push(KeyValue::new("sig", "query-sig-literal-0006"));
     spec.params.push(KeyValue::new("page", "2"));
+    // A name that resolves to a credential name, and literal text after a
+    // reference, are literals too.
+    spec.headers.push(KeyValue::new("{{header_name}}", "templated-name-literal-0007"));
+    spec.headers.push(KeyValue::new("X-Functions-Key", "{{tenant}}-mixed-literal-0008}}"));
     let extra = vec!["x-customer-ssn".to_string()];
     let leaked = |objects: &str| {
         literals
             .iter()
             .map(|(_, v)| *v)
-            .chain(["query-key-literal-0005", "query-sig-literal-0006"])
+            .chain(["query-key-literal-0005", "query-sig-literal-0006", "templated-name-literal-0007", "mixed-literal-0008"])
             .filter(|v| objects.contains(v))
             .collect::<Vec<_>>()
     };
