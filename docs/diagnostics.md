@@ -273,7 +273,7 @@ cannot complete mutual TLS with them ([protocols.md §3.6](protocols.md#36-dtls)
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.20` (default; hosted qualification recorded) | v0.9.20, `e4a606a` | **616** (556 − 2 removed + 62 new) | [audit/gateway-0.9.20-delta.md](audit/gateway-0.9.20-delta.md) (source delta covering v0.9.17–v0.9.20; [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) recorded) |
+| `ferrum-edge-0.9.20` (default; hosted qualification recorded) | v0.9.20, `e4a606a` | **620** (556 − 2 removed + 66 new) | [audit/gateway-0.9.20-delta.md](audit/gateway-0.9.20-delta.md) (source delta covering v0.9.17–v0.9.20; [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.15` | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta; [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.14` | v0.9.14, `9bd4d5f` | **553 carried IDs** | [audit/gateway-0.9.14-delta.md](audit/gateway-0.9.14-delta.md) (source delta covering v0.9.12–v0.9.14; hosted qualification recorded) |
 | `ferrum-edge-0.9.11` | v0.9.11, `c764084` | **553 carried IDs** | [audit/gateway-0.9.11-delta.md](audit/gateway-0.9.11-delta.md) (source delta; hosted qualification recorded) |
@@ -332,14 +332,18 @@ catalog whose id equals the profile's `compatibility_id`:
   record, Anvil says why.
 - `anvil gateway list WORKSPACE` lists a workspace's profiles (id, name,
   catalog, hosts, and whether trust needs verified TLS), and `anvil gateway
-  remove WORKSPACE PROFILE` (id, or a name no other profile has) removes
-  one; the desktop app's Connection profiles dialog has **Remove gateway**
-  on a saved profile (after an in-window prompt). Sends to its hosts are
-  then untrusted unless another profile matches them: trust and the G01
-  lookup follow the hosts of the profiles that remain. Settings that name
-  the profile (`integration_profile_id`, on the workspace, a folder or a
-  request) keep the id, which then matches no profile, and a vault secret
-  its lookup credential names is kept.
+  remove WORKSPACE PROFILE` (id, or a name no other profile of the workspace
+  has, case ignored by Unicode's lowercase rules as for workspaces) removes
+  one. An id wins: an argument that is one profile's id and another
+  profile's name removes the id's owner. A profile of another workspace is
+  never found. The desktop app's Connection profiles dialog has **Remove
+  gateway** on a saved profile (after an in-window prompt). Sends to its
+  hosts are then untrusted unless another profile matches them: trust and
+  the G01 lookup follow the hosts of the profiles that remain. Settings that
+  name the profile (`integration_profile_id`, on the workspace, a folder or a
+  request) keep the id, which then matches no profile; the desktop settings
+  show it as "removed profile", with **Clear** to inherit again. A vault
+  secret its lookup credential names is kept.
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 
@@ -400,7 +404,7 @@ it. A "(gateway error: …)" class in the result text is content, not proof.
 | `overload` | The gateway shed load, was draining, or hit the response-transform ceiling (502). | CPU pressure. |
 | `config_stale` | The data plane's configuration fence is stale. | Which configuration change is missing. |
 | `concurrency_limit` | An adaptive or static concurrency limit rejected the request. | The limit value or the load cause. |
-| `loop_detected` (0.9.20) | The request reached the gateway's proxy hop limit (508 `{"error":"Proxy hop limit exceeded"}`, `FERRUM_MAX_PROXY_HOPS`, default 10) and was refused before routing: usually a routing loop between Ferrum gateways. | That any backend was contacted; which gateway in the chain closed the loop. |
+| `loop_detected` (0.9.20) | The request reached the gateway's proxy hop limit (508 `{"error":"Proxy hop limit exceeded"}`, `FERRUM_MAX_PROXY_HOPS`, default 10) and was refused before routing: the `X-Ferrum-Hops` count it received had reached the limit. A routing loop between Ferrum gateways, a long but intended chain, or a count the caller or an intermediary supplied all produce this. | That any backend was contacted; how many gateways the request passed through; that a routing loop exists, or which gateway or route closes one. |
 
 A missing marker does not prove the response came from the backend
 (`ferrum.marker.absent` explains this). A 403 alone never proves a WAF:

@@ -110,16 +110,20 @@ impl Engine {
         }
         let schemes = session_preview::schemes(ctx.spec.protocol)?;
         let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed).with_secrets(ctx.secrets.clone());
-        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes)?;
+        // A failure can quote a resolved value (a lint error quotes the body,
+        // a refused gRPC metadata key is quoted lowercased): redacted as the
+        // send path's stored failure is, with the secrets resolved before it.
+        let redacted = |mut f: TransportFailure| {
+            Redactor::for_execution(&resolver, &ctx.redaction_names).failure(&mut f);
+            f
+        };
+        let prep = http_exec::prepare_all(self, ctx, &resolver, schemes).map_err(redacted)?;
         let mut inferred = prep.inferred.clone();
         let shape = match ctx.spec.protocol {
             Protocol::Http => Shape::http(&prep),
             // A message that does not fit the schema is refused with an error
             // that may quote it: redacted as the session's failure is.
-            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(|mut f| {
-                f.message = Redactor::for_execution(&resolver, &ctx.redaction_names).text(&f.message);
-                f
-            })?,
+            _ => Shape::session(ctx, &resolver, &prep, &mut inferred).map_err(redacted)?,
         };
         // After the session's messages and metadata are resolved, so the
         // secrets they use are known.
@@ -143,7 +147,7 @@ impl Engine {
         } else {
             prep.auth.clone()
         };
-        match anvil_auth::apply(&auth, &signable, chrono::Utc::now()) {
+        match anvil_auth::apply_hiding(&auth, &signable, chrono::Utc::now(), &prep.auth_hidden) {
             Ok(applied) => {
                 for s in applied.secrets.iter().filter(|s| s.as_str() != UNFETCHED_JWT_SVID) {
                     redactor.add_secret(s);
@@ -182,7 +186,7 @@ impl Engine {
             // schema comes from server reflection).
             redactor.json_text(m)
         } else {
-            redacted_body_preview(&redactor, &body, req.content_type.as_deref().map(|c| c.contains("json")).unwrap_or(false))
+            redacted_body_preview(&redactor, &body, req.content_type.as_deref().is_some_and(is_json_media_type))
         };
         let omitted = resolver.used_secrets.lock().len();
         Ok(EffectiveRequest {
@@ -194,7 +198,7 @@ impl Engine {
             body_bytes: body.len() as u64,
             body_preview,
             content_type: req.content_type.as_deref().map(|c| redactor.text_any_case(c)),
-            auth: prep.auth_label.clone(),
+            auth: redactor.metadata_text(&prep.auth_label),
             auth_varies_per_send: varies,
             tls_profile: prep.tls_profile_name.clone(),
             tls_verification: prep.tls.as_ref().map(|t| t.verify).unwrap_or(true),
@@ -205,8 +209,11 @@ impl Engine {
             },
             settings: prep.settings.clone(),
             variables_used: resolver.used.lock().clone(),
-            inferred,
-            lint_warning: prep.http.lint_bypassed.clone(),
+            // As the stored record's notes are: they can quote a templated
+            // host or the auth label (a resolved username or key name).
+            inferred: inferred.iter().map(|note| redactor.metadata_text(&redactor.inferred(note))).collect(),
+            // A parser error can quote the body (a tag or entity name).
+            lint_warning: prep.http.lint_bypassed.as_deref().map(|l| redactor.metadata_text(l)),
             omitted_secrets: omitted,
         })
     }
@@ -219,23 +226,92 @@ const BODY_PREVIEW_BYTES: usize = 64 * 1024;
 /// redacted before they are cut, so a secret that crosses the cut is replaced
 /// whole instead of leaving its prefix (only [`REDACT_LOOKAHEAD_BYTES`] past
 /// the cut are redacted). A whole JSON body also gets field-name redaction; a
-/// cut one is no longer JSON and is scrubbed as text, as before.
+/// cut one is no longer JSON and is scrubbed as text, as before. On every
+/// path a hidden auth parameter is first withheld where the generated
+/// WS-Security header writes it ([`Redactor::hide_written_parameters`]),
+/// before a secret replaced around it could hide it. Both run inside the
+/// redaction [`redact_then_cut`] applies to the window as captured, so the
+/// cut stays where it is in the body and a replacement crossing it, of
+/// either kind, is caught.
 fn redacted_body_preview(redactor: &Redactor, body: &[u8], json: bool) -> String {
-    let window = String::from_utf8_lossy(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
+    let captured = without_split_code_point(&body[..body.len().min(BODY_PREVIEW_BYTES + REDACT_LOOKAHEAD_BYTES)]);
+    let window = String::from_utf8_lossy(captured);
+    let redact = |s: &str| redactor.text(&redactor.hide_written_parameters(s));
     if body.len() <= BODY_PREVIEW_BYTES {
-        return if json { redactor.json_text(&window) } else { redactor.text(&window) };
+        return if json { redactor.json_text(&redactor.hide_written_parameters(&window)) } else { redact(&window) };
     }
     let mut cut = BODY_PREVIEW_BYTES.min(window.len());
     while !window.is_char_boundary(cut) {
         cut -= 1;
     }
-    redact_then_cut(&|s: &str| redactor.text(s), &window, cut)
+    redact_then_cut(&redact, &window, cut)
+}
+
+/// `bytes` without a last UTF-8 code point their end cuts short, so lossy
+/// decoding does not turn its first bytes into U+FFFD. Every other byte
+/// keeps its offset.
+fn without_split_code_point(bytes: &[u8]) -> &[u8] {
+    for (back, &b) in bytes.iter().rev().take(4).enumerate() {
+        if b & 0xC0 == 0x80 {
+            continue;
+        }
+        // A lead byte (or ASCII): how many bytes its code point takes.
+        let width = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        return if back + 1 < width { &bytes[..bytes.len() - back - 1] } else { bytes };
+    }
+    bytes
+}
+
+/// Whether a `Content-Type` names JSON by its media type essence
+/// (`type/subtype`): a `json`, `jsonl`, `ndjson` or `x-ndjson` subtype, a
+/// `+json` suffix or a `-json` one (`application/x-json`). Its parameters
+/// (a SOAP 1.2 `action="urn:json"`) do not count. A body that does not
+/// parse as one JSON document is still redacted as text.
+fn is_json_media_type(content_type: &str) -> bool {
+    let essence = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    essence.split_once('/').is_some_and(|(_, subtype)| {
+        matches!(subtype, "json" | "jsonl" | "ndjson" | "x-ndjson") || subtype.ends_with("+json") || subtype.ends_with("-json")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anvil_domain::secret::REDACTED;
+
+    #[test]
+    fn json_is_told_by_the_media_type_essence() {
+        for json in [
+            "application/json",
+            "Application/JSON; charset=utf-8",
+            "application/problem+json",
+            "text/json",
+            "application/x-json",
+            "application/jsonl",
+            "application/x-ndjson",
+            "application/ndjson",
+        ] {
+            assert!(is_json_media_type(json), "{json}");
+        }
+        for other in ["application/soap+xml; charset=utf-8; action=\"urn:json\"", "text/xml; json=1", "application/jsonx", "json"] {
+            assert!(!is_json_media_type(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_code_point_split_by_the_capture_is_left_out() {
+        let text = "aé€😀";
+        for end in 0..=text.len() {
+            let kept = without_split_code_point(&text.as_bytes()[..end]);
+            let boundary = (0..=end).rev().find(|&i| text.is_char_boundary(i)).unwrap();
+            assert_eq!(kept, &text.as_bytes()[..boundary], "{end}");
+        }
+    }
 
     #[test]
     fn a_secret_crossing_the_body_preview_cut_leaves_no_prefix() {

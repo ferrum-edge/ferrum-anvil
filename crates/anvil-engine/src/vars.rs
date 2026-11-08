@@ -102,6 +102,11 @@ pub struct Resolver {
     /// Names of request fields (headers, query parameters, form fields) the
     /// user marked sensitive, for name-based redaction.
     pub sensitive_names: Mutex<Vec<String>>,
+    /// Auth parameters (a username or API key name) that took a secret
+    /// variable, whole: hidden where Anvil writes them (the auth label, a
+    /// header, query or cookie name, the WS-Security username) whatever
+    /// their length.
+    pub hidden_parameters: Mutex<Vec<String>>,
 }
 
 impl Resolver {
@@ -124,6 +129,7 @@ impl Resolver {
             decoded_secrets: Mutex::new(vec![]),
             used: Mutex::new(vec![]),
             sensitive_names: Mutex::new(vec![]),
+            hidden_parameters: Mutex::new(vec![]),
         }
     }
 

@@ -578,8 +578,10 @@ const SKIPPED: &[(&str, &str, &str)] = &[
          behind the first on the one connection (200, one backend connection), and a backend that GOAWAYs each connection made \
          the pool reuse the draining connection (502 connection_failure, operator error_class connection_pool_error = pool \
          cancellation, not the ceiling). \
-         The pooled-lane public signal (502 connection_failure \"Backend unavailable\") is covered by the contract test \
-         up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family (crates/anvil-diagnostics/tests/upstream_setup_contract.rs).",
+         The pooled-lane public signal is covered by contract tests in crates/anvil-diagnostics/tests/upstream_setup_contract.rs: \
+         from 0.9.19 (#6777) the ceiling answers its own 503 connection_failure {\"error\":\"Backend connection limit exceeded\"} \
+         (own_setup_signals_name_one_outcome_from_0_9_19); through 0.9.15 it was the shared 502 connection_failure \
+         \"Backend unavailable\" (up_018_pooled_lane_ceiling_stays_in_the_ambiguous_family).",
     ),
 ];
 

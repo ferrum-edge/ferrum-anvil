@@ -961,6 +961,36 @@ describe("closing a tab with backend work", () => {
     await waitFor(() => expect(calls("cancel_execution")).toEqual([{ executionId: execId }]));
   });
 
+  it("leaves the keys to a modal a view opened itself, and still locks", async () => {
+    backend();
+    requests.r1 = request("r1", "A", "Alpha", { auth: { type: "bearer", token: { kind: "template", value: "" }, prefix: "Bearer" } as RequestSpec["auth"] });
+    const onLock = vi.fn();
+    render(<Workbench onLock={onLock} profileName="test" />);
+    await screen.findByRole("treeitem", { name: /Alpha/ });
+    await openTab("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+    const execId = calls("send_request")[0].executionId;
+
+    // The auth editor's own dialog, not one of Workbench's.
+    fireEvent.click(screen.getByRole("tab", { name: "Auth" }));
+    fireEvent.click(screen.getByRole("button", { name: /Inspect a JWT/ }));
+    const name = "Inspect JWT (decoded locally)";
+    await screen.findByRole("dialog", { name });
+    fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "l", ctrlKey: true });
+    expect(onLock).toHaveBeenCalledTimes(1);
+    // Escape closes the dialog only.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name })).toBeNull());
+    await act(async () => {});
+    expect(calls("cancel_execution")).toHaveLength(0);
+    expect(calls("send_request")).toHaveLength(1);
+    // With no modal showing, Escape cancels the request.
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(calls("cancel_execution")).toEqual([{ executionId: execId }]));
+  });
+
   it("still locks with ⌘/Ctrl+L while a dialog shows", async () => {
     backend();
     const onLock = vi.fn();

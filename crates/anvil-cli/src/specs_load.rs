@@ -5,6 +5,7 @@ use anvil_app::specs::SpecTarget;
 use anvil_contract::{json_safe, terminal_safe as t};
 use anvil_domain::Id;
 use anvil_domain::load::{AbortRule, ConnectionMode, LoadPlan, RunCompletion, Stage, Workload};
+use anvil_domain::workspace::names_match;
 use anvil_import::{GroupBy, ImportOptions, SampleMode};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
@@ -166,11 +167,11 @@ fn fill_in_hints(
         Some(arg) if same == 1 && name.parse::<Id>().is_err() => arg,
         _ => id.to_string(),
     };
-    let same_ws = app.workspaces()?.iter().filter(|w| w.name.eq_ignore_ascii_case(&ws.name)).count();
+    let same_ws = app.workspaces()?.iter().filter(|w| names_match(&w.name, &ws.name)).count();
     let ws_arg = by_name(&ws.name, &ws.meta.id, same_ws);
     let env_arg = match (active, envs.get(server).or(envs.first())) {
         (None, Some(e)) => {
-            let same = all.iter().filter(|x| x.name.eq_ignore_ascii_case(&e.name)).count();
+            let same = all.iter().filter(|x| names_match(&x.name, &e.name)).count();
             format!(" --env {}", by_name(&e.name, &e.meta.id, same))
         }
         _ => String::new(),

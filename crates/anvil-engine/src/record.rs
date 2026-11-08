@@ -77,8 +77,7 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
         a.method = r.metadata_text(&a.method);
         a.url = r.text_any_case(&r.url(&a.url));
         if let Some(f) = &mut a.failure {
-            f.message = r.text_any_case(&f.message);
-            f.field = f.field.as_deref().map(|s| r.text_any_case(s));
+            r.failure(f);
         }
         for phase in &mut a.phases {
             phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));
@@ -101,8 +100,7 @@ pub(crate) fn redact_attempts(attempts: &mut [AttemptObservation], r: &Redactor)
                 redact_tls(tls, r);
             }
             if let Some(f) = &mut t.failure {
-                f.message = r.text_any_case(&f.message);
-                f.field = f.field.as_deref().map(|s| r.text_any_case(s));
+                r.failure(f);
             }
             for phase in &mut t.phases {
                 phase.detail = phase.detail.as_deref().map(|s| r.text_any_case(s));

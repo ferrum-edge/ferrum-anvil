@@ -181,7 +181,7 @@
           ]
         },
         "auth_label": {
-          "description": "`api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never the secret.",
+          "description": "`api_key(header X-API-Key)`, `mtls(CN=...)`, etc. Never a credential value; a\nusername or key name taken from a secret is redacted.",
           "type": "string"
         },
         "tls_profile": {

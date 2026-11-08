@@ -16,6 +16,7 @@ pub mod oauth;
 pub mod wsse;
 
 use anvil_domain::auth::{BodyDigestHeader, HmacAlgorithm, HmacProfile, JwtAlgorithm, JwtClaims, KeyLocation, WssePasswordType};
+use anvil_domain::secret::REDACTED;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use zeroize::Zeroizing;
@@ -143,28 +144,61 @@ pub struct Applied {
     pub append_query: Vec<(String, String)>,
     /// Replacement body (WS-Security header insertion).
     pub body: Option<Vec<u8>>,
-    /// Human label for evidence (never contains secret material).
+    /// Human label for evidence ([`ResolvedAuth::label_hiding`] with
+    /// [`Applied::hidden`]). It holds no credential value; it names the
+    /// resolved username or API key name unless that is hidden.
     pub label: String,
+    /// Displayed parameters (a username or API key name) that came from a
+    /// secret: labels and messages show [`REDACTED`] in their place, whatever
+    /// their length (see [`apply_hiding`]).
+    pub hidden: Vec<String>,
     /// Secret values used, for exact-value redaction of evidence and logs.
     pub secrets: Vec<String>,
     /// Non-secret facts about the generated credential (nonce, jti, exp...).
     pub facts: Vec<(String, String)>,
 }
 
+impl Applied {
+    /// `value` as a message shows it: [`REDACTED`] when it is one of
+    /// [`Applied::hidden`].
+    pub fn shown<'a>(&self, value: &'a str) -> &'a str {
+        shown(value, &self.hidden)
+    }
+}
+
+/// `value`, or [`REDACTED`] when it is one of `hidden`.
+fn shown<'a>(value: &'a str, hidden: &[String]) -> &'a str {
+    if hidden.iter().any(|h| h == value) { REDACTED } else { value }
+}
+
 impl ResolvedAuth {
+    /// The auth type and its non-credential parameters, for evidence. It
+    /// names the resolved username or API key name, which can come from a
+    /// secret variable: use [`ResolvedAuth::label_hiding`] for a label that
+    /// is shown or stored.
     pub fn label(&self) -> String {
+        self.label_hiding(&[])
+    }
+
+    /// [`ResolvedAuth::label`] with each displayed parameter (a username or
+    /// API key name) that is one of `hidden` shown as [`REDACTED`], whatever
+    /// its length. The engine passes the parameters that took a secret
+    /// variable, so a short secret (which exact-value redaction of text
+    /// ignores) is not shown either.
+    pub fn label_hiding(&self, hidden: &[String]) -> String {
+        let show = |v: &str| shown(v, hidden).to_string();
         match self {
             ResolvedAuth::None => "none".into(),
-            ResolvedAuth::ApiKey { name, location, .. } => format!("api_key({location:?} {name})"),
-            ResolvedAuth::Basic { username, .. } => format!("basic(user {username})"),
+            ResolvedAuth::ApiKey { name, location, .. } => format!("api_key({location:?} {})", show(name)),
+            ResolvedAuth::Basic { username, .. } => format!("basic(user {})", show(username)),
             ResolvedAuth::Bearer { .. } => "bearer".into(),
             ResolvedAuth::Jwt { algorithm, .. } => format!("jwt({algorithm:?})"),
             ResolvedAuth::OAuth2 { .. } => "oauth2(access token)".into(),
-            ResolvedAuth::Hmac(p) => format!("hmac({:?}, user {})", p.profile, p.username),
+            ResolvedAuth::Hmac(p) => format!("hmac({:?}, user {})", p.profile, show(&p.username)),
             ResolvedAuth::Dpop { .. } => "dpop(bound access token)".into(),
-            ResolvedAuth::Wsse { username, password_type, .. } => format!("ws-security({password_type:?}, user {username})"),
-            ResolvedAuth::JwtSvid { header_name, .. } => format!("jwt_svid({header_name})"),
-            ResolvedAuth::Multi(v) => format!("multi[{}]", v.iter().map(|a| a.label()).collect::<Vec<_>>().join(", ")),
+            ResolvedAuth::Wsse { username, password_type, .. } => format!("ws-security({password_type:?}, user {})", show(username)),
+            ResolvedAuth::JwtSvid { header_name, .. } => format!("jwt_svid({})", show(header_name)),
+            ResolvedAuth::Multi(v) => format!("multi[{}]", v.iter().map(|a| a.label_hiding(hidden)).collect::<Vec<_>>().join(", ")),
         }
     }
 }
@@ -209,6 +243,14 @@ pub fn encode_query_component(s: &str) -> String {
 /// - A cookie API key's name must be an RFC 6265 token and its value
 ///   cookie-octets, so it cannot add or change another cookie.
 pub fn apply(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>) -> Result<Applied, AuthError> {
+    apply_hiding(auth, req, now, &[])
+}
+
+/// [`apply`], with the displayed parameters (a username or API key name)
+/// that came from a secret: the label and every refusal show [`REDACTED`]
+/// in their place (see [`ResolvedAuth::label_hiding`]). The credential sent
+/// is the same.
+pub fn apply_hiding(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, hidden: &[String]) -> Result<Applied, AuthError> {
     let mut steps = Vec::new();
     flatten(auth, &mut steps);
     let hmac = steps.iter().filter(|s| matches!(s, ResolvedAuth::Hmac(_))).count();
@@ -218,13 +260,13 @@ pub fn apply(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>) -> 
             return Err(AuthError::Invalid(format!("a multi-auth set can hold one {kind} profile")));
         }
     }
-    let mut applied = Applied { label: auth.label(), ..Default::default() };
+    let mut applied = Applied { label: auth.label_hiding(hidden), hidden: hidden.to_vec(), ..Default::default() };
     let mut effective = std::borrow::Cow::Borrowed(req);
     let mut composed = Composed::default();
     for (i, step) in steps.iter().enumerate() {
         let mut out = Applied::default();
-        apply_step(step, &effective, now, &mut out)?;
-        composed.check(step, &out)?;
+        apply_step(step, &effective, now, &mut out, hidden)?;
+        composed.check(step, &out, hidden)?;
         if i + 1 < steps.len() {
             absorb(effective.to_mut(), &out);
         }
@@ -289,8 +331,8 @@ struct Composed {
 }
 
 impl Composed {
-    fn check(&mut self, step: &ResolvedAuth, out: &Applied) -> Result<(), AuthError> {
-        let label = step.label();
+    fn check(&mut self, step: &ResolvedAuth, out: &Applied, hidden: &[String]) -> Result<(), AuthError> {
+        let label = step.label_hiding(hidden);
         let cookie_key = match step {
             ResolvedAuth::ApiKey { name, location: KeyLocation::Cookie, .. } => Some(name.as_str()),
             _ => None,
@@ -302,7 +344,7 @@ impl Composed {
                 Some("body".to_string())
             } else {
                 let signed = |n: &str| sig.headers.iter().any(|h| n.eq_ignore_ascii_case(h));
-                out.set_headers.iter().find(|(n, _)| signed(n.as_str())).map(|(n, _)| format!("{n} header"))
+                out.set_headers.iter().find(|(n, _)| signed(n.as_str())).map(|(n, _)| format!("{} header", shown(n, hidden)))
             };
             if let Some(what) = changed {
                 let signer = &sig.label;
@@ -316,6 +358,7 @@ impl Composed {
             let merge = cookie_key.is_some() && key == "cookie";
             if let Some((_, owner, owner_merge)) = self.headers.iter().find(|(h, _, _)| *h == key) {
                 if !(merge && *owner_merge) {
+                    let n = shown(n, hidden);
                     return Err(AuthError::Invalid(format!(
                         "several auth profiles would each set the {n} header ({owner} and {label}); choose one profile for {n}"
                     )));
@@ -326,6 +369,7 @@ impl Composed {
         }
         if let Some(name) = cookie_key {
             if let Some((_, owner)) = self.cookies.iter().find(|(c, _)| c == name) {
+                let name = shown(name, hidden);
                 return Err(AuthError::Invalid(format!(
                     "several auth profiles would each send the cookie '{name}' ({owner} and {label}); give each cookie credential its own name"
                 )));
@@ -334,6 +378,7 @@ impl Composed {
         }
         for (k, _) in &out.append_query {
             if let Some((_, owner)) = self.query.iter().find(|(q, _)| q == k) {
+                let k = shown(k, hidden);
                 return Err(AuthError::Invalid(format!(
                     "several auth profiles would each add the query parameter '{k}' ({owner} and {label}); give each query credential its own name"
                 )));
@@ -366,14 +411,16 @@ fn is_cookie_octet(b: u8) -> bool {
 /// A name that is not a token or a value that is not cookie-octets (optionally
 /// in double quotes) is refused, so a credential cannot add or change another
 /// cookie; the message names the cookie, never its value.
-fn with_cookie(req: &SignableRequest, name: &str, value: &str) -> Result<String, AuthError> {
+fn with_cookie(req: &SignableRequest, name: &str, value: &str, hidden: &[String]) -> Result<String, AuthError> {
     if !name.bytes().all(is_token_char) {
+        let name = shown(name, hidden);
         return Err(AuthError::Invalid(format!(
             "the cookie API key name {name:?} is not a valid cookie name; use letters, digits and !#$%&'*+-.^_`|~ only"
         )));
     }
     let inner = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
     if !inner.bytes().all(is_cookie_octet) {
+        let name = shown(name, hidden);
         return Err(AuthError::Invalid(format!(
             "the cookie API key '{name}' has an invalid cookie value (no whitespace, control or non-ASCII characters, \", ; or \\)"
         )));
@@ -391,7 +438,13 @@ fn with_cookie(req: &SignableRequest, name: &str, value: &str) -> Result<String,
     Ok(pairs.join("; "))
 }
 
-fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, out: &mut Applied) -> Result<(), AuthError> {
+fn apply_step(
+    auth: &ResolvedAuth,
+    req: &SignableRequest,
+    now: DateTime<Utc>,
+    out: &mut Applied,
+    hidden: &[String],
+) -> Result<(), AuthError> {
     match auth {
         // `apply` flattens a multi-auth set into its profiles.
         ResolvedAuth::None | ResolvedAuth::Multi(_) => {}
@@ -403,7 +456,7 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
             match location {
                 KeyLocation::Header => set(out, name, value.to_string()),
                 KeyLocation::Query => out.append_query.push((name.clone(), value.to_string())),
-                KeyLocation::Cookie => set(out, "Cookie", with_cookie(req, name, value)?),
+                KeyLocation::Cookie => set(out, "Cookie", with_cookie(req, name, value, hidden)?),
             }
         }
         ResolvedAuth::Basic { username, password } => {
@@ -506,6 +559,40 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, ou
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hidden username or key name is shown as the redaction marker in the
+    /// label and in a multi-auth refusal, whatever its length; the
+    /// credential applied is the same.
+    #[test]
+    fn hidden_parameters_are_masked_in_labels_and_refusals() {
+        let key = |name: &str| ResolvedAuth::ApiKey {
+            name: name.into(),
+            value: Zeroizing::new("tok-SENSITIVE-unit-key".into()),
+            location: KeyLocation::Header,
+        };
+        let basic = ResolvedAuth::Basic { username: "bo".into(), password: Zeroizing::new("tok-SENSITIVE-unit-pw".into()) };
+        let hidden = vec!["bo".to_string()];
+        assert_eq!(basic.label_hiding(&hidden), format!("basic(user {REDACTED})"));
+        assert_eq!(basic.label_hiding(&[]), "basic(user bo)");
+        assert_eq!(basic.label(), "basic(user bo)");
+        let req = SignableRequest {
+            method: "GET".into(),
+            scheme: "https".into(),
+            authority: "api.example.test".into(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            headers: vec![],
+            body: vec![],
+        };
+        let applied = apply_hiding(&basic, &req, Utc::now(), &hidden).unwrap();
+        assert_eq!(applied.label, format!("basic(user {REDACTED})"));
+        assert_eq!(applied.set_headers, apply(&basic, &req, Utc::now()).unwrap().set_headers);
+        // Two profiles set the header named by the hidden key name.
+        let multi = ResolvedAuth::Multi(vec![key("bo"), key("bo")]);
+        let AuthError::Invalid(message) = apply_hiding(&multi, &req, Utc::now(), &hidden).unwrap_err() else { panic!("not refused") };
+        assert!(message.contains(&format!("set the {REDACTED} header (api_key(Header {REDACTED})")), "{message}");
+        assert!(!message.contains("bo header") && !message.contains(" bo)"), "{message}");
+    }
 
     #[test]
     fn ws_security_registers_the_saml_assertion_and_the_escaped_password_as_secrets() {

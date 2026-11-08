@@ -48,8 +48,14 @@ fn open(root: &Path) -> App {
 
 /// Save a lab gateway profile for `host` in workspace "Lab".
 fn save_gateway(data: &Path, name: &str, host: &str) -> IntegrationProfile {
+    save_gateway_in(data, "Lab", name, host, false)
+}
+
+/// Save a gateway profile for `host` in `workspace`, trusted only over
+/// verified TLS when `verified`.
+fn save_gateway_in(data: &Path, workspace: &str, name: &str, host: &str, verified: bool) -> IntegrationProfile {
     let app = open(data);
-    let ws = app.find_workspace("Lab").unwrap();
+    let ws = app.find_workspace(workspace).unwrap();
     let now = chrono::Utc::now();
     app.save_integration(IntegrationProfile {
         id: anvil_domain::Id::new(),
@@ -58,7 +64,7 @@ fn save_gateway(data: &Path, name: &str, host: &str) -> IntegrationProfile {
         kind: IntegrationKind::FerrumGateway {
             hosts: vec![HostBinding { host: host.into(), port: None }],
             compatibility_id: CATALOG.into(),
-            require_verified_tls: false,
+            require_verified_tls: verified,
             detail: None,
             console_url: None,
         },
@@ -178,4 +184,65 @@ async fn a_name_matches_case_ignored_beyond_ascii() {
     let o = anvil(&data, &["gateway", "remove", "Lab", "café"]).await;
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert_eq!(saved_gateways(&data), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_profile_that_needs_verified_tls_says_so() {
+    let (_dir, data, _f) = setup().await;
+    let p = save_gateway_in(&data, "Lab", "Edge", "gw.example", true);
+    let o = anvil(&data, &["gateway", "list", "Lab"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let listed = String::from_utf8_lossy(&o.stdout).to_string();
+    assert_eq!(listed.trim(), format!("{}  Edge  {CATALOG}  gw.example  verified TLS required", p.id), "{listed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_profile_of_another_workspace_is_not_found() {
+    let (_dir, data, _f) = setup().await;
+    let o = anvil(&data, &["workspace", "create", "Other"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let elsewhere = save_gateway_in(&data, "Other", "Elsewhere", "gw.example", false);
+
+    let o = anvil(&data, &["gateway", "list", "Lab"]).await;
+    assert!(text(&o).contains("workspace 'Lab' has no Ferrum gateway profiles"), "{}", text(&o));
+    // Neither by name nor by id.
+    let id = elsewhere.id.to_string();
+    for key in ["Elsewhere", id.as_str()] {
+        let o = anvil(&data, &["gateway", "remove", "Lab", key]).await;
+        assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+        assert!(text(&o).contains(&format!("workspace 'Lab' has no Ferrum gateway profile '{key}'")), "{}", text(&o));
+    }
+    let app = open(&data);
+    let other = app.find_workspace("Other").unwrap();
+    assert_eq!(app.integrations(&other.meta.id).unwrap().into_iter().map(|p| p.id).collect::<Vec<_>>(), vec![elsewhere.id]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_id_wins_over_another_profiles_name() {
+    let (_dir, data, _f) = setup().await;
+    let target = save_gateway(&data, "Target", "gw-a.example");
+    // Another profile named like the first one's id.
+    let decoy = save_gateway(&data, &target.id.to_string(), "gw-b.example");
+    let id = target.id.to_string();
+    let o = anvil(&data, &["gateway", "remove", "Lab", &id]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("removed Ferrum gateway profile 'Target' from 'Lab'"), "{}", text(&o));
+    let app = open(&data);
+    let ws = app.find_workspace("Lab").unwrap();
+    assert_eq!(app.integrations(&ws.meta.id).unwrap().into_iter().map(|p| p.id).collect::<Vec<_>>(), vec![decoy.id]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_workspace_name_matches_case_ignored_beyond_ascii() {
+    let (_dir, data, _f) = setup().await;
+    let o = anvil(&data, &["workspace", "create", "CAFÉ"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let o = anvil(&data, &["gateway", "list", "Café"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("workspace 'CAFÉ' has no Ferrum gateway profiles"), "{}", text(&o));
+
+    save_gateway_in(&data, "CAFÉ", "Bar", "gw.example", false);
+    let o = anvil(&data, &["gateway", "remove", "café", "BAR"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("removed Ferrum gateway profile 'Bar' from 'CAFÉ'"), "{}", text(&o));
 }

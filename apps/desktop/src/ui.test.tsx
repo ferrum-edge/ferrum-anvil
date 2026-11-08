@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { KeyValue } from "./generated/contracts";
-import { KeyValueEditor, fmtBytes, fmtUs, humanize } from "./ui";
+import { KeyValueEditor, Modal, fmtBytes, fmtUs, humanize, modalOpen } from "./ui";
 
 afterEach(cleanup);
 
@@ -106,5 +106,46 @@ describe("KeyValueEditor", () => {
   it("has no reveal control for non-sensitive rows", () => {
     render(<Harness initial={[{ name: "Accept", value: "*/*", enabled: true }]} />);
     expect(screen.queryByRole("button", { name: "Reveal value" })).toBeNull();
+  });
+});
+
+function Dialog() {
+  const [open, setOpen] = useState(true);
+  return open ? (
+    <Modal title="Child dialog" onClose={() => setOpen(false)}>
+      <p>body</p>
+    </Modal>
+  ) : null;
+}
+
+describe("modalOpen", () => {
+  it("is true while any Modal is mounted, whoever opened it", () => {
+    expect(modalOpen()).toBe(false);
+    const a = render(<Dialog />);
+    const b = render(<Dialog />);
+    expect(modalOpen()).toBe(true);
+    a.unmount();
+    expect(modalOpen()).toBe(true);
+    b.unmount();
+    expect(modalOpen()).toBe(false);
+  });
+
+  it("still claims the Escape that closed the modal for a later window listener", () => {
+    render(<Dialog />);
+    // Registered after the modal's own Escape handler, so it runs after it.
+    const seen: boolean[] = [];
+    const later = (e: KeyboardEvent) => seen.push(modalOpen(e));
+    window.addEventListener("keydown", later);
+    try {
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "Child dialog" })).toBeNull();
+      expect(modalOpen()).toBe(false);
+      expect(seen).toEqual([true]);
+      // A key pressed with no modal open is not claimed.
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(seen).toEqual([true, false]);
+    } finally {
+      window.removeEventListener("keydown", later);
+    }
   });
 });

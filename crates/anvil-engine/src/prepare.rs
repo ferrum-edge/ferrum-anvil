@@ -230,6 +230,48 @@ pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<Stri
     Ok(Target { scheme, host, port, authority, path, query: encode_target_part(query) })
 }
 
+/// The origin of a URL, split as [`parse_target`] splits it, so a preflight
+/// can tell which part a per-send stand-in reaches (the load preflight's
+/// `per_run_origin` and [`crate::oauth_http::validate_worker_oauth_endpoint`]).
+/// Nothing is validated or normalized: a URL `parse_target` refuses still
+/// splits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginSplit<'a> {
+    /// Up to the first `://`; empty when the URL has none.
+    pub scheme: &'a str,
+    /// After the scheme's `://` (or from the start), up to the first `/`,
+    /// `?` or `#`.
+    pub authority: &'a str,
+    /// The authority up to the `:` before the port: after the `]` of a
+    /// bracketed IPv6 literal, else at the first `:`. The whole authority
+    /// when there is no such `:` (or the `[` is never closed).
+    pub host: &'a str,
+    /// What follows the host's `:`; `None` when no `:` follows the host
+    /// (also when anything else follows an IPv6 literal's `]`).
+    pub port: Option<PortSpan<'a>>,
+}
+
+/// The port text of an [`OriginSplit`] and its byte range in the split URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortSpan<'a> {
+    pub text: &'a str,
+    pub range: std::ops::Range<usize>,
+}
+
+/// Split `url` into its scheme, authority, host and port (see [`OriginSplit`]).
+pub fn split_origin(url: &str) -> OriginSplit<'_> {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority_start = url.len() - rest.len();
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
+    let (host, after_host) = authority.split_at(host_end.unwrap_or(authority.len()));
+    let port = after_host.strip_prefix(':').map(|text| {
+        let start = authority_start + host.len() + 1;
+        PortSpan { text, range: start..start + text.len() }
+    });
+    OriginSplit { scheme, authority, host, port }
+}
+
 /// Why an explicit `Host` value is not `uri-host [":" port]` (RFC 9110
 /// §7.2, RFC 3986 §3.2.2): a host name or IPv4 address, or an IPv6 address
 /// in brackets, each with an optional port. `None` when it is one. The
@@ -622,6 +664,37 @@ mod tests {
         assert_eq!(t.authority, "api.example.com:8443");
         assert_eq!(t.path, "/a/../b/%2F%20c", "dot segments and existing escapes are preserved");
         assert_eq!(t.query, "x=1&y=%C3%A9");
+    }
+
+    /// The split both per-run origin checks rely on: each case is (URL,
+    /// scheme, authority, host, port text and its byte range).
+    #[test]
+    fn split_origin_ends_each_part_where_parse_target_does() {
+        type Case = (&'static str, &'static str, &'static str, &'static str, Option<(&'static str, std::ops::Range<usize>)>);
+        let cases: [Case; 14] = [
+            ("http://127.0.0.1:8080/a?b#c", "http", "127.0.0.1:8080", "127.0.0.1", Some(("8080", 17..21))),
+            ("http://127.0.0.1/a:1", "http", "127.0.0.1", "127.0.0.1", None),
+            ("http://127.0.0.1?x=:1", "http", "127.0.0.1", "127.0.0.1", None),
+            ("http://127.0.0.1#:1", "http", "127.0.0.1", "127.0.0.1", None),
+            ("http://127.0.0.1:", "http", "127.0.0.1:", "127.0.0.1", Some(("", 17..17))),
+            ("127.0.0.1:9/x", "", "127.0.0.1:9", "127.0.0.1", Some(("9", 10..11))),
+            ("http://[::1]:9000/x", "http", "[::1]:9000", "[::1]", Some(("9000", 13..17))),
+            ("http://[::1]/x", "http", "[::1]", "[::1]", None),
+            ("http://[::1]x:9/", "http", "[::1]x:9", "[::1]", None),
+            ("http://[::1:9/", "http", "[::1:9", "[::1:9", None),
+            ("http://a:1:2/", "http", "a:1:2", "a", Some(("1:2", 9..12))),
+            ("http://u@h:5/", "http", "u@h:5", "u@h", Some(("5", 11..12))),
+            ("http:///p", "http", "", "", None),
+            ("a://b://c:1/", "a", "b:", "b", Some(("", 6..6))),
+        ];
+        for (url, scheme, authority, host, port) in cases {
+            let split = split_origin(url);
+            assert_eq!((split.scheme, split.authority, split.host), (scheme, authority, host), "{url}");
+            assert_eq!(split.port.clone().map(|p| (p.text, p.range)), port, "{url}");
+            if let Some(p) = split.port {
+                assert_eq!(&url[p.range], p.text, "{url}: the range is the port text");
+            }
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::env::find_workspace;
 use anvil_app::App;
 use anvil_contract::terminal_safe as t;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
-use anvil_domain::workspace::Workspace;
+use anvil_domain::workspace::{Workspace, names_match};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 
@@ -26,7 +26,8 @@ pub enum GatewayCmd {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
         /// Gateway profile (id, or a name no other profile in the workspace
-        /// has). Its own argument id: `profile` is the global `--profile`.
+        /// has). An id wins over another profile's name. Its own argument
+        /// id: `profile` is the global `--profile`.
         #[arg(value_name = "PROFILE")]
         gateway: String,
     },
@@ -63,13 +64,16 @@ fn line(p: &IntegrationProfile) -> String {
     format!("{}  {}  {}  {}  {tls}", p.id, t(&p.name), t(compatibility_id), hosts.join(", "))
 }
 
+/// The profile of `ws` that `key` names: its id, or its name with case
+/// ignored ([`names_match`]) when no other profile of `ws` has it. An id
+/// wins, as with `anvil env`: a `key` that is one profile's id and another's
+/// name finds the id's owner. A profile of another workspace is never found.
 fn find_profile(app: &App, ws: &Workspace, key: &str) -> Result<IntegrationProfile> {
     let mut all = app.integrations(&ws.meta.id)?;
     if let Some(i) = all.iter().position(|p| p.id.to_string() == key) {
         return Ok(all.swap_remove(i));
     }
-    let key_lower = key.to_lowercase();
-    let mut named: Vec<IntegrationProfile> = all.into_iter().filter(|p| p.name.to_lowercase() == key_lower).collect();
+    let mut named: Vec<IntegrationProfile> = all.into_iter().filter(|p| names_match(&p.name, key)).collect();
     match named.len() {
         1 => Ok(named.remove(0)),
         0 => bail!("workspace '{}' has no Ferrum gateway profile '{}' (`anvil gateway list` shows them)", t(&ws.name), t(key)),

@@ -307,3 +307,25 @@ async fn hints_follow_server_and_say_where_to_fill_in_without_an_environment() {
     assert!(out.contains("set them on its folder in the desktop app, or import it with --new-workspace"), "{out}");
     assert!(!out.contains("anvil env create"), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn names_match_case_ignored_beyond_ascii() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    ProfileManager::new(&data).create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+    assert_eq!(anvil(&data, &["workspace", "create", "CAFÉ"]).await.status.code(), Some(0));
+
+    // The workspace by "Café", the environment by "ÉTÉ".
+    let o = anvil(&data, &["env", "create", "Café", "été"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let o = anvil(&data, &["env", "use", "café", "ÉTÉ"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let o = anvil(&data, &["env", "list", "cAfÉ"]).await;
+    assert!(text(&o).lines().any(|l| l.starts_with(&format!("* {id}  été"))), "{}", text(&o));
+
+    // The same rule refuses a second environment of that name.
+    let o = anvil(&data, &["env", "create", "CAFÉ", "ÉTÉ"]).await;
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains("already has an environment named 'ÉTÉ'"), "{}", text(&o));
+}
