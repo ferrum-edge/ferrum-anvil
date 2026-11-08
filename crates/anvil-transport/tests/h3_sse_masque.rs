@@ -129,6 +129,50 @@ async fn sse_over_h3_parses_events_from_data_frames_and_measures_quic() {
     assert!(hdrs.iter().any(|(n, v)| n == "accept" && v == "text/event-stream"), "{hdrs:?}");
 }
 
+/// Request fields RFC 9114 §4.2 makes malformed in HTTP/3 (connection-specific
+/// ones, one a `Connection` value nominates, a `TE` other than `trailers`), and
+/// one ordinary field.
+fn connection_specific_fields() -> Vec<(http::HeaderName, http::HeaderValue)> {
+    [
+        ("proxy-connection", "keep-alive"),
+        ("te", "gzip"),
+        ("connection", "x-hop"),
+        ("x-hop", "1"),
+        ("keep-alive", "timeout=5"),
+        ("x-kept", "1"),
+    ]
+    .into_iter()
+    .map(|(n, v)| (http::HeaderName::from_static(n), http::HeaderValue::from_static(v)))
+    .collect()
+}
+
+/// The names `hdrs` carries out of [`connection_specific_fields`].
+fn sent_of_connection_specific(hdrs: &[(String, String)]) -> Vec<String> {
+    let names = ["proxy-connection", "te", "connection", "x-hop", "keep-alive", "x-kept"];
+    hdrs.iter().filter(|(n, _)| names.contains(&n.as_str())).map(|(n, v)| format!("{n}: {v}")).collect()
+}
+
+#[tokio::test]
+async fn sse_over_h3_leaves_out_connection_specific_fields() {
+    init();
+    let f = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let mut plan = sse_plan(f.addr, "/sse?count=1&interval=5");
+    plan.headers = connection_specific_fields();
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert!(out.attempts[0].observation.failure.is_none(), "{:?}", out.attempts[0].observation.failure);
+    assert_eq!(sse_state(&out), (200, 1, ClosedBy::Peer), "the request was not malformed");
+    let hdrs = f.log.last_request_headers().unwrap();
+    assert_eq!(sent_of_connection_specific(&hdrs), ["x-kept: 1"], "{hdrs:?}");
+
+    // `TE: trailers` is the one value HTTP/3 allows.
+    let mut plan = sse_plan(f.addr, "/sse?count=1&interval=5");
+    plan.headers = vec![(http::header::TE, http::HeaderValue::from_static("trailers"))];
+    let out = sse::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    assert_eq!(sse_state(&out).0, 200);
+    let hdrs = f.log.last_request_headers().unwrap();
+    assert!(hdrs.iter().any(|(n, v)| n == "te" && v == "trailers"), "{hdrs:?}");
+}
+
 #[tokio::test]
 async fn sse_over_h3_abort_mid_stream_is_incomplete_and_keeps_the_events() {
     init();
@@ -327,6 +371,23 @@ async fn connect_udp_with_capsules_when_the_proxy_does_not_offer_h3_datagrams() 
     assert!(hdrs.iter().any(|(n, v)| n == "capsule-protocol" && v == "?1"), "{hdrs:?}");
     assert_eq!(relayed(&proxy), vec!["capsule", "capsule"]);
     assert_eq!(echo.log.entries().iter().filter(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })).count(), 2);
+}
+
+#[tokio::test]
+async fn connect_udp_leaves_out_connection_specific_fields() {
+    init();
+    let proxy = h3server::serve("127.0.0.1:0", server_tls()).await.unwrap();
+    let echo = streams::udp("127.0.0.1:0", UdpMode::Echo).await.unwrap();
+    let mut plan = masque_plan(proxy.addr, echo.addr, "", &["ping"]);
+    plan.tunnel.headers = connection_specific_fields();
+    let out = masque::run(&plan, &EventCtx::none(), &CancellationToken::new(), None).await;
+    let a = &out.attempts[0];
+    assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
+    assert_eq!(a.response.as_ref().unwrap().status, 200);
+    assert_eq!(received(&out), vec!["ping"]);
+    let hdrs = proxy.log.last_request_headers().unwrap();
+    assert_eq!(sent_of_connection_specific(&hdrs), ["x-kept: 1"], "{hdrs:?}");
+    assert!(hdrs.iter().any(|(n, v)| n == "capsule-protocol" && v == "?1"), "{hdrs:?}");
 }
 
 #[tokio::test]

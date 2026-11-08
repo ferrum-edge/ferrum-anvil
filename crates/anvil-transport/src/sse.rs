@@ -46,6 +46,7 @@
 //!   reconnection that cannot be signed is not made, and the session notes
 //!   why.
 
+use crate::connection_fields::ConnectionSpecific;
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
@@ -472,14 +473,9 @@ fn sign_send(plan: &SsePlan) -> Result<Option<Vec<(HeaderName, HeaderValue)>>, T
 /// fields; HTTP/1.1 gets a `Host`.
 fn request_headers(plan: &SsePlan, fields: &[(HeaderName, HeaderValue)], pseudo: bool, last_event_id: Option<&str>) -> HeaderMap {
     let mut headers = HeaderMap::new();
+    let specific = ConnectionSpecific::of_fields(fields.iter().map(|(n, v)| (n, v)));
     for (n, v) in fields {
-        if pseudo
-            && (n == http::header::HOST
-                || n == http::header::CONNECTION
-                || n == http::header::TRANSFER_ENCODING
-                || n == http::header::UPGRADE
-                || n.as_str() == "keep-alive")
-        {
+        if pseudo && (n == http::header::HOST || specific.drops_field(n, v)) {
             continue;
         }
         headers.append(n.clone(), v.clone());

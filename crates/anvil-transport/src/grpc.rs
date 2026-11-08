@@ -35,6 +35,7 @@
 //! * Received messages compressed with `gzip` (`grpc-encoding`) are
 //!   decompressed with a bound; Anvil does not compress what it sends.
 
+use crate::connection_fields::ConnectionSpecific;
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
@@ -468,14 +469,20 @@ async fn next_cmd(rx: &mut Option<CommandRx>) -> Option<SessionCommand> {
 /// fields.
 fn call_headers(plan: &GrpcPlan, meta: &[(HeaderName, HeaderValue)], h1: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
+    let specific = ConnectionSpecific::of_fields(meta.iter().map(|(n, v)| (n, v)));
     for (n, v) in meta {
-        if n == http::header::HOST
-            || n == http::header::CONNECTION
-            || n == http::header::TRANSFER_ENCODING
-            || n == http::header::UPGRADE
-            || n == http::header::CONTENT_LENGTH
-            || n.as_str() == "keep-alive"
-        {
+        // HTTP/2 and HTTP/3 leave out every connection-specific field (the
+        // `te: trailers` below is the one RFC 9114 §4.2 allows); HTTP/1.1
+        // (gRPC-Web) leaves out the ones the transport sets itself.
+        let connection_specific = if h1 {
+            n == http::header::CONNECTION
+                || n == http::header::TRANSFER_ENCODING
+                || n == http::header::UPGRADE
+                || n.as_str() == "keep-alive"
+        } else {
+            specific.drops_field(n, v)
+        };
+        if n == http::header::HOST || n == http::header::CONTENT_LENGTH || connection_specific {
             continue;
         }
         h.append(n.clone(), v.clone());

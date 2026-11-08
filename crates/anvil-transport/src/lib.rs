@@ -10,6 +10,7 @@
 // are consumed once, not propagated through hot paths.
 
 pub mod certs;
+pub mod connection_fields;
 pub mod connector;
 pub mod datagram;
 pub mod decode;

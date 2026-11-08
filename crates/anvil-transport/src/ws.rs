@@ -27,6 +27,7 @@
 //! the (vendored) tungstenite; previews show the decompressed payload, and
 //! `max_message_bytes` limits the decompressed size.
 
+use crate::connection_fields::ConnectionSpecific;
 use crate::connector::{ProxyPlan, Target};
 use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
@@ -254,16 +255,10 @@ async fn await_extended_connect(
 
 fn build_request(plan: &WsPlan, h2: bool, key: &str) -> Result<Request<Empty<Bytes>>, String> {
     let mut headers = HeaderMap::new();
+    let specific = ConnectionSpecific::of_fields(plan.headers.iter().map(|(n, v)| (n, v)));
     for (n, v) in &plan.headers {
-        if h2
-            && (n == http::header::HOST
-                || n == http::header::CONNECTION
-                || n == http::header::UPGRADE
-                || n == http::header::TRANSFER_ENCODING
-                || n.as_str() == "keep-alive"
-                || n.as_str() == "sec-websocket-key")
-        {
-            continue; // connection-specific / H1-only fields are illegal in HTTP/2
+        if h2 && (n == http::header::HOST || n.as_str() == "sec-websocket-key" || specific.drops_field(n, v)) {
+            continue; // connection-specific / H1-only fields are illegal in HTTP/2 and HTTP/3
         }
         headers.append(n.clone(), v.clone());
     }
@@ -1823,6 +1818,26 @@ mod tests {
             redact: None,
             proxy_header: None,
         }
+    }
+
+    #[test]
+    fn extended_connect_leaves_out_connection_specific_fields() {
+        let mut p = plan(vec![], None);
+        p.headers = [("proxy-connection", "keep-alive"), ("te", "gzip"), ("connection", "x-hop"), ("x-hop", "1"), ("x-kept", "1")]
+            .into_iter()
+            .map(|(n, v)| (HeaderName::from_static(n), HeaderValue::from_static(v)))
+            .collect();
+        // HTTP/2 or HTTP/3 extended CONNECT (RFC 8441, RFC 9220).
+        let req = build_request(&p, true, "").unwrap();
+        for n in ["proxy-connection", "te", "connection", "x-hop"] {
+            assert!(!req.headers().contains_key(n), "{n}: {:?}", req.headers());
+        }
+        assert_eq!(req.headers().get("x-kept").unwrap(), "1");
+        p.headers = vec![(http::header::TE, HeaderValue::from_static("trailers"))];
+        assert_eq!(build_request(&p, true, "").unwrap().headers().get("te").unwrap(), "trailers");
+        // The HTTP/1.1 upgrade is unchanged.
+        p.headers = vec![(HeaderName::from_static("proxy-connection"), HeaderValue::from_static("keep-alive"))];
+        assert!(build_request(&p, false, "k").unwrap().headers().contains_key("proxy-connection"));
     }
 
     /// The session phase over an in-memory pipe (the handshake is not part of it).

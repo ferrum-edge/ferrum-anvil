@@ -8,12 +8,13 @@
 use crate::context::ExecutionContext;
 use crate::http_exec::Prepared;
 use crate::prepare::Target;
-use crate::sessions::{self, SessionRequest};
+use crate::sessions::{self, ConnectionFields, SessionRequest};
 use crate::vars::Resolver;
 use anvil_auth::ResolvedAuth;
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
 use anvil_domain::request::*;
 use anvil_domain::settings::HttpVersionPolicy;
+use anvil_transport::connection_fields::ConnectionSpecific;
 use anvil_transport::grpc;
 
 /// A request as it is sent, before auth is applied.
@@ -63,6 +64,7 @@ impl Shape {
             content_type: prep.http.content_type.clone(),
             transport: vec![],
             not_sent: &[],
+            connection_fields: ConnectionFields::Sent,
             host_from_authority: false,
             path_only: false,
         };
@@ -95,11 +97,56 @@ impl Shape {
         if self.session { sessions::auth_refusal(applied, self.req.path_only) } else { None }
     }
 
+    /// For a session whose HTTP version is negotiated when it is sent: a note
+    /// naming the fields of `headers` (after auth, before
+    /// [`Self::transport_headers`]) that HTTP/1.1 sends and HTTP/2 and
+    /// HTTP/3 leave out. Fields the transport leaves out, replaces or
+    /// defaults on every version are not named.
+    pub(crate) fn negotiated_fields_note(&self, headers: &[(String, String)]) -> Option<String> {
+        if self.req.connection_fields != ConnectionFields::Negotiated {
+            return None;
+        }
+        let rule = ConnectionSpecific::of(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+        // The transport sets these itself after leaving fields out (a
+        // replacement, or a default for one now absent), so they are sent on
+        // every version.
+        // HTTP libraries set `Content-Length` from the body itself (hyper on
+        // HTTP/2), as the preview's body size shows: it is never named.
+        let replaced =
+            |n: &str| n.eq_ignore_ascii_case("content-length") || self.req.transport.iter().any(|(t, _, _)| t.eq_ignore_ascii_case(n));
+        // A field some value of which is still sent (`TE: trailers` beside
+        // `TE: gzip`) is not wholly left out, so it is not named.
+        let survives = |n: &str| headers.iter().any(|(m, w)| m.eq_ignore_ascii_case(n) && !rule.drops(m, w));
+        let mut names: Vec<&str> = Vec::new();
+        for (n, v) in headers {
+            if rule.drops(n, v)
+                && !survives(n)
+                && !self.req.not_sent.contains(&n.to_ascii_lowercase().as_str())
+                && !replaced(n)
+                && !names.iter().any(|m| m.eq_ignore_ascii_case(n))
+            {
+                names.push(n);
+            }
+        }
+        if names.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{} {} sent over HTTP/1.1 but left out over HTTP/2 and HTTP/3, which do not carry connection-specific fields (RFC 9113 §8.2.2, RFC 9114 §4.2)",
+            names.join(", "),
+            if names.len() == 1 { "is" } else { "are" }
+        ))
+    }
+
     /// Apply what the transport does to the headers after auth: the fields
     /// it adds or replaces, and those it leaves out. `authority` is the one
     /// the request is sent with (and signed for).
     pub(crate) fn transport_headers(&self, headers: &mut Vec<(String, String)>, authority: &str) {
         headers.retain(|(n, _)| !self.req.not_sent.contains(&n.to_ascii_lowercase().as_str()));
+        if self.req.connection_fields == ConnectionFields::LeftOut {
+            let rule = ConnectionSpecific::of(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+            headers.retain(|(n, v)| !rule.drops(n, v));
+        }
         if self.req.host_from_authority {
             headers.push(("Host".into(), authority.to_string()));
         }
