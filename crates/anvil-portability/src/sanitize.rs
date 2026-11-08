@@ -9,6 +9,7 @@
 //! therefore never contains secret material, in any export mode.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Extracted {
@@ -90,28 +91,66 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
 pub struct Sanitized {
     pub extracted: Vec<Extracted>,
     pub warnings: Vec<ContentWarning>,
-    /// The value each placeholder name stands for so far.
-    placeholders: std::collections::HashMap<String, String>,
+    /// Names a new placeholder must not take: the graph's variable names and
+    /// `{{references}}`, and the placeholders already allocated.
+    reserved: HashSet<String>,
+    /// The placeholder allocated for each (base name, value).
+    by_value: HashMap<(String, String), String>,
+    /// The next numeric suffix to try for each base name.
+    next: HashMap<String, usize>,
 }
 
 impl Sanitized {
     /// A placeholder name for `value` under `hint`: the same name for the
     /// same value (one variable fills them all), another (`_2`, `_3`, ...)
-    /// for a different value, so a share-safely recipient can supply each.
+    /// for a different value, so a share-safely recipient can supply each,
+    /// and never a name the graph already uses for a variable or reference.
     fn placeholder_for(&mut self, hint: &str, value: &str) -> String {
         let base = placeholder_name(hint);
-        let mut n = 1usize;
-        loop {
-            let name = if n == 1 { base.clone() } else { format!("{base}_{n}") };
-            match self.placeholders.get(&name) {
-                Some(v) if v != value => n += 1,
-                Some(_) => return name,
-                None => {
-                    self.placeholders.insert(name.clone(), value.to_string());
-                    return name;
-                }
+        let key = (base, value.to_string());
+        if let Some(name) = self.by_value.get(&key) {
+            return name.clone();
+        }
+        let base = &key.0;
+        let mut n = self.next.get(base).copied().unwrap_or(1);
+        let name = loop {
+            let candidate = if n == 1 { base.clone() } else { format!("{base}_{n}") };
+            n += 1;
+            if self.reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        self.next.insert(base.clone(), n);
+        self.by_value.insert(key, name.clone());
+        name
+    }
+}
+
+/// The names `v` already uses: every variable's name and every `{{name}}`
+/// reference (as the resolver reads it: the first `}}` closes it).
+fn used_names(v: &serde_json::Value, out: &mut HashSet<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("secret")
+                && let Some(n) = map.get("name").and_then(|n| n.as_str())
+            {
+                out.insert(n.trim().to_string());
+            }
+            for child in map.values() {
+                used_names(child, out);
             }
         }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| used_names(x, out)),
+        serde_json::Value::String(text) => {
+            let mut rest = text.as_str();
+            while let Some(open) = rest.find("{{") {
+                let after = &rest[open + 2..];
+                let Some(close) = after.find("}}") else { break };
+                out.insert(after[..close].trim().to_string());
+                rest = &after[close + 2..];
+            }
+        }
+        _ => {}
     }
 }
 
@@ -119,7 +158,9 @@ impl Sanitized {
 /// the user's extra redaction names (`AppSettings::redaction_names`), always
 /// treated as credential names.
 pub fn sanitize(v: &mut serde_json::Value, extra: &[String]) -> Sanitized {
-    let mut s = Sanitized { extracted: vec![], warnings: vec![], placeholders: Default::default() };
+    let mut reserved = HashSet::new();
+    used_names(v, &mut reserved);
+    let mut s = Sanitized { extracted: vec![], warnings: vec![], reserved, by_value: HashMap::new(), next: HashMap::new() };
     walk(v, String::new(), "", extra, &mut s);
     s
 }
@@ -446,6 +487,36 @@ mod tests {
         assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_2", "secret_x_master_key", "secret_sig", "secret_sig_2"]);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
+    }
+
+    #[test]
+    fn placeholders_never_take_a_name_the_graph_already_uses() {
+        let kv = |n: &str, v: &str| serde_json::json!({"name": n, "value": v, "enabled": true});
+        let mut v = serde_json::json!({
+            "environments": [{"variables": [
+                {"name": "secret_x_master_key_2", "value": {"kind": "template", "value": "catalog-filter"}, "secret": false, "enabled": true}
+            ]}],
+            "requests": [
+                {"headers": [kv("X-Label", "{{secret_x_master_key_2}}"), kv("X-Other", "{{ secret_x_master_key_3 }}")]},
+                {"headers": [kv("X-Master-Key", "tenant-a"), kv("X-Master-Key", "tenant-b"), kv("X-Master-Key", "tenant-c")]}
+            ]
+        });
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let names: Vec<&str> = s.extracted.iter().map(|e| e.placeholder.as_str()).collect();
+        assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_4", "secret_x_master_key_5"]);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn many_distinct_values_under_one_name_are_allocated_in_linear_time() {
+        let fields: Vec<serde_json::Value> =
+            (0..20_000).map(|i| serde_json::json!({"name": "X-Master-Key", "value": format!("v{i}"), "enabled": true})).collect();
+        let mut v = serde_json::json!({"headers": fields});
+        let s = sanitize(&mut v, &[]);
+        assert_eq!(s.extracted.len(), 20_000);
+        assert_eq!(s.extracted.last().unwrap().placeholder, "secret_x_master_key_20000");
     }
 
     #[test]

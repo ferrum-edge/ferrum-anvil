@@ -296,7 +296,8 @@ extracted too.
 
 Each different value gets its own placeholder: two `X-Master-Key` literals
 that differ become `{{secret_x_master_key}}` and `{{secret_x_master_key_2}}`,
-while the same value everywhere stays one placeholder. A header or trailer
+while the same value everywhere stays one placeholder; a placeholder never
+takes a name the workspace already uses for a variable or a `{{reference}}`. A header or trailer
 assertion's expected value under such a name is extracted too; assertion
 values are compared as written, so a share-safely recipient types the
 expected value back into the assertion rather than defining a variable.
