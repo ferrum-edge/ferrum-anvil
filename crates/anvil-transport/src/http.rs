@@ -992,42 +992,71 @@ impl HttpTransport {
                     }
                     _ => None,
                 };
-                let connecting = async {
-                    match resumption {
-                        Some(r) => connector::establish_resumable(&mut rec, &target, &plan.dns, &plan.timeouts, r, header).await,
-                        None => (
-                            connector::establish_with(
-                                &mut rec,
-                                &target,
-                                &plan.dns,
-                                &plan.timeouts,
-                                plan.proxy.as_ref(),
-                                header,
-                                cancel,
-                                total_deadline,
-                            )
-                            .await,
-                            None,
-                        ),
+                // An interruption that wins the race still gives the setup one
+                // more poll ([`settle_once`]): an HBONE endpoint's refusal
+                // already received ends there with its evidence.
+                enum Setup<T> {
+                    Done(T),
+                    Canceled,
+                    Deadline,
+                }
+                let setup = {
+                    let connecting = async {
+                        match resumption {
+                            Some(r) => connector::establish_resumable(&mut rec, &target, &plan.dns, &plan.timeouts, r, header).await,
+                            None => (
+                                connector::establish_with(
+                                    &mut rec,
+                                    &target,
+                                    &plan.dns,
+                                    &plan.timeouts,
+                                    plan.proxy.as_ref(),
+                                    header,
+                                    cancel,
+                                    total_deadline,
+                                )
+                                .await,
+                                None,
+                            ),
+                        }
+                    };
+                    tokio::pin!(connecting);
+                    let raced = tokio::select! {
+                        biased;
+                        out = &mut connecting => Setup::Done(out),
+                        _ = cancel.cancelled() => Setup::Canceled,
+                        _ = sleep_until_opt(total_deadline) => Setup::Deadline,
+                    };
+                    match raced {
+                        Setup::Done(out) => Setup::Done(out),
+                        interrupted => match settle_once(connecting.as_mut()).await {
+                            Some(out @ (Err(_), _)) => Setup::Done(out),
+                            _ => interrupted,
+                        },
                     }
                 };
-                // Polled first: an HBONE endpoint's refusal already received
-                // ends at the deadline or a cancel inside it, with its evidence.
-                let est = tokio::select! {
-                    biased;
-                    (r, info) = connecting => {
+                let est = match setup {
+                    Setup::Done((r, info)) => {
                         if let (Some(e), Some(i)) = (early.as_mut(), info) {
                             e.info = Some(i);
                         }
                         r
                     }
-                    _ = cancel.cancelled() => {
-                        let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::Canceled, "canceled during connection setup");
+                    Setup::Canceled => {
+                        let f = TransportFailure::new(
+                            rec.open_phase().unwrap_or(Phase::Connect),
+                            FailureKind::Canceled,
+                            "canceled during connection setup",
+                        );
                         return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
-                    _ = sleep_until_opt(total_deadline) => {
-                        let f = TransportFailure::new(rec.open_phase().unwrap_or(Phase::Connect), FailureKind::TotalTimeout, "total deadline elapsed during connection setup")
-                            .with_deadline(plan.timeouts.total_ms);
+                    Setup::Deadline => {
+                        let f = TransportFailure::new(
+                            rec.open_phase().unwrap_or(Phase::Connect),
+                            FailureKind::TotalTimeout,
+                            "total deadline elapsed during connection setup",
+                        )
+                        .with_deadline(plan.timeouts.total_ms);
                         return (fail(rec, obs, f, DispatchState::NotDispatched), None);
                     }
                 };
@@ -1686,6 +1715,21 @@ fn finalize_fail(mut out: AttemptOutput, stats: &ConnStats, written_before: u64,
     out
 }
 
+/// One more poll of `fut` after the caller's race against cancel and the
+/// total deadline chose an interruption, before `fut` is dropped. A future
+/// that settles the interruption itself (an HBONE refusal whose body is being
+/// read keeps the endpoint's answer) is ready on this poll, since the cancel
+/// and the deadline are now observable to it; any other is still pending.
+pub(crate) async fn settle_once<F: std::future::Future>(mut fut: Pin<&mut F>) -> Option<F::Output> {
+    std::future::poll_fn(|cx| {
+        Poll::Ready(match std::future::Future::poll(fut.as_mut(), cx) {
+            Poll::Ready(out) => Some(out),
+            Poll::Pending => None,
+        })
+    })
+    .await
+}
+
 pub async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
@@ -1696,6 +1740,42 @@ pub async fn sleep_until_opt(at: Option<Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The race in a caller against cancel and the deadline can pick the
+    /// interruption after the setup future last returned `Pending` (another
+    /// thread cancels in between). The extra poll lets a future that settles
+    /// the interruption itself return its result instead of being dropped;
+    /// one that does not is still pending.
+    #[tokio::test]
+    async fn settle_once_hands_back_a_result_the_interruption_made_ready() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let settles = async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => "kept the evidence",
+                _ = std::future::pending::<()>() => unreachable!(),
+            }
+        };
+        tokio::pin!(settles);
+        assert_eq!(settle_once(settles.as_mut()).await, None, "nothing to settle yet");
+        cancel.cancel();
+        assert_eq!(settle_once(settles.as_mut()).await, Some("kept the evidence"));
+
+        let deadline = Instant::now();
+        let by_clock = async {
+            tokio::select! {
+                biased;
+                _ = std::future::ready(()), if Instant::now() >= deadline => "deadline seen on the clock",
+                _ = std::future::pending::<()>() => unreachable!(),
+            }
+        };
+        tokio::pin!(by_clock);
+        assert_eq!(settle_once(by_clock.as_mut()).await, Some("deadline seen on the clock"));
+
+        let never = std::future::pending::<()>();
+        tokio::pin!(never);
+        assert_eq!(settle_once(never.as_mut()).await, None);
+    }
 
     fn start_sweeper(t: &HttpTransport) {
         let mut state = t.pool.shared.state.lock();

@@ -530,14 +530,23 @@ pub async fn establish_guarded_with(
         Deadline,
     }
     let ev = {
-        // Polled first: an HBONE endpoint's refusal already received ends at
-        // the deadline or a cancel inside it, with its evidence kept.
+        // An interruption that wins the race still gives the setup one more
+        // poll (`settle_once`): an HBONE endpoint's refusal already received
+        // ends there, with its evidence kept.
         let fut = connector::establish_with(rec, target, dns, timeouts, proxy, header, cancel, total_deadline);
-        tokio::select! {
+        tokio::pin!(fut);
+        let raced = tokio::select! {
             biased;
-            r = fut => Ev::Done(r),
+            r = &mut fut => Ev::Done(r),
             _ = cancel.cancelled() => Ev::Canceled,
             _ = sleep_until_opt(total_deadline) => Ev::Deadline,
+        };
+        match raced {
+            Ev::Done(r) => Ev::Done(r),
+            interrupted => match crate::http::settle_once(fut.as_mut()).await {
+                Some(Err(e)) => Ev::Done(Err(e)),
+                _ => interrupted,
+            },
         }
     };
     match ev {

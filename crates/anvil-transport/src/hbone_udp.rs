@@ -296,6 +296,8 @@ pub async fn open(
             let chunk = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => { cut = Some(FailureKind::Canceled); break; }
+                // The clock, not only the timer (see `hbone::open`).
+                _ = std::future::ready(()), if total_deadline.is_some_and(|d| Instant::now() >= d) => { cut = Some(FailureKind::TotalTimeout); break; }
                 _ = sleep_until_opt(total_deadline) => { cut = Some(FailureKind::TotalTimeout); break; }
                 c = tokio::time::timeout(idle, rx.data()) => c,
             };
@@ -612,15 +614,27 @@ pub(crate) async fn open_channel(
         Some("UDP is connectionless; the HBONE endpoint opens the UDP socket toward the destination (outer TCP: tunnel evidence)"),
     );
     let idx = rec.start(Phase::ProxyTunnel);
-    // `open` is polled first: once it has the endpoint's refusal it ends at
-    // the deadline or a cancel itself, keeping that evidence.
-    let opened = tokio::select! {
-        biased;
-        r = open(rec, p, host, port, dns, timeouts, cancel, total_deadline) => Ok(r),
-        _ = cancel.cancelled() => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::Canceled,
-            "canceled while opening the HBONE datagram tunnel")),
-        _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::TotalTimeout,
-            "the total deadline elapsed while opening the HBONE datagram tunnel").with_deadline(timeouts.total_ms)),
+    // An interruption that wins the race still gives `open` one more poll
+    // (`settle_once`): once it has the endpoint's refusal it ends there,
+    // keeping that evidence.
+    let opened = {
+        let fut = open(rec, p, host, port, dns, timeouts, cancel, total_deadline);
+        tokio::pin!(fut);
+        let raced = tokio::select! {
+            biased;
+            r = &mut fut => Ok(r),
+            _ = cancel.cancelled() => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::Canceled,
+                "canceled while opening the HBONE datagram tunnel")),
+            _ = sleep_until_opt(total_deadline) => Err(TransportFailure::new(Phase::ProxyTunnel, FailureKind::TotalTimeout,
+                "the total deadline elapsed while opening the HBONE datagram tunnel").with_deadline(timeouts.total_ms)),
+        };
+        match raced {
+            Ok(r) => Ok(r),
+            Err(interrupted) => match crate::http::settle_once(fut.as_mut()).await {
+                Some(Err(refused)) => Ok(Err(refused)),
+                _ => Err(interrupted),
+            },
+        }
     };
     let (tunnel, t) = match opened {
         Ok(Ok(x)) => x,
