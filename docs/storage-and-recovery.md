@@ -270,6 +270,44 @@ entries that anyone holding the file can read. Secrets and literal secrets
 never appear in them, but a credential typed into a body or URL is exported
 as written, with a warning in the preview.
 
+A literal secret is a value that is not exactly one `{{variable}}` reference
+(or an argument-free helper such as `{{$guid}}`) spanning the whole value (in
+a field used as written, a TLS or proxy profile's secrets, an HBONE proxy
+profile's extra headers or a header or trailer assertion, reference-shaped text
+is the literal itself), of
+an auth field (a password, token or key), of a secret variable, or of a
+header, query parameter, form field or gRPC metadata entry that is marked
+sensitive, whose name is itself a template (it may resolve to a credential
+name), or whose name Anvil treats as a credential anywhere
+(`anvil_domain::credential_names`):
+
+- the names the engine redacts and keeps off a cross-origin redirect,
+  among them `Ocp-Apim-Subscription-Key`, `X-Functions-Key`, `DPoP` and any
+  name containing `token`, `secret`, `auth`, `sig`, `session` or
+  `access_key`, or ending in `-key` or `_key` (`X-Master-Key`,
+  `DD-Application-Key`, `tenant_key`);
+- the names the importer marks sensitive, among them the short names
+  `key`, `sig`, `pwd`, `pass`, `auth`, `otp`, `pin`, `jwt` and `sid`;
+- the OAuth token-request fields Anvil keeps out of issuer error text
+  (`code`, `assertion`, `client_assertion` among them);
+- the extra redaction names in Settings.
+
+The rule errs towards extraction: a value under a name matched by mistake
+only becomes a placeholder (share safely) or travels in the vault
+(encrypted transfer), so pagination tokens such as `page_token` are
+extracted too.
+
+Each different value gets its own placeholder: two `X-Master-Key` literals
+that differ become `{{secret_x_master_key}}` and `{{secret_x_master_key_2}}`,
+while the same value everywhere stays one placeholder. A placeholder never
+takes a name the workspace already uses for a variable, a `{{reference}}`, a
+response extraction or a sensitive dataset column (a dataset's other column
+names are only in its file and are not checked). A header or trailer
+assertion's expected value under such a name is extracted too, and so is an
+HBONE proxy profile's extra header. Both are used as written, without
+variables, so a share-safely recipient types the value back into the
+assertion or the profile rather than defining a variable.
+
 ### Encrypted bundles are tamper-evident
 
 An encrypted-transfer bundle (format 2) seals its vault with the SHA-256 of

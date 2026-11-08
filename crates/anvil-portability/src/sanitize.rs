@@ -1,13 +1,15 @@
 //! Moves sensitive literals out of the object graph before export.
 //!
 //! Every `SensitiveValue::Template` literal (auth passwords, tokens, private
-//! keys…), every *secret* variable value, and every sensitive-named header,
-//! query or form field with a literal value is replaced by a `{{placeholder}}`
+//! keys…), every *secret* variable value, and every header, query or form
+//! field with a literal value that is flagged `sensitive` or whose name is a
+//! credential name ([`sensitive_name`]) is replaced by a `{{placeholder}}`
 //! reference. The originals are returned so encrypted bundles can carry them
 //! in the authenticated vault and restore them on import. `objects.json`
 //! therefore never contains secret material, in any export mode.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Extracted {
@@ -24,31 +26,34 @@ pub struct ContentWarning {
     pub reason: String,
 }
 
-const SENSITIVE_PARTS: &[&str] = &[
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "authorization",
-    "cookie",
-    "session",
-    "private",
-    "credential",
-    "signature",
-    "x-api-key",
-];
-
-pub fn sensitive_name(n: &str) -> bool {
-    let l = n.to_ascii_lowercase();
-    SENSITIVE_PARTS.iter().any(|p| l.contains(p))
+/// Whether a field or variable named `name` holds a secret for export:
+/// any name the engine, the importer or the user's extra redaction names
+/// (`extra`) treat as a credential
+/// ([`anvil_domain::credential_names::is_export_secret_name`]).
+pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
+    anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
+/// Whether `s` carries no literal text: empty, or exactly one `{{name}}`
+/// reference spanning the whole (trimmed) value, as the resolver reads it
+/// (the first `}}` closes it). A dynamic helper counts only without
+/// arguments (`{{$guid}}`): an argument such as `{{$randomFrom a|b}}` is
+/// literal text that is sent.
 fn is_pure_reference(s: &str) -> bool {
     let t = s.trim();
-    t.is_empty() || (t.starts_with("{{") && t.ends_with("}}") && t.matches("{{").count() == 1)
+    if t.is_empty() {
+        return true;
+    }
+    let Some(inner) = t.strip_prefix("{{") else { return false };
+    let Some(close) = inner.find("}}") else { return false };
+    if close + 2 != inner.len() {
+        return false;
+    }
+    let expr = inner[..close].trim();
+    match expr.strip_prefix('$') {
+        Some(helper) => !helper.is_empty() && !helper.contains(char::is_whitespace),
+        None => !expr.is_empty(),
+    }
 }
 
 fn escape_ptr(s: &str) -> String {
@@ -86,16 +91,90 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
 pub struct Sanitized {
     pub extracted: Vec<Extracted>,
     pub warnings: Vec<ContentWarning>,
+    /// Names a new placeholder must not take: the graph's variable names and
+    /// `{{references}}`, and the placeholders already allocated.
+    reserved: HashSet<String>,
+    /// The placeholder allocated for each (base name, value).
+    by_value: HashMap<(String, String), String>,
+    /// The next numeric suffix to try for each base name.
+    next: HashMap<String, usize>,
 }
 
-/// Walk `objects.json` and replace sensitive literals in place.
-pub fn sanitize(v: &mut serde_json::Value) -> Sanitized {
-    let mut s = Sanitized { extracted: vec![], warnings: vec![] };
-    walk(v, String::new(), "", &mut s);
+impl Sanitized {
+    /// A placeholder name for `value` under `hint`: the same name for the
+    /// same value (one variable fills them all), another (`_2`, `_3`, ...)
+    /// for a different value, so a share-safely recipient can supply each,
+    /// and never a name the graph already uses for a variable or reference.
+    fn placeholder_for(&mut self, hint: &str, value: &str) -> String {
+        let base = placeholder_name(hint);
+        let key = (base, value.to_string());
+        if let Some(name) = self.by_value.get(&key) {
+            return name.clone();
+        }
+        let base = &key.0;
+        let mut n = self.next.get(base).copied().unwrap_or(1);
+        let name = loop {
+            let candidate = if n == 1 { base.clone() } else { format!("{base}_{n}") };
+            n += 1;
+            if self.reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        self.next.insert(base.clone(), n);
+        self.by_value.insert(key, name.clone());
+        name
+    }
+}
+
+/// The names `v` already uses: every variable's name, every response
+/// extraction's variable, every sensitive dataset column, and every
+/// `{{name}}` reference (as the resolver reads it: the first `}}` closes
+/// it). A dataset's other columns live only in its attachment and are not
+/// seen here.
+fn used_names(v: &serde_json::Value, out: &mut HashSet<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("secret")
+                && let Some(n) = map.get("name").and_then(|n| n.as_str())
+            {
+                out.insert(n.trim().to_string());
+            }
+            if let Some(n) = map.get("variable").and_then(|n| n.as_str()) {
+                out.insert(n.trim().to_string());
+            }
+            if let Some(columns) = map.get("sensitive_columns").and_then(|c| c.as_array()) {
+                out.extend(columns.iter().filter_map(|c| c.as_str()).map(|c| c.trim().to_string()));
+            }
+            for child in map.values() {
+                used_names(child, out);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| used_names(x, out)),
+        serde_json::Value::String(text) => {
+            let mut rest = text.as_str();
+            while let Some(open) = rest.find("{{") {
+                let after = &rest[open + 2..];
+                let Some(close) = after.find("}}") else { break };
+                out.insert(after[..close].trim().to_string());
+                rest = &after[close + 2..];
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk `objects.json` and replace sensitive literals in place. `extra` is
+/// the user's extra redaction names (`AppSettings::redaction_names`), always
+/// treated as credential names.
+pub fn sanitize(v: &mut serde_json::Value, extra: &[String]) -> Sanitized {
+    let mut reserved = HashSet::new();
+    used_names(v, &mut reserved);
+    let mut s = Sanitized { extracted: vec![], warnings: vec![], reserved, by_value: HashMap::new(), next: HashMap::new() };
+    walk(v, String::new(), "", extra, &mut s);
     s
 }
 
-fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
+fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: &mut Sanitized) {
     match v {
         serde_json::Value::Object(map) => {
             // SensitiveValue::Template  => {"kind":"template","value": "..."}
@@ -104,8 +183,13 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                 && map.get("value").map(|x| x.is_string()).unwrap_or(false);
             if is_template {
                 let val = map["value"].as_str().unwrap_or("").to_string();
-                if !is_pure_reference(&val) {
-                    let ph = placeholder_name(key);
+                // TLS and proxy profile secrets (a proxy password, a PKCS#12
+                // password, a key or bundle) are used as written, never
+                // resolved: reference-shaped text there is the literal.
+                let verbatim = ptr.starts_with("/proxy_profiles/") || ptr.starts_with("/tls_profiles/");
+                let literal = if verbatim { !val.is_empty() } else { !is_pure_reference(&val) };
+                if literal {
+                    let ph = s.placeholder_for(key, &val);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
                 }
@@ -125,7 +209,7 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                         val["value"] = serde_json::Value::String(String::new());
                     } else if !secret
                         && is_tpl
-                        && (sensitive_name(&name) || looks_like_credential(&text).is_some())
+                        && (sensitive_name(&name, extra) || looks_like_credential(&text).is_some())
                         && !text.is_empty()
                         && !is_pure_reference(&text)
                     {
@@ -143,8 +227,17 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                 let name = map.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let flagged = map.get("sensitive").and_then(|b| b.as_bool()).unwrap_or(false);
                 let val = map["value"].as_str().unwrap_or("").to_string();
-                if (flagged || sensitive_name(&name)) && !is_pure_reference(&val) {
-                    let ph = placeholder_name(&name);
+                // A templated name may resolve to a credential name in some
+                // scope: its literal value is extracted too.
+                let templated = name.contains("{{");
+                // Fields used as written, never resolved: an HBONE proxy
+                // profile's extra headers and a header or trailer
+                // assertion's expected value. Text shaped like a reference
+                // there is the literal itself.
+                let verbatim = key == "extra_headers" || map.contains_key("comparison");
+                let literal = if verbatim { !val.trim().is_empty() } else { !is_pure_reference(&val) };
+                if (flagged || templated || sensitive_name(&name, extra)) && literal {
+                    let ph = s.placeholder_for(&name, &val);
                     s.extracted.push(Extracted { pointer: format!("{ptr}/value"), placeholder: ph.clone(), value: val });
                     map.insert("value".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
                 } else if let Some(why) = looks_like_credential(&val) {
@@ -166,13 +259,13 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, s: &mut Sanitized) {
                     continue;
                 }
                 if let Some(child) = map.get_mut(&k) {
-                    walk(child, child_ptr, &k, s);
+                    walk(child, child_ptr, &k, extra, s);
                 }
             }
         }
         serde_json::Value::Array(a) => {
             for (i, x) in a.iter_mut().enumerate() {
-                walk(x, format!("{ptr}/{i}"), key, s);
+                walk(x, format!("{ptr}/{i}"), key, extra, s);
             }
         }
         _ => {}
@@ -235,7 +328,7 @@ mod tests {
             ]}]
         });
         let original = v.clone();
-        let s = sanitize(&mut v);
+        let s = sanitize(&mut v, &[]);
         let text = v.to_string();
         for leaked in ["hunter2", "k-123", "s3cr3t"] {
             assert!(!text.contains(leaked), "{leaked} leaked");
@@ -260,7 +353,7 @@ mod tests {
                 {"name": "db_pw", "value": {"kind": "template", "value": "s3cr3t"}, "secret": true, "enabled": true}
             ]}]
         });
-        let s = sanitize(&mut v);
+        let s = sanitize(&mut v, &[]);
         assert_eq!(s.extracted.len(), 2);
         let sanitized = v.clone();
         let pw = s.extracted.iter().position(|e| e.placeholder == "secret_password").unwrap();
@@ -292,10 +385,207 @@ mod tests {
         assert!(v.to_string().contains("hunter2") && v.to_string().contains("s3cr3t"));
     }
 
+    /// GHSA-8fmc-h49v-mh7f: every name the engine or the importer treats as
+    /// a credential, and the user's extra redaction names, is extracted from
+    /// headers, query parameters and form fields; ordinary names are not.
+    #[test]
+    fn every_credential_name_anvil_knows_is_extracted() {
+        use anvil_domain::credential_names as cn;
+        let extra = vec!["X-Customer-Ssn".to_string()];
+        let mut names: Vec<String> = [
+            cn::ENGINE_SENSITIVE_HEADERS,
+            cn::ENGINE_SENSITIVE_NAME_PARTS,
+            cn::IMPORT_CREDENTIAL_HEADERS,
+            cn::IMPORT_CREDENTIAL_PARTS,
+            cn::IMPORT_CREDENTIAL_EXACT,
+            cn::OAUTH_SECRET_FORM_FIELDS,
+        ]
+        .concat()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+        names.extend(
+            [
+                "Ocp-Apim-Subscription-Key",
+                "X-Functions-Key",
+                "DPoP",
+                "X-Master-Key",
+                "Subscription-Key",
+                "X-Auth-Key",
+                "DD-Application-Key",
+            ]
+            .map(String::from),
+        );
+        names.extend(
+            ["tenant_key", "aws_access_key_id", "X-Auth-User", "key", "sig", "pwd", "pass", "otp", "pin", "x-customer-ssn"]
+                .map(String::from),
+        );
+        let kv = |n: &str, i: usize, place: &str| serde_json::json!({"name": n, "value": format!("lit-{place}-{i}-zq"), "enabled": true});
+        let fields = |place: &str| names.iter().enumerate().map(|(i, n)| kv(n, i, place)).collect::<Vec<_>>();
+        let ordinary = ["Accept", "Content-Type", "X-Request-Id", "page", "limit"];
+        let kept = |place: &str| {
+            ordinary
+                .iter()
+                .map(|n| serde_json::json!({"name": n, "value": format!("plain-{place}-{n}"), "enabled": true}))
+                .collect::<Vec<_>>()
+        };
+        let mut headers = fields("h");
+        headers.extend(kept("h"));
+        let mut query = fields("q");
+        query.extend(kept("q"));
+        let mut form = fields("f");
+        form.extend(kept("f"));
+        let mut v = serde_json::json!({"requests": [{"spec": {
+            "headers": headers,
+            "query": query,
+            "body": {"type": "form", "fields": form}
+        }}]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &extra);
+        let text = v.to_string();
+        assert!(!text.contains("lit-"), "a credential-named literal stayed: {text}");
+        assert_eq!(s.extracted.len(), names.len() * 3);
+        for place in ["h", "q", "f"] {
+            for n in ordinary {
+                assert!(text.contains(&format!("plain-{place}-{n}")), "{n} was extracted");
+            }
+        }
+        // Without the extra name, its literal stays (it is no built-in name).
+        let mut without = original.clone();
+        let s_without = sanitize(&mut without, &[]);
+        assert_eq!(s_without.extracted.len(), (names.len() - 1) * 3, "x-customer-ssn is only an extra name");
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn only_a_whole_value_reference_is_left_in_place() {
+        for pure in ["", "  ", "{{token}}", " {{ token }} ", "{{$guid}}", "{{api key}}"] {
+            assert!(is_pure_reference(pure), "{pure:?}");
+        }
+        for literal in [
+            "{{tenant}}-live-key-123456}}",
+            "{{tenant}}-live-key",
+            "live-{{tenant}}",
+            "{{a}}{{b}}",
+            "{{$randomFrom live-key-a|live-key-b}}",
+            "{{}}",
+            "{{$}}",
+            "{{unterminated",
+        ] {
+            assert!(!is_pure_reference(literal), "{literal:?}");
+        }
+        let mut v = serde_json::json!({"headers": [
+            {"name": "X-Functions-Key", "value": "{{tenant}}-live-key-123456}}", "enabled": true},
+            {"name": "X-Functions-Key", "value": "{{$randomFrom live-key-a|live-key-b}}", "enabled": true},
+            {"name": "{{header_name}}", "value": "templated-name-literal", "enabled": true},
+            {"name": "{{header_name}}", "value": "{{header_value}}", "enabled": true},
+            {"name": "X-Functions-Key", "value": "{{function_key}}", "enabled": true}
+        ]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        for leaked in ["live-key", "templated-name-literal"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert!(text.contains("{{header_value}}") && text.contains("{{function_key}}"), "whole references stay: {text}");
+        assert_eq!(s.extracted.len(), 3);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn different_values_under_one_name_get_their_own_placeholders() {
+        let kv = |n: &str, v: &str| serde_json::json!({"name": n, "value": v, "enabled": true});
+        let mut v = serde_json::json!({"requests": [
+            {"headers": [kv("X-Master-Key", "tenant-a"), kv("x_master_key", "tenant-b")]},
+            {"headers": [kv("X-Master-Key", "tenant-a")], "params": [kv("sig", "s1"), kv("sig", "s2")]}
+        ]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let names: Vec<&str> = s.extracted.iter().map(|e| e.placeholder.as_str()).collect();
+        assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_2", "secret_x_master_key", "secret_sig", "secret_sig_2"]);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn placeholders_never_take_a_name_the_graph_already_uses() {
+        let kv = |n: &str, v: &str| serde_json::json!({"name": n, "value": v, "enabled": true});
+        let mut v = serde_json::json!({
+            "environments": [{"variables": [
+                {"name": "secret_x_master_key_2", "value": {"kind": "template", "value": "catalog-filter"}, "secret": false, "enabled": true}
+            ]}],
+            "datasets": [{"sensitive_columns": ["secret_x_master_key_5"]}],
+            "extractions": [{"variable": "secret_x_master_key_4", "from": {"kind": "status"}}],
+            "requests": [
+                {"headers": [kv("X-Label", "{{secret_x_master_key_2}}"), kv("X-Other", "{{ secret_x_master_key_3 }}")]},
+                {"headers": [kv("X-Master-Key", "tenant-a"), kv("X-Master-Key", "tenant-b"), kv("X-Master-Key", "tenant-c")]}
+            ]
+        });
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let names: Vec<&str> = s.extracted.iter().map(|e| e.placeholder.as_str()).collect();
+        assert_eq!(names, ["secret_x_master_key", "secret_x_master_key_6", "secret_x_master_key_7"]);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn many_distinct_values_under_one_name_are_allocated_in_linear_time() {
+        let fields: Vec<serde_json::Value> =
+            (0..20_000).map(|i| serde_json::json!({"name": "X-Master-Key", "value": format!("v{i}"), "enabled": true})).collect();
+        let mut v = serde_json::json!({"headers": fields});
+        let s = sanitize(&mut v, &[]);
+        assert_eq!(s.extracted.len(), 20_000);
+        assert_eq!(s.extracted.last().unwrap().placeholder, "secret_x_master_key_20000");
+    }
+
+    #[test]
+    fn values_used_as_written_are_extracted_even_when_shaped_like_a_reference() {
+        let mut v = serde_json::json!({
+            "proxy_profiles": [{"hbone": {"extra_headers": [
+                {"name": "X-Master-Key", "value": "{{hb-live-5724}}", "enabled": true, "sensitive": true}
+            ]}}],
+            "requests": [{"spec": {
+                "headers": [{"name": "X-Master-Key", "value": "{{master_key}}", "enabled": true}],
+                "assertions": [{"type": "header", "name": "X-Master-Key", "comparison": "equals", "value": "{{hb-live-5724}}", "enabled": true}]
+            }}]
+        });
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        assert!(!text.contains("hb-live-5724"), "{text}");
+        assert!(text.contains("{{master_key}}"), "a reference in a resolved field stays: {text}");
+        assert_eq!(s.extracted.len(), 2);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn profile_secrets_are_extracted_even_when_shaped_like_a_reference() {
+        let tpl = |v: &str| serde_json::json!({"kind": "template", "value": v});
+        let mut v = serde_json::json!({
+            "proxy_profiles": [{"username": "svc", "password": tpl("{{proxy-live-5724}}")}],
+            "tls_profiles": [{"client_identity": {"format": "pkcs12", "bundle_b64": tpl("{{$guid}}"), "password": tpl("{{p12-live-5724}}")}}],
+            "requests": [{"spec": {"auth": {"type": "basic", "username": "bob", "password": tpl("{{basic_password}}")}}}]
+        });
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        for leaked in ["proxy-live-5724", "p12-live-5724", "$guid"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+        assert!(text.contains("{{basic_password}}"), "a reference in a resolved field stays: {text}");
+        assert_eq!(s.extracted.len(), 3);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
+    }
+
     #[test]
     fn free_text_credentials_are_warned_not_modified() {
         let mut v = serde_json::json!({"requests": [{"spec": {"body": {"type": "json", "text": "{\"password\":\"abc123\"}"}}}]});
-        let s = sanitize(&mut v);
+        let s = sanitize(&mut v, &[]);
         assert_eq!(s.warnings.len(), 1);
         assert!(!s.warnings[0].reason.contains("use encrypted transfer"), "{}", s.warnings[0].reason);
         assert!(s.warnings[0].reason.contains("encrypted-transfer"), "{}", s.warnings[0].reason);

@@ -214,6 +214,68 @@ fn data_003_encrypted_transfer_restores_exact_values() {
     assert_eq!(opened.graph.secrets, g.secrets);
 }
 
+/// The readable `workspace/objects.json` of a bundle.
+fn objects_of(bytes: &[u8]) -> String {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut objects = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("workspace/objects.json").unwrap(), &mut objects).unwrap();
+    objects
+}
+
+/// GHSA-8fmc-h49v-mh7f: literals under header and parameter names the engine
+/// or the importer treats as credentials, and under the user's extra
+/// redaction names, never reach the readable objects in either bundle mode,
+/// and encrypted transfer restores them.
+#[test]
+fn credential_named_literals_never_reach_the_readable_objects() {
+    let mut g = sample();
+    let literals = [
+        ("Ocp-Apim-Subscription-Key", "apim-literal-0001"),
+        ("X-Master-Key", "master-literal-0002"),
+        ("DD-Application-Key", "dd-literal-0003"),
+        ("X-Customer-Ssn", "extra-literal-0004"),
+    ];
+    let spec = &mut g.requests[0].spec;
+    for (n, v) in literals {
+        spec.headers.push(KeyValue::new(n, v));
+    }
+    spec.params.push(KeyValue::new("key", "query-key-literal-0005"));
+    spec.params.push(KeyValue::new("sig", "query-sig-literal-0006"));
+    spec.params.push(KeyValue::new("page", "2"));
+    // A name that resolves to a credential name, and literal text after a
+    // reference, are literals too.
+    spec.headers.push(KeyValue::new("{{header_name}}", "templated-name-literal-0007"));
+    spec.headers.push(KeyValue::new("X-Functions-Key", "{{tenant}}-mixed-literal-0008}}"));
+    let extra = vec!["x-customer-ssn".to_string()];
+    let leaked = |objects: &str| {
+        literals
+            .iter()
+            .map(|(_, v)| *v)
+            .chain(["query-key-literal-0005", "query-sig-literal-0006", "templated-name-literal-0007", "mixed-literal-0008"])
+            .filter(|v| objects.contains(v))
+            .collect::<Vec<_>>()
+    };
+
+    let (bytes, preview) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &extra).unwrap();
+    assert!(leaked(&text_of(&bytes)).is_empty(), "share safely: {:?}", leaked(&text_of(&bytes)));
+    for (n, _) in literals {
+        let placeholder = format!("{{{{secret_{}}}}}", n.to_ascii_lowercase().replace('-', "_"));
+        assert!(objects_of(&bytes).contains(&placeholder), "{n}: no {placeholder}");
+    }
+    assert!(preview.manifest.excluded.iter().any(|e| e.contains("secret_ocp_apim_subscription_key")), "{:?}", preview.manifest.excluded);
+    let opened = bundle::open(&bytes, None).unwrap();
+    let create = opened.graph.requests.iter().find(|r| r.name == "Create order").unwrap();
+    assert!(create.spec.params.iter().any(|q| q.name == "page" && q.value == "2"), "an ordinary parameter stays");
+
+    let pass = "correct horse battery";
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some(pass)), &extra).unwrap();
+    assert!(leaked(&objects_of(&bytes)).is_empty(), "encrypted transfer: {:?}", leaked(&objects_of(&bytes)));
+    let opened = bundle::open(&bytes, Some(pass)).unwrap();
+    let mut expected = g.clone();
+    let _ = validate::validate_and_normalize(&mut expected).unwrap();
+    assert_eq!(opened.graph.requests, expected.requests, "encrypted transfer restores every literal");
+}
+
 #[test]
 fn data_004_wrong_passphrase_fails_safely() {
     let g = sample();
@@ -1310,7 +1372,7 @@ fn with_format_1_vault(bytes: &[u8], g: &PortableGraph, pass: &str) -> Vec<u8> {
     let salt = base64::engine::general_purpose::STANDARD.decode(manifest["vault"]["salt_b64"].as_str().unwrap()).unwrap();
     let key = anvil_storage::crypto::derive(pass.as_bytes(), &salt, &kdf).unwrap();
     let mut objects = serde_json::to_value(g).unwrap();
-    let literals = anvil_portability::sanitize::sanitize(&mut objects).extracted;
+    let literals = anvil_portability::sanitize::sanitize(&mut objects, &[]).extracted;
     let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals }).unwrap();
     let vault = anvil_storage::crypto::seal(&key, b"anvil-portable-vault-v1", &payload);
     repack(bytes, |n, b| match n {

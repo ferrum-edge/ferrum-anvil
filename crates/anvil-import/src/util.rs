@@ -163,52 +163,12 @@ pub fn sanitize_var(name: &str) -> String {
     out
 }
 
-/// Header names that always carry credentials or session state.
-const CREDENTIAL_HEADERS: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-api-key",
-    "api-key",
-    "apikey",
-    "x-auth-token",
-    "x-access-token",
-    "x-amz-security-token",
-    "x-csrf-token",
-    "x-xsrf-token",
-    "x-goog-api-key",
-    "dpop",
-    "x-functions-key",
-    "ocp-apim-subscription-key",
-    "x-session-token",
-    "x-refresh-token",
-];
-
-/// Name fragments that mark a header/query/body field as credential-like.
-const CREDENTIAL_PARTS: &[&str] = &[
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "access_key",
-    "accesskey",
-    "private_key",
-    "privatekey",
-    "client_secret",
-    "credential",
-    "session",
-    "signature",
-    "authorization",
-];
-
-/// Exact names (after lowercasing) that are credential-like even though they
-/// are short (`sig`, `key`, `pwd`, `auth`, `code`-style OAuth values).
-const CREDENTIAL_EXACT: &[&str] = &["sig", "key", "pwd", "pass", "auth", "otp", "pin", "jwt", "sid", "code_verifier"];
+// The importer's credential names live in `anvil_domain::credential_names`,
+// which the bundle export sanitizer reads too.
+use anvil_domain::credential_names::{
+    IMPORT_CREDENTIAL_EXACT as CREDENTIAL_EXACT, IMPORT_CREDENTIAL_HEADERS as CREDENTIAL_HEADERS,
+    IMPORT_CREDENTIAL_PARTS as CREDENTIAL_PARTS,
+};
 
 /// Best-effort detector for credential-looking names. Deliberately errs on
 /// the side of redaction; arbitrary content can still hide secrets it does

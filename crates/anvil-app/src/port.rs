@@ -199,6 +199,7 @@ impl App {
         if !include_standards {
             g.rulesets.clear();
         }
+        let settings = self.settings()?;
         let opts = ExportOptions {
             kind: BundleKind::Workspace,
             mode,
@@ -208,7 +209,7 @@ impl App {
             kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
         };
-        Ok(bundle::preview(&g, &opts)?)
+        Ok(bundle::preview_redacting(&g, &opts, &settings.redaction_names)?)
     }
 
     /// Write a bundle of one workspace, or of every workspace when `ws` is
@@ -236,6 +237,7 @@ impl App {
         if !include_standards {
             g.rulesets.clear();
         }
+        let settings = self.settings()?;
         let opts = ExportOptions {
             kind: BundleKind::Workspace,
             mode,
@@ -244,7 +246,7 @@ impl App {
             kdf: KdfParams::interactive(),
             app_version: env!("CARGO_PKG_VERSION"),
         };
-        Ok(bundle::write(&g, &opts)?)
+        Ok(bundle::write_redacting(&g, &opts, &settings.redaction_names)?)
     }
 
     /// Dry run: validate and plan without mutating anything. Bundles that

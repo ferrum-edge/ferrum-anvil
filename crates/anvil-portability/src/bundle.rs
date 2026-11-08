@@ -223,6 +223,18 @@ fn is_full_backup(kind: BundleKind, mode: ExportMode) -> bool {
 
 /// Build the manifest and sanitized objects without writing.
 pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manifest, serde_json::Value, VaultPayload), BundleError> {
+    prepare_redacting(graph, opts, &[])
+}
+
+/// [`prepare`] that also treats `redaction_names` (the user's extra
+/// redaction names, `AppSettings::redaction_names`) as credential names: a
+/// literal header, query or form value under one of them is moved out of
+/// `objects.json` like any other credential-named field.
+pub fn prepare_redacting(
+    graph: &PortableGraph,
+    opts: &ExportOptions<'_>,
+    redaction_names: &[String],
+) -> Result<(Manifest, serde_json::Value, VaultPayload), BundleError> {
     if is_full_backup(opts.kind, opts.mode) {
         return Err(BundleError::FullBackupNotABundle);
     }
@@ -240,7 +252,7 @@ pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manif
         charge_entry_bytes(&name, data.len() as u64, &mut remaining, READ_LIMITS)?;
     }
     let mut objects = serde_json::to_value(graph)?;
-    let san = sanitize::sanitize(&mut objects);
+    let san = sanitize::sanitize(&mut objects, redaction_names);
     let mut excluded = graph.omitted.clone();
     // Stored files whose content could not be read here travel without it.
     for u in crate::validate::uncarried_attachments(graph)? {
@@ -489,7 +501,16 @@ fn zip_export_files(files: &[(String, Cow<'_, [u8]>)], stored: &BTreeSet<String>
 }
 
 pub fn preview(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<ExportPreview, BundleError> {
-    let prepared = prepare(graph, opts)?;
+    preview_redacting(graph, opts, &[])
+}
+
+/// [`preview`] with the user's extra redaction names ([`prepare_redacting`]).
+pub fn preview_redacting(
+    graph: &PortableGraph,
+    opts: &ExportOptions<'_>,
+    redaction_names: &[String],
+) -> Result<ExportPreview, BundleError> {
+    let prepared = prepare_redacting(graph, opts, redaction_names)?;
     preview_prepared(graph, opts, prepared, READ_LIMITS)
 }
 
@@ -513,7 +534,16 @@ fn preview_prepared(
 
 /// Write a bundle to bytes.
 pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>, ExportPreview), BundleError> {
-    let prepared = prepare(graph, opts)?;
+    write_redacting(graph, opts, &[])
+}
+
+/// [`write`] with the user's extra redaction names ([`prepare_redacting`]).
+pub fn write_redacting(
+    graph: &PortableGraph,
+    opts: &ExportOptions<'_>,
+    redaction_names: &[String],
+) -> Result<(Vec<u8>, ExportPreview), BundleError> {
+    let prepared = prepare_redacting(graph, opts, redaction_names)?;
     write_prepared(graph, opts, prepared, READ_LIMITS)
 }
 
