@@ -400,7 +400,8 @@ async fn a_negotiated_version_shows_the_connection_specific_fields_and_says_wher
 
 /// The note is computed from the headers as sent, after auth: a credential
 /// auth adds and a `Connection` value names is named, and a field the
-/// transport replaces on every version (`Accept` of an event stream) is not.
+/// transport replaces or defaults on every version (an event stream's
+/// `Accept` and `Cache-Control`) is not.
 #[tokio::test]
 async fn the_negotiated_version_note_names_auth_fields_and_not_transport_replaced_ones() {
     init();
@@ -408,8 +409,9 @@ async fn the_negotiated_version_note_names_auth_fields_and_not_transport_replace
     let mut sse = RequestSpec::http("GET", "https://api.example.test/events");
     sse.protocol = Protocol::Sse;
     sse.sse = Some(SseSpec { max_events: 1, idle_timeout_ms: 5_000, last_event_id: None, reconnect: false });
-    sse.headers.push(KeyValue::new("Connection", "authorization, accept"));
+    sse.headers.push(KeyValue::new("Connection", "authorization, accept, cache-control"));
     sse.headers.push(KeyValue::new("Accept", "application/json"));
+    sse.headers.push(KeyValue::new("Cache-Control", "no-cache"));
     let p = e.preview(&with_auth(sse, Some(HttpVersionPolicy::Auto), hmac())).unwrap();
     let note =
         p.inferred.iter().find(|i| i.contains("left out over HTTP/2 and HTTP/3")).unwrap_or_else(|| panic!("no note: {:?}", p.inferred));
@@ -417,6 +419,7 @@ async fn the_negotiated_version_note_names_auth_fields_and_not_transport_replace
     assert!(named.iter().any(|n| n == "authorization"), "{note}");
     assert!(named.iter().any(|n| n == "connection"), "{note}");
     assert!(!named.iter().any(|n| n == "accept"), "the event stream's Accept is sent on every version: {note}");
+    assert!(!named.iter().any(|n| n == "cache-control"), "the transport's Cache-Control default is sent on every version: {note}");
 }
 
 #[tokio::test]
