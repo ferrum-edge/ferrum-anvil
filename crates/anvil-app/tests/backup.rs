@@ -213,17 +213,24 @@ async fn populated(root: &std::path::Path, fixture_url: &str, token_file: &std::
     // Device-bound: listed, never carried.
     a.bind_token_file(token_file).unwrap();
 
-    // More history than a single listing page, each with its own body.
+    // More history than a single listing page, each with its own body. One
+    // transaction for all of them: each commit is a synchronous fsync and a
+    // catalogue update, which cost tens of seconds on Windows runners.
     let first = a.store.list_history(None, None, 1).unwrap().remove(0);
     let (rec, _) = a.store.get_history::<ExecutionRecord>(&first.id).unwrap().unwrap();
-    for i in 0..1_050i64 {
-        let mut r = rec.clone();
-        r.id = Id::new();
-        r.started_at = chrono::DateTime::from_timestamp_millis(now.timestamp_millis() - i).unwrap();
-        let body = format!("{}-{i}", MARKERS[7]);
-        let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.timestamp_millis());
-        a.store.add_history(&r.id, ws_id.as_ref(), req_id.as_ref(), at, &r, Some(body.as_bytes())).unwrap();
-    }
+    a.store
+        .atomically(|tx| {
+            for i in 0..1_050i64 {
+                let mut r = rec.clone();
+                r.id = Id::new();
+                r.started_at = chrono::DateTime::from_timestamp_millis(now.timestamp_millis() - i).unwrap();
+                let body = format!("{}-{i}", MARKERS[7]);
+                let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.timestamp_millis());
+                tx.add_history(&r.id, ws_id.as_ref(), req_id.as_ref(), at, &r, Some(body.as_bytes()))?;
+            }
+            Ok(())
+        })
+        .unwrap();
     a
 }
 
