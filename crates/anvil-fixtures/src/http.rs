@@ -14,7 +14,8 @@
 //! * `/anvil.lab.v1.Echo/*`, `/grpc.reflection.*` — gRPC echo and reflection
 //!   ([`crate::grpc`]); with an `application/grpc-web*` content type, the
 //!   gRPC-Web echo ([`crate::grpc_web`])
-//! * `/sse?count=&interval=&set_cookie=&id=&no_id=&abort=` — server-sent events;
+//! * `/sse?count=&interval=&set_cookie=&id=&no_id=&abort=` — server-sent events
+//!   `interval` ms apart (default 50; `0` sends them back to back);
 //!   `set_cookie` (`name=value`) answers with that cookie (`Path=/; HttpOnly`),
 //!   `id` is sent as every event's id (instead of its index), `no_id=1` sends
 //!   events without an `id:` field (each keeps the last event ID the client
@@ -361,7 +362,14 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<State>) -
                     if tx.send(Ok(Frame::data(Bytes::from(ev)))).await.is_err() {
                         return;
                     }
-                    tokio::time::sleep(Duration::from_millis(interval)).await;
+                    // `interval=0` sends back to back. A zero sleep still
+                    // waits for the next timer tick (about 1 ms, and up to
+                    // ~15 ms on Windows), so only yield between events.
+                    if interval == 0 {
+                        tokio::task::yield_now().await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(interval)).await;
+                    }
                 }
                 if abort {
                     let _ = tx.send(Err(std::io::Error::other("fixture abort after the events"))).await;
