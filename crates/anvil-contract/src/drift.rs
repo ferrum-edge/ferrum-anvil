@@ -1556,7 +1556,35 @@ impl<'a> State<'a> {
             };
 
         // Undeclared responses, media types, query parameters, request types.
+        // Paths that `$ref` one Path Item share its operation objects, and so
+        // these suggestions: what every such path observed is merged, once
+        // per object, under the first of them that observed anything.
+        let mut merged: Vec<(usize, OpAcc)> = vec![];
+        let mut slot: HashMap<(usize, usize), usize> = HashMap::new();
         for (i, acc) in self.ops.iter().enumerate() {
+            if acc.new_responses.is_empty() && acc.new_media.is_empty() && acc.new_query.is_empty() && acc.new_request_types.is_empty() {
+                continue;
+            }
+            let s = *slot.entry(self.router.operation_object(i)).or_insert_with(|| {
+                merged.push((i, OpAcc::default()));
+                merged.len() - 1
+            });
+            let all = &mut merged[s].1;
+            for (key, shape) in &acc.new_responses {
+                all.new_responses.entry(key.clone()).or_default().merge(shape);
+            }
+            for (key, (resp_ptr, shape)) in &acc.new_media {
+                all.new_media.entry(key.clone()).or_insert_with(|| (resp_ptr.clone(), Shape::default())).1.merge(shape);
+            }
+            for q in &acc.new_query {
+                if all.new_query.len() < MAX_QUERY_NAMES {
+                    all.new_query.insert(q.clone());
+                }
+            }
+            all.new_request_types.extend(acc.new_request_types.iter().cloned());
+        }
+        for (i, acc) in &merged {
+            let i = *i;
             let op = &self.router.operation(i);
             let label = op.label();
             let op_ptr = op.pointer.clone();

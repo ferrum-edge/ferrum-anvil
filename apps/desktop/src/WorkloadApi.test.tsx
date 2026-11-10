@@ -117,6 +117,20 @@ describe("JWT-SVID auth editor", () => {
     expect(invoke).toHaveBeenCalledWith("file_choose", { purpose: "jwt_svid_file", options: { multiple: false } });
   });
 
+  it("says why a token file could not be chosen", async () => {
+    let last = { type: "none" } as AuthConfig;
+    render(<AuthHarness onValue={(a) => (last = a)} />);
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "jwt_svid" } });
+    fireEvent.change(screen.getByLabelText("Token source"), { target: { value: "file" } });
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "file_choose") throw "LOCKED";
+      return null;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("LOCKED");
+    expect(last.type === "jwt_svid" && last.config.source).toEqual({ kind: "file", path: "" });
+  });
+
   it("lists the token files chosen on this device and removes one chosen by mistake", async () => {
     let bound = [
       { id: "b1", path: "/run/secrets/jwt", bound_at: "2026-01-01T00:00:00Z" },

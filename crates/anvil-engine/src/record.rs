@@ -340,10 +340,14 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     // A partial or undecodable body cannot show an application-level fault.
     let body_complete = body_complete && decoding_gap.is_none();
     // A SOAP fault or GraphQL error arrives in a 2xx body. When only a prefix
-    // of that body was captured, a fault past the prefix goes unseen, so the
-    // application outcome is not determined rather than read as a success.
+    // of that body was captured, or the body is too large to be inspected, a
+    // fault in it goes unseen, so the application outcome is not determined
+    // rather than read as a success. (A SOAP envelope over the limit says so
+    // itself, with its own warning.)
     let judged_from_body = matches!(ctx.spec.body, Body::Soap { .. } | Body::GraphQl { .. });
-    let undetermined = body_unavailable.as_deref().filter(|_| judged_from_body && body_complete);
+    let not_inspected = (diagnosis.body.over_parse_limit && diagnosis.body.xml_not_inspected.is_none())
+        .then(|| format!("it is over the {} KiB inspected for one", anvil_diagnostics::facts::MAX_PARSE / 1024));
+    let undetermined = body_unavailable.clone().or(not_inspected).filter(|_| judged_from_body && body_complete);
     let body_complete = body_complete && undetermined.is_none();
     // A redirect into an interactive login (AUTH-017) never evaluated the API,
     // even when the login page itself answered 200.
@@ -355,7 +359,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let mut warnings = diagnosis.warnings.clone();
     if let Some(reason) = undetermined.filter(|_| application == ApplicationState::NotEvaluated) {
         let message = format!(
-            "The application outcome was not determined: a SOAP fault or GraphQL error is reported in the response body, and the complete body is not available ({reason})"
+            "The application outcome was not determined: a SOAP fault or GraphQL error is reported in the response body, and the complete body was not inspected ({reason})"
         );
         warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
     }

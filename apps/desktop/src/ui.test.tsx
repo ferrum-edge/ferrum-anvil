@@ -2,10 +2,33 @@
 // exercise the native engine (see apps/desktop/e2e for native E2E).
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { KeyValue } from "./generated/contracts";
-import { KeyValueEditor, ListText, Modal, fmtBytes, fmtUs, humanize, modalOpen } from "./ui";
+import type { KeyValue, SensitiveValue } from "./generated/contracts";
 
-afterEach(cleanup);
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
+
+import { KeyValueEditor, ListText, Modal, SecretField, fmtBytes, fmtUs, humanize, modalOpen } from "./ui";
+
+afterEach(() => {
+  cleanup();
+  invoke.mockReset();
+});
+
+describe("SecretField", () => {
+  it("keeps the value and says why when the vault refuses it", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "secret_create") throw "LOCKED";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const onChange = vi.fn();
+    const value: SensitiveValue = { kind: "template", value: "tok-SENSITIVE-ui-vault" };
+    render(<SecretField label="Token" value={value} onChange={onChange} workspaceId="ws" />);
+    fireEvent.click(screen.getByRole("button", { name: "Store in vault" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Not stored in the vault: LOCKED");
+    expect(onChange).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: "Store in vault" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
 
 describe("fmtBytes", () => {
   it("renders missing values as an em dash, not zero", () => {

@@ -251,6 +251,7 @@ export function SecretField(props: {
   const v = props.value ?? { kind: "template", value: "" };
   const [reveal, setReveal] = useState(false);
   const [storing, setStoring] = useState(false);
+  const [storeErr, setStoreErr] = useState<string | null>(null);
   const label = props.hideLabel ? <span className="sr-only">{props.label}</span> : props.label;
   if (v.kind === "secret") {
     return (
@@ -294,9 +295,13 @@ export function SecretField(props: {
             const workspaceId = props.workspaceId;
             if (!workspaceId) return;
             setStoring(true);
+            setStoreErr(null);
             try {
               const ref = await api.createSecret(workspaceId, props.vaultLabel ?? props.label, v.value);
               props.onChange({ kind: "secret", secret: ref });
+            } catch (e) {
+              // The value stays in the field; only the backend's reason is shown.
+              setStoreErr(`Not stored in the vault: ${String((e as Error).message)}`);
             } finally {
               setStoring(false);
             }
@@ -306,6 +311,11 @@ export function SecretField(props: {
           Store in vault
         </button>
       </div>
+      {storeErr && (
+        <div className="bad-box" role="alert">
+          {storeErr}
+        </div>
+      )}
     </label>
   );
 }

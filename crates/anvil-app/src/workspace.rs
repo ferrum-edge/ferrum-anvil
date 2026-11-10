@@ -807,6 +807,14 @@ impl App {
         Ok(SecretRef { id, label: label.into() })
     }
 
+    /// [`App::set_secret`], written only while `gate` allows it: the gate is
+    /// checked inside the vault transaction, so a lock or profile switch it
+    /// detects before the commit stores nothing (`Locked`), and a secret
+    /// committed before one stays stored and is returned.
+    pub fn set_secret_fenced(&self, ws: &Id, label: &str, value: &str, gate: impl FnOnce() -> bool) -> Result<SecretRef> {
+        self.set_secret_guarded(ws, label, value, || gate().then_some(()))
+    }
+
     /// Validate ownership and write in one transaction. Acquire the caller's
     /// lifecycle guard only once the store transaction has begun, and retain
     /// it through commit/rollback so revocation cannot cross the write.

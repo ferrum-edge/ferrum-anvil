@@ -21,7 +21,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         warn(
             warnings,
             WarningCode::PartialVisibility,
-            format!("The SOAP envelope is too complex to inspect safely ({why}); the application outcome was not evaluated."),
+            format!("The SOAP envelope was not inspected for a fault ({why}); the application outcome was not evaluated."),
         );
     }
     if let Some(g) = &ctx.body.graphql {

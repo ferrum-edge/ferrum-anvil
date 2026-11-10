@@ -7,7 +7,7 @@
 use crate::Id;
 use crate::assertions::AssertionResult;
 use crate::diagnostics::DiagnosticFinding;
-use crate::outcome::ExecutionOutcome;
+use crate::outcome::{ApplicationState, ExecutionOutcome, TransportState};
 use crate::request::Protocol;
 use crate::settings::EffectiveSettings;
 use chrono::{DateTime, Utc};
@@ -1006,8 +1006,11 @@ pub struct ListedResponse {
     pub status: u16,
 }
 
+/// [`ExecutionOutcome::transport`], [`ExecutionOutcome::application`] and
 /// [`ExecutionOutcome::summary`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ListedOutcome {
+    pub transport: TransportState,
+    pub application: ApplicationState,
     pub summary: String,
 }

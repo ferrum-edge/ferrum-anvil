@@ -139,6 +139,8 @@ export interface HistoryItem {
   url: string;
   summary: string;
   status?: number | null;
+  /** The transport failed or ended early, or the application reported a failure. */
+  failed: boolean;
   request_id?: string | null;
 }
 export interface EffectiveRequest {

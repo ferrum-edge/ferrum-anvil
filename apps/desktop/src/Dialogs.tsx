@@ -87,7 +87,7 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
     return e;
   };
   useEffect(() => {
-    void load();
+    load().catch((e) => setErr(`The environments could not be read: ${String((e as Error).message)}`));
   }, []);
   const selEnv = envs.find((x) => x.id === sel);
   const stored =
@@ -135,11 +135,18 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
             <button
               className="btn ghost danger"
               onClick={async () => {
-                await api.deleteEnvironment(sel);
+                setErr(null);
+                try {
+                  await api.deleteEnvironment(sel);
+                } catch (e) {
+                  // Still stored: keep it, and its unsaved edits, open.
+                  setErr(String((e as Error).message));
+                  return;
+                }
                 dropEdit(sel);
                 setSel("__base");
-                await load();
                 props.onChanged();
+                await load().catch((e) => setErr(String((e as Error).message)));
               }}
             >
               <Icon name="trash" size={14} />
@@ -171,10 +178,15 @@ export function EnvironmentsDialog(props: { workspace: Workspace; onClose: () =>
           <button
             className="nav-item add"
             onClick={async () => {
-              const e = await api.saveEnvironment({ id: crypto.randomUUID(), schema_version: 1, created_at: now(), updated_at: now(), workspace_id: props.workspace.id, name: "New environment", variables: [] });
-              await load();
-              setSel(e.id);
-              props.onChanged();
+              setErr(null);
+              try {
+                const e = await api.saveEnvironment({ id: crypto.randomUUID(), schema_version: 1, created_at: now(), updated_at: now(), workspace_id: props.workspace.id, name: "New environment", variables: [] });
+                await load();
+                setSel(e.id);
+                props.onChanged();
+              } catch (e) {
+                setErr(String((e as Error).message));
+              }
             }}
           >
             <Icon name="plus" size={15} />
@@ -295,7 +307,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
     setInts(c.filter((p) => n > (removedBefore.current.get(p.id) ?? 0)));
   };
   useEffect(() => {
-    void load();
+    load().catch((e) => setErr(`The profiles could not be read: ${String((e as Error).message)}`));
   }, []);
   const base = { id: crypto.randomUUID(), workspace_id: props.workspaceId, created_at: now(), updated_at: now() };
   // After a save or removal: this dialog's list and the caller's copy, both
@@ -515,8 +527,25 @@ function spiffeLabel(p: TlsProfile) {
 export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfile) => void }) {
   const id: ClientIdentity | null | undefined = p.client_identity;
   const spiffe = p.server_spiffe != null;
+  const [certErr, setCertErr] = useState<string | null>(null);
+  /** The PEM certificate text of a file the user picks, or null (none picked, or refused: said). */
+  const pickCertificate = async (): Promise<string | null> => {
+    setCertErr(null);
+    try {
+      const file = await api.chooseCertificateFile();
+      return file ? await api.readCertificateFile(file.token) : null;
+    } catch (e) {
+      setCertErr(`The certificate was not loaded: ${String((e as Error).message)}`);
+      return null;
+    }
+  };
   return (
     <div className="form">
+      {certErr && (
+        <div className="bad-box" role="alert">
+          {certErr}
+        </div>
+      )}
       <label className="lbl">
         Name
         <input className="field" value={p.name} onChange={(e) => onChange({ ...p, name: e.target.value })} />
@@ -547,9 +576,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
       <button
         className="btn small start"
         onClick={async () => {
-          const file = await api.chooseCertificateFile();
-          if (!file) return;
-          const text = await api.readCertificateFile(file.token);
+          const text = await pickCertificate();
           if (text) onChange({ ...p, extra_roots_pem: [...(p.extra_roots_pem ?? []), text] });
         }}
       >
@@ -655,9 +682,7 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
             <button
               className="btn small start"
               onClick={async () => {
-                const file = await api.chooseCertificateFile();
-                if (!file) return;
-                const text = await api.readCertificateFile(file.token);
+                const text = await pickCertificate();
                 if (text) onChange({ ...p, client_identity: { ...id, cert_chain_pem: text } });
               }}
             >
@@ -1386,11 +1411,29 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Why the settings could not be read: the dialog opens to say so.
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   useEffect(() => {
-    api.settings().then(setS);
-    api.systemInfo().then(setInfo);
+    api.settings().then(setS, (e) => setLoadErr(String((e as Error).message)));
+    api.systemInfo().then(setInfo, (e) => setErr(`System information could not be read: ${String((e as Error).message)}`));
   }, []);
   const close = () => props.onClose();
+  if (!s && loadErr)
+    return (
+      <Modal
+        title="Settings"
+        onClose={close}
+        footer={
+          <button className="btn" onClick={close}>
+            Close
+          </button>
+        }
+      >
+        <div className="bad-box" role="alert">
+          The settings could not be read: {loadErr}
+        </div>
+      </Modal>
+    );
   if (!s) return null;
   return (
     <Modal
@@ -1466,8 +1509,14 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
           <button
             className="btn danger"
             onClick={async () => {
-              await api.historyClear(null);
-              setNotice("History cleared.");
+              setNotice(null);
+              setErr(null);
+              try {
+                await api.historyClear(null);
+                setNotice("History cleared.");
+              } catch (e) {
+                setErr(`History was not cleared: ${String((e as Error).message)}`);
+              }
             }}
           >
             <Icon name="trash" size={14} />

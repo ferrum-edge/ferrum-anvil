@@ -94,6 +94,19 @@ describe("gRPC schema source chooser", () => {
       grpc: expect.objectContaining({ schema: { kind: "descriptor_set", attachment: expect.objectContaining({ file_name: "svc.pb" }) } }),
     });
   });
+
+  it("says why a schema file could not be added and keeps the schema", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "file_choose") return [{ token: "g1", file_name: "svc.proto" }];
+      if (cmd === "attachment_add") throw "the file is larger than the attachment limit";
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const set = vi.fn();
+    render(<ProtocolEditor spec={grpcSpec({ schema: { kind: "reflection" } })} set={set} workspaceId="ws" />);
+    fireEvent.change(screen.getByLabelText("Schema source"), { target: { value: "proto_files" } });
+    expect((await screen.findByRole("alert")).textContent).toBe("The schema was not added: the file is larger than the attachment limit");
+    expect(set).not.toHaveBeenCalled();
+  });
 });
 
 describe("request settings: PROXY protocol header for HTTP-family requests", () => {

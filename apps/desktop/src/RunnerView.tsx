@@ -74,10 +74,16 @@ export function RunnerView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
-  /** The workspace's reports, or null when the workspace changed meanwhile. */
+  /** The workspace's reports, or null when the workspace changed meanwhile or the lists could not be read (said). */
   const reload = async () => {
     const w = props.workspaceId;
-    const [s, r] = await Promise.all([api.scenarios(w), api.runReports(w)]);
+    let s: Scenario[], r: RunReport[];
+    try {
+      [s, r] = await Promise.all([api.scenarios(w), api.runReports(w)]);
+    } catch (e) {
+      if (w === wsRef.current) props.notify(`Could not read the scenarios and reports: ${String((e as Error).message)}`);
+      return null;
+    }
     if (w !== wsRef.current) return null;
     setScenarios(s);
     setReports(r);
@@ -272,7 +278,13 @@ export function RunnerView(props: {
             <ScenarioEditor
               requests={requests}
               onCreate={async (name, ids) => {
-                const s = await api.createScenario(props.workspaceId, name, ids);
+                let s: Scenario;
+                try {
+                  s = await api.createScenario(props.workspaceId, name, ids);
+                } catch (e) {
+                  props.notify(String((e as Error).message));
+                  return;
+                }
                 // Switched workspace meanwhile: do not select it in another workspace's view.
                 if ((await reload()) === null) return;
                 setSel({ kind: "scenario", id: s.id });
@@ -430,6 +442,30 @@ function ScenarioDetail(props: {
 }) {
   const s = props.draft ? { ...props.scenario, ...props.draft } : props.scenario;
   const setS = (next: Scenario) => props.onDraft({ iterations: next.iterations, stop_on_failure: next.stop_on_failure });
+  const [err, setErr] = useState<string | null>(null);
+  // A save (alone, or before a run) is on its way.
+  const [saving, setSaving] = useState(false);
+  /** Stores the options shown; false when the backend refused (the error is shown). */
+  const save = async (): Promise<boolean> => {
+    setErr(null);
+    const sent = props.draft;
+    try {
+      await api.saveScenario(s);
+    } catch (e) {
+      setErr(String((e as Error).message));
+      return false;
+    }
+    props.onSaved(s.id, sent);
+    return true;
+  };
+  const whileSaving = async (work: () => Promise<unknown>) => {
+    setSaving(true);
+    try {
+      await work();
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <div className="page narrow">
       <div className="page-head">
@@ -444,7 +480,19 @@ function ScenarioDetail(props: {
           </div>
         </div>
         <div className="page-actions">
-          <button className="btn primary" onClick={() => props.onRun(s)}>
+          <button
+            className="btn primary"
+            disabled={saving}
+            title={props.draft ? "Save the run options, then run" : undefined}
+            onClick={() =>
+              void whileSaving(async () => {
+                // A run reads the stored scenario: store the options shown first,
+                // as the load editor's Run… does.
+                if (props.draft && !(await save())) return;
+                props.onRun(s);
+              })
+            }
+          >
             <Icon name="play" size={11} />
             Run
           </button>
@@ -453,7 +501,13 @@ function ScenarioDetail(props: {
             aria-label="Delete scenario"
             title="Delete scenario"
             onClick={async () => {
-              await api.deleteScenario(s.id);
+              setErr(null);
+              try {
+                await api.deleteScenario(s.id);
+              } catch (e) {
+                setErr(String((e as Error).message));
+                return;
+              }
               props.onDeleted();
             }}
           >
@@ -462,6 +516,11 @@ function ScenarioDetail(props: {
         </div>
       </div>
       {s.trusted === false && <div className="warn-box">Imported scenario: review the steps before running it.</div>}
+      {err && (
+        <div className="bad-box" role="alert">
+          {err}
+        </div>
+      )}
       <fieldset>
         <legend>Steps</legend>
         <div className="step-list">
@@ -486,14 +545,7 @@ function ScenarioDetail(props: {
             Stop an iteration at its first failed step
           </label>
           <span className="spacer" />
-          <button
-            className="btn"
-            onClick={async () => {
-              const sent = props.draft;
-              await api.saveScenario(s);
-              props.onSaved(s.id, sent);
-            }}
-          >
+          <button className="btn" disabled={saving} onClick={() => void whileSaving(save)}>
             Save
           </button>
         </div>
@@ -561,17 +613,37 @@ const NON_FILE_NAME_CHARS = /[^\w.-]+/g;
 
 function ReportView(props: { runId: string; notify: (m: string) => void; onDeleted: () => void }) {
   const [r, setR] = useState<RunReport | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    api.runReport(props.runId).then(setR);
+    let alive = true;
+    setErr(null);
+    api.runReport(props.runId).then(
+      (x) => alive && setR(x),
+      (e) => alive && setErr(String((e as Error).message)),
+    );
+    return () => {
+      alive = false;
+    };
   }, [props.runId]);
-  if (!r) return <div className="faint">Loading report…</div>;
+  if (!r)
+    return err ? (
+      <div className="bad-box" role="alert">
+        The report could not be read: {err}
+      </div>
+    ) : (
+      <div className="faint">Loading report…</div>
+    );
   const t = r.totals;
   const exportAs = async (format: "json" | "junit" | "html") => {
     const ext = format === "junit" ? "xml" : format;
-    const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
-    if (!file) return;
-    await api.exportRunReport(r.run_id, format, file.token);
-    props.notify(`Exported to ${file.file_name}`);
+    try {
+      const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
+      if (!file) return;
+      await api.exportRunReport(r.run_id, format, file.token);
+      props.notify(`Exported to ${file.file_name}`);
+    } catch (e) {
+      props.notify(`Export failed: ${String((e as Error).message)}`);
+    }
   };
   return (
     <div className="page">
@@ -602,7 +674,12 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
           <button
             className="btn small ghost danger"
             onClick={async () => {
-              await api.deleteRunReport(r.run_id);
+              try {
+                await api.deleteRunReport(r.run_id);
+              } catch (e) {
+                props.notify(String((e as Error).message));
+                return;
+              }
               props.onDeleted();
             }}
           >

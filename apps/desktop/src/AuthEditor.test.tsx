@@ -106,6 +106,16 @@ test("an eligible uncached profile is signed out and browser refusal remains vis
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
+test("a refused sign-out says why and keeps the cached token shown", async () => {
+  backend.status.mockResolvedValue(summary);
+  backend.signOut.mockRejectedValue(new Error("LOCKED"));
+  render(editor());
+  fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+  await screen.findByText("LOCKED");
+  expect(backend.signOut).toHaveBeenCalledWith(input);
+  expect(screen.getByText(/signed in · Bearer/)).toBeTruthy();
+});
+
 test("a completed sign-in refreshes metadata and clears a status failure", async () => {
   backend.status.mockRejectedValueOnce(new Error(refusal)).mockResolvedValueOnce(summary);
   backend.signIn.mockResolvedValue({});

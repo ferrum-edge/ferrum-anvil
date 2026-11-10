@@ -20,6 +20,14 @@ Examples: an HTTP 200 whose body ends early is an application `success`
 with transport `incomplete`. A gRPC call with HTTP 200 and `grpc-status: 14`
 is an application failure. A graceful WebSocket close is not a failure.
 
+Response bodies are parsed for these facts up to 256 KiB. A SOAP fault,
+GraphQL `errors` or a JSON-RPC error arrives with a 2xx, so a complete body
+over that size could hide one: a SOAP envelope (in any response), the
+response to a request with a SOAP or GraphQL body, and an MCP operation's
+JSON-RPC response then have the application outcome `not_evaluated` with a
+`partial_visibility` warning, never `success`. Other large bodies (plain
+JSON, files) are judged by their status as usual.
+
 ## Findings
 
 A finding comes from a deterministic rule (`crates/anvil-diagnostics/src/rules/`)
