@@ -245,24 +245,41 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
             dataset_format: fmt,
             sensitive_columns,
         } => {
+            // Everything that can fail is checked before anything is stored,
+            // and the scenario is saved once, complete: a failed command
+            // leaves no partial scenario (and no dataset) behind.
+            if dataset.is_none() && !sensitive_columns.is_empty() {
+                bail!("--sensitive-column needs --dataset");
+            }
             let ws = app.find_workspace(workspace)?;
             let mut out = Vec::new();
             for (i, key) in steps.iter().enumerate() {
                 let r = app.find_request(&ws.meta.id, key)?;
                 out.push(ScenarioStep { request_id: r.meta.id, enabled: true, delay_ms: if i == 0 { 0 } else { *delay_ms } });
             }
-            let mut sc = app.create_scenario(&ws.meta.id, name, out)?;
+            let mut sc = app.new_scenario(&ws.meta.id, name, out)?;
             sc.iterations = iterations.unwrap_or(0);
             sc.stop_on_failure = *stop_on_failure;
-            if let Some(p) = dataset {
-                let format = dataset_format(p, *fmt)?;
-                let bytes = read_dataset_file(p)?;
-                let d = app.create_dataset(&ws.meta.id, &file_name(p), format, &bytes, sensitive_columns.clone())?;
-                sc.dataset_id = Some(d.meta.id);
-            } else if !sensitive_columns.is_empty() {
-                bail!("--sensitive-column needs --dataset");
-            }
-            let sc = app.update_scenario(sc)?;
+            let stored = match dataset {
+                Some(p) => {
+                    let format = dataset_format(p, *fmt)?;
+                    let bytes = read_dataset_file(p)?;
+                    Some(app.create_dataset(&ws.meta.id, &file_name(p), format, &bytes, sensitive_columns.clone())?)
+                }
+                None => None,
+            };
+            sc.dataset_id = stored.as_ref().map(|d| d.meta.id);
+            let sc = match app.update_scenario(sc) {
+                Ok(sc) => sc,
+                Err(e) => {
+                    // The dataset was stored only for this scenario.
+                    if let Some(d) = &stored {
+                        app.delete_dataset(&d.meta.id)
+                            .with_context(|| format!("{e}; the dataset stored for the scenario could not be removed"))?;
+                    }
+                    return Err(e.into());
+                }
+            };
             println!("{}", sc.meta.id);
             Ok(0)
         }

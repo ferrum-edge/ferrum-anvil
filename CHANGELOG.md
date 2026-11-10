@@ -221,6 +221,12 @@
   CI-only `mock-provider` feature is in the release graph, as ADR 0009 and `docs/identity.md`
   already said it did. The unused `anvil_identity::MOCK_PROVIDER_COMPILED` constant those
   documents named is removed (#525).
+- `anvil scenario create` no longer saves the scenario before checking the rest of the command.
+  A `--sensitive-column` without `--dataset`, an unreadable, malformed or unrecognised dataset
+  file, or too many `--iterations` used to leave a trusted scenario without the requested
+  settings, and re-running the corrected command then made the name ambiguous. The command now
+  checks everything first and saves the complete scenario once; a dataset stored for a scenario
+  that is then refused is removed again (#527).
 
 ## [0.1.7] - 2026-11-03
 
