@@ -102,6 +102,12 @@
   WS-Security header writes a username (a secret username with `&` or `<` was shown in the
   preview's body); and a multipart part name, whose `"` is written as `%22`. They were already
   redacted raw, percent-encoded, as hex and JSON-escaped.
+- A QUIC peer's close reason (or any TLS, HTTP or Workload API error text) of a few hundred bytes
+  of non-ASCII text no longer panics Anvil when the failure is recorded: the error text is cut at
+  600 bytes on a character boundary instead of inside a character. The server under test, or
+  anything answering on its UDP port before the handshake completed, could end `anvil send` or
+  `anvil run` with exit status 101 and no execution record, or end a load worker, for HTTP/3,
+  WebSocket, SSE and gRPC over HTTP/3, and MASQUE CONNECT-UDP (GHSA-c825-hqr8-8gj8).
 
 ### Changed
 
