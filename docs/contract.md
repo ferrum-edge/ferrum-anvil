@@ -246,7 +246,7 @@ joined by commas.
 ### Targets
 
 Every target has `extensions` (its `x-*` members). Targets reached through a
-`$ref` are reported once, where they are defined. An operation reached through several paths (one Path Item `$ref`'d by each) is a target per path, since each path has its own template.
+`$ref` are reported once, where they are defined. A path or an operation reached through several paths (one Path Item `$ref`'d by each) is a target per path, since each path has its own template.
 
 | Target | One per | Fields |
 |---|---|---|

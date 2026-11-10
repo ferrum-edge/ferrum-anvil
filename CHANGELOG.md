@@ -230,6 +230,12 @@
   through one Path Item (`$ref`) on the calls to all of those paths, once. The finding and its
   "Raise the budget" suggestion used to describe only the last such path in the document, even an
   uncalled one: "in 0 call(s) (largest 0 bytes)", with a patch lowering the budget to 1 byte (#519).
+- `anvil lint-spec` checks every path that shares a Path Item (`$ref`) with another, so
+  `path-trailing-slash` and `path-no-query-string` no longer see only the first such path, and
+  checks an operation's own `servers` (`server-https`), as `docs/contract.md` lists them. A string
+  example under `text/json` is checked as a JSON value, as drift reads that media type, instead of
+  being skipped. A rule turned off (`severity: off`) still has its `description`, `message`,
+  `how_to_fix` and `docs_url` type-checked (#520).
 
 ## [0.1.7] - 2026-11-03
 

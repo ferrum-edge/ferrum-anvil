@@ -608,3 +608,53 @@ fn custom_schema_functions_have_the_openapi_schema_limits() {
         assert_eq!(rules_hit(&r).contains(&"info-shape"), fails, "{schema}: {:?}", r.findings);
     }
 }
+
+#[test]
+fn every_path_and_operation_level_servers_are_checked() {
+    // `/b/{id}/` shares `/a/{id}`'s Path Item, so its template is checked
+    // too; the operation's own servers are checked once, where defined.
+    let text = r##"openapi: 3.1.0
+info: { title: t, version: '1' }
+servers: [{ url: https://x.example }]
+paths:
+  /a/{id}: { $ref: '#/components/pathItems/P' }
+  /b/{id}/: { $ref: '#/components/pathItems/P' }
+components:
+  pathItems:
+    P:
+      get:
+        operationId: g
+        servers: [{ url: 'http://op.example' }]
+        parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+        responses: { '200': { description: ok } }
+"##;
+    let r = run(text, &RuleSet::recommended());
+    let slash: Vec<&str> = r.findings.iter().filter(|f| f.rule == "path-trailing-slash").map(|f| f.message.as_str()).collect();
+    assert_eq!(slash, ["Path /b/{id}/ ends with a slash."]);
+    let http: Vec<&anvil_contract::LintFinding> = r.findings.iter().filter(|f| f.rule == "server-https").collect();
+    assert_eq!(http.len(), 1, "{http:?}");
+    assert_eq!(http[0].message, "Server http://op.example uses plain HTTP.");
+    assert!(http[0].pointer.starts_with("/components/pathItems/P/get/servers/0"), "{}", http[0].pointer);
+}
+
+#[test]
+fn string_examples_of_text_json_are_json_values() {
+    // A JSON string, as drift reads `text/json`: checked against the schema.
+    let text = r##"openapi: 3.1.0
+info: { title: t, version: '1' }
+servers: [{ url: https://x.example }]
+paths:
+  /a:
+    get:
+      operationId: g
+      responses:
+        '200':
+          description: ok
+          content:
+            text/json: { schema: { type: object }, example: '{"id": 1}' }
+"##;
+    let r = run(text, &RuleSet::recommended());
+    assert!(r.findings.iter().any(|f| f.rule == "example-valid"), "{:?}", r.findings);
+    let ok = run(&text.replace("type: object", "type: string"), &RuleSet::recommended());
+    assert!(!rules_hit(&ok).contains(&"example-valid"), "{:?}", ok.findings);
+}

@@ -475,10 +475,8 @@ struct ExampleChecker {
 impl ExampleChecker {
     fn check(&mut self, spec: &Spec, m: &Media<'_>, dir: Direction) -> Vec<String> {
         let (Some(schema), Some(obj)) = (m.schema, m.object) else { return vec![] };
-        let json_media = {
-            let e = m.media_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-            e == "application/json" || e.ends_with("+json") || e == "*/*"
-        };
+        // JSON as drift reads it (`text/json` included), and `*/*`.
+        let json_media = crate::observe::is_json(&m.media_type) || crate::observe::essence(&m.media_type) == "*/*";
         let mut examples: Vec<(String, &Value)> = vec![];
         if spec.is_swagger2() {
             if let Some(v) = obj.get("examples").and_then(|e| e.get(&m.media_type)) {
