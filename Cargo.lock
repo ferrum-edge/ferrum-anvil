@@ -540,6 +540,7 @@ dependencies = [
 name = "anvil-runner"
 version = "0.1.7"
 dependencies = [
+ "aho-corasick",
  "anvil-domain",
  "anvil-engine",
  "anvil-fixtures",
