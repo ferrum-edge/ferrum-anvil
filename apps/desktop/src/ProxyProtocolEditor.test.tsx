@@ -49,6 +49,20 @@ describe("ProxyHeaderEditor", () => {
     expect(last).toBeNull();
   });
 
+  it("drops the v2 LOCAL command and authority TLV on a switch to v1", () => {
+    let last: ProxyHeaderSpec | null = null;
+    render(<HeaderHarness onValue={(v) => (last = v)} />);
+    const header = () => screen.getByLabelText("PROXY protocol header", { selector: "select" });
+    fireEvent.change(header(), { target: { value: "v2" } });
+    fireEvent.change(screen.getByDisplayValue("PROXY (relayed client)"), { target: { value: "local" } });
+    fireEvent.change(screen.getByLabelText(/Authority TLV/), { target: { value: "api.example" } });
+    expect(last).toEqual({ version: "v2", command: "local", authority: "api.example" });
+    // v1 shows no command or TLV, and the engine refuses either: neither stays behind.
+    fireEvent.change(header(), { target: { value: "v1" } });
+    expect(last).toEqual({ version: "v1" });
+    expect(screen.getByLabelText(/Source \(client\)/)).toBeTruthy();
+  });
+
   it("offers raw bytes for deliberately malformed headers", () => {
     let last: ProxyHeaderSpec | null = null;
     render(<HeaderHarness onValue={(v) => (last = v)} />);

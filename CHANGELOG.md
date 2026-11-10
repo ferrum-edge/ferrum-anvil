@@ -223,6 +223,9 @@
 - Enter, F2, Delete or Backspace on a sidebar row's Rename, Duplicate, Folder settings or Delete
   button no longer also opens, toggles, renames or deletes the row, and opening a request twice
   while it is read opens one tab (#517).
+- Switching a PROXY protocol header from v2 to v1 in the desktop editor drops the v2 LOCAL command
+  and TLVs, which v1 does not show and the engine refuses, instead of keeping a header that could
+  not be sent (#518).
 
 ## [0.1.7] - 2026-11-03
 

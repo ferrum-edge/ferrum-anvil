@@ -52,7 +52,16 @@ export function ProxyHeaderEditor(props: { value: ProxyHeaderSpec | null | undef
             value={mode}
             onChange={(e) => {
               const m = e.target.value as HeaderMode;
-              props.onChange(m === "off" ? null : { ...(h ?? {}), version: m });
+              if (m === "off") return props.onChange(null);
+              const next: ProxyHeaderSpec = { ...(h ?? {}), version: m };
+              if (m === "v1") {
+                // v1 has no command and no TLVs, and its form shows neither:
+                // a v2 LOCAL or authority left behind would be refused unseen.
+                delete next.command;
+                delete next.authority;
+                delete next.tlvs;
+              }
+              props.onChange(next);
             }}
           >
             <option value="off">Off</option>
