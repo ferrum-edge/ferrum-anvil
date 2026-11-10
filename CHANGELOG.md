@@ -248,6 +248,11 @@
   scripted path; and a WebSocket Pong whose write failed is no longer recorded as sent, and ends the
   session as a failed send does. UDP through an HBONE or MASQUE tunnel counts echoed datagrams
   as direct UDP does, so a load run's `echoed_payloads` is no longer 0 through a tunnel (#522).
+- A JWT auth profile whose `expires_in_secs` or `not_before_offset_secs` puts `exp` or `nbf` out of
+  range is refused ("JWT expires-in offset is out of range") instead of panicking in a debug build
+  or wrapping to an already-expired token in a release build. A JWT-SVID whose `exp` is far out of
+  range fails its expiry check instead of wrapping into a pass, and its cache refresh time no longer
+  overflows (#523).
 
 ## [0.1.7] - 2026-11-03
 
