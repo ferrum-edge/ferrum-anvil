@@ -132,6 +132,16 @@ dimpl (`vendor/dimpl-0.8.0-empty-ca`), which accepted the empty list.
 
 ## Gateway core, frontend and taxonomy
 
+The per-area sections from here on are the area auditors' notes, kept largely as written before the
+adoption merged. The header, the [summary](#summary-of-public-signal-changes) and [Lab-scenario
+impacts fixed here](#lab-scenario-impacts-fixed-here) record the outcome; where a note below
+differs, they hold. In particular: a hand-off between areas ("open question", "should keep one id",
+"may need to") was written before the catalog merged, and the catalog is what was decided; an Anvil
+line cite next to a later "Fixed here" is the pre-fix line; a clause that keeps something "while
+v0.9.5 to v0.9.15 are supported" or "run nightly" is moot, since v0.9.20 is the only supported
+release and the only nightly pin; and the `lab/gateway/lint-profiles.rb` cite updates suggested
+below were not all made.
+
 All `file:line` citations are at v0.9.20 (`e4a606a`) unless a release is named. Changes tagged
 in the unpublished v0.9.16 and v0.9.18 are attributed to v0.9.17 and v0.9.19, where the
 changelog carries them. 60 outcomes in this slice: 33 carried unchanged, 27 modified, 0 removed,
@@ -340,8 +350,8 @@ v0.9.19 (#6833). `insert_pending_flow_or_use_sealed_cookie` (`src/plugins/oidc_r
 no longer treats a full cache as success. It calls `admit_sealed_only` (`:3781`), which refuses at
 the per-source cap (`:3544`, "Too many pending OIDC logins") or when the overflow set is also full
 (`:3554`, `STATE_CACHE_FULL_ERROR`). The caller answers `503` (`:2513`). The removed outcome
-`plugin.oidc_relying_party.challenge_browser_state_cache_full` may need to be restored; that is
-for the C_auth slice to decide.
+`plugin.oidc_relying_party.challenge_browser_state_cache_full` is restored in the 0.9.20 catalog
+(see the [summary](#summary-of-public-signal-changes)).
 
 ## Upstream and streaming
 
@@ -779,7 +789,7 @@ The old notes "key_auth defines no challenge", "mtls: No WWW-Authenticate" and "
 
 `oidc_relying_party` applies to every request (`src/plugins/mod.rs:13511`) and advertises `Bearer realm="oidc"` (`src/plugins/oidc_relying_party.rs:3216`). On a route that chains it with another mechanism, that mechanism's rejection now lists the OIDC challenge after its own. For example, `Invalid API key` answers `ApiKey realm="ferrum-edge", Bearer realm="oidc"`.
 
-**Anvil impact:** the `auth_session` rule (`crates/anvil-diagnostics/src/rules/auth_session.rs:96`) treats any 401 whose `WWW-Authenticate` contains `realm="oidc"` as a login step (`oidc_realm`, `:42`). On v0.9.20 it would also fire on a rejected API key or JWT on such a route. It should require the OIDC challenge to carry `error="invalid_token"` or to come first. No lab route combines OIDC with another mechanism.
+**Anvil impact:** before this adoption the `auth_session` rule treated any 401 whose `WWW-Authenticate` contained `realm="oidc"` as a login step, so on v0.9.20 it would also have fired on a rejected API key or JWT on such a route. It now fires only when every challenge offered is the OIDC one (`crates/anvil-diagnostics/src/rules/auth_session.rs`, `oidc_realm`; see [Lab-scenario impacts fixed here](#lab-scenario-impacts-fixed-here), item 5). No lab route combines OIDC with another mechanism.
 
 ### `key_auth`: two new 401 refusals and multiple key locations (#6882, #6937, v0.9.19)
 

@@ -66,10 +66,6 @@ impl TcpRelay {
         self.log.push(GroundTruth::FaultApplied { fault: "relay_healed".into() });
     }
 
-    pub fn is_cut(&self) -> bool {
-        *self.state.cut.lock()
-    }
-
     /// Connections accepted so far (relayed or rejected).
     pub fn connections(&self) -> usize {
         self.log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count()

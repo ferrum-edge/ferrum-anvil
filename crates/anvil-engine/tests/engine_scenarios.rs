@@ -296,6 +296,10 @@ async fn auth_002_query_key_and_data_020_secrets_redacted_everywhere() {
     // Ground truth: the server really received the values.
     let hdrs = f.log.last_request_headers().unwrap();
     assert!(hdrs.iter().any(|(n, v)| n == "x-trace" && v == "t-PLANTED-SECRET-9f8e7d"));
+    let requests = f.log.requests();
+    let (_, target) = requests.last().unwrap();
+    assert!(target.contains("note=PLANTED-SECRET-9f8e7d"), "{target}");
+    assert!(target.contains("api_key=QUERY-KEY-777777"), "the query key was sent: {target}");
 }
 
 #[tokio::test]

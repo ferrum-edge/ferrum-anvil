@@ -595,7 +595,8 @@ validation-work limit is recorded as not checked instead.
 
 For an imported spec, the exchanges are the newest sends (up to 500 in the
 desktop, `--limit` in the CLI, see [Limits](#limits); found among the
-workspace's newest 20,000 history entries) of its collection: saved
+workspace's newest history entries, 20 per exchange asked for: 10,000 at
+the default of 500, 20,000 at most) of its collection: saved
 requests imported from it (under the current or an earlier import id),
 requests under its import root, or, when the import made its own workspace,
 every request of that workspace, so endpoints added by hand are checked

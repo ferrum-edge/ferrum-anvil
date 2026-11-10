@@ -36,6 +36,17 @@ async fn run(ctx: &ExecutionContext) -> ExecutionOutput {
     Engine::new().execute(ctx, EventCtx::none(), CancellationToken::new()).await
 }
 
+/// Execute `c` on a caller's engine, so state kept by the engine between
+/// sends (prepared TLS, pooled connections) is shared.
+async fn run_on(engine: &Engine, c: ExecutionContext) -> ExecutionOutput {
+    engine.execute(&c, EventCtx::none(), CancellationToken::new()).await
+}
+
+fn in_workspace(mut c: ExecutionContext, isolation: &str) -> ExecutionContext {
+    c.isolation = isolation.into();
+    c
+}
+
 fn ctx(spec: RequestSpec) -> ExecutionContext {
     ExecutionContext::standalone(spec)
 }
@@ -239,17 +250,35 @@ async fn tls_013_private_ca_trust_is_scoped_to_its_profile() {
     init();
     let f = tls_fixture(&pki().server).await;
     let url = f.url_host("localhost", "/");
-    // Workspace A: profile trusting the private CA → verified.
-    let a = run(&select_tls(ctx(RequestSpec::http("GET", &url)), tls_profile("A private CA", vec![pki().ca.cert.clone()], true))).await;
+    // One engine for every send, as in the app: a leak would come from its
+    // prepared-TLS cache or its connection pool, which a fresh engine per
+    // send could not show.
+    let engine = Engine::new();
+    let send = |c: ExecutionContext| run_on(&engine, c);
+    let private_ca = tls_profile("A private CA", vec![pki().ca.cert.clone()], true);
+    // Workspace A: profile trusting the private CA → verified, and its
+    // connection stays pooled (keep-alive is the default).
+    let a = send(in_workspace(select_tls(ctx(RequestSpec::http("GET", &url)), private_ca.clone()), "workspace-a")).await;
     assert_eq!(a.record.outcome.transport, TransportState::Completed, "{:?}", codes(&a));
-    // Workspace B afterwards: no profile → the same server is untrusted; the
-    // CA was never installed globally or cached across profiles.
-    let b = run(&ctx(RequestSpec::http("GET", &url))).await;
+    // Workspace B afterwards, same engine: no profile → the same server is
+    // untrusted; the CA was never installed globally, and neither A's
+    // prepared trust nor its pooled verified connection is reused.
+    let b = send(in_workspace(ctx(RequestSpec::http("GET", &url)), "workspace-b")).await;
     assert_eq!(last_failure(&b), FailureKind::TlsUntrustedIssuer, "{:?}", codes(&b));
     assert!(has(&b, "client.tls.untrusted_issuer"), "{:?}", codes(&b));
-    let b2 =
-        run(&select_tls(ctx(RequestSpec::http("GET", &url)), tls_profile("B other CA", vec![pki().rogue_ca.cert.clone()], true))).await;
-    assert_eq!(last_failure(&b2), FailureKind::TlsUntrustedIssuer);
+    let b2 = send(in_workspace(
+        select_tls(ctx(RequestSpec::http("GET", &url)), tls_profile("B other CA", vec![pki().rogue_ca.cert.clone()], true)),
+        "workspace-b",
+    ))
+    .await;
+    assert_eq!(last_failure(&b2), FailureKind::TlsUntrustedIssuer, "{:?}", codes(&b2));
+    // Within workspace A too, the trust belongs to the profile: a send
+    // without it does not ride A's pooled connection.
+    let a_unselected = send(in_workspace(ctx(RequestSpec::http("GET", &url)), "workspace-a")).await;
+    assert_eq!(last_failure(&a_unselected), FailureKind::TlsUntrustedIssuer, "{:?}", codes(&a_unselected));
+    // B's failures did not disturb A: its profile still verifies the server.
+    let a_again = send(in_workspace(select_tls(ctx(RequestSpec::http("GET", &url)), private_ca), "workspace-a")).await;
+    assert_eq!(a_again.record.outcome.transport, TransportState::Completed, "{:?}", codes(&a_again));
 }
 
 #[tokio::test]

@@ -217,33 +217,6 @@ pub async fn serve(bind: &str, mode: DnsMode) -> anyhow::Result<DnsFixture> {
     Ok(DnsFixture { addr, log, cancel })
 }
 
-/// A TCP listener whose accept backlog is saturated and never drained, so new
-/// connection attempts stall in SYN handling (connect-timeout fixture).
-pub struct StalledListener {
-    pub addr: SocketAddr,
-    _listener: std::net::TcpListener,
-    _fillers: Vec<std::net::TcpStream>,
-}
-
-pub fn stalled_listener(bind: &str) -> anyhow::Result<StalledListener> {
-    use socket2::{Domain, Socket, Type};
-    let addr: SocketAddr = bind.parse()?;
-    let sock = Socket::new(Domain::for_address(addr), Type::STREAM, None)?;
-    sock.set_reuse_address(true)?;
-    sock.bind(&addr.into())?;
-    sock.listen(0)?;
-    let listener: std::net::TcpListener = sock.into();
-    let local = listener.local_addr()?;
-    let mut fillers = Vec::new();
-    for _ in 0..8 {
-        match std::net::TcpStream::connect_timeout(&local, std::time::Duration::from_millis(200)) {
-            Ok(s) => fillers.push(s),
-            Err(_) => break,
-        }
-    }
-    Ok(StalledListener { addr: local, _listener: listener, _fillers: fillers })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

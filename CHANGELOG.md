@@ -140,6 +140,11 @@
   `mesh::synthesis_refusal` is retained but unrun and v0.9.8 itself never ran (#484). The UP-018-H2
   skip text names the 0.9.19+ 503 contract test, and the failure-matrix coverage header names the
   release its recorded results ran on.
+- Docs: the imported-spec drift scan reads 20 history entries per exchange asked for (10,000 at
+  the default limit of 500, 20,000 at most), not always 20,000; the samples README says the
+  samples are a frozen 2026-09-25 capture against v0.9.5; PROTO-004's status names the GOAWAY
+  fixtures that now exist; and the v0.9.20 delta audit marks its per-area sections as pre-merge
+  working notes, with the two that contradicted the outcome corrected (#545).
 - The gitleaks allowlist for the soap_ws_security mechanism names covers only the 0.9.20 catalog
   and the `generic-api-key` rule.
 - Diagnostics catalog version 2026.11.03-1.

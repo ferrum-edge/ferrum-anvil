@@ -199,13 +199,6 @@ impl IdpFixture {
     pub fn revoke_refresh_tokens(&self) {
         self.state.refresh.lock().clear();
     }
-    /// Expire every access token now (without touching refresh tokens).
-    pub fn expire_access_tokens(&self) {
-        let now = Instant::now();
-        for t in self.state.access.lock().values_mut() {
-            t.expires = now;
-        }
-    }
     /// `grant_type` of every token request received, in order.
     pub fn grants_seen(&self) -> Vec<String> {
         self.state.grants_seen.lock().clone()
@@ -216,11 +209,6 @@ impl IdpFixture {
     /// (total, authorized) protected-API requests.
     pub fn api_requests(&self) -> (u64, u64) {
         *self.state.api_requests.lock()
-    }
-    /// Whether this exact access token is live (tests compare against tokens
-    /// they never print).
-    pub fn is_live_access_token(&self, token: &str) -> bool {
-        self.state.access.lock().get(token).map(|t| t.expires > Instant::now()).unwrap_or(false)
     }
 }
 
