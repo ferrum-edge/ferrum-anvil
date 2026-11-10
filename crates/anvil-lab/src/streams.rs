@@ -2796,8 +2796,19 @@ fn load013_grpc(env: &Env) -> Fut<'_> {
             unary(env) - before == 30,
             format!("{}", unary(env) - before),
         );
-        let lines: Vec<serde_json::Value> =
-            op_lines(env, from, "proto014-grpc").into_iter().filter(|v| v["request_path"] == "/anvil.lab.v1.Echo/Unary").collect();
+        // The gateway writes each call's line just after its response: poll
+        // (bounded) until all 30 are there, as load013_ws does for its ends.
+        let unary_lines = || -> Vec<serde_json::Value> {
+            op_lines(env, from, "proto014-grpc").into_iter().filter(|v| v["request_path"] == "/anvil.lab.v1.Echo/Unary").collect()
+        };
+        let mut lines = unary_lines();
+        for _ in 0..30 {
+            if lines.len() >= 30 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            lines = unary_lines();
+        }
         let by_status = |code: i64| lines.iter().filter(|v| v["grpc_status"].as_i64() == Some(code)).count();
         c.add(
             CheckKind::GroundTruth,
