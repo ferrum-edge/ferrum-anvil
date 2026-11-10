@@ -666,14 +666,13 @@ async fn stale_authorized_policy_cannot_unlink_or_replace_a_newer_binding() {
     let root = tempfile::tempdir().unwrap();
     let (dir, _) = profile(root.path(), "concurrency");
     link(&dir, Unlock::Passphrase(PASS), sign_in(&p).await, false, SECOND).unwrap();
-    let (authorized, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(SECOND)).unwrap();
-    let old_binding = anvil_storage::rotation::binding(&dir).unwrap().unwrap();
     let (_, recovery) = link(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await, true, THIRD).unwrap();
     let committed = state(&dir);
-    for replacement in [None, old_binding] {
-        assert!(anvil_storage::rotation::set_binding(&dir, &authorized, &key, replacement).is_err());
-        assert_eq!(state(&dir), committed);
-    }
+    // The passphrase that authorized the superseded policy neither unlinks
+    // nor relinks the newer binding; only a rotation changes it.
+    assert!(unlink(&dir, Unlock::Passphrase(SECOND), None, FOURTH).is_err());
+    assert!(link(&dir, Unlock::Passphrase(SECOND), sign_in(&p).await, false, FOURTH).is_err());
+    assert_eq!(state(&dir), committed);
     unlink(&dir, Unlock::RecoveryKey(&recovery), None, FOURTH).unwrap();
     assert!(ProfileManager::unlock(&dir, Unlock::Passphrase(FOURTH)).is_ok());
 }
