@@ -13,6 +13,8 @@ use anvil_storage::{KdfParams, StoreError, kind};
 use anvil_transport::recorder::EventCtx;
 use tokio_util::sync::CancellationToken;
 
+mod dataset_runs;
+
 fn new_app(root: &std::path::Path) -> App {
     let pm = ProfileManager::new(root);
     let (s, dek, _recovery) = pm.create_passphrase("att", "correct horse battery", KdfParams::testing()).unwrap();
@@ -45,7 +47,7 @@ async fn attachments_and_datasets_survive_sends_and_history_retention() {
     }
     app.store.prune_history(0, 0).unwrap();
     assert_eq!(app.get_attachment(&sha(&att)).unwrap().as_deref(), Some(&b"\x00\x01binary payload"[..]));
-    assert_eq!(app.run_dataset(&app.dataset(&ds.meta.id).unwrap()).unwrap().rows.len(), 2);
+    assert_eq!(dataset_runs::dataset_rows(&app, &app.dataset(&ds.meta.id).unwrap()).await.unwrap(), 2);
 }
 
 #[tokio::test]

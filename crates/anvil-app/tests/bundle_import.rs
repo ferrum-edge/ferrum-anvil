@@ -25,6 +25,8 @@ use sha2::Digest;
 use std::io::Write;
 use tokio_util::sync::CancellationToken;
 
+mod dataset_runs;
+
 const EXPORT_PASS: &str = "export passphrase 1";
 const TOKEN: &str = "placeholder-bearer-token";
 
@@ -703,9 +705,9 @@ fn a_stored_attachment_is_imported_only_with_its_bytes() {
         let rep = b.import(&bytes, None, policy).unwrap();
         let copy: Id = rep.workspace_ids[0].parse().unwrap();
         let data = b.datasets(&copy).unwrap().pop().unwrap();
-        assert_eq!(b.run_dataset(&data).unwrap().rows.len(), 1, "{name}");
         assert_eq!(b.get_attachment(&sha(&file)).unwrap().as_deref(), Some(&b"placeholder statement"[..]), "{name}");
         assert_eq!(b.requests(&copy).unwrap().len(), 2, "{name}");
+        assert_eq!(dataset_runs::dataset_rows_blocking(&b, &data).unwrap(), 1, "{name}");
     }
     let rep = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
     assert_eq!(a.datasets(&rep.workspace_ids[0].parse().unwrap()).unwrap().len(), 1);

@@ -29,6 +29,8 @@ use sha2::Digest;
 use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
+mod dataset_runs;
+
 const PASS: &str = "backup passphrase 1";
 /// Distinct plaintext planted in every kind of stored content.
 const MARKERS: &[&str] = &[
@@ -505,7 +507,7 @@ fn a_stored_attachment_without_its_content_is_restored_only_where_that_content_i
     let named: Vec<&String> = rep.warnings.iter().filter(|w| w.contains("does not include")).collect();
     assert_eq!(named.len(), 1, "{named:?}");
     assert!(named[0].starts_with("request 'Orphan'"), "{named:?}");
-    assert_eq!(b.run_dataset(&b.dataset(&rows.meta.id).unwrap()).unwrap().rows.len(), 1);
+    assert_eq!(dataset_runs::dataset_rows_blocking(&b, &b.dataset(&rows.meta.id).unwrap()).unwrap(), 1);
 }
 
 #[test]

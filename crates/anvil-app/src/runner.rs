@@ -558,20 +558,6 @@ impl App {
         })
     }
 
-    /// Load and parse a saved dataset for a run.
-    pub fn run_dataset(&self, d: &Dataset) -> Result<RunDataset> {
-        let bytes = match &d.attachment {
-            anvil_domain::request::AttachmentRef::Stored { sha256, .. } => {
-                self.get_attachment(sha256)?.ok_or_else(|| AppError::NotFound(format!("the data of dataset '{}'", d.name)))?
-            }
-            anvil_domain::request::AttachmentRef::LinkedFile { path } => {
-                let max = crate::file_grants::FilePurpose::Dataset.max_read_bytes();
-                self.read_linked_dataset(d.meta.id, path, max).map_err(|e| AppError::Invalid(format!("dataset '{}': {e}", d.name)))?
-            }
-        };
-        RunDataset::parse(&d.name, d.format, &bytes, &d.sensitive_columns).map_err(|e| AppError::Invalid(e.to_string()))
-    }
-
     /// Delete a dataset and release its stored file unless something else
     /// references it, in one write transaction. A file a user attached within
     /// [`crate::cleanup::ATTACHMENT_GRACE`] is kept, as a request delete

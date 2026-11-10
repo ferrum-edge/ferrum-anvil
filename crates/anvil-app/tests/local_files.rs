@@ -32,8 +32,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use tokio_util::sync::CancellationToken;
 
+mod dataset_runs;
 #[cfg(unix)]
 mod fifo;
+use dataset_runs::dataset_rows_blocking;
 #[cfg(unix)]
 use fifo::{mkfifo, within_seconds};
 
@@ -456,7 +458,7 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
         assert!(err.contains("not chosen on this device") && !err.contains(CANARY), "{}: {err}", r.name);
     }
     let dataset = b.datasets(&ws_b.meta.id).unwrap().pop().unwrap();
-    let err = refused(b.run_dataset(&dataset), "dataset");
+    let err = refused(dataset_rows_blocking(&b, &dataset), "dataset");
     assert!(err.contains("not chosen on this device"), "{err}");
     // The desktop shows each imported reference as not chosen here.
     for r in &requests {
@@ -471,11 +473,11 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
         b.build_context(Some(r.meta.id), &ws_b.meta.id, None, &SendOptions::default()).expect(&r.name);
         assert_eq!(states(&b, request(r)), vec![LinkedFileState::Bound], "{}", r.name);
     }
-    assert!(b.run_dataset(&dataset).is_err(), "the dataset's own file is still not chosen");
+    assert!(dataset_rows_blocking(&b, &dataset).is_err(), "the dataset's own file is still not chosen");
     assert_eq!(states(&b, dataset_referrer), vec![LinkedFileState::Unbound]);
     b.bind_linked_file(dataset_referrer, &rows).unwrap();
     assert_eq!(states(&b, dataset_referrer), vec![LinkedFileState::Bound]);
-    assert_eq!(b.run_dataset(&dataset).unwrap().rows.len(), 1);
+    assert_eq!(dataset_rows_blocking(&b, &dataset).unwrap(), 1);
 }
 
 #[test]
@@ -667,7 +669,7 @@ fn the_status_of_a_linked_file_follows_the_choice_on_this_device_and_the_file() 
         let status = app.linked_file_status(referrer).unwrap();
         assert_eq!(status[0].state, LinkedFileState::Invalid);
         assert!(status[0].problem.as_deref().unwrap().contains("resolves to a different location than the one chosen"), "{status:?}");
-        assert!(app.run_dataset(&d).is_err());
+        assert!(dataset_rows_blocking(&app, &d).is_err());
     }
 
     // Locked: nothing is reported.
@@ -686,13 +688,13 @@ fn a_linked_dataset_swapped_for_a_fifo_is_refused_without_blocking() {
     let ws = app.create_workspace("W").unwrap();
     let d = app.save_dataset(linked_dataset(ws.meta.id, &canonical(&rows))).unwrap();
     app.bind_linked_file(LinkedFileReferrer::Dataset { id: d.meta.id }, &rows).unwrap();
-    assert_eq!(app.run_dataset(&d).unwrap().rows.len(), 1);
+    assert_eq!(dataset_rows_blocking(&app, &d).unwrap(), 1);
 
     // The same path, now a FIFO with no writer: opening it for reading would
     // wait for one.
     std::fs::remove_file(&rows).unwrap();
     mkfifo(&rows);
-    let err = within_seconds(move || app.run_dataset(&d).map(|_| ()).map_err(|e| e.to_string())).unwrap_err();
+    let err = within_seconds(move || dataset_rows_blocking(&app, &d).map(|_| ()).map_err(|e| e.to_string())).unwrap_err();
     assert!(err.contains("not a regular file"), "{err}");
 }
 
@@ -999,7 +1001,7 @@ fn a_relocated_dataset_reads_its_new_file_and_a_later_export_names_the_new_paths
     let d = a.dataset(&d.meta.id).unwrap();
     assert_eq!(d.attachment, linked(&rows));
     assert_eq!(named(&a, dataset), vec![(path_str(&rows), LinkedFileState::Bound)]);
-    assert_eq!(a.run_dataset(&d).unwrap().rows.len(), 1);
+    assert_eq!(dataset_rows_blocking(&a, &d).unwrap(), 1);
 
     // The export carries the new paths (not the bindings), and its preview
     // says that requests or datasets name linked local files.
