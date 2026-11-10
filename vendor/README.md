@@ -4,9 +4,12 @@
 
 `h3` 0.0.8 exactly as published on crates.io (checksum
 `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be`, built from
-hyperium/h3 `22c1aa3f44d1463cd7644c8f654fffc9a6da305c`), with two changes:
-`patches/h3-0.0.8-rfc9220-websocket.patch` and
-`patches/h3-0.0.8-frame-limits.patch`.
+hyperium/h3 `22c1aa3f44d1463cd7644c8f654fffc9a6da305c`), with four changes,
+applied in this order:
+`patches/h3-0.0.8-rfc9220-websocket.patch`,
+`patches/h3-0.0.8-frame-limits.patch`,
+`patches/h3-0.0.8-drain-before-connection-error.patch` and
+`patches/h3-0.0.8-peek-buffered-trailers.patch`.
 
 The first patch is the upstream commit
 [`154ff8d`](https://github.com/hyperium/h3/commit/154ff8d4eb939cddf8136e45cfb757d7f9e55866)
@@ -43,19 +46,53 @@ equivalent bound before bumping `h3`. Anvil sets the limit from
 `max_response_header_bytes` on every HTTP/3 connection it opens. The patch
 is tested as Anvil code, against a raw HTTP/3 origin
 (`crates/anvil-fixtures/src/h3raw.rs`,
-`crates/anvil-transport/tests/h3_response_limits.rs`). No other file differs
-from the published crate.
+`crates/anvil-transport/tests/h3_response_limits.rs`).
+
+The third and fourth patches are ferrum-edge's patches 001 and 003
+(`docs/upstream-h3-patches/` in ferrum-edge; 001 is hyperium/h3#339, 003 is
+not filed upstream), ported onto this tree. Both are bugs of h3 as an HTTP/3
+client, which is Anvil's only role:
+
+* **Drain buffered bytes before a connection error** (001). h3 0.0.8 polls
+  QUIC before it decodes what it already holds, so a connection close (for
+  example `H3_NO_ERROR` from a server that closes without ending the stream)
+  read while whole frames or body bytes are buffered was returned at once,
+  and the response's last bytes were lost. Now a connection error is held on
+  the `FrameStream` until the buffered frames and body are delivered, then
+  surfaces exactly once, without polling QUIC again; a close that truncates a
+  DATA frame surfaces as the connection error, not `UnexpectedEnd`. Any other
+  error, a peer stream reset above all, still surfaces at once: quinn reports
+  a reset only once, and a reset that cut a DATA frame must not become a
+  connection-level `H3_FRAME_ERROR`. The tests are Edge's, in `src/frame.rs`;
+  `src/tests/mod.rs` now points at `../h3-quinn-0.0.10-stop-sending` (upstream
+  points at the h3 repository's `h3-quinn/`) so the crate's own tests build
+  here, and CI runs the frame-stream ones (`ci.yml`, "Vendored h3 frame-stream
+  regressions").
+* **Peek buffered trailers before FIN** (003). `recv_trailers` returns the
+  trailers only at the end of the stream, so it can refuse a known frame
+  after them. `RequestStream::peek_recv_trailers` (client side) decodes the
+  trailers h3 already holds without consuming them. Anvil reads them when its
+  deadline or a cancel ends that wait (`crates/anvil-transport/src/h3.rs`),
+  and the gRPC adapter passes them on as soon as they are buffered
+  (`grpc.rs`), so a server whose FIN is late still has its trailers and
+  status recorded (`h3_response_limits.rs`, `sessions_streams.rs`).
+
+No other file differs from the published crate.
 
 The workspace uses it through `[patch.crates-io]` in `Cargo.toml` (so
 `h3-quinn` 0.0.10 links against it too), and `vendor/` is excluded from the
 workspace so the crate is not linted or tested as Anvil code. The license is
 upstream's MIT license (`h3-0.0.8-rfc9220/LICENSE`).
 
-**Retire it** when an `h3` release after 0.0.8 includes `Protocol::WEBSOCKET`
-and bounds a frame's declared length before buffering it: bump `h3` (and
-`h3-quinn`) in `Cargo.toml`, delete the `[patch.crates-io]` entry, this
-directory and the patches, and regenerate `THIRD_PARTY_LICENSES.md`. Until a
-release bounds frames, re-vendor it with the frame-limit patch instead.
+**Retire it** when an `h3` release after 0.0.8 includes `Protocol::WEBSOCKET`,
+bounds a frame's declared length before buffering it, delivers buffered
+bytes before a connection error (hyperium/h3#339) and can return buffered
+trailers before FIN: bump `h3` (and `h3-quinn`) in `Cargo.toml`, delete the
+`[patch.crates-io]` entry, this directory and the patches, remove the CI step,
+and regenerate `THIRD_PARTY_LICENSES.md`. Until a release has all four,
+re-vendor it with the patches it still needs instead. ferrum-edge carries
+the same h3 fixes in its own vendored copy (`vendor/h3-0.0.8-ferrum-patched`),
+so check its patch list too on each bump.
 
 To check the vendored copy against crates.io:
 
@@ -63,6 +100,8 @@ To check the vendored copy against crates.io:
 cargo download h3@0.0.8   # or unpack ~/.cargo/registry/src/*/h3-0.0.8
 patch -d <unpacked h3-0.0.8> -p1 < vendor/patches/h3-0.0.8-rfc9220-websocket.patch
 patch -d <unpacked h3-0.0.8> -p1 < vendor/patches/h3-0.0.8-frame-limits.patch
+patch -d <unpacked h3-0.0.8> -p1 < vendor/patches/h3-0.0.8-drain-before-connection-error.patch
+patch -d <unpacked h3-0.0.8> -p1 < vendor/patches/h3-0.0.8-peek-buffered-trailers.patch
 diff -ru <unpacked h3-0.0.8> vendor/h3-0.0.8-rfc9220   # only Cargo.lock (and .cargo-ok) differ
 ```
 

@@ -692,7 +692,6 @@ export const api = {
   moveRequest: (requestId: string, folderId: string | null, sortKey: number) => call<RequestDefinition>("request_move", { requestId, folderId, sortKey }),
   duplicateRequest: (requestId: string) => call<RequestDefinition>("request_duplicate", { requestId }),
   deleteRequest: (requestId: string) => call<void>("request_delete", { requestId }),
-  search: (workspaceId: string, query: string) => call<RequestDefinition[]>("search", { workspaceId, query }),
 
   environments: (workspaceId: string) => call<Environment[]>("environments_list", { workspaceId }),
   saveEnvironment: (environment: Environment) => call<Environment>("environment_save", { environment }),
@@ -869,7 +868,6 @@ export const api = {
   driftReport: (importId: string) => call<DriftReport>("drift_report", { importId }),
   /** One recorded send checked against its import's description; null when it belongs to none. */
   driftCheckExecution: (executionId: string) => call<ExecutionDrift | null>("drift_check_execution", { executionId }),
-  driftRevise: (importId: string, suggestionIds: string[]) => call<Revision>("drift_revise", { importId, suggestionIds }),
   driftReimportPlan: (importId: string, suggestionIds: string[]) => call<DriftPlan>("drift_reimport_plan", { importId, suggestionIds }),
   /** Reimport the revised description; returns how many requests changed. */
   driftReimportApply: (importId: string, suggestionIds: string[], digest: string) =>

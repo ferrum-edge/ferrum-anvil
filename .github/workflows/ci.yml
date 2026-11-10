@@ -82,6 +82,13 @@ jobs:
           ulimit -n 4096 2>/dev/null || true
           # Every failing test binary is reported in one run, not just the first.
           cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast
+      # vendor/ is not in the workspace, so the vendored h3's own regression
+      # tests for Anvil's frame-stream patch (vendor/README.md) run here. The
+      # crate has no lockfile of its own; nothing it resolves ships.
+      - name: Vendored h3 frame-stream regressions
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --manifest-path vendor/h3-0.0.8-rfc9220/Cargo.toml --lib frame::tests -- --skip proto::
       # The desktop shell's own unit tests (no window is created). Not on
       # Windows: tauri-build embeds the common-controls manifest only in the app
       # binary, and a test binary linking the dialog plugin fails to load without it.

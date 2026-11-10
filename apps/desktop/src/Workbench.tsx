@@ -41,6 +41,7 @@ type Dialog =
   | "update"
   | "workspace"
   | { kind: "rename"; id: string; isFolder: boolean; name: string }
+  | { kind: "deleteWorkspace"; id: string; name: string }
   | { kind: "history"; view: ExecutionView }
   | { kind: "folder"; id: string };
 
@@ -683,6 +684,24 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     }
   };
 
+  const deleteWorkspace = async (id: string) => {
+    try {
+      // Stop first: if a tab's work could not be stopped, the workspace and its tabs stay.
+      const gone = tabsRef.current.filter((t) => t.wsId === id);
+      const results = await Promise.all(gone.map((t) => stopWork(t, "so the workspace was not deleted and its tab stays open")));
+      if (results.includes(false)) return;
+      await api.deleteWorkspace(id);
+      for (const t of gone) detachSession(t.session);
+      const ids = new Set(gone.map((t) => t.req.id));
+      setTabs((ts) => ts.filter((t) => t.wsId !== id));
+      setActive((a) => (a && ids.has(a) ? null : a));
+      // Another workspace is selected (a new one is made if none is left).
+      await loadWorkspaces();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
   const moveInto = async (dragId: string, dragKind: string, folderId: string | null) => {
     try {
       const key = Date.now();
@@ -792,6 +811,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     } catch (err) {
                       fail(err);
                     }
+                  } else if (e.target.value === "__delete") {
+                    if (ws) setDialog({ kind: "deleteWorkspace", id: ws.id, name: ws.name });
                   } else {
                     const w = workspaces.find((x) => x.id === e.target.value);
                     if (w) setWs(w);
@@ -804,6 +825,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   </option>
                 ))}
                 <option value="__new">+ New workspace…</option>
+                {ws && <option value="__delete">Delete this workspace…</option>}
               </select>
             </div>
             <button className="btn ghost icon-btn" aria-label="Workspace settings" title="Workspace auth, variables and settings" onClick={() => setDialog("workspace")}>
@@ -1292,6 +1314,17 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             }}
           />
         )}
+        {typeof dialog === "object" && dialog?.kind === "deleteWorkspace" && (
+          <DeleteWorkspaceDialog
+            name={dialog.name}
+            openTabs={tabs.filter((t) => t.wsId === dialog.id)}
+            onClose={() => setDialog(null)}
+            onDelete={async () => {
+              setDialog(null);
+              await deleteWorkspace(dialog.id);
+            }}
+          />
+        )}
         {typeof dialog === "object" && dialog?.kind === "history" && (
           <Modal
             title={`${dialog.view.record.prepared.method} ${dialog.view.record.prepared.url}`}
@@ -1383,6 +1416,51 @@ function RenameDialog(props: { name: string; onClose: () => void; onSave: (n: st
         }}
       >
         <input className="field full" aria-label="Name" value={n} onChange={(e) => setN(e.target.value)} onFocus={(e) => e.target.select()} />
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * Deleting a workspace deletes everything in it, so its name is typed to
+ * confirm (a misclick on the menu cannot do it).
+ */
+function DeleteWorkspaceDialog(props: { name: string; openTabs: OpenTab[]; onClose: () => void; onDelete: () => void }) {
+  const [typed, setTyped] = useState("");
+  const ok = typed === props.name;
+  const stop = props.openTabs.some((t) => liveWork(t)) ? " Its open sessions and requests in flight will be stopped." : "";
+  const dirty = props.openTabs.filter(isDirty).length;
+  const edits = dirty ? ` Unsaved changes in ${dirty} open tab(s) will be lost.` : "";
+  return (
+    <Modal
+      title="Delete workspace"
+      onClose={props.onClose}
+      footer={
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="btn danger" disabled={!ok} onClick={props.onDelete}>
+            Delete workspace
+          </button>
+        </>
+      }
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (ok) props.onDelete();
+        }}
+      >
+        <p className="confirm-message">
+          Delete “{props.name}” and everything in it: requests, folders, environments, profiles, secrets, load plans and history. This cannot be undone.
+          {stop}
+          {edits}
+        </p>
+        <label className="lbl">
+          Type the workspace name to confirm
+          <input className="field full" value={typed} onChange={(e) => setTyped(e.target.value)} data-autofocus />
+        </label>
       </form>
     </Modal>
   );

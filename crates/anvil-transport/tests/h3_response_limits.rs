@@ -8,7 +8,8 @@
 //!   buffering it, and refuses a decoded section over it.
 //! * The total deadline, the body idle deadline and cancellation end the
 //!   response in every phase: a body dripped past `total_ms`, and trailers
-//!   whose stream never ends. The client stops the stream when it gives up.
+//!   whose stream never ends. The client stops the stream when it gives up,
+//!   and records trailers that arrived before the deadline.
 
 use anvil_domain::Id;
 use anvil_domain::events::ExecutionEvent;
@@ -429,7 +430,14 @@ async fn trailers_without_the_end_of_the_stream_end_at_the_idle_and_total_deadli
         let out = send(&t, &p, &CancellationToken::new()).await;
         assert_eq!(failure(&out), (kind, Phase::ResponseBody));
         assert_eq!(out.observation.failure.as_ref().unwrap().deadline_ms, Some(deadline));
-        assert_eq!(out.response.as_ref().unwrap().body.completeness, BodyCompleteness::Incomplete);
+        let r = out.response.as_ref().unwrap();
+        assert_eq!(r.body.completeness, BodyCompleteness::Incomplete);
+        assert_eq!(&out.body[..], b"ok", "{kind:?}");
+        // The trailers arrived before the deadline: only the end of the
+        // stream is missing, so they are recorded (h3 hands them over only
+        // at FIN; the client reads what it already has).
+        assert!(r.trailers_received, "{kind:?}");
+        assert!(r.trailers.iter().any(|h| h.name == "accept-ranges" && h.value == "bytes"), "{kind:?}");
         assert_eq!(o.nth_stop(n, Duration::from_secs(5)).await, Some(H3_REQUEST_CANCELLED), "{kind:?}");
     }
 }

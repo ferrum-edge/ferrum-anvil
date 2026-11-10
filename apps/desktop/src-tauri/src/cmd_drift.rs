@@ -42,11 +42,6 @@ pub async fn drift_check_execution(handle: AppHandle, execution_id: String) -> R
     .await
 }
 
-#[tauri::command]
-pub async fn drift_revise(handle: AppHandle, import_id: String, suggestion_ids: Vec<String>) -> R<Revision> {
-    blocking(&handle, move |st| st.app()?.drift_revise(&id(&import_id)?, &suggestion_ids, LIMIT).map_err(e)).await
-}
-
 /// What reimporting the revision would do to the collection.
 #[derive(Serialize)]
 pub struct DriftPlan {

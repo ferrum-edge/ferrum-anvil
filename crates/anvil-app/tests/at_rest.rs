@@ -131,7 +131,7 @@ async fn no_plaintext_user_data_in_profile_files_side_files_or_temp() {
     assert_eq!(hist.len(), 1, "the exchange (echoing every canary back) is in history");
     // The data really is there and readable through the app.
     assert_eq!(app.get_attachment(&attachment_sha(&attachment)).unwrap().unwrap(), b"attachment body CANARY-ATTACH-1010");
-    assert!(app.search(&ws.meta.id, "canary-name").unwrap().iter().any(|r| r.meta.id == req.meta.id));
+    assert!(app.requests(&ws.meta.id).unwrap().iter().any(|r| r.meta.id == req.meta.id && r.name == "CANARY-NAME-3232"));
 
     // While open (WAL and shared-memory files present).
     let mut files = Vec::new();
