@@ -228,6 +228,10 @@
 - A load run's confirmation lists each destination once, in the order the plan first reaches
   it; a destination that recurred after another step's was listed again (#536).
 - Export and full-backup passphrases need 8 characters, as their messages say, not 8 bytes (#536).
+- A load plan whose chain has more than 64 steps is refused when it is saved; it used to save and
+  be refused only when run (#537).
+- The load report's timeline table shows "—" for the p50 and p99 of a second with no successful
+  unit, as the chart and the summary tiles do, instead of "0 µs" (#537).
 
 ## [0.1.7] - 2026-11-03
 
