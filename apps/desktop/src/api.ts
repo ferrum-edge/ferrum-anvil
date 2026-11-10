@@ -820,6 +820,7 @@ export const api = {
   datasets: (workspaceId: string) => call<Dataset[]>("datasets_list", { workspaceId }),
   addDataset: (workspaceId: string, grant: string, name: string, sensitiveColumns: string[]) =>
     call<Dataset>("dataset_add", { workspaceId, grant, name, sensitiveColumns }),
+  deleteDataset: (datasetId: string) => call<void>("dataset_delete", { datasetId }),
 
   scenarios: (workspaceId: string) => call<Scenario[]>("scenarios_list", { workspaceId }),
   createScenario: (workspaceId: string, name: string, requestIds: string[]) => call<Scenario>("scenario_create", { workspaceId, name, requestIds }),

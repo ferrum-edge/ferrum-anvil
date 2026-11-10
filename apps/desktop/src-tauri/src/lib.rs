@@ -233,6 +233,7 @@ pub fn run() {
             cmd_load::load_compare,
             cmd_load::datasets_list,
             cmd_load::dataset_add,
+            cmd_load::dataset_delete,
             cmd_runner::scenarios_list,
             cmd_runner::scenario_create,
             cmd_runner::scenario_save,

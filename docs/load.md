@@ -201,6 +201,10 @@ whole document. At the maximum bounds, stored dataset data is about 350 MiB
 or less before allocator and parser overhead: up to 64 MiB each for the source
 bytes and compact cell text, 4 Mi slots (about 192 MiB at the worst vector
 capacity), and up to 24 MiB for one million row-vector headers.
+In the desktop, **Delete dataset…** beside the plan's dataset deletes it, its
+linked-file binding and its stored copy unless something else uses that file.
+A load plan or scenario that still names a deleted dataset is refused when it
+runs, as one that names a deleted request is.
 
 **Warmup**: iterations that start (closed/iterations) or are scheduled (open)
 in the first `warmup_secs` are excluded from every summary metric. They stay

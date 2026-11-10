@@ -327,6 +327,14 @@ pub fn datasets_list(st: State<'_, DesktopState>, workspace_id: String) -> R<Vec
     st.app()?.datasets(&id(&workspace_id)?).map_err(e)
 }
 
+/// Delete a dataset, its linked-file binding and the stored file nothing
+/// else uses. A load plan or scenario that still names it is kept, and is
+/// refused when it runs, as one that names a deleted request is.
+#[tauri::command]
+pub fn dataset_delete(st: State<'_, DesktopState>, dataset_id: String) -> R<()> {
+    st.app()?.delete_dataset(&id(&dataset_id)?).map_err(e)
+}
+
 /// Copy a CSV/JSON file the user picked in the native open dialog (`grant`,
 /// purpose `dataset`) into encrypted storage as a dataset after checking
 /// that it parses.
