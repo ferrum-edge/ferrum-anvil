@@ -255,9 +255,11 @@ real-provider acceptance tests with test accounts.
 only by dev-dependencies) runs the real loopback PKCE flow against the fixture
 issuer (`anvil_fixtures::idp`), redeems the code through the engine transport
 and reads the subject from the issuer's userinfo endpoint with the new access
-token. It refuses any non-loopback endpoint, is not part of
-`builtin_providers()`, and `anvil_identity::MOCK_PROVIDER_COMPILED` lets
-release checks assert that it is absent.
+token. It refuses any non-loopback endpoint and is not part of
+`builtin_providers()`. The dependency-graph check of
+`scripts/release-check.sh` fails the release if
+`anvil-identity feature "mock-provider"` is in the desktop app's normal/build
+graph.
 
 ---
 

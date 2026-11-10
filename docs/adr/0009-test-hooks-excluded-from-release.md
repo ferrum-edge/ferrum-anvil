@@ -7,7 +7,10 @@
 - Release builds never enable the feature. `scripts/release-check.sh`
   inspects the release binaries for plugin symbols and the e2e unlock
   strings, and fails the release if they are present.
-- Mock identity providers follow the same rule (`mock-provider` feature).
+- Mock identity providers follow the same rule (`anvil-identity` cargo feature
+  `mock-provider`, enabled only from dev-dependencies). The graph check of
+  `scripts/release-check.sh` fails the release if the feature is in the
+  release dependency graph.
 
 ## Consequences
 - E2E tests drive the real native engine without typing credentials into

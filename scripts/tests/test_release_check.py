@@ -1068,6 +1068,51 @@ foreach ($k in $finds.Keys) {
         }, output)
 
 
+class ReleaseCheckGraph(unittest.TestCase):
+    """The graph check reads `cargo tree`; a stub `cargo` stands in for it."""
+
+    CLEAN_TREE = (
+        'anvil-desktop v0.1.7 (/src/apps/desktop/src-tauri)\n'
+        'anvil-desktop feature "default"\n'
+        'anvil-identity v0.1.7 (/src/crates/anvil-identity)\n'
+        'anvil-identity feature "default"\n'
+    )
+
+    def graph(self, tree):
+        with tempfile.TemporaryDirectory(prefix="release-check-graph-") as temp:
+            temp = Path(temp)
+            stub = temp / "bin" / "cargo"
+            stub.parent.mkdir()
+            stub.write_text('#!/bin/sh\n[ "$1" = tree ] || exit 97\ncat "$RELEASE_CHECK_FAKE_TREE"\n')
+            stub.chmod(0o755)
+            tree_file = temp / "tree.txt"
+            tree_file.write_text(tree)
+            report = temp / "report.json"
+            result = hosted_subprocess(
+                ["/bin/bash", str(CHECKER), "--report", str(report)],
+                env={**os.environ, "PATH": str(stub.parent) + os.pathsep + os.environ["PATH"],
+                     "RELEASE_CHECK_FAKE_TREE": str(tree_file), "TMPDIR": str(temp)},
+                cwd=temp, capture_output=True, text=True, timeout=30,
+            )
+            return result, json.loads(report.read_text())
+
+    def test_clean_release_graph_passes(self):
+        result, evidence = self.graph(self.CLEAN_TREE)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(evidence["graph"], "pass")
+
+    def test_test_only_features_in_the_release_graph_fail(self):
+        for line in ('anvil-identity feature "mock-provider"',
+                     'anvil-desktop feature "e2e"',
+                     'tauri-plugin-wdio-webdriver v0.2.0'):
+            with self.subTest(line=line):
+                result, evidence = self.graph(self.CLEAN_TREE + line + "\n")
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 1, output)
+                self.assertEqual(evidence["graph"], "fail")
+                self.assertIn("FAIL  graph:", output)
+
+
 class HostedFixturePolicy(unittest.TestCase):
     def test_root_cannot_bypass_permission_fixtures(self):
         env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}

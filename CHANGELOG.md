@@ -217,6 +217,10 @@
   have been read, the id is shown as it is (#471).
 - Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
   longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
+- `scripts/release-check.sh` now fails the dependency-graph check when `anvil-identity`'s
+  CI-only `mock-provider` feature is in the release graph, as ADR 0009 and `docs/identity.md`
+  already said it did. The unused `anvil_identity::MOCK_PROVIDER_COMPILED` constant those
+  documents named is removed (#525).
 
 ## [0.1.7] - 2026-11-03
 

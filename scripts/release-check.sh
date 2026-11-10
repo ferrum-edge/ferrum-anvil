@@ -14,8 +14,9 @@
 #
 # Checks
 #   1. graph    `cargo tree` for anvil-desktop with the release feature set
-#               (targets: all) must not contain tauri-plugin-wdio-webdriver or
-#               the `e2e` feature.                       (skip with --no-graph)
+#               (targets: all) must not contain tauri-plugin-wdio-webdriver,
+#               the `e2e` feature or anvil-identity's `mock-provider`
+#               feature.                                 (skip with --no-graph)
 #   2. content  no executable may contain strings unique to the embedded
 #               WebDriver plugin or to the E2E profile unlock; each artifact
 #               must contain at least one Anvil marker string, so a
@@ -142,11 +143,12 @@ if [ "$graph" = 1 ]; then
   [ -n "$features" ] && feat_args=(--features "$features")
   tree="$work/tree.txt"
   if (cd "$root" && cargo tree --locked -p anvil-desktop --target all -e normal,build,features --prefix none ${feat_args[@]+"${feat_args[@]}"}) >"$tree" 2>"$work/tree.err"; then
-    if grep -q "tauri-plugin-wdio-webdriver" "$tree" || grep -q 'anvil-desktop feature "e2e"' "$tree"; then
-      fail "graph: tauri-plugin-wdio-webdriver / feature e2e is in the release dependency graph"
+    if grep -q "tauri-plugin-wdio-webdriver" "$tree" || grep -q 'anvil-desktop feature "e2e"' "$tree" ||
+      grep -q 'anvil-identity feature "mock-provider"' "$tree"; then
+      fail "graph: tauri-plugin-wdio-webdriver / feature e2e / feature mock-provider is in the release dependency graph"
       graph_result="fail"
     else
-      say "ok    graph: $(sort -u "$tree" | wc -l | tr -d ' ') tree entries, no WebDriver plugin, no e2e feature"
+      say "ok    graph: $(sort -u "$tree" | wc -l | tr -d ' ') tree entries, no WebDriver plugin, no e2e or mock-provider feature"
       graph_result="pass"
     fi
   else
