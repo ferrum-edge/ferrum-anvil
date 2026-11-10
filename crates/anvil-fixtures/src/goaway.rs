@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 pub struct GoAwayFixture {
     pub addr: SocketAddr,
     pub log: GroundTruthLog,
-    /// Streams accepted per connection, in order (ground truth).
+    /// Request streams accepted, over all connections (ground truth).
     pub streams_seen: Arc<AtomicUsize>,
     cancel: CancellationToken,
 }

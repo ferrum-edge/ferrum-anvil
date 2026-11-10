@@ -1364,19 +1364,12 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
   const [s, setS] = useState<AppSettings | null>(null);
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  // A recovery key from a conversion is shown once: Settings stays open
-  // until the user confirms they stored it.
-  const [recovery, setRecovery] = useState<string | null>(null);
-  const [closeRefused, setCloseRefused] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     api.settings().then(setS);
     api.systemInfo().then(setInfo);
   }, []);
-  const close = () => {
-    if (recovery) return setCloseRefused(true);
-    props.onClose();
-  };
+  const close = () => props.onClose();
   if (!s) return null;
   return (
     <Modal
@@ -1424,14 +1417,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
           <input type="checkbox" checked={s.lock.lock_on_os_lock} onChange={(e) => setS({ ...s, lock: { ...s.lock, lock_on_os_lock: e.target.checked } })} />
           Lock when the computer sleeps
         </label>
-        <ChangePassphrase
-          recovery={recovery}
-          closeRefused={closeRefused}
-          onRecovery={(key) => {
-            setRecovery(key);
-            setCloseRefused(false);
-          }}
-        />
+        <ChangePassphrase />
       </section>
       <section className="settings-section">
         <h3>History</h3>
@@ -1597,7 +1583,7 @@ function StorageSection() {
 
 type LeftoverEntry = { profileId: string; name: string; service: string; account: string };
 
-function ChangePassphrase(props: { recovery: string | null; closeRefused: boolean; onRecovery: (key: string | null) => void }) {
+function ChangePassphrase() {
   const [open, setOpen] = useState(false);
   // Converting and changing are different operations: neither is offered
   // until the open profile's mode is known.
@@ -1647,7 +1633,7 @@ function ChangePassphrase(props: { recovery: string | null; closeRefused: boolea
       )}
     </>
   );
-  if (!open && !props.recovery)
+  if (!open)
     return (
       <>
         <button className="btn small start" disabled={!protection} onClick={() => setOpen(true)}>
@@ -1705,22 +1691,6 @@ function ChangePassphrase(props: { recovery: string | null; closeRefused: boolea
           Save
         </button>
       </div>
-      {props.recovery && (
-        <>
-          <p className="hint">Your recovery key opens this profile if you forget the passphrase. It is shown once and is not stored anywhere. Keep it offline.</p>
-          <div className="recovery" aria-label="Recovery key">
-            {props.recovery}
-          </div>
-          {props.closeRefused && (
-            <p className="hint" role="alert">
-              Store the recovery key before closing Settings. It cannot be shown again.
-            </p>
-          )}
-          <button className="btn small start" onClick={() => props.onRecovery(null)}>
-            I stored it safely
-          </button>
-        </>
-      )}
       {msg && <div className="hint">{msg}</div>}
       {notes}
     </fieldset>

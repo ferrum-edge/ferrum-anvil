@@ -40,6 +40,3 @@ pub use ids::Id;
 
 /// Version of the persisted/exported object schema. Bump with a migration.
 pub const SCHEMA_VERSION: u32 = 1;
-
-/// Version of the transport adapter event contract.
-pub const ADAPTER_CONTRACT_VERSION: u32 = 1;

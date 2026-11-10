@@ -70,7 +70,7 @@ fn plaintext_leak_audit_db_wal_checkpoints() {
     store.add_history(&Id::new(), Some(&ws), None, 1, &req, Some(format!("response containing {}", PLANTED[3]).as_bytes())).unwrap();
     store.put_blob(PLANTED[0].as_bytes()).unwrap();
     store.checkpoint("audit").unwrap();
-    // Force WAL content to exist on disk before scanning.
+    // The store is still open, so any -wal and -shm files are scanned too.
     for (path, bytes) in all_bytes(dir.path()) {
         for p in PLANTED {
             let hay = String::from_utf8_lossy(&bytes);

@@ -67,7 +67,7 @@ pub async fn send(env: &Env, c: &ExecutionContext) -> ExecutionOutput {
     env.engine.execute(c, EventCtx::none(), CancellationToken::new()).await
 }
 
-/// New gateway operator-log lines since `from`, mentioning `needle`.
+/// New gateway operator-log lines since `from` whose `proxy_id` is `proxy_id`.
 fn op_lines(env: &Env, from: usize, proxy_id: &str) -> Vec<String> {
     env.gateway.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(10).collect()
 }

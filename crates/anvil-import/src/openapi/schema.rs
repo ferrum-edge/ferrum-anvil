@@ -302,9 +302,6 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             }
         }
 
-        let nullable = types.iter().any(|t| t == "null")
-            || obj.get("nullable").and_then(Value::as_bool) == Some(true)
-            || obj.get("x-nullable").and_then(Value::as_bool) == Some(true);
         let non_null: Vec<&String> = types.iter().filter(|t| *t != "null").collect();
         if non_null.len() > 1 {
             // The message lists every type, on every visit: charged.
@@ -326,7 +323,6 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             None if !types.is_empty() => return Some(Value::Null), // only "null"
             None => infer_type(obj).map(str::to_string),
         };
-        let _ = nullable;
         match t.as_deref() {
             Some("object") => self.gen_object(obj, at, depth),
             Some("array") => self.gen_array(obj, at, depth, name),

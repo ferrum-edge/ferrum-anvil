@@ -57,7 +57,7 @@ proxies:
 
   # UP-003: TEST-NET-1 (RFC 5737) blackhole address: SYNs get no answer, so the
   # gateway's connect deadline fires. (A saturated-backlog loopback listener does
-  # not stall connects on macOS; see docs/lab.md.) Network-dependent: a host with
+  # not stall connects on macOS.) Network-dependent: a host with
   # no default route reports EHOSTUNREACH instead, which the scenario also accepts.
   - id: up003-connect-stall
     listen_path: /up/connect-stall

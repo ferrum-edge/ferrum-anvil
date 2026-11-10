@@ -1,5 +1,5 @@
 use crate::Id;
-use crate::execution::{Direction, FailureKind, Phase, PhaseStatus, StreamMessage};
+use crate::execution::{FailureKind, Phase, PhaseStatus, StreamMessage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +28,4 @@ pub enum SessionCommand {
     Ping,
     Close { code: u16, reason: String },
     HalfClose,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct SessionMessageEvent {
-    pub session_id: Id,
-    pub direction: Direction,
-    pub message: StreamMessage,
 }

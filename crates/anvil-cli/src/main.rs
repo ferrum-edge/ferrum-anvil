@@ -43,7 +43,7 @@ use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -1519,13 +1519,6 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
 /// no passphrase: a bundle without a vault refuses any passphrase.
 fn export_passphrase() -> Option<String> {
     std::env::var("ANVIL_EXPORT_PASSPHRASE").ok().filter(|p| !p.is_empty())
-}
-
-#[allow(dead_code)]
-fn read_all_stdin() -> Result<String> {
-    let mut s = String::new();
-    std::io::stdin().read_to_string(&mut s)?;
-    Ok(s)
 }
 
 #[cfg(test)]

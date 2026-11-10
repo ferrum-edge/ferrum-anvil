@@ -210,7 +210,7 @@ const ENTRY_BYTES: usize = 64;
 /// the same name and location). Every reference followed and every copy is
 /// charged to `meter` before it is made (see [`Spec::resolve_within`]);
 /// once one does not fit, the list stops short and [`Meter::exhausted`]
-/// says so. The same goes for [`request_body`] and [`responses`].
+/// says so. The same goes for [`body_of`] and [`responses`].
 pub fn parameters<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Vec<Param<'a>> {
     merge_parameters(parameter_lists(spec, op, meter))
 }
@@ -370,14 +370,8 @@ fn content_media<'a>(spec: &'a Spec, owner: &'a Value, owner_ptr: &str, meter: &
     out
 }
 
-/// The request body of an operation (see [`parameters`] for `meter`).
-pub fn request_body<'a>(spec: &'a Spec, op: &OperationRef<'a>, meter: &mut Meter) -> Option<RequestBody<'a>> {
-    let params = if spec.is_swagger2() { parameters(spec, op, meter) } else { vec![] };
-    body_of(spec, op, &params, meter)
-}
-
-/// [`request_body`] of `op`, whose [`parameters`] (Swagger 2.0 describes
-/// its body with them) are `params`.
+/// The request body of `op` (see [`parameters`] for `meter`), whose
+/// [`parameters`] (Swagger 2.0 describes its body with them) are `params`.
 pub(crate) fn body_of<'a>(spec: &'a Spec, op: &OperationRef<'a>, params: &[Param<'a>], meter: &mut Meter) -> Option<RequestBody<'a>> {
     if spec.is_swagger2() {
         if let Some(body) = params.iter().find(|p| p.location == "body") {

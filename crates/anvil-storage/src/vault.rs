@@ -399,7 +399,8 @@ fn unwrap_with_passphrase(w: &WrappedKey, passphrase: &str, label: &[u8]) -> Res
     Ok(Key::from_bytes(&dek)?)
 }
 
-/// Human-friendly recovery key: 32 random bytes as base32 groups.
+/// Human-friendly recovery key: `raw` as base32 in groups of four characters
+/// (every caller passes 20 random bytes, i.e. 160 bits as 32 characters).
 pub fn format_recovery_key(raw: &[u8]) -> String {
     const ALPHA: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bits = 0u32;

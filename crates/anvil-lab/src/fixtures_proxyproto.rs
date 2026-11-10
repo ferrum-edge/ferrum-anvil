@@ -1,4 +1,4 @@
-//! Fixtures for the `proxyproto` profile (ports 19901–19923, see
+//! Fixtures for the `proxyproto` profile (ports 19901–19930, see
 //! lab/gateway/proxyproto{,-auth,-v6}.yaml).
 //!
 //! The TCP backends require a PROXY v2 header themselves: the gateway's

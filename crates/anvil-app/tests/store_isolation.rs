@@ -72,7 +72,7 @@ fn deleting_a_folder_in_a_parent_cycle_terminates() {
     let b = app.create_folder(&ws.meta.id, Some(a.meta.id), "b").unwrap();
     let req = app.create_request(&ws.meta.id, Some(b.meta.id), "in b", RequestSpec::http("GET", "http://127.0.0.1/")).unwrap();
     // `save_folder` does not validate ancestry, so it can close the cycle
-    // a -> b -> a, as an imported bundle could.
+    // a -> b -> a.
     let mut a = app.folder(&a.meta.id).unwrap();
     a.parent_id = Some(b.meta.id);
     let a = app.save_folder(a).unwrap();
@@ -102,7 +102,7 @@ fn within_timeout<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> 
 }
 
 /// Close the parent cycle a -> b -> a with `save_folder`, which does not
-/// validate ancestry, as an imported bundle could. Returns (a, b).
+/// validate ancestry. Returns (a, b).
 fn folder_cycle(app: &App, ws: &Id) -> (Id, Id) {
     let a = app.create_folder(ws, None, "a").unwrap();
     let b = app.create_folder(ws, Some(a.meta.id), "b").unwrap();

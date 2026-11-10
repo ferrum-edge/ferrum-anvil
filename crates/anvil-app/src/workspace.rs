@@ -285,30 +285,6 @@ impl App {
         })?
     }
 
-    /// Ancestor chain root → leaf (inclusive); every folder must be in `ws`.
-    pub fn folder_chain(&self, ws: &Id, id: Option<Id>) -> Result<Vec<Folder>> {
-        let mut chain = Vec::new();
-        let mut cur = id;
-        let mut guard = 0;
-        while let Some(c) = cur {
-            let f = self.folder(&c)?;
-            // Folder settings, auth and variables apply only inside their own
-            // workspace; a parent id that names another workspace's folder
-            // is refused rather than followed.
-            if f.workspace_id != *ws {
-                return Err(AppError::Invalid(format!("folder '{}' is not in this workspace", f.name)));
-            }
-            cur = f.parent_id;
-            chain.push(f);
-            guard += 1;
-            if guard > 256 {
-                return Err(AppError::Invalid("folder ancestry is too deep or cyclic".into()));
-            }
-        }
-        chain.reverse();
-        Ok(chain)
-    }
-
     /// Delete a folder, its subfolders and their requests, and release the
     /// stored files those requests held as [`App::delete_request`] does.
     pub fn delete_folder(&self, id: &Id) -> Result<()> {
@@ -1002,9 +978,6 @@ impl App {
     }
 }
 
-/// Validate placement under the same write lock as a folder create/save.
-/// A concurrent delete cannot leave the new row under a deleted owner or
-/// parent; a foreign parent cannot supply another workspace's inherited scope.
 /// The import root a request in `folder` resolves under when it is not open
 /// to its workspace, as [`App::build_context`] decides it: the innermost
 /// import root of the folder's ancestry, unless the user opened it.
@@ -1030,6 +1003,9 @@ fn leaves_import_in(s: &StoreTx<'_>, from: Option<Id>, to: Option<Id>) -> anvil_
     Ok((!stays).then_some(root))
 }
 
+/// Validate placement under the same write lock as a folder create/save.
+/// A concurrent delete cannot leave the new row under a deleted owner or
+/// parent; a foreign parent cannot supply another workspace's inherited scope.
 fn validate_folder_parent_in(s: &StoreTx<'_>, ws: &Id, parent: Option<Id>) -> anvil_storage::store::Result<()> {
     if s.get::<Workspace>(kind::WORKSPACE, ws)?.is_none() {
         return Err(StoreError::NotFound("workspace".into()));

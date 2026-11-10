@@ -289,7 +289,6 @@ const STRICT: &str = r#"{"openapi": "3.1.0", "info": {"title": "t", "version": "
 
 #[test]
 fn observed_values_never_reach_findings_suggestions_or_revisions() {
-    let spec = Spec::parse(STRICT.as_bytes()).unwrap();
     // A token-shaped segment, assembled at run time so secret scanners do
     // not flag the fixture.
     let jwt = ["eyJhbGciOi", "JIUzI1NiJ9", ".", "eyJzdWIiOi", "JqYW5lIn0", ".", "c2lnbmF0dXJl"].concat();
@@ -355,7 +354,6 @@ fn observed_values_never_reach_findings_suggestions_or_revisions() {
         // The inferred map is `additionalProperties`, not properties named by emails.
         let users = r.suggestions.iter().find(|s| s.title.starts_with("Document GET /users")).unwrap();
         assert!(users.snippet.contains("additionalProperties"), "{}", users.snippet);
-        let _ = &spec;
     }
 }
 

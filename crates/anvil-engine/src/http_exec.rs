@@ -2,7 +2,6 @@
 //! (redirects, safe retries, DPoP nonce challenge, HTTP/3 → TCP fallback),
 //! each with freshly applied auth, followed by diagnosis and record assembly.
 
-use crate::assertions::{self, Observed};
 use crate::context::{ExecutionContext, resolve_sensitive};
 use crate::h3_exec::H3Fallback;
 use crate::prepare::{self, PreparedHttp, Target};
@@ -1418,8 +1417,6 @@ pub(crate) async fn execute_viewing(
             output.record.prepared.inferred.push(crate::SECRET_COOKIE_NAME_NOTE.into());
         }
     }
-    let _ = assertions::evaluate;
-    let _: Option<Observed> = None;
     output
 }
 

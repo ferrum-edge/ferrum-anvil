@@ -145,7 +145,6 @@ type PlanDraft = { plan: LoadPlan; created: boolean };
 /** Unsaved plan edits by workspace id, then plan id. */
 type Drafts = Record<string, Record<string, PlanDraft>>;
 
-/** The plan with its list fields normalized; an already normalized plan is returned as is. */
 /** What the backend sets on a save; an edit never changes it. */
 function storedMeta(p: LoadPlan): Pick<LoadPlan, "trusted" | "created_at" | "updated_at"> {
   return { trusted: p.trusted, created_at: p.created_at, updated_at: p.updated_at };
@@ -157,6 +156,7 @@ function sameEdit(a: LoadPlan, b: LoadPlan): boolean {
   return content(a) === content(b);
 }
 
+/** The plan with its list fields normalized; an already normalized plan is returned as is. */
 function editable(plan: LoadPlan): EditPlan {
   return plan.chain && plan.mix ? (plan as EditPlan) : { ...plan, chain: plan.chain ?? [], mix: plan.mix ?? [] };
 }

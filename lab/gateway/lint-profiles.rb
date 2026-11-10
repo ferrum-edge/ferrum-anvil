@@ -20,8 +20,8 @@
 # PassiveHealthCheck 1527, CircuitBreakerConfig 2225, RetryConfig 2294, GatewayConfig 3200);
 # @ v0.9.7 the same structs are at 2646, 3073, 3101, 1843, 1217, 1463, 1542, 2262, 2331, 3252;
 # src/config/types.rs is byte-identical at v0.9.8. v0.9.9 only adds Proxy fields
-# (allow_path_parameters, websocket_permessage_deflate) that older releases reject, so profiles must
-# not use them while those releases are supported. v0.9.10 changes no config struct or plugin key set
+# (allow_path_parameters, websocket_permessage_deflate) that older releases reject, so profiles did
+# not use them while those releases were supported. v0.9.10 changes no config struct or plugin key set
 # (only ai_prompt_shield, ai_transcript_audit, mcp_gateway and the MCP JSON-RPC helpers differ, in
 # request handling). v0.9.11 changes TLS material admission, not these field/key lists;
 # the lab uses PEM paths and a generated random OIDC session key. Runtime config validation
@@ -33,14 +33,14 @@
 # gains FERRUM_PER_IP_IPV6_PREFIX, FERRUM_HTTP3_CONNECT_UDP_MAX_SESSIONS_PER_IP,
 # FERRUM_HTTP3_MAX_UNVALIDATED_HANDSHAKES and FERRUM_MESH_TENANT_TLS_FILE_ROOTS). It removes ldap_auth
 # consumer_mapping (now refused), adds rate_limiting ipv6_prefix and mcp_gateway
-# sessions.max_sessions_per_principal (older releases reject both, so profiles must not use them), and
+# sessions.max_sessions_per_principal (older releases reject both, so profiles have not used them), and
 # confines plugin environment references to FERRUM_PLUGIN_SECRET_<NAME>; see
 # docs/audit/gateway-0.9.15-delta.md.
 # v0.9.20 adds no operator field to these structs (src/config/types.rs gains serde(skip) runtime
 # fields only) and refuses none of the keys listed here. #6967 closes nested plugin objects; the
 # built-in plugins the lab uses were already closed. New keys (waf on_unlisted_content_type,
 # openapi_validator operations.parameters, rate_limiting max_state_entries, access_control external
-# identity lists, among others) are rejected by older releases, so profiles must not use them.
+# identity lists, among others) are rejected by older releases, so profiles do not use them yet.
 # openapi_validator must be proxy-scoped (src/config/types.rs:6058, #6837), and a refused
 # stdout_logging config now fails startup (#6863); the lab's profiles satisfy both. See
 # docs/audit/gateway-0.9.20-delta.md.
@@ -140,7 +140,7 @@ PLUGIN_KEYS = {
   # the key sets of every plugin listed here are unchanged at v0.9.8 and unchanged or only extended
   # at v0.9.9 (source-checked: rate_limiting gains mcp_tool_calls, waf gains on_unlisted_content_type,
   # category_modes and detection_paranoia_level; nothing is removed); unchanged at v0.9.10/v0.9.11/v0.9.14;
-  # v0.9.15 adds rate_limiting ipv6_prefix, not allowed here while older releases are supported.
+  # v0.9.15 adds rate_limiting ipv6_prefix, not listed here yet (older releases rejected it).
   'bot_detection' => %w[blocked_patterns allow_list allow_missing_user_agent custom_response_code],
   'rate_limiting' => %w[limit_by expose_headers limits redis_failure_policy] + REDIS,
   'ai_response_guard' => %w[action pii_patterns custom_pii_patterns blocked_phrases blocked_patterns

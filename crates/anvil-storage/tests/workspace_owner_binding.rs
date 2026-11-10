@@ -180,12 +180,12 @@ fn sealed_revision(key: &Key, revision: &Object, owner: Id, request: Id, value: 
     crypto::seal(key, aad.as_bytes(), &serde_json::to_vec(&envelope).unwrap())
 }
 
-// This attacker has no key. Change only the plaintext routing column.
 /// Whether `result` failed naming row `id`, a `what`, so it can be found.
 fn names<T>(result: Result<T, StoreError>, what: &str, id: &Id) -> bool {
     matches!(result, Err(StoreError::ObjectIntegrity { kind: k, id: named }) if k == what && named == id.to_string())
 }
 
+// This attacker has no key. Change only the plaintext routing column.
 fn change_owner(db: &Connection, object: &Object, owner: Option<Id>) {
     db.execute(
         "UPDATE objects SET workspace_id=?1 WHERE kind=?2 AND id=?3",

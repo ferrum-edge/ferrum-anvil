@@ -355,47 +355,6 @@ impl App {
         })
     }
 
-    /// Requests of a folder subtree in tree order, as `(id, name)`.
-    pub fn folder_run_requests(&self, ws: &Id, folder: Option<Id>) -> Result<Vec<(Id, String)>> {
-        fn find(nodes: &[crate::workspace::TreeNode], id: Id) -> Option<&crate::workspace::TreeNode> {
-            for n in nodes {
-                if n.id == id && n.kind == "folder" {
-                    return Some(n);
-                }
-                if let Some(x) = find(&n.children, id) {
-                    return Some(x);
-                }
-            }
-            None
-        }
-        fn flatten(nodes: &[crate::workspace::TreeNode], out: &mut Vec<(Id, String)>) {
-            for n in nodes {
-                match n.kind {
-                    "request" => out.push((n.id, n.name.clone())),
-                    _ => flatten(&n.children, out),
-                }
-            }
-        }
-        let tree = self.tree(ws)?;
-        let mut out = Vec::new();
-        match folder {
-            None => flatten(&tree, &mut out),
-            Some(f) => {
-                let node = find(&tree, f).ok_or_else(|| AppError::NotFound("folder".into()))?;
-                flatten(&node.children, &mut out);
-            }
-        }
-        Ok(out)
-    }
-
-    /// `Orders/Refunds` style path of a folder (`/` for the workspace root).
-    pub fn folder_path(&self, ws: &Id, folder: Option<Id>) -> Result<String> {
-        if folder.is_none() {
-            return Ok("/".into());
-        }
-        Ok(self.folder_chain(ws, folder)?.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/"))
-    }
-
     /// Resolve a folder by id or `Parent/Child` path (`/` or empty = root).
     pub fn find_folder(&self, ws: &Id, key: &str) -> Result<Option<Id>> {
         let key = key.trim();

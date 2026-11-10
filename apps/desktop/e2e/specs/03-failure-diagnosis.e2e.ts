@@ -25,8 +25,8 @@ describe("HTTP request — connection refused diagnosis", () => {
   });
 
   it("explains the refusal with confidence, scope and what it does not prove", async () => {
-    // The response panel keeps the tab chosen for an earlier exchange (Body in
-    // the previous spec), so select Diagnosis explicitly. It must list one finding.
+    // Select Diagnosis explicitly rather than rely on the tab a new result opens
+    // on (Body when it is quiet). It must list one finding.
     await responseTab("Diagnosis");
     const tab = $(`//div[${cls("resp")}]/div[${cls("subtabs")}]/button[@role="tab"][starts-with(normalize-space(.),"Diagnosis")]`);
     await expect(tab).toHaveAttribute("aria-selected", "true");

@@ -10,7 +10,6 @@ const PATHS = {
   plus: <path d="M12 5v14M5 12h14" />,
   x: <path d="M6 6l12 12M18 6 6 18" />,
   check: <path d="m5 12.5 4.5 4.5L19 7" />,
-  chevronDown: <path d="m6 9 6 6 6-6" />,
   chevronRight: <path d="m9 6 6 6-6 6" />,
   chevronLeft: <path d="m15 6-6 6 6 6" />,
   arrowUp: <path d="M12 19V5M6 11l6-6 6 6" />,
@@ -97,12 +96,6 @@ const PATHS = {
       <path d="M9.5 4v16" />
     </>
   ),
-  splitRows: (
-    <>
-      <rect x="3" y="4" width="18" height="16" rx="2.5" />
-      <path d="M3 12h18" />
-    </>
-  ),
   splitColumns: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2.5" />
@@ -127,12 +120,6 @@ const PATHS = {
     <>
       <circle cx="12" cy="12" r="9" />
       <path d="m8.5 12.3 2.4 2.4 4.8-5" />
-    </>
-  ),
-  xCircle: (
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <path d="m9 9 6 6M15 9l-6 6" />
     </>
   ),
   activity: <path d="M3 12h4l2.5-7 5 14 2.5-7h4" />,

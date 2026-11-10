@@ -1,12 +1,13 @@
 //! Public-signal contract tests for gateway-to-upstream setup outcomes that
 //! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11, 0.9.14, 0.9.15 or 0.9.20:
 //!
-//! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): neither release has a
+//! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): no audited release has a
 //!   dial-admission hook, and exhausting the lab host's real ephemeral ports
 //!   is unsafe;
 //! * UP-019 trust withdrawn: emitted only by the mesh HBONE / sidecar-mTLS
 //!   transports when an accepted trust publication withdraws an authority;
-//!   there is no mesh/HBONE lab;
+//!   the mesh lab has no control plane publishing trust, so a withdrawal on a
+//!   live tunnel is not reproduced;
 //! * UP-018 on the pooled lanes (direct H1 from 0.9.11 / H2 / gRPC / H3 / mesh pools), whose
 //!   public signal is the same coarse `connection_failure` family through
 //!   0.9.15; from 0.9.19 (#6777) the ceiling is its own 503 and a connect

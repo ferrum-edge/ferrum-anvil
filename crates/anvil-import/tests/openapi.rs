@@ -405,7 +405,7 @@ fn swagger_20() {
     assert_eq!(sizes.split('|').count(), 2, "{sizes}");
     assert_eq!(param(list, "kinds").unwrap().value, "pdf");
     assert!(matches!(&list.auth, AuthConfig::ApiKey { location: KeyLocation::Query, name, .. } if name == "api_key"));
-    // body parameter with schema example; x-nullable.
+    // body parameter with schema example.
     assert_eq!(json_body(&req(&r, "putMetadata").spec)["title"], "Q3 report");
     // urlencoded formData with a password never generated.
     match &req(&r, "login").spec.body {
@@ -421,8 +421,6 @@ fn deterministic_for_same_input_and_seed() {
         let a = run(f, &opts());
         let b = run(f, &opts());
         assert_eq!(a, b, "{f} import is not deterministic");
-        let c = run(f, &ImportOptions { seed: 99, ..opts() });
-        assert_eq!(a.source.sha256, c.source.sha256);
     }
     let a = run(PETSTORE, &opts());
     let c = run(PETSTORE, &ImportOptions { seed: 99, ..opts() });

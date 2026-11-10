@@ -235,7 +235,7 @@ impl SoapSigning {
 
     /// A signed SAML 2.0 bearer assertion (enveloped signature over the
     /// assertion, exclusive C14N, RSA-SHA256) — what an identity provider
-    /// would issue. `window` = (NotBefore, NotOnOrAfter).
+    /// would issue.
     pub fn saml_assertion(&self, signer: &Signer, a: &SamlSpec) -> Result<String> {
         static N: AtomicU64 = AtomicU64::new(1);
         let id = format!("_anvil-lab-{}-{}", Utc::now().timestamp_micros(), N.fetch_add(1, Ordering::Relaxed));

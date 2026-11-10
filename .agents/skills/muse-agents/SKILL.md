@@ -120,8 +120,8 @@ approval prompts and Muse's OS sandbox are off; worktree isolation is the bounda
 sandbox. The launcher deliberately does not pass `--trust-workspace` or `--yolo`: the worktree
 stays untrusted, so Muse neither auto-loads candidate-authored project rules or skills (including
 these dispatch skills) nor enables its own automatic agent delegation. Every brief therefore tells
-the worker to read `AGENTS.md` and the governing docs explicitly. `--user-input-auto-resolve`
-cancels any interactive question instead of hanging a headless worker. Session logs stay on, so an
+the worker to read the governing docs explicitly (this repository has no `AGENTS.md`).
+`--user-input-auto-resolve` cancels any interactive question instead of hanging a headless worker. Session logs stay on, so an
 interrupted run can be inspected with `muse resume`. Delete the temporary prompt after the worker
 exits.
 
@@ -226,10 +226,11 @@ Never put credentials, tokens, cookies, or secrets in prompts or worker logs. Do
 
 Two lines on a healthy run are expected and do not mean the worker failed:
 
-- `rules file at .../AGENTS.md exists, but the workspace is untrusted, so it is skipped`: this is
-  by design. The launcher keeps the worktree untrusted so candidate-authored rules and skills never
-  load automatically. Never pass `--trust-workspace` or `--yolo` to silence it. Instead, confirm
-  that the prompt or brief tells the worker to read `AGENTS.md` and the governing docs explicitly.
+- `rules file at .../AGENTS.md exists, but the workspace is untrusted, so it is skipped`: this
+  repository has no `AGENTS.md`, so the line appears only if a candidate adds one. It is by design.
+  The launcher keeps the worktree untrusted so candidate-authored rules and skills never load
+  automatically. Never pass `--trust-workspace` or `--yolo` to silence it. Instead, confirm that
+  the prompt or brief tells the worker to read the governing docs explicitly.
   The bundled briefs and the reviewer mode above do.
 - `retrying meta model stream in <n>ms (attempt <k>/<max>)`: Muse retries provider stream errors
   inside the running worker. Do not relaunch while the process is alive, and do not start a second

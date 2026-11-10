@@ -351,7 +351,6 @@ describe("read-only diagnostic import through native IPC", () => {
     expect(oversized.err).toBe(
       "Diagnostic JSON exceeds a byte, depth, string or collection limit.",
     );
-    expect(oversized.err?.includes("credential-canary")).toBe(false);
     expect(fixture.requests.length).toBe(0);
   });
 

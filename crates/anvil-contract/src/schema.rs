@@ -893,13 +893,9 @@ fn text_bytes(v: &Value) -> usize {
 
 const ROOT: &str = "#root";
 
-/// Check a schema before it is compiled: refuse a reference cycle that
-/// does not descend into the value (validation would never end), and a
-/// schema that expands to more than [`MAX_EXPANDED_NODES`] nodes with every
-/// `$ref` expanded (repeated references count each time). Both passes are
-/// iterative, so neither nesting nor reference chains use the call stack.
-/// [`measure`], adding the members and items it looked at, and the bytes of
-/// their names and strings, to `total`.
+/// Check a schema before it is compiled: [`measure_in`] over the document,
+/// adding the members and items it looked at, and the bytes of their names
+/// and strings, to `total`, then [`check_keywords`].
 fn measure_counted(spec: &Spec, schema: &Value, total: &mut Scanned) -> Result<usize, String> {
     let size = measure_in(&spec.root, schema, total, MAX_DEPTH)?;
     check_keywords(&spec.root, schema, false, legacy(spec.dialect))?;
@@ -1313,7 +1309,12 @@ fn check_keywords(root_doc: &Value, schema: &Value, root_id: bool, legacy_ids: b
     Ok(())
 }
 
-/// [`measure_counted`] with references resolved in `root`.
+/// Measure `schema` with references resolved in `root_doc`: refuse a
+/// reference cycle that does not descend into the value (validation would
+/// never end), and a schema that expands to more than [`MAX_EXPANDED_NODES`]
+/// nodes with every `$ref` expanded (repeated references count each time).
+/// Both passes are iterative, so neither nesting nor reference chains use
+/// the call stack.
 fn measure_in(root_doc: &Value, schema: &Value, total: &mut Scanned, schema_depth_limit: usize) -> Result<Work, String> {
     let too_big = || format!("{TOO_LARGE}the schema expands to more than {MAX_EXPANDED_NODES} nodes through its references");
     let too_wide = || format!("{TOO_LARGE}the schema and the schemas it references have more than {MAX_SCAN_STEPS} members and items");
@@ -1627,12 +1628,8 @@ fn legacy(d: Dialect) -> bool {
 /// there.
 type Flags = HashMap<usize, Option<bool>>;
 
-/// Convert one schema (not following `$ref`s) for `direction`.
-pub fn convert(spec: &Spec, schema: &Value, direction: Direction, depth: usize) -> Value {
-    convert_in(spec, schema, direction, depth, &mut Flags::new())
-}
-
-/// [`convert`], reading the flags of `$ref` targets through `flags`.
+/// Convert one schema (not following `$ref`s) for `direction`, reading the
+/// flags of `$ref` targets through `flags`.
 fn convert_in(spec: &Spec, schema: &Value, direction: Direction, depth: usize, flags: &mut Flags) -> Value {
     let Value::Object(src) = schema else {
         // `true`/`false` schemas (3.1+) and anything malformed pass through.
@@ -1742,7 +1739,7 @@ fn excluded(spec: &Spec, parent: &Map<String, Value>, name: &str, direction: Dir
         Reach::Inline(v) => read(v),
         Reach::Target(t) => {
             let found = *flags.entry(t.id).or_insert_with(|| spec.target_value(&t).map(read));
-            // A missing target leaves the reference itself, as `Spec::deref`.
+            // A missing target leaves the reference itself.
             found.unwrap_or_else(|| read(prop))
         }
         Reach::Unresolved => read(prop),
