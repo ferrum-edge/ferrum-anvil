@@ -108,15 +108,14 @@ fn url_userinfo_becomes_basic_auth_only_inside_the_authority() {
     assert_eq!(s.url, "https://example.test/x");
     assert!(
         matches!(&s.auth, AuthConfig::Basic { username, password } if username == "bob" && password.is_pure_reference()),
-        "{:?}",
-        s.auth
+        "the userinfo becomes Basic auth with the password redacted"
     );
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("pw-secret"));
 
     let r = har_get("https://example.test?next=a@b");
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://example.test");
-    assert!(matches!(s.auth, AuthConfig::Inherit), "{:?}", s.auth);
+    assert!(matches!(s.auth, AuthConfig::Inherit), "an `@` in the query is not userinfo");
     assert_eq!(param(s, "next").unwrap().value, "a@b");
 }
 

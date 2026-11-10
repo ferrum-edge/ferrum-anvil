@@ -165,12 +165,12 @@ fn an_at_sign_in_the_query_or_fragment_is_not_userinfo() {
     let r = curl("curl 'https://api.example.com?email=a@b.com'");
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://api.example.com");
-    assert!(!matches!(s.auth, AuthConfig::Basic { .. }), "{:?}", s.auth);
+    assert!(!matches!(s.auth, AuthConfig::Basic { .. }), "no Basic auth is invented from the query or fragment");
     assert_eq!(param(s, "email").unwrap().value, "a@b.com");
     let r = curl("curl 'https://api.example.com#frag@x.test'");
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://api.example.com");
-    assert!(!matches!(s.auth, AuthConfig::Basic { .. }), "{:?}", s.auth);
+    assert!(!matches!(s.auth, AuthConfig::Basic { .. }), "no Basic auth is invented from the query or fragment");
 }
 
 #[test]
