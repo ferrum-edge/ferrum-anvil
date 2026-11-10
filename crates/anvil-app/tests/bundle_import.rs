@@ -985,8 +985,8 @@ fn a_share_safe_import_lists_a_missing_proxy_password() {
     let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
     let b = new_app(root.path(), "b");
     let rep = b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
-    assert_eq!(rep.missing_secrets.len(), 1, "{:?}", rep.missing_secrets);
-    assert!(rep.missing_secrets[0].starts_with("proxy password ("), "{:?}", rep.missing_secrets);
+    assert_eq!(rep.missing_secrets.len(), 1, "exactly one secret is listed as missing");
+    assert!(rep.missing_secrets[0].starts_with("proxy password ("), "the proxy password is the missing secret");
 }
 
 #[test]
