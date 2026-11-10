@@ -242,6 +242,10 @@
 - The desktop response Body tab opens each result in a view its body has (Pretty, Raw or Hex).
   Switching between request tabs used to keep the previous result's mode, so an image after a
   JSON response, or the reverse, showed an empty body until a mode button was clicked (#512).
+- Cmd/Ctrl+Enter, Cmd/Ctrl+S, Cmd/Ctrl+N and Escape act only while the desktop Requests view is
+  shown. In the Runner, Load tests or Contract view they used to send, save or cancel the hidden
+  active request tab, or create a "New request". Cmd/Ctrl+B and Cmd/Ctrl+L still work in every
+  view (#513).
 
 ## [0.1.7] - 2026-11-03
 
