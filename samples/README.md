@@ -5,6 +5,11 @@ Real output of the `anvil` CLI against the core lab gateway on
 platform and time the files were made. `crates/anvil-app/tests/samples.rs`
 checks that the workspace still imports and the reports still parse.
 
+They are a frozen capture: made on 2026-09-25 against Ferrum Edge v0.9.5,
+which is no longer supported, and not regenerated since. Their findings,
+wording and report layout are those of the Anvil commit in `SOURCE.txt`; a
+current build may word or diagnose the same failures differently.
+
 | File | What it is |
 |---|---|
 | `workspaces/anvil-samples.anvil` | A workspace exported in "share" mode (no secrets). Six saved requests in three folders: one healthy call, three gateway-to-backend failures (connection refused, unresolvable name, body ended early) and two application errors that only look like gateway problems (a 500, and a 403 that is not a WAF). Import it with **Import → Anvil bundle / backup** or `anvil import samples/workspaces/anvil-samples.anvil`. |
