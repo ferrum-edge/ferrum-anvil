@@ -1553,9 +1553,9 @@ Catalog: condition updates on `method_not_permitted` and `method_rate_limited`. 
 
 ### Lab impact
 
-- `crates/anvil-lab/src/policy.rs` `ext_rate_limit`: on v0.9.20 the gateway 429 carries `retry-after`, but the
-  application lookalike (policy.rs:592) does not. The check compares finding codes only, so it should still pass. For
-  v0.9.19 and later, mirror the observed `retry-after` in the lookalike and assert that the gateway sends it.
+- `crates/anvil-lab/src/policy.rs` `ext_rate_limit`: on v0.9.20 the gateway 429 carries `retry-after`, which the
+  application lookalike omitted. The check compares finding codes only, so it still passed. Done (#542): the
+  scenario asserts that the gateway sends `retry-after` and mirrors its value in the lookalike.
 - GW-008 (`core.yaml` `gw008-limit`): the 413 body loses `limit`. The scenario checks only the status and
   `http.payload_too_large`, so it passes. Expect the body shared with the core ceiling when re-binding fixtures.
 - `lint-profiles.rb`: every key the lab uses is still accepted. The new optional keys are refused by older supported
@@ -2229,7 +2229,7 @@ From v0.9.19 every rate_limiting quota 429 carries `Retry-After` (`src/plugins/r
 
 - `ext_rate_limit`'s application lookalike (crates/anvil-lab/src/policy.rs) omits it.
 - The checks still pass, because Anvil uses `Retry-After` only as text (`anvil-diagnostics/src/rules/http_status.rs:56`).
-- Fix: when the locked release is v0.9.19 or later, add `retry-after:2` to the lookalike headers. Do not add it for older releases.
+- Fixed (#542): the scenario asserts the gateway's `Retry-After` and the lookalike sends the same value. v0.9.20 is the only supported release, so no older-release branch is kept.
 - GW-020b's ai_rate_limiter 429 also gains `Retry-After` (`src/plugins/ai_rate_limiter.rs:1033`, #6847). No change is needed there.
 
 ### Lab: UP-003 connect timeout is now 504 (scenario already tolerant)
