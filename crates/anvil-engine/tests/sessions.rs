@@ -1200,6 +1200,8 @@ async fn grpc_header_status_followed_by_data_is_never_terminal_success() {
     // clean EOF with no terminal status: not a trailers-only response, so
     // the provisional header status must be discarded in both encodings.
     for wire in [GrpcWire::GrpcWeb, GrpcWire::GrpcWebText] {
+        // Each encoding must apply the fault itself, not reuse the previous entry.
+        f.log.clear();
         let c = with_metadata(
             grpc_wire_ctx(&url, "Unary", GrpcMode::Unary, &[r#"{"message":"m"}"#], wire, HttpVersionPolicy::Auto),
             "x-fixture-grpc-web",
@@ -1224,6 +1226,8 @@ async fn grpc_web_without_a_trailer_frame_is_incomplete_never_success() {
     let e = Engine::new();
     let url = format!("grpc://{}", f.addr);
     for wire in [GrpcWire::GrpcWeb, GrpcWire::GrpcWebText] {
+        // Each encoding must apply the fault itself, not reuse the previous entry.
+        f.log.clear();
         let c = with_metadata(
             grpc_wire_ctx(
                 &url,
@@ -1265,6 +1269,8 @@ async fn grpc_web_appended_trailer_frame_is_invalid_framing_not_success() {
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let e = Engine::new();
     for wire in [GrpcWire::GrpcWeb, GrpcWire::GrpcWebText] {
+        // Each encoding must apply the fault itself, not reuse the previous entry.
+        f.log.clear();
         let c = with_metadata(
             grpc_wire_ctx(&format!("grpc://{}", f.addr), "Unary", GrpcMode::Unary, &[r#"{"message":"m"}"#], wire, HttpVersionPolicy::Auto),
             "x-fixture-grpc-web",

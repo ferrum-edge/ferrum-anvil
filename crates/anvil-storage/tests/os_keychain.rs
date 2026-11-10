@@ -31,10 +31,19 @@ fn os_store() -> MutexGuard<'static, ()> {
 #[test]
 #[ignore = "touches the real OS credential store; CI runs it with --ignored"]
 fn keychain_profile_round_trips_through_the_os_credential_store() {
+    struct Cleanup(vault::ProfileHeader);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = vault::delete_keychain_entry(&self.0);
+        }
+    }
+    // Declared first so it is released last, after `Cleanup` removed the entry.
     let _store = os_store();
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_keychain_profile(dir.path(), "ci keychain").expect("the OS credential store accepted the data key");
     let h = vault::read_header(dir.path()).unwrap();
+    // A failed assertion below still removes the entry from the OS store.
+    let _cleanup = Cleanup(h.clone());
     assert_eq!(h.protection, ProtectionMode::OsKeychain);
     assert!(h.passphrase_wrap.is_none() && h.recovery_wrap.is_none(), "a keychain profile has no passphrase or recovery wrap");
 

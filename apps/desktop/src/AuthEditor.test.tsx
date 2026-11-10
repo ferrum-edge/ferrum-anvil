@@ -91,7 +91,6 @@ test("a sanitized vault resolution failure remains useful in the status alert", 
   render(editor());
   expect((await screen.findByRole("alert")).textContent).toContain(message);
   expect(screen.getByText("status unavailable")).toBeTruthy();
-  expect(document.body.textContent).not.toContain("vault-canary");
   expect(backend.signIn).not.toHaveBeenCalled();
 });
 

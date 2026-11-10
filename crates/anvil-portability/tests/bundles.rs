@@ -562,7 +562,7 @@ fn data_006_conflict_policies_and_duplicate_remap() {
     let folder_ids: HashSet<Id> = dup.folders.iter().map(|f| f.meta.id).collect();
     assert!(dup.requests.iter().all(|r| r.folder_id.map(|f| folder_ids.contains(&f)).unwrap_or(true)));
     assert!(dup.folders.iter().all(|f| f.workspace_id == dup.workspaces[0].meta.id));
-    // Duplicating twice is deterministic in shape (idempotent structure).
+    // A duplicate has as many objects as its source.
     assert_eq!(dup.object_count(), g.object_count());
 }
 

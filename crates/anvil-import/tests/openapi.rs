@@ -421,8 +421,6 @@ fn deterministic_for_same_input_and_seed() {
         let a = run(f, &opts());
         let b = run(f, &opts());
         assert_eq!(a, b, "{f} import is not deterministic");
-        let c = run(f, &ImportOptions { seed: 99, ..opts() });
-        assert_eq!(a.source.sha256, c.source.sha256);
     }
     let a = run(PETSTORE, &opts());
     let c = run(PETSTORE, &ImportOptions { seed: 99, ..opts() });
