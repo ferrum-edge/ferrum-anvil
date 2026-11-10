@@ -205,13 +205,6 @@ impl App {
             },
         })
     }
-
-    /// Read the linked file of a dataset, refusing it unless it was chosen
-    /// on this device for that dataset.
-    pub(crate) fn read_linked_dataset(&self, id: Id, path: &str, max: u64) -> Result<Vec<u8>> {
-        refuse_unbound(&self.linked_file_bindings()?, LinkedFileReferrer::Dataset { id }, path)?;
-        read_bound_file(path, max, "dataset")
-    }
 }
 
 /// Delete, in the transaction `s`, this device's linked-file bindings made

@@ -776,9 +776,10 @@ fn auth026(env: &Env) -> Fut<'_> {
         );
         c.has(&o, "http.unauthorized");
         c.absent_prefix(&o, "client.tls.");
-        if env.trusted && gateway::release_at_least("v0.9.19") {
-            // oauth2_introspection's certificate binding (#6840) answers the
-            // same 401 body, so the catalog cannot tell the two plugins apart.
+        if env.trusted {
+            // oauth2_introspection's certificate binding (#6840, v0.9.19)
+            // answers the same 401 body, so the catalog cannot tell the two
+            // plugins apart.
             c.has(&o, "ferrum.outcome_ambiguous");
             c.max_confidence(&o, "ferrum.outcome_ambiguous", Confidence::Unknown);
             let ids = crate::fixtures_policy::catalog_ids(&o);
@@ -790,9 +791,6 @@ fn auth026(env: &Env) -> Fut<'_> {
                     .all(|id| ids.iter().any(|i| i == id)),
                 format!("{ids:?}"),
             );
-        } else if env.trusted {
-            c.has(&o, "ferrum.outcome");
-            c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
         }
         let prefix_advice: Vec<String> = o
             .record
@@ -1119,25 +1117,20 @@ fn up007(env: &Env) -> Fut<'_> {
         let mut c = Checks::new();
         let (before, from) = (env.fx.stall.log.entries().len(), env.gw.log_lines().len());
         let o = go(env, &up_request(env, "/up/tls-stall/")).await;
-        // The stalled handshake runs under the backend connect budget. From
-        // v0.9.19 (#6777) a connect timeout answers 504 {"error":"Backend
-        // timeout"} with connection_failure instead of the shared 502; the
-        // confirmed 504 status finding is that fact, not a timeout claim.
-        if gateway::release_at_least("v0.9.19") {
-            upstream_setup_failure_status(&mut c, env, &o, 504, &["ferrum.token.connection_failure"]);
-            let bad: Vec<String> = o
-                .record
-                .findings
-                .iter()
-                .filter(|f| f.confidence == Confidence::Confirmed && f.code != "http.gateway_timeout")
-                .filter(|f| f.title.to_lowercase().contains("timeout") || f.code.contains("timeout"))
-                .map(|f| f.code.clone())
-                .collect();
-            c.add(CheckKind::Diagnosis, "no confirmed 'timeout' claim beyond the 504 status", bad.is_empty(), format!("{bad:?}"));
-        } else {
-            upstream_setup_failure(&mut c, env, &o, &["ferrum.token.connection_failure"]);
-            c.no_confirmed_claim(&o, "timeout");
-        }
+        // The stalled handshake runs under the backend connect budget. A
+        // connect timeout answers 504 {"error":"Backend timeout"} with
+        // connection_failure instead of the shared 502 (from v0.9.19, #6777);
+        // the confirmed 504 status finding is that fact, not a timeout claim.
+        upstream_setup_failure_status(&mut c, env, &o, 504, &["ferrum.token.connection_failure"]);
+        let bad: Vec<String> = o
+            .record
+            .findings
+            .iter()
+            .filter(|f| f.confidence == Confidence::Confirmed && f.code != "http.gateway_timeout")
+            .filter(|f| f.title.to_lowercase().contains("timeout") || f.code.contains("timeout"))
+            .map(|f| f.code.clone())
+            .collect();
+        c.add(CheckKind::Diagnosis, "no confirmed 'timeout' claim beyond the 504 status", bad.is_empty(), format!("{bad:?}"));
         let lines = crate::fixtures_policy::op_log_class(&env.gw, from, "up007-tls-stall", &["connection_timeout"]).await;
         c.operator_class(&lines, "up007-tls-stall", &["connection_timeout"]);
         c.add(CheckKind::GroundTruth, "the stalling backend accepted TCP", env.fx.stall.log.entries().len() > before, "");

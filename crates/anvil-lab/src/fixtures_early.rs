@@ -23,11 +23,7 @@
 //! 4. *Draining*: the other queued datagrams (1-RTT data such as EARLY-002's
 //!    retry after its 425) wait for the first gateway datagram relayed to the
 //!    Finished's client address after the release, which normally carries
-//!    HANDSHAKE_DONE, then for the relay's `settle` time, or at most
-//!    [`DRAIN_CAP`] in all. Releases before v0.9.8 can classify a 1-RTT stream
-//!    that becomes ready in the same turn as their handshake completion as
-//!    early data (ferrum-edge#5761), so the retry must not arrive with the
-//!    Finished; the lab sets `settle` only for them.
+//!    HANDSHAKE_DONE, or at most [`DRAIN_CAP`].
 //! 5. *Open*: everything passes until the next [`Relay::arm`].
 
 use std::collections::HashMap;
@@ -168,8 +164,8 @@ enum Gate {
     /// Released: the queued Handshake datagrams go out next.
     Releasing,
     /// The Finished went out: the other datagrams wait for the next gateway
-    /// datagram to `client` (the Finished's sender; `None` once it came, or
-    /// when no Finished was queued) and the settle time, or `until`.
+    /// datagram to `client` (the Finished's sender; `None` when no Finished
+    /// was queued), or `until`.
     Draining { client: Option<SocketAddr>, until: Instant },
 }
 
@@ -185,16 +181,13 @@ struct Queued {
 struct Machine {
     gate: Gate,
     queue: Vec<Queued>,
-    /// How long 1-RTT datagrams still wait after the gateway's first datagram
-    /// following the Finished.
-    settle: Duration,
     /// Since the last [`Machine::arm`].
     stats: HoldStats,
 }
 
 impl Machine {
-    fn new(settle: Duration) -> Self {
-        Machine { gate: Gate::Open, queue: Vec::new(), settle, stats: HoldStats::default() }
+    fn new() -> Self {
+        Machine { gate: Gate::Open, queue: Vec::new(), stats: HoldStats::default() }
     }
 
     /// Hold the next 0-RTT connection's Finished. Anything still queued goes
@@ -251,16 +244,10 @@ impl Machine {
     }
 
     /// A gateway datagram was relayed to `to`: while draining, the first one
-    /// to the Finished's client frees the queue, once the settle time passed.
-    fn server(&mut self, now: Instant, to: SocketAddr) -> Vec<Queued> {
+    /// to the Finished's client frees the queue.
+    fn server(&mut self, to: SocketAddr) -> Vec<Queued> {
         match self.gate {
-            Gate::Draining { client: Some(c), until } if c == to => {
-                if self.settle.is_zero() {
-                    return self.open();
-                }
-                self.gate = Gate::Draining { client: None, until: until.min(now + self.settle) };
-                Vec::new()
-            }
+            Gate::Draining { client: Some(c), .. } if c == to => self.open(),
             _ => Vec::new(),
         }
     }
@@ -303,11 +290,11 @@ pub struct Relay {
 }
 
 impl Relay {
-    /// Listen on `listen` and relay to `upstream`; `settle`: see *Draining*.
-    pub async fn start(listen: &str, upstream: &str, settle: Duration) -> anyhow::Result<Relay> {
+    /// Listen on `listen` and relay to `upstream`.
+    pub async fn start(listen: &str, upstream: &str) -> anyhow::Result<Relay> {
         let front = Arc::new(UdpSocket::bind(listen).await?);
         let upstream: SocketAddr = upstream.parse()?;
-        let machine = Arc::new(Mutex::new(Machine::new(settle)));
+        let machine = Arc::new(Mutex::new(Machine::new()));
         let wake = Arc::new(Notify::new());
         let task = tokio::spawn(relay(front, upstream, machine.clone(), wake.clone()));
         Ok(Relay { machine, wake, task })
@@ -380,7 +367,7 @@ async fn relay(front: Arc<UdpSocket>, upstream: SocketAddr, machine: Arc<Mutex<M
             }
             Some((client, datagram)) = from_gateway.recv() => {
                 let _ = front.send_to(&datagram, client).await;
-                step(&machine, |m| m.server(Instant::now(), client))
+                step(&machine, |m| m.server(client))
             }
             _ = wake.notified() => step(&machine, |m| m.due(Instant::now())),
             _ = tick.tick() => step(&machine, |m| m.due(Instant::now())),
@@ -526,7 +513,7 @@ mod tests {
     #[test]
     fn open_and_armed_relays_pass_everything_until_0rtt() {
         let now = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         assert!(sent(m.client(now, addr(), cat(&[long(INITIAL, 10), long(HANDSHAKE, 10)]))));
         m.arm();
         assert!(sent(m.client(now, addr(), short(10))), "an earlier connection's 1-RTT data passes");
@@ -540,7 +527,7 @@ mod tests {
     #[test]
     fn the_finished_is_held_until_released_and_1rtt_waits_for_the_gateway() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         assert!(sent(m.client(t0, addr(), cat(&[long(INITIAL, 1200), long(ZERO_RTT, 80)]))));
         assert!(sent(m.client(t0, addr(), long(ZERO_RTT, 80))), "more 0-RTT data passes");
@@ -552,7 +539,7 @@ mod tests {
         assert!(!sent(m.client(t1, addr(), finished.clone())));
         assert!(!sent(m.client(t1 + Duration::from_millis(3), addr(), long(HANDSHAKE, 60))), "a retransmission waits too");
         assert_eq!(m.holding_since(), Some(t1));
-        assert!(m.server(t1, addr()).is_empty(), "the gateway's 0.5-RTT data frees nothing");
+        assert!(m.server(addr()).is_empty(), "the gateway's 0.5-RTT data frees nothing");
         assert!(m.due(t1).is_empty(), "nothing is due before the release");
 
         assert_eq!(m.release(), 3);
@@ -565,7 +552,7 @@ mod tests {
         assert!(!sent(m.client(t2, addr(), short(30))), "1-RTT data waits for the gateway");
         assert!(sent(m.client(t2, addr(), long(HANDSHAKE, 60))), "Handshake data passes");
         assert!(m.due(t2 + Duration::from_millis(1)).is_empty());
-        let rest: Vec<Vec<u8>> = m.server(t2, addr()).into_iter().map(|q| q.datagram).collect();
+        let rest: Vec<Vec<u8>> = m.server(addr()).into_iter().map(|q| q.datagram).collect();
         assert_eq!(rest, vec![ack, retry, short(30)], "in order");
         assert!(sent(m.client(t2, addr(), short(30))), "open");
     }
@@ -573,7 +560,7 @@ mod tests {
     #[test]
     fn without_a_gateway_datagram_the_drain_cap_frees_the_1rtt_data() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         m.client(t0, addr(), long(ZERO_RTT, 10));
         m.client(t0, addr(), long(HANDSHAKE, 10));
@@ -585,32 +572,10 @@ mod tests {
         assert!(sent(m.client(t0, addr(), short(10))));
     }
 
-    /// Before v0.9.8: after the gateway's datagram, the 1-RTT data still
-    /// waits for the settle time (within the drain cap).
-    #[test]
-    fn a_settle_time_follows_the_gateway_datagram() {
-        let t0 = Instant::now();
-        let settle = Duration::from_millis(20);
-        let mut m = Machine::new(settle);
-        m.arm();
-        m.client(t0, addr(), long(ZERO_RTT, 10));
-        m.client(t0, addr(), long(HANDSHAKE, 10));
-        m.client(t0, addr(), short(10));
-        m.release();
-        assert_eq!(m.due(t0).len(), 1);
-        let t1 = t0 + Duration::from_millis(1);
-        assert!(m.server(t1, addr()).is_empty());
-        assert!(m.server(t1, addr()).is_empty(), "a second gateway datagram does not cut the settle time short");
-        assert!(!sent(m.client(t1, addr(), short(10))));
-        assert!(m.due(t1 + settle - Duration::from_millis(1)).is_empty());
-        assert_eq!(m.due(t1 + settle).len(), 2);
-        assert!(sent(m.client(t1 + settle, addr(), short(10))));
-    }
-
     #[test]
     fn disarming_forwards_everything_in_order() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         m.client(t0, addr(), long(ZERO_RTT, 10));
         m.client(t0, addr(), short(1));
@@ -627,7 +592,7 @@ mod tests {
     #[test]
     fn coalesced_1rtt_goes_with_the_finished_and_is_counted() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         m.client(t0, addr(), long(ZERO_RTT, 10));
         let finished = cat(&[long(HANDSHAKE, 60), short(40)]);
@@ -639,7 +604,7 @@ mod tests {
         assert_eq!(m.stats, HoldStats { coalesced_1rtt: 1, unparsed: 0 });
         assert!(sent(m.client(t0, addr(), cat(&[long(HANDSHAKE, 60), short(5)]))), "Handshake data passes while draining");
         assert_eq!(m.stats.coalesced_1rtt, 2);
-        assert_eq!(m.server(t0, addr()).len(), 1, "the lone 1-RTT datagram waited for the gateway");
+        assert_eq!(m.server(addr()).len(), 1, "the lone 1-RTT datagram waited for the gateway");
     }
 
     /// Unreadable datagrams are held while the Finished is (fail closed),
@@ -647,7 +612,7 @@ mod tests {
     #[test]
     fn unreadable_datagrams_are_held_and_counted() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         m.client(t0, addr(), long(ZERO_RTT, 10));
         let odd = long_with(0x0a0a_0a0a, HANDSHAKE, false, 8);
@@ -657,22 +622,22 @@ mod tests {
         assert_eq!(m.due(t0).len(), 1, "only the readable Handshake datagram goes first");
         assert!(!sent(m.client(t0, addr(), odd.clone())));
         assert_eq!(m.stats.unparsed, 2);
-        assert_eq!(m.server(t0, addr()).len(), 2);
+        assert_eq!(m.server(addr()).len(), 2);
     }
 
     /// Only a gateway datagram to the Finished's client ends the drain.
     #[test]
     fn the_drain_waits_for_a_datagram_to_the_finisheds_client() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         m.client(t0, addr(), long(ZERO_RTT, 10));
         m.client(t0, addr(), long(HANDSHAKE, 10));
         m.client(t0, addr(), short(10));
         m.release();
         assert_eq!(m.due(t0).len(), 1);
-        assert!(m.server(t0, other()).is_empty(), "another client's datagram");
-        assert_eq!(m.server(t0, addr()).len(), 1);
+        assert!(m.server(other()).is_empty(), "another client's datagram");
+        assert_eq!(m.server(addr()).len(), 1);
     }
 
     /// Arming again flushes what an earlier hold left queued, before
@@ -680,7 +645,7 @@ mod tests {
     #[test]
     fn arming_flushes_a_leftover_queue_first() {
         let t0 = Instant::now();
-        let mut m = Machine::new(Duration::ZERO);
+        let mut m = Machine::new();
         m.arm();
         m.client(t0, addr(), long(ZERO_RTT, 10));
         m.client(t0, addr(), short(3));

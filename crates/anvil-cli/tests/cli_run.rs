@@ -6,7 +6,7 @@ use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::runner::{RunReport, RunnerCompletion};
-use anvil_domain::workspace::{Meta, Scenario, ScenarioStep, Variable};
+use anvil_domain::workspace::{Environment, Meta, Scenario, ScenarioStep, Variable};
 use anvil_storage::KdfParams;
 use std::path::Path;
 use std::process::Output;
@@ -20,7 +20,13 @@ fn setup(root: &Path, base: &str, closed_port: u16) {
     let h = anvil_storage::vault::read_header(&s.dir).unwrap();
     let app = App::open(s.dir, h, dek).unwrap();
     let ws = app.create_workspace("Shop").unwrap();
-    app.create_environment(&ws.meta.id, "lab", vec![Variable::plain("base", base)]).unwrap();
+    app.save_environment(Environment {
+        meta: Meta::new(),
+        workspace_id: ws.meta.id,
+        name: "lab".into(),
+        variables: vec![Variable::plain("base", base)],
+    })
+    .unwrap();
 
     let mut login = RequestSpec::http("POST", "{{base}}/status/200");
     login.params.push(KeyValue::new("body", format!(r#"{{"session":"{TOKEN}"}}"#)));
@@ -279,7 +285,13 @@ fn setup_hostile(root: &Path, base: &str) -> String {
     let h = anvil_storage::vault::read_header(&s.dir).unwrap();
     let app = App::open(s.dir, h, dek).unwrap();
     let ws = app.create_workspace("Shop").unwrap();
-    app.create_environment(&ws.meta.id, "lab", vec![Variable::plain("base", base)]).unwrap();
+    app.save_environment(Environment {
+        meta: Meta::new(),
+        workspace_id: ws.meta.id,
+        name: "lab".into(),
+        variables: vec![Variable::plain("base", base)],
+    })
+    .unwrap();
     let folder = app.create_folder(&ws.meta.id, None, "::error::folder").unwrap();
     let mut spec = RequestSpec::http("GET", "{{base}}/status/200");
     spec.params.push(KeyValue::new("body", HOSTILE_BODY));

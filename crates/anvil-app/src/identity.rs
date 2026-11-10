@@ -23,7 +23,7 @@
 //! Imports and backups never carry local policy, so restoring someone else's
 //! backup cannot replace the local linked identity.
 //!
-//! **Target-API identity.** [`App::oauth_sign_in`] runs the interactive
+//! **Target-API identity.** [`App::oauth_sign_in_with`] runs the interactive
 //! OAuth authorization-code + PKCE flow for the auth profile in effect for a
 //! request and caches the token in this profile's engine (memory only,
 //! cleared on lock).
@@ -269,33 +269,14 @@ pub fn login_providers() -> Vec<ProviderInfo> {
 }
 
 impl App {
-    /// Sign in to the OAuth-protected API that `request_id` (or `draft`)
-    /// would call, in the system browser, and cache the token for sends
-    /// from this profile. The token is never returned; see
-    /// [`ApiAuthorization`]. Canceled by `cancel`; refused while locked, and
-    /// discarded if the app was locked while the browser was open.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn oauth_sign_in(
-        &self,
-        request_id: Option<Id>,
-        ws: &Id,
-        draft: Option<RequestSpec>,
-        opts: &SendOptions,
-        opener: &dyn BrowserOpener,
-        observer: &dyn FlowObserver,
-        flow: &FlowOptions,
-        cancel: &CancellationToken,
-    ) -> Result<ApiAuthorization> {
-        if self.is_locked() {
-            return Err(AppError::Locked);
-        }
-        let ctx = self.build_context_off_runtime(request_id, *ws, draft, opts.clone(), cancel).await?;
-        self.oauth_sign_in_with(&ctx, opener, observer, flow, cancel).await
-    }
-
-    /// [`App::oauth_sign_in`] for the context `ctx` exactly as given (built
-    /// by [`App::build_context`]), so a caller that checked it signs in with
-    /// what it checked, never with a context built again later.
+    /// Sign in to the OAuth-protected API that the request of context `ctx`
+    /// would call, in the system browser, and cache the token for sends from
+    /// this profile. `ctx` is used exactly as given (built by
+    /// [`App::build_context`]), so a caller that checked it signs in with
+    /// what it checked, never with a context built again later. The token is
+    /// never returned; see [`ApiAuthorization`]. Canceled by `cancel`;
+    /// refused while locked, and discarded if the app was locked while the
+    /// browser was open.
     pub async fn oauth_sign_in_with(
         &self,
         ctx: &ExecutionContext,

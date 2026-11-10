@@ -5,6 +5,7 @@
 //! claims which component answered, even for a trusted gateway, and a request
 //! that did not travel as early data is never described as early data.
 
+use anvil_diagnostics::ferrum::{DEFAULT_COMPATIBILITY_ID, compatibility_ids};
 use anvil_diagnostics::{Diagnosis, DiagnosticInput, FerrumTrust, diagnose};
 use anvil_domain::diagnostics::{Confidence, Severity, SourceScope};
 use anvil_domain::execution::*;
@@ -72,13 +73,29 @@ fn response(status: u16, body: &[u8]) -> ResponseRecord {
     }
 }
 
+/// The diagnosis from an untrusted destination, or (`trusted`) from one
+/// trusted with the default catalog. A trusted diagnosis is made with every
+/// embedded catalog too: what is not a Ferrum catalog conclusion (each
+/// finding outside `ferrum.*`) must not depend on which one.
 fn run(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trusted: bool) -> Diagnosis {
+    if !trusted {
+        return diagnose_with(attempts, r, body, &FerrumTrust::NotConfigured);
+    }
+    let trust = |id: &str| FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: id.into(), channel_authenticated: true };
+    let d = diagnose_with(attempts, r, body, &trust(DEFAULT_COMPATIBILITY_ID));
+    for id in compatibility_ids() {
+        let other = diagnose_with(attempts, r, body, &trust(id));
+        assert_eq!(outside_ferrum(&other), outside_ferrum(&d), "{id}");
+    }
+    d
+}
+
+fn outside_ferrum(d: &Diagnosis) -> Vec<&str> {
+    codes(d).into_iter().filter(|c| !c.starts_with("ferrum.")).collect()
+}
+
+fn diagnose_with(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trust: &FerrumTrust) -> Diagnosis {
     let status = ProtocolStatus::Http { status: r.status, reason: None };
-    let trust = if trusted {
-        FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: "ferrum-edge-0.9.7".into(), channel_authenticated: true }
-    } else {
-        FerrumTrust::NotConfigured
-    };
     diagnose(&DiagnosticInput {
         protocol: Protocol::Http,
         method: "PUT",
@@ -88,7 +105,7 @@ fn run(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trusted
         body,
         stream: None,
         protocol_status: &status,
-        trust: &trust,
+        trust,
         tls_verification_enabled: true,
         credentials_stripped_on_redirect: false,
         protocol_fallback_from: None,

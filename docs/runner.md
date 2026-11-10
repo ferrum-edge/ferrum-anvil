@@ -315,7 +315,7 @@ app.run_folder(&workspace_id, Some(folder_id) /* None = root */, settings, cance
 app.run_plan(plan, settings, cancel).await?
 app.run_reports(&ws)? / run_report(&id)? / delete_run_report(&id)?
 app.create_scenario / update_scenario / find_scenario / trust_scenario / delete_scenario
-app.create_dataset(&ws, name, DatasetFormat::Csv, bytes, sensitive_columns)? / run_dataset(&dataset)?
+app.create_dataset(&ws, name, DatasetFormat::Csv, bytes, sensitive_columns)? // read by a run of a scenario that names it
 app.find_folder(&ws, "Orders/Refunds")?
 ```
 

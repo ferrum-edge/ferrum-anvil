@@ -147,6 +147,39 @@ fn methods_head_and_misc_flags() {
     assert!(has_at(&r, "curl_option", "/args/1"));
 }
 
+/// The value of a value-taking option that is not imported is never read as
+/// the URL, whether the importer knows the option or not (#538).
+#[test]
+fn an_option_value_is_never_taken_for_the_url() {
+    for cmd in [
+        "curl --unix-socket /var/run/docker.sock http://localhost/v1/info",
+        "curl --retry-max-time 30 http://localhost/v1/info",
+        "curl --proxy-header 'X-Proxy: y' http://localhost/v1/info",
+        "curl --tls-max 1.2 http://localhost/v1/info",
+        "curl -K cfg http://localhost/v1/info",
+        "curl --config cfg http://localhost/v1/info",
+        "curl --noproxy '*' http://localhost/v1/info",
+        "curl -sKcfg http://localhost/v1/info",
+        // Unknown to the importer: the bare word after it is its value,
+        // since a URL follows.
+        "curl --frobnicate-with value http://localhost/v1/info",
+    ] {
+        let r = curl(cmd);
+        assert_eq!(r.requests.len(), 1, "{cmd}");
+        assert_eq!(r.requests[0].spec.url, "http://localhost/v1/info", "{cmd}");
+        assert!(has(&r, "curl_option"), "{cmd}: {:?}", codes(&r));
+        assert!(!has(&r, "curl_multiple_urls"), "{cmd}");
+    }
+    let r = curl("curl -K cfg http://localhost/v1/info");
+    assert!(r.report.external_refs.iter().any(|x| x.reference == "cfg"), "{:?}", r.report.external_refs);
+    // Without a URL after it, the bare word stays the URL, as before.
+    let r = curl("curl --frobnicate example.com");
+    assert_eq!(r.requests[0].spec.url, "http://example.com");
+    // A URL that is another option's value does not count.
+    let r = curl("curl --frobnicate example.com --proxy http://p:8080");
+    assert_eq!(r.requests[0].spec.url, "http://example.com");
+}
+
 /// `--max-redirs -1` is curl's "unlimited": the most a redirect policy
 /// follows, with a warning, never zero (#538).
 #[test]

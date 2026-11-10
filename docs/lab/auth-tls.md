@@ -9,12 +9,13 @@ Nothing is faked: no injected headers, no injected failure enums, no fixture
 pretending to be the gateway. Every result records the gateway release, source
 SHA, binary sha256 and platform.
 
-Every scenario passes on both releases with the same expectations, except two
-whose verdict is release-dependent (see
+Every scenario passed on v0.9.5 and v0.9.7 with the same expectations, except two
+whose verdict changed in 0.9.7 (see
 [gateway-0.9.7-delta.md](../audit/gateway-0.9.7-delta.md)):
-`AUTH-009.iss-array` (0.9.5 accepts a multi-valued `iss`; 0.9.7 rejects it with
-the ordinary 401 bodies) and `AUTH-X01.nbf` (0.9.5 ignores a future
-introspection `nbf`; 0.9.7 answers 401 `Token is not yet valid`).
+`AUTH-009.iss-array` (0.9.5 accepted a multi-valued `iss`; from 0.9.7 it is
+rejected with the ordinary 401 bodies) and `AUTH-X01.nbf` (0.9.5 ignored a
+future introspection `nbf`; from 0.9.7 it is 401 `Token is not yet valid`).
+The lab expects the later verdict.
 
 Three kinds of evidence are kept apart:
 
@@ -160,7 +161,7 @@ records redact `WWW-Authenticate`.
 | AUTH-015 | AUTH-015 | OAuth token endpoint returns 503 | `local.auth_preparation_failed`: nothing sent, no HTTP finding; the gateway and backend never saw a request |
 | AUTH-016 | AUTH-016 | Client credentials → opaque token → gateway introspects it → 200 | One token request, gateway introspection at the IdP, cached token reused, client secret not recorded |
 | AUTH-X01 | — | Token the IdP says is inactive → 401 `Inactive token` + `Bearer error="invalid_token"` | Credential rejection (401), never "unavailable"; the gateway did ask the IdP |
-| AUTH-X01.nbf | — | The IdP reports an active token whose `nbf` is 600 s in the future | **Release-dependent:** 0.9.5 ignores `nbf` and forwards (200); 0.9.7 answers 401 `Token is not yet valid` + `Bearer error="invalid_token"`, a credential verdict (never "unavailable"), matched against the 0.9.7 catalog at most likely; backend untouched |
+| AUTH-X01.nbf | — | The IdP reports an active token whose `nbf` is 600 s in the future | 401 `Token is not yet valid` + `Bearer error="invalid_token"` (from 0.9.7; 0.9.5 forwarded it), a credential verdict (never "unavailable"), matched against the running release's catalog at most likely; backend untouched |
 | AUTH-X02 | — | Introspection endpoint refused (and, as a variant, the IdP answering 503) → 503 `Token introspection unavailable`, no challenge | Dependency failure: 503, never an unauthorized/credential claim; same credential works once the IdP is reachable |
 | AUTH-018 | AUTH-018 | Engine-signed `ferrum-hmac-v2` GET and POST | Accepted; one fresh nonce per send; secret not recorded |
 | AUTH-018.skew | AUTH-018 | Date header 10 min old → 401 `Missing or expired Date header` | No confirmed clock claim |
@@ -171,7 +172,7 @@ records redact `WWW-Authenticate`.
 | AUTH-023 | AUTH-023 | Legacy `ferrum-hmac-v1` without the unsafe opt-in | Refused locally; nothing reaches the gateway |
 | AUTH-024 | AUTH-024 | DPoP-bound ES256 token + per-send proof | Accepted; binding facts (jkt/htu/jti) recorded without the key; missing proof → `DPoP proof required`, proof for another URL and proof from an unbound key are rejected |
 | AUTH-025 | AUTH-025 | Captured proof replayed → 401 `DPoP replay` | No `DPoP-Nonce` challenge (0.9.5 or 0.9.7) and no automatic retry loop; fresh proofs per send accepted |
-| AUTH-009.iss-array | AUTH-009 | HS256 token with `iss: [issuer, other]` on `jwt_auth` (no issuer configured) and an ES256 token with the same array on `jwks_auth` (issuer configured) | **Release-dependent:** 0.9.5 accepts both (200); 0.9.7 answers 401 `Invalid JWT token` / 401 `Invalid or unrecognized JWT`, matched against the 0.9.7 catalog at most likely; no confirmed issuer claim either way |
+| AUTH-009.iss-array | AUTH-009 | HS256 token with `iss: [issuer, other]` on `jwt_auth` (no issuer configured) and an ES256 token with the same array on `jwks_auth` (issuer configured) | 401 `Invalid JWT token` / 401 `Invalid or unrecognized JWT` (from 0.9.7; 0.9.5 accepted both), matched against the running release's catalog at most likely; no confirmed issuer claim |
 | AUTH-027 | AUTH-027 | Wrong LDAP password → 401 `LDAP authentication failed` | Directory really rejected the bind; no "unavailable/unreachable" claim |
 | AUTH-028 | AUTH-028 | Directory unreachable → 500 `LDAP authentication temporarily unavailable` | Never a password/credential claim; the same credentials work against the reachable directory |
 | AUTH-032 | AUTH-032 | Multi-auth: JWT(alice)+key(bob) → 403 `Consumer is not allowed`; bad JWT + key(bob) → 200; key(bob) → 200 | The first successful identity is judged alone (no privilege union); a later valid mechanism wins over an earlier rejection |
@@ -308,8 +309,8 @@ or the wrong thing.
 
 Dated run counts (2026-09, v0.9.5 and v0.9.7) are kept in the
 [repository history](https://github.com/ferrum-edge/ferrum-anvil/blob/7b4a6b367476208e8a1ffbc0483f8e3d6c681e3e/docs/lab/auth-tls.md#stability).
-`AUTH-009.iss-array` and `AUTH-X01.nbf` pass on v0.9.5 and v0.9.7 with their
-release-dependent expectations.
+`AUTH-009.iss-array` and `AUTH-X01.nbf` passed on v0.9.5 and v0.9.7 with the
+expectations each release had then.
 
 One earlier batch failed 3 of 64 tls results (TLS-005/006/014, untrusted
 pass): the TLS 1.3 alert was lost to the gateway's reset and Anvil reported

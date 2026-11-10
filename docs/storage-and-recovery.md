@@ -210,13 +210,18 @@ Changes that make the profile safer are not asked about.
     transaction.
 
   Changes saved meanwhile by other commands are kept, so the checkpoint is
-  not restored automatically; it stays on disk for a manual restore.
+  not restored automatically; it stays on disk for a manual restore. An
+  import, restore or spec reimport refused by the checks its transaction
+  makes before writing (an unapproved existing workspace, an object of
+  another workspace, a stored file the bundle does not carry, API standards
+  over the profile limits, a spec source changed since its diff) writes
+  nothing, and its checkpoint is deleted.
 
 ## Export and import
 
 | Mode | Contents | Secrets |
 |---|---|---|
-| Share safely | One workspace, or every workspace when none is chosen | None: literal secrets become `{{placeholders}}` listed in the manifest |
+| Share safely | One workspace, or every workspace when none is chosen | None: literal secrets become `{{placeholders}}` listed in the manifest, and each vault secret left out is listed among its excluded items by label |
 | Encrypted transfer | One workspace, or every workspace when none is chosen | Vault secrets and the literal secrets, encrypted with a passphrase you share separately |
 | Full backup | Everything, including history and settings | Encrypted; an ANVILBAK file, not a bundle ([below](#full-backups)) |
 
@@ -1021,7 +1026,7 @@ uses it is saved, in a separate call. Its index entry is marked as added by
 a user (`"user": true`, with `"attached_at"`, the time in unix
 milliseconds it was last attached; entries written earlier have neither),
 and no automatic release, such as a reimport releasing the source file it
-replaces or `App::release_attachment`, deletes a marked attachment: only
+replaces, deletes a marked attachment: only
 deleting or replacing an item that held it does. A bundle import or a
 restore stores the files its items reference without marking them (an entry
 already marked stays marked). A save checks, in its own write transaction,

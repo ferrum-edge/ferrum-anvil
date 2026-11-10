@@ -3,8 +3,9 @@
 //! rejection byte for byte, relayed through the gateway, was attributed to the
 //! gateway's plugin. The tests reproduce only the public evidence the lab
 //! observed — never its private ground truth — plus the genuine gateway
-//! rejection that must keep its attribution.
+//! rejection that must keep its attribution, against every embedded catalog.
 
+use anvil_diagnostics::ferrum::compatibility_ids;
 use anvil_diagnostics::{Diagnosis, DiagnosticInput, FerrumTrust, diagnose};
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry, ResponseRecord};
@@ -39,12 +40,13 @@ fn response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> ResponseRecor
     }
 }
 
-fn http(r: &ResponseRecord, body: &[u8], trusted: bool) -> Diagnosis {
+/// Diagnose `r` from a destination trusted with `catalog` (a compatibility
+/// id), or from an untrusted one (`None`).
+fn http(r: &ResponseRecord, body: &[u8], catalog: Option<&str>) -> Diagnosis {
     let status = ProtocolStatus::Http { status: r.status, reason: None };
-    let trust = if trusted {
-        FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: "ferrum-edge-0.9.5".into(), channel_authenticated: false }
-    } else {
-        FerrumTrust::NotConfigured
+    let trust = match catalog {
+        Some(id) => FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: id.into(), channel_authenticated: false },
+        None => FerrumTrust::NotConfigured,
     };
     diagnose(&DiagnosticInput {
         protocol: Protocol::Http,
@@ -74,13 +76,19 @@ const KEY_AUTH_BODY: &[u8] = br#"{"error":"Invalid API key"}"#;
 #[test]
 fn auth_x04_backend_401_with_gateway_via_hop_is_not_a_gateway_rejection() {
     let r = response(401, &[("content-type", "application/json"), ("via", "1.1 ferrum-edge")], KEY_AUTH_BODY);
-    let d = http(&r, KEY_AUTH_BODY, true);
-    assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.outcome")), "{:?}", codes(&d));
-    let f = d.findings.iter().find(|f| f.code == "ferrum.relayed_backend_response").expect("relay finding");
-    assert_eq!(f.scope, SourceScope::UpstreamApplication);
-    assert!(f.confidence <= Confidence::Likely, "body/header evidence stays at most likely");
-    assert!(f.explanation.contains("1.1 ferrum-edge") && f.explanation.contains("plugin.key_auth.invalid_key"), "{}", f.explanation);
-    assert!(codes(&d).contains(&"http.unauthorized"));
+    for id in compatibility_ids() {
+        let d = http(&r, KEY_AUTH_BODY, Some(id));
+        assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.outcome")), "{id}: {:?}", codes(&d));
+        let f = d.findings.iter().find(|f| f.code == "ferrum.relayed_backend_response").expect("relay finding");
+        assert_eq!(f.scope, SourceScope::UpstreamApplication, "{id}");
+        assert!(f.confidence <= Confidence::Likely, "{id}: body/header evidence stays at most likely");
+        assert!(
+            f.explanation.contains("1.1 ferrum-edge") && f.explanation.contains("plugin.key_auth.invalid_key"),
+            "{id}: {}",
+            f.explanation
+        );
+        assert!(codes(&d).contains(&"http.unauthorized"), "{id}");
+    }
 }
 
 /// Lookalike in the other direction: the genuine gateway rejection (no Via)
@@ -88,11 +96,13 @@ fn auth_x04_backend_401_with_gateway_via_hop_is_not_a_gateway_rejection() {
 #[test]
 fn auth_x04_lookalike_gateway_rejection_without_via_keeps_its_attribution() {
     let r = response(401, &[("content-type", "application/json")], KEY_AUTH_BODY);
-    let d = http(&r, KEY_AUTH_BODY, true);
-    let f = d.findings.iter().find(|f| f.code == "ferrum.outcome").expect("gateway outcome");
-    assert_eq!(f.scope, SourceScope::GatewayAdmission);
-    assert_eq!(f.confidence, Confidence::Likely);
-    assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"));
+    for id in compatibility_ids() {
+        let d = http(&r, KEY_AUTH_BODY, Some(id));
+        let f = d.findings.iter().find(|f| f.code == "ferrum.outcome").expect("gateway outcome");
+        assert_eq!(f.scope, SourceScope::GatewayAdmission, "{id}");
+        assert_eq!(f.confidence, Confidence::Likely, "{id}");
+        assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"), "{id}");
+    }
 }
 
 /// A Via hop from some other intermediary is not the gateway's hop and
@@ -100,24 +110,34 @@ fn auth_x04_lookalike_gateway_rejection_without_via_keeps_its_attribution() {
 #[test]
 fn auth_x04_foreign_via_and_untrusted_destinations_are_unchanged() {
     let r = response(401, &[("via", "1.1 varnish")], KEY_AUTH_BODY);
-    let d = http(&r, KEY_AUTH_BODY, true);
-    assert!(codes(&d).contains(&"ferrum.outcome"), "{:?}", codes(&d));
+    for id in compatibility_ids() {
+        let d = http(&r, KEY_AUTH_BODY, Some(id));
+        assert!(codes(&d).contains(&"ferrum.outcome"), "{id}: {:?}", codes(&d));
+    }
     let r = response(401, &[("via", "1.1 ferrum-edge")], KEY_AUTH_BODY);
-    let d = http(&r, KEY_AUTH_BODY, false);
+    let d = http(&r, KEY_AUTH_BODY, None);
     assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.")), "{:?}", codes(&d));
 }
 
 /// AUTH-X05: the fallback-challenge body shared by several gateway paths
-/// (ambiguous) is also contradicted by the gateway's Via hop.
+/// (ambiguous) is also contradicted by the gateway's Via hop, with the bare
+/// fallback challenge and with the per-mechanism one (from v0.9.19).
 #[test]
 fn auth_x05_ambiguous_gateway_candidates_are_all_contradicted_by_via() {
     let body = br#"{"error":"Authentication required"}"#;
-    let r = response(401, &[("www-authenticate", "ferrum-edge"), ("via", "1.1 ferrum-edge")], body);
-    let d = http(&r, body, true);
-    assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.outcome")), "{:?}", codes(&d));
-    assert!(codes(&d).contains(&"ferrum.relayed_backend_response"));
-    let r = response(401, &[("www-authenticate", "ferrum-edge")], body);
-    assert!(codes(&http(&r, body, true)).contains(&"ferrum.outcome_ambiguous"), "without Via the gateway candidates stay listed");
+    for challenge in ["ferrum-edge", r#"ApiKey realm="ferrum-edge""#] {
+        for id in compatibility_ids() {
+            let r = response(401, &[("www-authenticate", challenge), ("via", "1.1 ferrum-edge")], body);
+            let d = http(&r, body, Some(id));
+            assert!(!codes(&d).iter().any(|c| c.starts_with("ferrum.outcome")), "{id} {challenge}: {:?}", codes(&d));
+            assert!(codes(&d).contains(&"ferrum.relayed_backend_response"), "{id} {challenge}");
+            let r = response(401, &[("www-authenticate", challenge)], body);
+            assert!(
+                codes(&http(&r, body, Some(id))).contains(&"ferrum.outcome_ambiguous"),
+                "{id} {challenge}: without Via the gateway candidates stay listed"
+            );
+        }
+    }
 }
 
 /// Authentication 5xx outcomes are left alone: some are raised at the final
@@ -127,9 +147,11 @@ fn auth_x05_ambiguous_gateway_candidates_are_all_contradicted_by_via() {
 fn auth_5xx_outcomes_are_not_contradicted_by_via() {
     let body = br#"{"error":"Token introspection unavailable"}"#;
     let r = response(503, &[("via", "1.1 ferrum-edge")], body);
-    let d = http(&r, body, true);
-    assert!(codes(&d).contains(&"ferrum.outcome"), "{:?}", codes(&d));
-    assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"));
+    for id in compatibility_ids() {
+        let d = http(&r, body, Some(id));
+        assert!(codes(&d).contains(&"ferrum.outcome"), "{id}: {:?}", codes(&d));
+        assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"), "{id}");
+    }
 }
 
 /// Gateway-synthesized upstream failures DO carry Via; the relay rule must
@@ -138,8 +160,10 @@ fn auth_5xx_outcomes_are_not_contradicted_by_via() {
 fn upstream_failure_with_via_keeps_its_token_and_catalog_candidates() {
     let body = br#"{"error":"Backend unavailable"}"#;
     let r = response(502, &[("x-gateway-error", "connection_failure"), ("via", "1.1 ferrum-edge")], body);
-    let d = http(&r, body, true);
-    assert!(codes(&d).contains(&"ferrum.token.connection_failure"), "{:?}", codes(&d));
-    assert!(codes(&d).contains(&"ferrum.outcome_ambiguous"), "{:?}", codes(&d));
-    assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"));
+    for id in compatibility_ids() {
+        let d = http(&r, body, Some(id));
+        assert!(codes(&d).contains(&"ferrum.token.connection_failure"), "{id}: {:?}", codes(&d));
+        assert!(codes(&d).contains(&"ferrum.outcome_ambiguous"), "{id}: {:?}", codes(&d));
+        assert!(!codes(&d).contains(&"ferrum.relayed_backend_response"), "{id}");
+    }
 }

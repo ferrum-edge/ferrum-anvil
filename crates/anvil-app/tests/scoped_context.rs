@@ -58,7 +58,13 @@ fn unrelated_request_revision_workspace_profiles_and_credentials_preserve_contex
     let foreign = app.create_workspace("foreign").unwrap();
     app.set_secret(&foreign.meta.id, "foreign", "secret-canary").unwrap();
     valid(&ctx);
-    app.create_environment(&ws.meta.id, "unused", vec![Variable::plain("unused", "value")]).unwrap();
+    app.save_environment(Environment {
+        meta: Meta::new(),
+        workspace_id: ws.meta.id,
+        name: "unused".into(),
+        variables: vec![Variable::plain("unused", "value")],
+    })
+    .unwrap();
     let unused_tls = tls(&app, ws.meta.id);
     proxy(&app, ws.meta.id, Some(unused_tls.id));
     app.set_secret(&ws.meta.id, "unused", "secret-canary").unwrap();
@@ -181,9 +187,9 @@ fn ancestor_and_app_settings_are_relevant_but_sibling_folders_are_not() {
     let build = || app.build_context(Some(req.meta.id), &ws.meta.id, None, &SendOptions::default()).unwrap();
     let ctx = build();
     let sibling = app.create_folder(&ws.meta.id, None, "sibling").unwrap();
-    app.save_folder(sibling).unwrap();
+    app.save_folder_in_place(sibling).unwrap();
     valid(&ctx);
-    app.save_folder(parent).unwrap();
+    app.save_folder_in_place(parent).unwrap();
     stale(&ctx, &app);
     let ctx = build();
     app.save_settings(&app.settings().unwrap()).unwrap();

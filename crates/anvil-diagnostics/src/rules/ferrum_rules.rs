@@ -33,11 +33,15 @@ fn scope_for_family(f: &str) -> SourceScope {
     }
 }
 
+/// The owner a catalog outcome names, spelled as the contract's [`Owner`]
+/// (`catalog_drift.rs` requires that spelling); anything else is `Unknown`.
 fn owner_from(s: &str) -> Owner {
     match s {
         "caller" => Owner::Caller,
         "gateway_operator" => Owner::GatewayOperator,
         "api_owner" => Owner::ApiOwner,
+        "network_administrator" => Owner::NetworkAdministrator,
+        "identity_provider" => Owner::IdentityProvider,
         _ => Owner::Unknown,
     }
 }
@@ -587,13 +591,16 @@ fn catalog_title(id: &str) -> String {
     let label = match family {
         "upstream" => "Gateway could not complete the upstream exchange",
         "gateway" => "Gateway rejected or could not serve the request",
-        "size" => "Gateway size limit",
+        "size" | "size_limit" => "Gateway size limit",
         "frontend_parse" => "Gateway rejected the request framing",
         "frontend_tls" => "Gateway TLS listener rejected the connection",
         "protocol" => "Gateway protocol-specific rejection",
         "streaming" => "Response stream failed after headers",
         "auth" => "Gateway authentication outcome",
         "plugin" => "Gateway plugin outcome",
+        "proxy" => "Gateway proxy outcome",
+        "l4" => "Gateway L4 outcome",
+        "generic" => "Gateway outcome",
         _ => "Ferrum Edge outcome",
     };
     label.to_string()
@@ -601,7 +608,7 @@ fn catalog_title(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{token_owner, token_scope};
+    use super::{catalog_title, token_owner, token_scope};
     use crate::facts::{DiagnosticInput, FerrumTrust};
     use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Owner, SourceScope};
     use anvil_domain::execution::{BodyCapture, BodyCompleteness, HeaderEntry, ResponseRecord};
@@ -610,6 +617,18 @@ mod tests {
 
     // Deliberately unsupported, independent of which numbered release ships next.
     const UNSUPPORTED_COMPATIBILITY_ID: &str = "ferrum-edge-unsupported-test-release";
+
+    /// Every outcome family of every embedded catalog has its own title;
+    /// the generic fallback is for a family a later catalog adds.
+    #[test]
+    fn every_catalog_family_has_a_title() {
+        for c in crate::ferrum::catalogs() {
+            for o in &c.outcomes {
+                assert_ne!(catalog_title(&o.id), "Ferrum Edge outcome", "{}: {}", c.compatibility_id, o.id);
+            }
+        }
+        assert_eq!(catalog_title("size_limit.synthetic_response_over_ceiling"), catalog_title("size.request_body"));
+    }
 
     #[test]
     fn token_scope_and_owner_cover_the_pinned_vocabulary() {

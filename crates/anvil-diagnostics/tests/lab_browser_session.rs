@@ -4,6 +4,7 @@
 //! below are the public evidence the auth lab observed from Ferrum Edge
 //! 0.9.5's `oidc_relying_party`; the lookalikes must not get the finding.
 
+use anvil_diagnostics::ferrum::{DEFAULT_COMPATIBILITY_ID, compatibility_ids};
 use anvil_diagnostics::{Diagnosis, DiagnosticInput, FerrumTrust, diagnose};
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::{
@@ -57,13 +58,30 @@ fn response(status: u16, headers: &[(&str, &str)], ct: &str, body: &[u8]) -> Res
     }
 }
 
+/// The diagnosis from an untrusted destination, or (`trusted`) from one
+/// trusted with the default catalog. A trusted diagnosis is made with every
+/// embedded catalog too: what is not a Ferrum catalog conclusion (each
+/// finding outside `ferrum.*`, and whether it stopped at a login) must not depend on which one.
 fn run(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trusted: bool) -> Diagnosis {
+    if !trusted {
+        return diagnose_with(attempts, r, body, &FerrumTrust::NotConfigured);
+    }
+    let trust = |id: &str| FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: id.into(), channel_authenticated: false };
+    let d = diagnose_with(attempts, r, body, &trust(DEFAULT_COMPATIBILITY_ID));
+    for id in compatibility_ids() {
+        let other = diagnose_with(attempts, r, body, &trust(id));
+        assert_eq!(outside_ferrum(&other), outside_ferrum(&d), "{id}");
+        assert_eq!(other.stopped_at_login, d.stopped_at_login, "{id}");
+    }
+    d
+}
+
+fn outside_ferrum(d: &Diagnosis) -> Vec<&str> {
+    codes(d).into_iter().filter(|c| !c.starts_with("ferrum.")).collect()
+}
+
+fn diagnose_with(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trust: &FerrumTrust) -> Diagnosis {
     let status = ProtocolStatus::Http { status: r.status, reason: None };
-    let trust = if trusted {
-        FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: "ferrum-edge-0.9.5".into(), channel_authenticated: false }
-    } else {
-        FerrumTrust::NotConfigured
-    };
     diagnose(&DiagnosticInput {
         protocol: Protocol::Http,
         method: "GET",
@@ -73,7 +91,7 @@ fn run(attempts: &[AttemptObservation], r: &ResponseRecord, body: &[u8], trusted
         body,
         stream: None,
         protocol_status: &status,
-        trust: &trust,
+        trust,
         tls_verification_enabled: true,
         credentials_stripped_on_redirect: true,
         protocol_fallback_from: None,

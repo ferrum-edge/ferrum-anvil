@@ -3,6 +3,7 @@
 //! imported scenarios, datasets and lock behaviour — over real sockets.
 
 use anvil_app::App;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
 use anvil_domain::assertions::{Extraction, ExtractionSource};
@@ -10,7 +11,7 @@ use anvil_domain::auth::{AuthConfig, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::runner::*;
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{DatasetFormat, Meta, Scenario, ScenarioStep, Variable};
+use anvil_domain::workspace::{DatasetFormat, Environment, Meta, Scenario, ScenarioStep, Variable};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
@@ -67,17 +68,18 @@ async fn oversized_extractions_preserve_deferred_vault_variable_bindings() {
             ws.variables.push(vault("kept", &kept));
             ws.variables.push(vault("also_kept", &also_kept));
             let env = app
-                .create_environment(
-                    &ws.meta.id,
-                    "active",
-                    vec![
+                .save_environment(Environment {
+                    meta: Meta::new(),
+                    workspace_id: ws.meta.id,
+                    name: "active".into(),
+                    variables: vec![
                         vault("session", &removed),
                         Variable::plain("also_removed", "outer fallback"),
                         vault("kept", &kept),
                         vault("also_kept", &also_kept),
                         Variable::plain("label", "environment-public"),
                     ],
-                )
+                })
                 .unwrap();
             ws.active_environment_id = Some(env.meta.id);
         }
@@ -158,7 +160,14 @@ async fn scenario_run_chains_records_history_and_saves_a_redacted_report() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path(), "runner");
     let ws = app.create_workspace("Shop").unwrap();
-    let env = app.create_environment(&ws.meta.id, "lab", vec![Variable::plain("base", &f.url(""))]).unwrap();
+    let env = app
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws.meta.id,
+            name: "lab".into(),
+            variables: vec![Variable::plain("base", &f.url(""))],
+        })
+        .unwrap();
     let mut w = app.workspace(&ws.meta.id).unwrap();
     w.active_environment_id = Some(env.meta.id);
     app.save_workspace(w).unwrap();
@@ -221,11 +230,11 @@ async fn imported_scenarios_never_run_until_trusted_or_explicitly_allowed() {
     let ws = a.create_workspace("Shared").unwrap();
     let req = a.create_request(&ws.meta.id, None, "Ping", RequestSpec::http("GET", &f.url("/count/imported"))).unwrap();
     a.create_scenario(&ws.meta.id, "Smoke", vec![step(req.meta.id)]).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
 
     let b_root = tempfile::tempdir().unwrap();
     let b = new_app(b_root.path(), "recipient");
-    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     let ws_b = b.find_workspace("Shared").unwrap();
     let sc = b.find_scenario(&ws_b.meta.id, "smoke").unwrap();
     assert!(!sc.trusted, "import marks scenarios untrusted");

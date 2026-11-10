@@ -402,6 +402,24 @@ async fn traffic_stopped(f: &fx::Fixture) -> bool {
     f.log.count_requests() == n1
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_the_worker_refuses_reaches_the_host_as_the_error_it_raised() {
+    let _g = serial().await;
+    let (mut job, _) = open_job("http://127.0.0.1:9/never", None, 1);
+    job.options.acknowledged = false;
+    let c = LoadController::spawn(WORKER.as_ref(), &job).await.unwrap();
+    let e = c.wait().await.expect_err("an unacknowledged job is refused");
+    assert!(matches!(e, anvil_load::LoadError::NotAcknowledged), "{e}");
+    assert!(!e.to_string().contains("invalid load plan"), "{e}");
+
+    // A job this worker cannot read is a protocol error, named once.
+    let (mut job, _) = open_job("http://127.0.0.1:9/never", None, 1);
+    job.protocol_version = 0;
+    let e = LoadController::spawn(WORKER.as_ref(), &job).await.unwrap().wait().await.expect_err("an unreadable job is refused");
+    assert!(matches!(&e, anvil_load::LoadError::Protocol(m) if m.contains("not supported by this worker")), "{e}");
+    assert_eq!(e.to_string().matches("worker protocol").count(), 1, "{e}");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn load_009_worker_crash_yields_partial_report_from_last_progress() {

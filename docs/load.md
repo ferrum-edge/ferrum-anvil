@@ -352,7 +352,10 @@ and the HTML report says "WARNING: counts do not balance" otherwise. With
 * Streams: `opened ≤ settled`, `with_messages ≤ opened`; SSE `Σ ended_by = opened`.
 * WebSocket: `opened + handshake_rejected + not_opened = settled`,
   `closed_cleanly ≤ opened`, `Σ close_codes = opened`, and no RTT pairs
-  unless a pairing is defined.
+  unless a pairing is defined. `close_codes` has a row per closing side and
+  code for at most 16 distinct codes in 1000–4999, the first ones seen; every
+  other code (outside that range, or past the 16th) is counted under code `0`
+  ("other"), so a peer cannot grow it with a new code per session.
 * TCP: `connected ≤ settled`; `expectation_met + expectation_short = completed`
   when the request expects frames; short exchanges are application failures.
 * UDP/DTLS: `exchanges_with_response + exchanges_silent = completed`;
@@ -458,7 +461,11 @@ arguments** (it exits with 64 if given any).
   (≤ 4/s; lossy under backpressure; carries a balanced snapshot plus only the
   timeline buckets finalized since the last delivered progress) and exactly one
   `report`. A refused job yields `error` and exit code 2, and the error text
-  never quotes job content (serde messages can echo values).
+  never quotes job content (serde messages can echo values). The `error`
+  carries the refusal's kind (`invalid`, `not_acknowledged`, `unsupported`,
+  `refused` with the typed LOAD-013 refusal, `io`, `protocol`, `report`) and
+  its own message, and the controller returns the same `LoadError` the worker
+  raised, so the host names the cause once and keeps a typed refusal typed.
 
 **Secret handling.** `WorkerJob::from_load_job` resolves only the secrets the
 plan's requests actually reference — the effective auth profile, the client
@@ -513,7 +520,9 @@ reader cannot keep a finished worker alive.
   `grpc_status`, `stream` (with `messages_sent` for client and bidirectional
   gRPC), `websocket`, `websocket_close`, `tcp`, `datagram`, `dtls_handshake`,
   `tunnel`); `datagram,observed_received_per_sent` is labelled an
-  observation, and empty distributions have empty values, not zeros.
+  observation, and empty distributions have empty values, not zeros. In
+  `timeline_csv`, a second with no successful unit has empty
+  `success_p50_us` and `success_p99_us`.
 * **HTML** (`html::to_html`): one self-contained file — inline CSS and inline
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
   embedded CSP (`default-src 'none'`). Every dynamic string is escaped,

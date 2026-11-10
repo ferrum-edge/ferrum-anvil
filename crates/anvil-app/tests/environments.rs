@@ -3,7 +3,7 @@ use anvil_app::exec::SendOptions;
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::runner::RunSettings;
 use anvil_domain::request::RequestSpec;
-use anvil_domain::workspace::ScenarioStep;
+use anvil_domain::workspace::{Environment, Meta, ScenarioStep};
 use anvil_storage::KdfParams;
 use tokio_util::sync::CancellationToken;
 
@@ -22,8 +22,12 @@ fn deleting_active_environment_clears_selection_atomically_and_survives_reopen()
     let app = new_app(root.path(), "environment-delete");
     let workspace = app.create_workspace("Workspace").unwrap();
     let request = app.create_request(&workspace.meta.id, None, "Literal", RequestSpec::http("GET", "http://127.0.0.1/")).unwrap();
-    let active = app.create_environment(&workspace.meta.id, "active", vec![]).unwrap();
-    let inactive = app.create_environment(&workspace.meta.id, "inactive", vec![]).unwrap();
+    let active = app
+        .save_environment(Environment { meta: Meta::new(), workspace_id: workspace.meta.id, name: "active".into(), variables: vec![] })
+        .unwrap();
+    let inactive = app
+        .save_environment(Environment { meta: Meta::new(), workspace_id: workspace.meta.id, name: "inactive".into(), variables: vec![] })
+        .unwrap();
     let mut saved = app.workspace(&workspace.meta.id).unwrap();
     saved.active_environment_id = Some(active.meta.id);
     app.save_workspace(saved).unwrap();
@@ -95,7 +99,14 @@ fn setting_a_variable_keeps_secrets_in_the_vault_and_one_value_per_name() {
     let app = new_app(root.path(), "environment-set");
     let ws = app.create_workspace("Workspace").unwrap();
     let dup = |v: &str| Variable { enabled: false, ..Variable::plain("token", v) };
-    let env = app.create_environment(&ws.meta.id, "dev", vec![Variable::plain("base", "http://x"), dup("a"), dup("b")]).unwrap();
+    let env = app
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws.meta.id,
+            name: "dev".into(),
+            variables: vec![Variable::plain("base", "http://x"), dup("a"), dup("b")],
+        })
+        .unwrap();
 
     // A plain value replaces the first variable of the name, enabled, and
     // drops the others; the other variables stay as they were.
@@ -139,8 +150,11 @@ fn the_active_environment_must_belong_to_the_workspace() {
     let app = new_app(root.path(), "environment-use");
     let ws = app.create_workspace("Workspace").unwrap();
     let other = app.create_workspace("Other").unwrap();
-    let mine = app.create_environment(&ws.meta.id, "mine", vec![]).unwrap();
-    let theirs = app.create_environment(&other.meta.id, "theirs", vec![]).unwrap();
+    let mine =
+        app.save_environment(Environment { meta: Meta::new(), workspace_id: ws.meta.id, name: "mine".into(), variables: vec![] }).unwrap();
+    let theirs = app
+        .save_environment(Environment { meta: Meta::new(), workspace_id: other.meta.id, name: "theirs".into(), variables: vec![] })
+        .unwrap();
 
     assert_eq!(app.set_active_environment(&ws.meta.id, Some(&mine.meta.id)).unwrap().active_environment_id, Some(mine.meta.id));
     assert!(app.set_active_environment(&ws.meta.id, Some(&theirs.meta.id)).is_err());
@@ -167,10 +181,18 @@ fn a_secret_is_never_made_plain_and_a_replaced_vault_entry_still_reads() {
     let (old_a, held_a) = vault("old-a");
     let plain_then_secret =
         vec![Variable::plain("token", "plain"), Variable { secret: true, value: held_a, ..Variable::plain("token", "") }];
-    let a = app.create_environment(&ws.meta.id, "a", plain_then_secret).unwrap();
+    let a = app
+        .save_environment(Environment { meta: Meta::new(), workspace_id: ws.meta.id, name: "a".into(), variables: plain_then_secret })
+        .unwrap();
     let (old_b, held_b) = vault("old-b");
-    let b =
-        app.create_environment(&ws.meta.id, "b", vec![Variable { secret: false, value: held_b, ..Variable::plain("token", "") }]).unwrap();
+    let b = app
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws.meta.id,
+            name: "b".into(),
+            variables: vec![Variable { secret: false, value: held_b, ..Variable::plain("token", "") }],
+        })
+        .unwrap();
     for (env, old) in [(&a, &old_a), (&b, &old_b)] {
         let e = app.set_environment_variable(&env.meta.id, "token", "new", false).unwrap();
         let tokens: Vec<_> = e.variables.iter().filter(|v| v.name == "token").collect();

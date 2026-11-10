@@ -7,7 +7,7 @@ use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
-use anvil_domain::workspace::{DatasetFormat, RequestDefinition, ScenarioStep};
+use anvil_domain::workspace::{DatasetFormat, Environment, Meta, RequestDefinition, ScenarioStep};
 use anvil_storage::store::DB_FILE;
 use anvil_storage::{KdfParams, StoreError, kind};
 use rusqlite::{Connection, params};
@@ -63,7 +63,7 @@ fn snapshot(app: &App) -> Vec<RawObject> {
 
 fn save(app: &App, k: &str, value: Value) -> anvil_app::Result<()> {
     match k {
-        kind::FOLDER => app.save_folder(serde_json::from_value(value)?).map(|_| ()),
+        kind::FOLDER => app.save_folder_in_place(serde_json::from_value(value)?).map(|_| ()),
         kind::REQUEST => app.save_request(serde_json::from_value(value)?).map(|_| ()),
         kind::ENVIRONMENT => app.save_environment(serde_json::from_value(value)?).map(|_| ()),
         kind::TLS_PROFILE => app.save_tls_profile(serde_json::from_value(value)?).map(|_| ()),
@@ -94,7 +94,8 @@ fn list(app: &App, k: &str, ws: &Id) -> anvil_app::Result<Value> {
 fn objects(app: &App, ws: Id) -> Vec<(&'static str, Id, Value)> {
     let folder = app.create_folder(&ws, None, "folder").unwrap();
     let request = app.create_request(&ws, Some(folder.meta.id), "request", RequestSpec::http("GET", "https://original.invalid/")).unwrap();
-    let environment = app.create_environment(&ws, "environment", vec![]).unwrap();
+    let environment =
+        app.save_environment(Environment { meta: Meta::new(), workspace_id: ws, name: "environment".into(), variables: vec![] }).unwrap();
     let scenario =
         app.create_scenario(&ws, "scenario", vec![ScenarioStep { request_id: request.meta.id, enabled: true, delay_ms: 0 }]).unwrap();
     let dataset = app.create_dataset(&ws, "dataset", DatasetFormat::Csv, b"column\nvalue\n", vec![]).unwrap();
@@ -224,9 +225,7 @@ fn explicit_folder_and_request_moves_keep_owner_revisions_and_referential_integr
     assert!(app.move_folder(&right.meta.id, Some(child.meta.id), 0.0).is_err());
     assert!(app.move_request(&request.meta.id, Some(Id::new()), 0.0).is_err());
     assert!(app.create_folder(&a, Some(foreign.meta.id), "refused").is_err());
-    let mut invalid = app.folder(&child.meta.id).unwrap();
-    invalid.parent_id = Some(foreign.meta.id);
-    assert!(app.save_folder(invalid).is_err());
+    assert!(app.move_folder_keeping_isolation(&child.meta.id, Some(foreign.meta.id), 0.0, None).is_err());
     assert_eq!(snapshot(&app), original, "refused placements must mutate no row");
     app.delete_request(&request.meta.id).unwrap();
     assert!(app.revision(&request.revision_id.unwrap()).is_err());

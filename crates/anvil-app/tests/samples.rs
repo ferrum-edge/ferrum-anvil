@@ -3,6 +3,7 @@
 //! reports parse with the current report types.
 
 use anvil_app::App;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_domain::load::LoadReport;
 use anvil_domain::runner::RunReport;
@@ -23,7 +24,7 @@ fn sample_workspace_imports_into_a_clean_profile() {
     let app = App::open(s.dir.clone(), anvil_storage::vault::read_header(&s.dir).unwrap(), dek).unwrap();
     let preview = app.import_preview(&bytes, None, ConflictPolicy::Merge).unwrap();
     assert!(preview.missing_secrets.is_empty(), "the sample needs no secrets");
-    app.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    app.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     let ws = app.find_workspace("Anvil samples (lab core)").unwrap();
     assert_eq!(app.requests(&ws.meta.id).unwrap().len(), 6);
     assert!(app.find_request(&ws.meta.id, "Gateway to backend/Backend refuses connections").is_ok());

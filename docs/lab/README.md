@@ -15,8 +15,8 @@ v0.9.15 were retired with Anvil's vendored dimpl: their DTLS 1.3 listeners send 
 `certificate_authorities` list when they require a client certificate, which Anvil's DTLS client
 no longer accepts (PROTO-022; [protocols.md §3.6](../protocols.md#36-dtls)). Their locks are
 removed; their audits, catalogs and the observations recorded on them below stay as history.
-Scenario code still keys some expectations on those releases, which is harmless while only
-v0.9.20 runs.
+Scenario code expects only v0.9.20's signals: the branches for retired releases were removed, and
+the expectations they held are kept in those releases' audits.
 
 ## Running
 
