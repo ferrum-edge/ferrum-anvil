@@ -462,6 +462,15 @@ pub fn split_query(url: &str) -> (String, Vec<(String, String)>) {
     (base.to_string(), pairs)
 }
 
+/// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
+/// URL with its `scheme://` removed), if it has userinfo. The authority ends
+/// at the first `/`, `?` or `#` (RFC 3986 section 3.2), so an `@` in the path,
+/// query or fragment is not one.
+pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
+    let authority_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
+    after_scheme[..authority_end].find('@')
+}
+
 /// Remove a `#fragment`, ignoring `#` inside `{{…}}` references.
 pub fn strip_fragment(url: &str) -> &str {
     let bytes = url.as_bytes();

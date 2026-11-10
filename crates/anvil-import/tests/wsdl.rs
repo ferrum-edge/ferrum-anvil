@@ -200,6 +200,39 @@ fn count(env: &str, local: &str) -> usize {
     parse(env).descendants().filter(|n| n.has_tag_name(("urn:g", local))).count()
 }
 
+/// Numeric facets bound the sample even outside the default sample range,
+/// a single facet included; facets no value of the type satisfies are
+/// reported (#538).
+#[test]
+fn numeric_facets_bound_the_sample() {
+    let restricted = |name: &str, base: &str, facets: &str| {
+        format!(
+            r#"<xsd:element name="{name}"><xsd:simpleType><xsd:restriction base="xsd:{base}">{facets}</xsd:restriction></xsd:simpleType></xsd:element>"#
+        )
+    };
+    let schema = format!(
+        r#"<xsd:element name="Req"><xsd:complexType><xsd:sequence>{}{}{}</xsd:sequence></xsd:complexType></xsd:element>"#,
+        restricted("negative", "int", r#"<xsd:minInclusive value="-100"/><xsd:maxInclusive value="-1"/>"#),
+        restricted("small", "decimal", r#"<xsd:maxInclusive value="0.5"/>"#),
+        restricted("large", "long", r#"<xsd:minInclusive value="5000"/>"#),
+    );
+    let (r, env) = op_envelope(&schema);
+    let doc = parse(&env);
+    let value = |local: &str| -> f64 {
+        let text = doc.descendants().find(|n| n.has_tag_name(("urn:g", local))).and_then(|n| n.text());
+        text.unwrap_or_else(|| panic!("no {local} value in {env}")).parse().unwrap()
+    };
+    assert!((-100.0..=-1.0).contains(&value("negative")), "{env}");
+    assert!(value("small") <= 0.5, "{env}");
+    assert!((5000.0..=6000.0).contains(&value("large")), "{env}");
+    assert!(!has(&r, "contradictory_schema"), "{:?}", codes(&r));
+
+    // No byte is 200 or more: reported, and the declared minimum used.
+    let (r, env) = op_envelope(&restricted("Req", "byte", r#"<xsd:minInclusive value="200"/>"#));
+    assert!(has(&r, "contradictory_schema"), "{:?}", codes(&r));
+    assert!(env.contains(">200<"), "{env}");
+}
+
 /// `Ids` and `Items` reference themselves where `{refs}` is.
 const RECURSIVE_GROUPS: &str = r#"
 <xsd:attributeGroup name="Ids">

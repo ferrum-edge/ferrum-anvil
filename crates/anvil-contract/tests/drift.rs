@@ -674,3 +674,26 @@ fn redacted_routes_are_unknown_but_redacted_query_values_still_route() {
     assert_eq!(report.matched, 1);
     assert!(report.findings.iter().any(|f| f.kind == DriftKind::UndeclaredStatus));
 }
+
+#[test]
+fn paths_sharing_a_path_item_share_its_budget_findings() {
+    // `/a` and `/b` reference one Path Item: one operation object, one
+    // response size budget, and one finding over the calls to both paths.
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"$ref": "#/components/pathItems/P"}, "/b": {"$ref": "#/components/pathItems/P"}, "/c": {"$ref": "#/components/pathItems/P"}},
+        "components": {"pathItems": {"P": {"get": {"x-anvil-expectations": {"max_response_bytes": 1000},
+            "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {}}}}}}}}}});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    // `/c` is never called: it must not turn the finding into "0 call(s)".
+    let obs =
+        vec![Obs::new("1", "GET", "/a").json(200, json!({})).size(5000).0, Obs::new("2", "GET", "/b").json(200, json!({})).size(3000).0];
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+    let f = find(&r, DriftKind::ResponseLargerThanDeclared, "1000-byte budget");
+    assert_eq!(f.message, "GET /a returned more than its 1000-byte budget in 2 call(s) (largest 5000 bytes)");
+    let raise: Vec<_> = r.suggestions.iter().filter(|s| s.title.starts_with("Raise the response size budget")).collect();
+    assert_eq!(raise.len(), 1, "{raise:#?}");
+    assert_eq!(raise[0].title, "Raise the response size budget of GET /a to 5000 bytes");
+    assert_eq!(raise[0].ops.len(), 1);
+    assert_eq!(raise[0].ops[0].path, "/components/pathItems/P/get/x-anvil-expectations/max_response_bytes");
+    assert_eq!(raise[0].ops[0].value, Some(json!(5000)));
+}

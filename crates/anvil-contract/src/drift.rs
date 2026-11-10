@@ -547,6 +547,13 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[rank.min(sorted.len()) - 1]
 }
 
+/// Sorts `latencies` and summarizes them (`None`: no latency observed).
+fn latency_stats(latencies: &mut [f64]) -> Option<LatencyStats> {
+    latencies.sort_by(|a, b| a.total_cmp(b));
+    let lat: &[f64] = latencies;
+    (!lat.is_empty()).then(|| LatencyStats { p50: percentile(lat, 50.0), p95: percentile(lat, 95.0), max: *lat.last().unwrap_or(&0.0) })
+}
+
 /// Round up to 1, 2, 2.5 or 5 × 10ⁿ.
 fn nice_ceil(x: f64) -> f64 {
     if x <= 1.0 {
@@ -1869,91 +1876,104 @@ impl<'a> State<'a> {
         // (`None`: past the resolution budget).
         let mut statuses: HashMap<(usize, usize), Option<Vec<String>>> = HashMap::new();
         let mut unlisted = 0;
+        // Paths that `$ref` one Path Item share its operation objects, and so
+        // their budgets and budget findings: those are judged on the calls
+        // of every such path together, once per object.
+        let mut shared: HashMap<(usize, usize), OpAcc> = HashMap::new();
+        for (i, acc) in self.ops.iter().enumerate() {
+            let all = shared.entry(self.router.operation_object(i)).or_default();
+            all.latencies.extend_from_slice(&acc.latencies);
+            all.max_bytes = all.max_bytes.max(acc.max_bytes);
+            all.max_request = all.max_request.max(acc.max_request);
+            all.slow += acc.slow;
+            all.large += acc.large;
+            all.large_request += acc.large_request;
+        }
         for (i, acc) in self.ops.iter().enumerate() {
             let op = &self.router.operation(i);
             let label = op.label();
             let b = budget(spec, op);
-            let mut lat = acc.latencies.clone();
-            lat.sort_by(|a, b| a.total_cmp(b));
-            let stats = (!lat.is_empty()).then(|| LatencyStats {
-                p50: percentile(&lat, 50.0),
-                p95: percentile(&lat, 95.0),
-                max: *lat.last().unwrap_or(&0.0),
-            });
-            let x_ptr = ptr(&op.pointer, EXPECTATIONS);
-            if let (Some(max), Some(s)) = (b.max_latency_ms, stats) {
-                let key = format!("slow|{}", op.pointer);
-                if let Some(f) = self.findings.get_mut(key.as_str()) {
-                    f.message = format!(
-                        "{label} took longer than its {max} ms budget in {} of {} calls (p95 {:.0} ms, slowest {:.0} ms)",
-                        acc.slow,
-                        lat.len(),
-                        s.p95,
-                        s.max
-                    );
+            let stats = latency_stats(&mut acc.latencies.clone());
+            let object = self.router.operation_object(i);
+            // The first path listed for the object reports its budgets.
+            if let Some(mut all) = shared.remove(&object) {
+                let x_ptr = ptr(&op.pointer, EXPECTATIONS);
+                let all_stats = latency_stats(&mut all.latencies);
+                let calls = all.latencies.len();
+                if let (Some(max), Some(s)) = (b.max_latency_ms, all_stats) {
+                    let key = format!("slow|{}", op.pointer);
+                    if let Some(f) = self.findings.get_mut(key.as_str()) {
+                        // The finding names the path first seen over budget.
+                        let label = f.operation.clone().unwrap_or_else(|| label.clone());
+                        f.message = format!(
+                            "{label} took longer than its {max} ms budget in {} of {} calls (p95 {:.0} ms, slowest {:.0} ms)",
+                            all.slow, calls, s.p95, s.max
+                        );
+                        add(
+                            &key,
+                            format!("Raise the latency budget of {label} to {} ms", nice_ceil(s.max)),
+                            format!(
+                                "Observed p95 {:.0} ms and slowest {:.0} ms against {max} ms. \
+                                 Raise it only if the budget, not the API, is wrong.",
+                                s.p95, s.max
+                            ),
+                            SuggestionKind::Relaxation,
+                            false,
+                            op.pointer.clone(),
+                            vec![PatchOp::replace(ptr(&x_ptr, "max_latency_ms"), json!(nice_ceil(s.max)))],
+                        );
+                    }
+                } else if b.max_latency_ms.is_none()
+                    && let Some(s) = all_stats
+                {
+                    let key = format!("budget|{}", op.pointer);
+                    let v = nice_ceil(s.p95 * 1.5);
                     add(
                         &key,
-                        format!("Raise the latency budget of {label} to {} ms", nice_ceil(s.max)),
+                        format!("Declare a {v} ms latency budget for {label}"),
                         format!(
-                            "Observed p95 {:.0} ms and slowest {:.0} ms against {max} ms. \
-                             Raise it only if the budget, not the API, is wrong.",
-                            s.p95, s.max
+                            "No budget is declared. Observed p95 {:.0} ms over {calls} call(s); later checks then flag slower calls.",
+                            s.p95
+                        ),
+                        SuggestionKind::Addition,
+                        false,
+                        op.pointer.clone(),
+                        vec![PatchOp::add(x_ptr.clone(), json!({"max_latency_ms": v}))],
+                    );
+                }
+                let size_budgets = [
+                    ("size", "max_response_bytes", b.max_response_bytes, all.large, all.max_bytes, "returned more than its", "response"),
+                    (
+                        "reqsize",
+                        "max_request_bytes",
+                        b.max_request_bytes,
+                        all.large_request,
+                        all.max_request,
+                        "was sent more than its",
+                        "request",
+                    ),
+                ];
+                for (prefix, field, max, over, largest, verb, what) in size_budgets {
+                    let key = format!("{prefix}|{}", op.pointer);
+                    let (Some(max), Some(f)) = (max, self.findings.get_mut(key.as_str())) else { continue };
+                    let label = f.operation.clone().unwrap_or_else(|| label.clone());
+                    let largest = largest.unwrap_or(0);
+                    let of = if what == "request" { "request " } else { "" };
+                    f.message = format!("{label} {verb} {max}-byte {of}budget in {over} call(s) (largest {largest} bytes)");
+                    let raised = nice_ceil(largest as f64) as u64;
+                    add(
+                        &key,
+                        format!("Raise the {what} size budget of {label} to {raised} bytes"),
+                        format!(
+                            "The largest {what} was {largest} bytes against {max}. Raise it only if the budget, not the API, is wrong."
                         ),
                         SuggestionKind::Relaxation,
                         false,
                         op.pointer.clone(),
-                        vec![PatchOp::replace(ptr(&x_ptr, "max_latency_ms"), json!(nice_ceil(s.max)))],
+                        vec![PatchOp::replace(ptr(&x_ptr, field), json!(raised))],
                     );
                 }
-            } else if b.max_latency_ms.is_none()
-                && let Some(s) = stats
-            {
-                let key = format!("budget|{}", op.pointer);
-                let v = nice_ceil(s.p95 * 1.5);
-                add(
-                    &key,
-                    format!("Declare a {v} ms latency budget for {label}"),
-                    format!(
-                        "No budget is declared. Observed p95 {:.0} ms over {} call(s); later checks then flag slower calls.",
-                        s.p95,
-                        lat.len()
-                    ),
-                    SuggestionKind::Addition,
-                    false,
-                    op.pointer.clone(),
-                    vec![PatchOp::add(x_ptr.clone(), json!({"max_latency_ms": v}))],
-                );
             }
-            let size_budgets = [
-                ("size", "max_response_bytes", b.max_response_bytes, acc.large, acc.max_bytes, "returned more than its", "response"),
-                (
-                    "reqsize",
-                    "max_request_bytes",
-                    b.max_request_bytes,
-                    acc.large_request,
-                    acc.max_request,
-                    "was sent more than its",
-                    "request",
-                ),
-            ];
-            for (prefix, field, max, over, largest, verb, what) in size_budgets {
-                let key = format!("{prefix}|{}", op.pointer);
-                let (Some(max), Some(f)) = (max, self.findings.get_mut(key.as_str())) else { continue };
-                let largest = largest.unwrap_or(0);
-                let of = if what == "request" { "request " } else { "" };
-                f.message = format!("{label} {verb} {max}-byte {of}budget in {over} call(s) (largest {largest} bytes)");
-                let raised = nice_ceil(largest as f64) as u64;
-                add(
-                    &key,
-                    format!("Raise the {what} size budget of {label} to {raised} bytes"),
-                    format!("The largest {what} was {largest} bytes against {max}. Raise it only if the budget, not the API, is wrong."),
-                    SuggestionKind::Relaxation,
-                    false,
-                    op.pointer.clone(),
-                    vec![PatchOp::replace(ptr(&x_ptr, field), json!(raised))],
-                );
-            }
-            let object = self.router.operation_object(i);
             let declared_statuses = match self.declared.get(&object) {
                 Some(Some(lists)) => Some(lists.resps.iter().map(|r| r.code.clone()).collect()),
                 _ => statuses.entry(object).or_insert_with(|| declared_codes(spec, op, &mut self.resolve_meter)).clone(),

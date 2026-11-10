@@ -262,7 +262,7 @@ pub fn prepare_redacting(
         }
     }
     let encrypted = !matches!(opts.mode, ExportMode::ShareSafely);
-    if encrypted && opts.passphrase.map(|p| p.len() < 8).unwrap_or(true) {
+    if encrypted && opts.passphrase.is_none_or(|p| p.chars().count() < 8) {
         return Err(BundleError::Invalid("encrypted exports need an export passphrase of at least 8 characters".into()));
     }
     let mut vault = VaultPayload::default();

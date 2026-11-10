@@ -2,14 +2,14 @@
 //! survive history retention, and deleting their last owner must remove the
 //! encrypted content.
 
-use anvil_app::App;
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
+use anvil_app::{App, AppError};
 use anvil_domain::Id;
 use anvil_domain::request::{AttachmentRef, Body, RequestSpec};
 use anvil_domain::workspace::{Dataset, DatasetFormat, RequestDefinition};
 use anvil_storage::store::DB_FILE;
-use anvil_storage::{KdfParams, kind};
+use anvil_storage::{KdfParams, StoreError, kind};
 use anvil_transport::recorder::EventCtx;
 use tokio_util::sync::CancellationToken;
 
@@ -277,4 +277,24 @@ fn a_revision_elsewhere_that_does_not_decode_keeps_files_without_failing_a_delet
     assert!(app.request(&q.meta.id).is_err(), "the request is deleted");
     // That revision could name the file, so the file is kept, not deleted.
     assert!(app.get_attachment(&sha(&att)).unwrap().is_some());
+}
+
+/// A stored file that no longer opens fails the send's context as an
+/// integrity failure, which locks the profile, instead of reading as a file
+/// that was never attached (#536).
+#[test]
+fn a_stored_file_that_does_not_open_fails_the_context_and_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let att = app.put_attachment("payload.bin", b"payload that will not open", None).unwrap();
+    let req = app.create_request(&ws, None, "upload", upload(&att)).unwrap();
+    assert!(app.build_context(Some(req.meta.id), &ws, None, &SendOptions::default()).is_ok());
+    let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
+    db.execute_batch("UPDATE blobs SET payload = x'00';").unwrap();
+    let Err(e) = app.build_context(Some(req.meta.id), &ws, None, &SendOptions::default()) else {
+        panic!("a context was built around a stored file that does not open")
+    };
+    assert!(matches!(e, AppError::Store(StoreError::Integrity)), "{e}");
+    assert!(matches!(app.workspaces(), Err(AppError::Locked)), "an integrity failure locks the profile");
 }

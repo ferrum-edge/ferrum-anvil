@@ -937,6 +937,23 @@ fn phase_status(kind: FailureKind) -> PhaseStatus {
     }
 }
 
+/// The attempt's total deadline elapsed while its QUIC connection was set
+/// up: nothing was sent.
+fn setup_total_timeout(rec: &Recorder, plan: &HttpPlan) -> TransportFailure {
+    TransportFailure::new(
+        rec.open_phase().unwrap_or(Phase::QuicHandshake),
+        FailureKind::TotalTimeout,
+        "total deadline elapsed during the QUIC connection setup",
+    )
+    .with_deadline(plan.timeouts.total_ms)
+}
+
+/// The attempt's total deadline elapsed while the request was written.
+fn write_total_timeout(plan: &HttpPlan) -> TransportFailure {
+    TransportFailure::new(Phase::RequestWrite, FailureKind::TotalTimeout, "total deadline elapsed while sending the HTTP/3 request")
+        .with_deadline(plan.timeouts.total_ms)
+}
+
 fn fail_attempt(
     mut rec: Recorder,
     mut obs: AttemptObservation,
@@ -1581,36 +1598,61 @@ impl H3Transport {
                 });
                 (Some(c), true, None)
             }
-            None if early_on => match self.connect_resumable(&mut rec, plan, &prepared, ticket_generation, cancel).await {
-                Ok(Fresh::Established(b)) => {
-                    let (c, t) = *b;
-                    track = Some(t);
-                    lease = Some(if plan.keepalive { self.pool.checkin(&key, c.clone(), generation) } else { self.pool.lease(&key, &c) });
-                    (Some(c), false, None)
-                }
-                Ok(Fresh::ZeroRtt(z)) => (None, false, Some(z)),
-                Err((f, cobs, t)) => {
-                    obs.connection = cobs;
-                    return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(t), events), None);
-                }
-            },
-            None => {
-                let connected = match quic_connect(
-                    &mut rec,
-                    &plan.host,
-                    plan.port,
-                    &plan.dns,
-                    &plan.timeouts,
-                    &plan.limits,
-                    &prepared,
-                    |v6| self.endpoint(v6),
-                    cancel,
-                )
-                .await
-                {
-                    Ok(c) => c,
-                    Err((f, cobs)) => {
+            None if early_on => {
+                // The attempt's total deadline bounds connection setup, as
+                // on TCP.
+                let resumed = {
+                    let connect = self.connect_resumable(&mut rec, plan, &prepared, ticket_generation, cancel);
+                    tokio::select! {
+                        r = connect => Some(r),
+                        _ = sleep_until_opt(total_deadline) => None,
+                    }
+                };
+                match resumed {
+                    Some(Ok(Fresh::Established(b))) => {
+                        let (c, t) = *b;
+                        track = Some(t);
+                        lease =
+                            Some(if plan.keepalive { self.pool.checkin(&key, c.clone(), generation) } else { self.pool.lease(&key, &c) });
+                        (Some(c), false, None)
+                    }
+                    Some(Ok(Fresh::ZeroRtt(z))) => (None, false, Some(z)),
+                    Some(Err((f, cobs, t))) => {
                         obs.connection = cobs;
+                        return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, Some(t), events), None);
+                    }
+                    None => {
+                        let f = setup_total_timeout(&rec, plan);
+                        return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, local_track(), events), None);
+                    }
+                }
+            }
+            None => {
+                let connected = {
+                    let connect = quic_connect(
+                        &mut rec,
+                        &plan.host,
+                        plan.port,
+                        &plan.dns,
+                        &plan.timeouts,
+                        &plan.limits,
+                        &prepared,
+                        |v6| self.endpoint(v6),
+                        cancel,
+                    );
+                    tokio::select! {
+                        r = connect => Some(r),
+                        _ = sleep_until_opt(total_deadline) => None,
+                    }
+                };
+                let connected = match connected {
+                    Some(Ok(c)) => c,
+                    Some(Err((f, cobs))) => {
+                        obs.connection = cobs;
+                        return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None);
+                    }
+                    None => {
+                        let f = setup_total_timeout(&rec, plan);
                         return (fail_attempt(rec, obs, f, DispatchState::NotDispatched, None, events), None);
                     }
                 };
@@ -1632,6 +1674,7 @@ impl H3Transport {
             let sent = tokio::select! {
                 w = write_request(&send, plan, req, header_bytes, Some(&mut watch)) => Ok(w),
                 _ = sleep_until_opt(write_deadline) => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteTimeout, "the HTTP/3 request could not be sent before the write deadline").with_deadline(plan.timeouts.request_write_ms)),
+                _ = sleep_until_opt(total_deadline) => Err(write_total_timeout(plan)),
                 _ = cancel.cancelled() => Err(TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending")),
             };
             // Early data covers the request only when its HEADERS went out
@@ -1667,6 +1710,13 @@ impl H3Transport {
                     obs.connection = Some(cobs);
                     let f = TransportFailure::new(Phase::QuicHandshake, FailureKind::QuicHandshakeTimeout,
                         format!("the QUIC handshake did not complete within {} ms after the request was sent as 0-RTT early data", hs_ms.unwrap_or(0))).with_deadline(hs_ms);
+                    return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
+                }
+                _ = sleep_until_opt(total_deadline) => {
+                    quic.close(H3_NO_ERROR.into(), b"");
+                    obs.connection = Some(cobs);
+                    let f = TransportFailure::new(Phase::QuicHandshake, FailureKind::TotalTimeout,
+                        "total deadline elapsed during the QUIC handshake (the request was already sent as 0-RTT early data)").with_deadline(plan.timeouts.total_ms);
                     return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                 }
                 _ = cancel.cancelled() => {
@@ -1812,6 +1862,10 @@ impl H3Transport {
                         let f = TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteTimeout, "the HTTP/3 request could not be sent before the write deadline").with_deadline(plan.timeouts.request_write_ms);
                         return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, Some(track_z), events), None);
                     }
+                    _ = sleep_until_opt(total_deadline) => {
+                        obs.connection = Some(cobs);
+                        return (fail_attempt(rec, obs, write_total_timeout(plan), DispatchState::MayHaveBeenSent, Some(track_z), events), None);
+                    }
                     _ = cancel.cancelled() => {
                         obs.connection = Some(cobs);
                         let f = TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending");
@@ -1891,6 +1945,9 @@ impl H3Transport {
                 _ = sleep_until_opt(write_deadline) => {
                     let f = TransportFailure::new(Phase::RequestWrite, FailureKind::RequestWriteTimeout, "the HTTP/3 request could not be sent before the write deadline").with_deadline(plan.timeouts.request_write_ms);
                     return (fail_attempt(rec, obs, f, DispatchState::MayHaveBeenSent, track, events), None);
+                }
+                _ = sleep_until_opt(total_deadline) => {
+                    return (fail_attempt(rec, obs, write_total_timeout(plan), DispatchState::MayHaveBeenSent, track, events), None);
                 }
                 _ = cancel.cancelled() => {
                     let f = TransportFailure::new(Phase::RequestWrite, FailureKind::Canceled, "canceled while sending");

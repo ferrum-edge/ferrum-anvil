@@ -410,13 +410,6 @@ impl App {
                         }
                         Err(UrlProblem::PerRun(origin)) => return Err(refuse(label, origin)),
                     };
-                    if label == "OAuth token URL" {
-                        // Eligibility is the acquisition sink's policy: literal
-                        // loopback on a direct route, whatever the DNS overrides.
-                        let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-                        anvil_engine::oauth_http::require_token_endpoint_route(&proven.probe, ctx, &settings, proven.port_varies)
-                            .map_err(AppError::Invalid)?;
-                    }
                     let target = anvil_engine::prepare::parse_target(
                         &proven.probe,
                         anvil_load::protocol::send_schemes(Protocol::Http),
@@ -438,7 +431,9 @@ impl App {
                 }
             }
         }
-        destinations.dedup();
+        // Each destination once, in the order the plan first reaches it.
+        let mut listed = std::collections::HashSet::new();
+        destinations.retain(|d| listed.insert(d.clone()));
         let (workload, max_duration_secs, peak_target) = describe(p);
         let mut warnings = Vec::new();
         if !p.trusted {
@@ -684,7 +679,7 @@ fn prove_url(resolver: &Resolver, template: &str, field: &str) -> std::result::R
 /// per-run stand-ins) when a per-run value reaches it, or which part of its
 /// origin a per-run value reaches when that cannot be proven local. The URL
 /// is split as `parse_target` splits it (`anvil_engine::prepare::split_origin`,
-/// shared with the OAuth worker endpoint check): the scheme ends at the first `://`
+/// shared with the OAuth worker endpoint check): a leading scheme ends at its `://`
 /// (with none, a fixed one is inferred), the authority at the first `/`, `?`
 /// or `#`, and the host at the `:` before the port (after the `]` of an IPv6
 /// literal). A per-run port is accepted only after a fixed loopback host,

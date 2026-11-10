@@ -401,7 +401,14 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                     "forwarding credentials to other hosts on redirect is never imported as an active setting",
                 );
             }
-            "--max-redirs" => max_redirs = value(&mut i).and_then(|v| v.parse::<i64>().ok()).map(|v| v.clamp(0, 255) as u8),
+            "--max-redirs" => {
+                let limit = value(&mut i).and_then(|v| v.parse::<i64>().ok());
+                // curl reads -1 as unlimited: the most a redirect policy follows.
+                if limit.is_some_and(|v| v < 0) {
+                    b.report.warn("curl_unlimited_redirects", &at, "curl follows any number of redirects; imported as the most Anvil follows, 255");
+                }
+                max_redirs = limit.map(|v| if v < 0 { u8::MAX } else { v.min(255) as u8 });
+            }
             "--compressed" => settings.decompress = Some(true),
             "--http1.0" | "--http1.1" => settings.http_version = Some(HttpVersionPolicy::Http1Only),
             "--http2" => settings.http_version = Some(HttpVersionPolicy::Auto),
@@ -623,7 +630,7 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     // Credentials embedded in the URL are moved to Basic auth.
     let mut auth = auth;
     if let Some((scheme, rest)) = url.split_once("://")
-        && let Some(at_pos) = rest.find('@').filter(|p| rest[..*p].find('/').is_none())
+        && let Some(at_pos) = crate::common::userinfo_end(rest)
     {
         let userinfo = rest[..at_pos].to_string();
         let (user, pass) =

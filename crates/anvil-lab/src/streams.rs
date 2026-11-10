@@ -378,8 +378,11 @@ fn bytes_received(log: &anvil_fixtures::GroundTruthLog) -> u64 {
         .sum()
 }
 
-fn fault_applied(log: &anvil_fixtures::GroundTruthLog, fault: &str) -> bool {
-    log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: fault.into() })
+/// Whether the fixture applied `fault` after entry `from` of its log. The
+/// log outlives a scenario (and the untrusted pass reruns it on the same
+/// fixtures), so an earlier entry never proves this run reached the fault.
+fn fault_applied(log: &anvil_fixtures::GroundTruthLog, from: usize, fault: &str) -> bool {
+    log.entries().iter().skip(from).any(|e| e.event == GroundTruth::FaultApplied { fault: fault.into() })
 }
 
 fn connections(log: &anvil_fixtures::GroundTruthLog) -> usize {
@@ -788,11 +791,12 @@ fn proto010(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let faults_from = env.fx.ws.log.entries().len();
         let o = send(env, &ws_ctx(env, &format!("ws://{HTTP}/ws?abnormal_after=1"), WsBootstrap::Http1Upgrade, &["only"], 3_000)).await;
         c.add(
             CheckKind::GroundTruth,
             "backend dropped the socket without a Close frame",
-            fault_applied(&env.fx.ws.log, "ws_abnormal_drop"),
+            fault_applied(&env.fx.ws.log, faults_from, "ws_abnormal_drop"),
             "",
         );
         let (_, code, by) = ws_status(&o);
@@ -1348,12 +1352,13 @@ fn proto015(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let faults_from = env.fx.grpc.log.entries().len();
         let msg = format!(r#"{{"message":"hi","failWith":{}}}"#, anvil_fixtures::grpc::ABORT_WITHOUT_STATUS);
         let o = send(env, &grpc_ctx(env, &format!("grpc://{HTTP}"), "Unary", GrpcMode::Unary, &[&msg], None)).await;
         c.add(
             CheckKind::GroundTruth,
             "backend reset the stream before any grpc-status",
-            fault_applied(&env.fx.grpc.log, "grpc_abort_before_status"),
+            fault_applied(&env.fx.grpc.log, faults_from, "grpc_abort_before_status"),
             "",
         );
         let (http, st, src, _) = grpc_status(&o);
@@ -2411,11 +2416,12 @@ fn trust007_sse(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let faults_from = env.fx.sse_abort.log.entries().len();
         let o = send(env, &sse_ctx(env, &format!("http://{HTTP}/sse-abort/?count=3&interval=20"), 0, 5_000, None)).await;
         c.add(
             CheckKind::GroundTruth,
             "backend aborted its event stream after the events",
-            fault_applied(&env.fx.sse_abort.log, "sse_abort_mid_stream"),
+            fault_applied(&env.fx.sse_abort.log, faults_from, "sse_abort_mid_stream"),
             "",
         );
         let (events, by) = match &o.record.outcome.protocol_status {
@@ -2796,8 +2802,19 @@ fn load013_grpc(env: &Env) -> Fut<'_> {
             unary(env) - before == 30,
             format!("{}", unary(env) - before),
         );
-        let lines: Vec<serde_json::Value> =
-            op_lines(env, from, "proto014-grpc").into_iter().filter(|v| v["request_path"] == "/anvil.lab.v1.Echo/Unary").collect();
+        // The gateway writes each call's line just after its response: poll
+        // (bounded) until all 30 are there, as load013_ws does for its ends.
+        let unary_lines = || -> Vec<serde_json::Value> {
+            op_lines(env, from, "proto014-grpc").into_iter().filter(|v| v["request_path"] == "/anvil.lab.v1.Echo/Unary").collect()
+        };
+        let mut lines = unary_lines();
+        for _ in 0..30 {
+            if lines.len() >= 30 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            lines = unary_lines();
+        }
         let by_status = |code: i64| lines.iter().filter(|v| v["grpc_status"].as_i64() == Some(code)).count();
         c.add(
             CheckKind::GroundTruth,

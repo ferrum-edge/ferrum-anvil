@@ -78,6 +78,22 @@ pub fn op_lines(gw: &Gateway, from: usize, proxy_id: &str) -> Vec<String> {
     gw.log_lines().into_iter().skip(from).filter(|l| l.contains(&format!("\"proxy_id\":\"{proxy_id}\""))).take(20).collect()
 }
 
+/// Whether a transaction line records `status` as its response status.
+fn logged_status(lines: &[String], status: u64) -> bool {
+    lines
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .any(|v| v.get("response_status_code").and_then(serde_json::Value::as_u64) == Some(status))
+}
+
+/// [`op_lines`] once a line records `status`: the gateway flushes the
+/// transaction line just after the response, so a single read can race it.
+/// After the bounded wait the latest read is returned, and the caller's
+/// check still fails.
+async fn op_lines_with_status(gw: &Gateway, from: usize, proxy_id: &str, status: u64) -> Vec<String> {
+    crate::fixtures_policy::wait_for_op_lines(|| op_lines(gw, from, proxy_id), |lines| logged_status(lines, status)).await
+}
+
 pub fn final_failure(o: &ExecutionOutput) -> Option<FailureKind> {
     o.record.attempts.last().and_then(|a| a.failure.as_ref()).map(|f| f.kind)
 }
@@ -398,13 +414,8 @@ fn tls008(env: &Env) -> Fut<'_> {
         c.absent_prefix(&o, "client.tls.");
         c.absent_prefix(&o, "ferrum.token");
         c.add(CheckKind::GroundTruth, "the echo backend received the request", echo_since(env, before) >= 1, "");
-        let lines = op_lines(&env.gw, from, "tls-frontend-echo");
-        c.add(
-            CheckKind::GroundTruth,
-            "gateway transaction logged with status 200",
-            lines.iter().any(|l| l.contains("200")),
-            format!("{lines:?}"),
-        );
+        let lines = op_lines_with_status(&env.gw, from, "tls-frontend-echo", 200).await;
+        c.add(CheckKind::GroundTruth, "gateway transaction logged with status 200", logged_status(&lines, 200), format!("{lines:?}"));
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
 }
@@ -538,13 +549,8 @@ fn tls006_lookalike(env: &Env) -> Fut<'_> {
             c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
         }
         c.add(CheckKind::GroundTruth, "the backend was not reached", echo_since(env, before) == 0, "");
-        let lines = op_lines(&env.gw, from, "tls-mtls-auth");
-        c.add(
-            CheckKind::GroundTruth,
-            "gateway logged a 401 for the mtls_auth route",
-            lines.iter().any(|l| l.contains("401")),
-            format!("{lines:?}"),
-        );
+        let lines = op_lines_with_status(&env.gw, from, "tls-mtls-auth", 401).await;
+        c.add(CheckKind::GroundTruth, "gateway logged a 401 for the mtls_auth route", logged_status(&lines, 401), format!("{lines:?}"));
         let r = go(env, &https(env, &format!("{HTTPS}/tls/mtls-auth/echo"), &Client::lab(env, Some(&env.fx.pki.client_good)))).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
@@ -804,13 +810,8 @@ fn auth026(env: &Env) -> Fut<'_> {
         );
         record_excludes(&mut c, &o, &token, "the bound access token");
         c.add(CheckKind::GroundTruth, "the backend was not reached", echo_since(env, before) == 0, "");
-        let lines = op_lines(&env.gw, from, "tls-bound-token");
-        c.add(
-            CheckKind::GroundTruth,
-            "gateway logged a 401 for the bound-token route",
-            lines.iter().any(|l| l.contains("401")),
-            format!("{lines:?}"),
-        );
+        let lines = op_lines_with_status(&env.gw, from, "tls-bound-token", 401).await;
+        c.add(CheckKind::GroundTruth, "gateway logged a 401 for the bound-token route", logged_status(&lines, 401), format!("{lines:?}"));
         // Recovery: a token bound to the certificate actually presented.
         let rebound = env.fx.bound_token(&env.fx.pki.client_unmapped.cert);
         let mut r = https(env, &url, &Client::lab(env, Some(&env.fx.pki.client_unmapped)));
@@ -1188,6 +1189,9 @@ fn up008_http_to_tls(env: &Env) -> Fut<'_> {
     })
 }
 
+/// The gateway error classes UP-016 maps to a public token.
+const UP016_CLASSES: &[&str] = &["connection_pool_error", "tls_error", "connection_reset", "connection_closed", "request_error"];
+
 /// UP-016: repeat the TLS 1.3 backend-mTLS route and check that every
 /// public observation stays consistent with the operator-side class
 /// (pool cancellation ↔ `connection_failure`, post-connect reset ↔
@@ -1202,9 +1206,13 @@ fn up016(env: &Env) -> Fut<'_> {
         for _ in 0..5 {
             let from = env.gw.log_lines().len();
             let o = go(env, &up_request(env, "/up/mtls-missing/")).await;
-            // Give the access log a moment to flush.
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let lines = op_lines(&env.gw, from, "up006-mtls-missing-h1");
+            // Wait (bounded) for the line that records the error class.
+            let lines = crate::fixtures_policy::wait_for_op_class(
+                || op_lines(&env.gw, from, "up006-mtls-missing-h1"),
+                "up006-mtls-missing-h1",
+                UP016_CLASSES,
+            )
+            .await;
             let class = lines
                 .iter()
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())

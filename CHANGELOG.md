@@ -102,6 +102,20 @@
   WS-Security header writes a username (a secret username with `&` or `<` was shown in the
   preview's body); and a multipart part name, whose `"` is written as `%22`. They were already
   redacted raw, percent-encoded, as hex and JSON-escaped.
+- A QUIC peer's close reason (or any TLS, HTTP or Workload API error text) of a few hundred bytes
+  of non-ASCII text no longer panics Anvil when the failure is recorded: the error text is cut at
+  600 bytes on a character boundary instead of inside a character. The server under test, or
+  anything answering on its UDP port before the handshake completed, could end `anvil send` or
+  `anvil run` with exit status 101 and no execution record, or end a load worker, for HTTP/3,
+  WebSocket, SSE and gRPC over HTTP/3, and MASQUE CONNECT-UDP (GHSA-c825-hqr8-8gj8).
+- A DTLS server whose leaf certificate is over 2 KiB (a long SAN list, or any blob the server or
+  something answering on its UDP port sends in the unauthenticated DTLS 1.2 Certificate flight) no
+  longer panics Anvil inside the DTLS library before the certificate is verified, which ended
+  `anvil send` or `anvil run` with exit status 101 and no record, or a load worker. The handshake
+  now offers the library a buffer that holds any certificate it can assemble. After the handshake,
+  a datagram over 2 KiB is sent and received: one to send was silently never sent, and a larger
+  answer was never read and blocked every later one, so the exchange recorded "no response
+  observed" (`datagrams_received: 0`) although the answer had arrived (GHSA-62g8-g8px-5xm3).
 
 ### Changed
 
@@ -140,6 +154,11 @@
   `mesh::synthesis_refusal` is retained but unrun and v0.9.8 itself never ran (#484). The UP-018-H2
   skip text names the 0.9.19+ 503 contract test, and the failure-matrix coverage header names the
   release its recorded results ran on.
+- Docs: the imported-spec drift scan reads 20 history entries per exchange asked for (10,000 at
+  the default limit of 500, 20,000 at most), not always 20,000; the samples README says the
+  samples are a frozen 2026-09-25 capture against v0.9.5; PROTO-004's status names the GOAWAY
+  fixtures that now exist; and the v0.9.20 delta audit marks its per-area sections as pre-merge
+  working notes, with the two that contradicted the outcome corrected (#545).
 - The gitleaks allowlist for the soap_ws_security mechanism names covers only the 0.9.20 catalog
   and the `generic-api-key` rule.
 - Diagnostics catalog version 2026.11.03-1.
@@ -241,6 +260,98 @@
   stored response bodies no remaining history record uses, in the same transaction. They used to
   stay encrypted in `anvil.db` until a later recorded send ran retention, and for good once
   history was turned off. Stored attachments are not affected (#530).
+- A DNS override that leaves no address to dial (an empty address list, or only IPv4 addresses
+  under `ipv6_only` and the reverse) fails the DNS phase as `dns_no_records`, naming
+  `settings.dns_overrides`. HTTP/3, WebSocket, SSE and gRPC over HTTP/3 and MASQUE used to panic
+  (exit status 101 and no record), and TCP reported a connect timeout although nothing was dialled
+  (#509).
+- cURL and HAR import read URL userinfo only inside the authority, which ends at the first `/`,
+  `?` or `#`. `curl 'https://api.example.com?email=a@b.com'` used to import as a request to
+  `https://b.com` with Basic auth for the user `api.example.com?email=a` (#511).
+- The desktop response Body tab opens each result in a view its body has (Pretty, Raw or Hex).
+  Switching between request tabs used to keep the previous result's mode, so an image after a
+  JSON response, or the reverse, showed an empty body until a mode button was clicked (#512).
+- Cmd/Ctrl+Enter, Cmd/Ctrl+S, Cmd/Ctrl+N and Escape act only while the desktop Requests view is
+  shown. In the Runner, Load tests or Contract view they used to send, save or cancel the hidden
+  active request tab, or create a "New request". Cmd/Ctrl+B and Cmd/Ctrl+L still work in every
+  view (#513).
+- Desktop list fields keep the text as typed, so a second item can be entered from the keyboard:
+  JWT-SVID audiences, WebSocket subprotocols and messages, gRPC messages, the "Status is one of"
+  assertion, a TLS profile's "Present only to these hosts", gateway frontend hosts, HBONE extra
+  CONNECT headers and the redaction names in Settings. Each keystroke used to render the list
+  back, which dropped the separator or empty line just typed (`200, 404` became `200404`, and
+  `X-Foo: bar` became the header `X` with the value `-Foo: bar`). The load plan's number fields
+  keep a decimal point and an emptied field while typing, so "Max failures (%)" accepts `12.5`
+  (#514).
+- A desktop load plan whose delete the backend refuses (a locked profile, a storage error) stays
+  open with its unsaved edits and shows why. It used to close and drop the unsaved draft while the
+  plan stayed in the list. The export dialog clears an earlier preview's error when the options
+  change, and shows only the preview for the options now chosen, not a slower earlier one (#515).
+- The desktop Body tab shows a body that is not UTF-8 as binary (hex) instead of as text with its
+  last three bytes missing, and a text body over the 2 MiB display cap stays text when the cap cuts
+  a multi-byte character, instead of turning into a hex dump (#516).
+- Enter, F2, Delete or Backspace on a sidebar row's Rename, Duplicate, Folder settings or Delete
+  button no longer also opens, toggles, renames or deletes the row, and opening a request twice
+  while it is read opens one tab (#517).
+- Switching a PROXY protocol header from v2 to v1 in the desktop editor drops the v2 LOCAL command
+  and TLVs, which v1 does not show and the engine refuses, instead of keeping a header that could
+  not be sent (#518).
+- Contract drift judges the latency and size budgets of an operation that several paths share
+  through one Path Item (`$ref`) on the calls to all of those paths, once. The finding and its
+  "Raise the budget" suggestion used to describe only the last such path in the document, even an
+  uncalled one: "in 0 call(s) (largest 0 bytes)", with a patch lowering the budget to 1 byte (#519).
+- `anvil lint-spec` checks every path that shares a Path Item (`$ref`) with another, so
+  `path-trailing-slash` and `path-no-query-string` no longer see only the first such path, and
+  checks an operation's own `servers` (`server-https`), as `docs/contract.md` lists them. A string
+  example under `text/json` is checked as a JSON value, as drift reads that media type, instead of
+  being skipped. A rule turned off (`severity: off`) still has its `description`, `message`,
+  `how_to_fix` and `docs_url` type-checked (#520).
+- An HTTP/3 request, and gRPC over HTTP/3, ends at the attempt's total deadline (`total_ms`) while
+  its QUIC connection is set up, while the request is written and while a 0-RTT handshake
+  completes, as `total_timeout`, as HTTP/1.1 and HTTP/2 do. With `total_ms: 5000` an HTTP/3
+  attempt to a UDP port that never answers used to end after the handshake deadline (about 10 s)
+  as `quic_handshake_timeout`, and a stalled upload after the write deadline (#521).
+- Session transcripts no longer drop send failures: a UDP datagram the OS refused to send (on the
+  retry after an ICMP port-unreachable, or from an interactive Send) and an interactive DTLS
+  datagram DTLS could not send are noted as "datagram not sent"; a TLS alert that ends an
+  interactive raw TLS write (a post-handshake mTLS rejection) is classified by the alert, as on the
+  scripted path; and a WebSocket Pong whose write failed is no longer recorded as sent, and ends the
+  session as a failed send does. UDP through an HBONE or MASQUE tunnel counts echoed datagrams
+  as direct UDP does, so a load run's `echoed_payloads` is no longer 0 through a tunnel (#522).
+- A JWT auth profile whose `expires_in_secs` or `not_before_offset_secs` puts `exp` or `nbf` out of
+  range is refused ("JWT expires-in offset is out of range") instead of panicking in a debug build
+  or wrapping to an already-expired token in a release build. A JWT-SVID whose `exp` is far out of
+  range fails its expiry check instead of wrapping into a pass, and its cache refresh time no longer
+  overflows (#523).
+- A URL without a scheme that carries a URL in its query
+  (`localhost:8080/cb?next=https://example.com`) gets the inferred `http://` instead of failing
+  with "scheme 'localhost:8080/cb?next=https' is not supported": only a leading `scheme://` is a
+  scheme, in request preparation and in the load and OAuth worker preflights' origin split. A
+  `tls://` TCP session or a UDP/DTLS session with the early-data setting on now notes that 0-RTT
+  is not used for sessions, as WebSocket, SSE and gRPC sessions do (#524).
+- A bundle import lists every vault secret the bundle leaves behind, as a full backup's restore
+  does: a proxy profile's password, an integration's credentials and the secrets of datasets,
+  scenarios and load plans were missing from the list (#535).
+- An export with history that has more than 1,000 records for a workspace lists the older ones
+  among its excluded items instead of leaving them out silently (#535).
+- A send whose stored attachment no longer opens fails with the storage error, and an integrity
+  failure locks the profile as other context reads do; it used to report the file as missing
+  from the workspace (#536).
+- A load run's confirmation lists each destination once, in the order the plan first reaches
+  it; a destination that recurred after another step's was listed again (#536).
+- Export and full-backup passphrases need 8 characters, as their messages say, not 8 bytes (#536).
+- A load plan whose chain has more than 64 steps is refused when it is saved; it used to save and
+  be refused only when run (#537).
+- The load report's timeline table shows "—" for the p50 and p99 of a second with no successful
+  unit, as the chart and the summary tiles do, instead of "0 µs" (#537).
+- cURL import: `--max-redirs -1` (curl's "unlimited") follows up to 255 redirects, with a
+  `curl_unlimited_redirects` warning; it was imported as "follow at most 0 redirects" (#538).
+- OpenAPI import: a request body declared only as a media range (`*/*`, `text/*`, `application/*`,
+  or Swagger 2.0 `consumes: ["*/*"]`) no longer sends the range as its `Content-Type`; the body's
+  own type applies (`application/json` for a generated JSON body) (#538).
+- WSDL import: integer and decimal facets bound the sample outside the default sample range
+  (`minInclusive=-100 maxInclusive=-1` on `xsd:int` gave `1`), a lone `maxInclusive` included, and
+  facets no value of the type satisfies are reported as `contradictory_schema` (#538).
 
 ## [0.1.7] - 2026-11-03
 

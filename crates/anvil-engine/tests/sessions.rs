@@ -11,7 +11,7 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::*;
 use anvil_domain::request::*;
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::settings::{HttpVersionPolicy, ProxySelection, SettingsOverrides, TimeoutOverrides};
+use anvil_domain::settings::{EarlyDataPolicy, HttpVersionPolicy, ProxySelection, SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::{ClientIdentity, ProxyKind, ProxyProfile, TlsMinVersion, TlsProfile};
 use anvil_domain::{Id, secret::REDACTED};
 use anvil_engine::context::MemoryAttachments;
@@ -1585,6 +1585,37 @@ async fn proto_020_udp_silence_is_only_no_response_observed() {
 }
 
 #[tokio::test]
+async fn tcp_and_udp_sessions_say_the_early_data_setting_is_not_used() {
+    init();
+    let e = Engine::new();
+    let udp = streams::udp("127.0.0.1:0", UdpMode::Silent).await.unwrap();
+    let tcp = streams::tcp("127.0.0.1:0", TcpMode::Echo, None).await.unwrap();
+    let mut u = spec(Protocol::Udp, &format!("udp://{}", udp.addr));
+    u.udp = Some(udp_spec(&["x"], 100));
+    let mut t = spec(Protocol::Tcp, &format!("tcp://{}", tcp.addr));
+    t.tcp = Some(TcpSpec {
+        tls: false,
+        framing: TcpFraming::None,
+        payloads: vec![StreamPayload { data: "x".into(), encoding: PayloadEncoding::Text }],
+        half_close_after_send: false,
+        read_idle_ms: 300,
+        max_read_bytes: 4096,
+        expect_frames: 0,
+        proxy_protocol: None,
+    });
+    for s in [u, t] {
+        let mut c = ctx(s);
+        run_layer(
+            &mut c,
+            SettingsOverrides { early_data: Some(EarlyDataPolicy { enabled: true, extra_methods: vec![] }), ..Default::default() },
+        );
+        let o = run(&e, &c).await;
+        let inferred = &o.record.prepared.inferred;
+        assert!(inferred.iter().any(|i| i.starts_with("0-RTT early data is not used for sessions")), "{inferred:?}");
+    }
+}
+
+#[tokio::test]
 async fn proto_021_udp_loss_and_repeats_are_counted_not_explained() {
     init();
     let e = Engine::new();
@@ -1659,10 +1690,14 @@ async fn dtls_fixture(client_ca: bool) -> fxdtls::DtlsFixture {
 }
 
 fn dtls_ctx(url: &str, p: TlsProfile) -> ExecutionContext {
+    dtls_ctx_with(url, p, "secure hello")
+}
+
+fn dtls_ctx_with(url: &str, p: TlsProfile, datagram: &str) -> ExecutionContext {
     let mut s = spec(Protocol::Udp, url);
     s.udp = Some(UdpSpec {
         dtls: true,
-        datagrams: vec![StreamPayload { data: "secure hello".into(), encoding: PayloadEncoding::Text }],
+        datagrams: vec![StreamPayload { data: datagram.into(), encoding: PayloadEncoding::Text }],
         response_window_ms: 500,
         max_datagrams: 10,
         masque: None,
@@ -1693,6 +1728,36 @@ async fn proto_022_dtls_handshake_with_verified_peer() {
     assert_eq!(previews(&o, Direction::Received, "datagram"), vec!["secure hello"]);
     assert!(matches!(o.record.outcome.protocol_status, ProtocolStatus::Udp { datagrams_sent: 1, datagrams_received: 1, .. }));
     assert_eq!(f.completed_handshakes(), vec![None]);
+}
+
+/// A server leaf larger than the 2 KiB poll buffer the client used to have
+/// (dimpl panicked writing it), and a datagram larger than that buffer each
+/// way (it was never sent, and an answer that large was never read)
+/// (GHSA-62g8-g8px-5xm3).
+#[tokio::test]
+async fn proto_022_dtls_large_certificate_and_datagrams() {
+    init();
+    let large = &pki().server_large;
+    let leaf_len = anvil_fixtures::tlsserver::certs(&large.cert)[0].as_ref().len();
+    assert!(leaf_len > 3 * 1024, "the fixture leaf is only {leaf_len} bytes");
+    let f =
+        fxdtls::serve("127.0.0.1:0", DtlsServerOptions { cert_pem: large.cert.clone(), key_pem: large.key.clone(), client_ca_pem: None })
+            .await
+            .unwrap();
+    let e = Engine::new();
+    let payload = "d".repeat(4096);
+    let o = run(&e, &dtls_ctx_with(&f.url(), profile(&[&pki().ca.cert], None, true), &payload)).await;
+    let a = last(&o);
+    assert!(a.failure.is_none(), "{:?}", a.failure);
+    assert_eq!(phase(a, Phase::DtlsHandshake).unwrap().status, PhaseStatus::Completed);
+    let tls = a.connection.as_ref().unwrap().tls.as_ref().unwrap();
+    assert_eq!(tls.verification, TlsVerification::Verified);
+    assert!(tls.peer_certificates[0].subject.contains("anvil-lab-server-large"), "the large lab leaf is the one presented");
+    assert!(matches!(o.record.outcome.protocol_status, ProtocolStatus::Udp { datagrams_sent: 1, datagrams_received: 1, .. }));
+    let received: Vec<u64> =
+        stream(&o).messages.iter().filter(|m| m.direction == Direction::Received && m.kind == "datagram").map(|m| m.size).collect();
+    assert_eq!(received, vec![4096], "the echo of the 4 KiB datagram is read");
+    assert!(f.log.entries().iter().any(|e| matches!(e.event, GroundTruth::DatagramReceived { bytes: 4096 })));
 }
 
 #[tokio::test]

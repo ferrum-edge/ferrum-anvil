@@ -147,6 +147,20 @@ fn methods_head_and_misc_flags() {
     assert!(has_at(&r, "curl_option", "/args/1"));
 }
 
+/// `--max-redirs -1` is curl's "unlimited": the most a redirect policy
+/// follows, with a warning, never zero (#538).
+#[test]
+fn unlimited_max_redirs_follows_the_most_redirects() {
+    let r = curl("curl -L --max-redirs -1 https://example.com");
+    let redirects = r.requests[0].spec.settings.redirects.unwrap();
+    assert!(redirects.follow);
+    assert_eq!(redirects.max, u8::MAX);
+    assert!(has(&r, "curl_unlimited_redirects"));
+    let r = curl("curl -L --max-redirs 1000 https://example.com");
+    assert_eq!(r.requests[0].spec.settings.redirects.unwrap().max, u8::MAX);
+    assert!(!has(&r, "curl_unlimited_redirects"));
+}
+
 #[test]
 fn url_credentials_and_scheme_default() {
     let r = curl("curl http://bob:pa%3Ass@example.com/x");
@@ -156,6 +170,21 @@ fn url_credentials_and_scheme_default() {
     let r = curl("curl example.com/x");
     assert_eq!(r.requests[0].spec.url, "http://example.com/x");
     assert!(has(&r, "curl_default_scheme"));
+}
+
+/// The authority ends at the first `/`, `?` or `#`: an `@` after it is not
+/// userinfo, so the host stays and no Basic auth is invented (#511).
+#[test]
+fn an_at_sign_in_the_query_or_fragment_is_not_userinfo() {
+    let r = curl("curl 'https://api.example.com?email=a@b.com'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com");
+    assert!(!matches!(s.auth, AuthConfig::Basic { .. }), "no Basic auth is invented from the query or fragment");
+    assert_eq!(param(s, "email").unwrap().value, "a@b.com");
+    let r = curl("curl 'https://api.example.com#frag@x.test'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com");
+    assert!(!matches!(s.auth, AuthConfig::Basic { .. }), "no Basic auth is invented from the query or fragment");
 }
 
 #[test]

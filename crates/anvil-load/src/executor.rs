@@ -1042,6 +1042,10 @@ pub fn validate_plan(plan: &LoadPlan) -> Result<(), LoadError> {
     if !plan.mix.is_empty() && plan.mix.iter().all(|m| m.weight == 0) {
         return Err(LoadError::Invalid("every weighted-mix weight is zero".into()));
     }
+    // Checked when a plan is saved, as when it is prepared to run.
+    if plan.mix.is_empty() && plan.chain.len() > MAX_CHAIN_STEPS {
+        return Err(LoadError::Invalid(format!("the chain has {} steps; the limit is {MAX_CHAIN_STEPS}", plan.chain.len())));
+    }
     validate_workload(plan).map(|_| ())
 }
 

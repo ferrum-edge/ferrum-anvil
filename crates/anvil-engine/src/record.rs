@@ -350,7 +350,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let application = if diagnosis.stopped_at_login {
         ApplicationState::NotEvaluated
     } else {
-        anvil_diagnostics::assess_application(ctx.spec.protocol, &protocol_status, &diagnosis.body, body_complete)
+        anvil_diagnostics::assess_application(&protocol_status, &diagnosis.body, body_complete)
     };
     let mut warnings = diagnosis.warnings.clone();
     if let Some(reason) = undetermined.filter(|_| application == ApplicationState::NotEvaluated) {

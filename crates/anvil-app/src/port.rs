@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+/// The most history records of one workspace an export with history carries
+/// (the newest); older ones are listed among the excluded items.
+pub const EXPORT_HISTORY_LIMIT: usize = 1000;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportReport {
     pub plan: ImportPlan,
@@ -137,9 +141,19 @@ impl App {
                 }
             }
             if include_history {
-                // One decryption per record: the listing's own. The bundle
-                // carries records, not response bodies.
-                for (_, rec) in self.store.list_history_with::<serde_json::Value>(Some(&id), None, 1000)? {
+                // The newest records only; the export lists the cut among
+                // its excluded items. One decryption per record: the
+                // listing's own. The bundle carries records, not response
+                // bodies.
+                let mut entries = self.store.list_history_with::<serde_json::Value>(Some(&id), None, EXPORT_HISTORY_LIMIT + 1)?;
+                if entries.len() > EXPORT_HISTORY_LIMIT {
+                    entries.truncate(EXPORT_HISTORY_LIMIT);
+                    g.omitted.push(format!(
+                        "history records of workspace '{}' older than its newest {EXPORT_HISTORY_LIMIT} (an export carries at most {EXPORT_HISTORY_LIMIT} per workspace)",
+                        w.name
+                    ));
+                }
+                for (_, rec) in entries {
                     g.history.push(rec?);
                 }
             }
@@ -707,17 +721,14 @@ pub(crate) fn uncarried_warnings(
     Ok(warnings)
 }
 
-/// Secret references in the graph whose values were not included.
+/// "label (id)" of every secret an object of the graph references (a proxy
+/// password and an integration's credentials as much as a request's auth)
+/// that the bundle does not carry, as a full backup's restore lists them.
 fn missing_secrets(g: &PortableGraph) -> Vec<String> {
-    let text = serde_json::to_string(&(&g.requests, &g.environments, &g.tls_profiles, &g.workspaces, &g.folders)).unwrap_or_default();
-    let mut out = Vec::new();
-    for part in text.split("\"kind\":\"secret\",\"secret\":{\"id\":\"").skip(1) {
-        let id: String = part.chars().take(36).collect();
-        if !g.secrets.contains_key(&id) {
-            let label = part.split("\"label\":\"").nth(1).map(|l| l.split('"').next().unwrap_or("").to_string()).unwrap_or_default();
-            out.push(format!("{label} ({id})"));
-        }
-    }
+    let mut refs = Vec::new();
+    crate::backup::secret_refs(&serde_json::to_value(g).unwrap_or_default(), &mut refs);
+    let mut out: Vec<String> =
+        refs.into_iter().filter(|(id, _)| !g.secrets.contains_key(id)).map(|(id, label)| format!("{label} ({id})")).collect();
     out.sort();
     out.dedup();
     out

@@ -138,6 +138,22 @@ describe("ResponsePanel", () => {
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
   });
 
+  it("opens each result's body in a mode that body has (#512)", () => {
+    const text = view({ bodyText: "plain text" });
+    const binary = {
+      record: { ...text.record, id: "00000000-0000-0000-0000-000000000002" },
+      body: { text: null, pretty: null, hex: "89 50 4e 47", is_binary: true, decoded: false, shown_bytes: 4, captured_bytes: 4 },
+    } as unknown as ExecutionView;
+    const { rerender } = render(<ResponsePanel view={text} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByLabelText("Response body").textContent).toBe("plain text");
+    rerender(<ResponsePanel view={binary} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByLabelText("Response body").textContent).toBe("89 50 4e 47");
+    expect(screen.getByRole("button", { name: "Hex" }).getAttribute("aria-pressed")).toBe("true");
+    rerender(<ResponsePanel view={text} running={false} progressBytes={null} onCancel={() => {}} />);
+    expect(screen.getByLabelText("Response body").textContent).toBe("plain text");
+    expect(screen.getByRole("button", { name: "Raw" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("notifies when copying the response body fails", async () => {
     const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
     const writeText = vi.fn().mockRejectedValue(new Error("clipboard unavailable"));

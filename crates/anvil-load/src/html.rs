@@ -788,6 +788,8 @@ pub fn to_html(r: &LoadReport) -> String {
     if !r.timeline.is_empty() {
         h.push_str(r#"<details class="card"><summary>Timeline table</summary><table><tr><th class="num">Second</th><th>Phase</th><th class="num">Started</th><th class="num">Completed</th><th class="num">Failures</th><th class="num">Dropped</th><th class="num">Peak in flight</th><th class="num">p50</th><th class="num">p99</th><th class="num">Start lag p99</th></tr>"#);
         for b in &r.timeline {
+            // A second with no successful unit has no success latency, never "0 µs".
+            let success_us = |v: u64| if b.p50_us == 0 { "—".to_string() } else { fmt_us(v) };
             let _ = write!(
                 h,
                 r#"<tr><td class="num">{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td></tr>"#,
@@ -798,8 +800,8 @@ pub fn to_html(r: &LoadReport) -> String {
                 b.failures,
                 b.dropped,
                 b.in_flight,
-                fmt_us(b.p50_us),
-                fmt_us(b.p99_us),
+                success_us(b.p50_us),
+                success_us(b.p99_us),
                 fmt_us(b.p99_schedule_lag_us)
             );
         }
@@ -890,6 +892,19 @@ mod tests {
             let want = tile(&format!("Failed {}", unit_words(&r).1), pct, finished);
             assert!(to_html(&r).contains(&want), "{want}");
         }
+    }
+
+    /// The timeline table shows no success latency for a second without a
+    /// successful unit, as the chart and the summary tiles do (#537).
+    #[test]
+    fn timeline_table_shows_no_latency_for_a_second_without_successes() {
+        let mut r = sample_report();
+        let b = &mut r.timeline[0];
+        b.p50_us = 0;
+        b.p99_us = 0;
+        b.p99_schedule_lag_us = 0;
+        let html = to_html(&r);
+        assert!(html.contains(r#"<td class="num">—</td><td class="num">—</td><td class="num">0 µs</td></tr>"#), "{html}");
     }
 
     #[test]

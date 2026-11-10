@@ -585,11 +585,20 @@ fn ext_rate_limit(env: &Env) -> Fut<'_> {
         operator_field(&mut c, &ops, "/metadata/rejection_phase", &["on_request_received"]);
         plugin_reject(&mut c, &o, 429, "http.too_many_requests");
         c.add(CheckKind::GroundTruth, "x-ratelimit-remaining: 0 exposed", header(&o, "x-ratelimit-remaining") == ["0"], "");
+        // Every rate_limiting quota 429 carries Retry-After since v0.9.19.
+        let retry_after = header(&o, "retry-after");
+        c.add(CheckKind::GroundTruth, "retry-after exposed", retry_after.len() == 1, format!("{retry_after:?}"));
         no_claim(&mut c, &o, "concurrency", Confidence::Likely);
         c.add(CheckKind::Diagnosis, "no single-cause catalog attribution", !has_code(&o, "ferrum.outcome"), format!("{:?}", codes(&o)));
-        // Lookalike: the application answers the same 429 with the same headers.
+        // Lookalike: the application answers the same 429 with the same
+        // headers, the gateway's Retry-After value included.
+        let retry_after = format!("retry-after:{}", retry_after.first().map(String::as_str).unwrap_or("2"));
         let look = env
-            .backend(429, r#"{"error":"Rate limit exceeded"}"#, &["x-ratelimit-limit:2", "x-ratelimit-remaining:0", "x-ratelimit-window:2"])
+            .backend(
+                429,
+                r#"{"error":"Rate limit exceeded"}"#,
+                &["x-ratelimit-limit:2", "x-ratelimit-remaining:0", "x-ratelimit-window:2", retry_after.as_str()],
+            )
             .await;
         c.add(CheckKind::GroundTruth, "lookalike body is byte-identical", body_text(&look) == body_text(&o), "");
         indistinguishable(&mut c, &o, &look, "gateway 429 vs application 429");

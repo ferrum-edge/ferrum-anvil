@@ -96,6 +96,8 @@ fn drain(s: &mut Session) -> Vec<Out> {
     for _ in 0..1024 {
         match s.dtls.poll_output(&mut buf) {
             Output::Packet(p) => outs.push(Out::Packet(p.to_vec())),
+            // A record or packet over the buffer stays pending until it fits.
+            Output::BufferTooSmall { needed } => buf.resize(needed.max(buf.len()), 0),
             Output::Timeout(t) => {
                 s.next_timeout = Some(t);
                 break;

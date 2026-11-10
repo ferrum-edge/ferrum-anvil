@@ -47,14 +47,14 @@ use crate::http::{AttemptOutput, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
 use crate::session::*;
 use crate::stats::ConnStats;
+use crate::udp::PayloadTally;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, ProtocolStatus};
 use anvil_domain::settings::Timeouts;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Method, Request};
-use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -688,9 +688,12 @@ fn send_interrupted() -> TransportFailure {
 }
 
 /// Send one datagram through the tunnel and record it (or why it was not sent).
-async fn send_recorded(chan: &mut HboneChannel, tr: &mut Transcript, payload: &[u8]) {
+async fn send_recorded(chan: &mut HboneChannel, tr: &mut Transcript, tally: &mut PayloadTally, payload: &[u8]) {
     match chan.send(payload).await {
-        Ok(Sent::Sent(_)) => tr.data(Direction::Sent, "datagram", payload),
+        Ok(Sent::Sent(_)) => {
+            tally.sent(payload);
+            tr.data(Direction::Sent, "datagram", payload);
+        }
         Ok(Sent::NotSent(why)) => tr.note("not_sent", &why),
         Err(f) => tr.note("not_sent", &f.message),
     }
@@ -730,12 +733,13 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     let s_idx = rec.start(Phase::Session);
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
-    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    // Repeats and echoes, counted as direct UDP counts them.
+    let mut tally = PayloadTally::default();
 
     for d in &plan.datagrams {
         // `guarded` checks cancellation, then the deadline, before the send:
         // a canceled or expired attempt hands nothing more to the tunnel.
-        match guarded(send_recorded(&mut chan, &mut tr, d), cancel, total_deadline).await {
+        match guarded(send_recorded(&mut chan, &mut tr, &mut tally, d), cancel, total_deadline).await {
             Ok(()) => {}
             Err(Interrupted::Deadline) => {
                 failure = Some(
@@ -789,11 +793,7 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
         match ev {
             Ev::In(Inbound::Datagram(p)) => {
                 received += 1;
-                let mut digest = [0u8; 32];
-                digest.copy_from_slice(&Sha256::digest(&p));
-                if !seen.insert(digest) {
-                    facts.repeated_datagrams += 1;
-                }
+                tally.received(&p, &mut facts);
                 tr.data(Direction::Received, "datagram", &p);
                 if received >= plan.max_datagrams as u64 {
                     tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
@@ -810,7 +810,7 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
             Ev::In(Inbound::PortUnreachable(_) | Inbound::Error(_) | Inbound::Dropped(_)) => {}
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    if guarded(send_recorded(&mut chan, &mut tr, text.as_bytes()), cancel, total_deadline).await.is_err() {
+                    if guarded(send_recorded(&mut chan, &mut tr, &mut tally, text.as_bytes()), cancel, total_deadline).await.is_err() {
                         failure = Some(send_interrupted());
                         chan.set_closed_by(ClosedBy::Client);
                     }
@@ -818,7 +818,7 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        if guarded(send_recorded(&mut chan, &mut tr, &b), cancel, total_deadline).await.is_err() {
+                        if guarded(send_recorded(&mut chan, &mut tr, &mut tally, &b), cancel, total_deadline).await.is_err() {
                             failure = Some(send_interrupted());
                             chan.set_closed_by(ClosedBy::Client);
                         }

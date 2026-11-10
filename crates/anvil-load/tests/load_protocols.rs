@@ -413,13 +413,18 @@ async fn load_grpc_client_and_bidi_streams_are_one_unit_per_call_on_pooled_chann
 
     // A client stream still sending when its gRPC deadline elapses is a
     // censored timeout with an unknown status, as for server streams.
+    // (Whether the response headers arrived within the 1 ms deadline varies,
+    // so the missing-status count is not asserted.)
     let mut c = scripted("Bidi", GrpcMode::Bidirectional, r#"{"message":"c"}"#);
     c.spec.grpc.as_mut().unwrap().messages = vec![r#"{"message":"x"}"#.into(); 2_000];
     c.spec.grpc.as_mut().unwrap().deadline_ms = Some(1);
     let id = Id::new();
     let r = run_one(plan(iterations(3, 1), vec![id], ConnectionMode::Persistent), c).await;
     let g = proto(&r).grpc.clone().unwrap();
+    assert_eq!(r.requests.timeouts, 3, "{:?}", r.failure_categories);
+    assert!(g.status_codes.is_empty(), "the status is unknown, never DEADLINE_EXCEEDED: {g:?}");
     assert_eq!(r.latency_success.count, 0);
+    assert_eq!(r.timeouts_censored.count, 3);
     assert_eq!(g.ok, 0, "{g:?}");
 }
 

@@ -85,6 +85,10 @@ pub(crate) fn explicit_example(sg: &mut SampleGen, holder: &Value, at: &str) -> 
 /// synthesized Swagger 2.0 equivalent).
 pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str) -> GeneratedBody {
     sg.reset_budget();
+    // A media range (`*/*`, `text/*`) names no type to send: the body's own
+    // default content type applies instead.
+    let range = media_essence(mt).ends_with("/*");
+    let raw_type = (!range).then(|| mt.to_string());
     let (media, mptr) = sg.refs.resolve_or_self(media, mptr, sg.report);
     for k in ["prefixEncoding", "itemEncoding"] {
         if media.get(k).is_some() {
@@ -102,11 +106,11 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
             "OpenAPI 3.2 sequential media (`itemSchema`) is not generated as a stream; a single item is emitted",
         );
         let v = sg.generate(item, &ptr(&mptr, "itemSchema"), None).unwrap_or(Value::Null);
-        return GeneratedBody { body: Body::Raw { text: format!("{v}\n"), content_type: Some(mt.to_string()) }, content_type: None };
+        return GeneratedBody { body: Body::Raw { text: format!("{v}\n"), content_type: raw_type }, content_type: None };
     }
     let explicit = if sg.mode == SampleMode::Sample { explicit_example(sg, media, &mptr) } else { None };
     if let Some(Explicit::Serialized(text)) = &explicit {
-        return GeneratedBody { body: Body::Raw { text: text.clone(), content_type: Some(mt.to_string()) }, content_type: None };
+        return GeneratedBody { body: Body::Raw { text: text.clone(), content_type: raw_type }, content_type: None };
     }
     let mut value = || -> Value {
         match &explicit {
@@ -125,7 +129,7 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
                 Value::String(s) if matches!(&explicit, Some(Explicit::Value(_))) && looks_like_json_doc(s) => s.clone(),
                 _ => serde_json::to_string_pretty(&v).unwrap_or_default(),
             };
-            let explicit_ct = (e != "application/json").then(|| mt.to_string());
+            let explicit_ct = (e != "application/json" && !range).then(|| mt.to_string());
             GeneratedBody { body: Body::Json { text }, content_type: explicit_ct }
         }
         Rank::Xml => {
@@ -166,7 +170,7 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
                 other @ (Value::Array(_) | Value::Object(_)) => other.to_string(),
                 other => scalar_text(&other),
             };
-            GeneratedBody { body: Body::Raw { text, content_type: Some(mt.to_string()) }, content_type: None }
+            GeneratedBody { body: Body::Raw { text, content_type: raw_type }, content_type: None }
         }
         Rank::Other => {
             sg.report.unsupported(
@@ -174,7 +178,7 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
                 &mptr,
                 format!("'{mt}' request bodies need a file attachment; the request is imported without a body"),
             );
-            GeneratedBody { body: Body::None, content_type: Some(mt.to_string()) }
+            GeneratedBody { body: Body::None, content_type: raw_type }
         }
     }
 }

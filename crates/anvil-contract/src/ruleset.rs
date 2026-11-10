@@ -483,18 +483,23 @@ fn compile_rule(source: &str, ruleset: &str, id: &str, o: &Map<String, Value>) -
     {
         return Err(err("`recommended` is true or false".into()));
     }
+    // Checked for a rule turned off too, like every other key.
+    let description = text("description")?;
+    let message = text("message")?;
+    let how_to_fix = text("how_to_fix")?;
+    let docs_url = text("docs_url")?;
     let Some(severity) = severity else { return Ok(None) };
     Ok(Some(Rule {
         id: id.to_string(),
-        description: text("description")?,
-        message: text("message")?,
+        description,
+        message,
         severity,
         given,
         conditions,
         then,
         formats,
-        how_to_fix: text("how_to_fix")?,
-        docs_url: text("docs_url")?,
+        how_to_fix,
+        docs_url,
         ruleset: ruleset.to_string(),
     }))
 }
@@ -625,6 +630,10 @@ mod tests {
                 "unknown format",
             ),
             ("anvil_ruleset: 1\nrules:\n  'bad id':\n    given: operation\n    then: {function: truthy, field: a}\n", "rule ids"),
+            (
+                "anvil_ruleset: 1\nrules:\n  x:\n    given: operation\n    severity: 'off'\n    message: [a]\n    then: {function: truthy, field: a}\n",
+                "`message` must be text",
+            ),
         ];
         for (text, needle) in cases {
             let e = load(text).unwrap_err();

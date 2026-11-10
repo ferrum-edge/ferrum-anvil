@@ -188,6 +188,11 @@ jobs:
         run: python3 -I scripts/tests/test_release_smoke_record.py
       - name: Failure-matrix classifier tests (pinned, requires)
         run: python3 -I scripts/tests/test_matrix_coverage.py
+      # Fake agent executables only: no agent CLI is installed, no model request is made.
+      - name: Agent-skill resolver and launcher tests
+        run: |
+          python3 -I .agents/skills/_lib/test_resolve_agent_bin.py
+          python3 -I .agents/skills/sol-agents/scripts/test_dispatch.py
       - name: Release dependency graph has no WebDriver plugin / e2e feature
         run: scripts/release-check.sh
 

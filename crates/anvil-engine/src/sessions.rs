@@ -1293,7 +1293,7 @@ fn prepare_tcp(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r
         .transpose()?;
     // Covers the secrets of the payloads and PROXY header, resolved after the redactor was built.
     b.redactor.refresh_used_secrets(r);
-    b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
+    b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY") || i == EARLY_DATA_NOTE);
     if let Some(p) = &spec.proxy_protocol {
         b.inferred.push(crate::proxy_protocol::header_note(p));
     }
@@ -1362,7 +1362,7 @@ async fn prepare_udp(
         spec.proxy_protocol.as_ref().map(|p| crate::proxy_protocol::envelope_plan(p, ctx, r, &mut b.redactor, use_dtls)).transpose()?;
     // Covers the secrets of the datagrams and envelope, resolved after the redactor was built.
     b.redactor.refresh_used_secrets(r);
-    b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY"));
+    b.inferred.retain(|i| i.starts_with("no scheme given") || i.contains("TLS profile") || i.contains("NO_PROXY") || i == EARLY_DATA_NOTE);
     if let Some(m) = &spec.masque {
         if envelope.is_some() {
             return Err(unsupported(

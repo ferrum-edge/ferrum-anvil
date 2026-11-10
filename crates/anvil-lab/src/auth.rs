@@ -1286,7 +1286,7 @@ fn soap_ctx(env: &Env, path: &str, auth: AuthConfig, envelope: &str) -> Executio
     c
 }
 
-fn wsse(_env: &Env, password: &str, ptype: WssePasswordType, ttl: Option<u32>, saml: Option<&str>) -> AuthConfig {
+fn wsse(password: &str, ptype: WssePasswordType, ttl: Option<u32>, saml: Option<&str>) -> AuthConfig {
     AuthConfig::Wsse {
         config: WsseConfig {
             username: "alice".into(),
@@ -1348,24 +1348,17 @@ fn auth029(env: &Env) -> Fut<'_> {
         let (before, from) = (env.fx.echo.log.count_requests(), env.gw.log_lines().len());
         // Accepted control: PasswordDigest built by Anvil at send time.
         let ok =
-            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
-                .await;
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(&pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE)).await;
         c.success(CheckKind::Diagnosis, &ok);
         c.add(CheckKind::Diagnosis, "PasswordDigest never puts the password on the wire", !echoed_body(&ok).contains(&pw), "");
         record_excludes(&mut c, &ok, &pw, "the WS-Security password");
-        // Wrong password.
-        let wrong = go(
-            env,
-            &soap_ctx(
-                env,
-                "/soap/digest/echo",
-                wsse(env, "not-the-password", WssePasswordType::PasswordDigest, Some(60), None),
-                SOAP_ENVELOPE,
-            ),
-        )
-        .await;
+        // Wrong password: generated per run, like the lab's own secrets.
+        let wrong_pw = crate::gateway::random_secret();
+        let wrong =
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(&wrong_pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
+                .await;
         soap_rejection(&mut c, env, &wrong, "WS-Security: invalid credentials");
-        record_excludes(&mut c, &wrong, "not-the-password", "the wrong password");
+        record_excludes(&mut c, &wrong, &wrong_pw, "the wrong password");
         // Replay: the identical captured envelope, twice (raw bytes; Anvil's
         // own signer would never reuse a nonce).
         let captured = captured_wsse(env, WssePasswordType::PasswordDigest, 60);
@@ -1390,11 +1383,9 @@ fn auth029(env: &Env) -> Fut<'_> {
         // Recovery: Anvil generates a fresh nonce and Created per send.
         let mut all_ok = true;
         for _ in 0..3 {
-            let r = go(
-                env,
-                &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE),
-            )
-            .await;
+            let r =
+                go(env, &soap_ctx(env, "/soap/digest/echo", wsse(&pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
+                    .await;
             all_ok &= r.record.response.as_ref().map(|x| x.status) == Some(200);
         }
         c.add(CheckKind::Recovery, "three fresh Anvil envelopes in a row are all accepted", all_ok, "");
@@ -1408,8 +1399,7 @@ fn auth029_text(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let pw = env.fx.secrets.soap_alice_password.clone();
-        let o =
-            go(env, &soap_ctx(env, "/soap/text/echo", wsse(env, &pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
+        let o = go(env, &soap_ctx(env, "/soap/text/echo", wsse(&pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
         c.success(CheckKind::Diagnosis, &o);
         record_excludes(&mut c, &o, &pw, "the PasswordText password");
         let got = echoed_body(&o);
@@ -1421,11 +1411,10 @@ fn auth029_text(env: &Env) -> Fut<'_> {
         );
         // Lookalike: the right password presented as PasswordText to the
         // PasswordDigest route is a profile mismatch, not a wrong password.
-        let m = go(env, &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE))
-            .await;
+        let m =
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(&pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
         soap_rejection(&mut c, env, &m, "WS-Security: Password Type does not match the configured password_type");
-        let r =
-            go(env, &soap_ctx(env, "/soap/text/echo", wsse(env, &pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
+        let r = go(env, &soap_ctx(env, "/soap/text/echo", wsse(&pw, WssePasswordType::PasswordText, Some(60), None), SOAP_ENVELOPE)).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
     })
@@ -1444,8 +1433,7 @@ fn auth029_expired(env: &Env) -> Fut<'_> {
         soap_rejection(&mut c, env, &o, "WS-Security: Timestamp has expired");
         backend_untouched(&mut c, env, before);
         let r =
-            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
-                .await;
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(&pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE)).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
     })
@@ -1521,7 +1509,7 @@ fn assertion(env: &Env, signer: &Signer, spec: &SamlSpec) -> String {
 /// user-supplied assertion embedded verbatim.
 fn saml_send(env: &Env, a: &str) -> ExecutionContext {
     let pw = env.fx.secrets.soap_alice_password.clone();
-    soap_ctx(env, "/soap/saml/echo", wsse(env, &pw, WssePasswordType::PasswordDigest, Some(60), Some(a)), SOAP_ENVELOPE)
+    soap_ctx(env, "/soap/saml/echo", wsse(&pw, WssePasswordType::PasswordDigest, Some(60), Some(a)), SOAP_ENVELOPE)
 }
 
 fn auth031(env: &Env) -> Fut<'_> {

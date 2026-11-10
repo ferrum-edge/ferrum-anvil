@@ -20,7 +20,6 @@ pub mod rules;
 
 use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, Evidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
 use anvil_domain::outcome::{ApplicationState, OutcomeWarning, ProtocolStatus, WarningCode};
-use anvil_domain::request::Protocol;
 pub use facts::{BodyFacts, DiagnosticInput, FerrumTrust};
 
 /// Catalog versions this build embeds: the findings wording catalog and every
@@ -182,7 +181,7 @@ fn dedupe(v: Vec<DiagnosticFinding>) -> Vec<DiagnosticFinding> {
 }
 
 /// Application-level assessment (independent of transport completion).
-pub fn assess_application(protocol: Protocol, status: &ProtocolStatus, body: &BodyFacts, body_complete: bool) -> ApplicationState {
+pub fn assess_application(status: &ProtocolStatus, body: &BodyFacts, body_complete: bool) -> ApplicationState {
     match status {
         ProtocolStatus::Http { status, .. } | ProtocolStatus::Sse { http_status: status, .. } => {
             if *status >= 400 {
@@ -219,10 +218,7 @@ pub fn assess_application(protocol: Protocol, status: &ProtocolStatus, body: &Bo
         ProtocolStatus::Udp { masque: Some(m), .. } if m.connect_status.map(|s| !(200..300).contains(&s)).unwrap_or(false) => {
             ApplicationState::Failure
         }
-        _ => {
-            let _ = protocol;
-            ApplicationState::NotEvaluated
-        }
+        _ => ApplicationState::NotEvaluated,
     }
 }
 

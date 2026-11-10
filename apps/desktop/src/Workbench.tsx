@@ -325,7 +325,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const openRequest = async (id: string) => {
     if (!tabsRef.current.some((t) => t.req.id === id)) {
       const req = await api.getRequest(id);
-      setTabs((ts) => [...ts, { wsId: req.workspace_id, req, saved: snap(req), view: null, running: false, execId: null, progress: null }]);
+      // A second open may have added the tab while this read was in flight.
+      setTabs((ts) => (ts.some((t) => t.req.id === id) ? ts : [...ts, { wsId: req.workspace_id, req, saved: snap(req), view: null, running: false, execId: null, progress: null }]));
     }
     setActive(id);
   };
@@ -674,6 +675,16 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       // A confirmation or a dialog is showing, Workbench's own or one a view
       // opened (any Modal): its keys (Escape, ⌘/Ctrl+Enter) are its own.
       if (asking || dialog || modalOpen(e)) return;
+      // The sidebar shows beside every view.
+      if (mod && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSideCollapsed((c) => !c);
+        return;
+      }
+      // The rest act on the active request tab, which only the Requests view
+      // shows: in Runner, Load tests or Contract they would send, save or
+      // cancel a request the user cannot see.
+      if (view !== "requests") return;
       if (mod && e.key === "Enter") {
         e.preventDefault();
         void send();
@@ -683,9 +694,6 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
         void newRequest(null);
-      } else if (mod && e.key.toLowerCase() === "b") {
-        e.preventDefault();
-        setSideCollapsed((c) => !c);
       } else if (e.key === "Escape" && tab?.running) {
         void cancel();
       }
@@ -1394,6 +1402,8 @@ function Tree(props: {
               }}
               onClick={() => (folder ? props.onToggle(n.id) : props.onOpen(n.id))}
               onKeyDown={(e) => {
+                // Keys on the row's own action buttons belong to those buttons.
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter") folder ? props.onToggle(n.id) : props.onOpen(n.id);
                 if (e.key === "F2") props.onRename(n);
                 if (e.key === "Delete" || e.key === "Backspace") props.onDelete(n);

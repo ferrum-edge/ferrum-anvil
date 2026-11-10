@@ -1,43 +1,6 @@
-# Exact-fingerprint ignore for a dummy X-API-Key test value in
-# crates/anvil-engine/tests/redirect_policy.rs, first pushed in commit fa40c8bc on
-# branch fix/redirect-hop-policy-reevaluation. The value is fake; later commits use the
-# allowlisted tok-SENSITIVE- canary prefix. CI scans full history, so the original
-# commit stays visible without a history rewrite, hence this single fingerprint.
-fa40c8bc7e0dd5f62b2f36ead7f7c67b5c7a80a8:crates/anvil-engine/tests/redirect_policy.rs:generic-api-key:76
-
-# Fake JWT-shaped path segment in crates/anvil-contract/tests/drift.rs (a test that
-# observed values never reach drift reports), first pushed in commit a7b38263 on
-# branch claude/openapi-contract-drift. It encodes no real credential; later commits
-# build it at run time. CI scans full history, hence this single fingerprint.
-a7b38263c579e088c5fe03efd2f18aba50453414:crates/anvil-contract/tests/drift.rs:jwt:289
-
-# Exact-fingerprint ignore for a dummy refusal-body test secret in
-# crates/anvil-engine/src/record.rs, first pushed in commit 4c929780 on branch
-# fix/stream-residuals. The value is fake; the next commit switches it to the
-# allowlisted tok-SENSITIVE- canary prefix. CI scans full history, hence this fingerprint.
-4c929780cc834aaaa5f67af9a8ca1a38f7ec67ed:crates/anvil-engine/src/record.rs:generic-api-key:567
-# Exact-fingerprint ignore for a planted redaction canary in
-# crates/anvil-engine/tests/mcp.rs, first pushed in commit d64da595 on branch
-# feature/mcp-request-kind. The value is fake; the next commit switches it to
-# the allowlisted tok-SENSITIVE- canary prefix. CI scans full history.
-d64da595172a550838586dfbb1c291ccaaa88879:crates/anvil-engine/tests/mcp.rs:generic-api-key:224
-# Exact-fingerprint ignore for a fake test URL (`https://<host>:8443/v1/charges`)
-# in apps/desktop/src-tauri/src/draft_authority.rs, first pushed in commit 4f83130f
-# on branch fix/renderer-authority-trusted-presence. It holds no credential; the
-# next commit renames the host so the generic rule no longer matches. CI scans full
-# history, hence this fingerprint.
-4f83130f8c24acd410c36a764a734c7069d9a8e7:apps/desktop/src-tauri/src/draft_authority.rs:generic-api-key:275
-
-# Exact-fingerprint ignore for a planted redaction canary in
-# crates/anvil-engine/tests/engine_scenarios.rs, first pushed in commit 1e7d5153 on
-# branch fix/problem-details-evidence. The value is fake; the next commit switches it
-# to the allowlisted tok-SENSITIVE- canary prefix. CI scans full history, hence this
-# single fingerprint.
-1e7d5153af10c28f38ea2b271a58294044185da6:crates/anvil-engine/tests/engine_scenarios.rs:generic-api-key:772
-
-# Exact-fingerprint ignore for a planted redaction canary (a fake XML tag name used
-# as a secret variable) in crates/anvil-engine/tests/redaction.rs, first pushed in
-# commit 0f4dd500 on branch security/redact-prepared-auth-label. The value is fake;
-# the next commit switches it to the allowlisted tok-SENSITIVE- canary prefix. CI
-# scans full history, hence this single fingerprint.
-0f4dd500f97c728029c0e50e387055efd03de352:crates/anvil-engine/tests/redaction.rs:generic-api-key:628
+# Exact gitleaks fingerprints (<commit>:<path>:<rule>:<line>) to ignore, each with its reason.
+#
+# CI scans the working tree and the history of HEAD only (.github/workflows/ci.yml): on a
+# pull request, the PR's own commits; on main, main's. Pull requests are squash-merged, so
+# a fingerprint for a commit of a PR is dead once it merges: remove it then. Prefer the
+# allowlisted tok-SENSITIVE- canary prefix (.gitleaks.toml) or a value built at run time.

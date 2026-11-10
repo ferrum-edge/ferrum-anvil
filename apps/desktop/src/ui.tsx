@@ -310,6 +310,42 @@ export function SecretField(props: {
   );
 }
 
+/**
+ * A text field (or textarea) for a list value. The text is kept as typed
+ * and the parsed list is committed on every change: rendering the list back
+ * on each keystroke would drop the separator or empty line just typed, so a
+ * second item could not be entered. The text follows the list only when the
+ * list changes from elsewhere (it no longer matches the parse of the text),
+ * as when another request is shown.
+ */
+export function ListText<T>(props: {
+  value: T[];
+  format: (list: T[]) => string;
+  parse: (text: string) => T[];
+  onChange: (list: T[]) => void;
+  multiline?: boolean;
+  rows?: number;
+  className?: string;
+  placeholder?: string;
+}) {
+  const { format, parse, onChange, className = "field mono", placeholder } = props;
+  const formatted = format(props.value);
+  const [text, setText] = useState(formatted);
+  // `format` and `parse` are pure: only the list and the text matter.
+  useEffect(() => {
+    if (format(parse(text)) !== formatted) setText(formatted);
+  }, [formatted, text]);
+  const change = (t: string) => {
+    setText(t);
+    onChange(parse(t));
+  };
+  return props.multiline ? (
+    <textarea className={className} rows={props.rows} value={text} placeholder={placeholder} onChange={(e) => change(e.target.value)} />
+  ) : (
+    <input className={className} value={text} placeholder={placeholder} onChange={(e) => change(e.target.value)} />
+  );
+}
+
 export function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
   useEffect(() => {
