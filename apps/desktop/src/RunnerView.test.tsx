@@ -6,7 +6,8 @@
 // workspace's selection, folder choice and pending confirmation, but keeps a
 // live run's Stop control. An unsaved scenario edit is kept per workspace:
 // hidden while another workspace is shown, restored on return, and dropped
-// once its scenario is gone from the workspace.
+// once its scenario is gone from the workspace. Run saves an edit first, so
+// the run is the one on screen; a refused save or delete is shown.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
@@ -371,6 +372,73 @@ describe("unsaved scenario edits", () => {
     fireEvent.click(await screen.findByText("Scenario A"));
     expect(iterations().value).toBe("1");
     expect(screen.queryByText("unsaved")).toBeNull();
+  });
+
+  it("saves the edited run options before Run, so the run is the one on screen", async () => {
+    const order: string[] = [];
+    backend({
+      scenario_save: (a) => {
+        order.push("save");
+        lists.A = [a.scenario as Scenario];
+        return a.scenario;
+      },
+      run_start: () => {
+        order.push("run");
+        return "run-1";
+      },
+    });
+    await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.change(iterations(), { target: { value: "5" } });
+    fireEvent.click(button("Run"));
+
+    await screen.findByRole("button", { name: "Stop run" });
+    expect(order).toEqual(["save", "run"]);
+    expect((calls("scenario_save")[0].scenario as Scenario).iterations).toBe(5);
+    expect(calls("run_start")[0].target).toEqual({ kind: "scenario", scenario_id: "sa" });
+  });
+
+  it("does not run when saving the edited options is refused, and keeps the edit", async () => {
+    backend({
+      scenario_save: () => {
+        throw "LOCKED";
+      },
+    });
+    await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.change(iterations(), { target: { value: "5" } });
+    fireEvent.click(button("Run"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("LOCKED");
+    expect(calls("run_start")).toHaveLength(0);
+    expect(iterations().value).toBe("5");
+    expect(screen.getAllByText("unsaved")).toHaveLength(2);
+    await waitFor(() => expect(button("Run").disabled).toBe(false));
+  });
+
+  it("runs a scenario without edits as stored, without saving it", async () => {
+    backend({ run_start: () => "run-1" });
+    await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.click(button("Run"));
+    await screen.findByRole("button", { name: "Stop run" });
+    expect(calls("scenario_save")).toHaveLength(0);
+  });
+
+  it("reports a refused delete and keeps the scenario and its edit open", async () => {
+    backend({
+      scenario_delete: () => {
+        throw "storage error";
+      },
+    });
+    await mount("A");
+    fireEvent.click(screen.getByText("Scenario A"));
+    fireEvent.change(iterations(), { target: { value: "7" } });
+    fireEvent.click(button("Delete scenario"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("storage error");
+    expect(screen.getByRole("heading", { name: "Scenario A" })).toBeTruthy();
+    expect(iterations().value).toBe("7");
   });
 
   it("drops the edit of a deleted scenario while it is shown", async () => {

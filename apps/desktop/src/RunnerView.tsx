@@ -430,6 +430,30 @@ function ScenarioDetail(props: {
 }) {
   const s = props.draft ? { ...props.scenario, ...props.draft } : props.scenario;
   const setS = (next: Scenario) => props.onDraft({ iterations: next.iterations, stop_on_failure: next.stop_on_failure });
+  const [err, setErr] = useState<string | null>(null);
+  // A save (alone, or before a run) is on its way.
+  const [saving, setSaving] = useState(false);
+  /** Stores the options shown; false when the backend refused (the error is shown). */
+  const save = async (): Promise<boolean> => {
+    setErr(null);
+    const sent = props.draft;
+    try {
+      await api.saveScenario(s);
+    } catch (e) {
+      setErr(String((e as Error).message));
+      return false;
+    }
+    props.onSaved(s.id, sent);
+    return true;
+  };
+  const whileSaving = async (work: () => Promise<unknown>) => {
+    setSaving(true);
+    try {
+      await work();
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <div className="page narrow">
       <div className="page-head">
@@ -444,7 +468,19 @@ function ScenarioDetail(props: {
           </div>
         </div>
         <div className="page-actions">
-          <button className="btn primary" onClick={() => props.onRun(s)}>
+          <button
+            className="btn primary"
+            disabled={saving}
+            title={props.draft ? "Save the run options, then run" : undefined}
+            onClick={() =>
+              void whileSaving(async () => {
+                // A run reads the stored scenario: store the options shown first,
+                // as the load editor's Run… does.
+                if (props.draft && !(await save())) return;
+                props.onRun(s);
+              })
+            }
+          >
             <Icon name="play" size={11} />
             Run
           </button>
@@ -453,7 +489,13 @@ function ScenarioDetail(props: {
             aria-label="Delete scenario"
             title="Delete scenario"
             onClick={async () => {
-              await api.deleteScenario(s.id);
+              setErr(null);
+              try {
+                await api.deleteScenario(s.id);
+              } catch (e) {
+                setErr(String((e as Error).message));
+                return;
+              }
               props.onDeleted();
             }}
           >
@@ -462,6 +504,11 @@ function ScenarioDetail(props: {
         </div>
       </div>
       {s.trusted === false && <div className="warn-box">Imported scenario: review the steps before running it.</div>}
+      {err && (
+        <div className="bad-box" role="alert">
+          {err}
+        </div>
+      )}
       <fieldset>
         <legend>Steps</legend>
         <div className="step-list">
@@ -486,14 +533,7 @@ function ScenarioDetail(props: {
             Stop an iteration at its first failed step
           </label>
           <span className="spacer" />
-          <button
-            className="btn"
-            onClick={async () => {
-              const sent = props.draft;
-              await api.saveScenario(s);
-              props.onSaved(s.id, sent);
-            }}
-          >
+          <button className="btn" disabled={saving} onClick={() => void whileSaving(save)}>
             Save
           </button>
         </div>
