@@ -37,7 +37,6 @@ roxmltree.workspace = true
 
 [dev-dependencies]
 anvil-xml-limits = { workspace = true, features = ["test-support"] }
-tokio.workspace = true
 
 [lints]
 workspace = true

@@ -35,7 +35,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }
-tokio.workspace = true
 
 [lints]
 workspace = true

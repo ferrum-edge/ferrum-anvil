@@ -46,7 +46,6 @@ libc.workspace = true
 [dev-dependencies]
 anvil-xml-limits = { workspace = true, features = ["test-support"] }
 anvil-fixtures = { path = "../anvil-fixtures" }
-chrono.workspace = true
 jsonwebtoken.workspace = true
 
 [lints]
