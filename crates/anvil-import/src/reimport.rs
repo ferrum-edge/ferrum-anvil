@@ -421,12 +421,18 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
         .map(|f| folder_key(f.meta.id))
         .filter(|k| !(current.contains_key(k) && fresh.contains_key(k)))
         .collect();
+    // Looked up by key; reversed so that the first of equal keys wins.
+    let fresh_values: HashMap<&str, &Value> = fresh_units.iter().rev().map(|(k, v)| (k.as_str(), v)).collect();
+    let fresh_environments: HashMap<String, &Environment> =
+        scope.fresh.environments.iter().rev().map(|e| (environment_key(e.meta.id), e)).collect();
     let current_only = current_units.iter().map(|(k, _)| k).filter(|k| !fresh.contains_key(*k));
     for key in fresh_units.iter().map(|(k, _)| k).chain(current_only) {
-        if one_sided.iter().any(|e| key.starts_with(&format!("{e}/"))) {
+        let owner = unit_owner(key);
+        // A variable of a one-sided environment goes with it.
+        if owner.is_some_and(|o| o.len() < key.len() && one_sided.contains(o)) {
             continue;
         }
-        if lone_folders.iter().any(|lone| key == lone || key.starts_with(&format!("{lone}/"))) {
+        if owner.is_some_and(|o| lone_folders.contains(o)) {
             continue;
         }
         let whole = one_sided.contains(key);
@@ -441,9 +447,9 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
             plan.scope_preserved_edits.push(key.clone());
             continue;
         }
-        let fresh_value = match scope.fresh.environments.iter().find(|e| environment_key(e.meta.id) == *key) {
+        let fresh_value = match fresh_environments.get(key.as_str()) {
             Some(e) => Some(to_json(e)),
-            None => fresh_units.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
+            None => fresh_values.get(key.as_str()).copied().cloned(),
         };
         let label = scope_label(key, scope);
         let change = ScopeChange { key: key.clone(), label, user_edited, whole_environment: whole, fresh: fresh_value };
@@ -516,6 +522,14 @@ fn variable_keys<'v>(prefix: &str, variables: &'v [Variable]) -> Vec<(String, &'
             (key, v)
         })
         .collect()
+}
+
+/// The environment or folder unit `key` is or belongs to: its first two
+/// segments (`environments/<id>`, `folders/<id>`). `None` for a key with one
+/// segment (`description`, `settings`, `auth`).
+fn unit_owner(key: &str) -> Option<&str> {
+    let first = key.find('/')?;
+    Some(key[first + 1..].find('/').map_or(key, |second| &key[..first + 1 + second]))
 }
 
 fn environment_key(id: Id) -> String {
@@ -769,5 +783,20 @@ impl ReimportPlan {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unit_owner;
+
+    #[test]
+    fn a_units_owner_is_its_environment_or_folder() {
+        let id = "0190f1c2-0000-7000-8000-000000000001";
+        assert_eq!(unit_owner(&format!("environments/{id}")), Some(format!("environments/{id}").as_str()));
+        assert_eq!(unit_owner(&format!("environments/{id}/variables/a/b")), Some(format!("environments/{id}").as_str()));
+        assert_eq!(unit_owner(&format!("folders/{id}/auth")), Some(format!("folders/{id}").as_str()));
+        assert_eq!(unit_owner("variables/token"), Some("variables/token"));
+        assert_eq!(unit_owner("description"), None);
     }
 }
