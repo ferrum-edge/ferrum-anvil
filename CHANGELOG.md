@@ -246,6 +246,14 @@
   shown. In the Runner, Load tests or Contract view they used to send, save or cancel the hidden
   active request tab, or create a "New request". Cmd/Ctrl+B and Cmd/Ctrl+L still work in every
   view (#513).
+- Desktop list fields keep the text as typed, so a second item can be entered from the keyboard:
+  JWT-SVID audiences, WebSocket subprotocols and messages, gRPC messages, the "Status is one of"
+  assertion, a TLS profile's "Present only to these hosts", gateway frontend hosts, HBONE extra
+  CONNECT headers and the redaction names in Settings. Each keystroke used to render the list
+  back, which dropped the separator or empty line just typed (`200, 404` became `200404`, and
+  `X-Foo: bar` became the header `X` with the value `-Foo: bar`). The load plan's number fields
+  keep a decimal point and an emptied field while typing, so "Max failures (%)" accepts `12.5`
+  (#514).
 
 ## [0.1.7] - 2026-11-03
 

@@ -21,6 +21,7 @@ import type {
   Environment,
   HboneMarker,
   HboneOptions,
+  HostBinding,
   IntegrationProfile,
   KeyValue,
   ProtectionMode,
@@ -31,7 +32,7 @@ import type {
 } from "./generated/contracts";
 import { PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
-import { Modal, SecretField, Tabs, humanize, uid } from "./ui";
+import { ListText, Modal, SecretField, Tabs, humanize, uid } from "./ui";
 import { useConfirm } from "./Confirm";
 import { Icon, type IconName } from "./icons";
 import { displayPath } from "./LinkedFile";
@@ -678,7 +679,13 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
         {id && (
           <label className="lbl">
             Present only to these hosts (comma-separated; empty = any request using this profile)
-            <input className="field mono" value={hostsText(p.bindings)} onChange={(e) => onChange({ ...p, bindings: parseHosts(e.target.value) })} placeholder="api.internal.example.com, *.mtls.example.com:8443" />
+            <ListText<HostBinding>
+              value={p.bindings ?? []}
+              format={hostsText}
+              parse={parseHosts}
+              onChange={(bindings) => onChange({ ...p, bindings })}
+              placeholder="api.internal.example.com, *.mtls.example.com:8443"
+            />
           </label>
         )}
         {id && (p.bindings ?? []).length === 0 && <div className="warn-box">This certificate will be offered to any server a request using this profile connects to, including redirect targets.</div>}
@@ -821,7 +828,14 @@ export function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsPr
           <p className="hint">A marker never authenticates the client; identity baggage is honored only from trusted assertors that match the client SVID.</p>
           <label className="lbl">
             Extra CONNECT headers (one "Name: value" per line)
-            <textarea className="field mono" rows={2} value={headersText(opts.extra_headers)} onChange={(e) => setHbone({ ...opts, extra_headers: parseHeaders(e.target.value) })} />
+            <ListText<KeyValue>
+              multiline
+              rows={2}
+              value={opts.extra_headers ?? []}
+              format={headersText}
+              parse={parseHeaders}
+              onChange={(extra_headers) => setHbone({ ...opts, extra_headers })}
+            />
           </label>
         </fieldset>
       )}
@@ -851,7 +865,7 @@ function FerrumForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: Inte
       </label>
       <label className="lbl">
         Gateway frontend hosts (comma-separated, optional :port)
-        <input className="field mono" value={hostsText(p.hosts)} onChange={(e) => onChange({ ...p, hosts: parseHosts(e.target.value) })} />
+        <ListText<HostBinding> value={p.hosts} format={hostsText} parse={parseHosts} onChange={(hosts) => onChange({ ...p, hosts })} />
       </label>
       <label className="lbl">
         Compatibility catalog
@@ -1459,7 +1473,12 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
         <h3>Privacy and sign-in</h3>
         <label className="lbl">
           Extra names to always redact (comma-separated headers, params, fields)
-          <input className="field mono" value={s.redaction_names.join(", ")} onChange={(e) => setS({ ...s, redaction_names: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
+          <ListText<string>
+            value={s.redaction_names}
+            format={(l) => l.join(", ")}
+            parse={(t) => t.split(",").map((x) => x.trim()).filter(Boolean)}
+            onChange={(redaction_names) => setS({ ...s, redaction_names })}
+          />
         </label>
         <Providers />
       </section>

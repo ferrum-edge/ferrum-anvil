@@ -23,12 +23,13 @@ import type {
   RequestSpec,
   SettingsOverrides,
   TlsProfile,
+  WsMessage,
 } from "./generated/contracts";
 import { AuthEditor } from "./AuthEditor";
 import { DatagramEnvelopeEditor, ProxyHeaderEditor } from "./ProxyProtocolEditor";
 import { EarlyDataSettings } from "./EarlyData";
 import { LinkedFileBinding } from "./LinkedFile";
-import { KeyValueEditor, Tabs, fmtBytes, humanize, shortcut, uid, useDebounced } from "./ui";
+import { KeyValueEditor, ListText, Tabs, fmtBytes, humanize, shortcut, uid, useDebounced } from "./ui";
 import { Icon } from "./icons";
 import { WsDeflateEditor } from "./WsDeflateEditor";
 
@@ -880,15 +881,23 @@ export function ProtocolEditor({
         </label>
         <label className="lbl">
           Subprotocols (comma-separated)
-          <input className="field mono" value={(ws.subprotocols ?? []).join(", ")} onChange={(e) => set({ websocket: { ...ws, subprotocols: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } })} />
+          <ListText<string>
+            value={ws.subprotocols ?? []}
+            format={(l) => l.join(", ")}
+            parse={(t) => t.split(",").map((s) => s.trim()).filter(Boolean)}
+            onChange={(subprotocols) => set({ websocket: { ...ws, subprotocols } })}
+          />
         </label>
         <label className="lbl">
           Messages to send after open (one text message per line)
-          <textarea
+          <ListText<WsMessage>
+            multiline
             className="field"
             rows={5}
-            value={(ws.messages ?? []).map((m) => (m.kind === "text" ? m.text : "")).join("\n")}
-            onChange={(e) => set({ websocket: { ...ws, messages: e.target.value.split("\n").filter((l) => l.length > 0).map((text) => ({ kind: "text" as const, text })) } })}
+            value={ws.messages ?? []}
+            format={(l) => l.map((m) => (m.kind === "text" ? m.text : "")).join("\n")}
+            parse={(t) => t.split("\n").filter((l) => l.length > 0).map((text) => ({ kind: "text" as const, text }))}
+            onChange={(messages) => set({ websocket: { ...ws, messages } })}
           />
         </label>
         <div className="fields">
@@ -1011,7 +1020,15 @@ export function ProtocolEditor({
         )}
         <label className="lbl">
           Messages (JSON, one per line; unary/server streaming send the first)
-          <textarea className="field" rows={5} value={g.messages.join("\n")} onChange={(e) => set({ grpc: { ...g, messages: e.target.value.split("\n").filter((l) => l.trim()) } })} />
+          <ListText<string>
+            multiline
+            className="field"
+            rows={5}
+            value={g.messages}
+            format={(l) => l.join("\n")}
+            parse={(t) => t.split("\n").filter((l) => l.trim())}
+            onChange={(messages) => set({ grpc: { ...g, messages } })}
+          />
         </label>
         <div className="fields">
           <NumField label="Deadline (grpc-timeout, ms)" value={g.deadline_ms} onChange={(v) => set({ grpc: { ...g, deadline_ms: v } })} />
@@ -1315,7 +1332,15 @@ function AssertionFields({ a, onChange }: { a: Assertion; onChange: (a: Assertio
         </>
       );
     case "status_in":
-      return <input className="field mono grow" value={a.values.join(", ")} onChange={(e) => onChange({ ...a, values: e.target.value.split(LIST_SEPARATOR).filter(Boolean).map(Number).filter((n) => !Number.isNaN(n)) })} />;
+      return (
+        <ListText<number>
+          className="field mono grow"
+          value={a.values}
+          format={(l) => l.join(", ")}
+          parse={(t) => t.split(LIST_SEPARATOR).filter(Boolean).map(Number).filter((n) => !Number.isNaN(n))}
+          onChange={(values) => onChange({ ...a, values })}
+        />
+      );
     case "header":
     case "trailer":
       return (

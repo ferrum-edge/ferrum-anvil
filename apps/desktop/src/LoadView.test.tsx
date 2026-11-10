@@ -898,6 +898,29 @@ describe("PlanEditor save", () => {
   });
 });
 
+describe("PlanEditor numbers", () => {
+  it("keeps a decimal point and an emptied field while typing (#514)", async () => {
+    const saves: LoadPlan[] = [];
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      if (cmd === "load_plan_save") {
+        saves.push(args.plan as LoadPlan);
+        return args.plan;
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<PlanEditor plan={{ ...plan(), chain: [], abort: { max_failure_permille: 200, window_secs: 10 } }} {...editorProps} />);
+    const field = screen.getByLabelText("Max failures (%)") as HTMLInputElement;
+    expect(field.value).toBe("20");
+    for (const typed of ["", "1", "12", "12.", "12.5"]) {
+      fireEvent.change(field, { target: { value: typed } });
+      expect(field.value).toBe(typed);
+    }
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(saves[0].abort).toEqual({ max_failure_permille: 125, window_secs: 10 });
+  });
+});
+
 describe("LoadView save", () => {
   it("keeps an edit typed during a save unsaved, and its own save clears it", async () => {
     const first = deferred<void>();
