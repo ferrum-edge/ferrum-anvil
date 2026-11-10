@@ -280,6 +280,11 @@ impl Manifest {
         }
         view
     }
+    /// Every entry of `kind` in `table` that `owner` owns (any owner for
+    /// `None`), in name order, as this transaction sees them.
+    pub fn owned(&self, table: &str, kind: &str, owner: Option<&str>) -> Vec<Entry> {
+        self.view(table, Some(kind)).into_values().filter(|e| owner.is_none_or(|w| e.owner.as_deref() == Some(w))).cloned().collect()
+    }
     pub fn remove_workspace(&mut self, ws: &str) {
         let mut gone: Vec<String> = self
             .view("objects", None)

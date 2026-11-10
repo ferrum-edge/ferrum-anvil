@@ -2275,6 +2275,11 @@ impl StoreRead<'_> {
         self.records()?.list(kind, workspace_id)
     }
 
+    /// [`StoreRead::list`] with each object's row id, in the same order.
+    pub(crate) fn list_with_ids<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<(String, T)>> {
+        self.records()?.list_with_ids(kind, workspace_id)
+    }
+
     pub fn object_meta(&self, kind: &str) -> Result<Vec<RowMeta>> {
         self.records()?.object_meta(kind)
     }
@@ -2691,6 +2696,11 @@ impl Records<'_> {
     }
 
     fn list<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<T>> {
+        Ok(self.list_with_ids(kind, workspace_id)?.into_iter().map(|(_, v)| v).collect())
+    }
+
+    /// [`Records::list`] with each object's row id.
+    fn list_with_ids<T: DeserializeOwned + 'static>(&self, kind: &str, workspace_id: Option<&Id>) -> Result<Vec<(String, T)>> {
         let mut out = Vec::new();
         let mut owners = RequestOwners::new();
         let query_owner = workspace_id.map(|ws| ws.to_string());
@@ -2718,7 +2728,8 @@ impl Records<'_> {
                 return Err(StoreError::Integrity);
             }
             let (pt, decoded) = self.open_object(kind, &id, &row, &mut owners)?;
-            out.push(typed(decoded, &pt)?);
+            let value = typed(decoded, &pt)?;
+            out.push((id, value));
         }
         Ok(out)
     }

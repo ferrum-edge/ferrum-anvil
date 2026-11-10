@@ -807,7 +807,10 @@ rebuild the request or reopen the session. Saving another request or workspace,
 unused environment/TLS/proxy/secret rows, or a collection-run report does not
 interrupt unrelated contexts. Gateway candidate membership/order is relevant;
 whole-row comparison also treats an unchanged relevant row saved again as a
-change. No field-level semantic comparison is claimed. Relevant load-plan and
+change. No field-level semantic comparison is claimed. A context check
+decrypts the objects of a queried kind again only when one of their catalogue
+entries (payload digest, owner or order) changed since the context was built,
+and then once for every query over them. Relevant load-plan and
 dataset inputs remain checked through worker admission, and scenario inputs
 remain checked by frozen run contexts. A legitimate edit does not relock the
 profile. Integrity failure at an authority preflight locks it; the idle-lock loop
