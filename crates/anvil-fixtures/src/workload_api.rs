@@ -173,11 +173,6 @@ impl Fixture {
         self.state.lock().mode = mode;
     }
 
-    /// Lifetime of JWT-SVIDs minted from now on (negative: already expired).
-    pub fn set_jwt_ttl_secs(&self, secs: i64) {
-        self.state.lock().jwt_ttl_secs = secs;
-    }
-
     pub fn set_x509_ttl(&self, ttl: Duration) {
         self.state.lock().x509_ttl = ttl;
     }

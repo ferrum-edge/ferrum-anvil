@@ -56,17 +56,6 @@ pub fn has_at(r: &ImportResult, code: &str, pointer_part: &str) -> bool {
     r.report.warnings.iter().chain(r.report.unsupported.iter()).any(|f| f.code == code && f.pointer.contains(pointer_part))
 }
 
-pub fn dump(r: &ImportResult) -> String {
-    serde_json::to_string_pretty(&serde_json::json!({
-        "requests": r.requests.iter().map(|q| serde_json::json!({"name": q.name, "folder": q.folder_id, "spec": q.spec})).collect::<Vec<_>>(),
-        "folders": r.folders.iter().map(|f| (f.name.clone(), f.meta.id, f.parent_id)).collect::<Vec<_>>(),
-        "envs": r.environments,
-        "report": r.report,
-        "ws": r.workspace,
-    }))
-    .unwrap()
-}
-
 /// `text` with `{{name}}` placeholders replaced by the given values, as the
 /// engine's resolver substitutes them, parsed as JSON.
 pub fn substituted(text: &str, vars: &[(&str, &str)]) -> serde_json::Value {

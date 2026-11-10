@@ -35,13 +35,11 @@ use std::path::Path;
 use time::{Duration, OffsetDateTime};
 
 pub const TRUST_DOMAIN: &str = "cluster.local";
-pub const NAMESPACE: &str = "ferrum";
 pub const EGRESS_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-egress";
 pub const CLIENT_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-client";
 pub const SVC_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-svc";
 pub const ZTUNNEL_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-ztunnel";
 pub const OTHER_SPIFFE_ID: &str = "spiffe://cluster.local/ns/ferrum/sa/anvil-lab-other";
-pub const PARTNER_TRUST_DOMAIN: &str = "partner.example";
 pub const PARTNER_CLIENT_SPIFFE_ID: &str = "spiffe://partner.example/ns/ferrum/sa/anvil-lab-client";
 pub const PARTNER_SVC_SPIFFE_ID: &str = "spiffe://partner.example/ns/ferrum/sa/anvil-lab-svc";
 
