@@ -490,6 +490,7 @@ export function PlanEditor(props: {
   const [preflight, setPreflight] = useState<LoadPreflight | null>(null);
   const [ack, setAck] = useState(false);
   const [datasetDlg, setDatasetDlg] = useState(false);
+  const [deletingDataset, setDeletingDataset] = useState<Dataset | null>(null);
   const [check, setCheck] = useState<LoadPlanCheck | null>(null);
   // A save, or a Run… (its save and preflight), is on its way: a new plan cannot be discarded meanwhile.
   const [saving, setSaving] = useState(false);
@@ -773,6 +774,12 @@ export function PlanEditor(props: {
             <Icon name="file" size={14} />
             Add dataset…
           </button>
+          {dataset && (
+            <button className="btn ghost danger" disabled={otherWorkspace} onClick={() => setDeletingDataset(dataset)}>
+              <Icon name="trash" size={14} />
+              Delete dataset…
+            </button>
+          )}
         </div>
         {dataset?.attachment.kind === "linked_file" && (
           <LinkedFileBinding
@@ -800,6 +807,43 @@ export function PlanEditor(props: {
           </div>
         )}
       </fieldset>
+
+      {deletingDataset && (
+        <Modal
+          title="Delete dataset"
+          onClose={() => setDeletingDataset(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setDeletingDataset(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                onClick={async () => {
+                  const d = deletingDataset;
+                  setDeletingDataset(null);
+                  setErr(null);
+                  try {
+                    await api.deleteDataset(d.id);
+                  } catch (e) {
+                    setErr(String((e as Error).message));
+                    return;
+                  }
+                  if (p.dataset_id === d.id) setP({ ...p, dataset_id: null });
+                  await props.onDatasetsChanged();
+                }}
+              >
+                Delete
+              </button>
+            </>
+          }
+        >
+          <p>
+            Delete the dataset “{deletingDataset.name}” from this workspace? Its stored data is removed; a linked file stays where it is. Other load plans and
+            scenarios that use it cannot run until they name another dataset.
+          </p>
+        </Modal>
+      )}
 
       {datasetDlg && (
         <DatasetDialog

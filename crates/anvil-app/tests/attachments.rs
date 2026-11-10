@@ -298,3 +298,22 @@ fn a_stored_file_that_does_not_open_fails_the_context_and_locks() {
     assert!(matches!(e, AppError::Store(StoreError::Integrity)), "{e}");
     assert!(matches!(app.workspaces(), Err(AppError::Locked)), "an integrity failure locks the profile");
 }
+
+#[test]
+fn opening_a_profile_releases_history_bodies_no_record_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let att = app.put_attachment("kept.bin", b"a pinned attachment", None).unwrap();
+    // A body an earlier build's clear left behind: no record uses it.
+    let left_over = app.store.put_blob(b"a left-over response body").unwrap();
+    // Retention removes no record here, so it sweeps nothing.
+    assert_eq!(app.store.prune_history(u32::MAX, u64::MAX).unwrap(), 0);
+    assert!(app.store.get_blob(&left_over).unwrap().is_some());
+
+    let path = app.dir.clone();
+    drop(app);
+    let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
+    let app = App::open(path, header, key).unwrap();
+    assert!(app.store.get_blob(&left_over).unwrap().is_none(), "opening the profile released it");
+    assert_eq!(app.get_attachment(&sha(&att)).unwrap().as_deref(), Some(&b"a pinned attachment"[..]));
+}

@@ -16,22 +16,106 @@
 //! shorter than 4 characters are not exact-value scrubbed (the engine's rule:
 //! they would shred ordinary text); name-based redaction still applies.
 
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use anvil_domain::execution::{ContentDecoding, ExecutionRecord};
 use anvil_domain::secret::REDACTED;
 use anvil_engine::ExecutionOutput;
 use anvil_engine::redact::Redactor;
 use bytes::Bytes;
 use std::collections::VecDeque;
+use std::ops::Range;
 
 /// Bound on remembered run secrets (oldest evicted first). Current-iteration
 /// values are always present because they are added last.
 pub const MAX_RUN_SECRETS: usize = 4_096;
+
+/// Bound on the run-value matches scrubbed from one body; a body with more
+/// is withheld whole rather than scanned on.
+const MAX_BODY_MATCHES: usize = 1 << 20;
 
 #[derive(Clone, Default)]
 pub struct RunSecrets {
     values: VecDeque<String>,
     names: Vec<String>,
     redactor: Redactor,
+    /// Every remembered value, matched in one pass over a body.
+    body: BodyMatcher,
+}
+
+/// Finds run values in a captured body: one automaton over all of them, so a
+/// body is read once however many values the run remembers.
+#[derive(Clone, Default)]
+enum BodyMatcher {
+    #[default]
+    Empty,
+    Automaton(AhoCorasick),
+    /// The values, when no automaton could be built for them: each is
+    /// searched for in turn.
+    Values(Vec<Vec<u8>>),
+}
+
+impl BodyMatcher {
+    fn new<'a>(values: impl IntoIterator<Item = &'a String>) -> Self {
+        let values: Vec<&[u8]> = values.into_iter().map(|v| v.as_bytes()).filter(|v| !v.is_empty()).collect();
+        if values.is_empty() {
+            return BodyMatcher::Empty;
+        }
+        match AhoCorasickBuilder::new().kind(Some(AhoCorasickKind::ContiguousNFA)).match_kind(MatchKind::Standard).build(&values) {
+            Ok(automaton) => BodyMatcher::Automaton(automaton),
+            Err(_) => BodyMatcher::Values(values.into_iter().map(<[u8]>::to_vec).collect()),
+        }
+    }
+
+    fn is_match(&self, hay: &[u8]) -> bool {
+        match self {
+            BodyMatcher::Empty => false,
+            BodyMatcher::Automaton(a) => a.is_match(hay),
+            BodyMatcher::Values(values) => values.iter().any(|v| hay.windows(v.len()).any(|w| w == v.as_slice())),
+        }
+    }
+
+    /// The spans of `hay` any value covers, in order, overlapping matches
+    /// merged into one; `None` past [`MAX_BODY_MATCHES`] matches.
+    fn spans(&self, hay: &[u8]) -> Option<Vec<Range<usize>>> {
+        let mut spans: Vec<Range<usize>> = Vec::new();
+        let mut add = |found: Range<usize>| {
+            // Matches arrive in end order, so one can reach back over several
+            // earlier spans.
+            let mut start = found.start;
+            while spans.last().is_some_and(|last| last.end > start) {
+                if let Some(last) = spans.pop() {
+                    start = start.min(last.start);
+                }
+            }
+            spans.push(start..found.end);
+        };
+        match self {
+            BodyMatcher::Empty => {}
+            BodyMatcher::Automaton(a) => {
+                for (index, m) in a.find_overlapping_iter(hay).enumerate() {
+                    if index == MAX_BODY_MATCHES {
+                        return None;
+                    }
+                    add(m.range());
+                }
+            }
+            BodyMatcher::Values(values) => {
+                // Every match, ordered by where it ends.
+                let mut found: Vec<Range<usize>> = Vec::new();
+                for v in values {
+                    for at in (0..=hay.len().saturating_sub(v.len())).filter(|&at| hay[at..].starts_with(v)) {
+                        if found.len() == MAX_BODY_MATCHES {
+                            return None;
+                        }
+                        found.push(at..at + v.len());
+                    }
+                }
+                found.sort_by_key(|r| (r.end, r.start));
+                found.into_iter().for_each(&mut add);
+            }
+        }
+        Some(spans)
+    }
 }
 
 impl RunSecrets {
@@ -41,8 +125,11 @@ impl RunSecrets {
         s
     }
 
+    /// Rebuild the matchers from the values and names: once per change of
+    /// either (an `add_values` call adds every value of an iteration at once).
     fn rebuild(&mut self) {
         self.redactor = Redactor::new(self.values.iter().cloned().collect(), self.names.clone());
+        self.body = BodyMatcher::new(&self.values);
     }
 
     /// Add values; returns true if anything new was added.
@@ -122,7 +209,6 @@ impl RunSecrets {
         if !self.has_values() || out.body.is_empty() {
             return None;
         }
-        let secrets: Vec<&[u8]> = self.values.iter().map(|v| v.as_bytes()).collect();
         let capture = out.record.response.as_ref().map(|r| &r.body);
         let coded = out.decoded_body.is_some()
             || out.response_metadata.as_ref().map_or_else(
@@ -133,7 +219,7 @@ impl RunSecrets {
             let complete = capture.and_then(|b| b.decoding) == Some(ContentDecoding::Complete);
             let reason = match out.decoded_body.as_ref().filter(|_| complete) {
                 None => Some("it was not fully decoded, so it could not be checked for sensitive run values"),
-                Some(d) if secrets.iter().any(|s| contains(d, s) || contains(&out.body, s)) => Some("it contained a sensitive run value"),
+                Some(d) if self.body.is_match(d) || self.body.is_match(&out.body) => Some("it contained a sensitive run value"),
                 Some(_) => None,
             };
             let reason = reason?;
@@ -141,44 +227,36 @@ impl RunSecrets {
             out.decoded_body = None;
             return Some(format!("A content-encoded response body was not kept in history: {reason}."));
         }
-        let mut body = out.body.to_vec();
-        let mut changed = false;
-        for s in &secrets {
-            if contains(&body, s) {
-                body = replace(&body, s, REDACTED.as_bytes());
-                changed = true;
+        match self.body.spans(&out.body) {
+            Some(spans) => {
+                if !spans.is_empty() {
+                    out.body = Bytes::from(replace_spans(&out.body, &spans));
+                }
             }
-        }
-        if changed {
-            out.body = Bytes::from(body);
+            // So many matches that the body is mostly run values.
+            None => out.body = Bytes::from_static(REDACTED.as_bytes()),
         }
         None
     }
+}
+
+/// `hay` with each span (in order, not overlapping) replaced by one marker.
+fn replace_spans(hay: &[u8], spans: &[Range<usize>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(hay.len());
+    let mut at = 0;
+    for span in spans {
+        out.extend_from_slice(&hay[at..span.start]);
+        out.extend_from_slice(REDACTED.as_bytes());
+        at = span.end;
+    }
+    out.extend_from_slice(&hay[at..]);
+    out
 }
 
 /// True when a `Content-Encoding` value names any coding other than
 /// `identity`, including ones Anvil cannot decode (e.g. `none`).
 fn has_content_coding(ce: Option<&str>) -> bool {
     ce.is_some_and(|ce| ce.split(',').map(str::trim).any(|c| !c.is_empty() && !c.eq_ignore_ascii_case("identity")))
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
-}
-
-fn replace(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(hay.len());
-    let mut i = 0;
-    while i < hay.len() {
-        if hay.len() - i >= needle.len() && &hay[i..i + needle.len()] == needle {
-            out.extend_from_slice(with);
-            i += needle.len();
-        } else {
-            out.push(hay[i]);
-            i += 1;
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -240,9 +318,27 @@ mod tests {
     }
 
     #[test]
-    fn byte_replace() {
-        assert_eq!(replace(b"a-tok-b-tok", b"tok", b"X"), b"a-X-b-X".to_vec());
-        assert!(contains(b"hello world", b"o w"));
+    fn body_spans_cover_every_value_and_merge_overlaps() {
+        let values: Vec<String> = ["tok-1", "abcd", "bcde", "aaaa"].into_iter().map(String::from).collect();
+        let matchers = [BodyMatcher::new(&values), BodyMatcher::Values(values.iter().map(|v| v.as_bytes().to_vec()).collect())];
+        for m in &matchers {
+            let scrub = |hay: &[u8]| String::from_utf8(replace_spans(hay, &m.spans(hay).unwrap())).unwrap();
+            assert_eq!(scrub(b"a-tok-1-b-tok-1"), format!("a-{REDACTED}-b-{REDACTED}"));
+            // Overlapping values are covered whole, not one with a residue.
+            assert_eq!(scrub(b"<abcde>"), format!("<{REDACTED}>"));
+            assert_eq!(scrub(b"xaaaaaay"), format!("x{REDACTED}y"));
+            assert_eq!(scrub(b"nothing here"), "nothing here");
+            assert!(m.is_match(b"..bcde..") && !m.is_match(b"bcd"));
+        }
+        assert!(!BodyMatcher::new(&Vec::<String>::new()).is_match(b"anything"));
+        assert_eq!(BodyMatcher::Empty.spans(b"anything"), Some(vec![]));
+    }
+
+    #[test]
+    fn a_body_with_too_many_matches_is_withheld_whole() {
+        let values = vec!["xxxx".to_string()];
+        let hay = vec![b'x'; MAX_BODY_MATCHES + 4];
+        assert_eq!(BodyMatcher::new(&values).spans(&hay), None);
     }
 
     #[test]

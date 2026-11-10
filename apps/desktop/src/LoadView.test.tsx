@@ -871,6 +871,85 @@ describe("PlanEditor dataset linked file", () => {
   });
 });
 
+describe("PlanEditor dataset delete", () => {
+  const stored: Dataset = {
+    id: "ds-1",
+    schema_version: 1,
+    created_at: "2026-09-26T00:00:00Z",
+    updated_at: "2026-09-26T00:00:00Z",
+    workspace_id: "ws-1",
+    name: "rows",
+    format: "csv",
+    attachment: { kind: "stored", sha256: "ab", size: 3, file_name: "rows.csv" },
+  };
+
+  /** The load view's datasets: a reload after the delete lists none. */
+  function Editor({ onChange, reloaded }: { onChange: (p: LoadPlan) => void; reloaded: () => void }) {
+    const [datasets, setDatasets] = useState([stored]);
+    return (
+      <PlanEditor
+        {...editorProps}
+        plan={{ ...plan(), chain: ["req-http"], dataset_id: "ds-1" }}
+        datasets={datasets}
+        onChange={onChange}
+        onDatasetsChanged={async () => {
+          reloaded();
+          setDatasets([]);
+        }}
+      />
+    );
+  }
+
+  function backend(remove: () => unknown) {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "dataset_delete") return remove();
+      // The plan's unit check is not under test.
+      if (cmd === "load_plan_check") return new Promise(() => {});
+      throw new Error(`unexpected ${cmd}`);
+    });
+  }
+
+  const calls = (cmd: string) => invoke.mock.calls.filter(([c]) => c === cmd).map(([, args]) => args);
+  const select = () => screen.getByLabelText("Dataset (one row per iteration)") as HTMLSelectElement;
+
+  it("deletes the selected dataset only once confirmed, and the plan no longer names it", async () => {
+    backend(() => undefined);
+    const onChange = vi.fn();
+    const reloaded = vi.fn();
+    render(<Editor onChange={onChange} reloaded={reloaded} />);
+    expect(select().value).toBe("ds-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete dataset…" }));
+    expect(screen.getByText(/Delete the dataset “rows” from this workspace\?/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await act(async () => {});
+    expect(calls("dataset_delete")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete dataset…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(calls("dataset_delete")).toEqual([{ datasetId: "ds-1" }]));
+    await waitFor(() => expect(reloaded).toHaveBeenCalledTimes(1));
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ dataset_id: null }));
+    expect(select().value).toBe("");
+    expect(screen.queryByRole("button", { name: "Delete dataset…" })).toBeNull();
+  });
+
+  it("keeps the dataset selected and says why when the delete is refused", async () => {
+    backend(() => {
+      throw "the store could not be written";
+    });
+    const onChange = vi.fn();
+    const reloaded = vi.fn();
+    render(<Editor onChange={onChange} reloaded={reloaded} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete dataset…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("the store could not be written")).toBeTruthy();
+    expect(select().value).toBe("ds-1");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(reloaded).not.toHaveBeenCalled();
+  });
+});
+
 describe("ReportView", () => {
   it("counts exchanges, not requests, and shows the protocol panel", async () => {
     const report = sampleReport();

@@ -4,6 +4,7 @@
 
 use anvil_app::App;
 use anvil_app::profiles::ProfileManager;
+use anvil_domain::assertions::{Assertion, AssertionKind, Comparison};
 use anvil_domain::load::LoadReport;
 use anvil_domain::request::{PayloadEncoding, Protocol, RequestSpec, StreamPayload, UdpSpec, WsBootstrap, WsMessage, WsSpec};
 use anvil_storage::KdfParams;
@@ -115,4 +116,46 @@ async fn load_protocol_commands_end_to_end() {
     assert!(!o.status.success());
     assert!(text(&o).contains("LOAD-013"), "{}", text(&o));
     assert_eq!(http.log.entries().len(), before, "a refused plan sends nothing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_run_exit_codes_put_assertion_failures_first() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let http = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path();
+    {
+        let pm = ProfileManager::new(data);
+        let (s, dek, _) = pm.create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        let app = App::open(s.dir, h, dek).unwrap();
+        let ws = app.create_workspace("Codes").unwrap();
+        let failing = RequestSpec::http("GET", &format!("http://{}/status/500", http.addr));
+        app.create_request(&ws.meta.id, None, "Failing", failing.clone()).unwrap();
+        // Every response is an application failure (500) and fails this
+        // assertion too.
+        let mut asserted = failing;
+        asserted.assertions = vec![Assertion {
+            enabled: true,
+            label: String::new(),
+            kind: AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() },
+        }];
+        app.create_request(&ws.meta.id, None, "Asserted", asserted).unwrap();
+    }
+
+    // Application failures alone: 1.
+    let o = anvil(data, &["load", "create", "Codes", "plain", "--request", "Failing", "--iterations", "2", "--concurrency", "1"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    let o = anvil(data, &["load", "run", "Codes", "plain", "--i-am-authorized"]).await;
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+
+    // Assertion failures together with application failures: 2, as `send`
+    // and `run` answer for the same mix.
+    let o = anvil(data, &["load", "create", "Codes", "asserted", "--request", "Asserted", "--iterations", "2", "--concurrency", "1"]).await;
+    assert!(o.status.success(), "{}", text(&o));
+    let o = anvil(data, &["load", "run", "Codes", "asserted", "--i-am-authorized"]).await;
+    let out = text(&o);
+    assert!(out.contains("2 application failures, 2 assertion failures"), "{out}");
+    assert_eq!(o.status.code(), Some(2), "{out}");
 }

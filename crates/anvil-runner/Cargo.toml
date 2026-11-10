@@ -21,6 +21,8 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
+# One pass over a captured body for every remembered run value.
+aho-corasick.workspace = true
 
 [dev-dependencies]
 anvil-fixtures = { path = "../anvil-fixtures" }

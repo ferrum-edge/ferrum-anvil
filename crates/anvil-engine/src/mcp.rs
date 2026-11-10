@@ -572,13 +572,8 @@ fn finish(
     if changed {
         r.outcome.summary = record::summary_line(r.outcome.transport, r.outcome.application, &r.outcome.protocol_status, &r.findings);
     }
+    // This pass covers the findings and the inferred notes too.
     redactor.record_metadata(r);
-    for finding in &mut r.findings {
-        redactor.finding(finding);
-    }
-    for note in &mut r.prepared.inferred {
-        *note = redactor.text_any_case(&redactor.inferred(note));
-    }
     out
 }
 

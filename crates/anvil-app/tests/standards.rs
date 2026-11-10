@@ -110,10 +110,10 @@ fn a_settings_save_from_elsewhere_keeps_the_standards() {
     let stale = app.settings().unwrap();
     app.add_api_ruleset("team.yaml", TEAM.as_bytes()).unwrap();
     let mut edited = stale.clone();
-    edited.autosave = true;
+    edited.check_for_updates = true;
     app.save_settings_keeping_standards(&edited).unwrap();
     let now = app.settings().unwrap();
-    assert!(now.autosave);
+    assert!(now.check_for_updates);
     assert_eq!(app.api_standards().unwrap().rulesets.len(), 1, "the dialog's stale copy did not drop the ruleset");
 }
 
@@ -228,14 +228,14 @@ fn migration_keeps_all_legacy_rulesets_over_limits_and_the_profile_can_be_trimme
     opened.set_api_ruleset_enabled(&records[0].id, false).unwrap();
     opened.remove_api_ruleset(&records[1].id).unwrap();
     let mut settings = opened.settings().unwrap();
-    settings.autosave = true;
+    settings.check_for_updates = true;
     opened.save_settings(&settings).unwrap();
     let saved = opened.api_standards().unwrap().rulesets;
     assert_eq!(saved.len(), anvil_domain::settings::MAX_STORED_RULESETS);
     assert!(!saved.iter().find(|ruleset| ruleset.id == records[0].id).unwrap().enabled);
     assert!(!saved.iter().any(|ruleset| ruleset.id == records[1].id));
     assert!(saved.iter().all(|ruleset| records.iter().any(|original| original.id == ruleset.id)));
-    assert!(opened.settings().unwrap().autosave);
+    assert!(opened.settings().unwrap().check_for_updates);
 }
 
 #[test]

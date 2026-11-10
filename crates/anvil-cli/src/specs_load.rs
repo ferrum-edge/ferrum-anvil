@@ -456,11 +456,13 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             for n in &report.notes {
                 println!("  note: {}", t(n));
             }
+            // The CLI convention (`send`, `run`): an assertion failure wins
+            // over every other failure.
             let failed = k.transport_failures + k.timeouts + k.application_failures > 0;
-            Ok(if report.completion != RunCompletion::Completed || report.partial || failed {
-                1
-            } else if k.assertion_failures > 0 {
+            Ok(if k.assertion_failures > 0 {
                 2
+            } else if report.completion != RunCompletion::Completed || report.partial || failed {
+                1
             } else {
                 0
             })

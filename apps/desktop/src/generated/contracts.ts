@@ -51,13 +51,6 @@ export type ProxySelection =
  */
 export type Theme = "system" | "light" | "dark";
 /**
- * What happens to active runs when the vault locks.
- *
- * This interface was referenced by `AnvilContracts`'s JSON-Schema
- * via the `definition` "LockRunPolicy".
- */
-export type LockRunPolicy = "stop_runs";
-/**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "DatasetFormat".
  */
@@ -1736,7 +1729,6 @@ export interface AppSettings {
   theme: Theme;
   history: HistoryPolicy;
   lock: LockPolicy;
-  autosave: boolean;
   /**
    * Extra header/query/cookie/body-field names always treated as secrets
    * by the redactor (in addition to built-in patterns).
@@ -1902,8 +1894,6 @@ export interface LockPolicy {
    */
   idle_minutes: number;
   lock_on_os_lock: boolean;
-  run_policy: LockRunPolicy;
-  clear_clipboard_on_lock: boolean;
 }
 /**
  * API standards settings stored in `AppSettings`.

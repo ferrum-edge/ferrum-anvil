@@ -157,6 +157,8 @@ cached OAuth tokens and pooled connections, aborts executions and
 interactive sessions, and stops load workers (their partial reports are
 kept). Deleting a workspace stops that workspace's load workers; their
 reports are not kept. Backend commands return `LOCKED` until unlock.
+Locking does not clear the system clipboard: a response body or support
+bundle copied before the lock stays there.
 
 The idle timeout counts the app's activity reports, but only within four
 hours (or the idle timeout, if longer) of the last native sign of the user:
@@ -178,7 +180,7 @@ system dialog the backend shows itself (declining changes nothing):
   (outside it, those requests use the workspace's variables, environment
   and auth just the same);
 - a weaker lock policy: a longer or no idle timeout, or turning off locking
-  on sleep or clearing the clipboard on lock. A full-backup restore keeps
+  on sleep. A full-backup restore keeps
   this profile's lock policy when the backup's is weaker, says so in its
   report, and then offers the backup's in the same dialog.
 
@@ -805,7 +807,10 @@ rebuild the request or reopen the session. Saving another request or workspace,
 unused environment/TLS/proxy/secret rows, or a collection-run report does not
 interrupt unrelated contexts. Gateway candidate membership/order is relevant;
 whole-row comparison also treats an unchanged relevant row saved again as a
-change. No field-level semantic comparison is claimed. Relevant load-plan and
+change. No field-level semantic comparison is claimed. A context check
+decrypts the objects of a queried kind again only when one of their catalogue
+entries (payload digest, owner or order) changed since the context was built,
+and then once for every query over them. Relevant load-plan and
 dataset inputs remain checked through worker admission, and scenario inputs
 remain checked by frozen run contexts. A legitimate edit does not relock the
 profile. Integrity failure at an authority preflight locks it; the idle-lock loop
@@ -986,8 +991,12 @@ historical data is an intentional owner choice.
 ## History retention
 
 Configurable in Settings: enable or disable history, keep or drop response
-bodies, maximum age (days) and total size. Pruning keeps the newest records
-within the budget. "Clear all history" (or a workspace's history) deletes
+bodies, maximum age (days) and total size. Pruning (after every recorded
+send) keeps the newest records within the budget and releases the response
+bodies of the records it removes; when no record is too old and all fit, it
+reads only their oldest time and total size, and removes and releases
+nothing. Opening a profile releases any history body no record uses, once
+attachment pins are re-applied. "Clear all history" (or a workspace's history) deletes
 those history records and the response bodies no remaining record uses, in
 one write transaction; deleting a workspace does the same for its records.
 Neither touches stored attachments. A

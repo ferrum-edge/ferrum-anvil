@@ -217,6 +217,39 @@ fn history_retention_prunes_by_size() {
 }
 
 #[test]
+fn retention_sweeps_bodies_only_when_it_removes_a_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let recent = Id::new();
+    store.add_history(&recent, None, None, now, &serde_json::json!({"n": 1}), Some(b"recent body")).unwrap();
+    // A body no record uses and nothing pins (left by an earlier build).
+    let left_over = store.put_blob(b"left over").unwrap();
+
+    // Within age and size: nothing to remove, so nothing is swept.
+    assert_eq!(store.prune_history(30, u64::MAX).unwrap(), 0);
+    assert!(store.get_blob(&left_over).unwrap().is_some());
+    assert_eq!(store.list_history(None, None, 10).unwrap().len(), 1);
+
+    // A record past the age limit goes, and the sweep that releases its body
+    // takes the left-over one too; the recent record keeps its body.
+    let old = Id::new();
+    store.add_history(&old, None, None, now - 40 * 86_400_000, &serde_json::json!({"n": 2}), Some(b"old body")).unwrap();
+    assert_eq!(store.prune_history(30, u64::MAX).unwrap(), 1);
+    assert!(store.get_blob(&left_over).unwrap().is_none());
+    assert!(store.get_history::<serde_json::Value>(&old.to_string()).unwrap().is_none());
+    let (_, body) = store.get_history::<serde_json::Value>(&recent.to_string()).unwrap().unwrap();
+    assert_eq!(body.expect("the recent body is kept").as_slice(), b"recent body");
+
+    // Over the size budget: the oldest records go until the rest fit.
+    let size = store.list_history(None, None, 10).unwrap()[0].size as u64;
+    store.add_history(&Id::new(), None, None, now + 1, &serde_json::json!({"n": 3}), Some(b"newest body")).unwrap();
+    assert_eq!(store.prune_history(30, size).unwrap(), 1);
+    assert!(store.get_history::<serde_json::Value>(&recent.to_string()).unwrap().is_none());
+}
+
+#[test]
 fn replacing_a_history_record_releases_its_old_body() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();

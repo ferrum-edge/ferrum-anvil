@@ -18,7 +18,6 @@ const settings = {
   theme: "system",
   history: { enabled: true, keep_response_bodies: false, max_age_days: 30, max_total_bytes: 64 * 1024 * 1024 },
   lock: { idle_minutes: 15, lock_on_os_lock: true },
-  autosave: true,
   redaction_names: [],
   check_for_updates: false,
 } as unknown as AppSettings;
