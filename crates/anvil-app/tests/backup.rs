@@ -436,6 +436,8 @@ fn passphrase_format_and_costs_are_checked() {
 
     // Exports refuse weak passphrases and out-of-bounds costs.
     assert!(matches!(a.export_backup_with("short", KdfParams::testing()), Err(AppError::Backup(BackupError::WeakPassphrase))));
+    // Characters are counted, not bytes: four two-byte characters are four (#536).
+    assert!(matches!(a.export_backup_with("éééé", KdfParams::testing()), Err(AppError::Backup(BackupError::WeakPassphrase))));
     let costly = KdfParams { m_cost: backup::MAX_KDF_MEMORY_KIB + 1, ..KdfParams::interactive() };
     assert!(matches!(a.export_backup_with(PASS, costly), Err(AppError::Backup(BackupError::UnsupportedKdf(_)))));
     // A zip bundle is not mistaken for a full backup.

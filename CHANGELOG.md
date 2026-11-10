@@ -222,6 +222,12 @@
   scenarios and load plans were missing from the list (#535).
 - An export with history that has more than 1,000 records for a workspace lists the older ones
   among its excluded items instead of leaving them out silently (#535).
+- A send whose stored attachment no longer opens fails with the storage error, and an integrity
+  failure locks the profile as other context reads do; it used to report the file as missing
+  from the workspace (#536).
+- A load run's confirmation lists each destination once, in the order the plan first reaches
+  it; a destination that recurred after another step's was listed again (#536).
+- Export and full-backup passphrases need 8 characters, as their messages say, not 8 bytes (#536).
 
 ## [0.1.7] - 2026-11-03
 

@@ -284,6 +284,16 @@ fn data_004_wrong_passphrase_fails_safely() {
     assert!(matches!(bundle::open(&bytes, None), Err(BundleError::PassphraseRequired)));
 }
 
+/// The export passphrase's minimum length counts characters, as its message
+/// says, not bytes (#536).
+#[test]
+fn encrypted_exports_count_passphrase_characters() {
+    let g = sample();
+    let short = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("éééé")));
+    assert!(matches!(&short, Err(BundleError::Invalid(m)) if m.contains("at least 8 characters")), "four characters, eight bytes");
+    assert!(bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("éééééééé"))).is_ok());
+}
+
 #[test]
 fn data_005_corrupt_or_truncated_bundles_are_rejected() {
     let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();

@@ -68,8 +68,9 @@ impl SecretResolver for StoreSecrets {
 pub struct ResolvedSecrets {
     resolved: Mutex<HashMap<SecretRef, std::result::Result<Zeroizing<String>, String>>>,
     variables: HashMap<(usize, usize), SecretRef>,
-    /// Looks up a reference not prefetched, including deferred OAuth credentials.
-    store: StoreSecrets,
+    /// The workspace whose vault a reference not prefetched (a deferred OAuth
+    /// credential among them) is resolved in, through `authority`.
+    workspace: Id,
     authority: AppContextAuthority,
 }
 
@@ -115,7 +116,7 @@ fn resolve_secret(read: &ContextRead<'_, '_>, ws: &Id, r: &SecretRef) -> std::re
 }
 impl ResolvedSecrets {
     fn lookup(
-        store: StoreSecrets,
+        workspace: Id,
         read: &ContextRead<'_, '_>,
         parts: &[serde_json::Value],
         variables: HashMap<(usize, usize), SecretRef>,
@@ -130,11 +131,11 @@ impl ResolvedSecrets {
         let resolved = refs
             .into_iter()
             .map(|r| {
-                let v = resolve_secret(read, &store.workspace, &r);
+                let v = resolve_secret(read, &workspace, &r);
                 (r, v)
             })
             .collect();
-        ResolvedSecrets { resolved: Mutex::new(resolved), variables, store, authority }
+        ResolvedSecrets { resolved: Mutex::new(resolved), variables, workspace, authority }
     }
 }
 
@@ -158,7 +159,7 @@ impl SecretResolver for ResolvedSecrets {
                 // Freeze the first deferred outcome too: producer validation
                 // and subsequent wire materialization must see the same vault
                 // value, even if the stored issuer changes between them.
-                let value = crate::blocking_in_place(|| self.authority.resolve(&self.store.workspace, r));
+                let value = crate::blocking_in_place(|| self.authority.resolve(&self.workspace, r));
                 resolved.insert(r.clone(), value.clone());
                 value
             }
@@ -496,14 +497,27 @@ impl App {
         for f in nested {
             add_layer(format!("folder:{}", f.name), &f.variables)?;
         }
-        // Attachments referenced by the spec.
+        // Attachments referenced by the spec. One that is not stored is
+        // reported as missing when it is used; one that is stored but does
+        // not open fails the context (and an integrity failure locks).
         let mut index = std::collections::HashMap::new();
+        let mut unreadable = None;
         let spec_json = serde_json::to_value(&spec)?;
         collect_attachments(&spec_json, &mut |sha| {
-            if let Ok(Some(b)) = attachment_for(read, sha) {
-                index.insert(sha.to_string(), b);
+            if unreadable.is_some() {
+                return;
+            }
+            match attachment_for(read, sha) {
+                Ok(Some(b)) => {
+                    index.insert(sha.to_string(), b);
+                }
+                Ok(None) => {}
+                Err(e) => unreadable = Some(e),
             }
         });
+        if let Some(e) = unreadable {
+            return Err(e);
+        }
         let settings_app = &settings;
         let mut ctx = ExecutionContext {
             workspace_id: Some(*ws_id),
@@ -597,7 +611,7 @@ impl App {
             confined,
         };
         ctx.secrets = Arc::new(ResolvedSecrets::lookup(
-            StoreSecrets { store: self.store.clone(), workspace: *ws_id },
+            *ws_id,
             read,
             &parts,
             deferred_variables,
