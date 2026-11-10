@@ -610,14 +610,7 @@ impl App {
             confinement: self.confined_token_files.clone(),
             confined,
         };
-        ctx.secrets = Arc::new(ResolvedSecrets::lookup(
-            *ws_id,
-            read,
-            &parts,
-            deferred_variables,
-            prefetch_variables,
-            authority.clone(),
-        ));
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(*ws_id, read, &parts, deferred_variables, prefetch_variables, authority.clone()));
         ctx.attachments = Arc::new(StoreAttachments { index, linked, authority });
         Ok(ctx)
     }

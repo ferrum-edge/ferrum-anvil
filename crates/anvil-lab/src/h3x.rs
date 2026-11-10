@@ -588,7 +588,12 @@ fn proto018_h3_reconnect(env: &Env) -> Fut<'_> {
             ids == vec![None, Some("2".to_string())],
             format!("{ids:?}"),
         );
-        c.add(CheckKind::GroundTruth, "the backend aborted the first stream", fault_applied(&env.fx.sse_flaky.log, faults_from, "sse_flaky_abort"), "");
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend aborted the first stream",
+            fault_applied(&env.fx.sse_flaky.log, faults_from, "sse_flaky_abort"),
+            "",
+        );
         c.absent_prefix(&o, "ferrum.token");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "h3x-sse-flaky").await }
     })

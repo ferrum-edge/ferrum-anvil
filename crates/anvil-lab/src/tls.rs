@@ -415,12 +415,7 @@ fn tls008(env: &Env) -> Fut<'_> {
         c.absent_prefix(&o, "ferrum.token");
         c.add(CheckKind::GroundTruth, "the echo backend received the request", echo_since(env, before) >= 1, "");
         let lines = op_lines_with_status(&env.gw, from, "tls-frontend-echo", 200).await;
-        c.add(
-            CheckKind::GroundTruth,
-            "gateway transaction logged with status 200",
-            logged_status(&lines, 200),
-            format!("{lines:?}"),
-        );
+        c.add(CheckKind::GroundTruth, "gateway transaction logged with status 200", logged_status(&lines, 200), format!("{lines:?}"));
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: lines }
     })
 }
@@ -555,12 +550,7 @@ fn tls006_lookalike(env: &Env) -> Fut<'_> {
         }
         c.add(CheckKind::GroundTruth, "the backend was not reached", echo_since(env, before) == 0, "");
         let lines = op_lines_with_status(&env.gw, from, "tls-mtls-auth", 401).await;
-        c.add(
-            CheckKind::GroundTruth,
-            "gateway logged a 401 for the mtls_auth route",
-            logged_status(&lines, 401),
-            format!("{lines:?}"),
-        );
+        c.add(CheckKind::GroundTruth, "gateway logged a 401 for the mtls_auth route", logged_status(&lines, 401), format!("{lines:?}"));
         let r = go(env, &https(env, &format!("{HTTPS}/tls/mtls-auth/echo"), &Client::lab(env, Some(&env.fx.pki.client_good)))).await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: lines }
@@ -821,12 +811,7 @@ fn auth026(env: &Env) -> Fut<'_> {
         record_excludes(&mut c, &o, &token, "the bound access token");
         c.add(CheckKind::GroundTruth, "the backend was not reached", echo_since(env, before) == 0, "");
         let lines = op_lines_with_status(&env.gw, from, "tls-bound-token", 401).await;
-        c.add(
-            CheckKind::GroundTruth,
-            "gateway logged a 401 for the bound-token route",
-            logged_status(&lines, 401),
-            format!("{lines:?}"),
-        );
+        c.add(CheckKind::GroundTruth, "gateway logged a 401 for the bound-token route", logged_status(&lines, 401), format!("{lines:?}"));
         // Recovery: a token bound to the certificate actually presented.
         let rebound = env.fx.bound_token(&env.fx.pki.client_unmapped.cert);
         let mut r = https(env, &url, &Client::lab(env, Some(&env.fx.pki.client_unmapped)));
