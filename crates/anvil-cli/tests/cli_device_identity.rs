@@ -38,7 +38,7 @@ fn setup(root: &Path, bundle: &Path) {
     let mut spec = RequestSpec::http("GET", "https://api.example.invalid/svid");
     spec.auth = AuthConfig::JwtSvid { config };
     app.create_request(&ws.meta.id, None, "svid", spec).unwrap();
-    let (bytes, _) = app.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = app.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
     std::fs::write(bundle, bytes).unwrap();
 }
 

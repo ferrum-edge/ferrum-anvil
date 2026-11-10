@@ -181,25 +181,16 @@ impl App {
         Ok(f)
     }
 
-    /// Save a folder. Whether it is an import root, and whether that root is
-    /// open to the workspace, are kept as stored: only a spec import makes
-    /// an import root, and only [`App::set_import_root_workspace_scope`]
-    /// opens one.
-    pub fn save_folder(&self, f: Folder) -> Result<Folder> {
-        self.save_folder_with(f, false)
-    }
-
-    /// [`App::save_folder`] that keeps a stored folder under its stored
-    /// parent: it moves only through [`App::move_folder_keeping_isolation`],
-    /// which checks what the move takes out of an import root.
-    pub fn save_folder_in_place(&self, f: Folder) -> Result<Folder> {
-        self.save_folder_with(f, true)
-    }
-
-    fn save_folder_with(&self, mut f: Folder, in_place: bool) -> Result<Folder> {
+    /// Save a folder. A stored folder stays under its stored parent: it
+    /// moves only through [`App::move_folder_keeping_isolation`], which
+    /// checks what the move takes out of an import root. Whether it is an
+    /// import root, and whether that root is open to the workspace, are kept
+    /// as stored: only a spec import makes an import root, and only
+    /// [`App::set_import_root_workspace_scope`] opens one.
+    pub fn save_folder_in_place(&self, mut f: Folder) -> Result<Folder> {
         self.store.atomically(|s| {
             let stored: Option<Folder> = s.get(kind::FOLDER, &f.meta.id)?;
-            if in_place && let Some(stored) = &stored {
+            if let Some(stored) = &stored {
                 f.parent_id = stored.parent_id;
             }
             validate_folder_parent_in(s, &f.workspace_id, f.parent_id)?;
@@ -663,10 +654,6 @@ impl App {
         Ok(e)
     }
 
-    pub fn create_environment(&self, ws: &Id, name: &str, vars: Vec<Variable>) -> Result<Environment> {
-        self.save_environment(Environment { meta: Meta::new(), workspace_id: *ws, name: name.into(), variables: vars })
-    }
-
     pub fn delete_environment(&self, id: &Id) -> Result<()> {
         self.store.atomically(|s| {
             let Some(env) = s.get::<Environment>(kind::ENVIRONMENT, id)? else { return Ok(()) };
@@ -962,17 +949,6 @@ impl App {
         })?)
     }
 
-    /// Delete a stored attachment once nothing references it any more.
-    /// Content addressing means several requests, revisions, datasets or spec
-    /// sources can share one attachment, so every object that can hold one is
-    /// checked first. The check and the release run in one write transaction,
-    /// so nothing can reference the attachment between them. One a user added
-    /// ([`App::put_attachment`]) is kept: an item not saved yet may hold it.
-    /// Returns whether it was deleted.
-    pub fn release_attachment(&self, sha256: &str) -> Result<bool> {
-        Ok(self.store.atomically(|s| release_attachment_in(s, sha256))?)
-    }
-
     /// The index entry and the blob it names are read in one read
     /// transaction: a re-attachment that moves the entry to a new blob and
     /// releases the old one ([`index_attachment_in`]) commits before or after
@@ -1153,10 +1129,14 @@ fn user_added(index: &serde_json::Value) -> bool {
     index.get("user").and_then(|u| u.as_bool()).unwrap_or(false)
 }
 
-/// [`App::release_attachment`] inside the caller's transaction: what the
-/// caller wrote before it is checked as a reference too, and the release is
-/// rolled back with everything else the caller writes. An attachment a user
-/// added is kept.
+/// Delete stored attachment `sha256`, in the caller's transaction, once
+/// nothing references it any more. Content addressing means several
+/// requests, revisions, datasets or spec sources can share one attachment,
+/// so every object that can hold one is checked first; what the caller wrote
+/// before is checked as a reference too, and the release is rolled back with
+/// everything else the caller writes. An attachment a user added
+/// ([`App::put_attachment`]) is kept: an item not saved yet may hold it.
+/// Returns whether it was deleted.
 pub(crate) fn release_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
     release_in(s, sha256, false)
 }

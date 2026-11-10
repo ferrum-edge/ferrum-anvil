@@ -82,7 +82,7 @@ Cancellation and invalidation:
 
 ### The sign-in flow (RFC 8252 native app, RFC 7636 S256)
 
-`anvil_identity::authorize_api` (or `App::oauth_sign_in` from the app layer):
+`anvil_identity::authorize_api` (or `App::oauth_sign_in_with` from the app layer):
 
 1. Resolves the OAuth profile in effect for the request (request → folders →
    workspace, including a profile inside a multi-auth set), with variables and
@@ -284,9 +284,11 @@ supplies:
 Target-API sign-in (identity 2):
 
 ```rust
-App::oauth_sign_in(&self, request_id: Option<Id>, ws: &Id, draft: Option<RequestSpec>,
-    opts: &SendOptions, opener: &dyn BrowserOpener, observer: &dyn FlowObserver,
-    flow: &FlowOptions, cancel: &CancellationToken) -> Result<ApiAuthorization>
+App::build_context_off_runtime(&self, request_id: Option<Id>, ws: Id, draft: Option<RequestSpec>,
+    opts: SendOptions, cancel: &CancellationToken) -> Result<ExecutionContext>
+App::oauth_sign_in_with(&self, ctx: &ExecutionContext, opener: &dyn BrowserOpener,
+    observer: &dyn FlowObserver, flow: &FlowOptions, cancel: &CancellationToken)
+    -> Result<ApiAuthorization>
 App::oauth_token_status(&self, request_id, ws, draft, opts) -> Result<Option<TokenSummary>>
 App::oauth_sign_out(&self, request_id, ws, draft, opts) -> Result<bool>
 ```

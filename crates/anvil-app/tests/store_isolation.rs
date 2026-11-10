@@ -71,11 +71,9 @@ fn deleting_a_folder_in_a_parent_cycle_terminates() {
     let a = app.create_folder(&ws.meta.id, None, "a").unwrap();
     let b = app.create_folder(&ws.meta.id, Some(a.meta.id), "b").unwrap();
     let req = app.create_request(&ws.meta.id, Some(b.meta.id), "in b", RequestSpec::http("GET", "http://127.0.0.1/")).unwrap();
-    // `save_folder` does not validate ancestry, so it can close the cycle
-    // a -> b -> a.
-    let mut a = app.folder(&a.meta.id).unwrap();
-    a.parent_id = Some(b.meta.id);
-    let a = app.save_folder(a).unwrap();
+    // Damaged or imported data can hold the cycle a -> b -> a, which no
+    // save or move makes: write it to the store directly.
+    let a = close_cycle(&app, &a.meta.id, &b.meta.id);
 
     app.delete_folder(&a.meta.id).unwrap();
     assert!(app.folders(&ws.meta.id).unwrap().is_empty());
@@ -101,15 +99,20 @@ fn within_timeout<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> 
     rx.recv_timeout(Duration::from_secs(20)).expect("the folder walk did not terminate")
 }
 
-/// Close the parent cycle a -> b -> a with `save_folder`, which does not
-/// validate ancestry. Returns (a, b).
+/// Put folder `a` under its own subfolder `b` in the store, as damaged or
+/// imported data could: every save and move checks ancestry, so none can.
+fn close_cycle(app: &App, a: &Id, b: &Id) -> anvil_domain::workspace::Folder {
+    let mut a = app.folder(a).unwrap();
+    a.parent_id = Some(*b);
+    app.store.put(kind::FOLDER, &a.meta.id, Some(&a.workspace_id), a.parent_id.as_ref(), a.sort_key, &a).unwrap();
+    a
+}
+
+/// Close the parent cycle a -> b -> a ([`close_cycle`]). Returns (a, b).
 fn folder_cycle(app: &App, ws: &Id) -> (Id, Id) {
     let a = app.create_folder(ws, None, "a").unwrap();
     let b = app.create_folder(ws, Some(a.meta.id), "b").unwrap();
-    let mut a = app.folder(&a.meta.id).unwrap();
-    a.parent_id = Some(b.meta.id);
-    let a = app.save_folder(a).unwrap();
-    (a.meta.id, b.meta.id)
+    (close_cycle(app, &a.meta.id, &b.meta.id).meta.id, b.meta.id)
 }
 
 #[test]

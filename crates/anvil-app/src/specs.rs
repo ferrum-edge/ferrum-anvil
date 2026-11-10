@@ -283,7 +283,7 @@ impl App {
             }
         };
         let scope_hashes = baseline(&r, root.is_some());
-        // Kept for a manual restore only; see `App::import`.
+        // Kept for a manual restore only; see `App::import_approved`.
         self.store.checkpoint("before-spec-import")?;
         let workspace_id = self.store.atomically(|s| {
             if let Some(clash) = existing_object(&s.as_read(), &r, root.as_ref())? {
@@ -522,7 +522,7 @@ impl App {
             || scope.settings != current.settings
             || scope.variables != current.variables
             || scope.auth != current.auth;
-        // Kept for a manual restore only; see `App::import`.
+        // Kept for a manual restore only; see `App::import_approved`.
         self.store.checkpoint("before-spec-reimport")?;
         self.store.atomically(|s| {
             // Everything below is written from copies read before this
@@ -1017,7 +1017,7 @@ mod tests {
             } else {
                 f.variables.push(Variable::plain("token", "mine"));
             }
-            let f = app.save_folder(f).unwrap();
+            let f = app.save_folder_in_place(f).unwrap();
             let requests = app.requests(&ws).unwrap();
             let err = app.apply_reimport(r, newer.as_bytes(), "admin-v2.json", &ReimportApproval::default()).unwrap_err();
             assert!(err.to_string().contains("re-run the reimport diff"), "{edit}: {err}");

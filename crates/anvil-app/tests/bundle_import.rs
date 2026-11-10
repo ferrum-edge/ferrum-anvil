@@ -175,7 +175,7 @@ fn encrypted(g: &PortableGraph) -> Vec<u8> {
         kdf: KdfParams::testing(),
         app_version: "test",
     };
-    bundle::write(g, &opts).unwrap().0
+    bundle::write_redacting(g, &opts, &[]).unwrap().0
 }
 
 /// An encrypted bundle as anyone could write one: a workspace of its own
@@ -213,9 +213,10 @@ async fn duplicate_import_is_independent_of_its_source() {
     assert_eq!(send(&a, &ws.meta.id, &original.meta.id).await, 200);
 
     // Duplicate the workspace into the same profile.
-    let (bytes, preview) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, preview) =
+        a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
     assert_eq!(preview.secrets_included, 1);
-    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     assert_eq!(rep.workspace_ids.len(), 1);
     let copy_ws: Id = rep.workspace_ids[0].parse().unwrap();
     assert_ne!(copy_ws, ws.meta.id);
@@ -246,7 +247,7 @@ async fn duplicate_import_is_independent_of_its_source() {
     assert_eq!(send(&a, &copy_ws, &copy.meta.id).await, 200, "the copy still has its credentials");
 
     // And exporting the copy carries its secret and revision.
-    let (bytes, preview) = a.export(Some(&copy_ws), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, preview) = a.export_with_standards(Some(&copy_ws), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
     assert_eq!(preview.secrets_included, 1);
     let opened = bundle::open(&bytes, Some(EXPORT_PASS)).unwrap();
     assert_eq!(opened.graph.revisions.iter().map(|r| r.id).collect::<Vec<_>>(), vec![copy_rev]);
@@ -263,9 +264,9 @@ fn duplicating_twice_gives_two_independent_copies() {
     let mut spec = RequestSpec::http("GET", "https://api.example.test/");
     spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: token }, prefix: "Bearer".into() };
     a.create_request(&ws.meta.id, None, "Check token", spec).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
-    let first = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
-    let second = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
+    let first = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
+    let second = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     let (w1, w2): (Id, Id) = (first.workspace_ids[0].parse().unwrap(), second.workspace_ids[0].parse().unwrap());
     assert_ne!(w1, w2);
     let (r1, r2) = (a.requests(&w1).unwrap().remove(0), a.requests(&w2).unwrap().remove(0));
@@ -284,7 +285,7 @@ fn merge_import_keeps_an_existing_secret() {
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
     let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
     a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
     a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws.meta.id, &bytes)).unwrap();
     let (_, value) = a.store.get_secret(&token.id).unwrap().unwrap();
@@ -313,13 +314,13 @@ async fn replace_import_never_takes_a_secret_from_another_workspace() {
     assert!(preview.plan.conflicts.contains(&listed), "{:?}", preview.plan.conflicts);
 
     // Replace refuses the whole bundle.
-    let e = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap_err();
+    let e = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &ImportApproval::default()).unwrap_err();
     assert!(matches!(&e, AppError::Invalid(m) if m.contains(&listed)), "{e}");
     assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
     untouched(&a);
 
     // Merge keeps the stored secret, and the imported request cannot use it.
-    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(rep.plan.foreign_secrets, vec![listed]);
     untouched(&a);
     let incoming: Id = rep.workspace_ids[0].parse().unwrap();
@@ -334,7 +335,7 @@ fn replace_import_restores_a_secret_its_own_workspace_owns() {
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
     let token = a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
     a.store.put_secret(&token.id, Some(&ws.meta.id), "bearer", "placeholder-rotated-token").unwrap();
     let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &into(&ws.meta.id, &bytes)).unwrap();
     assert!(rep.plan.foreign_secrets.is_empty() && rep.plan.foreign_objects.is_empty(), "{:?}", rep.plan);
@@ -397,8 +398,8 @@ async fn a_duplicate_without_the_secret_never_uses_its_sources() {
     let original = a.create_request(&ws.meta.id, None, "Check token", bearer(&token, &url)).unwrap();
 
     // A share-safe bundle carries the reference but not the secret.
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
-    let rep = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
+    let rep = a.import_approved(&bytes, None, ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     assert_eq!(rep.missing_secrets.len(), 1, "{:?}", rep.missing_secrets);
     let copy_ws: Id = rep.workspace_ids[0].parse().unwrap();
     let copy = a.requests(&copy_ws).unwrap().remove(0);
@@ -413,7 +414,7 @@ fn bundles_this_build_cannot_read_change_nothing() {
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
     a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
 
     let b_root = tempfile::tempdir().unwrap();
     let b = new_app(b_root.path(), "b");
@@ -423,16 +424,16 @@ fn bundles_this_build_cannot_read_change_nothing() {
     for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
         let e = b.import_preview(&newer, Some(EXPORT_PASS), policy).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::FutureSchema { found, .. }) if found == future), "{e}");
-        let e = b.import(&newer, Some(EXPORT_PASS), policy).unwrap_err();
+        let e = b.import_approved(&newer, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::FutureSchema { found, .. }) if found == future), "{e}");
-        let e = b.import(&costly, Some(EXPORT_PASS), policy).unwrap_err();
+        let e = b.import_approved(&costly, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::UnsupportedKdf(_))), "{e}");
     }
     assert!(b.workspaces().unwrap().is_empty(), "nothing was imported");
     assert!(b.store.list_secret_ids(None).unwrap().is_empty());
 
     // The same bundle at the current schema imports.
-    b.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
 }
 
@@ -456,7 +457,7 @@ async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
         let preview = a.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap();
         assert_eq!(preview.plan.existing_workspaces, expected, "{policy:?}");
         // ...and applying without approving it, or approving another one, is refused.
-        let e = a.import(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
+        let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
         assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
         let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&Id::new(), &bytes)).unwrap_err();
         assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
@@ -469,7 +470,7 @@ async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
     // A Duplicate copy claims no stored workspace, and its request cannot use the secret.
     let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
     assert!(preview.plan.existing_workspaces.is_empty(), "{:?}", preview.plan);
-    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap();
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     let copy_ws: Id = rep.workspace_ids[0].parse().unwrap();
     assert_ne!(copy_ws, ws.meta.id);
     let copy = a.requests(&copy_ws).unwrap().remove(0);
@@ -502,13 +503,13 @@ fn replace_never_overwrites_an_object_of_another_workspace() {
     let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
     assert_eq!(preview.plan.foreign_objects, vec![listed.clone()]);
     assert!(preview.plan.existing_workspaces.is_empty(), "{:?}", preview.plan);
-    let e = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap_err();
+    let e = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &ImportApproval::default()).unwrap_err();
     assert!(matches!(&e, AppError::Invalid(m) if m.contains(&listed)), "{e}");
     assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
     assert_eq!(a.folder(&folder.meta.id).unwrap(), folder, "the folder stays in its workspace, unchanged");
 
     // Merge keeps the stored folder.
-    let rep = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(rep.plan.foreign_objects, vec![listed]);
     assert_eq!(a.folder(&folder.meta.id).unwrap(), folder);
 }
@@ -605,7 +606,7 @@ fn replace_never_overwrites_a_revision_of_another_workspace() {
 
     let preview = a.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap();
     assert_eq!(preview.plan.foreign_objects, vec![listed.clone()]);
-    let e = a.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace).unwrap_err();
+    let e = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Replace, &ImportApproval::default()).unwrap_err();
     assert!(matches!(&e, AppError::Invalid(m) if m.contains(&listed)), "{e}");
     assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
     assert_eq!(a.revision(&rid).unwrap(), revision, "the revision stays with its request, unchanged");
@@ -643,7 +644,7 @@ async fn a_scenario_never_runs_with_a_dataset_of_another_workspace() {
         ..Default::default()
     };
     g.attachments.insert(sha(&rows.attachment), b"card\nplaceholder-card\n".to_vec());
-    let rep = a.import(&encrypted(&g), Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    let rep = a.import_approved(&encrypted(&g), Some(EXPORT_PASS), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(rep.plan.foreign_objects, vec![format!("dataset 'customers' ({})", rows.meta.id)]);
     // Merge keeps the stored dataset in its own workspace and adds the scenario.
     assert_eq!(a.dataset(&rows.meta.id).unwrap(), rows);
@@ -713,24 +714,24 @@ fn a_stored_attachment_is_imported_only_with_its_bytes() {
         let e = a.import_preview(bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate).unwrap_err();
         assert!(e.to_string().contains("uses a stored attachment that the bundle does not carry"), "{label}: {e}");
         for policy in [ConflictPolicy::Duplicate, ConflictPolicy::Merge] {
-            let e = a.import(bytes, Some(EXPORT_PASS), policy).unwrap_err();
+            let e = a.import_approved(bytes, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
             assert!(e.to_string().contains("uses a stored attachment that the bundle does not carry"), "{label}: {e}");
         }
     }
     assert_eq!(a.workspaces().unwrap().len(), 1, "nothing was imported");
 
     // An exported workspace carries the bytes of every attachment it uses.
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
     for (name, policy) in [("duplicate", ConflictPolicy::Duplicate), ("merge", ConflictPolicy::Merge)] {
         let b = new_app(root.path(), name);
-        let rep = b.import(&bytes, None, policy).unwrap();
+        let rep = b.import_approved(&bytes, None, policy, &ImportApproval::default()).unwrap();
         let copy: Id = rep.workspace_ids[0].parse().unwrap();
         let data = b.datasets(&copy).unwrap().pop().unwrap();
         assert_eq!(b.get_attachment(&sha(&file)).unwrap().as_deref(), Some(&b"placeholder statement"[..]), "{name}");
         assert_eq!(b.requests(&copy).unwrap().len(), 2, "{name}");
         assert_eq!(dataset_runs::dataset_rows_blocking(&b, &data).unwrap(), 1, "{name}");
     }
-    let rep = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    let rep = a.import_approved(&bytes, None, ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     assert_eq!(a.datasets(&rep.workspace_ids[0].parse().unwrap()).unwrap().len(), 1);
 }
 
@@ -750,10 +751,11 @@ fn a_stored_attachment_whose_content_is_not_stored_here_imports_with_a_warning()
     a.store.put(kind::REQUEST, &q.meta.id, Some(&ws.meta.id), None, q.sort_key, &q).unwrap();
 
     // The export says which request travels without its file.
-    let preview = a.export_preview(Some(&ws.meta.id), ExportMode::EncryptedTransfer, false).unwrap();
+    let preview = a.export_preview_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, false, false).unwrap();
     let excluded = &preview.manifest.excluded;
     assert!(excluded.iter().any(|x| x.contains("a stored file of request 'Upload'")), "{excluded:?}");
-    let (bytes, written) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, written) =
+        a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
     assert_eq!(written.manifest.excluded, preview.manifest.excluded);
 
     // A profile that does not store that content imports the bundle, with a
@@ -762,7 +764,7 @@ fn a_stored_attachment_whose_content_is_not_stored_here_imports_with_a_warning()
     let b = new_app(root.path(), "b");
     let preview = b.import_preview(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
     assert!(preview.warnings.iter().any(|w| w == warning), "{:?}", preview.warnings);
-    let rep = b.import(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    let rep = b.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert!(rep.warnings.iter().any(|w| w == warning), "{:?}", rep.warnings);
     assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
     assert!(b.get_attachment(&sha256).unwrap().is_none(), "nothing stands in for the missing content");
@@ -775,7 +777,7 @@ fn a_stored_attachment_whose_content_is_not_stored_here_imports_with_a_warning()
     for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
         let e = c.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
         assert!(e.to_string().contains(needle), "{policy:?}: {e}");
-        let e = c.import(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
+        let e = c.import_approved(&bytes, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
         assert!(e.to_string().contains(needle), "{policy:?}: {e}");
     }
     assert!(c.workspaces().unwrap().is_empty(), "nothing was imported");
@@ -789,13 +791,13 @@ fn bundles_describing_a_full_backup_are_never_written_or_restored() {
     a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
     // Full backups are ANVILBAK files; bundle exports refuse the mode.
     for scope in [Some(&ws.meta.id), None] {
-        let e = a.export(scope, ExportMode::FullBackup, Some(EXPORT_PASS), false).unwrap_err();
+        let e = a.export_with_standards(scope, ExportMode::FullBackup, Some(EXPORT_PASS), false, false).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::FullBackupNotABundle)), "{e}");
-        let e = a.export_preview(scope, ExportMode::FullBackup, false).unwrap_err();
+        let e = a.export_preview_with_standards(scope, ExportMode::FullBackup, false, false).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::FullBackupNotABundle)), "{e}");
     }
     // A bundle of every workspace is a workspace bundle, not a backup.
-    let (all, preview) = a.export(None, ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (all, preview) = a.export_with_standards(None, ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
     assert_eq!(preview.manifest.kind, BundleKind::Workspace);
 
     // The zip full backup of early builds: an authentic vault, and a manifest
@@ -811,7 +813,7 @@ fn bundles_describing_a_full_backup_are_never_written_or_restored() {
         let e = b.import_preview(&legacy, Some(EXPORT_PASS), policy).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::LegacyFullBackup)), "{e}");
         assert!(e.to_string().contains("legacy full backups are not supported; restore from an ANVILBAK backup"), "{e}");
-        let e = b.import(&legacy, Some(EXPORT_PASS), policy).unwrap_err();
+        let e = b.import_approved(&legacy, Some(EXPORT_PASS), policy, &ImportApproval::default()).unwrap_err();
         assert!(matches!(e, AppError::Bundle(BundleError::LegacyFullBackup)), "{e}");
     }
     // Nor is it taken for an ANVILBAK backup.
@@ -822,7 +824,7 @@ fn bundles_describing_a_full_backup_are_never_written_or_restored() {
     assert!(b.backup_contents().unwrap() == before, "a refused legacy backup changed the profile");
 
     // The same bundle with its own manifest imports.
-    b.import(&all, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    b.import_approved(&all, Some(EXPORT_PASS), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(b.workspaces().unwrap().len(), 1);
 }
 
@@ -864,17 +866,17 @@ async fn an_import_stores_the_load_plans_and_history_the_bundle_carries() {
     let gone = a.create_request(&ws.meta.id, None, "Gone", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
     a.save_load_plan(LoadPlan { name: "stale".into(), ..load_plan(ws.meta.id, gone.meta.id) }).unwrap();
     a.delete_request(&gone.meta.id).unwrap();
-    let (bytes, preview) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, true).unwrap();
+    let (bytes, preview) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, true, false).unwrap();
     assert_eq!((preview.manifest.counts["load_plans"], preview.manifest.counts["history"]), (1, 1));
     let excluded = &preview.manifest.excluded;
     assert!(excluded.iter().any(|x| x.starts_with("load plan 'stale'")), "{excluded:?}");
     assert!(!excluded.iter().any(|x| x.contains("'smoke'")), "{excluded:?}");
-    let planned = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
+    let planned = a.export_preview_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, true, false).unwrap();
     assert_eq!(planned.manifest.excluded, preview.manifest.excluded);
 
     // Into another profile, under the bundle's own ids.
     let b = new_app(root.path(), "b");
-    let rep = b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    let rep = b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert!(rep.plan.conflicts.is_empty(), "nothing is stored there yet: {:?}", rep.plan.conflicts);
     let plans = b.load_plans(&ws.meta.id).unwrap();
     assert_eq!(plans.iter().map(|p| p.id).collect::<Vec<_>>(), vec![plan.id]);
@@ -889,7 +891,7 @@ async fn an_import_stores_the_load_plans_and_history_the_bundle_carries() {
     assert_eq!(b.store.list_history(Some(&ws.meta.id), None, 10).unwrap().len(), 1);
 
     // A Duplicate copy gets its own plan and record, linked to the copied request.
-    let dup = a.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    let dup = a.import_approved(&bytes, None, ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     let copy: Id = dup.workspace_ids[0].parse().unwrap();
     let copy_request = a.requests(&copy).unwrap().remove(0);
     let copy_plan = a.load_plans(&copy).unwrap().remove(0);
@@ -925,11 +927,11 @@ async fn an_imported_history_record_is_never_dated_after_its_import() {
         kdf: KdfParams::testing(),
         app_version: "test",
     };
-    let (bytes, _) = bundle::write(&g, &opts).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts, &[]).unwrap();
 
     let b = new_app(root.path(), "b");
     let before = chrono::Utc::now();
-    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     let after = chrono::Utc::now();
     let stored = b.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
     assert_eq!(stored.len(), 1);
@@ -952,7 +954,7 @@ async fn an_export_with_history_lists_the_records_it_leaves_out() {
     let request = a.create_request(&ws.meta.id, None, "Echo", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
     let opts = SendOptions { record_history: true, ..Default::default() };
     a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
-    let preview = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
+    let preview = a.export_preview_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, true, false).unwrap();
     assert_eq!(preview.manifest.counts["history"], 1);
     let excluded = &preview.manifest.excluded;
     assert!(!excluded.iter().any(|x| x.starts_with("history records")), "{excluded:?}");
@@ -972,12 +974,12 @@ async fn an_export_with_history_lists_the_records_it_leaves_out() {
             Ok(())
         })
         .unwrap();
-    let (_, written) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, true).unwrap();
+    let (_, written) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, true, false).unwrap();
     assert_eq!(written.manifest.counts["history"], EXPORT_HISTORY_LIMIT);
     let excluded = &written.manifest.excluded;
     let note = format!("history records of workspace 'Payments' older than its newest {EXPORT_HISTORY_LIMIT}");
     assert!(excluded.iter().any(|x| x.starts_with(&note)), "{excluded:?}");
-    let planned = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
+    let planned = a.export_preview_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, true, false).unwrap();
     assert_eq!(planned.manifest.excluded, written.manifest.excluded);
 }
 
@@ -1005,9 +1007,9 @@ fn a_share_safe_import_lists_a_missing_proxy_password() {
         updated_at: chrono::Utc::now(),
     })
     .unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
     let b = new_app(root.path(), "b");
-    let rep = b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    let rep = b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(rep.missing_secrets.len(), 1, "exactly one secret is listed as missing");
     assert!(rep.missing_secrets[0].starts_with("proxy password ("), "the proxy password is the missing secret");
 }
@@ -1049,7 +1051,7 @@ fn a_passphrase_is_refused_for_a_bundle_that_is_not_encrypted() {
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
     a.create_request(&ws.meta.id, None, "Probe", RequestSpec::http("GET", "https://api.example.test/")).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
     let b = new_app(root.path(), "b");
     for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace, ConflictPolicy::Duplicate] {
         let e = b.import_preview(&bytes, Some(EXPORT_PASS), policy).unwrap_err();
@@ -1059,7 +1061,7 @@ fn a_passphrase_is_refused_for_a_bundle_that_is_not_encrypted() {
     }
     assert!(b.workspaces().unwrap().is_empty(), "nothing was imported");
     // Without one, it imports.
-    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1);
 }
 
@@ -1093,7 +1095,7 @@ fn an_import_declined_once_its_bundle_is_open_writes_nothing() {
     let a = new_app(root.path(), "a");
     let ws = a.create_workspace("Payments").unwrap();
     a.set_secret(&ws.meta.id, "bearer", TOKEN).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
 
     let b_root = tempfile::tempdir().unwrap();
     let b = new_app(b_root.path(), "b");

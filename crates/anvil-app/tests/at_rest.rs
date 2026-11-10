@@ -10,7 +10,7 @@ use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{DatasetFormat, Variable};
+use anvil_domain::workspace::{DatasetFormat, Environment, Meta, Variable};
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use std::path::{Path, PathBuf};
@@ -98,10 +98,11 @@ async fn no_plaintext_user_data_in_profile_files_side_files_or_temp() {
     let ws = app.create_workspace("CANARY-WORKSPACE-4343").unwrap();
     let secret = app.set_secret(&ws.meta.id, "token", "CANARY-SECRET-8383").unwrap();
     let env = app
-        .create_environment(
-            &ws.meta.id,
-            "lab",
-            vec![
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws.meta.id,
+            name: "lab".into(),
+            variables: vec![
                 Variable::plain("base", &fx.url("")),
                 Variable {
                     name: "tok".into(),
@@ -111,7 +112,7 @@ async fn no_plaintext_user_data_in_profile_files_side_files_or_temp() {
                     description: String::new(),
                 },
             ],
-        )
+        })
         .unwrap();
     let attachment = app.put_attachment("notes.txt", b"attachment body CANARY-ATTACH-1010", Some("text/plain".into())).unwrap();
     app.create_dataset(&ws.meta.id, "users", DatasetFormat::Csv, b"user,password\nalice,CANARY-DATASET-2121\n", vec!["password".into()])

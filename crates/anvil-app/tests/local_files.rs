@@ -439,7 +439,7 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     let rows = canonical(&rows);
     let d = a.save_dataset(linked_dataset(ws.meta.id, &rows)).unwrap();
     a.bind_linked_file(LinkedFileReferrer::Dataset { id: d.meta.id }, &rows).unwrap();
-    let (bytes, _) = a.export(None, ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = a.export_with_standards(None, ExportMode::EncryptedTransfer, Some("export passphrase 1"), false, false).unwrap();
 
     let b = new_app(root.path(), "b");
     // The preview lists every linked file the bundle names, datasets included.
@@ -448,7 +448,7 @@ fn linked_files_in_an_imported_bundle_stay_inert_on_the_receiving_device() {
     assert!(preview.linked_files.iter().any(|l| l.starts_with("dataset 'rows'")), "{:?}", preview.linked_files);
     assert!(preview.warnings.iter().any(|w| w.contains("linked local file")), "{:?}", preview.warnings);
 
-    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert!(b.linked_file_bindings().unwrap().is_empty(), "an import never binds a linked file");
     let ws_b = b.workspaces().unwrap().into_iter().find(|w| w.name == "W").unwrap();
     let requests = b.requests(&ws_b.meta.id).unwrap();
@@ -489,7 +489,8 @@ fn an_import_that_overwrites_a_request_drops_its_linked_file_binding() {
     let ws = app.create_workspace("W").unwrap();
     let spec = with_body(Body::Binary { attachment: linked(&path), content_type: None });
     let r = app.create_request(&ws.meta.id, None, "upload", spec).unwrap();
-    let (bytes, _) = app.export(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) =
+        app.export_with_standards(Some(&ws.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false, false).unwrap();
     app.bind_linked_file(request(&r), &path).unwrap();
     app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()).expect("bound");
 
@@ -551,7 +552,7 @@ fn a_load_worker_gets_a_bound_linked_file_as_bytes_and_never_its_path() {
     let spec = with_body(Body::Binary { attachment: linked(&path), content_type: None });
     let r = app.create_request(&ws.meta.id, None, "upload", spec).unwrap();
     app.bind_linked_file(request(&r), &path).unwrap();
-    let job = app.worker_job(&load_plan(ws.meta.id, vec![r.meta.id], None), true).unwrap();
+    let job = app.worker_job_with_authority(&load_plan(ws.meta.id, vec![r.meta.id], None), true).unwrap().0;
     let json = serde_json::to_string(&job).unwrap();
     assert!(!json.contains("linked_file") && !json.contains(path.to_str().unwrap()), "the worker job names no local file");
 
@@ -1005,14 +1006,14 @@ fn a_relocated_dataset_reads_its_new_file_and_a_later_export_names_the_new_paths
 
     // The export carries the new paths (not the bindings), and its preview
     // says that requests or datasets name linked local files.
-    let preview = a.export_preview(None, ExportMode::EncryptedTransfer, false).unwrap();
+    let preview = a.export_preview_with_standards(None, ExportMode::EncryptedTransfer, false, false).unwrap();
     assert!(preview.manifest.device_bindings.iter().any(|b| b.contains("linked local files")), "{:?}", preview.manifest.device_bindings);
-    let (bytes, _) = a.export(None, ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) = a.export_with_standards(None, ExportMode::EncryptedTransfer, Some("export passphrase 1"), false, false).unwrap();
     let b = new_app(root.path(), "b");
     let imported = b.import_preview(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
     let mut listed = imported.linked_files.clone();
     listed.sort();
     assert_eq!(listed, vec![format!("dataset 'rows': {}", path_str(&rows)), format!("request 'upload': {}", path_str(&upload))]);
-    b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert!(b.linked_file_bindings().unwrap().is_empty(), "the bindings stay on the device that made them");
 }

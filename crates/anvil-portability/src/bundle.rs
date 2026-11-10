@@ -221,13 +221,9 @@ fn is_full_backup(kind: BundleKind, mode: ExportMode) -> bool {
     kind == BundleKind::Backup || mode == ExportMode::FullBackup
 }
 
-/// Build the manifest and sanitized objects without writing.
-pub fn prepare(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Manifest, serde_json::Value, VaultPayload), BundleError> {
-    prepare_redacting(graph, opts, &[])
-}
-
-/// [`prepare`] that also treats `redaction_names` (the user's extra
-/// redaction names, `AppSettings::redaction_names`) as credential names: a
+/// Build the manifest and sanitized objects without writing. Also treats
+/// `redaction_names` (the user's extra redaction names,
+/// `AppSettings::redaction_names`; empty for none) as credential names: a
 /// literal header, query or form value under one of them is moved out of
 /// `objects.json` like any other credential-named field.
 pub fn prepare_redacting(
@@ -500,11 +496,8 @@ fn zip_export_files(files: &[(String, Cow<'_, [u8]>)], stored: &BTreeSet<String>
     Ok(writer.finish()?.into_inner())
 }
 
-pub fn preview(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<ExportPreview, BundleError> {
-    preview_redacting(graph, opts, &[])
-}
-
-/// [`preview`] with the user's extra redaction names ([`prepare_redacting`]).
+/// What [`write_redacting`] would write, with the user's extra redaction
+/// names ([`prepare_redacting`]).
 pub fn preview_redacting(
     graph: &PortableGraph,
     opts: &ExportOptions<'_>,
@@ -532,12 +525,8 @@ fn preview_prepared(
     })
 }
 
-/// Write a bundle to bytes.
-pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>, ExportPreview), BundleError> {
-    write_redacting(graph, opts, &[])
-}
-
-/// [`write`] with the user's extra redaction names ([`prepare_redacting`]).
+/// Write a bundle to bytes, with the user's extra redaction names
+/// ([`prepare_redacting`]).
 pub fn write_redacting(
     graph: &PortableGraph,
     opts: &ExportOptions<'_>,
@@ -1218,7 +1207,7 @@ mod read_tests {
             kdf: KdfParams::testing(),
             app_version: "test",
         };
-        let (bytes, _) = write(&graph, &options).unwrap();
+        let (bytes, _) = write_redacting(&graph, &options, &[]).unwrap();
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut files = Vec::new();
         for index in 0..archive.len() {
@@ -1659,7 +1648,7 @@ mod read_tests {
                 kdf: KdfParams::testing(),
                 app_version: "test",
             };
-            let (bytes, preview) = write(&graph, &opts).unwrap();
+            let (bytes, preview) = write_redacting(&graph, &opts, &[]).unwrap();
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
             let mut files = Vec::new();
             for index in 0..archive.len() {
@@ -1669,7 +1658,7 @@ mod read_tests {
                 files.push((f.name().unwrap().into_owned(), data));
             }
             let limits = boundary_limits(&files);
-            let (_, objects, vault) = prepare(&graph, &opts).unwrap();
+            let (_, objects, vault) = prepare_redacting(&graph, &opts, &[]).unwrap();
             export_preflight(&graph, &opts, &preview.manifest, &objects, &vault, limits).unwrap();
             for smaller in [
                 ReadLimits { total: limits.total - 1, ..limits },
@@ -1699,8 +1688,8 @@ mod read_tests {
             kdf: KdfParams::testing(),
             app_version: "test",
         };
-        preview(&graph, &opts).unwrap();
-        let (bytes, _) = write(&graph, &opts).unwrap();
+        preview_redacting(&graph, &opts, &[]).unwrap();
+        let (bytes, _) = write_redacting(&graph, &opts, &[]).unwrap();
         let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
         let entry = archive.by_name(&format!("attachments/{hash}")).unwrap();
         assert_eq!(entry.compression(), zip::CompressionMethod::Stored);
@@ -1719,7 +1708,7 @@ mod read_tests {
                 kdf: KdfParams::interactive(),
                 app_version: "test",
             };
-            let mut prepared = prepare(&graph, &opts).unwrap();
+            let mut prepared = prepare_redacting(&graph, &opts, &[]).unwrap();
             // Exercise the production paths with one stable timestamp, not a
             // second prepare whose fractional timestamp length could differ.
             prepared.0.created_at = "2026-10-04T00:00:00Z".parse().unwrap();
@@ -1828,7 +1817,7 @@ mod read_tests {
                 kdf: KdfParams::testing(),
                 app_version: &app_version,
             };
-            let (manifest, mut objects, vault) = prepare(&graph, &opts).unwrap();
+            let (manifest, mut objects, vault) = prepare_redacting(&graph, &opts, &[]).unwrap();
             if name == "workspace/objects.json" {
                 objects = serde_json::json!({"sample": "x".repeat(4096)});
             }
@@ -1856,8 +1845,8 @@ mod read_tests {
             kdf: KdfParams::testing(),
             app_version: "test",
         };
-        assert!(matches!(preview(&too_many, &opts), Err(BundleError::Limits(_))));
-        assert!(matches!(write(&too_many, &opts), Err(BundleError::Limits(_))));
+        assert!(matches!(preview_redacting(&too_many, &opts, &[]), Err(BundleError::Limits(_))));
+        assert!(matches!(write_redacting(&too_many, &opts, &[]), Err(BundleError::Limits(_))));
         let mut writer = LengthWriter { bytes: 7, bound: 8, json: NodeCounter::default() };
         assert!(writer.write_all(b"secret").is_err());
         assert_eq!(writer.bytes, 7);
@@ -1980,7 +1969,7 @@ mod read_tests {
         let mut graph = PortableGraph::default();
         let data = zip64(0);
         graph.attachments.insert(sha256(&data), data);
-        let (bytes, _) = write(&graph, &opts).unwrap();
+        let (bytes, _) = write_redacting(&graph, &opts, &[]).unwrap();
         assert_eq!(open(&bytes, None).unwrap().graph.attachments, graph.attachments);
         let mut graph = PortableGraph::default();
         let data = zip64(0xFF);
@@ -1996,13 +1985,13 @@ mod read_tests {
             attachment,
             sensitive_columns: Vec::new(),
         });
-        let error = write(&graph, &opts).unwrap_err();
+        let error = write_redacting(&graph, &opts, &[]).unwrap_err();
         let message = error.to_string();
         assert!(matches!(error, BundleError::Limits(_)), "{message}");
         assert!(message.contains("the file 'rows.zip' of dataset 'Rows' contains a ZIP64 end-of-central-directory record"), "{message}");
         // Without a request or dataset naming it, the file is named by its hash.
         graph.datasets.clear();
-        let message = write(&graph, &opts).unwrap_err().to_string();
+        let message = write_redacting(&graph, &opts, &[]).unwrap_err().to_string();
         assert!(message.contains(&format!("the stored file {hash} contains a ZIP64")), "{message}");
     }
 

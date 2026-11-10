@@ -1012,7 +1012,7 @@ uses it is saved, in a separate call. Its index entry is marked as added by
 a user (`"user": true`, with `"attached_at"`, the time in unix
 milliseconds it was last attached; entries written earlier have neither),
 and no automatic release, such as a reimport releasing the source file it
-replaces or `App::release_attachment`, deletes a marked attachment: only
+replaces, deletes a marked attachment: only
 deleting or replacing an item that held it does. A bundle import or a
 restore stores the files its items reference without marking them (an entry
 already marked stays marked). A save checks, in its own write transaction,

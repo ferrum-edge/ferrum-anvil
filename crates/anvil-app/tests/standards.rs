@@ -2,6 +2,7 @@
 //! added or changed, layered in order, and used to lint imported specs.
 
 use anvil_app::App;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::specs::SpecTarget;
 use anvil_contract::Severity;
@@ -279,12 +280,16 @@ fn rulesets_export_import_and_merge_conflicts_follow_object_kind_rules() {
     target.store.put(kind::API_RULESET, &changed.id, None, None, 0.0, &changed).unwrap();
     let conflict = target.import_preview(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
     assert!(conflict.plan.conflicts.iter().any(|c| c.contains("api_ruleset 'Team'")), "{:?}", conflict.plan.conflicts);
-    target.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    target
+        .import_approved(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge, &ImportApproval::default())
+        .unwrap();
     assert_eq!(target.api_standards().unwrap().rulesets[0].name, "Local version");
 
     let round_trip = new_app(root.path());
     round_trip.set_api_standards_recommended(false).unwrap();
-    round_trip.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    round_trip
+        .import_approved(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Merge, &ImportApproval::default())
+        .unwrap();
     assert!(!round_trip.api_standards().unwrap().include_recommended, "import keeps the local recommended-rules setting");
     let mut imported = ruleset;
     imported.enabled = false;
@@ -309,7 +314,9 @@ fn replace_import_keeps_enabled_state_and_sort_order_for_matching_ruleset_id() {
     let mut local = ruleset.clone();
     local.enabled = true;
     target.store.put(kind::API_RULESET, &local.id, None, None, 7.0, &local).unwrap();
-    target.import(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
+    target
+        .import_approved(&bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace, &ImportApproval::default())
+        .unwrap();
 
     let imported = target.api_standards().unwrap().rulesets;
     assert_eq!(imported.len(), 2);
@@ -348,7 +355,14 @@ fn replace_import_checks_changed_rulesets_at_their_stored_position() {
     let preview =
         target.import_preview(&changed_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
-    let report = target.import(&changed_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
+    let report = target
+        .import_approved(
+            &changed_bundle,
+            Some("bundle passphrase"),
+            anvil_portability::plan::ConflictPolicy::Replace,
+            &ImportApproval::default(),
+        )
+        .unwrap();
     assert!(report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
 
     let unchanged = new_app(root.path());
@@ -358,7 +372,14 @@ fn replace_import_checks_changed_rulesets_at_their_stored_position() {
     let preview =
         unchanged.import_preview(&unchanged_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
     assert!(!preview.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", preview.warnings);
-    let report = unchanged.import(&unchanged_bundle, Some("bundle passphrase"), anvil_portability::plan::ConflictPolicy::Replace).unwrap();
+    let report = unchanged
+        .import_approved(
+            &unchanged_bundle,
+            Some("bundle passphrase"),
+            anvil_portability::plan::ConflictPolicy::Replace,
+            &ImportApproval::default(),
+        )
+        .unwrap();
     assert!(!report.warnings.iter().any(|warning| warning.contains("would not load")), "{:?}", report.warnings);
 }
 
@@ -387,7 +408,7 @@ fn share_safe_bundles_exclude_standards_unless_explicitly_enabled() {
     let (mismatched, _) =
         app.export_with_standards(Some(&ws.meta.id), anvil_portability::ExportMode::ShareSafely, None, false, true).unwrap();
     let target = new_app(dir.path());
-    target.import(&mismatched, None, anvil_portability::plan::ConflictPolicy::Merge).unwrap();
+    target.import_approved(&mismatched, None, anvil_portability::plan::ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     let imported = target.api_standards().unwrap().rulesets;
     assert_eq!(imported.iter().map(|r| r.id).collect::<Vec<_>>(), [ruleset.id, overlay.id]);
     assert_eq!(imported[0].sha256, ruleset.sha256);
@@ -459,7 +480,9 @@ fn duplicate_import_skips_matching_ruleset_hashes_and_combined_limits_refuse_exc
 
     let duplicate_target = new_app(dir.path());
     duplicate_target.add_api_ruleset("local.yaml", TEAM.as_bytes()).unwrap();
-    duplicate_target.import(&bundle, None, anvil_portability::plan::ConflictPolicy::Duplicate).unwrap();
+    duplicate_target
+        .import_approved(&bundle, None, anvil_portability::plan::ConflictPolicy::Duplicate, &ImportApproval::default())
+        .unwrap();
     assert_eq!(duplicate_target.api_standards().unwrap().rulesets.len(), 1);
 
     let full_target = new_app(dir.path());
@@ -473,7 +496,8 @@ fn duplicate_import_skips_matching_ruleset_hashes_and_combined_limits_refuse_exc
     }
     let preview = full_target.import_preview(&bundle, None, anvil_portability::plan::ConflictPolicy::Merge).unwrap();
     assert!(preview.warnings.iter().any(|warning| warning.contains("the import will be refused")), "{:?}", preview.warnings);
-    let err = full_target.import(&bundle, None, anvil_portability::plan::ConflictPolicy::Merge).unwrap_err();
+    let err =
+        full_target.import_approved(&bundle, None, anvil_portability::plan::ConflictPolicy::Merge, &ImportApproval::default()).unwrap_err();
     assert!(err.to_string().contains("32 rulesets"));
     let backup = source.export_backup_with("backup passphrase", anvil_storage::KdfParams::testing()).unwrap().0;
     let preview = full_target.restore_preview(&backup, Some("backup passphrase"), anvil_portability::plan::ConflictPolicy::Merge).unwrap();

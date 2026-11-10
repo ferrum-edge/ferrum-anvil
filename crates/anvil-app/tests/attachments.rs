@@ -95,8 +95,6 @@ fn deleting_the_request_that_holds_an_attached_file_removes_the_content() {
     let app = new_app(root.path());
     let ws = app.create_workspace("W").unwrap().meta.id;
     let att = app.put_attachment("payload.bin", b"attached payload", None).unwrap();
-    // An attached file is kept by an automatic release, even with no owner yet.
-    assert!(!app.release_attachment(&sha(&att)).unwrap(), "attached, not saved yet: kept");
     let a = app.create_request(&ws, None, "a", upload(&att)).unwrap();
     // Edited since: an earlier revision still names the file.
     app.save_request(RequestDefinition { spec: RequestSpec::http("GET", "http://127.0.0.1:9/"), ..a.clone() }).unwrap();

@@ -51,7 +51,7 @@ fn setup(root: &Path, pki: &LabPki, url: &str) {
         early_data: Some(EarlyDataPolicy { enabled: true, extra_methods: vec![] }),
         ..Default::default()
     };
-    app.save_folder(folder.clone()).unwrap();
+    app.save_folder_in_place(folder.clone()).unwrap();
     app.create_request(&ws.meta.id, Some(folder.meta.id), "First", RequestSpec::http("GET", url)).unwrap();
     app.create_request(&ws.meta.id, Some(folder.meta.id), "Second", RequestSpec::http("GET", url)).unwrap();
 }

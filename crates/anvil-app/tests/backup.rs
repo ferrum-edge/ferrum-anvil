@@ -18,7 +18,7 @@ use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::{DnsOverride, EarlyDataPolicy, RedirectPolicy, Theme};
-use anvil_domain::workspace::{DatasetFormat, Meta, ProtectionMode, Scenario, ScenarioStep, UserProfile, Variable};
+use anvil_domain::workspace::{DatasetFormat, Environment, Meta, ProtectionMode, Scenario, ScenarioStep, UserProfile, Variable};
 use anvil_import::ImportOptions;
 use anvil_portability::ExportMode;
 use anvil_portability::plan::{ConflictPolicy, ExistingWorkspace};
@@ -155,7 +155,13 @@ async fn populated(root: &std::path::Path, fixture_url: &str, token_file: &std::
     // A secret no workspace owns, as older builds stored them.
     let profile_secret = SecretRef { id: Id::new(), label: "profile token".into() };
     a.store.put_secret(&profile_secret.id, None, &profile_secret.label, MARKERS[4]).unwrap();
-    a.create_environment(&ws.meta.id, "lab", vec![Variable::plain("base", fixture_url)]).unwrap();
+    a.save_environment(Environment {
+        meta: Meta::new(),
+        workspace_id: ws.meta.id,
+        name: "lab".into(),
+        variables: vec![Variable::plain("base", fixture_url)],
+    })
+    .unwrap();
 
     let mut spec = RequestSpec::http("POST", &format!("{fixture_url}/echo"));
     spec.headers.push(KeyValue::new("X-Marker", MARKERS[1]));
@@ -443,7 +449,7 @@ fn passphrase_format_and_costs_are_checked() {
     let costly = KdfParams { m_cost: backup::MAX_KDF_MEMORY_KIB + 1, ..KdfParams::interactive() };
     assert!(matches!(a.export_backup_with(PASS, costly), Err(AppError::Backup(BackupError::UnsupportedKdf(_)))));
     // A zip bundle is not mistaken for a full backup.
-    let (zip, _) = a.export(None, ExportMode::ShareSafely, None, false).unwrap();
+    let (zip, _) = a.export_with_standards(None, ExportMode::ShareSafely, None, false, false).unwrap();
     assert!(!backup::is_backup(&zip));
 }
 
@@ -530,12 +536,10 @@ fn a_restore_keeps_a_file_attached_here_marked_as_attached() {
 
     // Deleting the restored workspace, the only saved item that names it,
     // keeps it: it was attached here within the grace period, so the draft
-    // may hold it. An automatic release keeps it too.
+    // may hold it.
     b.delete_workspace(&ws.meta.id).unwrap();
     let AttachmentRef::Stored { sha256, .. } = &file else { panic!("a stored attachment") };
     assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]), "released by the workspace delete");
-    assert!(!b.release_attachment(sha256).unwrap(), "still marked as attached here");
-    assert_eq!(b.get_attachment(sha256).unwrap().as_deref(), Some(&content[..]));
 }
 
 #[test]

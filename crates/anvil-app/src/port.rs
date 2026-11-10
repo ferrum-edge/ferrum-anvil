@@ -201,12 +201,8 @@ impl App {
         Ok(g)
     }
 
-    /// What [`App::export`] would write. A full backup is not a bundle: see
-    /// [`App::backup_preview`].
-    pub fn export_preview(&self, ws: Option<&Id>, mode: ExportMode, include_history: bool) -> Result<ExportPreview> {
-        self.export_preview_with_standards(ws, mode, include_history, false)
-    }
-
+    /// What [`App::export_with_standards`] would write. A full backup is
+    /// not a bundle: see [`App::backup_preview`].
     pub fn export_preview_with_standards(
         &self,
         ws: Option<&Id>,
@@ -233,17 +229,8 @@ impl App {
     }
 
     /// Write a bundle of one workspace, or of every workspace when `ws` is
-    /// `None`. A full backup is not a bundle: see [`App::export_backup`].
-    pub fn export(
-        &self,
-        ws: Option<&Id>,
-        mode: ExportMode,
-        passphrase: Option<&str>,
-        include_history: bool,
-    ) -> Result<(Vec<u8>, ExportPreview)> {
-        self.export_with_standards(ws, mode, passphrase, include_history, false)
-    }
-
+    /// `None`; profile API standards travel only with `include_standards`.
+    /// A full backup is not a bundle: see [`App::export_backup`].
     pub fn export_with_standards(
         &self,
         ws: Option<&Id>,
@@ -340,12 +327,6 @@ impl App {
             bundle_sha256,
             withheld_lock: None,
         })
-    }
-
-    /// [`App::import_approved`] with nothing approved: a bundle that claims
-    /// a workspace stored here is refused under Merge and Replace.
-    pub fn import(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
-        self.import_approved(bytes, passphrase, policy, &ImportApproval::default())
     }
 
     /// Apply after taking a restore checkpoint. Objects and secrets are

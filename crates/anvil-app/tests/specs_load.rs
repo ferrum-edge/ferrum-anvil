@@ -10,7 +10,7 @@ use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{Body, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::DnsOverride;
-use anvil_domain::workspace::DatasetFormat;
+use anvil_domain::workspace::{DatasetFormat, Environment, Meta};
 use anvil_import::{ImportOptions, ReimportApproval};
 use anvil_storage::KdfParams;
 use tokio_util::sync::CancellationToken;
@@ -153,7 +153,8 @@ fn preflight_workspace(app: &App) -> (Id, Id, Id) {
     use anvil_domain::workspace::Variable;
     let ws = app.create_workspace("Load").unwrap();
     let vars = vec![Variable::plain("host", "127.0.0.1"), Variable::plain("base", "http://{{$randomFrom 127.0.0.1|example.org}}")];
-    let env = app.create_environment(&ws.meta.id, "lab", vars).unwrap();
+    let env =
+        app.save_environment(Environment { meta: Meta::new(), workspace_id: ws.meta.id, name: "lab".into(), variables: vars }).unwrap();
     let rows = b"host,qaRow,rowId,verb,port\n192.0.2.10,first,1,POST,8080\n198.51.100.7,second,2,PUT,8081\n";
     let dataset = app.create_dataset(&ws.meta.id, "rows", DatasetFormat::Csv, rows, vec![]).unwrap();
     (ws.meta.id, env.meta.id, dataset.meta.id)
@@ -566,7 +567,7 @@ fn load_preflight_keeps_per_run_values_out_of_a_sealed_import_root() {
     let mut sealed = app.folder(&done.root_folder_id.unwrap()).unwrap();
     assert!(sealed.import_root && !sealed.use_workspace_scope);
     sealed.variables.push(Variable::plain("host", "127.0.0.1"));
-    let sealed = app.save_folder(sealed).unwrap();
+    let sealed = app.save_folder_in_place(sealed).unwrap();
     let by_host = || RequestSpec::http("GET", "http://{{host}}:8080/x");
     let inside = app.create_request(&ws, Some(sealed.meta.id), "inside", by_host()).unwrap().meta.id;
     let outside = app.create_request(&ws, None, "outside", by_host()).unwrap().meta.id;
@@ -617,9 +618,9 @@ async fn load_plan_requires_acknowledgement_runs_and_stores_report() {
     let pre = app.load_preflight(&p).unwrap();
     assert_eq!(pre.destinations.len(), 1);
     assert!(pre.destinations[0].starts_with("GET http://127.0.0.1:"), "{:?}", pre.destinations);
-    assert!(app.worker_job(&p, false).is_err(), "never runs without explicit acknowledgement");
+    assert!(app.worker_job_with_authority(&p, false).is_err(), "never runs without explicit acknowledgement");
     let untrusted = LoadPlan { trusted: false, ..p.clone() };
-    assert!(app.worker_job(&untrusted, true).is_err(), "imported plans must be reviewed first");
+    assert!(app.worker_job_with_authority(&untrusted, true).is_err(), "imported plans must be reviewed first");
 
     // Run in-process (the desktop/CLI use the worker process; semantics are identical).
     let job = app.load_job(&p).unwrap();
@@ -730,11 +731,12 @@ fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
     let app = new_app(root.path());
     let ws = app.create_workspace("Load").unwrap();
     let env = app
-        .create_environment(
-            &ws.meta.id,
-            "lab",
-            vec![Variable::plain("local_proxy", "127.0.0.1:4433"), Variable::plain("remote_proxy", "proxy.example.test:4433")],
-        )
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws.meta.id,
+            name: "lab".into(),
+            variables: vec![Variable::plain("local_proxy", "127.0.0.1:4433"), Variable::plain("remote_proxy", "proxy.example.test:4433")],
+        })
         .unwrap();
     let udp = |url: &str, proxy_url: Option<&str>| {
         let mut s = RequestSpec::http("GET", url);

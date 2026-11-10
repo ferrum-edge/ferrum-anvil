@@ -500,8 +500,8 @@ version and import time of that file, and the new import id) describe them.
 The earlier import id is appended to `previous_import_ids`, and the id
 namespace stays the same. Anything that reads the stored original afterwards
 reads the version last applied. The original it replaces is released in the
-same transaction, by the same reference check as `App::release_attachment`:
-it is deleted unless another object still references it (another import of
+same transaction, after a reference check over every stored object: it is
+deleted unless another object still references it (another import of
 the same bytes, a request body, a revision, a dataset, a scenario or a load
 plan) or a user attached the same file, which a request or dataset not saved
 yet may hold (see `docs/storage-and-recovery.md`). A refused apply leaves the

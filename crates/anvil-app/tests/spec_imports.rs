@@ -6,6 +6,7 @@
 mod faults;
 
 use anvil_app::exec::SendOptions;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
 use anvil_app::specs::{SpecSourceRecord, SpecTarget};
@@ -21,7 +22,7 @@ use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::ProxySelection;
 use anvil_domain::tls::{ClientIdentity, HostBinding, ProxyKind, ProxyProfile, TlsProfile};
 use anvil_domain::workload::{JwtSvidConfig, JwtSvidSource};
-use anvil_domain::workspace::{Environment, RequestRevision, Variable, Workspace};
+use anvil_domain::workspace::{Environment, Meta, RequestRevision, Variable, Workspace};
 use anvil_engine::ExecutionContext;
 use anvil_fixtures::GroundTruth;
 use anvil_import::{ImportOptions, ReimportApproval};
@@ -316,7 +317,9 @@ fn destination_with_environment(app: &App) -> (Workspace, Environment) {
     };
     ws.variables.push(from_vault("workspace_key"));
     let vars = vec![from_vault("api_key"), Variable::plain("region", "destination-region")];
-    let env = app.create_environment(&ws.meta.id, "Production", vars).unwrap();
+    let env = app
+        .save_environment(Environment { meta: Meta::new(), workspace_id: ws.meta.id, name: "Production".into(), variables: vars })
+        .unwrap();
     ws.active_environment_id = Some(env.meta.id);
     (app.save_workspace(ws).unwrap(), env)
 }
@@ -374,7 +377,7 @@ fn only_the_user_opens_an_import_root_to_the_destination_on_this_device() {
     let mut edited = app.folder(&root_id).unwrap();
     edited.use_workspace_scope = true;
     edited.import_root = false;
-    let saved = app.save_folder(edited).unwrap();
+    let saved = app.save_folder_in_place(edited).unwrap();
     assert!(saved.import_root && !saved.use_workspace_scope);
     nothing_from_the_destination(&build());
 
@@ -399,10 +402,11 @@ fn only_the_user_opens_an_import_root_to_the_destination_on_this_device() {
     assert!(app.set_import_root_workspace_scope(&plain.meta.id, true).is_err());
 
     // A bundle keeps the import root but never carries the choice.
-    let (bytes, _) = app.export(Some(&dest.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false).unwrap();
+    let (bytes, _) =
+        app.export_with_standards(Some(&dest.meta.id), ExportMode::EncryptedTransfer, Some("export passphrase 1"), false, false).unwrap();
     let other = tempfile::tempdir().unwrap();
     let b = new_app(other.path());
-    let report = b.import(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate).unwrap();
+    let report = b.import_approved(&bytes, Some("export passphrase 1"), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     assert!(report.warnings.iter().any(|w| w.contains("imported collection")), "{:?}", report.warnings);
     let ws_b: Id = report.workspace_ids[0].parse().unwrap();
     let root_b = b.folders(&ws_b).unwrap().into_iter().find(|f| f.import_root).expect("the import root is kept");
@@ -488,7 +492,7 @@ fn an_imported_collection_does_not_use_this_devices_workload_identity_by_default
     // Inherited from the root folder too, inside a multi-auth profile.
     let mut root_folder = app.folder(&root_id).unwrap();
     root_folder.auth = AuthConfig::Multi { profiles: vec![jwt_svid(JwtSvidSource::WorkloadApi)] };
-    app.save_folder(root_folder).unwrap();
+    app.save_folder_in_place(root_folder).unwrap();
     requests.push(app.requests(&dest.meta.id).unwrap().into_iter().find(|q| q.name == "Deep").unwrap());
 
     for q in &requests {
@@ -1145,7 +1149,7 @@ fn a_reimport_applies_a_folders_own_settings_and_keeps_the_users_until_approved(
         // Changed by the user and upstream: kept until approved.
         let mut f = app.folder(&folder).unwrap();
         f.variables.iter_mut().find(|v| v.name == "scope").unwrap().value = SensitiveValue::template("mine");
-        app.save_folder(f).unwrap();
+        app.save_folder_in_place(f).unwrap();
         let v3 = admin("admin");
         let key = format!("folders/{folder}/variables/scope");
         let plan = app.spec_reimport_plan(&latest(&app), &v3).unwrap();
