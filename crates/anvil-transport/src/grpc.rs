@@ -1599,18 +1599,34 @@ async fn connect(
                     None,
                 ));
             };
-            let c = crate::h3::quic_connect(
-                rec,
-                &plan.host,
-                plan.port,
-                &plan.dns,
-                &plan.timeouts,
-                &plan.limits,
-                &tls,
-                crate::h3::client_endpoint,
-                cancel,
-            )
-            .await?;
+            // The total deadline bounds the QUIC setup, as it does the TCP leg's.
+            let connected = {
+                let connect = crate::h3::quic_connect(
+                    rec,
+                    &plan.host,
+                    plan.port,
+                    &plan.dns,
+                    &plan.timeouts,
+                    &plan.limits,
+                    &tls,
+                    crate::h3::client_endpoint,
+                    cancel,
+                );
+                tokio::select! {
+                    r = connect => Some(r),
+                    _ = sleep_until_opt(total_deadline) => None,
+                }
+            };
+            let Some(connected) = connected else {
+                let f = TransportFailure::new(
+                    rec.open_phase().unwrap_or(Phase::QuicHandshake),
+                    FailureKind::TotalTimeout,
+                    "total deadline elapsed during the QUIC connection setup",
+                )
+                .with_deadline(plan.timeouts.total_ms);
+                return Err((f, None));
+            };
+            let c = connected?;
             return Ok(Connected { conn: Conn::H3(c.send), stats: ConnStats::new(), observation: c.observation, quic: Some(c.quic) });
         }
         Leg::Tcp(t) => t,

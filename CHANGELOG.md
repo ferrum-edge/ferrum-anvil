@@ -236,6 +236,11 @@
   example under `text/json` is checked as a JSON value, as drift reads that media type, instead of
   being skipped. A rule turned off (`severity: off`) still has its `description`, `message`,
   `how_to_fix` and `docs_url` type-checked (#520).
+- An HTTP/3 request, and gRPC over HTTP/3, ends at the attempt's total deadline (`total_ms`) while
+  its QUIC connection is set up, while the request is written and while a 0-RTT handshake
+  completes, as `total_timeout`, as HTTP/1.1 and HTTP/2 do. With `total_ms: 5000` an HTTP/3
+  attempt to a UDP port that never answers used to end after the handshake deadline (about 10 s)
+  as `quic_handshake_timeout`, and a stalled upload after the write deadline (#521).
 
 ## [0.1.7] - 2026-11-03
 
