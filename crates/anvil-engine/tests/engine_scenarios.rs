@@ -290,9 +290,18 @@ async fn auth_002_query_key_and_data_020_secrets_redacted_everywhere() {
     let o = run(&e, &ctx).await;
     assert_eq!(o.record.response.as_ref().unwrap().status, 200);
     let json = serde_json::to_string(&o.record).unwrap();
-    for secret in ["PLANTED-SECRET-9f8e7d", "QUERY-KEY-777777"] {
-        assert!(!json.contains(secret), "{secret} leaked into the execution record");
+    for secret in ["PLANTED-SECRET-9f8e7d", "QUERY-KEY-777777", "hunter2-literal"] {
+        assert!(!json.contains(secret), "a planted secret leaked into the execution record");
     }
+    // The preview shows the body: the password field is redacted by name,
+    // the planted variable and the query key by value.
+    let preview = e.preview(&ctx).unwrap();
+    let shown = serde_json::to_string(&preview).unwrap();
+    for secret in ["PLANTED-SECRET-9f8e7d", "QUERY-KEY-777777", "hunter2-literal"] {
+        assert!(!shown.contains(secret), "a planted secret leaked into the request preview");
+    }
+    let body: serde_json::Value = serde_json::from_str(&preview.body_preview).expect("the body preview is JSON");
+    assert!(body["password"] == REDACTED, "the password field is not redacted by name");
     // Ground truth: the server really received the values.
     let hdrs = f.log.last_request_headers().unwrap();
     assert!(hdrs.iter().any(|(n, v)| n == "x-trace" && v == "t-PLANTED-SECRET-9f8e7d"));
@@ -300,6 +309,8 @@ async fn auth_002_query_key_and_data_020_secrets_redacted_everywhere() {
     let (_, target) = requests.last().unwrap();
     assert!(target.contains("note=PLANTED-SECRET-9f8e7d"), "the fixture did not receive the planted variable in the query");
     assert!(target.contains("api_key=QUERY-KEY-777777"), "the fixture did not receive the query key");
+    // The echo answers with the body it received: the literal password went out.
+    assert!(String::from_utf8_lossy(&o.body).contains("hunter2-literal"), "the fixture did not receive the literal password");
 }
 
 #[tokio::test]
