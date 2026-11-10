@@ -732,8 +732,14 @@ sends it (reported).
 Reported: `-k`/`--insecure` (inactive, never applied), `--location-trusted`
 (inactive), `--digest`/`--ntlm`/`--negotiate`/`--aws-sigv4`, proxies, client
 certificates and CA files, `--resolve`/`--connect-to`, `-T` uploads, `@file`
-data, cookie-jar files, unknown options, extra URLs. Output-only flags
-(`-s`, `-v`, `-o`, …) are ignored.
+data, cookie-jar files, `-K`/`--config` files, unknown options, extra URLs.
+Output-only flags (`-s`, `-v`, `-o`, …) are ignored. The value of an option
+that is not imported is never read as the URL: about 80 more of curl's
+value-taking options (`--unix-socket`, `--retry-max-time`, `--proxy-header`,
+`--tls-max`, `--noproxy`, the SOCKS, mail and FTP options, …) are skipped
+with their value and reported, and a bare word right after an option the
+importer does not know is taken as that option's value when a URL with a
+scheme follows it.
 
 ## HAR 1.1/1.2
 
