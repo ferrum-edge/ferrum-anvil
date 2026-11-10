@@ -83,11 +83,13 @@ pub fn server_config(opts: &TlsServerOptions) -> anyhow::Result<Arc<ServerConfig
 
 /// Common name of the first presented client certificate, if any.
 pub fn client_cn(conn: &rustls::ServerConnection) -> Option<String> {
-    let certs = conn.peer_certificates()?;
-    let first = certs.first()?;
-    // Minimal CN extraction without a full X.509 parser: look for the CN OID
-    // (2.5.4.3 = 55 04 03) followed by a UTF8String/PrintableString.
-    let der = first.as_ref();
+    cn_from_der(conn.peer_certificates()?.first()?.as_ref())
+}
+
+/// Common name of a DER certificate (the subject's, the last CN in it).
+/// Minimal extraction without a full X.509 parser: the CN OID (2.5.4.3 =
+/// 55 04 03) followed by a UTF8String/PrintableString.
+pub fn cn_from_der(der: &[u8]) -> Option<String> {
     let mut last = None;
     for i in 0..der.len().saturating_sub(5) {
         if der[i] == 0x55 && der[i + 1] == 0x04 && der[i + 2] == 0x03 {
