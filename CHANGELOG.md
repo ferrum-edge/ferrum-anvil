@@ -30,6 +30,12 @@
   refusal before routing because the received `X-Ferrum-Hops` count reached the hop limit. It
   names a routing loop, a long gateway chain and a caller-supplied count as possible causes, and
   does not claim how many gateways the request passed through.
+- The desktop load plan editor can delete the selected dataset (**Delete dataset…**, confirmed in
+  the window). That removes its linked-file binding, and its stored file if nothing else uses it. A
+  plan or scenario still naming it is refused when it runs (#530).
+- Delete a workspace: **Delete this workspace…** in the workspace picker (confirmed by typing the
+  workspace's name; its open sessions and requests in flight are stopped first) and `anvil workspace
+  delete <workspace> --confirm-delete` (an id, or an exact name no other workspace has) (#544).
 
 ### Security
 
@@ -168,6 +174,36 @@
   used to leave out (and `anvil history` failed on) are now listed, and fail only when opened:
   one whose stored response body no longer opens, and an authentic record whose listed fields
   decode but whose other fields do not. No storage format change.
+- A complete 2xx response body over the 256 KiB the diagnosis inspects is no longer an application
+  `success` when it could hide a fault. A SOAP envelope that large (in any response), the response
+  to a request with a SOAP or GraphQL body, and an MCP operation's JSON-RPC response now give
+  `not_evaluated` (for SOAP and GraphQL requests, "not determined") with a `partial_visibility`
+  warning. Large plain JSON, files and other XML are still judged by their status. Load runs count
+  such SOAP and GraphQL units as `application.not_determined_from_body` (#510).
+- Rulesets refuse the rule key `recommended` as unknown. It was accepted but had no effect, so a
+  ported Spectral rule marked `recommended: false` still ran (#520).
+- With unsaved edits, the Runner's Run saves the shown run options before running, as the load
+  editor's Run… does. Previously it ran the stored options (#518).
+- A drop on a request row in the request tree files the dragged node in that request's folder.
+  Previously the drop fell through to the sidebar and moved the node to the end of the root (#517).
+- `anvil load run` returns exit code 2 whenever a unit failed an assertion, and 1 only otherwise (a
+  transport failure, timeout or application failure, or a partial or unfinished run), the same order
+  as `anvil send` and `anvil run`. Before, 1 took precedence over 2. `docs/load.md` lists the exit
+  codes (#528).
+- Recording a send skips the history-retention scan and blob sweep when no record is too old and all
+  fit the size budget. Opening a profile releases history bodies that no record uses (#531).
+- Request-context checks decrypt a queried kind's objects only when one of them changed since the
+  context was built, and then once per check instead of twice per query. Folder runs no longer
+  decrypt the workspace once per folder (#531).
+- Collection runs scrub remembered sensitive values from a response body in one pass instead of one
+  pass per value. Overlapping values are now redacted as one span (#532).
+- Reimport scope diffs and applying a scope plan look units, environments, folders and variables up
+  by key instead of scanning lists (#532).
+- The worker → controller `error` message carries the refusal kind (`WorkerMessage::Error { error:
+  WorkerError }`) (#537).
+- The AUTH-X04/X05, AUTH-017 and 425 diagnostics regression tests run against every embedded Ferrum
+  catalog, not only 0.9.5/0.9.7 (#540).
+- `docs/completion-report.md` dates its source and website rows 2026-11-10 (#545).
 
 ### Removed
 
@@ -184,6 +220,25 @@
   that do not request a certificate, are unaffected. `dtls_edge_interop.rs` now runs Anvil's
   client against a DTLS 1.3 listener that omits the extension, as v0.9.20 does, and the
   `dimpl-edge` (0.6.1) test dependency is gone.
+- The lock policy's `clear_clipboard_on_lock` and `run_policy` settings and the `autosave` app
+  setting, which nothing read. Turning off clipboard clearing is no longer reported or confirmed as
+  weakening the lock policy. Locking never cleared the clipboard, and the storage docs now say so.
+  Stored settings that carry the fields still open (#529).
+- `App::run_dataset`, `App::export`, `App::export_preview`, `App::import`,
+  `App::create_environment`, `App::save_folder`, `App::release_attachment`, `App::worker_job`,
+  `App::oauth_sign_in`, `LoadRunGuard::is_stopped` and `anvil_portability::bundle::{prepare,
+  preview, write}`, which only tests called; use `export_with_standards`,
+  `export_preview_with_standards`, `import_approved`, `save_environment`, `save_folder_in_place`,
+  `worker_job_with_authority`, `build_context_off_runtime` + `oauth_sign_in_with` and the
+  `*_redacting` bundle functions (#534).
+- Lab: the scenario branches, helpers (`release_at_least`, `release_from_through_pin`) and
+  early-data relay settle time for retired Ferrum Edge releases (v0.9.5–v0.9.15); the lab expects
+  v0.9.20's signals only (#540).
+- The unused `search` and `drift_revise` IPC commands (and `App::search`). The sidebar filters the
+  tree itself, and saving a revised description uses `drift_revise_exact` (#544).
+- `scripts/cli-vertical-slice.sh`, `apps/desktop/assets/icon-source.png` and the twelve application
+  icons not in `bundle.icon` (`64x64.png`, `icon.png`, `StoreLogo.png`, the `Square*Logo.png` set)
+  (#546).
 
 ### Fixed
 
@@ -352,6 +407,59 @@
 - WSDL import: integer and decimal facets bound the sample outside the default sample range
   (`minInclusive=-100 maxInclusive=-1` on `xsd:int` gave `1`), a lone `maxInclusive` included, and
   facets no value of the type satisfies are reported as `contradictory_schema` (#538).
+- With send anyway, GraphQL variables that are not valid JSON are reported as a `lint_bypassed`
+  warning ("…; the request was sent without variables") instead of being dropped silently (#524).
+- Contract drift merges the undeclared status, media type, query parameter and request type
+  observations of every path that shares a Path Item into one suggestion. Previously the last path's
+  inferred body replaced the others' (#519).
+- History rows without an HTTP status (TCP/UDP sessions, transport failures) are shown in the error
+  colour only when the exchange failed. The history listing now carries each record's transport and
+  application outcome (#517).
+- The desktop app reports backend refusals that about 40 actions and loaders ignored. Affected:
+  reports, Settings, folder settings, environments, profiles, scenarios, OAuth sign-out, DPoP key
+  generation, Store in vault, the file and certificate pickers, and the Workbench tree, history and
+  list refreshes. Before, these showed nothing or stayed "Loading…" forever. A refused environment
+  or scenario delete keeps the item open (#515).
+- A PKCS#12 import that was stored just before the profile locked is no longer reported as `LOCKED`,
+  so picking the file again after unlocking no longer stores a second copy. Like the private-key
+  import, the write is fenced inside the vault transaction (#515).
+- MCP executions no longer redact findings and inferred notes a second time after the full metadata
+  pass (#526).
+- A share-safely export, and its preview, lists each vault secret it leaves out by label (`secret
+  'label' (id)`), never its value; the list was always empty (#534).
+- An import, full-backup restore, spec import or spec reimport that its checks refuse no longer
+  leaves a `VACUUM INTO` checkpoint of the whole database behind; a committed one keeps its
+  checkpoint (#536).
+- A load run the worker refuses reaches the app with its own kind and message (no doubled "invalid
+  load plan:" prefix; a LOAD-013 refusal stays typed; a host/worker mismatch reads "worker protocol:
+  …") (#537).
+- The load report's WebSocket close table is bounded: codes outside 1000–4999, and any past the
+  first 16 distinct ones, are counted under "other" (code 0), so a peer cannot grow it with a code
+  per session (#537).
+- The load timeline CSV leaves `success_p50_us`/`success_p99_us` empty for a second with no
+  successful unit instead of writing 0 (#537).
+- cURL import never takes an option's value for the URL: about 80 more value-taking curl options
+  (`--unix-socket`, `--retry-max-time`, `--proxy-header`, `--tls-max`, `-K`/`--config`, `--noproxy`,
+  …) are skipped with their value and reported, and a bare word after an unknown option is taken as
+  its value when a URL follows (#538).
+- `plugin.trigger.query_semicolon_refused` (Ferrum Edge 0.9.20 catalog) is addressed to the caller;
+  its owner was misspelled `client` and read as unknown (#539).
+- PROXY-protocol header findings (`protocol.proxy_header`) report rule version 2, the version that
+  covers HTTP-family connections (#539).
+- Ferrum catalog outcomes of the `generic`, `l4`, `proxy` and `size_limit` families get their own
+  titles instead of "Ferrum Edge outcome" (#539).
+- Lab: PROTO-002, PROTO-014, PROTO-016 and PROTO-019 ground-truth checks only count fixture traffic
+  from their own run (#542).
+- HTTP/3 responses keep bytes the server already sent when it closes the connection before ending
+  the stream. The vendored h3 now delivers buffered frames and body before it reports the connection
+  error (ferrum-edge's h3 patch 001). Trailers that arrive before a late end of stream (FIN) are
+  recorded when the body idle deadline, the total deadline or a cancel ends the wait, instead of
+  being dropped (patch 003). A gRPC call over HTTP/3 keeps the status in those trailers, and its
+  deadline failure no longer says the status is unknown when one was received (#547).
+- Tests that claimed more than they checked: which secrets a context looks up when it is built (the
+  selected proxy profile's password only; an OAuth client secret or vault variable only for a fixed
+  endpoint that passes its policy) is now tested directly, and the AUTH-002 redaction test checks
+  the literal password it plants (#543).
 
 ## [0.1.7] - 2026-11-03
 
