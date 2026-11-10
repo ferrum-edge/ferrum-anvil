@@ -78,7 +78,8 @@ pub struct DiagnosticInput<'a> {
 pub struct BodyFacts {
     /// Top-level JSON `error` string, if the body is a JSON object with one.
     pub json_error: Option<String>,
-    /// Canonical JSON text of the body (when valid JSON, ≤ 64 KiB).
+    /// The parsed body, when it is valid JSON of at most `MAX_PARSE` bytes
+    /// (256 KiB).
     pub json_canonical: Option<serde_json::Value>,
     pub soap_fault: Option<SoapFault>,
     pub graphql: Option<GraphQlResult>,
