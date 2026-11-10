@@ -1483,19 +1483,24 @@ fn ingest_private_key(
 }
 
 /// PKCS#12 remains vault-only and is stored as base64. This command has
-/// no plaintext-return mode and accepts only a PKCS#12 chooser grant.
+/// no plaintext-return mode and accepts only a PKCS#12 chooser grant. As for
+/// a private key, the write is fenced against a lock or profile switch, and a
+/// committed reference remains a success even if a lock follows the commit
+/// (so picking the bundle again after unlocking does not store a second copy).
 #[tauri::command]
 pub async fn import_pkcs12_file(handle: AppHandle, grant: String, workspace_id: String, label: String) -> R<SecretRef> {
-    blocking(&handle, move |st| ingest_pkcs12(st, &grant, &workspace_id, &label)).await
+    let seen = handle.state::<DesktopState>().epoch();
+    blocking_unchecked(&handle, move |st| ingest_pkcs12(st, seen, &grant, &workspace_id, &label)).await
 }
 
-fn ingest_pkcs12(st: &DesktopState, grant: &str, workspace_id: &str, label: &str) -> R<SecretRef> {
+fn ingest_pkcs12(st: &DesktopState, seen: u64, grant: &str, workspace_id: &str, label: &str) -> R<SecretRef> {
     use base64::Engine as _;
     let app = st.app()?;
     let file = st.file_grants.read(grant, FilePurpose::Pkcs12File).map_err(|err| err.to_string())?;
     let bytes = zeroize::Zeroizing::new(file.bytes);
     let text = zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(&*bytes));
-    app.set_secret(&id(workspace_id)?, label, &text).map_err(e)
+    // Checked inside the vault transaction; never takes the app lock there.
+    app.set_secret_fenced(&id(workspace_id)?, label, &text, || st.epoch() == seen).map_err(e)
 }
 
 #[cfg(test)]
@@ -1869,7 +1874,7 @@ pub(crate) mod tests {
         let path = root.0.join("client.p12");
         std::fs::write(&path, [0, 1, 2, 255]).unwrap();
         let grant = st.file_grants.grant_read(FilePurpose::Pkcs12File, &path).unwrap();
-        let secret = ingest_pkcs12(&st, &grant.token, &workspace.to_string(), "bundle").unwrap();
+        let secret = ingest_pkcs12(&st, st.epoch(), &grant.token, &workspace.to_string(), "bundle").unwrap();
         assert_eq!(serde_json::to_value(&secret).unwrap(), serde_json::json!({ "id": secret.id, "label": "bundle" }),);
         let (_, stored) = app.store.get_workspace_secret(&secret.id, &workspace).unwrap().unwrap();
         assert_eq!(&*stored, "AAEC/w==");
@@ -1880,11 +1885,16 @@ pub(crate) mod tests {
             } else {
                 st.file_grants.grant_read(purpose, &path).unwrap()
             };
-            assert!(ingest_pkcs12(&st, &grant.token, &workspace.to_string(), "confused").is_err());
+            assert!(ingest_pkcs12(&st, st.epoch(), &grant.token, &workspace.to_string(), "confused").is_err());
         }
         assert_eq!(app.store.list_secret_ids(Some(&workspace)).unwrap().len(), 1);
+        // A lock or profile switch since the command started (another epoch)
+        // stores nothing.
+        let grant = st.file_grants.grant_read(FilePurpose::Pkcs12File, &path).unwrap();
+        assert_eq!(ingest_pkcs12(&st, st.epoch().wrapping_add(1), &grant.token, &workspace.to_string(), "stale"), Err("LOCKED".into()));
+        assert_eq!(app.store.list_secret_ids(Some(&workspace)).unwrap().len(), 1);
         st.lock();
-        assert_eq!(ingest_pkcs12(&st, "unknown", &workspace.to_string(), "locked"), Err("LOCKED".into()),);
+        assert_eq!(ingest_pkcs12(&st, st.epoch(), "unknown", &workspace.to_string(), "locked"), Err("LOCKED".into()),);
     }
 
     /// A registered attempt, and the gate of its writes.
