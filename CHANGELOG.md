@@ -239,6 +239,9 @@
 - cURL and HAR import read URL userinfo only inside the authority, which ends at the first `/`,
   `?` or `#`. `curl 'https://api.example.com?email=a@b.com'` used to import as a request to
   `https://b.com` with Basic auth for the user `api.example.com?email=a` (#511).
+- The desktop response Body tab opens each result in a view its body has (Pretty, Raw or Hex).
+  Switching between request tabs used to keep the previous result's mode, so an image after a
+  JSON response, or the reverse, showed an empty body until a mode button was clicked (#512).
 
 ## [0.1.7] - 2026-11-03
 
