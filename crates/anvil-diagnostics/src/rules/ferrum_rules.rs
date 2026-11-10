@@ -33,11 +33,15 @@ fn scope_for_family(f: &str) -> SourceScope {
     }
 }
 
+/// The owner a catalog outcome names, spelled as the contract's [`Owner`]
+/// (`catalog_drift.rs` requires that spelling); anything else is `Unknown`.
 fn owner_from(s: &str) -> Owner {
     match s {
         "caller" => Owner::Caller,
         "gateway_operator" => Owner::GatewayOperator,
         "api_owner" => Owner::ApiOwner,
+        "network_administrator" => Owner::NetworkAdministrator,
+        "identity_provider" => Owner::IdentityProvider,
         _ => Owner::Unknown,
     }
 }
