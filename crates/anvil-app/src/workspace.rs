@@ -599,19 +599,6 @@ impl App {
         }
     }
 
-    pub fn search(&self, ws: &Id, query: &str) -> Result<Vec<RequestDefinition>> {
-        let q = query.to_lowercase();
-        Ok(self
-            .requests(ws)?
-            .into_iter()
-            .filter(|r| {
-                r.name.to_lowercase().contains(&q)
-                    || r.spec.url.to_lowercase().contains(&q)
-                    || r.tags.iter().any(|t| t.to_lowercase().contains(&q))
-            })
-            .collect())
-    }
-
     pub fn tree(&self, ws: &Id) -> Result<Vec<TreeNode>> {
         let folders = self.folders(ws)?;
         let reqs = self.requests(ws)?;

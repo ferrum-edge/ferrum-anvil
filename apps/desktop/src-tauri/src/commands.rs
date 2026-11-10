@@ -495,11 +495,6 @@ pub fn request_delete(st: State<'_, DesktopState>, request_id: String) -> R<()> 
     st.app()?.delete_request(&id(&request_id)?).map_err(e)
 }
 
-#[tauri::command]
-pub fn search(st: State<'_, DesktopState>, workspace_id: String, query: String) -> R<Vec<RequestDefinition>> {
-    st.app()?.search(&id(&workspace_id)?, &query).map_err(e)
-}
-
 // ------------------------------------------------------------------ environments & secrets
 
 #[tauri::command]
