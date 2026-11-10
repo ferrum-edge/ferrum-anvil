@@ -253,6 +253,12 @@
   or wrapping to an already-expired token in a release build. A JWT-SVID whose `exp` is far out of
   range fails its expiry check instead of wrapping into a pass, and its cache refresh time no longer
   overflows (#523).
+- A URL without a scheme that carries a URL in its query
+  (`localhost:8080/cb?next=https://example.com`) gets the inferred `http://` instead of failing
+  with "scheme 'localhost:8080/cb?next=https' is not supported": only a leading `scheme://` is a
+  scheme, in request preparation and in the load and OAuth worker preflights' origin split. A
+  `tls://` TCP session or a UDP/DTLS session with the early-data setting on now notes that 0-RTT
+  is not used for sessions, as WebSocket, SSE and gRPC sessions do (#524).
 
 ## [0.1.7] - 2026-11-03
 
