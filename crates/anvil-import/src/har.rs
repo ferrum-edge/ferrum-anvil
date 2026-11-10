@@ -39,7 +39,7 @@ pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
     b.workspace.name = if creator.is_empty() { "HAR import".into() } else { format!("HAR import ({creator})") };
     b.title = Some(b.workspace.name.clone());
     b.workspace.auth = AuthConfig::None;
-    let entries = log.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    let entries = log.get("entries").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let mut dropped: BTreeSet<String> = BTreeSet::new();
     for (i, e) in entries.iter().enumerate() {
         let at = format!("/log/entries/{i}");
@@ -170,7 +170,7 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String
         return Body::None;
     }
     let essence = media_essence(&mime);
-    let params = pd.get("params").and_then(Value::as_array).cloned().unwrap_or_default();
+    let params = pd.get("params").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     if essence == "multipart/form-data" {
         if params.is_empty() && !text.is_empty() {
             b.report.unsupported(
