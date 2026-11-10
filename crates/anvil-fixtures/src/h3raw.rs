@@ -1,7 +1,7 @@
 //! A raw HTTP/3 origin for tests of the client's own limits.
 //!
-//! It writes hand-built frames (RFC 9114 §7) with QPACK static-table field
-//! lines (RFC 9204 §4.5) instead of going through h3, so it can send what a
+//! It writes hand-built frames (RFC 9114 §7) with QPACK field lines that use
+//! no dynamic table (RFC 9204 §4.5) instead of going through h3, so it can send what a
 //! conforming server library would not: a HEADERS frame that declares more
 //! than the client accepts, a field section over the client's
 //! `SETTINGS_MAX_FIELD_SECTION_SIZE`, a body that never ends, or trailers
@@ -355,6 +355,18 @@ pub fn indexed(index: u8) -> u8 {
 /// and `value` sent as it is (no Huffman coding).
 pub fn literal(out: &mut Vec<u8>, index: u8, value: &[u8]) {
     out.push(0x50 | index);
+    prefix_int(out, 7, value.len());
+    out.extend_from_slice(value);
+}
+
+/// A literal field line with a literal (lowercase) `name` and `value`, both
+/// sent as they are (no Huffman coding; RFC 9204 §4.5.6).
+pub fn literal_name(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
+    // 0b001N_Hxxx with N = 0 and H = 0: the name length has a 3-bit prefix.
+    let first = out.len();
+    prefix_int(out, 3, name.len());
+    out[first] |= 0x20;
+    out.extend_from_slice(name);
     prefix_int(out, 7, value.len());
     out.extend_from_slice(value);
 }
