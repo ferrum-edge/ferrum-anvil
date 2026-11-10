@@ -16,11 +16,11 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-656 Rust crates, 4 npm packages.
+658 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
-| MIT OR Apache-2.0 | 300 |
+| MIT OR Apache-2.0 | 301 |
 | MIT | 152 |
 | Apache-2.0 OR MIT | 85 |
 | MIT/Apache-2.0 | 26 |
@@ -36,6 +36,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | Apache-2.0/MIT | 3 |
 | MIT OR Apache-2.0 OR Zlib | 3 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 2 |
+| CC0-1.0 OR MIT-0 OR Apache-2.0 | 2 |
 | MIT OR Zlib OR Apache-2.0 | 2 |
 | Zlib | 2 |
 | (MIT OR Apache-2.0) AND Apache-2.0 | 1 |
@@ -49,7 +50,6 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | BSD-2-Clause OR Apache-2.0 OR MIT | 1 |
 | BSD-3-Clause AND MIT | 1 |
 | BSD-3-Clause/MIT | 1 |
-| CC0-1.0 OR MIT-0 OR Apache-2.0 | 1 |
 | ISC AND (Apache-2.0 OR ISC) | 1 |
 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | 1 |
 | MIT-0 | 1 |
@@ -68,7 +68,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.38.0 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (656)
+## Rust crates (658)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -160,6 +160,7 @@ the modified file under MPL-2.0.
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/concurrent-queue |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
+| constant_time_eq | 0.6.1 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://codeberg.org/cesarb/constant_time_eq |
 | cookie | 0.18.2 | MIT OR Apache-2.0 | https://github.com/SergioBenitez/cookie-rs |
 | cookie_store | 0.22.1 | MIT OR Apache-2.0 | https://github.com/pfernie/cookie_store |
 | core-foundation | 0.9.4 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
@@ -462,7 +463,7 @@ the modified file under MPL-2.0.
 | prost-types | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | protox | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
 | protox-parse | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
-| psl | 2.1.245 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
+| psl | 2.1.247 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
 | psl-types | 2.0.11 | MIT/Apache-2.0 | https://github.com/addr-rs/psl-types |
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
@@ -499,6 +500,7 @@ the modified file under MPL-2.0.
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki | 0.103.16 | ISC | https://github.com/rustls/webpki |
+| rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
 | salsa20 | 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/stream-ciphers |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
@@ -718,7 +720,7 @@ the modified file under MPL-2.0.
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| zip | 9.2.0 | MIT | https://github.com/zip-rs/zip2 |
+| zip | 9.5.0 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |
