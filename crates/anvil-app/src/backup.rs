@@ -379,7 +379,7 @@ pub fn seal(
     passphrase: &str,
     kdf: KdfParams,
 ) -> std::result::Result<Vec<u8>, BackupError> {
-    if passphrase.len() < MIN_PASSPHRASE_LEN {
+    if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
         return Err(BackupError::WeakPassphrase);
     }
     check_kdf(&kdf)?;
@@ -522,7 +522,7 @@ impl App {
     /// [`App::export_backup`] with explicit Argon2id costs (within the bounds
     /// of [`check_kdf`]).
     pub fn export_backup_with(&self, passphrase: &str, kdf: KdfParams) -> Result<(Vec<u8>, BackupPreview)> {
-        if passphrase.len() < MIN_PASSPHRASE_LEN {
+        if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
             return Err(BackupError::WeakPassphrase.into());
         }
         check_kdf(&kdf)?;
@@ -1076,7 +1076,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
 }
 
 /// Secret references (`{"kind":"secret","secret":{"id":..,"label":..}}`) in `v`.
-fn secret_refs(v: &Value, out: &mut Vec<(String, String)>) {
+pub(crate) fn secret_refs(v: &Value, out: &mut Vec<(String, String)>) {
     match v {
         Value::Object(m) => {
             if m.get("kind").and_then(Value::as_str) == Some("secret")

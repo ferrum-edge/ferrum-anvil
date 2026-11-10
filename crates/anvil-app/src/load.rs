@@ -410,13 +410,6 @@ impl App {
                         }
                         Err(UrlProblem::PerRun(origin)) => return Err(refuse(label, origin)),
                     };
-                    if label == "OAuth token URL" {
-                        // Eligibility is the acquisition sink's policy: literal
-                        // loopback on a direct route, whatever the DNS overrides.
-                        let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
-                        anvil_engine::oauth_http::require_token_endpoint_route(&proven.probe, ctx, &settings, proven.port_varies)
-                            .map_err(AppError::Invalid)?;
-                    }
                     let target = anvil_engine::prepare::parse_target(
                         &proven.probe,
                         anvil_load::protocol::send_schemes(Protocol::Http),
@@ -438,7 +431,9 @@ impl App {
                 }
             }
         }
-        destinations.dedup();
+        // Each destination once, in the order the plan first reaches it.
+        let mut listed = std::collections::HashSet::new();
+        destinations.retain(|d| listed.insert(d.clone()));
         let (workload, max_duration_secs, peak_target) = describe(p);
         let mut warnings = Vec::new();
         if !p.trusted {

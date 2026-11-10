@@ -232,6 +232,23 @@ fn load_preflight_allows_per_run_values_outside_a_fixed_loopback_origin() {
     assert_eq!(app.load_preflight(&p).unwrap().destinations, vec!["{{$randomFrom GET|POST}} http://127.0.0.1:8080".to_string()]);
 }
 
+/// The confirmation lists a destination several steps share once, in the
+/// order the plan first reaches it, however the steps interleave (#536).
+#[test]
+fn load_preflight_lists_each_destination_once_in_plan_order() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let (ws, env, _) = preflight_workspace(&app);
+    let create = |name: &str, method: &str, path: &str| {
+        let spec = RequestSpec::http(method, &format!("http://127.0.0.1:8080{path}"));
+        app.create_request(&ws, None, name, spec).unwrap().meta.id
+    };
+    let chain = vec![create("list", "GET", "/items"), create("add", "POST", "/items"), create("read", "GET", "/items/1")];
+    let p = app.save_load_plan(chain_plan(ws, env, chain, None)).unwrap();
+    let pre = app.load_preflight(&p).unwrap();
+    assert_eq!(pre.destinations, vec!["GET http://127.0.0.1:8080".to_string(), "POST http://127.0.0.1:8080".to_string()]);
+}
+
 #[test]
 fn load_preflight_uses_transport_dns_overrides_for_loopback_judgments() {
     let root = tempfile::tempdir().unwrap();

@@ -329,6 +329,29 @@
   scheme, in request preparation and in the load and OAuth worker preflights' origin split. A
   `tls://` TCP session or a UDP/DTLS session with the early-data setting on now notes that 0-RTT
   is not used for sessions, as WebSocket, SSE and gRPC sessions do (#524).
+- A bundle import lists every vault secret the bundle leaves behind, as a full backup's restore
+  does: a proxy profile's password, an integration's credentials and the secrets of datasets,
+  scenarios and load plans were missing from the list (#535).
+- An export with history that has more than 1,000 records for a workspace lists the older ones
+  among its excluded items instead of leaving them out silently (#535).
+- A send whose stored attachment no longer opens fails with the storage error, and an integrity
+  failure locks the profile as other context reads do; it used to report the file as missing
+  from the workspace (#536).
+- A load run's confirmation lists each destination once, in the order the plan first reaches
+  it; a destination that recurred after another step's was listed again (#536).
+- Export and full-backup passphrases need 8 characters, as their messages say, not 8 bytes (#536).
+- A load plan whose chain has more than 64 steps is refused when it is saved; it used to save and
+  be refused only when run (#537).
+- The load report's timeline table shows "—" for the p50 and p99 of a second with no successful
+  unit, as the chart and the summary tiles do, instead of "0 µs" (#537).
+- cURL import: `--max-redirs -1` (curl's "unlimited") follows up to 255 redirects, with a
+  `curl_unlimited_redirects` warning; it was imported as "follow at most 0 redirects" (#538).
+- OpenAPI import: a request body declared only as a media range (`*/*`, `text/*`, `application/*`,
+  or Swagger 2.0 `consumes: ["*/*"]`) no longer sends the range as its `Content-Type`; the body's
+  own type applies (`application/json` for a generated JSON body) (#538).
+- WSDL import: integer and decimal facets bound the sample outside the default sample range
+  (`minInclusive=-100 maxInclusive=-1` on `xsd:int` gave `1`), a lone `maxInclusive` included, and
+  facets no value of the type satisfies are reported as `contradictory_schema` (#538).
 
 ## [0.1.7] - 2026-11-03
 

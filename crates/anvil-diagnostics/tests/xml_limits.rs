@@ -106,7 +106,7 @@ fn redeclared(n: usize) -> String {
 }
 
 fn application(d: &Diagnosis) -> ApplicationState {
-    assess_application(Protocol::Http, &ProtocolStatus::Http { status: 200, reason: None }, &d.body, true)
+    assess_application(&ProtocolStatus::Http { status: 200, reason: None }, &d.body, true)
 }
 
 #[test]

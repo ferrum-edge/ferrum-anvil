@@ -295,8 +295,11 @@ fn datagrams(log: &anvil_fixtures::GroundTruthLog) -> usize {
     log.entries().iter().filter(|e| matches!(e.event, GroundTruth::DatagramReceived { .. })).count()
 }
 
-fn fault_applied(log: &anvil_fixtures::GroundTruthLog, fault: &str) -> bool {
-    log.entries().iter().any(|e| e.event == GroundTruth::FaultApplied { fault: fault.into() })
+/// Whether the fixture applied `fault` after entry `from` of its log. The
+/// log outlives a scenario (and the untrusted pass reruns it on the same
+/// fixtures), so an earlier entry never proves this run reached the fault.
+fn fault_applied(log: &anvil_fixtures::GroundTruthLog, from: usize, fault: &str) -> bool {
+    log.entries().iter().skip(from).any(|e| e.event == GroundTruth::FaultApplied { fault: fault.into() })
 }
 
 fn quic_phases_ok(c: &mut Checks, a: Option<&AttemptObservation>) {
@@ -501,11 +504,12 @@ fn trust007_sse_h3(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let faults_from = env.fx.sse_abort.log.entries().len();
         let o = send(env, &sse_ctx(env, &format!("https://{HTTPS}/sse-abort/?count=3&interval=40"), 0, 5_000, false)).await;
         c.add(
             CheckKind::GroundTruth,
             "backend aborted its event stream after the events",
-            fault_applied(&env.fx.sse_abort.log, "sse_abort_mid_stream"),
+            fault_applied(&env.fx.sse_abort.log, faults_from, "sse_abort_mid_stream"),
             "",
         );
         let (events, by) = sse_state(&o).map(|s| (s.1, Some(s.2))).unwrap_or((0, None));
@@ -541,6 +545,7 @@ fn proto018_h3_reconnect(env: &Env) -> Fut<'_> {
         fresh_connections(env);
         let from = op_from(env);
         let before = env.fx.sse_flaky.log.requests().len();
+        let faults_from = env.fx.sse_flaky.log.entries().len();
         let o = send(env, &sse_ctx(env, &format!("https://{HTTPS}/sse-flaky/?interval=40"), 0, 5_000, true)).await;
         let atts = &o.record.attempts;
         c.add(
@@ -583,7 +588,12 @@ fn proto018_h3_reconnect(env: &Env) -> Fut<'_> {
             ids == vec![None, Some("2".to_string())],
             format!("{ids:?}"),
         );
-        c.add(CheckKind::GroundTruth, "the backend aborted the first stream", fault_applied(&env.fx.sse_flaky.log, "sse_flaky_abort"), "");
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend aborted the first stream",
+            fault_applied(&env.fx.sse_flaky.log, faults_from, "sse_flaky_abort"),
+            "",
+        );
         c.absent_prefix(&o, "ferrum.token");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "h3x-sse-flaky").await }
     })

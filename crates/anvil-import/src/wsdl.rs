@@ -1458,6 +1458,48 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         String::new()
     }
 
+    /// An integer within the type's `bounds` and the declared facets. With no
+    /// facet the `default` sample range applies; with one, the other side of
+    /// the range is up to 1000 from it. Facets no integer of the type
+    /// satisfies are reported and the minimum is used, as the OpenAPI
+    /// generator does.
+    fn int_sample(&mut self, (min, max): (i128, i128), default: (i128, i128), f: Facets, at: Node) -> String {
+        // `as` saturates (and maps NaN to 0): a facet past the type's bounds
+        // stays past them and is reported below.
+        let lo = f.min.map(|m| (m.ceil() as i128).max(min));
+        let hi = f.max.map(|m| (m.floor() as i128).min(max));
+        let (lo, hi) = match (lo, hi) {
+            (None, None) => default,
+            (Some(lo), None) => (lo, lo.saturating_add(1000).min(max)),
+            (None, Some(hi)) => (hi.saturating_sub(1000).max(min), hi),
+            (Some(lo), Some(hi)) => (lo, hi),
+        };
+        if lo > hi {
+            self.warn("contradictory_schema", at, format!("no integer of this type lies within [{lo}, {hi}]; minimum used"));
+            return lo.to_string();
+        }
+        self.rng.range_i128(lo, hi).to_string()
+    }
+
+    /// A decimal within the declared facets, rounded to two places; with one
+    /// facet, the other side of the range is 1000 from it. Facets no value
+    /// satisfies are reported and the minimum is used.
+    fn decimal_sample(&mut self, f: Facets, at: Node) -> String {
+        let (lo, hi) = match (f.min, f.max) {
+            (None, None) => (1.0, 1001.0),
+            (Some(lo), None) => (lo, lo + 1000.0),
+            (None, Some(hi)) => (hi - 1000.0, hi),
+            (Some(lo), Some(hi)) => (lo, hi),
+        };
+        if lo > hi {
+            self.warn("contradictory_schema", at, format!("no number lies within [{lo}, {hi}]; minimum used"));
+            return format!("{lo}");
+        }
+        // Rounding may step just outside a narrow range: keep it inside.
+        let v = (((lo + self.rng.unit_f64() * (hi - lo)) * 100.0).round() / 100.0).max(lo).min(hi);
+        format!("{v}")
+    }
+
     fn builtin(&mut self, t: &str, name: &str, f: Facets, at: Node) -> String {
         if self.mode == SampleMode::Blank {
             return String::new();
@@ -1470,27 +1512,15 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             );
             return String::new();
         }
+        if let Some((bounds, default)) = int_type(t) {
+            return self.int_sample(bounds, default, f, at);
+        }
+        if matches!(t, "decimal" | "float" | "double") {
+            return self.decimal_sample(f, at);
+        }
         let r = &mut self.rng;
-        let int_range = |lo: i128, hi: i128, f: Facets, r: &mut SplitMix64| -> String {
-            let lo = f.min.map(|m| m.ceil() as i128).unwrap_or(lo).max(lo);
-            let hi = f.max.map(|m| m.floor() as i128).unwrap_or(hi).min(hi);
-            if lo > hi { lo.to_string() } else { r.range_i128(lo, hi).to_string() }
-        };
         match t {
             "boolean" => (if r.bool() { "true" } else { "false" }).into(),
-            "int" | "integer" | "long" | "short" => int_range(1, 1000, f, r),
-            "byte" => int_range(1, 100, f, r),
-            "nonNegativeInteger" | "unsignedInt" | "unsignedLong" | "unsignedShort" => int_range(0, 1000, f, r),
-            "unsignedByte" => int_range(0, 255, f, r),
-            "positiveInteger" => int_range(1, 1000, f, r),
-            "negativeInteger" => int_range(-1000, -1, f, r),
-            "nonPositiveInteger" => int_range(-1000, 0, f, r),
-            "decimal" | "float" | "double" => {
-                let lo = f.min.unwrap_or(1.0);
-                let hi = f.max.unwrap_or(lo + 1000.0);
-                let v = if lo > hi { lo } else { ((lo + r.unit_f64() * (hi - lo)) * 100.0).round() / 100.0 };
-                format!("{v}")
-            }
             "dateTime" => {
                 let secs = r.range_i128(1_577_836_800, 1_893_455_999) as i64;
                 chrono::DateTime::from_timestamp(secs, 0).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default()
@@ -1535,6 +1565,27 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             }
         }
     }
+}
+
+/// The value bounds of an XSD built-in integer type, and the sample range
+/// used when no facet bounds it; `None` for any other type.
+fn int_type(t: &str) -> Option<((i128, i128), (i128, i128))> {
+    Some(match t {
+        "int" => ((i128::from(i32::MIN), i128::from(i32::MAX)), (1, 1000)),
+        "long" => ((i128::from(i64::MIN), i128::from(i64::MAX)), (1, 1000)),
+        "short" => ((i128::from(i16::MIN), i128::from(i16::MAX)), (1, 1000)),
+        "byte" => ((i128::from(i8::MIN), i128::from(i8::MAX)), (1, 100)),
+        "integer" => ((i128::MIN, i128::MAX), (1, 1000)),
+        "unsignedLong" => ((0, i128::from(u64::MAX)), (0, 1000)),
+        "unsignedInt" => ((0, i128::from(u32::MAX)), (0, 1000)),
+        "unsignedShort" => ((0, i128::from(u16::MAX)), (0, 1000)),
+        "unsignedByte" => ((0, i128::from(u8::MAX)), (0, 255)),
+        "nonNegativeInteger" => ((0, i128::MAX), (0, 1000)),
+        "positiveInteger" => ((1, i128::MAX), (1, 1000)),
+        "negativeInteger" => ((i128::MIN, -1), (-1000, -1)),
+        "nonPositiveInteger" => ((i128::MIN, 0), (-1000, 0)),
+        _ => return None,
+    })
 }
 
 fn facets(restriction: Node) -> Facets {

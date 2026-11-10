@@ -4,8 +4,9 @@ use anvil_domain::diagnostics::{Confidence, EvidenceSource as E, Owner, Severity
 use anvil_domain::execution::{FailureKind as K, PeerIdentityCheck, TlsObservation, TlsVerification};
 use anvil_domain::outcome::{OutcomeWarning, WarningCode};
 
-/// Alerts that specifically concern the client's certificate.
-const CLIENT_CERT_ALERTS: &[&str] = &[
+/// Alerts that specifically concern the client's certificate: on the
+/// gateway's frontend here, and on the mesh endpoint judging the SVID.
+pub(super) const CLIENT_CERT_ALERTS: &[&str] = &[
     "bad_certificate",
     "unsupported_certificate",
     "certificate_revoked",

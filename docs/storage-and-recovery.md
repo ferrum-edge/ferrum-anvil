@@ -238,9 +238,10 @@ profiles, spec-import records or load reports, and its bundle kind is
 - Each workspace's load plans, except one that names a request, dataset or
   environment deleted since (an import would refuse it; the export lists it
   among its excluded items).
-- When history is included, the workspace's history records without their
-  response bodies. On import, a history record is kept only when it belongs
-  to a workspace in the bundle. It keeps its request, revision and
+- When history is included, the workspace's newest 1,000 history records
+  without their response bodies; when it has more, the export lists the older
+  ones among its excluded items. On import, a history record is kept only
+  when it belongs to a workspace in the bundle. It keeps its request, revision and
   environment links only when the bundle carries that object in the record's
   workspace (a revision only as one of the linked request). A record that is
   not a valid execution record is left out with a warning, and one dated

@@ -147,6 +147,20 @@ fn methods_head_and_misc_flags() {
     assert!(has_at(&r, "curl_option", "/args/1"));
 }
 
+/// `--max-redirs -1` is curl's "unlimited": the most a redirect policy
+/// follows, with a warning, never zero (#538).
+#[test]
+fn unlimited_max_redirs_follows_the_most_redirects() {
+    let r = curl("curl -L --max-redirs -1 https://example.com");
+    let redirects = r.requests[0].spec.settings.redirects.unwrap();
+    assert!(redirects.follow);
+    assert_eq!(redirects.max, u8::MAX);
+    assert!(has(&r, "curl_unlimited_redirects"));
+    let r = curl("curl -L --max-redirs 1000 https://example.com");
+    assert_eq!(r.requests[0].spec.settings.redirects.unwrap().max, u8::MAX);
+    assert!(!has(&r, "curl_unlimited_redirects"));
+}
+
 #[test]
 fn url_credentials_and_scheme_default() {
     let r = curl("curl http://bob:pa%3Ass@example.com/x");

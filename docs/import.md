@@ -550,6 +550,8 @@ element/attribute/text/cdata/none), `application/x-www-form-urlencoded` (with
 `encoding` style/explode), `multipart/form-data` (files become disabled
 placeholder parts; `encoding.contentType` kept), text. Binary media types
 (`application/octet-stream`, images) are reported: they need an attachment.
+A media range (`*/*`, `text/*`) is never sent as the `Content-Type`: the
+generated body's own type applies (`application/json`, `text/plain`).
 Swagger 2.0 `in: body` and `formData` (file parameters → multipart) are
 mapped to the same model.
 
@@ -712,7 +714,8 @@ only the first command of a pipeline/list is imported. `$VAR`/`${VAR}` become
 `--http2-prior-knowledge`, `--http3`, `--http3-only`, `--connect-timeout`,
 `-m`, `--url`, short-option clusters (`-sSL`, `-XPOST`). Method inference
 follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD).
-A missing scheme defaults to `http://` (reported). Literal data keeps its
+A missing scheme defaults to `http://` (reported). `--max-redirs -1`
+(unlimited) follows up to 255 redirects (reported). Literal data keeps its
 bytes, line breaks included (curl strips CR/LF only from `@file` data);
 `--form-string` values are literal (no `;type=` metadata, no file reads).
 SOAP requests (`SOAPAction` + XML, or `application/soap+xml`) become SOAP

@@ -8,7 +8,7 @@
 
 use anvil_domain::Id;
 use anvil_domain::load::{ConnectionMode, LoadPlan, Stage, Workload};
-use anvil_load::executor::MAX_DURATION_SECS;
+use anvil_load::executor::{MAX_CHAIN_STEPS, MAX_DURATION_SECS};
 use anvil_load::{LoadError, validate_plan};
 use chrono::Utc;
 
@@ -97,4 +97,16 @@ fn valid_step_and_ramp_schedules_are_accepted() {
     assert_valid(Workload::OpenArrivalRate { stages: stages(&[(60, 10), (240, 50)]), max_in_flight: 100 });
     // The exact limit is still allowed.
     assert_valid(Workload::OpenArrivalRate { stages: stages(&[(MAX_DURATION_SECS, 1)]), max_in_flight: 1 });
+}
+
+/// A chain over the step limit is refused when the plan is saved, not only
+/// when it is run (#537).
+#[test]
+fn a_chain_over_the_step_limit_is_refused() {
+    let mut long = plan(Workload::ClosedVirtualUsers { stages: stages(&[(60, 1)]), think_time_ms: 0 });
+    long.chain = (0..MAX_CHAIN_STEPS).map(|_| Id::new()).collect();
+    assert!(validate_plan(&long).is_ok(), "the limit itself is allowed");
+    long.chain.push(Id::new());
+    let refused = validate_plan(&long);
+    assert!(matches!(&refused, Err(LoadError::Invalid(m)) if m.contains("the limit is 64")), "{refused:?}");
 }

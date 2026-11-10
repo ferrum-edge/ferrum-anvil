@@ -85,26 +85,6 @@ pub fn binding(dir: &Path) -> Result<Option<Option<Value>>, VaultError> {
     let _lock = crate::profile_lock::shared(dir)?;
     Ok(read(dir)?.map(|s| s.binding))
 }
-/// Refuse same-key policy publication. Policy changes require full key rotation.
-pub fn set_binding(dir: &Path, header: &ProfileHeader, key: &Key, binding: Option<Value>) -> Result<bool, VaultError> {
-    let _lock = crate::profile_lock::shared(dir)?;
-    let mut conn = Connection::open(dir.join(DB_FILE)).map_err(db)?;
-    conn.busy_timeout(crate::store::BUSY_TIMEOUT).map_err(db)?;
-    conn.execute_batch("PRAGMA synchronous=FULL;").map_err(db)?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db)?;
-    let Some(state) = read_on(&tx)? else {
-        return Ok(false);
-    };
-    crate::vault::check_current(&state.header, header, key)?;
-    // Authorization happened against this authenticated policy snapshot.
-    // A competing link/unlink must force reauthorization, even under the same DEK.
-    crate::vault::check_protection_mac(header, key)?;
-    if state.header.rotation.as_ref().map(|p| &p.binding_digest) != header.rotation.as_ref().map(|p| &p.binding_digest) {
-        return Err(VaultError::Header("identity policy changed; unlock and authorize the operation again".into()));
-    }
-    let _ = binding;
-    Err(VaultError::Header("identity changes require encryption-key rotation".into()))
-}
 
 /// Hold the cooperative data fence across a legacy sidecar operation, so
 /// it cannot publish an ignored identity change after rotation commits.
