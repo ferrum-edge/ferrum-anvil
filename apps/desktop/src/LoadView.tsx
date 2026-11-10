@@ -600,7 +600,14 @@ export function PlanEditor(props: {
               disabled={otherWorkspace}
               onClick={async () => {
                 if (otherWorkspace) return;
-                await api.deleteLoadPlan(p.id).catch(() => undefined);
+                setErr(null);
+                try {
+                  await api.deleteLoadPlan(p.id);
+                } catch (e) {
+                  // The plan is still stored: keep it, and its unsaved edits, open.
+                  setErr(String((e as Error).message));
+                  return;
+                }
                 props.onDeleted();
               }}
             >

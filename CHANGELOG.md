@@ -254,6 +254,10 @@
   `X-Foo: bar` became the header `X` with the value `-Foo: bar`). The load plan's number fields
   keep a decimal point and an emptied field while typing, so "Max failures (%)" accepts `12.5`
   (#514).
+- A desktop load plan whose delete the backend refuses (a locked profile, a storage error) stays
+  open with its unsaved edits and shows why. It used to close and drop the unsaved draft while the
+  plan stayed in the list. The export dialog clears an earlier preview's error when the options
+  change, and shows only the preview for the options now chosen, not a slower earlier one (#515).
 
 ## [0.1.7] - 2026-11-03
 

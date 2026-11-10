@@ -579,6 +579,21 @@ describe("LoadView workspace switch", () => {
     await waitFor(() => expect(calls("load_plan_delete")).toEqual([{ planId: "pa" }]));
   });
 
+  it("keeps the plan and its unsaved edit open when the delete is refused (#515)", async () => {
+    backend({
+      load_plan_delete: () => {
+        throw "the store could not be written";
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "Edited A" } });
+    fireEvent.click(button("Delete plan"));
+    expect(await screen.findByText("the store could not be written")).toBeTruthy();
+    expect(calls("load_plan_delete")).toEqual([{ planId: "pa" }]);
+    expect(planName().value).toBe("Edited A");
+  });
+
   it("cannot discard a new plan while its save or Run… is on its way", async () => {
     let save = deferred<void>();
     backend({

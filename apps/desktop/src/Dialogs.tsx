@@ -959,12 +959,19 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
   const [busy, setBusy] = useState(false);
   const wsId = scope === "workspace" ? props.workspace?.id ?? null : null;
   const effMode = scope === "all" ? "full_backup" : mode;
+  // Only the preview for the options now chosen is shown, and an earlier
+  // preview's error goes with it.
   useEffect(() => {
+    let alive = true;
     setPreview(null);
+    setErr(null);
     api
       .exportPreview(wsId, effMode, includeStandards)
-      .then(setPreview)
-      .catch((e) => setErr(String((e as Error).message)));
+      .then((p) => alive && setPreview(p))
+      .catch((e) => alive && setErr(String((e as Error).message)));
+    return () => {
+      alive = false;
+    };
   }, [effMode, includeStandards, wsId]);
   const encrypted = effMode !== "share_safely";
   const go = async () => {
