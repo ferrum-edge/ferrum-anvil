@@ -70,8 +70,9 @@ on the request's protocol (`anvil_load::protocol`):
 `errors` array arrives with an HTTP 2xx, so the application outcome of a
 request with a SOAP or GraphQL body is judged from the response body. When
 only a prefix of that body is available (it exceeded the capture, which a load
-run lowers to at most 1 MiB, or it did not decode completely), a fault past
-the prefix would go unseen: the engine records the application status
+run lowers to at most 1 MiB, or it did not decode completely), or the complete
+body is over the 256 KiB the diagnosis inspects, a fault in it would go
+unseen: the engine records the application status
 `not_evaluated` with a `partial_visibility` warning, never `success`. A load
 run counts such a completed request as an **application failure** in the
 category `application_failure: application.not_determined_from_body`, so it
@@ -80,8 +81,9 @@ the successes. The same holds for any other `not_evaluated` outcome of a
 SOAP or GraphQL request (a login redirect, say). Other HTTP requests are
 judged by their status, which a prefix does not hide: a 2xx with a
 display-truncated body still counts as a success unless an assertion fails.
-A SOAP or GraphQL endpoint whose responses exceed the load capture therefore
-cannot show successes in a load run; its units read as "not determined".
+A SOAP or GraphQL endpoint whose responses exceed the load capture or 256 KiB
+therefore cannot show successes in a load run; its units read as "not
+determined".
 
 A plan has **exactly one unit kind**, so every count, rate and percentile in
 its report has one denominator. The editor (`load_plan_check`), the preflight

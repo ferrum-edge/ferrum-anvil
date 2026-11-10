@@ -118,7 +118,10 @@ against it).
   - a SOAP envelope in a response is not inspected for a fault, its
     application outcome is `not_evaluated` and a `partial_visibility`
     warning says why (XML whose root is not an `Envelope` cannot carry a
-    fault and is not parsed for one);
+    fault and is not parsed for one). The same holds for an envelope over
+    256 KiB, which is not parsed at all, and for the 2xx response of a SOAP,
+    GraphQL or MCP request whose complete body is over 256 KiB, so a fault
+    after a large payload is never read as a success;
   - WS-Security refuses the envelope.
 
   The remaining work is bounded in proportion to those limits, not proven

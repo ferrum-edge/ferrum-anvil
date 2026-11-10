@@ -165,6 +165,29 @@ async fn json_rpc_errors_and_tool_errors_are_application_failures() {
     assert!(o.record.assertion_results[2].actual.as_deref().is_some_and(|a| a.starts_with("sha256 ")));
 }
 
+/// A JSON-RPC response over the 256 KiB the diagnosis inspects could hold an
+/// error or a tool failure that is never looked for: its 2xx is not a success.
+#[tokio::test]
+async fn a_json_rpc_response_too_large_to_inspect_is_not_judged() {
+    init();
+    let e = Engine::new();
+    for sse in [false, true] {
+        let f = mcp::serve("127.0.0.1:0", McpOptions { sse, ..Default::default() }).await.unwrap();
+        let text = "x".repeat(300 * 1024);
+        let o = run(&e, &mcp_ctx(&f.url(), call("echo", &format!(r#"{{"text":"{text}"}}"#)))).await;
+        assert_eq!(status(&o), Some(200), "sse {sse}: {}", o.record.outcome.summary);
+        assert_eq!(f.state.tool_calls("echo"), 1, "sse {sse}");
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "sse {sse}");
+        let w = o.record.outcome.warnings.iter().find(|w| w.message.contains("JSON-RPC response is over the 256 KiB"));
+        assert!(w.is_some(), "sse {sse}: {:?}", o.record.outcome.warnings);
+        assert!(o.record.outcome.summary.contains("application not evaluated"), "sse {sse}: {}", o.record.outcome.summary);
+
+        // A response within the limit is judged.
+        let o = run(&e, &mcp_ctx(&f.url(), call("echo", r#"{"text":"short"}"#))).await;
+        assert_eq!(o.record.outcome.application, ApplicationState::Success, "sse {sse}");
+    }
+}
+
 #[tokio::test]
 async fn a_failed_handshake_is_the_result_and_the_operation_is_not_sent() {
     init();
