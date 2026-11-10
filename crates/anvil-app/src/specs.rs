@@ -209,10 +209,6 @@ fn run(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult> {
 }
 
 impl App {
-    pub fn spec_detect(&self, bytes: &[u8]) -> Detected {
-        anvil_import::detect(bytes)
-    }
-
     pub fn spec_preview(&self, bytes: &[u8], opts: &ImportOptions) -> Result<SpecPreview> {
         let detected = anvil_import::detect(bytes);
         let r = import_review(bytes, opts)?;

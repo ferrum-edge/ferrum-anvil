@@ -1612,10 +1612,6 @@ impl Store {
         result
     }
 
-    pub fn check_protected_authority(&self, expected: &Option<String>) -> Result<()> {
-        if &self.protected_authority()? == expected { Ok(()) } else { Err(StoreError::StaleAuthority) }
-    }
-
     /// Run `f` with the unlocked data key (for re-wrapping it under a new
     /// passphrase). Fails while locked; the key never leaves the backend.
     pub fn with_key<R>(&self, f: impl FnOnce(&Key) -> R) -> Result<R> {

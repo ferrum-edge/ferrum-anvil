@@ -1313,7 +1313,6 @@ impl HttpTransport {
         if !write_done {
             rec.finish_with(w_idx, PhaseStatus::Unknown, "response arrived before the request body was fully sent");
         }
-        let head_at = Instant::now();
         let first_byte = conn.stats.first_read_after_mark();
         if let Some(i) = h_idx {
             rec.finish(i, PhaseStatus::Completed);
@@ -1322,7 +1321,6 @@ impl HttpTransport {
                 rec.phases[i].detail = Some(format!("first response byte at +{} µs (connection-level)", off));
             }
         }
-        let _ = head_at;
         obs.dispatch = DispatchState::Sent;
         let status = resp.status().as_u16();
         obs.response_status = Some(status);

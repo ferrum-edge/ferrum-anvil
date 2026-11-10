@@ -59,7 +59,6 @@ impl RunCtx {
 
     /// A result for a scenario that could not run in this environment. A skip
     /// is never counted as a pass.
-    #[allow(dead_code)] // for profiles whose prerequisites can be missing
     pub fn skipped(&self, id: &str, title: &str, reason: &str) -> ScenarioResult {
         ScenarioResult {
             id: id.into(),

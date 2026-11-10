@@ -157,11 +157,6 @@ impl Resolver {
         }
     }
 
-    pub fn with_counter_start(self, n: u64) -> Self {
-        self.counter.store(n, Ordering::Relaxed);
-        self
-    }
-
     fn lookup(&self, name: &str) -> Option<(&VarEntry, &str, usize, usize)> {
         for (layer_index, layer) in self.layers.iter().enumerate().rev() {
             if let Some((variable_index, v)) = layer.vars.iter().enumerate().rev().find(|(_, v)| v.name == name) {

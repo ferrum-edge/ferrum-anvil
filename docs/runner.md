@@ -316,7 +316,7 @@ app.run_plan(plan, settings, cancel).await?
 app.run_reports(&ws)? / run_report(&id)? / delete_run_report(&id)?
 app.create_scenario / update_scenario / find_scenario / trust_scenario / delete_scenario
 app.create_dataset(&ws, name, DatasetFormat::Csv, bytes, sensitive_columns)? / run_dataset(&dataset)?
-app.find_folder(&ws, "Orders/Refunds")? / folder_run_requests(&ws, folder)?
+app.find_folder(&ws, "Orders/Refunds")?
 ```
 
 `RunSettings`: `environment`, `iterations`, `stop_on_failure`, `fail_on`,

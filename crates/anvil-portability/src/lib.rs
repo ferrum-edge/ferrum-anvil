@@ -26,6 +26,3 @@ pub mod validate;
 pub use bundle::{BundleError, BundleKind, ExportMode, ExportOptions, Manifest, Opened};
 pub use graph::{PortableGraph, SecretValue};
 pub use plan::{ConflictPolicy, ImportPlan};
-
-pub const WORKSPACE_EXTENSION: &str = "anvil-workspace";
-pub const BACKUP_EXTENSION: &str = "anvil-backup";

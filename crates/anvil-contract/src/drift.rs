@@ -1247,7 +1247,8 @@ impl<'a> State<'a> {
         false
     }
 
-    /// [`Spec::deref`] charged to [`State::walk_bytes`]: `None` once that
+    /// [`Spec::resolve_within`] charged to [`State::walk_bytes`], falling back
+    /// to the value itself for an unresolvable reference: `None` once that
     /// budget is spent.
     fn walk_deref(&mut self, v: &'a Value, at: &str) -> Option<(&'a Value, String)> {
         let fresh = !self.walk_bytes.exhausted();

@@ -295,13 +295,6 @@ impl FailureKind {
                 | TlsInvalidSvid
         )
     }
-
-    /// Failures of the tunnel leg (Anvil ↔ HBONE endpoint): the inner
-    /// destination was never contacted.
-    pub fn is_tunnel_leg(self) -> bool {
-        use FailureKind::*;
-        matches!(self, HboneEndpointTlsFailed | HboneConnectRefused | HboneProtocolError)
-    }
 }
 
 /// A typed transport failure with library detail for display. `message` is

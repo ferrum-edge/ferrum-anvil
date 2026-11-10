@@ -311,18 +311,6 @@ impl Spec {
         }
     }
 
-    /// Resolve `v` and return the resolved value, or `v` itself when it is not
-    /// a resolvable reference (then still a `{"$ref": …}` object: callers
-    /// that need the referenced object skip it, see [`Spec::usable`]).
-    pub fn deref<'a>(&'a self, v: &'a Value, at: &str) -> (&'a Value, String) {
-        self.resolve(v, at).unwrap_or((v, at.to_string()))
-    }
-
-    /// `v` resolved, or `None` when it is a reference that cannot be.
-    pub fn usable<'a>(&'a self, v: &'a Value, at: &str) -> Option<(&'a Value, String)> {
-        self.resolve(v, at)
-    }
-
     /// Locations of `$ref`s that could not be followed so far (at most
     /// 1,000), and how many distinct ones there were. Objects behind them
     /// are left out of every analysis instead of being checked as `$ref`s.
@@ -386,30 +374,7 @@ pub fn internal_pointer(r: &str) -> Option<String> {
     if !(frag.is_empty() || frag.starts_with('/')) {
         return None;
     }
-    Some(percent_decode(frag))
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
-        {
-            out.push(h * 16 + l);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    (b as char).to_digit(16).map(|d| d as u8)
+    Some(crate::observe::percent_decode_path(frag))
 }
 
 #[cfg(test)]

@@ -34,7 +34,7 @@
 //! `workload attested` / `minted JWT-SVID` lines and its `workload
 //! attestation failed` warning), and the lookalike fixture's log.
 
-use crate::fixtures_policy::{codes, send, skips};
+use crate::fixtures_policy::{codes, send};
 use crate::gateway::{self, Gateway, Instance, Readiness};
 use crate::harness::{self, LabEnv, Outcome, RunCtx};
 use crate::profiles::{BoxFut, Profile, RunArgs};
@@ -703,8 +703,6 @@ fn all() -> Vec<Def> {
     ]
 }
 
-const SKIPPED: &[(&str, &str, &str)] = &[];
-
 pub fn profile() -> Profile {
     Profile {
         name: "workload",
@@ -924,14 +922,13 @@ async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("workload")?;
     let mut env = start().await?;
     std::fs::write(ctx.out_dir.join("sockets.txt"), format!("{}\n", env.socket_note)).ok();
-    let mut results = match harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await {
+    let results = match harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await {
         Ok(r) => r,
         Err(e) => {
             stop(env).await;
             return Err(e);
         }
     };
-    results.extend(skips(&ctx, &args.only, SKIPPED));
     let finished = harness::finish(&ctx, &env, &results);
     stop(env).await;
     finished?;
