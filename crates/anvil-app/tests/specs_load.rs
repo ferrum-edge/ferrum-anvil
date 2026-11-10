@@ -751,8 +751,8 @@ fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
     let pre = preflight(udp("udp://127.0.0.1:9", Some("https://{{remote_proxy}}")));
     assert_eq!(pre.destinations, vec!["UDP udp://127.0.0.1:9 via MASQUE proxy https://proxy.example.test:4433".to_string()]);
     assert!(leaves(&pre.warnings), "{:?}", pre.warnings);
-    // A target routed through the proxy cannot use its own loopback name as
-    // proof that the proxy reaches this machine.
+    // A loopback target through a loopback proxy, named as an IPv6 literal
+    // or as `localhost`, stays on this machine: no warning.
     let pre = preflight(udp("udp://[::1]:9", Some("https://[::1]:4433")));
     assert!(!leaves(&pre.warnings), "{:?}", pre.warnings);
     let pre = preflight(udp("udp://[::1]:9", Some("https://localhost:4433")));
