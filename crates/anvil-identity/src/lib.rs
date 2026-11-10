@@ -35,10 +35,6 @@ pub use api_oauth::{ApiAuthorization, authorize_api};
 pub use flow::{AuthorizationCode, AuthorizationRequest, authorize_in_browser};
 pub use provider::{Availability, IdentityProvider, IdentitySummary, ProviderInfo, VerifiedIdentity, builtin_providers, find_provider};
 
-/// Whether the CI-only mock provider is compiled into this build. Release
-/// checks assert this is `false`.
-pub const MOCK_PROVIDER_COMPILED: bool = cfg!(feature = "mock-provider");
-
 /// Launches the system browser at the authorization URL.
 ///
 /// Implementations must return as soon as the browser was asked to open and

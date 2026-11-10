@@ -137,10 +137,10 @@ impl App {
                 }
             }
             if include_history {
-                for h in self.store.list_history(Some(&id), None, 1000)? {
-                    if let Some((rec, _)) = self.store.get_history::<serde_json::Value>(&h.id)? {
-                        g.history.push(rec);
-                    }
+                // One decryption per record: the listing's own. The bundle
+                // carries records, not response bodies.
+                for (_, rec) in self.store.list_history_with::<serde_json::Value>(Some(&id), None, 1000)? {
+                    g.history.push(rec?);
                 }
             }
         }

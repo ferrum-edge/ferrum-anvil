@@ -670,10 +670,6 @@ fn alpn_for(policy: HttpVersionPolicy) -> &'static [&'static str] {
     }
 }
 
-fn is_idempotent(m: &Method) -> bool {
-    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE | Method::PUT | Method::DELETE)
-}
-
 /// The failures of a connection closed or reset under a request before its
 /// response head: the peer closed it, typically as it went idle.
 fn closed_before_response(kind: FailureKind) -> bool {
@@ -1270,7 +1266,7 @@ impl HttpTransport {
                     None
                 } else if !written && (unsent || closed || refused) {
                     Some(ClosedUnder::Unsent(f.kind))
-                } else if refused || (closed && no_response && is_idempotent(&plan.method)) {
+                } else if refused || (closed && no_response && plan.method.is_idempotent()) {
                     Some(ClosedUnder::MayHaveBeenSent(f.kind))
                 } else {
                     None
@@ -1297,7 +1293,7 @@ impl HttpTransport {
                             f.message, conn.template.id, plan.method
                         );
                     }
-                    None if reused && closed && written && !is_idempotent(&plan.method) => {
+                    None if reused && closed && written && !plan.method.is_idempotent() => {
                         f.message = format!(
                             "{} (reused connection #{}; not sent again: the {} request was written and is not idempotent)",
                             f.message, conn.template.id, plan.method

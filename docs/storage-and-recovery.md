@@ -468,7 +468,9 @@ was normalised.
 Device-bound items (keychain entries, provider sessions, linked local files)
 are reported as needing rebinding, and the preview lists each linked local
 file with the request or dataset that names it. A bundle import drops this
-device's linked-file bindings for every request and dataset it overwrites.
+device's linked-file bindings for every request and dataset it overwrites,
+and deleting a request, folder, dataset or workspace drops the bindings of
+the requests and datasets it deletes.
 In the desktop, choose each linked file again with **Choose file…** beside
 the request's body or gRPC schema, or beside the dataset in a load plan. A
 request's file that is somewhere else on this device is repointed with
@@ -984,7 +986,10 @@ historical data is an intentional owner choice.
 
 Configurable in Settings: enable or disable history, keep or drop response
 bodies, maximum age (days) and total size. Pruning keeps the newest records
-within the budget. "Clear all history" deletes history records only. A
+within the budget. "Clear all history" (or a workspace's history) deletes
+those history records and the response bodies no remaining record uses, in
+one write transaction; deleting a workspace does the same for its records.
+Neither touches stored attachments. A
 history record that is overwritten (an import under Replace) releases its old
 response body unless another record, or the new version of the same record,
 still uses it. Retention and that release look up a blob's uses by index and

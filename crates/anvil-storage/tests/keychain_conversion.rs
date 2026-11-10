@@ -2,7 +2,6 @@
 //! keyring-core's in-memory mock credential store. The mock is installed as
 //! the default store before any entry is created, so no real OS keychain is
 //! read or written.
-#![cfg(feature = "os-keychain")]
 
 use anvil_domain::workspace::ProtectionMode;
 use anvil_storage::vault::{self, VaultError};

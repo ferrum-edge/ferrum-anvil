@@ -183,8 +183,10 @@ scripts/release-check.sh [--features <list>] [--no-graph] [--runtime-probe] [--r
 ```
 
 1. **Graph** — `cargo tree -p anvil-desktop --target all -e normal,build,features`
-   for the release feature set must not contain `tauri-plugin-wdio-webdriver`
-   or `anvil-desktop feature "e2e"`. (`deny.toml` additionally bans the plugin
+   for the release feature set must not contain `tauri-plugin-wdio-webdriver`,
+   `anvil-desktop feature "e2e"` or `anvil-identity feature "mock-provider"`
+   (the CI-only identity provider; only dev-dependencies enable it, and dev
+   edges are not in this graph). (`deny.toml` additionally bans the plugin
    from the default graph.)
 2. **Content** — installers and archives are unpacked (`.app`, `.dmg`, `.deb`,
    `.rpm`, `.AppImage`, `.msi` via `msiexec /a`, NSIS via `7z`, `.tar.gz`, `.zip`)

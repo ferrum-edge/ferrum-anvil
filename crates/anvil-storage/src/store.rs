@@ -555,6 +555,18 @@ struct HistoryOwner {
 
 /// Refuse a history record whose sealed workspace or request differs from
 /// the row's plaintext indexes.
+/// Delete the history body blobs no history record uses. Only history bodies
+/// are collectable here: attachment blobs are pinned (see `pin_blob`)
+/// because the objects referencing them are encrypted and invisible to this
+/// query. A body blob is written in the transaction that writes its history
+/// row, so none is caught between the two.
+fn sweep_history_bodies(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM blobs WHERE NOT EXISTS (SELECT 1 FROM history WHERE body_blob=blobs.id) AND NOT EXISTS (SELECT 1 FROM meta WHERE key='pin:'||blobs.id)",
+        [],
+    )?)
+}
+
 fn check_history_owner(json: &[u8], workspace_id: Option<&str>, request_id: Option<&str>) -> Result<()> {
     let sealed: HistoryOwner = serde_json::from_slice(json).map_err(|_| StoreError::Integrity)?;
     if sealed.workspace_id.map(|w| w.to_string()).as_deref() != workspace_id
@@ -1844,20 +1856,21 @@ impl Store {
                 removed += tx.execute("DELETE FROM history WHERE id=?1", params![id])?;
             }
         }
-        // Only history bodies are collectable here: attachment blobs are
-        // pinned (see `pin_blob`) because the objects referencing them are
-        // encrypted and invisible to this query.
-        tx.execute(
-            "DELETE FROM blobs WHERE NOT EXISTS (SELECT 1 FROM history WHERE body_blob=blobs.id) AND NOT EXISTS (SELECT 1 FROM meta WHERE key='pin:'||blobs.id)",
-            [],
-        )?;
+        sweep_history_bodies(&tx)?;
         tx.commit()?;
         Ok(removed)
     }
 
+    /// Delete the history records of `workspace_id` (every record for
+    /// `None`) and the response bodies no remaining record uses.
     pub fn clear_history(&self, workspace_id: Option<&Id>) -> Result<()> {
-        let conn = self.writing()?;
-        conn.execute("DELETE FROM history WHERE (?1 IS NULL OR workspace_id=?1)", params![workspace_id.map(|w| w.to_string())])?;
+        let mut conn = self.writing()?;
+        // Under the write lock, as `prune_history`: the bodies are collected
+        // against one state of `history` and the pins.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM history WHERE (?1 IS NULL OR workspace_id=?1)", params![workspace_id.map(|w| w.to_string())])?;
+        sweep_history_bodies(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -2106,6 +2119,7 @@ impl StoreTx<'_> {
         self.tx.execute("DELETE FROM objects WHERE kind='workspace' AND id=?1", params![ws])?;
         self.tx.execute("DELETE FROM secrets WHERE workspace_id=?1", params![ws])?;
         self.tx.execute("DELETE FROM history WHERE workspace_id=?1", params![ws])?;
+        sweep_history_bodies(&self.tx)?;
         self.tx.execute("DELETE FROM load_reports WHERE workspace_id=?1", params![ws])?;
         if let Some(m) = self.manifest.borrow_mut().as_mut() {
             m.remove_workspace(&ws);

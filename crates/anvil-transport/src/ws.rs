@@ -437,27 +437,6 @@ fn rejected_handshake_failure(rejected: String, deadline_hit: bool, total_ms: Op
     }
 }
 
-/// Wait up to `ms` for the HTTP/3 peer's SETTINGS. `Ok(enabled)` says whether
-/// they enable extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 9220 §3).
-async fn await_h3_settings(send: &crate::h3::SendReq, ms: u64, cancel: &CancellationToken) -> Result<bool, &'static str> {
-    use h3::ConnectionState;
-    let deadline = Instant::now() + Duration::from_millis(ms);
-    loop {
-        // Borrowed once the peer's SETTINGS frame has arrived; before that h3
-        // hands out RFC 9114 defaults, which say nothing about the peer.
-        if let std::borrow::Cow::Borrowed(s) = send.settings() {
-            return Ok(s.enable_extended_connect());
-        }
-        if Instant::now() >= deadline {
-            return Err("timeout");
-        }
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
-            _ = cancel.cancelled() => return Err("canceled"),
-        }
-    }
-}
-
 /// Bridge an accepted RFC 9220 stream to a byte stream the WebSocket codec
 /// can drive: DATA frame payloads are the WebSocket bytes. Counts those bytes
 /// in `stats`, and keeps the h3 stream error, if the stream fails, as evidence.
@@ -623,14 +602,14 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
     };
     let crate::h3::QuicConnected { quic, mut send, observation: cobs } = connected;
     obs.connection = Some(cobs);
-    let close_quic = |quic: &quinn::Connection| quic.close(0x100u32.into(), b""); // H3_NO_ERROR
+    let close_quic = |quic: &quinn::Connection| quic.close(crate::h3::H3_NO_ERROR.into(), b"");
     let wait_ms = plan.timeouts.response_headers_ms.unwrap_or(5_000).min(5_000);
     // The total deadline bounds the SETTINGS wait too (cancellation first).
     let settings = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err("canceled"),
         _ = sleep_until_opt(total_deadline) => Err("total_deadline"),
-        r = await_h3_settings(&send, wait_ms, cancel) => r,
+        r = crate::h3::await_peer_settings(&send, wait_ms, cancel) => r.map(|p| p.extended_connect),
     };
     match settings {
         Ok(true) => rec.mark(Phase::ProtocolHandshake, PhaseStatus::Completed, Some("peer enabled extended CONNECT (RFC 9220)")),

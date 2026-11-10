@@ -1420,7 +1420,8 @@ pub(crate) async fn execute_viewing(
     output
 }
 
-fn replace_oauth(a: &mut ResolvedAuth, t: &anvil_auth::oauth::CachedToken) {
+/// Swap a refreshed OAuth token into every OAuth 2.0 part of `a`.
+pub(crate) fn replace_oauth(a: &mut ResolvedAuth, t: &anvil_auth::oauth::CachedToken) {
     match a {
         ResolvedAuth::OAuth2 { access_token, token_type } => {
             *access_token = t.access_token.clone();

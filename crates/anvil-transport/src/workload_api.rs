@@ -31,10 +31,10 @@
 //! `google.protobuf.Struct` from v0.9.8), which Anvil does not use: JWT-SVIDs
 //! are checked locally against the bundles from `FetchJWTBundles`.
 
+use crate::certs::pem;
 use crate::connector::BoxIo;
 use crate::errors::display_chain;
 use anvil_domain::workload::{SPIFFE_ENDPOINT_SOCKET, WorkloadCallResult, WorkloadEndpointSource, WorkloadRpc, grpc_code_name};
-use base64::Engine as _;
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use http::{Method, Request};
@@ -646,17 +646,6 @@ pub fn split_der_certificates(mut data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         data = &data[total..];
     }
     Ok(out)
-}
-
-fn pem(label: &str, der: &[u8]) -> String {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut s = format!("-----BEGIN {label}-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        s.push_str(std::str::from_utf8(chunk).unwrap_or_default());
-        s.push('\n');
-    }
-    s.push_str(&format!("-----END {label}-----\n"));
-    s
 }
 
 fn validity(der: &[u8]) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {

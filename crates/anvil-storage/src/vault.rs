@@ -48,14 +48,11 @@ const PROTECTION_MAC_LABEL: &[u8] = b"anvil-profile-protection-v1";
 /// Prefix of a keychain entry written for a header with a protection MAC.
 /// An untagged entry holds the bare key (earlier builds) and still unlocks
 /// a header without a MAC; a tagged one never does.
-#[cfg(feature = "os-keychain")]
 const KEYCHAIN_SECRET_TAG: &[u8] = b"anvil-dek-v2:";
-#[cfg(feature = "os-keychain")]
 const ENROLLED_KEYCHAIN_TAG: &[u8] = b"anvil-dek-enrolled-v1:";
 /// Prefix of the marker that replaces a converted profile's entry when the
 /// credential store refuses to delete it: followed by the profile's key
 /// check, it holds no key and opens nothing.
-#[cfg(feature = "os-keychain")]
 const KEYCHAIN_RETIRED_TAG: &[u8] = b"anvil-dek-retired-v1:";
 /// A leftover `profile.json.<pid>.<random>.tmp` older than this is from a
 /// writer that stopped before renaming it, and is removed under the lock.
@@ -242,7 +239,6 @@ pub(crate) fn rotated_header(
 /// A rotation that stops before its commit removes the new entry
 /// ([`discard_staged_keychain`]). Keychain headers carry no passphrase or
 /// recovery wrap.
-#[cfg(feature = "os-keychain")]
 pub(crate) fn rotated_keychain_header(h: &ProfileHeader, key: &Key) -> Result<ProfileHeader, VaultError> {
     require_protection(h, ProtectionMode::OsKeychain)?;
     let account = format!("profile-{}-{}", h.profile_id, hex::encode(crypto::random_bytes(8)));
@@ -257,23 +253,15 @@ pub(crate) fn rotated_keychain_header(h: &ProfileHeader, key: &Key) -> Result<Pr
     Ok(next)
 }
 
-#[cfg(not(feature = "os-keychain"))]
-pub(crate) fn rotated_keychain_header(_h: &ProfileHeader, _key: &Key) -> Result<ProfileHeader, VaultError> {
-    Err(VaultError::KeychainUnavailable("this build has no OS credential store".into()))
-}
-
 /// Remove the entry [`rotated_keychain_header`] staged for a rotation that
 /// did not reach its commit. Best effort: an entry left behind holds a key
 /// that encrypts nothing.
 pub(crate) fn discard_staged_keychain(staged: &ProfileHeader) {
-    #[cfg(feature = "os-keychain")]
     if let Some(account) = &staged.keychain_account
         && let Err(e) = delete_retired_entry(&staged.key_check, account)
     {
         tracing::warn!(error = %e, "an abandoned rotation's new keychain entry could not be removed; it holds no key in use");
     }
-    #[cfg(not(feature = "os-keychain"))]
-    let _ = staged;
 }
 
 fn key_check(k: &Key) -> String {
@@ -727,7 +715,6 @@ pub fn upgrade_header(dir: &Path, h: &mut ProfileHeader, dek: &Key) -> Result<()
     check_protection_mac(&next, dek)?;
     *h = next;
     // The MAC is on disk first: a tagged entry refuses a header without one.
-    #[cfg(feature = "os-keychain")]
     if h.protection == ProtectionMode::OsKeychain {
         tag_keychain_entry(h, dek)?;
     }
@@ -801,7 +788,6 @@ pub struct KeychainConversion {
 /// is refused: the header's authenticated mode is `Passphrase`, and a copy
 /// edited back to keychain mode without its MAC meets a tagged entry. The
 /// header keeps the old account name only until the entry is gone.
-#[cfg(feature = "os-keychain")]
 pub fn convert_keychain_to_passphrase(
     dir: &Path,
     h: &mut ProfileHeader,
@@ -845,7 +831,6 @@ pub fn convert_keychain_to_passphrase(
 /// behind, then forget its account name. A no-op when none is recorded.
 /// An entry holding a different key is not this profile's: it is forgotten,
 /// never deleted. Keychain profiles are refused (their entry is their key).
-#[cfg(feature = "os-keychain")]
 pub fn retire_keychain_entry(dir: &Path, h: &mut ProfileHeader) -> Result<(), VaultError> {
     require_protection(h, ProtectionMode::Passphrase)?;
     let Some(account) = h.keychain_account.clone() else {
@@ -881,10 +866,7 @@ pub fn retire_rotated_keychain(dir: &Path, h: &mut ProfileHeader, key: &Key) -> 
     for entry in retired.iter() {
         // Serializes all cooperating cleanup clients. OS tools that replace
         // credentials outside Anvil are outside this file fence.
-        #[cfg(feature = "os-keychain")]
         let removed = delete_retired_entry(&entry.key_check, &entry.account);
-        #[cfg(not(feature = "os-keychain"))]
-        let removed: Result<(), VaultError> = Err(VaultError::KeychainUnavailable("this build has no OS credential store".into()));
         if let Err(e) = removed {
             refused.get_or_insert(e);
             left.push(entry.clone());
@@ -907,7 +889,6 @@ pub fn retire_rotated_keychain(dir: &Path, h: &mut ProfileHeader, key: &Key) -> 
 /// Maps a keyring error to a vault error. The user refusing access (the OS
 /// prompt was denied or cancelled, common after an unsigned app update)
 /// is distinct from a store that is genuinely unavailable.
-#[cfg(feature = "os-keychain")]
 fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
     let message = error.to_string();
     let normalized = message.to_ascii_lowercase();
@@ -926,7 +907,6 @@ fn keychain_error(error: &dyn std::fmt::Display) -> VaultError {
 /// overwritten with the marker (see [`KEYCHAIN_RETIRED_TAG`]) so that a copy
 /// of the header saved before the conversion cannot unlock from it; the
 /// removal is still reported as failed and retried.
-#[cfg(feature = "os-keychain")]
 fn delete_retired_entry(key_check_of_entry: &str, account: &str) -> Result<(), VaultError> {
     let entry = keychain_entry(account)?;
     let unavailable = |e: keyring_core::Error| keychain_error(&e);
@@ -962,7 +942,6 @@ fn delete_retired_entry(key_check_of_entry: &str, account: &str) -> Result<(), V
 
 /// The marker left in place of a converted profile's keychain entry that
 /// the store refused to delete. It holds no key.
-#[cfg(feature = "os-keychain")]
 fn retired_secret(key_check: &str) -> Vec<u8> {
     [KEYCHAIN_RETIRED_TAG, key_check.as_bytes()].concat()
 }
@@ -975,7 +954,6 @@ fn retired_secret(key_check: &str) -> Vec<u8> {
 /// undone. If the header no longer names this account in passphrase mode it
 /// is left alone. Either way `h` becomes the header on disk when that is
 /// still this profile's passphrase header.
-#[cfg(feature = "os-keychain")]
 fn forget_keychain_account(dir: &Path, h: &mut ProfileHeader, account: &str) -> Result<(), VaultError> {
     let same_profile =
         |x: &ProfileHeader| x.protection == ProtectionMode::Passphrase && x.profile_id == h.profile_id && x.key_check == h.key_check;
@@ -993,7 +971,6 @@ fn forget_keychain_account(dir: &Path, h: &mut ProfileHeader, account: &str) -> 
 }
 
 /// The keychain secret stored for `dek`: tagged, see [`KEYCHAIN_SECRET_TAG`].
-#[cfg(feature = "os-keychain")]
 fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
     let mut secret = Zeroizing::new(Vec::with_capacity(KEYCHAIN_SECRET_TAG.len() + crypto::KEY_LEN));
     secret.extend_from_slice(KEYCHAIN_SECRET_TAG);
@@ -1002,7 +979,6 @@ fn keychain_secret(dek: &Key) -> Zeroizing<Vec<u8>> {
 }
 
 /// The key in a keychain secret, and whether the secret is tagged.
-#[cfg(feature = "os-keychain")]
 fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
     if let Some(raw) = secret.strip_prefix(ENROLLED_KEYCHAIN_TAG) {
         return Ok((Key::from_bytes(raw)?, true));
@@ -1016,7 +992,6 @@ fn parse_keychain_secret(secret: &[u8]) -> Result<(Key, bool), VaultError> {
 /// Tag the untagged entry of a keychain profile whose header has a MAC. An
 /// entry that is missing, holds no key or holds another key cannot open
 /// this profile, and is left alone.
-#[cfg(feature = "os-keychain")]
 fn tag_keychain_entry(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
@@ -1032,7 +1007,7 @@ fn tag_keychain_entry(h: &ProfileHeader, dek: &Key) -> Result<(), VaultError> {
     }
 }
 
-#[cfg(all(test, feature = "os-keychain"))]
+#[cfg(test)]
 thread_local! {
     /// Runs just before a retired entry is deleted, so a test can make the
     /// mock store refuse the delete after the read succeeded.
@@ -1046,7 +1021,6 @@ thread_local! {
 /// macOS Keychain, the Windows Credential Manager, or the freedesktop Secret
 /// Service (GNOME Keyring, KWallet) on Linux and the BSDs. There is no
 /// in-memory fallback: a missing store is `KeychainUnavailable`.
-#[cfg(feature = "os-keychain")]
 fn keychain_entry(account: &str) -> Result<keyring_core::Entry, VaultError> {
     let unavailable = |e: &dyn std::fmt::Display| keychain_error(e);
     // The platform store is installed on first use. A store installed
@@ -1068,7 +1042,6 @@ fn keychain_entry(account: &str) -> Result<keyring_core::Entry, VaultError> {
     entry.map_err(|e| unavailable(&e))
 }
 
-#[cfg(feature = "os-keychain")]
 pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
     let dek = Key::random();
     let profile_id = uuid::Uuid::now_v7().to_string();
@@ -1094,7 +1067,6 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
     Ok(CreatedProfile { header, dek, recovery_key: None })
 }
 
-#[cfg(feature = "os-keychain")]
 pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
     let mut created = create_keychain_profile(dir, display_name)?;
     let entry = keychain_entry(created.header.keychain_account.as_deref().expect("keychain account"))?;
@@ -1107,15 +1079,9 @@ pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Resul
     Ok(created)
 }
 
-#[cfg(not(feature = "os-keychain"))]
-pub fn create_enrolled_keychain_profile(dir: &Path, display_name: &str) -> Result<CreatedProfile, VaultError> {
-    create_keychain_profile(dir, display_name)
-}
-
 /// Unlock a keychain profile. An entry written by an earlier build is
 /// tagged here once its header has a protection MAC (best effort; retried
 /// at each unlock).
-#[cfg(feature = "os-keychain")]
 pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
     // Checked before the store is touched: a converted profile may still
     // name its old account until that entry is removed.
@@ -1151,7 +1117,6 @@ pub fn unlock_with_keychain(h: &ProfileHeader) -> Result<Key, VaultError> {
 
 /// Remove a keychain profile's data key from the OS credential store. The
 /// profile can no longer be opened afterwards (portable backups still restore).
-#[cfg(feature = "os-keychain")]
 pub fn delete_keychain_entry(h: &ProfileHeader) -> Result<(), VaultError> {
     let account = h.keychain_account.as_deref().ok_or_else(|| VaultError::Header("no keychain account recorded".into()))?;
     let entry = keychain_entry(account)?;
@@ -1167,7 +1132,6 @@ pub fn check_app_key(h: &ProfileHeader, key: &Key) -> Result<(), VaultError> {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "os-keychain")]
     #[test]
     fn keychain_access_denied_is_distinct_from_an_unavailable_store() {
         let canceled = keyring_core::Error::PlatformFailure(Box::new(std::io::Error::other("User canceled the operation")));
@@ -1219,7 +1183,6 @@ mod tests {
 
     /// Install keyring-core's in-memory mock as the credential store, once
     /// for every test in this binary.
-    #[cfg(feature = "os-keychain")]
     fn mock_store() {
         static INSTALL: std::sync::Once = std::sync::Once::new();
         INSTALL.call_once(|| keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap()));
@@ -1228,13 +1191,11 @@ mod tests {
     }
 
     /// Make the mock store refuse the next operation on this entry.
-    #[cfg(feature = "os-keychain")]
     fn refuse(entry: &keyring_core::Entry) {
         let cred = entry.as_any().downcast_ref::<keyring_core::mock::Cred>().unwrap();
         cred.set_error(keyring_core::Error::NoStorageAccess(Box::new(std::io::Error::other("store locked"))));
     }
 
-    #[cfg(feature = "os-keychain")]
     #[test]
     fn keychain_delete_refused_after_a_successful_read_is_retried() {
         mock_store();
@@ -1267,7 +1228,6 @@ mod tests {
         assert!(read_header(dir.path()).unwrap().keychain_account.is_none());
     }
 
-    #[cfg(feature = "os-keychain")]
     #[test]
     fn an_untagged_entry_left_behind_does_not_reopen_a_flipped_header_without_its_mac() {
         mock_store();
@@ -1301,7 +1261,6 @@ mod tests {
         assert!(matches!(unlock_with_keychain(&flipped), Err(VaultError::HeaderTampered)));
     }
 
-    #[cfg(feature = "os-keychain")]
     #[test]
     fn a_conversion_stops_unchanged_when_the_entry_cannot_be_tagged() {
         mock_store();
@@ -1322,7 +1281,6 @@ mod tests {
         assert_eq!(unlock_with_keychain(&read_header(dir.path()).unwrap()).unwrap().as_bytes(), created.dek.as_bytes());
     }
 
-    #[cfg(feature = "os-keychain")]
     #[test]
     fn a_keychain_rotation_stages_a_new_entry_and_discards_it_if_it_stops_before_commit() {
         mock_store();
@@ -1351,12 +1309,10 @@ mod tests {
         assert!(matches!(rotated_keychain_header(&c.header, &new), Err(VaultError::WrongProtection(_))));
     }
 
-    #[cfg(feature = "os-keychain")]
     thread_local! {
         static PROFILE_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     }
 
-    #[cfg(feature = "os-keychain")]
     #[test]
     fn a_removed_entry_is_reported_even_if_the_header_update_fails() {
         fn break_header(_: &keyring_core::Entry) {

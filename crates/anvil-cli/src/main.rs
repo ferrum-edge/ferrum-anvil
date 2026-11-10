@@ -558,6 +558,21 @@ enum Policy {
     Duplicate,
 }
 
+/// The next stdin line, without its line ending, for a value the command
+/// requires (a recovery key, a new passphrase, an acknowledgment): end of
+/// input or an empty line is the error `missing`.
+fn stdin_line(missing: &str) -> Result<Zeroizing<String>> {
+    let mut s = Zeroizing::new(String::new());
+    std::io::stdin().read_line(&mut s)?;
+    let line = s.trim_end_matches(['\r', '\n']);
+    if line.is_empty() {
+        bail!("{missing}");
+    }
+    Ok(Zeroizing::new(line.to_string()))
+}
+
+/// The passphrase from the next stdin line (`--passphrase-stdin`), else from
+/// the environment variable `env`.
 fn passphrase(from_stdin: bool, env: &str) -> Result<Option<Zeroizing<String>>> {
     if from_stdin {
         let mut s = String::new();
@@ -583,7 +598,7 @@ fn open_app_inner(cli: &Cli, recovery_key_stdin: bool, rotation_only: bool) -> R
         None => pm.list().into_iter().next().ok_or_else(|| anyhow!("no profile exists; run `anvil profile create <name>`"))?,
     };
     let (header, key) = if recovery_key_stdin {
-        let recovery = passphrase(true, "ANVIL_RECOVERY_KEY")?.ok_or_else(|| anyhow!("provide the current recovery key on stdin"))?;
+        let recovery = stdin_line("provide the current recovery key on stdin")?;
         ProfileManager::unlock(&summary.dir, Unlock::RecoveryKey(&recovery))?
     } else {
         match summary.protection {
@@ -907,7 +922,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         None => pm.list().into_iter().next().ok_or_else(|| anyhow!("no profile exists"))?,
                     };
                     let old = if *recovery_key_stdin {
-                        passphrase(true, "ANVIL_RECOVERY_KEY")?
+                        Some(stdin_line("provide the current recovery key on stdin")?)
                     } else if summary.protection == anvil_domain::workspace::ProtectionMode::Passphrase {
                         passphrase(cli.passphrase_stdin, "ANVIL_PASSPHRASE")?
                     } else {
@@ -920,7 +935,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     } else {
                         Unlock::Keychain
                     };
-                    let new = passphrase(true, "ANVIL_NEW_PASSPHRASE")?.ok_or_else(|| anyhow!("provide the new passphrase"))?;
+                    let new = stdin_line("provide the new passphrase on stdin")?;
                     let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
                     {
                         let mut out = std::io::stdout().lock();
@@ -928,7 +943,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         writeln!(out, "Copy the key from your saved record onto the next stdin line. Enrollment has not committed.")?;
                         out.flush()?;
                     }
-                    if passphrase(true, "")?.as_ref().map(|s| s.as_str()) != Some(recovery.as_str()) {
+                    if stdin_line("acknowledge the saved recovery key on stdin")?.as_str() != recovery.as_str() {
                         bail!("recovery acknowledgment did not match; nothing committed");
                     }
                     ProfileManager::enroll_legacy_policy(
@@ -974,7 +989,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         }
                         return Ok(0);
                     }
-                    let new = passphrase(true, "ANVIL_NEW_PASSPHRASE")?.ok_or_else(|| anyhow!("provide the new passphrase on stdin"))?;
+                    let new = stdin_line("provide the new passphrase on stdin")?;
                     let recovery = anvil_storage::vault::RotationRecoveryKey::generate();
                     {
                         let mut out = std::io::stdout().lock();
@@ -985,7 +1000,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         )?;
                         out.flush()?;
                     }
-                    let acknowledgment = passphrase(true, "")?.ok_or_else(|| anyhow!("acknowledge the saved recovery key on stdin"))?;
+                    let acknowledgment = stdin_line("acknowledge the saved recovery key on stdin")?;
                     if acknowledgment.as_str() != recovery.as_str() {
                         bail!("recovery key acknowledgment did not match; rotation was not committed");
                     }

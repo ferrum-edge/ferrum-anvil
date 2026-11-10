@@ -217,6 +217,30 @@
   have been read, the id is shown as it is (#471).
 - Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
   longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
+- `scripts/release-check.sh` now fails the dependency-graph check when `anvil-identity`'s
+  CI-only `mock-provider` feature is in the release graph, as ADR 0009 and `docs/identity.md`
+  already said it did. The unused `anvil_identity::MOCK_PROVIDER_COMPILED` constant those
+  documents named is removed (#525).
+- `anvil scenario create` no longer saves the scenario before checking the rest of the command.
+  A `--sensitive-column` without `--dataset`, an unreadable, malformed or unrecognised dataset
+  file, or too many `--iterations` used to leave a trusted scenario without the requested
+  settings, and re-running the corrected command then made the name ambiguous. The command now
+  checks everything first and saves the complete scenario once; a dataset stored for a scenario
+  that is then refused is removed again (#527).
+- `anvil profile rotate-key` and `anvil profile enroll-policy` refuse an empty or missing stdin
+  line for the current recovery key (`--recovery-key-stdin`), the new passphrase and the
+  recovery key acknowledgment with "provide the … on stdin", before anything is generated. An
+  empty new-passphrase line used to be taken as an empty passphrase. The code also named
+  `ANVIL_RECOVERY_KEY` and `ANVIL_NEW_PASSPHRASE` as fallbacks it never read; those names are
+  gone (stdin is the only source, as documented) (#528).
+- Deleting a request, folder, dataset or workspace now also deletes this device's linked-file
+  bindings for the requests and datasets it deletes, in the same transaction. They used to stay
+  in the vault for good, and a request a reimport brought back under its old id could pick up
+  the old binding without the file being chosen again (#530).
+- Clearing history (all of it or a workspace's) and deleting a workspace now also delete the
+  stored response bodies no remaining history record uses, in the same transaction. They used to
+  stay encrypted in `anvil.db` until a later recorded send ran retention, and for good once
+  history was turned off. Stored attachments are not affected (#530).
 
 ## [0.1.7] - 2026-11-03
 

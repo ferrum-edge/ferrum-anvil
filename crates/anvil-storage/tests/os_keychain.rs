@@ -13,7 +13,6 @@
 //! threads at once (see the `windows-native-keyring-store` crate docs): with
 //! the other tests writing in parallel, reading an entry just written failed
 //! with "No matching credential found" on the Windows CI runner.
-#![cfg(feature = "os-keychain")]
 
 use std::sync::{Mutex, MutexGuard};
 

@@ -438,12 +438,20 @@ impl App {
     /// Create a scenario authored by the local user (trusted). Every step
     /// must reference a request of the same workspace.
     pub fn create_scenario(&self, ws: &Id, name: &str, steps: Vec<ScenarioStep>) -> Result<Scenario> {
+        let s = self.new_scenario(ws, name, steps)?;
+        self.update_scenario(s)
+    }
+
+    /// A new scenario authored by the local user (trusted), not yet saved:
+    /// set its other fields, then validate and save it once with
+    /// [`App::update_scenario`].
+    pub fn new_scenario(&self, ws: &Id, name: &str, steps: Vec<ScenarioStep>) -> Result<Scenario> {
         self.workspace(ws)?;
         let name = name.trim();
         if name.is_empty() {
             return Err(AppError::Invalid("scenario name is empty".into()));
         }
-        let s = Scenario {
+        Ok(Scenario {
             meta: Meta::new(),
             workspace_id: *ws,
             name: name.into(),
@@ -453,8 +461,7 @@ impl App {
             iterations: 0,
             stop_on_failure: false,
             trusted: true,
-        };
-        self.update_scenario(s)
+        })
     }
 
     /// Validate and save a scenario (steps and dataset in this workspace,
@@ -573,6 +580,7 @@ impl App {
         self.store.atomically(|s| {
             let d: Option<Dataset> = s.get(kind::DATASET, id)?;
             s.delete(kind::DATASET, id)?;
+            crate::linked_files::drop_bindings_in(s, &std::collections::HashSet::from([*id]))?;
             if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
                 release_held_attachment_in(s, &sha256)?;
             }

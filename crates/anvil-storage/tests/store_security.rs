@@ -251,6 +251,51 @@ fn replacing_a_history_record_releases_its_old_body() {
 }
 
 #[test]
+fn clearing_history_or_deleting_its_workspace_releases_the_bodies_only_it_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
+    let store = Store::open(dir.path(), created.dek.clone()).unwrap();
+    let body_of = |id: &Id| -> String {
+        let conn = rusqlite::Connection::open(dir.path().join("anvil.db")).unwrap();
+        conn.query_row("SELECT body_blob FROM history WHERE id=?1", [id.to_string()], |r| r.get(0)).unwrap()
+    };
+    let (one, two) = (Id::new(), Id::new());
+    for ws in [one, two] {
+        store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(&ws, "w")).unwrap();
+    }
+    let add = |ws: Id, body: &[u8]| {
+        let id = Id::new();
+        store.add_history(&id, Some(&ws), None, 1, &serde_json::json!({"workspace_id": ws}), Some(body)).unwrap();
+        body_of(&id)
+    };
+    let pinned = store.put_blob(b"attachment").unwrap();
+    store.pin_blob(&pinned).unwrap();
+    let (only_one, shared) = (add(one, b"only in one"), add(one, b"in both"));
+    add(two, b"in both");
+    add(one, b"attachment");
+    let only_two = add(two, b"only in two");
+
+    // Clearing one workspace's history drops the bodies only its records used.
+    store.clear_history(Some(&one)).unwrap();
+    assert!(store.get_blob(&only_one).unwrap().is_none(), "a cleared record's body is released");
+    assert!(store.get_blob(&shared).unwrap().is_some(), "another workspace's record still uses it");
+    assert_eq!(store.get_blob(&pinned).unwrap().unwrap().as_slice(), b"attachment", "a pinned attachment stays");
+
+    // Deleting a workspace drops its records' bodies too.
+    store.delete_workspace(&two).unwrap();
+    assert!(store.get_blob(&shared).unwrap().is_none());
+    assert!(store.get_blob(&only_two).unwrap().is_none());
+    assert!(store.get_blob(&pinned).unwrap().is_some());
+
+    // Clearing all history keeps pinned attachments.
+    add(one, b"cleared with everything");
+    let last = add(one, b"last");
+    store.clear_history(None).unwrap();
+    assert!(store.get_blob(&last).unwrap().is_none());
+    assert!(store.get_blob(&pinned).unwrap().is_some());
+}
+
+#[test]
 fn replacing_a_history_record_with_the_same_body_keeps_it() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();

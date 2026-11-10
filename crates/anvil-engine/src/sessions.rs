@@ -210,17 +210,6 @@ fn dns_config(s: &EffectiveSettings) -> DnsConfig {
     DnsConfig { resolver: s.resolver.clone(), overrides: s.dns_overrides.clone(), ip_preference: s.ip_preference }
 }
 
-fn replace_oauth(a: &mut ResolvedAuth, t: &anvil_auth::oauth::CachedToken) {
-    match a {
-        ResolvedAuth::OAuth2 { access_token, token_type } => {
-            *access_token = t.access_token.clone();
-            *token_type = t.token_type.clone();
-        }
-        ResolvedAuth::Multi(v) => v.iter_mut().for_each(|x| replace_oauth(x, t)),
-        _ => {}
-    }
-}
-
 pub(crate) fn has_explicit_header(spec: &RequestSpec, name: &str) -> bool {
     spec.headers.iter().any(|h| h.enabled && h.name.trim().eq_ignore_ascii_case(name))
 }
@@ -356,7 +345,7 @@ async fn apply_auth(
 ) -> Result<Authorized, TransportFailure> {
     if let Some((key, cfg)) = &prep.oauth_key {
         match crate::oauth_http::acquire(engine, prep.epoch, ctx, &prep.settings, key, cfg, cancel).await {
-            Ok(t) => replace_oauth(&mut prep.auth, &t),
+            Ok(t) => http_exec::replace_oauth(&mut prep.auth, &t),
             Err(e) => return Err(crate::oauth_http::acquisition_failure(cfg, e, "Nothing was sent.")),
         }
     }

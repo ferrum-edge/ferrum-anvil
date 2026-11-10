@@ -249,7 +249,7 @@ fn collect_secret_refs(v: &serde_json::Value, out: &mut HashSet<SecretRef>) {
 }
 
 pub struct StoreAttachments {
-    pub index: std::collections::HashMap<String, Vec<u8>>,
+    pub index: std::collections::HashMap<String, Bytes>,
     /// Linked files chosen on this device (see `anvil_app::linked_files`);
     /// any other linked file is refused, never read.
     pub linked: Vec<String>,
@@ -260,11 +260,9 @@ impl AttachmentResolver for StoreAttachments {
     fn load(&self, a: &AttachmentRef) -> std::result::Result<Bytes, String> {
         crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())?;
         match a {
-            AttachmentRef::Stored { sha256, file_name, .. } => self
-                .index
-                .get(sha256)
-                .map(|b| Bytes::from(b.clone()))
-                .ok_or_else(|| format!("attachment '{file_name}' is missing from this workspace")),
+            AttachmentRef::Stored { sha256, file_name, .. } => {
+                self.index.get(sha256).cloned().ok_or_else(|| format!("attachment '{file_name}' is missing from this workspace"))
+            }
             AttachmentRef::LinkedFile { path } if self.linked.contains(path) => {
                 read_bound_file(path, FilePurpose::Attachment.max_read_bytes(), "file").map(Bytes::from).map_err(|e| e.to_string())
             }
@@ -501,7 +499,7 @@ impl App {
         let spec_json = serde_json::to_value(&spec)?;
         collect_attachments(&spec_json, &mut |sha| {
             if let Ok(Some(b)) = attachment_for(read, sha) {
-                index.insert(sha.to_string(), b);
+                index.insert(sha.to_string(), Bytes::from(b));
             }
         });
         let settings_app = &settings;

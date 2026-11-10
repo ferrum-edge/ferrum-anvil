@@ -298,13 +298,25 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
         scope_removed: vec![],
     };
     let mut matched: HashSet<&str> = HashSet::new();
+    // The first fresh request of each operation key, as a search in order
+    // finds it, and each fresh folder by id: looked up once per request.
+    let mut by_key: HashMap<&str, &RequestDefinition> = HashMap::new();
+    for f in &fresh.requests {
+        if let Some(s) = &f.spec.source {
+            by_key.entry(s.operation_key.as_str()).or_insert(f);
+        }
+    }
+    let mut folders: HashMap<Id, &Folder> = HashMap::new();
+    for f in &fresh.folders {
+        folders.entry(f.meta.id).or_insert(f);
+    }
     for prev in previous {
         let Some(src) = &prev.spec.source else {
             plan.unlinked.push(prev.meta.id);
             continue;
         };
         let spec_edited = spec_hash(&prev.spec) != src.generated_hash;
-        let found = fresh.requests.iter().find(|f| f.spec.source.as_ref().is_some_and(|s| s.operation_key == src.operation_key));
+        let found = by_key.get(src.operation_key.as_str()).copied();
         let Some(f) = found else {
             let details_edited = DETAILS.iter().any(|part| detail_diff(prev, prev, src, part, scope.generated).1);
             let user_edited = spec_edited || details_edited;
@@ -359,7 +371,7 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
                 if !needed.insert(id) {
                     break;
                 }
-                cur = fresh.folders.iter().find(|x| x.meta.id == id).and_then(|x| x.parent_id);
+                cur = folders.get(&id).and_then(|x| x.parent_id);
             }
         }
     }
@@ -584,11 +596,17 @@ impl ReimportPlan {
     /// records a new one when it persists the update.
     pub fn apply(&self, previous: &[RequestDefinition], approval: &ReimportApproval) -> Vec<RequestDefinition> {
         let mut out = Vec::with_capacity(previous.len() + self.added.len());
+        let removed: HashSet<Id> = self.removed.iter().map(|r| r.existing_id).collect();
+        // The first change for each request, as a search in order finds it.
+        let mut changes: HashMap<Id, &ReimportChange> = HashMap::new();
+        for c in self.updated.iter().chain(&self.conflicts) {
+            changes.entry(c.existing_id).or_insert(c);
+        }
         for prev in previous {
-            if self.removed.iter().any(|r| r.existing_id == prev.meta.id) && approval.delete.contains(&prev.meta.id) {
+            if removed.contains(&prev.meta.id) && approval.delete.contains(&prev.meta.id) {
                 continue;
             }
-            let change = self.updated.iter().chain(&self.conflicts).find(|c| c.existing_id == prev.meta.id);
+            let change = changes.get(&prev.meta.id).copied();
             let taken = change.map(|c| self.taken_fields(c, approval)).unwrap_or_default();
             match change {
                 Some(c) if !taken.is_empty() => {

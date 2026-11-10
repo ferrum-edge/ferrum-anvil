@@ -117,6 +117,15 @@ impl App {
             let entries = attachment_entries_in(&s.as_read())?;
             let stored = entries.into_iter().filter(|e| !attached_recently(e, cutoff)).map(|e| e.attachment).collect();
             let held = workspace_attachments_in(s, id, stored)?;
+            // The linked-file bindings of its requests and datasets: they are
+            // not owned by the workspace, so its delete leaves them.
+            let ws = id.to_string();
+            let mut owned = HashSet::new();
+            for k in [kind::REQUEST, kind::DATASET] {
+                let rows = s.object_meta(k)?.into_iter().filter(|m| m.workspace_id.as_deref() == Some(ws.as_str()));
+                owned.extend(rows.filter_map(|m| m.id.parse::<Id>().ok()));
+            }
+            crate::linked_files::drop_bindings_in(s, &owned)?;
             s.delete_workspace(id)?;
             for sha in unreferenced_in(s, held)? {
                 drop_attachment_in(s, &sha)?;
@@ -1373,6 +1382,7 @@ pub(crate) fn delete_requests_in(s: &StoreTx<'_>, requests: &[RequestDefinition]
     for r in requests {
         s.delete(kind::REQUEST, &r.meta.id)?;
     }
+    crate::linked_files::drop_bindings_in(s, &requests.iter().map(|r| r.meta.id).collect())?;
     let mut held = HashSet::new();
     for spec in &specs {
         crate::exec::collect_attachments(spec, &mut |sha| {

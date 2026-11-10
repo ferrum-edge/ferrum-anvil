@@ -9,8 +9,9 @@
 //! dataset (`file_choose` with purpose `linked_file` and the referrer),
 //! which binds the referrer and the file's canonical path in the vault. A
 //! binding made for one request or dataset never lets another one read the
-//! file, and a bundle import drops the bindings of every request and dataset
-//! it writes. Bindings are device-specific: they are not exported, and an
+//! file, a bundle import drops the bindings of every request and dataset it
+//! writes, and deleting a request or dataset (also with its folder or
+//! workspace) drops its bindings. Bindings are device-specific: they are not exported, and an
 //! import cannot create one. The CLI cannot bind a linked file (it has no
 //! dialog), but it reads one the desktop bound when it sends that saved
 //! request or uses that dataset from the same profile.
@@ -211,6 +212,28 @@ impl App {
         refuse_unbound(&self.linked_file_bindings()?, LinkedFileReferrer::Dataset { id }, path)?;
         read_bound_file(path, max, "dataset")
     }
+}
+
+/// Delete, in the transaction `s`, this device's linked-file bindings made
+/// for any of `referrers`: requests or datasets this transaction deletes. A
+/// binding was chosen for that object; one that comes back under the same id
+/// (a reimport, an import or a restore) must have its file chosen again. A
+/// binding that does not decode is kept, as other stored objects are.
+pub(crate) fn drop_bindings_in(s: &StoreTx<'_>, referrers: &std::collections::HashSet<Id>) -> anvil_storage::store::Result<()> {
+    if referrers.is_empty() {
+        return Ok(());
+    }
+    for m in s.object_meta(kind::LINKED_FILE)? {
+        let Ok(id) = m.id.parse::<Id>() else { continue };
+        match s.get::<LinkedFileBinding>(kind::LINKED_FILE, &id) {
+            Ok(Some(b)) if referrers.contains(&b.referrer.id()) => {
+                s.delete(kind::LINKED_FILE, &id)?;
+            }
+            Ok(_) | Err(anvil_storage::StoreError::Integrity | anvil_storage::StoreError::Serde(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Rewrite every linked file `referrer` names at `old` to name `new`, in

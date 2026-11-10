@@ -2,7 +2,7 @@
 //! profile on disk and a real fixture server.
 
 use anvil_app::App;
-use anvil_app::profiles::ProfileManager;
+use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::runner::{RunReport, RunnerCompletion};
@@ -203,6 +203,63 @@ async fn run_and_scenario_commands_end_to_end() {
     }
     let o = anvil(&data, &["run", "--help"]).await;
     assert_eq!(o.status.code(), Some(0));
+}
+
+/// `anvil scenario create` checks everything before it stores anything: a
+/// command that fails leaves no scenario and no dataset behind, so the
+/// corrected command creates the only scenario of that name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_scenario_create_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    setup(&data, "http://127.0.0.1:1", 1);
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    std::fs::write(p("rows.csv"), "user,pin\nann,pin-000111\n").unwrap();
+    std::fs::write(p("rows.txt"), "user,pin\nann,pin-000111\n").unwrap();
+    std::fs::write(p("bad.json"), "{not json").unwrap();
+    let (rows, txt, bad) = (p("rows.csv"), p("rows.txt"), p("bad.json"));
+    let failing: [Vec<&str>; 6] = [
+        vec!["--sensitive-column", "pin"],
+        vec!["--dataset", "/definitely/missing.csv"],
+        vec!["--dataset", &txt],
+        vec!["--dataset", &bad],
+        vec!["--dataset", &rows, "--sensitive-column", "nope"],
+        // Refused by the scenario's own validation, after the dataset was stored.
+        vec!["--dataset", &rows, "--iterations", "10001"],
+    ];
+    for extra in &failing {
+        let mut args = vec!["scenario", "create", "Shop", "Smoke", "--step", "Greet"];
+        args.extend(extra.iter().copied());
+        let o = anvil(&data, &args).await;
+        assert_eq!(o.status.code(), Some(3), "{extra:?}: {}", text(&o));
+    }
+    let open = || {
+        let s = ProfileManager::new(&data).list().into_iter().find(|s| s.display_name == "ci").unwrap();
+        let (h, key) = ProfileManager::unlock(&s.dir, Unlock::Passphrase(PASS)).unwrap();
+        App::open(s.dir, h, key).unwrap()
+    };
+    {
+        let app = open();
+        let ws = app.find_workspace("Shop").unwrap();
+        let names: Vec<String> = app.scenarios(&ws.meta.id).unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["Imported"], "a failed create left a scenario behind");
+        assert!(app.datasets(&ws.meta.id).unwrap().is_empty(), "a failed create left a dataset behind");
+    }
+
+    let o = anvil(
+        &data,
+        &["scenario", "create", "Shop", "Smoke", "--step", "Greet", "--dataset", &rows, "--sensitive-column", "pin", "--iterations", "2"],
+    )
+    .await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let app = open();
+    let ws = app.find_workspace("Shop").unwrap();
+    let sc = app.find_scenario(&ws.meta.id, "Smoke").expect("exactly one scenario named Smoke");
+    assert_eq!(sc.iterations, 2);
+    assert!(sc.trusted);
+    let d = app.workspace_dataset(&ws.meta.id, &sc.dataset_id.expect("the dataset is attached")).unwrap();
+    assert_eq!(d.sensitive_columns, ["pin"]);
+    assert_eq!(app.datasets(&ws.meta.id).unwrap().len(), 1);
 }
 
 /// A body a hostile server under test returns: once decoded, its `v` is a

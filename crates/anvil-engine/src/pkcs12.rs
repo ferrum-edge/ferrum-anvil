@@ -3,20 +3,10 @@
 //! are secrets and never logged.
 
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
+use anvil_transport::certs::pem;
 use anvil_transport::tls::ClientIdentityMaterial;
 use base64::Engine;
 use zeroize::Zeroizing;
-
-fn pem(label: &str, der: &[u8]) -> String {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut s = format!("-----BEGIN {label}-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        s.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-        s.push('\n');
-    }
-    s.push_str(&format!("-----END {label}-----\n"));
-    s
-}
 
 pub fn to_pem(bundle_b64: &str, password: &str) -> Result<ClientIdentityMaterial, TransportFailure> {
     let fail =
