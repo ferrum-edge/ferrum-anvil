@@ -9,8 +9,8 @@ pass.
 
 | What | Where |
 |---|---|
-| Source | `ferrum-edge/ferrum-anvil`, branch `main`, as of 2026-10-31 |
-| Website | `ferrum-edge/ferrumedge`, branch `main`, live; as of 2026-10-31 the Anvil pages describe the published unsigned preview. |
+| Source | `ferrum-edge/ferrum-anvil`, branch `main`, as of 2026-11-10 |
+| Website | `ferrum-edge/ferrumedge`, branch `main` (the live site); as of 2026-11-10 (`63bc030`) the Anvil pages describe the published `anvil-v0.1.7` unsigned preview. |
 | Gateway compatibility targets | Ferrum Edge v0.9.20 (source `e4a606a`, `lab/gateway/RELEASE.lock`, checksum-pinned and source-audited; hosted Anvil qualification recorded: Lab run 41810892175), the only supported release. Retired with Anvil's vendored dimpl: v0.9.15 (`25b3739`), v0.9.14 (`9bd4d5f`), v0.9.11 (`c764084`), v0.9.10 (`ee040d5`), v0.9.9 (`234717c`), v0.9.8 (`e27f210`), v0.9.7 (`8fed134`) and v0.9.5 (`20e7603`); their locks are removed and their source-audited catalogs stay embedded for existing profiles |
 | Gateway changes | G01, the authorized diagnostic reference, ships in Ferrum Edge v0.9.9 (`ferrum-edge/ferrum-edge#5767`; #5845, #5857/#5862 and #5868), and `ferrum-contracts` `contracts-edge-0.9.9` publishes its header and `ferrum.diagnostic_ref.v1` schema (that tag also covers v0.9.10, which changed no contract source). Anvil looks references up for gateway profiles that configure the lookup; only a record bound to the response raises a finding above "likely". The contract is in `docs/g01-gateway-diagnostic-contract.md`; Anvil's use of it is in `docs/diagnostics.md`. |
 | Published preview assets and checksums | The current public release, [`anvil-v0.1.7`](https://github.com/ferrum-edge/ferrum-anvil/releases/tag/anvil-v0.1.7), has downloadable CLI and desktop installers, `SHA256SUMS`, SBOMs and `latest.json` with minisign updater signatures, as did the first public preview, `anvil-v0.1.0`. The installers are unsigned previews: platform code signing and notarization are still blocked on owner credentials, and the release workflow creates a draft an owner publishes by hand (see `docs/release.md`). |
