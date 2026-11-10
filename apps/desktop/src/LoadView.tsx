@@ -115,6 +115,13 @@ function closedText(c: ClosedCount["closed_by"]): string {
   }
 }
 
+/** The report counts close codes outside 1000–4999, and any past the first
+ * 16 distinct ones, under code 0 (anvil-load `WS_CLOSE_OTHER`). */
+function closeCodeText(code: ClosedCount["code"]): string {
+  if (code == null) return "";
+  return code === 0 ? ", other codes" : `, code ${code}`;
+}
+
 function flatten(nodes: TreeNode[], path: string[] = []): { id: string; label: string; method: string; url?: string | null }[] {
   return nodes.flatMap((n) =>
     n.kind === "folder" ? flatten(n.children, [...path, n.name]) : [{ id: n.id, label: [...path, n.name].join(" / "), method: n.method ?? "GET", url: n.url }],
@@ -1557,7 +1564,7 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
               ["Not opened (connect, TLS, invalid handshake, timeout, cancel)", String(p.websocket.not_opened)],
               ["Opened and closed cleanly", String(p.websocket.closed_cleanly)],
               ["Messages sent / received", `${p.websocket.messages_sent} / ${p.websocket.messages_received}`],
-              ...p.websocket.close_codes.map((c) => [`Closed by ${closedText(c.closed_by)}${c.code != null ? `, code ${c.code}` : ""}`, String(c.count)] as [string, string]),
+              ...p.websocket.close_codes.map((c) => [`Closed by ${closedText(c.closed_by)}${closeCodeText(c.code)}`, String(c.count)] as [string, string]),
             ]}
           />
           {p.websocket.rtt_defined ? (

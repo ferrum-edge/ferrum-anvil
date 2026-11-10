@@ -715,7 +715,11 @@ fn protocol_csv(p: &ProtocolLoadMetrics, add: &mut impl FnMut(&str, &str, String
             latency_csv("websocket_rtt_us", &w.rtt, add);
         }
         for c in &w.close_codes {
-            let code = c.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
+            let code = match c.code {
+                Some(crate::metrics::WS_CLOSE_OTHER) => "other".into(),
+                Some(c) => c.to_string(),
+                None => "none".into(),
+            };
             add("websocket_close", &format!("{}:{code}", snake(&c.closed_by)), c.count.to_string());
         }
     }

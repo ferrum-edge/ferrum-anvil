@@ -433,7 +433,11 @@ fn protocol_section(p: &ProtocolLoadMetrics) -> String {
                     h,
                     r#"<tr><td>{}</td><td class="num">{}</td><td class="num">{}</td></tr>"#,
                     closed_text(c.closed_by),
-                    c.code.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
+                    match c.code {
+                        Some(crate::metrics::WS_CLOSE_OTHER) => "other".into(),
+                        Some(c) => c.to_string(),
+                        None => "—".into(),
+                    },
                     fmt_n(c.count)
                 );
             }

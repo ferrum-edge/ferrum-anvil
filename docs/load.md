@@ -346,7 +346,10 @@ and the HTML report says "WARNING: counts do not balance" otherwise. With
 * Streams: `opened ≤ settled`, `with_messages ≤ opened`; SSE `Σ ended_by = opened`.
 * WebSocket: `opened + handshake_rejected + not_opened = settled`,
   `closed_cleanly ≤ opened`, `Σ close_codes = opened`, and no RTT pairs
-  unless a pairing is defined.
+  unless a pairing is defined. `close_codes` has a row per closing side and
+  code for at most 16 distinct codes in 1000–4999, the first ones seen; every
+  other code (outside that range, or past the 16th) is counted under code `0`
+  ("other"), so a peer cannot grow it with a new code per session.
 * TCP: `connected ≤ settled`; `expectation_met + expectation_short = completed`
   when the request expects frames; short exchanges are application failures.
 * UDP/DTLS: `exchanges_with_response + exchanges_silent = completed`;
