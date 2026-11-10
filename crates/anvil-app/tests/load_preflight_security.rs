@@ -465,8 +465,11 @@ async fn literal_loopback_cleartext_issuers_through_a_proxy_are_refused_before_c
     assert!(recorder.requests().is_empty());
 }
 
+/// Which of these credentials a context looks up when it is built is checked
+/// in `anvil-app/src/exec.rs` (`prefetch_tests`): any protected edit stales the
+/// whole context, so the deletions here prove revocation, not prefetch order.
 #[test]
-fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_scope() {
+fn oauth_credential_contexts_resolve_and_are_revoked_for_every_grant_and_endpoint() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Credential ordering").unwrap();
@@ -521,7 +524,7 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
     }
     let ctx = context(&app, &plan(&app, ws.meta.id, spec));
     app.store.delete_secret(&secret.id).unwrap();
-    assert!(ctx.secrets.resolve(&secret).is_err(), "a proxied cleartext credential was prefetched");
+    assert!(ctx.secrets.resolve(&secret).is_err(), "a revoked proxied cleartext credential still resolved");
 }
 
 #[tokio::test]
@@ -625,10 +628,10 @@ async fn app_and_worker_producer_check_ineligible_issuers_before_nested_vault_va
                 let mut job = app.load_job(&p).expect("context defers unvalidated credential variables");
                 let ctx = job.requests.get_mut(&p.chain[0]).unwrap();
                 assert!(ctx.secrets.variable_secret(0, 0).is_some(), "the credential reference is retained");
-                // Deletion exposes any eager prefetch, including a duplicate
-                // direct reference through the spec or mixed effective auth.
+                // Deletion stales the context, so any later resolve fails
+                // (prefetch order is checked in exec.rs `prefetch_tests`).
                 app.store.delete_secret(&credential.id).unwrap();
-                assert!(ctx.secrets.resolve(&credential).is_err(), "credential was prefetched before eligibility");
+                assert!(ctx.secrets.resolve(&credential).is_err(), "a revoked credential still resolved");
                 // Rebuild after the edit to exercise endpoint eligibility
                 // independently of the newly tested stale-context refusal.
                 job = app.load_job(&p).unwrap();

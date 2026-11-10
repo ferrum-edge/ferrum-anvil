@@ -6,12 +6,9 @@
 use anvil_app::exec::SendOptions;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
-use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::{SecretRef, SensitiveValue};
-use anvil_domain::settings::ProxySelection;
-use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use std::sync::{Arc, mpsc};
@@ -32,26 +29,6 @@ fn bearer(secret: &SecretRef) -> RequestSpec {
     let mut spec = RequestSpec::http("GET", "http://127.0.0.1:9/");
     spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: secret.clone() }, prefix: "Bearer".into() };
     spec
-}
-
-/// An HTTP proxy profile whose password is `password`.
-fn proxy(app: &App, ws: &Id, password: &SecretRef) -> Id {
-    let now = chrono::Utc::now();
-    let p = ProxyProfile {
-        id: Id::new(),
-        workspace_id: *ws,
-        name: password.label.clone(),
-        kind: ProxyKind::Http,
-        address: "proxy.example.invalid:3128".into(),
-        username: Some("user".into()),
-        password: Some(SensitiveValue::Secret { secret: password.clone() }),
-        no_proxy: String::new(),
-        tls_profile_id: None,
-        hbone: None,
-        created_at: now,
-        updated_at: now,
-    };
-    app.save_proxy_profile(p).unwrap().id
 }
 
 #[tokio::test]
@@ -115,24 +92,4 @@ fn a_context_looks_up_its_workspace_secrets_when_built_and_fails_them_closed_onc
     // Once the profile locks, the context's secrets fail closed.
     app.lock();
     assert_eq!(ctx.secrets.resolve(&mine).unwrap_err(), "Anvil is locked");
-}
-
-#[test]
-fn a_context_looks_up_only_the_secrets_of_the_profiles_its_settings_select() {
-    let (_root, app) = open_app("selected");
-    let ws = app.create_workspace("w").unwrap();
-    let used = app.set_secret(&ws.meta.id, "used", "used-value").unwrap();
-    let unused = app.set_secret(&ws.meta.id, "unused", "unused-value").unwrap();
-    let selected = proxy(&app, &ws.meta.id, &used);
-    proxy(&app, &ws.meta.id, &unused);
-    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:9/");
-    spec.settings.proxy_profile_id = Some(ProxySelection::Profile { id: selected });
-    let ctx = app.build_context(None, &ws.meta.id, Some(spec), &SendOptions::default()).unwrap();
-    // Only the selected proxy's password was looked up when the context was
-    // built; the other profile's is looked up if it is used, and is gone by then.
-    assert_eq!(ctx.secrets.resolve(&used).unwrap().as_str(), "used-value");
-    app.store.delete_secret(&used.id).unwrap();
-    app.store.delete_secret(&unused.id).unwrap();
-    assert!(ctx.secrets.resolve(&used).unwrap_err().contains("configuration changed"));
-    assert!(ctx.secrets.resolve(&unused).is_err());
 }
