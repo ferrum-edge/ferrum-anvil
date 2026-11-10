@@ -791,6 +791,9 @@ pub fn timeline_csv(r: &LoadReport) -> String {
         .collect::<Vec<_>>(),
     ];
     for b in &r.timeline {
+        // A second with no successful unit has no success latency: an empty
+        // value, as the summary leaves an empty distribution, never 0.
+        let success_us = |v: u64| if b.p50_us == 0 { String::new() } else { v.to_string() };
         rows.push(vec![
             b.second.to_string(),
             b.warmup.to_string(),
@@ -799,8 +802,8 @@ pub fn timeline_csv(r: &LoadReport) -> String {
             b.failures.to_string(),
             b.dropped.to_string(),
             b.in_flight.to_string(),
-            b.p50_us.to_string(),
-            b.p99_us.to_string(),
+            success_us(b.p50_us),
+            success_us(b.p99_us),
             b.p99_schedule_lag_us.to_string(),
         ]);
     }
@@ -974,6 +977,24 @@ pub(crate) mod tests {
         assert!(s.lines().any(|l| l.starts_with("iterations,dropped,2")));
         let t = timeline_csv(&r);
         assert_eq!(t.lines().count(), 6);
+    }
+
+    /// A second without a successful unit has empty success latencies in the
+    /// timeline CSV, as an empty distribution has in the summary, never 0.
+    #[test]
+    fn timeline_csv_leaves_success_latency_empty_for_a_second_without_successes() {
+        let mut r = sample_report();
+        r.timeline[0].p50_us = 0;
+        r.timeline[0].p99_us = 0;
+        r.timeline[1].p50_us = 1_500;
+        r.timeline[1].p99_us = 9_000;
+        let t = timeline_csv(&r);
+        let rows: Vec<Vec<&str>> = t.lines().map(|l| l.split(',').collect()).collect();
+        let (p50, p99) =
+            (rows[0].iter().position(|c| *c == "success_p50_us").unwrap(), rows[0].iter().position(|c| *c == "success_p99_us").unwrap());
+        assert_eq!((rows[1][p50], rows[1][p99]), ("", ""), "{t}");
+        assert_eq!((rows[2][p50], rows[2][p99]), ("1500", "9000"), "{t}");
+        assert_eq!(rows[1].len(), rows[0].len(), "every column is still there");
     }
 
     #[test]

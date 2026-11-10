@@ -514,7 +514,9 @@ reader cannot keep a finished worker alive.
   `grpc_status`, `stream` (with `messages_sent` for client and bidirectional
   gRPC), `websocket`, `websocket_close`, `tcp`, `datagram`, `dtls_handshake`,
   `tunnel`); `datagram,observed_received_per_sent` is labelled an
-  observation, and empty distributions have empty values, not zeros.
+  observation, and empty distributions have empty values, not zeros. In
+  `timeline_csv`, a second with no successful unit has empty
+  `success_p50_us` and `success_p99_us`.
 * **HTML** (`html::to_html`): one self-contained file — inline CSS and inline
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
   embedded CSP (`default-src 'none'`). Every dynamic string is escaped,
