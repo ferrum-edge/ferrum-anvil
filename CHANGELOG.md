@@ -231,6 +231,11 @@
   have been read, the id is shown as it is (#471).
 - Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
   longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
+- A DNS override that leaves no address to dial (an empty address list, or only IPv4 addresses
+  under `ipv6_only` and the reverse) fails the DNS phase as `dns_no_records`, naming
+  `settings.dns_overrides`. HTTP/3, WebSocket, SSE and gRPC over HTTP/3 and MASQUE used to panic
+  (exit status 101 and no record), and TCP reported a connect timeout although nothing was dialled
+  (#509).
 
 ## [0.1.7] - 2026-11-03
 
