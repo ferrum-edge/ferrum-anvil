@@ -127,7 +127,11 @@ impl Checks {
         }
     }
 
-    /// No finding may be *confirmed* while mentioning a forbidden term in its title/explanation.
+    /// No finding may be *confirmed* while naming a forbidden term in its
+    /// title or code. The explanation is not read: explanations name the
+    /// causes a finding leaves open or rules out (a confirmed
+    /// `http.forbidden` says a 403 alone does not tell whether a WAF, the
+    /// gateway or the application refused it), so a term there is no claim.
     pub fn no_confirmed_claim(&mut self, o: &ExecutionOutput, term: &str) {
         let bad: Vec<String> = o
             .record

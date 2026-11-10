@@ -484,6 +484,7 @@ fn proto002(env: &Env) -> Fut<'_> {
         let trailers_of = |o: &ExecutionOutput| -> Vec<(String, String)> {
             o.record.response.as_ref().map(|r| r.trailers.iter().map(|h| (h.name.clone(), h.value.clone())).collect()).unwrap_or_default()
         };
+        let h2_from = env.fx.h2_tls.log.entries().len();
         // Through the gateway: h2 over TLS on the client leg and on the upstream leg.
         let mut x = http_ctx(env, "GET", &format!("https://{HTTPS}/proto/h2/trailers"), Some(HttpVersionPolicy::Http2Only));
         x.spec.headers.push(KeyValue::new("te", "trailers"));
@@ -510,7 +511,7 @@ fn proto002(env: &Env) -> Fut<'_> {
         c.add(
             CheckKind::GroundTruth,
             "the h2 backend produced the body and its trailers",
-            env.fx.h2_tls.log.requests().iter().any(|(_, p)| p == "/trailers"),
+            requests_since(&env.fx.h2_tls.log, h2_from).iter().any(|(p, _)| p == "/trailers"),
             "",
         );
         let echo = send(env, &http_ctx(env, "GET", &format!("https://{HTTPS}/proto/h2/echo"), Some(HttpVersionPolicy::Http2Only))).await;
@@ -1282,6 +1283,7 @@ fn proto014(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let grpc_from = env.fx.grpc.log.entries().len();
         let o = send(env, &grpc_ctx(env, &format!("grpc://{HTTP}"), "Unary", GrpcMode::Unary, &[r#"{"message":"x","failWith":5}"#], None))
             .await;
         let (http, st, src, msg) = grpc_status(&o);
@@ -1302,7 +1304,7 @@ fn proto014(env: &Env) -> Fut<'_> {
         c.add(
             CheckKind::GroundTruth,
             "the backend itself returned the status",
-            env.fx.grpc.log.requests().iter().any(|(_, p)| p == "/anvil.lab.v1.Echo/Unary"),
+            requests_since(&env.fx.grpc.log, grpc_from).iter().any(|(p, _)| p == "/anvil.lab.v1.Echo/Unary"),
             "",
         );
         operator_status(&mut c, &op_log(env, from, "proto014-grpc").await, 200);
@@ -1385,6 +1387,7 @@ fn proto016(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let grpc_from = env.fx.grpc.log.entries().len();
         let url = format!("grpc://{HTTP}");
         let mut check = |label: &str, o: &ExecutionOutput, want: Vec<&str>| {
             let got = previews(o, Direction::Received, "grpc_message");
@@ -1419,7 +1422,7 @@ fn proto016(env: &Env) -> Fut<'_> {
         let tls = send(env, &grpc_ctx(env, &format!("grpcs://{HTTPS}"), "Unary", GrpcMode::Unary, &[r#"{"message":"tls"}"#], None)).await;
         check("unary over TLS (grpcs, ALPN h2)", &tls, vec![r#"{"message":"tls"}"#]);
         c.add(CheckKind::Diagnosis, "grpcs leg verified", tls_verified(&tls), "");
-        let paths: Vec<String> = env.fx.grpc.log.requests().into_iter().map(|(_, p)| p).collect();
+        let paths: Vec<String> = requests_since(&env.fx.grpc.log, grpc_from).into_iter().map(|(p, _)| p).collect();
         c.add(
             CheckKind::GroundTruth,
             "backend saw all four call modes",
@@ -2495,6 +2498,7 @@ fn proto019_echo(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
+        let before = bytes_received(&env.fx.tcp_echo.log);
         let o = send(env, &tcp_ctx(env, "tcp://127.0.0.1:18408", TcpFraming::NewlineDelimited, &["first", "second"], false, 2)).await;
         c.add(
             CheckKind::Diagnosis,
@@ -2504,7 +2508,7 @@ fn proto019_echo(env: &Env) -> Fut<'_> {
             outcome_line(&o),
         );
         c.add(CheckKind::Diagnosis, "no failure recorded", failure_kind(&o).is_none(), "");
-        c.add(CheckKind::GroundTruth, "the backend echo received the frames", bytes_received(&env.fx.tcp_echo.log) >= 13, "");
+        c.add(CheckKind::GroundTruth, "the backend echo received the frames", bytes_received(&env.fx.tcp_echo.log) >= before + 13, "");
         Outcome { main: Some(o), recovery: None, checks: c, operator_log: op_log(env, from, "tcp-echo").await }
     })
 }
