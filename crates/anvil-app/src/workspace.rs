@@ -945,11 +945,15 @@ impl App {
         Ok(self.store.atomically(|s| store_attachment_in(s, file_name, bytes, media_type, true))?)
     }
 
-    /// Pin the blob of every stored attachment (idempotent). Profiles created
-    /// before blobs were pinned could lose attachments to history retention;
-    /// this protects whatever is still there. The index is read and every pin
-    /// written in one write transaction, so retention on any connection runs
-    /// before or after all of it, never between the read and a pin.
+    /// Pin the blob of every stored attachment (idempotent), then release
+    /// the history response bodies no record uses. Profiles created before
+    /// blobs were pinned could lose attachments to history retention; this
+    /// protects whatever is still there. Retention sweeps bodies only when it
+    /// removes a record, so a body left by an earlier build (whose clear did
+    /// not release them) is collected here. The index is read, every pin
+    /// written and the bodies swept in one write transaction, so retention on
+    /// any connection runs before or after all of it, never between the read
+    /// and a pin.
     pub(crate) fn pin_attachment_blobs(&self) -> Result<()> {
         Ok(self.store.atomically(|s| {
             let idx: Vec<serde_json::Value> = s.list(kind::IMPORT_SOURCE, None)?;
@@ -958,6 +962,7 @@ impl App {
                     s.pin_blob(blob)?;
                 }
             }
+            s.sweep_history_bodies()?;
             Ok(())
         })?)
     }

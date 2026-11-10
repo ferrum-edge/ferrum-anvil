@@ -988,8 +988,12 @@ historical data is an intentional owner choice.
 ## History retention
 
 Configurable in Settings: enable or disable history, keep or drop response
-bodies, maximum age (days) and total size. Pruning keeps the newest records
-within the budget. "Clear all history" (or a workspace's history) deletes
+bodies, maximum age (days) and total size. Pruning (after every recorded
+send) keeps the newest records within the budget and releases the response
+bodies of the records it removes; when no record is too old and all fit, it
+reads only their oldest time and total size, and removes and releases
+nothing. Opening a profile releases any history body no record uses, once
+attachment pins are re-applied. "Clear all history" (or a workspace's history) deletes
 those history records and the response bodies no remaining record uses, in
 one write transaction; deleting a workspace does the same for its records.
 Neither touches stored attachments. A

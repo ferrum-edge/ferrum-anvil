@@ -1835,7 +1835,8 @@ impl Store {
         Records { key, conn: &conn, manifest: None }.get_history(id)
     }
 
-    /// Enforce history retention by age and total bytes; removes orphaned blobs.
+    /// Enforce history retention by age and total bytes, and release the
+    /// response bodies of the records it removes.
     pub fn prune_history(&self, max_age_days: u32, max_total_bytes: u64) -> Result<usize> {
         let mut conn = self.writing()?;
         // Take the write lock up front: blobs are collected against one state
@@ -1843,6 +1844,17 @@ impl Store {
         // connection has since written past.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let cutoff = chrono::Utc::now().timestamp_millis() - (max_age_days as i64) * 86_400_000;
+        // The usual case (a recorded send under budget): no record is too
+        // old and all fit, so none is removed and no body is released. Every
+        // other delete of a record releases its body itself (`clear_history`,
+        // a workspace delete, a replaced record), and opening a profile
+        // releases any body left over (`StoreTx::sweep_history_bodies`).
+        let (oldest, total): (Option<i64>, i64) =
+            tx.query_row("SELECT MIN(started_at), COALESCE(SUM(MAX(size, 0)), 0) FROM history", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if oldest.is_none_or(|o| o >= cutoff) && total.max(0) as u64 <= max_total_bytes {
+            tx.commit()?;
+            return Ok(0);
+        }
         let mut removed = tx.execute("DELETE FROM history WHERE started_at < ?1", params![cutoff])?;
         // Keep the newest entries whose cumulative size fits the budget.
         let rows: Vec<(String, i64)> = {
@@ -2125,6 +2137,13 @@ impl StoreTx<'_> {
             m.remove_workspace(&ws);
         }
         Ok(())
+    }
+
+    /// Delete the history response bodies no history record uses; pinned
+    /// blobs (stored attachments) are kept. Run after every attachment blob
+    /// is pinned. The number of blobs deleted.
+    pub fn sweep_history_bodies(&self) -> Result<usize> {
+        sweep_history_bodies(&self.tx)
     }
 
     /// Keep `value` as this database's note `name` (see [`StoreRead::note`]).
