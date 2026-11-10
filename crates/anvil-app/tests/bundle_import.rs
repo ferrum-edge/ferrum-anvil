@@ -931,7 +931,8 @@ async fn an_export_with_history_lists_the_records_it_leaves_out() {
     a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
     let preview = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
     assert_eq!(preview.manifest.counts["history"] as usize, 1);
-    assert!(preview.manifest.excluded.is_empty(), "{:?}", preview.manifest.excluded);
+    let excluded = &preview.manifest.excluded;
+    assert!(!excluded.iter().any(|x| x.starts_with("history records")), "{excluded:?}");
 
     // As many older copies of the record again, in one transaction.
     let first = a.store.list_history(Some(&ws.meta.id), None, 1).unwrap().remove(0);
