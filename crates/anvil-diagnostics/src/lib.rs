@@ -151,7 +151,6 @@ pub fn diagnose(input: &DiagnosticInput<'_>) -> Diagnosis {
     let ctx = rules::Ctx { input, body: &body };
     rules::run_all(&ctx, &mut drafts, &mut warnings);
     let stopped_at_login = rules::stopped_at_login(&ctx);
-    // Cap confidence when the only provenance is an unauthenticated channel.
     let findings = drafts.into_iter().map(render::render).collect::<Vec<_>>();
     let mut findings = dedupe(findings);
     findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(specificity(b).cmp(&specificity(a))).then(b.confidence.cmp(&a.confidence)));

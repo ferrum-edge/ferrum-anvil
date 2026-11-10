@@ -151,7 +151,7 @@ fn display_name(s: &str) -> String {
     name.trim().to_string()
 }
 
-/// The arguments as the request's JSON text: `{{` is written `{{`, so
+/// The arguments as the request's JSON text: `{{` is written `{\u007b`, so
 /// the variable resolver leaves it as the text the tool listed.
 fn arguments_text(v: &Value) -> String {
     let text = serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into());

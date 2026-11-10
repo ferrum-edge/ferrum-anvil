@@ -992,7 +992,6 @@ struct WorkloadLimits {
 }
 
 /// Workload, warmup and abort-rule checks (returns the resolved limits).
-/// Public so callers can reject a plan when it is saved, not only when it runs.
 fn validate_workload(plan: &LoadPlan) -> Result<WorkloadLimits, LoadError> {
     let (slots, planned_secs) = match &plan.workload {
         Workload::ClosedVirtualUsers { stages, think_time_ms } => {
@@ -1035,6 +1034,7 @@ fn validate_workload(plan: &LoadPlan) -> Result<WorkloadLimits, LoadError> {
 
 /// Validate a plan's shape without resolving its requests: a chain or mix is
 /// present and the workload, warmup and abort rule are within limits.
+/// Public so callers can reject a plan when it is saved, not only when it runs.
 pub fn validate_plan(plan: &LoadPlan) -> Result<(), LoadError> {
     if plan.chain.is_empty() && plan.mix.is_empty() {
         return Err(LoadError::Invalid("the plan has neither a request chain nor a weighted mix".into()));
