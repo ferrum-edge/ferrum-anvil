@@ -1912,3 +1912,36 @@ describe("the send shortcut", () => {
     await waitFor(() => expect(calls("send_request")).toHaveLength(1));
   });
 });
+
+describe("the request tree", () => {
+  it("leaves Enter and Delete on a row's action button to that button", async () => {
+    backend();
+    await boot();
+    const row = screen.getByRole("treeitem", { name: /Alpha/ });
+    fireEvent.keyDown(within(row).getByRole("button", { name: "Rename" }), { key: "Enter" });
+    fireEvent.keyDown(within(row).getByRole("button", { name: "Duplicate" }), { key: "Delete" });
+    await act(async () => {});
+    expect(calls("request_get")).toHaveLength(0);
+    expect(ask).not.toHaveBeenCalled();
+    expect(calls("request_delete")).toHaveLength(0);
+    expect(openTabs().queryByRole("tab", { name: /Alpha/ })).toBeNull();
+
+    // Positive control: Enter on the row itself opens the request.
+    fireEvent.keyDown(row, { key: "Enter" });
+    await openTabs().findByRole("tab", { name: /Alpha/ });
+    expect(calls("request_get")).toHaveLength(1);
+  });
+
+  it("opens one tab when a request is opened twice while it is read", async () => {
+    const read = deferred<RequestDefinition>();
+    backend({ request_get: () => read.promise });
+    await boot();
+    const row = screen.getByRole("treeitem", { name: /Alpha/ });
+    fireEvent.click(row);
+    fireEvent.click(row);
+    await waitFor(() => expect(calls("request_get")).toHaveLength(2));
+    await act(async () => read.resolve(requests.r1));
+    await openTabs().findByRole("tab", { name: /Alpha/ });
+    expect(openTabs().getAllByRole("tab", { name: /Alpha/ })).toHaveLength(1);
+  });
+});

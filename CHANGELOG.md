@@ -220,6 +220,9 @@
 - The desktop Body tab shows a body that is not UTF-8 as binary (hex) instead of as text with its
   last three bytes missing, and a text body over the 2 MiB display cap stays text when the cap cuts
   a multi-byte character, instead of turning into a hex dump (#516).
+- Enter, F2, Delete or Backspace on a sidebar row's Rename, Duplicate, Folder settings or Delete
+  button no longer also opens, toggles, renames or deletes the row, and opening a request twice
+  while it is read opens one tab (#517).
 
 ## [0.1.7] - 2026-11-03
 
