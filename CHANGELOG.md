@@ -168,6 +168,8 @@
 
 ### Fixed
 
+- An MCP request's protocol tag in the sidebar and tab bar uses the protocol colour of the
+  other non-HTTP requests instead of the `GET` colour.
 - HTTP/3 requests, WebSocket over HTTP/3, SSE over HTTP/3, gRPC over HTTP/3 and MASQUE CONNECT-UDP
   no longer send `Proxy-Connection`, a `TE` other than `trailers`, or a field a `Connection` value
   names. RFC 9114 makes such a request malformed, so the server reset the stream where the same
