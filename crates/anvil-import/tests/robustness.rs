@@ -59,13 +59,19 @@ fn every_fixture_imports_and_detects() {
 
 #[test]
 fn garbage_is_an_error_not_a_panic() {
+    // Input that cannot be an importable document: empty, UTF-16, a parse
+    // error, a top-level value that is not an object, XML without a root
+    // element, an OpenAPI version Anvil does not import.
+    for input in
+        [&b""[..], b"   ", b"\xff\xfe\x00\x00", b"\xef\xbb\xbf{", b"{\"openapi\": 3}", b"<not-closed", b"- a\n- b\n", b"key: [unclosed"]
+    {
+        let _ = detect(input);
+        assert!(import(input, &small()).is_err(), "{:?} imported", String::from_utf8_lossy(input));
+    }
+    // Malformed members of a recognized format: the importer may report an
+    // error or import what it can, but must not panic.
     for input in [
-        &b""[..],
-        b"   ",
-        b"\xff\xfe\x00\x00",
-        b"\xef\xbb\xbf{",
-        b"{\"openapi\": 3}",
-        b"{\"openapi\": \"3.0.0\", \"paths\": []}",
+        &b"{\"openapi\": \"3.0.0\", \"paths\": []}"[..],
         b"{\"openapi\": \"3.1.0\", \"paths\": {\"/a\": {\"get\": 5, \"post\": {\"requestBody\": 7}}}}",
         b"{\"swagger\": \"2.0\", \"paths\": {\"/a\": {\"get\": {\"parameters\": [1, null, {\"in\": \"body\"}]}}}}",
         b"{\"info\": {\"_postman_id\": \"x\"}, \"item\": {}}",
@@ -74,13 +80,10 @@ fn garbage_is_an_error_not_a_panic() {
         b"{\"log\": {\"entries\": [{}, {\"request\": {\"url\": 5}}]}}",
         b"type: collection.insomnia.rest/5.0\ncollection: 5\n",
         b"<definitions xmlns=\"http://schemas.xmlsoap.org/wsdl/\"><binding name=\"b\"><operation/></binding></definitions>",
-        b"<not-closed",
         b"curl",
         b"curl -H",
         b"curl -u",
         b"curl $'\\x",
-        b"- a\n- b\n",
-        b"key: [unclosed",
     ] {
         let _ = detect(input);
         let _ = import(input, &small());
