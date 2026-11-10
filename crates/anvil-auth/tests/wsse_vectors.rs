@@ -58,7 +58,8 @@ fn the_complete_envelope_carries_the_digest_of_its_inputs() {
     let env = vectors.iter().find(|v| v["expected"]["envelope"].is_string()).expect("envelope vector");
     let i = &env["inputs"];
     let digest = password_digest(&b64(s(i, "nonce_base64")), s(i, "created"), s(i, "password"));
-    assert!(s(&env["expected"], "envelope").contains(&format!(">{digest}</wsse:Password>")), "{digest}");
+    let password_element = format!(">{digest}</wsse:Password>");
+    assert!(s(&env["expected"], "envelope").contains(&password_element), "the envelope does not carry the computed digest");
 }
 
 /// The header Anvil writes for a whole-second Created (it formats Created
@@ -74,8 +75,11 @@ fn generated_security_header_matches_the_whole_second_vector() {
     let now: DateTime<Utc> = s(i, "created").parse().unwrap();
     let nonce = hex::decode(s(i, "nonce_bytes_hex")).unwrap();
     let header = security_header(s(i, "username"), s(i, "password"), WssePasswordType::PasswordDigest, None, None, now, &nonce);
-    assert!(header.contains(&format!(">{}</wsse:Password>", s(&vec["expected"], "password_digest_base64"))), "{header}");
-    assert!(header.contains(&format!(">{}</wsse:Nonce>", s(i, "nonce_base64"))), "{header}");
-    assert!(header.contains(&format!("<wsu:Created>{}</wsu:Created>", s(i, "created"))), "{header}");
-    assert!(header.contains(&format!("<wsse:Username>{}</wsse:Username>", s(i, "username"))), "{header}");
+    assert!(
+        header.contains(&format!(">{}</wsse:Password>", s(&vec["expected"], "password_digest_base64"))),
+        "the header does not carry the vector's digest"
+    );
+    assert!(header.contains(&format!(">{}</wsse:Nonce>", s(i, "nonce_base64"))), "the header does not carry the nonce");
+    assert!(header.contains(&format!("<wsu:Created>{}</wsu:Created>", s(i, "created"))), "the header does not carry Created");
+    assert!(header.contains(&format!("<wsse:Username>{}</wsse:Username>", s(i, "username"))), "the header does not carry the username");
 }
