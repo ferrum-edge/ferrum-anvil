@@ -531,6 +531,12 @@ async fn send_cmd<W: tokio::io::AsyncWrite + Unpin>(
         Ok(Err(e)) => {
             let mut f = TransportFailure::new(Phase::Session, FailureKind::RequestWriteFailed, format!("writing the payload failed: {e}"));
             f.io_error_kind = Some(format!("{:?}", e.kind()));
+            // A TLS alert from the peer (a post-handshake mTLS rejection) is
+            // classified as on the scripted path.
+            if let Some((k, a)) = bound.stats.tls_error() {
+                f.kind = k;
+                f.tls_alert = a;
+            }
             *stop = Some(Stop::Failed(f, ClosedBy::Abnormal));
         }
     }

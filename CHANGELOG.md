@@ -241,6 +241,13 @@
   completes, as `total_timeout`, as HTTP/1.1 and HTTP/2 do. With `total_ms: 5000` an HTTP/3
   attempt to a UDP port that never answers used to end after the handshake deadline (about 10 s)
   as `quic_handshake_timeout`, and a stalled upload after the write deadline (#521).
+- Session transcripts no longer drop send failures: a UDP datagram the OS refused to send (on the
+  retry after an ICMP port-unreachable, or from an interactive Send) and an interactive DTLS
+  datagram DTLS could not send are noted as "datagram not sent"; a TLS alert that ends an
+  interactive raw TLS write (a post-handshake mTLS rejection) is classified by the alert, as on the
+  scripted path; and a WebSocket Pong whose write failed is no longer recorded as sent, and ends the
+  session as a failed send does. UDP through an HBONE or MASQUE tunnel counts echoed datagrams
+  as direct UDP does, so a load run's `echoed_payloads` is no longer 0 through a tunnel (#522).
 
 ## [0.1.7] - 2026-11-03
 

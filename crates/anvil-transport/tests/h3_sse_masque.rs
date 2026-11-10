@@ -365,6 +365,8 @@ async fn connect_udp_with_capsules_when_the_proxy_does_not_offer_h3_datagrams() 
     assert_eq!((m.sent_capsules, m.received_capsules, m.sent_quic_datagrams, m.received_quic_datagrams), (2, 2, 0, 0));
     assert_eq!(m.closed_by, ClosedBy::Client, "Anvil ended the tunnel after the response window");
     assert_eq!(received(&out), vec!["ping-1", "ping-2"]);
+    // Counted as direct UDP counts them: both replies echo a datagram sent.
+    assert_eq!((out.facts.echoed_datagrams, out.facts.repeated_datagrams), (2, 0));
     assert_eq!(a.observation.dispatch, DispatchState::Sent);
     // Ground truth: the proxy saw an RFC 9298 request and relayed capsules to the target.
     let hdrs = proxy.log.last_request_headers().unwrap();

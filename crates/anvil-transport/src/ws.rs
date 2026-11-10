@@ -1359,7 +1359,10 @@ where
                         tr.control(Direction::Received, "ping", &p);
                         // tungstenite queued the Pong.
                         match guarded(ws.flush(), cancel, total_deadline).await {
-                            Ok(_) => tr.control(Direction::Sent, "pong", &p),
+                            Ok(Ok(())) => tr.control(Direction::Sent, "pong", &p),
+                            // The Pong did not leave: the failed write ends
+                            // the session as a failed send does.
+                            Ok(Err(e)) => pending_error = Some(e),
                             Err(i) => write_stop = Some(WriteStop::Interrupted(i)),
                         }
                     }

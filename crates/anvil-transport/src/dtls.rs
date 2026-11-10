@@ -1135,7 +1135,9 @@ async fn exchange<C: DatagramChannel>(
                     Some(SessionCommand::Close { .. }) | None => break,
                 };
                 if let Some(p) = payload {
-                    if dtls.send_application_data(&p).is_ok() {
+                    if let Err(e) = dtls.send_application_data(&p) {
+                        tr.note("error", &format!("datagram not sent: DTLS could not send it: {e:?}"));
+                    } else {
                         let outs = drain(&mut dtls, &mut next_timeout);
                         if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                             failure = Some(f);

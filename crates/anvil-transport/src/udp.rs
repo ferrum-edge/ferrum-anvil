@@ -292,7 +292,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                         );
                         break;
                     }
-                    SendStep::Done(Err(_)) => {}
+                    SendStep::Done(Err(e)) => tr.note("error", &format!("datagram not sent: {e}")),
                 }
             }
             SendStep::Done(Err(e)) => {
@@ -400,7 +400,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
                             tally.sent(&b);
                             tr.data(Direction::Sent, "datagram", &b);
                         }
-                        SendStep::Done(Err(_)) => {}
+                        SendStep::Done(Err(e)) => tr.note("error", &format!("datagram not sent: {e}")),
                         SendStep::Canceled => {
                             failure = Some(TransportFailure::new(Phase::Session, FailureKind::Canceled, "the UDP exchange was canceled"));
                         }
